@@ -1,4 +1,4 @@
-<h1 align="center">comux</h1>
+<h1 align="center">comux ✨</h1>
 
 <h3 align="center">Parallel agents with tmux, worktrees, and Coven</h3>
 
