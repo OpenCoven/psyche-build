@@ -157,10 +157,14 @@ export class AgenticCapabilityRouter {
     const idempotencyKey = request.context.idempotencyKey;
     const traceId = request.traceId ?? `${taskId}:${capability}:${attempt}`;
     const startedAt = this.clock();
+    const normalizedContext: AgenticCapabilityContext = Object.freeze({
+      ...request.context,
+      attempt,
+    });
     const strategyRequest: AgenticCapabilityRequest = Object.freeze({
       ...request,
       input: Object.freeze({ ...request.input }),
-      context: Object.freeze({ ...request.context }),
+      context: normalizedContext,
     });
     const result = await strategy.execute(strategyRequest);
     const output = normalizeStrategyOutput(result, strategyRequest.input);
