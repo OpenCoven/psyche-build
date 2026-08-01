@@ -1,5 +1,6 @@
 import type { AgentName, PermissionMode } from './utils/agentLaunch.js';
 import type { NotificationSoundId } from './utils/notificationSounds.js';
+import type { OrchestrationLaneMode } from './orchestration/types.js';
 
 export type PsycheThemeName =
   | 'red'
@@ -88,6 +89,12 @@ export interface PsychePane {
   devUrl?: string;        // Detected dev server URL
   agent?: AgentName;
   agentSession?: AgentSessionReference;
+  orchestration?: {
+    taskId: string;
+    laneId: string;
+    traceId?: string;
+    mode: OrchestrationLaneMode;
+  };
   permissionMode?: PermissionMode;
   agentStatus?: AgentStatus;  // Agent working/attention status
   needsAttention?: boolean; // Pane has settled and is waiting on the user
