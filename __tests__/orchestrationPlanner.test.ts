@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { planOrchestrationTask } from '../src/orchestration/planner.js';
 import {
@@ -24,6 +25,49 @@ let testPaths: TestPaths;
 
 function relativeToProject(targetPath: string): string {
   return path.relative(testPaths.projectRoot, targetPath);
+}
+
+function runGit(args: string[], cwd: string): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function initializeGitRepo(projectRoot: string): void {
+  runGit(['init'], projectRoot);
+  runGit(['config', 'user.name', 'Test User'], projectRoot);
+  runGit(['config', 'user.email', 'test@example.invalid'], projectRoot);
+  runGit(['checkout', '-b', 'main'], projectRoot);
+  fs.writeFileSync(path.join(projectRoot, 'README.md'), '# Test repo\n');
+  runGit(['add', 'README.md'], projectRoot);
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-m', 'init'], {
+    cwd: projectRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function createGitBranch(projectRoot: string, branchName: string): void {
+  runGit(['branch', branchName, 'main'], projectRoot);
+}
+
+function createGitWorktree(worktreePath: string, branchName: string, startPoint = 'main'): void {
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+  execFileSync(
+    'git',
+    ['-C', testPaths.projectRoot, 'worktree', 'add', worktreePath, '-b', branchName, startPoint],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+}
+
+function detachGitWorktree(worktreePath: string): void {
+  execFileSync('git', ['-C', worktreePath, 'checkout', '--detach', 'HEAD'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function buildRequest(
@@ -77,6 +121,10 @@ const branchFieldCases = [
     expectedMessage: /startPointBranch must be a valid git branch name/i,
     buildRequest: (branchName: string): OrchestrationTaskRequest =>
       buildRequest({ startPointBranch: branchName }),
+    buildAcceptanceRequest: (): OrchestrationTaskRequest => {
+      createGitBranch(testPaths.projectRoot, 'feature/normal-branch');
+      return buildRequest({ startPointBranch: 'feature/normal-branch' });
+    },
   },
   {
     fieldName: 'existingWorktree.branchName',
@@ -95,6 +143,22 @@ const branchFieldCases = [
           },
         ],
       }),
+    buildAcceptanceRequest: (): OrchestrationTaskRequest => {
+      createGitWorktree(testPaths.existingWorktreePath, 'feature/normal-branch');
+      return buildRequest({
+        lanes: [
+          {
+            id: 'lane-a',
+            mode: 'shared-worktree',
+            existingWorktree: {
+              slug: 'existing',
+              worktreePath: relativeToProject(testPaths.existingWorktreePath),
+              branchName: 'feature/normal-branch',
+            },
+          },
+        ],
+      });
+    },
   },
   {
     fieldName: 'mergeTargetChain[0].branchName',
@@ -131,6 +195,7 @@ describe('planOrchestrationTask', () => {
     fs.mkdirSync(existingWorktreePath, { recursive: true });
     fs.mkdirSync(mergeTargetWorktreePath, { recursive: true });
     fs.mkdirSync(outsideRoot, { recursive: true });
+    initializeGitRepo(projectRoot);
     fs.writeFileSync(projectRootFile, 'not a directory');
     fs.writeFileSync(cwdFile, 'not a directory');
     fs.writeFileSync(existingWorktreeFilePath, 'not a directory');
@@ -270,7 +335,9 @@ describe('planOrchestrationTask', () => {
     );
   });
 
-  describe.each(branchFieldCases)('%s validation', ({ buildRequest, expectedMessage }) => {
+  describe.each(branchFieldCases)(
+    '$fieldName validation',
+    ({ buildRequest, buildAcceptanceRequest, expectedMessage }) => {
     it.each(invalidBranchNames)('rejects %s', (branchName) => {
       expectError(
         () => planOrchestrationTask(buildRequest(branchName)),
@@ -280,11 +347,14 @@ describe('planOrchestrationTask', () => {
     });
 
     it('accepts a normal branch name', () => {
+      const acceptedRequest = buildAcceptanceRequest?.()
+        ?? buildRequest('feature/normal-branch');
       expect(() =>
-        planOrchestrationTask(buildRequest('feature/normal-branch'))
+        planOrchestrationTask(acceptedRequest)
       ).not.toThrow();
     });
-  });
+    }
+  );
 
   it('rejects nonexistent projectRoot values', () => {
     expectError(
@@ -540,6 +610,7 @@ describe('planOrchestrationTask', () => {
   });
 
   it('propagates taskId and traceId to every lane plan and keeps in-root worktree paths canonical', () => {
+    createGitWorktree(testPaths.existingWorktreePath, 'feat/existing');
     const plan = planOrchestrationTask(
       buildRequest({
         taskId: '  task-456  ',
@@ -570,6 +641,7 @@ describe('planOrchestrationTask', () => {
   });
 
   it('accepts projectRoot, cwd, existing worktree, and merge target directory paths', () => {
+    createGitWorktree(testPaths.existingWorktreePath, 'feat/existing');
     const plan = planOrchestrationTask(
       buildRequest({
         projectRoot: testPaths.projectRoot,
@@ -603,5 +675,105 @@ describe('planOrchestrationTask', () => {
     expect(plan.lanes[0].mergeTargetChain?.[0]?.worktreePath).toBe(
       fs.realpathSync.native(testPaths.mergeTargetWorktreePath)
     );
+  });
+
+  describe('git identity validation', () => {
+    it('accepts a supplied startPointBranch that exists in projectRoot', () => {
+      createGitBranch(testPaths.projectRoot, 'feature/start-point');
+
+      expect(() =>
+        planOrchestrationTask(
+          buildRequest({
+            startPointBranch: 'feature/start-point',
+          })
+        )
+      ).not.toThrow();
+    });
+
+    it('rejects a supplied startPointBranch that does not exist in projectRoot', () => {
+      expectError(
+        () =>
+          planOrchestrationTask(
+            buildRequest({
+              startPointBranch: 'feature/missing-start-point',
+            })
+          ),
+        'invalid_orchestration_request',
+        /startPointBranch "feature\/missing-start-point" does not exist in projectRoot/i
+      );
+    });
+
+    it('accepts an existing worktree whose checked out branch matches the request', () => {
+      createGitWorktree(testPaths.existingWorktreePath, 'feat/existing');
+
+      expect(() =>
+        planOrchestrationTask(
+          buildRequest({
+            lanes: [
+              {
+                id: 'lane-a',
+                mode: 'shared-worktree',
+                existingWorktree: {
+                  slug: 'existing',
+                  worktreePath: relativeToProject(testPaths.existingWorktreePath),
+                  branchName: 'feat/existing',
+                },
+              },
+            ],
+          })
+        )
+      ).not.toThrow();
+    });
+
+    it('rejects an existing worktree whose checked out branch does not match the request', () => {
+      createGitWorktree(testPaths.existingWorktreePath, 'feat/actual');
+
+      expectError(
+        () =>
+          planOrchestrationTask(
+            buildRequest({
+              lanes: [
+                {
+                  id: 'lane-a',
+                  mode: 'shared-worktree',
+                  existingWorktree: {
+                    slug: 'existing',
+                    worktreePath: relativeToProject(testPaths.existingWorktreePath),
+                    branchName: 'feat/expected',
+                  },
+                },
+              ],
+            })
+          ),
+        'invalid_orchestration_request',
+        /existingWorktree\.branchName "feat\/expected" does not match checked out branch "feat\/actual"/i
+      );
+    });
+
+    it('rejects a detached existing worktree', () => {
+      createGitWorktree(testPaths.existingWorktreePath, 'feat/detached');
+      detachGitWorktree(testPaths.existingWorktreePath);
+
+      expectError(
+        () =>
+          planOrchestrationTask(
+            buildRequest({
+              lanes: [
+                {
+                  id: 'lane-a',
+                  mode: 'shared-worktree',
+                  existingWorktree: {
+                    slug: 'existing',
+                    worktreePath: relativeToProject(testPaths.existingWorktreePath),
+                    branchName: 'feat/detached',
+                  },
+                },
+              ],
+            })
+          ),
+        'invalid_orchestration_request',
+        /existingWorktree\.worktreePath .*detached or not a git worktree/i
+      );
+    });
   });
 });

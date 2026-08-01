@@ -48,6 +48,7 @@ export function planOrchestrationTask(
     request?.startPointBranch,
     'startPointBranch'
   );
+  assertGitCommitRefExists(projectRoot, startPointBranch, 'startPointBranch');
   const mergeTargetChain = normalizeMergeTargetChain(
     request?.mergeTargetChain,
     projectRoot
@@ -171,17 +172,21 @@ function normalizeExistingWorktreeRef(
     );
   }
 
+  const branchName = normalizeRequiredBranchName(
+    value.branchName,
+    'existingWorktree.branchName'
+  );
+  const worktreePath = resolveProjectContainedPath(
+    projectRoot,
+    normalizeRequiredString(value.worktreePath, 'existingWorktree.worktreePath'),
+    'existingWorktree.worktreePath'
+  );
+  assertExistingWorktreeBranch(projectRoot, worktreePath, branchName);
+
   return {
     slug: normalizeRequiredString(value.slug, 'existingWorktree.slug'),
-    worktreePath: resolveProjectContainedPath(
-      projectRoot,
-      normalizeRequiredString(value.worktreePath, 'existingWorktree.worktreePath'),
-      'existingWorktree.worktreePath'
-    ),
-    branchName: normalizeRequiredBranchName(
-      value.branchName,
-      'existingWorktree.branchName'
-    ),
+    worktreePath,
+    branchName,
   };
 }
 
@@ -414,6 +419,110 @@ function isGitBranchName(branchName: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function assertGitCommitRefExists(
+  projectRoot: string,
+  refName: string | undefined,
+  fieldName: string
+): void {
+  if (!refName) {
+    return;
+  }
+
+  try {
+    execFileSync(
+      'git',
+      ['-C', projectRoot, 'rev-parse', '--verify', '--end-of-options', `${refName}^{commit}`],
+      { stdio: 'ignore' }
+    );
+  } catch (error) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `${fieldName} "${refName}" does not exist in projectRoot`,
+      error
+    );
+  }
+}
+
+function assertExistingWorktreeBranch(
+  projectRoot: string,
+  worktreePath: string,
+  branchName: string
+): void {
+  if (!getCanonicalGitWorktreePaths(projectRoot).has(worktreePath)) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `existingWorktree.worktreePath "${worktreePath}" is not a git worktree in projectRoot`
+    );
+  }
+
+  const checkedOutBranch = getGitWorktreeBranch(worktreePath, branchName);
+  if (checkedOutBranch !== branchName) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `existingWorktree.branchName "${branchName}" does not match checked out branch "${checkedOutBranch}" at "${worktreePath}"`
+    );
+  }
+}
+
+function getCanonicalGitWorktreePaths(projectRoot: string): Set<string> {
+  let rawOutput: string;
+  try {
+    rawOutput = execFileSync(
+      'git',
+      ['-C', projectRoot, 'worktree', 'list', '--porcelain'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+  } catch (error) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `projectRoot "${projectRoot}" is not a git repository`,
+      error
+    );
+  }
+
+  const worktreePaths = new Set<string>();
+  for (const line of rawOutput.split('\n')) {
+    if (!line.startsWith('worktree ')) {
+      continue;
+    }
+
+    const listedPath = line.slice('worktree '.length).trim();
+    if (!listedPath) {
+      continue;
+    }
+
+    try {
+      worktreePaths.add(fs.realpathSync.native(listedPath));
+    } catch {
+      worktreePaths.add(path.resolve(listedPath));
+    }
+  }
+
+  return worktreePaths;
+}
+
+function getGitWorktreeBranch(worktreePath: string, expectedBranchName: string): string {
+  try {
+    return execFileSync(
+      'git',
+      ['-C', worktreePath, 'symbolic-ref', '--quiet', '--short', 'HEAD'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    ).trim();
+  } catch (error) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `existingWorktree.worktreePath "${worktreePath}" is detached or not a git worktree for branch "${expectedBranchName}"`,
+      error
+    );
   }
 }
 
