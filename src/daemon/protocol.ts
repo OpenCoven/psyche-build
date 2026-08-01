@@ -31,6 +31,7 @@ export interface ProjectSummary {
 export type CovenSessionSummary = {
   id: string;
   projectRoot: string;
+  cwd?: string;
   harness: string;
   title: string;
   status: 'starting' | 'running' | 'waiting' | 'completed' | 'failed' | 'killed' | 'orphaned' | 'created' | 'archived';
@@ -53,6 +54,18 @@ export type CovenSessionLaunchRequest = {
   prompt: string;
   cwd?: string;
   title?: string;
+};
+
+export type CovenCapabilityRequest = Omit<
+  AgenticCapabilityRequest,
+  'capability' | 'input' | 'context'
+> & {
+  capability: AgenticCapabilityRequest['capability'];
+  prompt: string;
+  title?: string;
+  state?: Readonly<Record<string, unknown>>;
+  attempt?: number;
+  idempotencyKey?: string;
 };
 
 export type CovenDesktopUseQuickAction = 'screenshot' | 'inspect' | 'permissions' | 'approve' | 'deny' | 'test';
@@ -95,6 +108,7 @@ export type ClientRequest =
   | { type: 'coven.sessions.list'; requestId: string }
   | { type: 'coven.sessions.launch'; requestId: string; launch: CovenSessionLaunchRequest }
   | { type: 'coven.sessions.open'; requestId: string; id: string }
+  | { type: 'coven.capabilities.execute'; requestId: string; sessionId: string; capability: CovenCapabilityRequest }
   | { type: 'coven.desktop.state'; requestId: string; sessionId: string }
   | { type: 'coven.desktop.action'; requestId: string; sessionId: string; action: CovenDesktopUseQuickAction }
   | { type: 'panes.spawn'; requestId: string; cwd: string; branch?: string; agent?: string; title?: string; prompt?: string }
@@ -118,6 +132,7 @@ export type ServerResponse =
   | { type: 'coven.sessions.list.result'; requestId: string; sessions: CovenSessionSummary[] }
   | { type: 'coven.sessions.launch.result'; requestId: string; session: CovenSessionSummary }
   | { type: 'coven.sessions.open.result'; requestId: string; id: PaneId; pane: PaneSummary; session: CovenSessionSummary }
+  | { type: 'coven.capabilities.execute.result'; requestId: string; sessionId: string; execution: AgenticCapabilityExecution }
   | { type: 'coven.desktop.state.result'; requestId: string; state: CovenDesktopUseState }
   | { type: 'coven.desktop.action.result'; requestId: string; sessionId: string; action: CovenDesktopUseQuickAction; accepted: boolean }
   | { type: 'panes.spawn.result'; requestId: string; id: PaneId; pane?: PaneSummary; worktreePath?: string; branch?: string }
@@ -152,3 +167,7 @@ export function decodeBinaryFrame(buf: Buffer): { streamId: StreamId; payload: B
   const payload = buf.subarray(1 + idLen);
   return { streamId, payload };
 }
+import type {
+  AgenticCapabilityExecution,
+  AgenticCapabilityRequest,
+} from '../orchestration/capabilityRouter.js';

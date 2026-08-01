@@ -138,6 +138,43 @@ The bridge must stay conservative:
 - avoid push, merge, publish, delete, or external actions without explicit approval;
 - keep secrets and infrastructure URLs out of UI copy and logs.
 
+## Agentic capability boundary
+
+The orchestration layer may run an agentic coding capability for an
+authoritative Coven session. The supported boundary is intentionally narrow: planning, code
+synthesis, tool routing, repository navigation, iterative refinement,
+verification, evaluation, debugging, and reasoning policy.
+
+`src/orchestration/capabilityRouter.ts` owns provider selection. Coven-native
+behavior is the default and is a pass-through, so existing launches are
+unchanged. A future Psyche integration registers a `psyche` strategy against
+the same input/output contract; it does not branch inside session lifecycle,
+path validation, PTY execution, or persistence code. Explicit Psyche routing
+fails closed when no Psyche strategy is registered or the strategy does not
+support the requested capability.
+
+The bridge fetches the session from the daemon and revalidates its project root
+and cwd before invoking any provider. The authoritative session harness and id
+become capability context, so Psyche cannot run ahead of session initialization
+or substitute lifecycle identity. Initial `POST /api/v1/sessions` payloads are
+unchanged.
+
+Authenticated bridge clients invoke the seam with
+`coven.capabilities.execute`. The daemon owns the router instance and accepts
+optional strategy registrations from embedded callers; the standalone daemon
+ships only the Coven-native strategy until Psyche is available. Capability
+execution is limited to `starting`, `running`, and `waiting` sessions, and all
+terminal or detached states fail closed before provider code runs.
+
+Every capability execution returns a provider-neutral trace with task and
+trace IDs, attempt and idempotency metadata, tool calls, deltas, and evaluation
+outcomes. The capability bridge returns that trace to the orchestration caller
+for event-ledger persistence without adding fields to the daemon's session
+launch payload.
+The Rust daemon remains responsible for canonical project roots, cwd
+containment, harness validation, process launch, and the authoritative session
+ledger.
+
 ## First demo loop
 
 1. Open a repo in comux.

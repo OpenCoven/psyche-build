@@ -27,17 +27,25 @@ import {
   createCovenClient,
   launchProjectCovenSession,
   openProjectCovenSession,
+  routeProjectCovenSessionCapability,
   readPaneStatus,
   resolveConfiguredPaneId,
   spawnBridgePane,
   tmuxPaneExists,
 } from './bridge.js';
+import {
+  AgenticCapabilityRouter,
+  createCovenNativeCapabilityStrategy,
+  type AgenticCapabilityStrategy,
+} from '../orchestration/capabilityRouter.js';
+import type { CovenClient } from './bridge.js';
 
-interface DaemonOptions {
+export interface DaemonOptions {
   port: number;
   projectRoot: string;
   printToken: boolean;
   serverVersion: string;
+  capabilityStrategies: readonly AgenticCapabilityStrategy[];
 }
 
 const DEFAULT_PORT = Number(process.env.COMUX_DAEMON_PORT ?? 47123);
@@ -46,6 +54,12 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
   const port = opts.port ?? DEFAULT_PORT;
   const serverVersion = opts.serverVersion ?? 'unknown';
+  const capabilityRouter = new AgenticCapabilityRouter({
+    strategies: [
+      createCovenNativeCapabilityStrategy(),
+      ...(opts.capabilityStrategies ?? []),
+    ],
+  });
 
   const token = await readOrCreateToken();
 
@@ -84,7 +98,14 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
 
   wss.on('connection', (ws, req) => {
     const authedViaHeader = req.headers['authorization'] === `Bearer ${token}`;
-    const conn = new Connection(ws, { token, projectRoot, serverVersion, authedViaHeader, tmux });
+    const conn = new Connection(ws, {
+      token,
+      projectRoot,
+      serverVersion,
+      authedViaHeader,
+      tmux,
+      capabilityRouter,
+    });
     conn.bind();
   });
 
@@ -105,6 +126,7 @@ interface ConnectionDeps {
   serverVersion: string;
   authedViaHeader: boolean;
   tmux: TmuxControl;
+  capabilityRouter: AgenticCapabilityRouter;
 }
 
 class Connection {
@@ -248,6 +270,23 @@ class Connection {
         }
         return;
       }
+      case 'coven.capabilities.execute': {
+        try {
+          this.send(await dispatchCovenCapabilityRequest(
+            this.deps.projectRoot,
+            msg,
+            this.deps.capabilityRouter,
+          ));
+        } catch (e) {
+          this.send({
+            type: 'error',
+            requestId: msg.requestId,
+            code: bridgeErrorCode(e, 'coven_capability_execution_failed'),
+            message: bridgeErrorMessage(e),
+          });
+        }
+        return;
+      }
       case 'coven.desktop.state': {
         try {
           const client = createCovenClient();
@@ -260,6 +299,7 @@ class Connection {
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_desktop_state_failed'), message: bridgeErrorMessage(e) });
         }
+
         return;
       }
       case 'coven.desktop.action': {
@@ -438,6 +478,27 @@ class Connection {
       }
     }
   }
+}
+
+export async function dispatchCovenCapabilityRequest(
+  projectRoot: string,
+  request: Extract<ClientRequest, { type: 'coven.capabilities.execute' }>,
+  router: AgenticCapabilityRouter,
+  client: CovenClient = createCovenClient(),
+): Promise<Extract<ServerResponse, { type: 'coven.capabilities.execute.result' }>> {
+  const execution = await routeProjectCovenSessionCapability(
+    projectRoot,
+    request.sessionId,
+    request.capability,
+    router,
+    client,
+  );
+  return {
+    type: 'coven.capabilities.execute.result',
+    requestId: request.requestId,
+    sessionId: request.sessionId,
+    execution,
+  };
 }
 
 export async function updatePaneMeta(
