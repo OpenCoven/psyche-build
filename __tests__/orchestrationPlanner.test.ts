@@ -11,8 +11,12 @@ interface TestPaths {
   sandboxRoot: string;
   projectRoot: string;
   cwd: string;
+  projectRootFile: string;
+  cwdFile: string;
   existingWorktreePath: string;
+  existingWorktreeFilePath: string;
   mergeTargetWorktreePath: string;
+  mergeTargetWorktreeFilePath: string;
   outsideRoot: string;
 }
 
@@ -115,21 +119,33 @@ describe('planOrchestrationTask', () => {
     );
     const projectRoot = path.join(sandboxRoot, 'project');
     const cwd = path.join(projectRoot, 'packages', 'app');
+    const projectRootFile = path.join(sandboxRoot, 'project-root.txt');
+    const cwdFile = path.join(projectRoot, 'packages', 'cwd.txt');
     const existingWorktreePath = path.join(projectRoot, '.worktrees', 'existing');
+    const existingWorktreeFilePath = path.join(projectRoot, '.worktrees', 'existing-file.txt');
     const mergeTargetWorktreePath = path.join(projectRoot, '.worktrees', 'main');
+    const mergeTargetWorktreeFilePath = path.join(projectRoot, '.worktrees', 'main-file.txt');
     const outsideRoot = path.join(sandboxRoot, 'outside');
 
     fs.mkdirSync(cwd, { recursive: true });
     fs.mkdirSync(existingWorktreePath, { recursive: true });
     fs.mkdirSync(mergeTargetWorktreePath, { recursive: true });
     fs.mkdirSync(outsideRoot, { recursive: true });
+    fs.writeFileSync(projectRootFile, 'not a directory');
+    fs.writeFileSync(cwdFile, 'not a directory');
+    fs.writeFileSync(existingWorktreeFilePath, 'not a directory');
+    fs.writeFileSync(mergeTargetWorktreeFilePath, 'not a directory');
 
     testPaths = {
       sandboxRoot,
       projectRoot,
       cwd,
+      projectRootFile,
+      cwdFile,
       existingWorktreePath,
+      existingWorktreeFilePath,
       mergeTargetWorktreePath,
+      mergeTargetWorktreeFilePath,
       outsideRoot,
     };
   });
@@ -283,6 +299,19 @@ describe('planOrchestrationTask', () => {
     );
   });
 
+  it('rejects projectRoot values that resolve to files', () => {
+    expectError(
+      () =>
+        planOrchestrationTask(
+          buildRequest({
+            projectRoot: testPaths.projectRootFile,
+          })
+        ),
+      'invalid_orchestration_request',
+      /projectRoot .*must be a directory, not a file/i
+    );
+  });
+
   it('rejects nonexistent cwd values', () => {
     expectError(
       () =>
@@ -293,6 +322,19 @@ describe('planOrchestrationTask', () => {
         ),
       'invalid_orchestration_request',
       /cwd .*does not exist/i
+    );
+  });
+
+  it('rejects cwd values that resolve to files', () => {
+    expectError(
+      () =>
+        planOrchestrationTask(
+          buildRequest({
+            cwd: path.relative(testPaths.projectRoot, testPaths.cwdFile),
+          })
+        ),
+      'invalid_orchestration_request',
+      /cwd .*must be a directory, not a file/i
     );
   });
 
@@ -344,6 +386,29 @@ describe('planOrchestrationTask', () => {
     );
   });
 
+  it('rejects existing worktree paths that resolve to files', () => {
+    expectError(
+      () =>
+        planOrchestrationTask(
+          buildRequest({
+            lanes: [
+              {
+                id: 'lane-a',
+                mode: 'shared-worktree',
+                existingWorktree: {
+                  slug: 'existing',
+                  worktreePath: relativeToProject(testPaths.existingWorktreeFilePath),
+                  branchName: 'feat/existing',
+                },
+              },
+            ],
+          })
+        ),
+      'invalid_orchestration_request',
+      /existingWorktree\.worktreePath .*must be a directory, not a file/i
+    );
+  });
+
   it('rejects merge target worktree paths outside the project root', () => {
     const escapedMergeTarget = path.join(testPaths.outsideRoot, 'merge-target');
     fs.mkdirSync(escapedMergeTarget, { recursive: true });
@@ -382,6 +447,28 @@ describe('planOrchestrationTask', () => {
         ),
       'invalid_orchestration_request',
       /mergeTargetChain\[0\]\.worktreePath .*does not exist/i
+    );
+  });
+
+  it('rejects merge target worktree paths that resolve to files', () => {
+    expectError(
+      () =>
+        planOrchestrationTask(
+          buildRequest({
+            mergeTargetChain: [
+              {
+                branchName: 'main',
+                slug: 'main',
+                worktreePath: path.relative(
+                  testPaths.projectRoot,
+                  testPaths.mergeTargetWorktreeFilePath
+                ),
+              },
+            ],
+          })
+        ),
+      'invalid_orchestration_request',
+      /mergeTargetChain\[0\]\.worktreePath .*must be a directory, not a file/i
     );
   });
 
@@ -480,5 +567,41 @@ describe('planOrchestrationTask', () => {
       worktreePath: fs.realpathSync.native(testPaths.existingWorktreePath),
       branchName: 'feat/existing',
     });
+  });
+
+  it('accepts projectRoot, cwd, existing worktree, and merge target directory paths', () => {
+    const plan = planOrchestrationTask(
+      buildRequest({
+        projectRoot: testPaths.projectRoot,
+        cwd: relativeToProject(testPaths.cwd),
+        mergeTargetChain: [
+          {
+            branchName: 'main',
+            slug: 'main',
+            worktreePath: relativeToProject(testPaths.mergeTargetWorktreePath),
+          },
+        ],
+        lanes: [
+          {
+            id: 'lane-a',
+            mode: 'shared-worktree',
+            existingWorktree: {
+              slug: 'existing',
+              worktreePath: relativeToProject(testPaths.existingWorktreePath),
+              branchName: 'feat/existing',
+            },
+          },
+        ],
+      })
+    );
+
+    expect(plan.projectRoot).toBe(fs.realpathSync.native(testPaths.projectRoot));
+    expect(plan.cwd).toBe(fs.realpathSync.native(testPaths.cwd));
+    expect(plan.lanes[0].existingWorktree?.worktreePath).toBe(
+      fs.realpathSync.native(testPaths.existingWorktreePath)
+    );
+    expect(plan.lanes[0].mergeTargetChain?.[0]?.worktreePath).toBe(
+      fs.realpathSync.native(testPaths.mergeTargetWorktreePath)
+    );
   });
 });

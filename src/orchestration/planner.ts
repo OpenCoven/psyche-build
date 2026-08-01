@@ -274,7 +274,7 @@ function resolveScopedCwd(projectRoot: string, cwd: OrchestrationTaskRequest['cw
 
 function normalizeProjectRoot(value: OrchestrationTaskRequest['projectRoot']): string {
   const projectRoot = path.resolve(normalizeRequiredString(value, 'projectRoot'));
-  return resolveExistingPath(projectRoot, 'projectRoot');
+  return resolveExistingDirectoryPath(projectRoot, 'projectRoot');
 }
 
 function resolveProjectContainedPath(
@@ -283,7 +283,7 @@ function resolveProjectContainedPath(
   fieldName: string
 ): string {
   const resolvedPath = path.resolve(projectRoot, relativeOrAbsolutePath);
-  const canonicalPath = resolveExistingPath(resolvedPath, fieldName);
+  const canonicalPath = resolveExistingDirectoryPath(resolvedPath, fieldName);
   assertProjectContainedPath(projectRoot, canonicalPath, fieldName);
   return canonicalPath;
 }
@@ -321,6 +321,35 @@ function resolveExistingPath(targetPath: string, fieldName: string): string {
       `${fieldName} "${targetPath}" could not be resolved`
     );
   }
+}
+
+function resolveExistingDirectoryPath(targetPath: string, fieldName: string): string {
+  const canonicalPath = resolveExistingPath(targetPath, fieldName);
+  assertDirectoryPath(canonicalPath, fieldName);
+  return canonicalPath;
+}
+
+function assertDirectoryPath(targetPath: string, fieldName: string): void {
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(targetPath);
+  } catch (error) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `${fieldName} "${targetPath}" could not be inspected`,
+      error
+    );
+  }
+
+  if (stats.isDirectory()) {
+    return;
+  }
+
+  const receivedType = stats.isFile() ? 'a file' : 'a non-directory path';
+  throw new OrchestrationError(
+    'invalid_orchestration_request',
+    `${fieldName} "${targetPath}" must be a directory, not ${receivedType}`
+  );
 }
 
 function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
