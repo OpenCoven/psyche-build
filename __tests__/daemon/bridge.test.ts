@@ -16,9 +16,14 @@ import {
   readPaneStatus,
   resolveCovenEndpoint,
   resolveScopedCwd,
+  routeProjectCovenSessionCapability,
   spawnBridgePane,
   tailTextLines,
 } from '../../src/daemon/bridge.js';
+import {
+  AgenticCapabilityRouter,
+  createCovenNativeCapabilityStrategy,
+} from '../../src/orchestration/capabilityRouter.js';
 
 let tempRoots: string[] = [];
 
@@ -146,6 +151,172 @@ describe('daemon bridge Coven helpers', () => {
     ]);
     expect(session).toMatchObject({ id: 'session-1', projectRoot: root, harness: 'codex', status: 'running' });
   });
+
+  it('routes a capability only after resolving an authoritative scoped Coven session', async () => {
+    const root = await tempDir('comux-bridge-capability-route-');
+    await mkdir(path.join(root, 'worktree'));
+    const lifecycle: string[] = [];
+    const router = new AgenticCapabilityRouter({
+      strategies: [
+        createCovenNativeCapabilityStrategy(),
+        {
+          id: 'psyche',
+          supports: (capability) => capability === 'planning',
+          execute: async (request) => {
+            lifecycle.push('psyche.execute');
+            expect(request.context).toMatchObject({
+              sessionId: 'session-1',
+              projectRoot: root,
+              cwd: path.join(root, 'worktree'),
+            });
+            return {
+              output: {
+                ...request.input,
+                prompt: `Planned by Psyche:\n${request.input.prompt}`,
+              },
+              instrumentation: {
+                deltas: [{
+                  deltaId: 'plan-1',
+                  kind: 'plan',
+                  summary: 'Prepared session plan',
+                }],
+              },
+            };
+          },
+        },
+      ],
+    });
+
+    const execution = await routeProjectCovenSessionCapability(
+      root,
+      'session-1',
+      {
+        prompt: 'Fix tests',
+        capability: 'planning',
+        provider: 'psyche',
+        taskId: 'task-123',
+        traceId: 'trace-123',
+        idempotencyKey: 'task-123:planning',
+        attempt: 1,
+      },
+      router,
+      {
+        listSessions: async () => [],
+        getSession: async () => {
+          lifecycle.push('coven.getSession');
+          return {
+            id: 'session-1',
+            projectRoot: root,
+            cwd: path.join(root, 'worktree'),
+            harness: 'codex',
+            title: 'Fix tests',
+            status: 'running',
+            createdAt: '2026-08-01T14:00:00Z',
+            updatedAt: '2026-08-01T14:00:01Z',
+          };
+        },
+      },
+    );
+
+    expect(lifecycle).toEqual(['coven.getSession', 'psyche.execute']);
+    expect(execution.output).toMatchObject({
+      harness: 'codex',
+      prompt: 'Planned by Psyche:\nFix tests',
+    });
+    expect(execution.trace).toMatchObject({
+      taskId: 'task-123',
+      traceId: 'trace-123',
+      capability: 'planning',
+      provider: 'psyche',
+      deltas: [{ deltaId: 'plan-1', kind: 'plan' }],
+    });
+  });
+
+  it('does not execute Psyche for a session outside the project boundary', async () => {
+    const root = await tempDir('comux-bridge-capability-root-');
+    const outside = await tempDir('comux-bridge-capability-outside-');
+    let executed = false;
+    const router = new AgenticCapabilityRouter({
+      strategies: [{
+        id: 'psyche',
+        supports: () => true,
+        execute: async (request) => {
+          executed = true;
+          return { output: { ...request.input } };
+        },
+      }],
+    });
+
+    await expect(routeProjectCovenSessionCapability(
+      root,
+      'session-1',
+      {
+        prompt: 'Fix tests',
+        capability: 'planning',
+        provider: 'psyche',
+        taskId: 'task-123',
+      },
+      router,
+      {
+        listSessions: async () => [],
+        getSession: async () => ({
+          id: 'session-1',
+          projectRoot: outside,
+          harness: 'codex',
+          title: 'Outside',
+          status: 'running',
+          createdAt: '2026-08-01T14:00:00Z',
+          updatedAt: '2026-08-01T14:00:01Z',
+        }),
+      },
+    )).rejects.toMatchObject({ code: 'coven_session_scope_violation' });
+
+    expect(executed).toBe(false);
+  });
+
+  it.each(['created', 'completed', 'failed', 'killed', 'orphaned', 'archived'] as const)(
+    'does not execute Psyche for a %s session',
+    async (status) => {
+      const root = await tempDir(`comux-bridge-capability-${status}-`);
+      let executed = false;
+      const router = new AgenticCapabilityRouter({
+        strategies: [{
+          id: 'psyche',
+          supports: () => true,
+          execute: async (request) => {
+            executed = true;
+            return { output: { ...request.input } };
+          },
+        }],
+      });
+
+      await expect(routeProjectCovenSessionCapability(
+        root,
+        'session-1',
+        {
+          prompt: 'Fix tests',
+          capability: 'planning',
+          provider: 'psyche',
+          taskId: 'task-123',
+        },
+        router,
+        {
+          listSessions: async () => [],
+          getSession: async () => ({
+            id: 'session-1',
+            projectRoot: root,
+            harness: 'codex',
+            title: 'Terminal session',
+            status,
+            createdAt: '2026-08-01T14:00:00Z',
+            updatedAt: '2026-08-01T14:00:01Z',
+          }),
+        },
+      )).rejects.toMatchObject({ code: 'coven_session_not_live' });
+
+      expect(executed).toBe(false);
+    },
+  );
 
   it('rejects Coven launch cwd outside the current project before calling Coven', async () => {
     const root = await tempDir('comux-bridge-coven-launch-root-');

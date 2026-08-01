@@ -32,7 +32,7 @@ describe('agent launch utils', () => {
   });
 
   it('returns default-enabled registry agents', () => {
-    expect(getDefaultEnabledAgents()).toEqual(['claude', 'opencode', 'codex']);
+    expect(getDefaultEnabledAgents()).toEqual(['claude', 'opencode', 'codex', 'coven-code']);
   });
 
   it('builds single-agent options from available agents', () => {
