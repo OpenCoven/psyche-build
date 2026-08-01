@@ -31,18 +31,20 @@ After Coven creates a session, an orchestration caller may route a capability
 against that authoritative session through the authenticated comux daemon
 message `coven.capabilities.execute`:
 
-```json
-{
-  "sessionId": "session-123",
-  "prompt": "Fix the failing tests",
-  "capability": "planning",
-  "provider": "psyche",
-  "taskId": "task-123",
-  "traceId": "trace-123",
-  "attempt": 1,
-  "idempotencyKey": "task-123:planning"
-}
-```
+    {
+      "type": "coven.capabilities.execute",
+      "requestId": "request-123",
+      "sessionId": "session-123",
+      "capability": {
+        "prompt": "Fix the failing tests",
+        "capability": "planning",
+        "provider": "psyche",
+        "taskId": "task-123",
+        "traceId": "trace-123",
+        "attempt": 1,
+        "idempotencyKey": "task-123:planning"
+      }
+    }
 
 The bridge fetches the session from Coven, verifies its project root and cwd,
 then routes the phase through `AgenticCapabilityRouter`. `coven-native` is the default provider; `psyche` is an optional
