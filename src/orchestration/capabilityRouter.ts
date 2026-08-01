@@ -232,10 +232,38 @@ function normalizeStrategyOutput(
     );
   }
 
+  if (result.output.title !== undefined && typeof result.output.title !== 'string') {
+    throw new CapabilityRoutingError(
+      'capability_contract_violation',
+      'Capability provider returned a non-string title',
+    );
+  }
+  const title = typeof result.output.title === 'string' ? result.output.title.trim() : undefined;
+
+  if (
+    result.output.state !== undefined
+    && (result.output.state === null || typeof result.output.state !== 'object' || Array.isArray(result.output.state))
+  ) {
+    throw new CapabilityRoutingError(
+      'capability_contract_violation',
+      'Capability provider returned an invalid state payload',
+    );
+  }
+
+  if (
+    result.output.stateDelta !== undefined
+    && (result.output.stateDelta === null || typeof result.output.stateDelta !== 'object' || Array.isArray(result.output.stateDelta))
+  ) {
+    throw new CapabilityRoutingError(
+      'capability_contract_violation',
+      'Capability provider returned an invalid stateDelta payload',
+    );
+  }
+
   return {
     prompt: result.output.prompt.trim(),
     harness: input.harness,
-    ...(result.output.title !== undefined ? { title: result.output.title } : {}),
+    ...(title ? { title } : {}),
     ...(result.output.state !== undefined ? { state: result.output.state } : {}),
     ...(result.output.stateDelta !== undefined ? { stateDelta: result.output.stateDelta } : {}),
   };
