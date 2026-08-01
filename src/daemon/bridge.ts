@@ -7,6 +7,12 @@ import path from 'node:path';
 import { AGENT_IDS, buildAgentCommand, buildInitialPromptCommand, type AgentName } from '../utils/agentLaunch.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import type { ComuxConfig } from '../types.js';
+import {
+  isAgenticCapability,
+  type AgenticCapabilityRouter,
+  type AgenticCapabilityExecution,
+  type CapabilityProviderId,
+} from '../orchestration/capabilityRouter.js';
 import type {
   CovenSessionEvent,
   CovenSessionLaunchRequest,
@@ -84,6 +90,24 @@ export interface BridgeCovenOpenResult {
   pane: PaneSummary;
   session: CovenSessionSummary;
 }
+
+export interface ProjectCovenCapabilityRequest {
+  taskId: string;
+  traceId?: string;
+  capability: string;
+  provider?: string;
+  prompt: string;
+  title?: string;
+  state?: Readonly<Record<string, unknown>>;
+  attempt?: number;
+  idempotencyKey?: string;
+}
+
+const LIVE_CAPABILITY_SESSION_STATUSES = new Set<CovenSessionSummary['status']>([
+  'starting',
+  'running',
+  'waiting',
+]);
 
 interface RawConfigPane extends Record<string, unknown> {
   id?: string;
@@ -203,6 +227,92 @@ export async function launchProjectCovenSession(
     throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this comux project scope');
   }
   return { ...session, projectRoot: sessionRoot };
+}
+
+export async function routeProjectCovenSessionCapability(
+  projectRoot: string,
+  sessionId: string,
+  request: ProjectCovenCapabilityRequest,
+  router: AgenticCapabilityRouter,
+  client: CovenClient = createCovenClient(),
+): Promise<AgenticCapabilityExecution> {
+  if (!client.getSession) {
+    throw bridgeError(
+      'coven_session_lookup_unsupported',
+      'Coven client does not support fetching sessions',
+    );
+  }
+  if (!isSafeCovenSessionId(sessionId)) {
+    throw bridgeError('invalid_coven_session_id', 'Coven session id contains unsupported characters');
+  }
+  const capability = typeof request.capability === 'string' ? request.capability.trim() : '';
+  const taskId = typeof request.taskId === 'string' ? request.taskId.trim() : '';
+  const prompt = typeof request.prompt === 'string' ? request.prompt.trim() : '';
+  const provider = typeof request.provider === 'string' ? request.provider.trim() : undefined;
+  if (!isAgenticCapability(capability)) {
+    throw bridgeError('invalid_capability_route', `Unsupported agentic capability "${capability}"`);
+  }
+  if (!taskId) {
+    throw bridgeError('invalid_capability_route', 'Capability route requires a taskId');
+  }
+  if (!prompt) {
+    throw bridgeError('invalid_capability_route', 'Capability route requires a prompt');
+  }
+  if (provider !== undefined && provider !== 'coven-native' && provider !== 'psyche') {
+    throw bridgeError('invalid_capability_route', `Unsupported capability provider "${provider}"`);
+  }
+  if (
+    request.attempt !== undefined
+    && (!Number.isInteger(request.attempt) || request.attempt < 1)
+  ) {
+    throw bridgeError('invalid_capability_route', 'Capability route attempt must be a positive integer');
+  }
+
+  const rootReal = await realpath(projectRoot);
+  const session = await client.getSession(sessionId);
+  const sessionRoot = await realpath(session.projectRoot);
+  if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
+    throw bridgeError(
+      'coven_session_scope_violation',
+      'Coven session is outside this comux project scope',
+    );
+  }
+  if (!LIVE_CAPABILITY_SESSION_STATUSES.has(session.status)) {
+    throw bridgeError(
+      'coven_session_not_live',
+      `Coven session "${session.id}" is not live`,
+    );
+  }
+  const scoped = await resolveScopedCwd(
+    sessionRoot,
+    typeof session.cwd === 'string' ? session.cwd : undefined,
+  );
+
+  return router.execute({
+    taskId,
+    traceId: typeof request.traceId === 'string' && request.traceId.trim()
+      ? request.traceId.trim()
+      : undefined,
+    capability,
+    provider: provider as CapabilityProviderId | undefined,
+    input: {
+      prompt,
+      harness: session.harness,
+      title: typeof request.title === 'string' && request.title.trim()
+        ? request.title.trim()
+        : undefined,
+      state: request.state,
+    },
+    context: {
+      sessionId: session.id,
+      projectRoot: scoped.projectRoot,
+      cwd: scoped.requestedCwd,
+      attempt: request.attempt,
+      idempotencyKey: typeof request.idempotencyKey === 'string' && request.idempotencyKey.trim()
+        ? request.idempotencyKey.trim()
+        : undefined,
+    },
+  });
 }
 
 export async function openProjectCovenSession(
@@ -532,6 +642,7 @@ function normalizeCovenSession(raw: any): CovenSessionSummary {
   return {
     id: String(raw.id),
     projectRoot: String(raw.projectRoot ?? raw.project_root),
+    cwd: typeof raw.cwd === 'string' && raw.cwd.trim() ? raw.cwd.trim() : undefined,
     harness: String(raw.harness),
     title: String(raw.title),
     status: archivedAt ? 'archived' : (raw.status || 'created'),

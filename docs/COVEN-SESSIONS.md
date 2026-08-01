@@ -25,6 +25,47 @@ POST /api/v1/sessions/:id/input
 
 comux first checks `GET /api/v1/health` and accepts the current stable `apiVersion: "coven.daemon.v1"` contract. Event polling accepts the current paginated envelope and stores `nextCursor.afterSeq`-style sequence progress by reading event `seq` values.
 
+### Optional agentic capability routing
+
+After Coven creates a session, an orchestration caller may route a capability
+against that authoritative session through the authenticated comux daemon
+message `coven.capabilities.execute`:
+
+    {
+      "type": "coven.capabilities.execute",
+      "requestId": "request-123",
+      "sessionId": "session-123",
+      "capability": {
+        "prompt": "Fix the failing tests",
+        "capability": "planning",
+        "provider": "psyche",
+        "taskId": "task-123",
+        "traceId": "trace-123",
+        "attempt": 1,
+        "idempotencyKey": "task-123:planning"
+      }
+    }
+
+The bridge fetches the session from Coven, verifies its project root and cwd,
+then routes the phase through `AgenticCapabilityRouter`. `coven-native` is the default provider; `psyche` is an optional
+strategy registration point, not a built-in Psyche implementation. Provider
+output cannot replace the authoritative session harness, project root, cwd, or
+session id.
+
+Only `starting`, `running`, and `waiting` sessions accept capability work.
+Created/detached, completed, failed, killed, orphaned, and archived sessions
+fail closed before provider execution. Embedded daemon callers can register a
+future Psyche strategy through `runDaemon({ capabilityStrategies: [...] })`;
+without that registration, explicit Psyche requests return a structured
+provider-unavailable error.
+
+The returned trace reports the task, provider, tool calls, deltas, and
+evaluation outcomes for orchestration-ledger persistence. The v1 daemon still
+receives the existing `{ harness, prompt, title, projectRoot, cwd }` launch shape, so
+there is no session-store migration and older clients remain compatible.
+Explicit unsupported or unavailable routes return structured errors rather
+than silently falling back.
+
 The legacy visibility-only CLI fallback is still supported for tests and older local builds when explicitly configured:
 
 ```bash
