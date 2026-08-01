@@ -65,6 +65,49 @@ function expectError(
   }
 }
 
+const invalidBranchNames = ['foo.lock', 'foo/', '.foo', 'foo//bar', 'foo.'];
+
+const branchFieldCases = [
+  {
+    fieldName: 'startPointBranch',
+    expectedMessage: /startPointBranch must be a valid git branch name/i,
+    buildRequest: (branchName: string): OrchestrationTaskRequest =>
+      buildRequest({ startPointBranch: branchName }),
+  },
+  {
+    fieldName: 'existingWorktree.branchName',
+    expectedMessage: /existingWorktree\.branchName must be a valid git branch name/i,
+    buildRequest: (branchName: string): OrchestrationTaskRequest =>
+      buildRequest({
+        lanes: [
+          {
+            id: 'lane-a',
+            mode: 'shared-worktree',
+            existingWorktree: {
+              slug: 'existing',
+              worktreePath: relativeToProject(testPaths.existingWorktreePath),
+              branchName,
+            },
+          },
+        ],
+      }),
+  },
+  {
+    fieldName: 'mergeTargetChain[0].branchName',
+    expectedMessage: /mergeTargetChain\[0\]\.branchName must be a valid git branch name/i,
+    buildRequest: (branchName: string): OrchestrationTaskRequest =>
+      buildRequest({
+        mergeTargetChain: [
+          {
+            branchName,
+            slug: 'main',
+            worktreePath: relativeToProject(testPaths.mergeTargetWorktreePath),
+          },
+        ],
+      }),
+  },
+];
+
 describe('planOrchestrationTask', () => {
   beforeEach(() => {
     const sandboxRoot = fs.mkdtempSync(
@@ -211,59 +254,20 @@ describe('planOrchestrationTask', () => {
     );
   });
 
-  it('rejects invalid startPointBranch values before they can reach git commands', () => {
-    expectError(
-      () =>
-        planOrchestrationTask(
-          buildRequest({
-            startPointBranch: 'main && echo pwned',
-          })
-        ),
-      'invalid_orchestration_request',
-      /startPointBranch must be a valid git branch name/i
-    );
-  });
+  describe.each(branchFieldCases)('%s validation', ({ buildRequest, expectedMessage }) => {
+    it.each(invalidBranchNames)('rejects %s', (branchName) => {
+      expectError(
+        () => planOrchestrationTask(buildRequest(branchName)),
+        'invalid_orchestration_request',
+        expectedMessage
+      );
+    });
 
-  it('rejects invalid existing worktree branch names before they can reach git commands', () => {
-    expectError(
-      () =>
-        planOrchestrationTask(
-          buildRequest({
-            lanes: [
-              {
-                id: 'lane-a',
-                mode: 'shared-worktree',
-                existingWorktree: {
-                  slug: 'existing',
-                  worktreePath: relativeToProject(testPaths.existingWorktreePath),
-                  branchName: 'feat$(echo pwned)',
-                },
-              },
-            ],
-          })
-        ),
-      'invalid_orchestration_request',
-      /existingWorktree\.branchName must be a valid git branch name/i
-    );
-  });
-
-  it('rejects invalid merge target branch names before they can reach git commands', () => {
-    expectError(
-      () =>
-        planOrchestrationTask(
-          buildRequest({
-            mergeTargetChain: [
-              {
-                branchName: 'feat/../escape',
-                slug: 'main',
-                worktreePath: relativeToProject(testPaths.mergeTargetWorktreePath),
-              },
-            ],
-          })
-        ),
-      'invalid_orchestration_request',
-      /mergeTargetChain\[0\]\.branchName must be a valid git branch name/i
-    );
+    it('accepts a normal branch name', () => {
+      expect(() =>
+        planOrchestrationTask(buildRequest('feature/normal-branch'))
+      ).not.toThrow();
+    });
   });
 
   it('rejects nonexistent projectRoot values', () => {

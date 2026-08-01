@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type { MergeTargetReference } from '../types.js';
 import { isAgentName, type PermissionMode } from '../utils/agentLaunch.js';
 import { isValidBranchName } from '../utils/git.js';
@@ -367,13 +368,24 @@ function normalizeOptionalBranchName(value: unknown, fieldName: string): string 
 }
 
 function validateBranchName(branchName: string, fieldName: string): string {
-  if (!isValidBranchName(branchName)) {
+  if (!isValidBranchName(branchName) || !isGitBranchName(branchName)) {
     throw new OrchestrationError(
       'invalid_orchestration_request',
       `${fieldName} must be a valid git branch name`
     );
   }
   return branchName;
+}
+
+function isGitBranchName(branchName: string): boolean {
+  try {
+    execFileSync('git', ['check-ref-format', '--branch', branchName], {
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeRequestTraceId(value: unknown, taskId: string): string {
