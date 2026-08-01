@@ -92,7 +92,7 @@ export interface PsychePane {
   orchestration?: {
     taskId: string;
     laneId: string;
-    traceId?: string;
+    traceId: string;
     mode: OrchestrationLaneMode;
   };
   permissionMode?: PermissionMode;

@@ -23,7 +23,7 @@ const SUPPORTED_PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set([
 
 interface NormalizedTaskFields {
   taskId: string;
-  traceId?: string;
+  traceId: string;
   projectRoot: string;
   cwd: string;
   prompt: string;
@@ -36,7 +36,7 @@ export function planOrchestrationTask(
   request: OrchestrationTaskRequest
 ): OrchestrationTaskPlan {
   const taskId = normalizeRequiredString(request?.taskId, 'taskId');
-  const traceId = normalizeOptionalString(request?.traceId, 'traceId');
+  const traceId = normalizeRequestTraceId(request?.traceId, taskId);
   const projectRoot = path.resolve(normalizeRequiredString(request?.projectRoot, 'projectRoot'));
   const cwd = resolveScopedCwd(projectRoot, request?.cwd);
   const prompt = normalizeRequiredString(request?.prompt, 'prompt');
@@ -305,6 +305,18 @@ function normalizeOptionalString(value: unknown, fieldName: string): string | un
 
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeRequestTraceId(value: unknown, taskId: string): string {
+  if (value === undefined) return taskId;
+  if (typeof value !== 'string') {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      'traceId must be a string when provided'
+    );
+  }
+
+  return value.trim() || taskId;
 }
 
 function normalizeConcurrency(value: unknown, laneCount: number): number {

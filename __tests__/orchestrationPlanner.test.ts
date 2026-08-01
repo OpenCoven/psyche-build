@@ -82,6 +82,24 @@ describe('planOrchestrationTask', () => {
     });
   });
 
+  it('defaults traceId to taskId when request traceId is blank or omitted', () => {
+    const blankTracePlan = planOrchestrationTask(buildRequest({
+      taskId: '  task-blank-trace  ',
+      traceId: '   ',
+    }));
+
+    expect(blankTracePlan.traceId).toBe('task-blank-trace');
+    expect(blankTracePlan.lanes.every((lane) => lane.traceId === 'task-blank-trace')).toBe(true);
+
+    const omittedTracePlan = planOrchestrationTask(buildRequest({
+      taskId: 'task-missing-trace',
+      traceId: undefined,
+    }));
+
+    expect(omittedTracePlan.traceId).toBe('task-missing-trace');
+    expect(omittedTracePlan.lanes.every((lane) => lane.traceId === 'task-missing-trace')).toBe(true);
+  });
+
   it('rejects duplicate lane ids after trimming', () => {
     expectError(
       () => planOrchestrationTask(buildRequest({
@@ -105,14 +123,21 @@ describe('planOrchestrationTask', () => {
     );
   });
 
-  it('rejects empty request fields and missing lanes', () => {
+  it('rejects empty task and prompt request fields', () => {
     expectError(
       () => planOrchestrationTask(buildRequest({
         taskId: '   ',
         prompt: '   ',
-        lanes: [],
       })),
       'invalid_orchestration_request'
+    );
+  });
+
+  it('rejects requests without lanes', () => {
+    expectError(
+      () => planOrchestrationTask(buildRequest({ lanes: [] })),
+      'invalid_orchestration_request',
+      /at least one lane/i
     );
   });
 

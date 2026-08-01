@@ -40,7 +40,7 @@ export interface OrchestrationTaskRequest {
 
 export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
   taskId: string;
-  traceId?: string;
+  traceId: string;
   index: number;
   projectRoot: string;
   cwd: string;
@@ -52,7 +52,7 @@ export interface OrchestrationLanePlan extends OrchestrationLaneRequest {
 
 export interface OrchestrationTaskPlan {
   taskId: string;
-  traceId?: string;
+  traceId: string;
   projectRoot: string;
   cwd: string;
   concurrency: number;
@@ -60,10 +60,7 @@ export interface OrchestrationTaskPlan {
 }
 
 export interface OrchestrationLaneResultBase {
-  taskId: string;
-  laneId: string;
-  traceId?: string;
-  mode: OrchestrationLaneMode;
+  id: string;
   startedAt: string;
   completedAt: string;
 }
@@ -76,7 +73,7 @@ export interface OrchestrationLaneSuccessResult extends OrchestrationLaneResultB
 
 export interface OrchestrationLaneFailureResult extends OrchestrationLaneResultBase {
   status: 'failed';
-  error: OrchestrationError;
+  error: { code: OrchestrationErrorCode; message: string };
 }
 
 export type OrchestrationLaneResult =
@@ -87,7 +84,7 @@ export type OrchestrationTaskResultStatus = 'completed' | 'partial' | 'failed';
 
 export interface OrchestrationTaskResult {
   taskId: string;
-  traceId?: string;
+  traceId: string;
   status: OrchestrationTaskResultStatus;
   startedAt: string;
   completedAt: string;
