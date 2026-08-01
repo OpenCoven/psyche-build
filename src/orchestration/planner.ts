@@ -1,6 +1,8 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import type { MergeTargetReference } from '../types.js';
 import { isAgentName, type PermissionMode } from '../utils/agentLaunch.js';
+import { isValidBranchName } from '../utils/git.js';
 import {
   ORCHESTRATION_LANE_MODES,
   OrchestrationError,
@@ -37,11 +39,11 @@ export function planOrchestrationTask(
 ): OrchestrationTaskPlan {
   const taskId = normalizeRequiredString(request?.taskId, 'taskId');
   const traceId = normalizeRequestTraceId(request?.traceId, taskId);
-  const projectRoot = path.resolve(normalizeRequiredString(request?.projectRoot, 'projectRoot'));
+  const projectRoot = normalizeProjectRoot(request?.projectRoot);
   const cwd = resolveScopedCwd(projectRoot, request?.cwd);
   const prompt = normalizeRequiredString(request?.prompt, 'prompt');
   const title = normalizeOptionalString(request?.title, 'title');
-  const startPointBranch = normalizeOptionalString(
+  const startPointBranch = normalizeOptionalBranchName(
     request?.startPointBranch,
     'startPointBranch'
   );
@@ -175,7 +177,7 @@ function normalizeExistingWorktreeRef(
       normalizeRequiredString(value.worktreePath, 'existingWorktree.worktreePath'),
       'existingWorktree.worktreePath'
     ),
-    branchName: normalizeRequiredString(
+    branchName: normalizeRequiredBranchName(
       value.branchName,
       'existingWorktree.branchName'
     ),
@@ -245,7 +247,7 @@ function normalizeMergeTargetReference(
   );
 
   return {
-    branchName,
+    branchName: validateBranchName(branchName, `mergeTargetChain[${index}].branchName`),
     displayName,
     slug,
     worktreePath: worktreePath
@@ -269,14 +271,20 @@ function resolveScopedCwd(projectRoot: string, cwd: OrchestrationTaskRequest['cw
   return rawCwd ? resolveProjectContainedPath(projectRoot, rawCwd, 'cwd') : projectRoot;
 }
 
+function normalizeProjectRoot(value: OrchestrationTaskRequest['projectRoot']): string {
+  const projectRoot = path.resolve(normalizeRequiredString(value, 'projectRoot'));
+  return resolveExistingPath(projectRoot, 'projectRoot');
+}
+
 function resolveProjectContainedPath(
   projectRoot: string,
   relativeOrAbsolutePath: string,
   fieldName: string
 ): string {
   const resolvedPath = path.resolve(projectRoot, relativeOrAbsolutePath);
-  assertProjectContainedPath(projectRoot, resolvedPath, fieldName);
-  return resolvedPath;
+  const canonicalPath = resolveExistingPath(resolvedPath, fieldName);
+  assertProjectContainedPath(projectRoot, canonicalPath, fieldName);
+  return canonicalPath;
 }
 
 function assertProjectContainedPath(
@@ -295,6 +303,27 @@ function assertProjectContainedPath(
 function isPathInsideOrEqual(parentPath: string, childPath: string): boolean {
   const relative = path.relative(parentPath, childPath);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function resolveExistingPath(targetPath: string, fieldName: string): string {
+  try {
+    return fs.realpathSync.native(targetPath);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      throw new OrchestrationError(
+        'invalid_orchestration_request',
+        `${fieldName} "${targetPath}" does not exist`
+      );
+    }
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `${fieldName} "${targetPath}" could not be resolved`
+    );
+  }
+}
+
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return !!error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
 }
 
 function normalizeRequiredString(value: unknown, fieldName: string): string {
@@ -326,6 +355,25 @@ function normalizeOptionalString(value: unknown, fieldName: string): string | un
 
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeRequiredBranchName(value: unknown, fieldName: string): string {
+  return validateBranchName(normalizeRequiredString(value, fieldName), fieldName);
+}
+
+function normalizeOptionalBranchName(value: unknown, fieldName: string): string | undefined {
+  const branchName = normalizeOptionalString(value, fieldName);
+  return branchName ? validateBranchName(branchName, fieldName) : undefined;
+}
+
+function validateBranchName(branchName: string, fieldName: string): string {
+  if (!isValidBranchName(branchName)) {
+    throw new OrchestrationError(
+      'invalid_orchestration_request',
+      `${fieldName} must be a valid git branch name`
+    );
+  }
+  return branchName;
 }
 
 function normalizeRequestTraceId(value: unknown, taskId: string): string {
