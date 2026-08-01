@@ -170,9 +170,10 @@ function normalizeExistingWorktreeRef(
 
   return {
     slug: normalizeRequiredString(value.slug, 'existingWorktree.slug'),
-    worktreePath: path.resolve(
+    worktreePath: resolveProjectContainedPath(
       projectRoot,
-      normalizeRequiredString(value.worktreePath, 'existingWorktree.worktreePath')
+      normalizeRequiredString(value.worktreePath, 'existingWorktree.worktreePath'),
+      'existingWorktree.worktreePath'
     ),
     branchName: normalizeRequiredString(
       value.branchName,
@@ -247,7 +248,13 @@ function normalizeMergeTargetReference(
     branchName,
     displayName,
     slug,
-    worktreePath: worktreePath ? path.resolve(projectRoot, worktreePath) : undefined,
+    worktreePath: worktreePath
+      ? resolveProjectContainedPath(
+          projectRoot,
+          worktreePath,
+          `mergeTargetChain[${index}].worktreePath`
+        )
+      : undefined,
   };
 }
 
@@ -259,16 +266,30 @@ function cloneMergeTargetChain(
 
 function resolveScopedCwd(projectRoot: string, cwd: OrchestrationTaskRequest['cwd']): string {
   const rawCwd = normalizeOptionalString(cwd, 'cwd');
-  const resolvedCwd = rawCwd ? path.resolve(projectRoot, rawCwd) : projectRoot;
+  return rawCwd ? resolveProjectContainedPath(projectRoot, rawCwd, 'cwd') : projectRoot;
+}
 
-  if (!isPathInsideOrEqual(projectRoot, resolvedCwd)) {
+function resolveProjectContainedPath(
+  projectRoot: string,
+  relativeOrAbsolutePath: string,
+  fieldName: string
+): string {
+  const resolvedPath = path.resolve(projectRoot, relativeOrAbsolutePath);
+  assertProjectContainedPath(projectRoot, resolvedPath, fieldName);
+  return resolvedPath;
+}
+
+function assertProjectContainedPath(
+  projectRoot: string,
+  resolvedPath: string,
+  fieldName: string
+): void {
+  if (!isPathInsideOrEqual(projectRoot, resolvedPath)) {
     throw new OrchestrationError(
       'project_scope_violation',
-      `cwd "${resolvedCwd}" resolves outside the project root`
+      `${fieldName} "${resolvedPath}" resolves outside the project root`
     );
   }
-
-  return resolvedCwd;
 }
 
 function isPathInsideOrEqual(parentPath: string, childPath: string): boolean {

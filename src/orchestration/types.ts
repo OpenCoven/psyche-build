@@ -65,20 +65,20 @@ export interface OrchestrationLaneResultBase {
   completedAt: string;
 }
 
-export interface OrchestrationLaneSuccessResult extends OrchestrationLaneResultBase {
+export interface OrchestrationLaneSuccess extends OrchestrationLaneResultBase {
   status: 'completed';
   pane?: ComuxPane;
   sessionId?: string;
 }
 
-export interface OrchestrationLaneFailureResult extends OrchestrationLaneResultBase {
+export interface OrchestrationLaneFailure extends OrchestrationLaneResultBase {
   status: 'failed';
   error: { code: OrchestrationErrorCode; message: string };
 }
 
 export type OrchestrationLaneResult =
-  | OrchestrationLaneSuccessResult
-  | OrchestrationLaneFailureResult;
+  | OrchestrationLaneSuccess
+  | OrchestrationLaneFailure;
 
 export type OrchestrationTaskResultStatus = 'completed' | 'partial' | 'failed';
 
@@ -107,15 +107,13 @@ export type OrchestrationErrorCode = typeof ORCHESTRATION_ERROR_CODES[number];
 
 export class OrchestrationError extends Error {
   readonly code: OrchestrationErrorCode;
+  public readonly cause: unknown;
 
-  constructor(
-    code: OrchestrationErrorCode,
-    message: string,
-    options?: { cause?: unknown }
-  ) {
-    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+  constructor(code: OrchestrationErrorCode, message: string, cause?: unknown) {
+    super(message);
     this.name = 'OrchestrationError';
     this.code = code;
+    this.cause = cause;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

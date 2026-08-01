@@ -151,6 +151,42 @@ describe('planOrchestrationTask', () => {
     );
   });
 
+  it('rejects existing worktree refs outside the project root', () => {
+    expectError(
+      () => planOrchestrationTask(buildRequest({
+        lanes: [
+          {
+            id: 'lane-a',
+            mode: 'shared-worktree',
+            existingWorktree: {
+              slug: 'existing',
+              worktreePath: '../outside',
+              branchName: 'feat/existing',
+            },
+          },
+        ],
+      })),
+      'project_scope_violation',
+      /existingWorktree\.worktreePath .*outside the project root/i
+    );
+  });
+
+  it('rejects merge target worktree paths outside the project root', () => {
+    expectError(
+      () => planOrchestrationTask(buildRequest({
+        mergeTargetChain: [
+          {
+            branchName: 'main',
+            slug: 'main',
+            worktreePath: '../outside',
+          },
+        ],
+      })),
+      'project_scope_violation',
+      /mergeTargetChain\[0\]\.worktreePath .*outside the project root/i
+    );
+  });
+
   it('rejects unknown agents from runtime callers', () => {
     expectError(
       () => planOrchestrationTask(buildRequest({
