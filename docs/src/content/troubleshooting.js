@@ -26,7 +26,7 @@ psyche --version</code></pre>
         <tr><td>Permission denied during global install</td><td>npm prefix ownership</td><td>Use a Node version manager or fix npm global directory ownership</td></tr>
       </tbody>
     </table>
-    <pre><code data-lang="bash">npm install -g psyche</code></pre>
+    <pre><code data-lang="bash">npm install -g psyche-build</code></pre>
 
     <h2>psyche Will Not Start</h2>
     <ul>

@@ -1,6 +1,6 @@
 <h1 align="center">psyche ✨</h1>
 
-<h3 align="center">Parallel agents with tmux, worktrees, and Coven</h3>
+<h3 align="center">Multiagent coding harness for parallel agent lanes</h3>
 
 <p align="center">
   Manage multiple AI coding agents in visible, isolated terminal workspaces.<br/>
@@ -18,13 +18,13 @@
 ## Install
 
 ```sh
-npm install -g psyche
+npm install -g psyche-build
 ```
 
 Or try it without a global install:
 
 ```sh
-npm exec psyche@latest -- doctor --json
+npm exec psyche-build@latest -- doctor --json
 ```
 
 ## Quick Start

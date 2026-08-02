@@ -712,12 +712,8 @@ a {
   margin-bottom: 12px;
 }
 
-.sa-logo {
-  display: none;
-}
-
 .sa-banner-header::before {
-  content: 'psyche';
+  content: 'Psyche Build';
   font-family: var(--font-display);
   font-size: 28px;
   font-weight: 600;

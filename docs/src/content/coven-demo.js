@@ -6,7 +6,7 @@ export function render() {
     <p class="lead">Use this loop to show how psyche and Coven fit together: one project, any harness, visible work.</p>
 
     <h2>Prerequisites</h2>
-    <pre><code data-lang="bash">npm install -g psyche
+    <pre><code data-lang="bash">npm install -g psyche-build
 npx @opencoven/cli doctor
 coven doctor
 coven daemon start

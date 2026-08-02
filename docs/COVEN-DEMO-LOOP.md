@@ -16,7 +16,7 @@ https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md
 Install psyche and Coven, then verify both from the same shell:
 
 ```bash
-npm install -g psyche
+npm install -g psyche-build
 npx @opencoven/cli doctor
 ```
 

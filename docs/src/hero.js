@@ -14,7 +14,7 @@ export function renderHero(starCount) {
           <div class="relative inline-block mb-8">
             <img src="/psyche.svg" alt="psyche" class="hero-logo h-36 w-auto relative z-1 drop-shadow-[0_0_80px_rgba(139,92,246,0.35)] max-sm:h-24" style="animation: hero-logo-in 0.8s 0.04s cubic-bezier(0.16,1,0.3,1) both" />
           </div>
-          <p class="hero-title" style="animation: fade-up 0.7s 0.1s cubic-bezier(0.16,1,0.3,1) both">Parallel agents with tmux, worktrees, and Coven</p>
+          <p class="hero-title" style="animation: fade-up 0.7s 0.1s cubic-bezier(0.16,1,0.3,1) both">Multiagent coding harness for parallel agent lanes</p>
           <p class="hero-subtitle" style="animation: fade-up 0.7s 0.2s cubic-bezier(0.16,1,0.3,1) both">Run independent AI coding agents in isolated worktrees, keep the terminal as the control room, and land reviewed work without losing the plot.</p>
           <div class="hero-actions" style="animation: fade-up 0.7s 0.3s cubic-bezier(0.16,1,0.3,1) both">
             <a href="#getting-started" class="hero-btn-primary inline-flex items-center gap-2 px-7 h-10 rounded-[10px] font-[var(--font-body)] text-sm font-semibold bg-accent border border-accent shadow-[0_0_24px_rgba(139,92,246,0.2),inset_0_1px_0_rgba(255,255,255,0.1)] hover:bg-accent-light hover:border-accent-light hover:-translate-y-0.5 hover:shadow-[0_8px_32px_rgba(139,92,246,0.35)] transition-all cursor-pointer max-sm:w-full max-sm:justify-center max-sm:max-w-[280px]">Read the field manual</a>
@@ -24,7 +24,7 @@ export function renderHero(starCount) {
               <span class="hero-star-badge bg-accent-glow-mid text-accent px-1.5 py-px rounded-lg text-[11.5px] font-semibold tabular-nums" ${starCount ? '' : 'style="display:none"'}>${starCount ? formatStars(starCount) : ''}</span>
             </a>
             <button id="hero-copy-btn" title="Copy to clipboard" class="hero-install-btn group inline-flex items-center gap-2.5 bg-bg-code border border-border rounded-[10px] px-5 h-10 cursor-pointer hover:border-border-hover hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-all">
-              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g psyche</code>
+              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g psyche-build</code>
               <svg class="hero-copy-icon text-text-dimmer group-hover:text-accent transition-colors" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               <svg class="hero-check-icon hidden text-text-secondary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
             </button>
