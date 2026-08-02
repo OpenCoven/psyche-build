@@ -213,12 +213,12 @@ class Psyche {
     // Set up global signal handlers for clean exit
     this.setupGlobalSignalHandlers();
 
-    // Ensure .psyche directory exists and is in .gitignore
-    await this.ensurePsycheDirectory();
-
     // Surface leftover comux state. Nothing is migrated; this only makes the
     // clean break visible instead of letting hooks silently stop firing.
     this.warnAboutLegacyComuxState();
+
+    // Ensure .psyche directory exists and is in .gitignore
+    await this.ensurePsycheDirectory();
 
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();

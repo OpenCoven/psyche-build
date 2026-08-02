@@ -913,4 +913,40 @@ describe('daemon bridge pane helpers', () => {
       ],
     });
   });
+
+  it('creates a generated pane branch from the requested start-point branch', async () => {
+    const root = await tempDir('psyche-bridge-start-point-');
+    execSync('git init', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
+    await writeFile(path.join(root, 'README.md'), '# demo\n');
+    execSync('git add README.md && git -c commit.gpgsign=false commit -m init', { cwd: root, stdio: 'ignore' });
+    execSync('git branch -M main', { cwd: root, stdio: 'ignore' });
+    await writeConfig(root, {
+      projectName: 'demo',
+      projectRoot: root,
+      panes: [],
+      settings: {},
+      lastUpdated: '2026-04-27T00:00:00.000Z',
+    });
+
+    const result = await spawnBridgePane(root, 'psyche-demo', {
+      requestId: 'req-start-point',
+      cwd: root,
+      title: 'From main',
+      startPointBranch: 'main',
+    }, {
+      tmuxSessionExists: () => true,
+      createTmuxPane: () => '%43',
+      sendTmuxCommand: () => undefined,
+    });
+
+    expect(result.branch).toBe('psyche/from-main');
+    expect(execSync('git branch --show-current', { cwd: result.worktreePath, encoding: 'utf8' }).trim())
+      .toBe('psyche/from-main');
+    expect(() => execSync('git merge-base --is-ancestor main HEAD', {
+      cwd: result.worktreePath,
+      stdio: 'ignore',
+    })).not.toThrow();
+  });
 });

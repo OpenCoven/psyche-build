@@ -49,6 +49,8 @@ export interface BridgeSpawnRequest {
   agent?: string;
   title?: string;
   prompt?: string;
+  /** Existing branch or ref from which to create the generated pane branch. */
+  startPointBranch?: string;
   branch?: string;
 }
 
@@ -845,7 +847,12 @@ export async function spawnBridgePane(
     const nextWorktreePath = path.join(worktreesRoot, nextSlug);
     assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
 
-    createGitWorktree(scoped.projectRoot, nextWorktreePath, nextBranch);
+    createGitWorktree(
+      scoped.projectRoot,
+      nextWorktreePath,
+      nextBranch,
+      request.startPointBranch,
+    );
     return { slug: nextSlug, branch: nextBranch, worktreePath: nextWorktreePath };
   });
 
@@ -1195,7 +1202,12 @@ async function resolveSpawnBranch(projectRoot: string, requestedBranch: string |
   throw bridgeError('branch_exhausted', 'could not allocate a unique psyche branch');
 }
 
-function createGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
+function createGitWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  branch: string,
+  startPointBranch?: string,
+): void {
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
     execFileSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' });
@@ -1203,7 +1215,9 @@ function createGitWorktree(projectRoot: string, worktreePath: string, branch: st
     if (gitBranchExists(projectRoot, branch)) {
       execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, branch], { stdio: 'pipe' });
     } else {
-      execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch], { stdio: 'pipe' });
+      const args = ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch];
+      if (startPointBranch) args.push(startPointBranch);
+      execFileSync('git', args, { stdio: 'pipe' });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

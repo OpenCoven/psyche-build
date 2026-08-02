@@ -72,7 +72,9 @@ export function detectLegacyComuxState(
   // to hear about it again.
   return candidates.filter((candidate) => {
     if (!exists(candidate.path)) return false;
-    const replacement = candidate.path.replace(/\.comux/, '.psyche');
+    const replacement = candidate.path === path.join(projectRoot, '.comux')
+      ? path.join(projectRoot, '.psyche', 'psyche.config.json')
+      : candidate.path.replace(/\.comux/, '.psyche');
     return !exists(replacement);
   });
 }

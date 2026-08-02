@@ -55,7 +55,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
       cwd: lane.cwd,
       ...(lane.agent ? { agent: lane.agent } : {}),
       prompt: lane.prompt,
-      ...(lane.startPointBranch ? { branch: lane.startPointBranch } : {}),
+      ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
       ...(lane.title ? { title: lane.title } : {}),
     });
 

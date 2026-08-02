@@ -63,6 +63,24 @@ describe('detectLegacyComuxState', () => {
     expect(findings.map((f) => f.path)).toEqual([path.join(ROOT, '.comux')]);
   });
 
+  it('still flags legacy config when a new psyche directory has no config yet', () => {
+    const findings = detectWith([
+      path.join(ROOT, '.comux'),
+      path.join(ROOT, '.psyche'),
+    ]);
+
+    expect(findings.map((f) => f.path)).toEqual([path.join(ROOT, '.comux')]);
+  });
+
+  it('stays quiet after the new project config has been initialized', () => {
+    const findings = detectWith([
+      path.join(ROOT, '.comux'),
+      path.join(ROOT, '.psyche', 'psyche.config.json'),
+    ]);
+
+    expect(findings).toEqual([]);
+  });
+
   it('omits home candidates when no home directory is supplied', () => {
     const findings = detectLegacyComuxState({
       projectRoot: ROOT,

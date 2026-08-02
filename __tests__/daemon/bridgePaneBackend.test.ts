@@ -56,6 +56,17 @@ describe('createBridgePaneBackend', () => {
     expect((spawnPane.mock.calls[0] as any[])[2].agent).toBeUndefined();
   });
 
+  it('uses the lane start point to create a generated branch', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('codex'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+
+    await backend.execute(lane({ startPointBranch: 'main' }));
+
+    const request = (spawnPane.mock.calls[0] as any[])[2];
+    expect(request.startPointBranch).toBe('main');
+    expect(request.branch).toBeUndefined();
+  });
+
   // spawnBridgePane always creates a fresh worktree. Silently making a second
   // one when the caller asked to share an existing one would be worse than
   // refusing.
