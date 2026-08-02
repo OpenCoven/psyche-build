@@ -162,6 +162,9 @@ export async function attachAgentToWorktree(
     prompt,
     slug,
     projectRoot,
+    // The attached agent runs in the target pane's worktree, not the project
+    // root, so workspace-trust setup has to point at the worktree.
+    worktreePath: targetPane.worktreePath,
     psychePaneId,
     codexHookEventFile,
     permissionMode: settings.permissionMode,

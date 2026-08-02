@@ -18,30 +18,14 @@ import { atomicWriteJsonSync } from './atomicWrite.js';
 import { LogService } from '../services/LogService.js';
 import {
   appendSlugSuffix,
-  buildAgentCommand,
-  buildInitialPromptCommand,
-  getAgentProcessName,
-  getPromptTransport,
-  getSendKeysPostPasteDelayMs,
-  getSendKeysPrePrompt,
-  getSendKeysReadyDelayMs,
-  getSendKeysSubmit,
+  launchAgentInPane,
   type AgentName,
 } from './agentLaunch.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
-import {
-  buildPromptReadAndDeleteSnippet,
-  writePromptFile,
-} from './promptStore.js';
-import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { isValidBranchName } from './git.js';
 import { ensurePsycheRuntimeIgnored } from './gitignore.js';
-import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import { readWorktreeMetadata, writeWorktreeMetadata } from './worktreeMetadata.js';
-import {
-  buildCodexHookedCommand,
-  installCodexPaneHooks,
-} from './codexHooks.js';
+import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
@@ -576,16 +560,10 @@ export async function createPane(
   }
 
   // Launch agent if specified
-  const hasInitialPrompt = !!(prompt && prompt.trim());
-
   if (agent) {
-    if (agent === 'gemini') {
-      const geminiWorkspacePath = fs.existsSync(worktreePath)
-        ? worktreePath
-        : projectRoot;
-      ensureGeminiFolderTrusted(geminiWorkspacePath);
-    }
-
+    // Codex hooks must be installed before launch so the wrapped command can
+    // point at the event file. Kept here because it needs the worktree path
+    // and the persisted pane id.
     let codexHookEventFile: string | undefined;
     if (agent === 'codex') {
       try {
@@ -603,76 +581,23 @@ export async function createPane(
       }
     }
 
-    const promptTransport = getPromptTransport(agent);
-    const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
-    let baselineCommand: string | undefined;
-    if (shouldSendPromptViaTmux) {
-      try {
-        baselineCommand = await tmuxService.getPaneCurrentCommand(paneInfo);
-      } catch {
-        baselineCommand = undefined;
-      }
-    }
-
-    let launchCommand: string;
-    if (hasInitialPrompt && !shouldSendPromptViaTmux) {
-      let promptFilePath: string | null = null;
-      try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
-      } catch {
-        // Fall back to inline escaping if prompt file write fails
-      }
-
-      if (promptFilePath) {
-        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
-          agent,
-          '"$PSYCHE_PROMPT_CONTENT"',
-          settings.permissionMode
-        )}`;
-      } else {
-        const escapedPrompt = prompt
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`')
-          .replace(/\$/g, '\\$');
-        launchCommand = buildInitialPromptCommand(
-          agent,
-          `"${escapedPrompt}"`,
-          settings.permissionMode
-        );
-      }
-    } else {
-      launchCommand = buildAgentCommand(agent, settings.permissionMode);
-    }
-
-    if (agent === 'codex') {
-      launchCommand = buildCodexHookedCommand(launchCommand, {
-        psychePaneId: newPane.id,
-        tmuxPaneId: paneInfo,
-        eventFile: codexHookEventFile,
-      });
-    }
-
-    await tmuxService.sendShellCommand(paneInfo, launchCommand);
-    await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-    if (shouldSendPromptViaTmux) {
-      await sendPromptViaTmux({
-        paneId: paneInfo,
-        prompt,
-        tmuxService,
-        expectedCommand: getAgentProcessName(agent),
-        baselineCommand,
-        prePromptKeys: getSendKeysPrePrompt(agent),
-        submitKeys: getSendKeysSubmit(agent),
-        postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
-        readyDelayMs: getSendKeysReadyDelayMs(agent),
-      });
-    }
+    await launchAgentInPane({
+      paneId: paneInfo,
+      agent,
+      prompt,
+      slug,
+      projectRoot,
+      worktreePath,
+      permissionMode: settings.permissionMode,
+      psychePaneId: newPane.id,
+      codexHookEventFile,
+      tmuxService,
+    });
 
     if (agent === 'claude') {
-      // Auto-approve trust prompts for Claude (workspace trust, not edit permissions)
+      // Auto-approve trust prompts for Claude (workspace trust, not edit
+      // permissions). Lives here rather than in the shared launcher because
+      // agentLaunch importing this module would be circular.
       autoApproveTrustPrompt(paneInfo, prompt).catch(() => {
         // Ignore errors in background monitoring
       });

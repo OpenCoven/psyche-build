@@ -3,5 +3,12 @@ import { configDefaults, defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, '.worktrees/**', '.psyche/**'],
+    // Several suites shell out to real git (creating worktrees, branches, and
+    // repos on disk) rather than mocking it. Vitest's 5s/10s defaults are
+    // wall-clock budgets, so under full-suite parallelism those tests flake on
+    // machine load rather than on behaviour. These limits still fail a genuinely
+    // hung test — just not a merely slow one.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 });
