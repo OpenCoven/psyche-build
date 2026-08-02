@@ -62,9 +62,9 @@ function Harness({
   popupManager: any;
   trackProjectActivity?: any;
   handleReopenWorktree?: any;
-  setStatusMessage?: ReturnType<typeof vi.fn>;
-  saveSidebarProjects?: ReturnType<typeof vi.fn>;
-  completeStartupPrimer?: ReturnType<typeof vi.fn>;
+  setStatusMessage?: (...args: any[]) => any;
+  saveSidebarProjects?: (...args: any[]) => any;
+  completeStartupPrimer?: (...args: any[]) => any;
   showStartupPrimer?: boolean;
 }) {
   useInputHandling({
@@ -109,6 +109,8 @@ function Harness({
     handleCreateChildWorktree: vi.fn(),
     handleReopenWorktree,
     setDevSourceFromPane: vi.fn(),
+    refreshPsycheSettings: vi.fn(),
+    openRitual: vi.fn(),
     savePanes: vi.fn(),
     sidebarProjects: [
       { projectRoot: '/repo-root', projectName: 'repo-root' },
@@ -118,7 +120,7 @@ function Harness({
     loadPanes: vi.fn(),
     cleanExit: vi.fn(),
     getAvailableAgentsForProject: vi.fn(() => []),
-    panesFile: '/tmp/comux.config.json',
+    panesFile: '/tmp/psyche.config.json',
     projectRoot: '/repo-root',
     projectActionItems,
     completeStartupPrimer,
@@ -126,7 +128,7 @@ function Harness({
     findCardInDirection: vi.fn(() => null),
   });
 
-  return <Text>comux</Text>;
+  return <Text>psyche</Text>;
 }
 
 describe('useInputHandling reopen project selection', () => {
@@ -209,7 +211,7 @@ describe('useInputHandling reopen project selection', () => {
       {
         branchName: 'feature-a',
         slug: 'feature-a',
-        path: '/repo-selected/.comux/worktrees/feature-a',
+        path: '/repo-selected/.psyche/worktrees/feature-a',
         lastModified: new Date('2026-03-12T12:00:00.000Z'),
         hasUncommittedChanges: false,
         hasWorktree: true,
@@ -276,7 +278,7 @@ describe('useInputHandling reopen project selection', () => {
       {
         branchName: 'feature-a',
         slug: 'feature-a',
-        path: '/repo-selected/.comux/worktrees/feature-a',
+        path: '/repo-selected/.psyche/worktrees/feature-a',
         lastModified: new Date('2026-03-12T12:00:00.000Z'),
         hasUncommittedChanges: false,
         hasWorktree: true,

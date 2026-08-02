@@ -144,7 +144,7 @@ export async function launchPopup(
   } = options;
 
   // Create a temp file for the result
-  const resultFile = path.join(os.tmpdir(), `comux-popup-${Date.now()}.json`);
+  const resultFile = path.join(os.tmpdir(), `psyche-popup-${Date.now()}.json`);
 
   // Build tmux popup command
   const args: string[] = [
@@ -257,7 +257,7 @@ export async function launchNodePopup<T = any>(
   options: PopupOptions = {}
 ): Promise<PopupResult<T>> {
   // Get the result file path that the script will write to
-  const resultFile = path.join(os.tmpdir(), `comux-popup-${Date.now()}.json`);
+  const resultFile = path.join(os.tmpdir(), `psyche-popup-${Date.now()}.json`);
 
   // Build node command with proper escaping
   // Escape each argument for shell: replace backslashes, then single quotes
@@ -299,7 +299,7 @@ export function launchPopupNonBlocking(
   const bounds = calculatePopupBounds(options);
 
   // Create a temp file for the result
-  const resultFile = path.join(os.tmpdir(), `comux-popup-${Date.now()}.json`);
+  const resultFile = path.join(os.tmpdir(), `psyche-popup-${Date.now()}.json`);
 
   // Build tmux popup command
   const args: string[] = [
@@ -486,10 +486,10 @@ export function launchNodePopupNonBlocking<T = any>(
 
   // Get the result file path that the script will write to
   // IMPORTANT: Only create this ONCE - do NOT create it again in child.on('close')
-  const resultFile = path.join(os.tmpdir(), `comux-popup-${Date.now()}.json`);
+  const resultFile = path.join(os.tmpdir(), `psyche-popup-${Date.now()}.json`);
   const readyFile = path.join(
     os.tmpdir(),
-    `comux-popup-ready-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
+    `psyche-popup-ready-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
   );
 
   // Build node command with proper escaping
@@ -501,12 +501,12 @@ export function launchNodePopupNonBlocking<T = any>(
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "'\\''");
 
-  const envAssignments = [`COMUX_POPUP_READY_FILE='${escapedReadyFile}'`];
+  const envAssignments = [`PSYCHE_POPUP_READY_FILE='${escapedReadyFile}'`];
   if (themeName) {
     const escapedThemeName = themeName
       .replace(/\\/g, '\\\\')
       .replace(/'/g, "'\\''");
-    envAssignments.push(`COMUX_THEME='${escapedThemeName}'`);
+    envAssignments.push(`PSYCHE_THEME='${escapedThemeName}'`);
   }
 
   const command = `${envAssignments.join(' ')} node ${escapedArgs.join(' ')}`;

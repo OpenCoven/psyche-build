@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { ComuxConfig, ComuxThemeName } from '../types.js';
+import type { PsycheConfig, PsycheThemeName } from '../types.js';
 import { createWelcomePane, welcomePaneExists, destroyWelcomePane } from './welcomePane.js';
 import { LogService } from '../services/LogService.js';
 import { atomicWriteJsonSync } from './atomicWrite.js';
@@ -51,14 +51,14 @@ export function destroyWelcomePaneCoordinated(projectRoot: string): boolean {
   const logService = LogService.getInstance();
 
   try {
-    const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
     if (!fs.existsSync(configPath)) {
       return true; // No config, nothing to destroy
     }
 
     const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: ComuxConfig = JSON.parse(configContent);
+    const config: PsycheConfig = JSON.parse(configContent);
 
     if (config.welcomePaneId) {
       // Destroy the pane
@@ -95,7 +95,7 @@ export function destroyWelcomePaneCoordinated(projectRoot: string): boolean {
 export async function createWelcomePaneCoordinated(
   projectRoot: string,
   controlPaneId: string,
-  themeName?: ComuxThemeName
+  themeName?: PsycheThemeName
 ): Promise<boolean> {
   const logService = LogService.getInstance();
 
@@ -106,7 +106,7 @@ export async function createWelcomePaneCoordinated(
   }
 
   try {
-    const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
     if (!fs.existsSync(configPath)) {
       logService.debug('Config file not found', 'WelcomePaneManager');
@@ -114,7 +114,7 @@ export async function createWelcomePaneCoordinated(
     }
 
     const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: ComuxConfig = JSON.parse(configContent);
+    const config: PsycheConfig = JSON.parse(configContent);
 
     // Check if we already have a valid welcome pane
     if (config.welcomePaneId && await welcomePaneExists(config.welcomePaneId)) {
@@ -145,7 +145,7 @@ export async function syncWelcomePaneVisibility(
   projectRoot: string,
   controlPaneId: string | undefined,
   shouldShowWelcome: boolean,
-  themeName?: ComuxThemeName
+  themeName?: PsycheThemeName
 ): Promise<boolean> {
   if (!controlPaneId) {
     return false;
@@ -154,14 +154,14 @@ export async function syncWelcomePaneVisibility(
   const logService = LogService.getInstance();
 
   try {
-    const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
     if (!fs.existsSync(configPath)) {
       return false;
     }
 
     const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: ComuxConfig = JSON.parse(configContent);
+    const config: PsycheConfig = JSON.parse(configContent);
     const hasTrackedWelcomePane = !!config.welcomePaneId;
     const hasLiveWelcomePane = hasTrackedWelcomePane
       ? await welcomePaneExists(config.welcomePaneId)
@@ -199,7 +199,7 @@ export async function syncWelcomePaneVisibility(
 }
 
 /**
- * LEGACY: Ensures a welcome pane exists when there are no comux panes
+ * LEGACY: Ensures a welcome pane exists when there are no psyche panes
  *
  * NOTE: This function is no longer used in normal operation.
  * Welcome pane management is now fully event-based:
@@ -211,7 +211,7 @@ export async function syncWelcomePaneVisibility(
  *
  * @param projectRoot - The project root directory
  * @param controlPaneId - The control pane ID
- * @param panesCount - Number of active comux panes
+ * @param panesCount - Number of active psyche panes
  */
 export async function ensureWelcomePane(
   projectRoot: string,
@@ -222,7 +222,7 @@ export async function ensureWelcomePane(
 
   logService.debug(`ensureWelcomePane called: panesCount=${panesCount}, controlPaneId=${controlPaneId}`, 'WelcomePaneManager');
 
-  // Only create welcome pane if there are no comux panes
+  // Only create welcome pane if there are no psyche panes
   if (panesCount > 0 || !controlPaneId) {
     logService.debug(`Skipping: panesCount > 0 (${panesCount}) or no controlPaneId (${controlPaneId})`, 'WelcomePaneManager');
     return;

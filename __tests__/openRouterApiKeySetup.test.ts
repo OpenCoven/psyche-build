@@ -27,16 +27,16 @@ describe('openRouterApiKeySetup', () => {
     const exportLine = buildOpenRouterExportLine('sk-test-123', '/bin/zsh');
     const updated = upsertOpenRouterKeyBlock('', exportLine);
 
-    expect(updated).toContain('# >>> comux openrouter >>>');
+    expect(updated).toContain('# >>> psyche openrouter >>>');
     expect(updated).toContain("export OPENROUTER_API_KEY='sk-test-123'");
-    expect(updated).toContain('# <<< comux openrouter <<<');
+    expect(updated).toContain('# <<< psyche openrouter <<<');
   });
 
   it('replaces existing managed block', () => {
     const initial = [
-      '# >>> comux openrouter >>>',
+      '# >>> psyche openrouter >>>',
       "export OPENROUTER_API_KEY='old-key'",
-      '# <<< comux openrouter <<<',
+      '# <<< psyche openrouter <<<',
       '',
     ].join('\n');
 
@@ -48,7 +48,7 @@ describe('openRouterApiKeySetup', () => {
   });
 
   it('persists key to shell config file', async () => {
-    const homeDir = mkdtempSync(path.join(tmpdir(), 'comux-openrouter-'));
+    const homeDir = mkdtempSync(path.join(tmpdir(), 'psyche-openrouter-'));
 
     try {
       const zshrcPath = path.join(homeDir, '.zshrc');
@@ -68,10 +68,10 @@ describe('openRouterApiKeySetup', () => {
   });
 
   it('writes openrouter onboarding state without clobbering existing keys', async () => {
-    const homeDir = mkdtempSync(path.join(tmpdir(), 'comux-openrouter-state-'));
+    const homeDir = mkdtempSync(path.join(tmpdir(), 'psyche-openrouter-state-'));
 
     try {
-      const onboardingDir = path.join(homeDir, '.comux');
+      const onboardingDir = path.join(homeDir, '.psyche');
       mkdirSync(onboardingDir, { recursive: true });
       writeFileSync(
         path.join(onboardingDir, 'onboarding.json'),

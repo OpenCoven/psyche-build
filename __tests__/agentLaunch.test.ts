@@ -31,8 +31,12 @@ describe('agent launch utils', () => {
     expect(getAgentSlugSuffix('gemini')).toBe('gemini');
   });
 
-  it('returns default-enabled registry agents', () => {
-    expect(getDefaultEnabledAgents()).toEqual(['claude', 'opencode', 'codex', 'coven-code']);
+  it('returns default-enabled registry agents, led by Coven Code', () => {
+    expect(getDefaultEnabledAgents()).toEqual(['coven-code', 'claude', 'opencode', 'codex']);
+  });
+
+  it('lists Coven Code first so it leads the new-pane picker', () => {
+    expect(getAgentDefinitions()[0]?.id).toBe('coven-code');
   });
 
   it('builds single-agent options from available agents', () => {

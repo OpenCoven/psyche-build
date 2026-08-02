@@ -2,7 +2,7 @@ import { TmuxControl } from "./tmuxControl.js";
 import { PaneOutputBuffer } from "./PaneOutputBuffer.js";
 
 /**
- * One TmuxControl subprocess per comux session. As `%output` events arrive
+ * One TmuxControl subprocess per psyche session. As `%output` events arrive
  * from tmux for any pane, we fan them into per-pane PaneOutputBuffer
  * instances. Subscribers attach via bufferFor(paneId).subscribe(...) for
  * live tail; bufferFor(paneId).snapshot(sinceSeq?) gives the replay window.

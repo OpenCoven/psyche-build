@@ -1,9 +1,20 @@
 import { createHash } from 'crypto';
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { getPaneProjectName, getPaneProjectRoot } from './paneProject.js';
 
-export const PANE_TITLE_DELIMITER = '__comux__';
+export const PANE_TITLE_DELIMITER = '__psyche__';
+/**
+ * Delimiters that were actually written into pane titles by earlier releases.
+ *
+ * These must NOT be renamed along with the current delimiter. The whole point
+ * of the list is to recognize titles that already exist in a running tmux
+ * server, so it has to name the string that is really out there. `::psyche::`
+ * never shipped; `::comux::` did.
+ *
+ * (The vmux -> comux rename got this wrong in fe18067, renaming the legacy
+ * entry too and leaving a list that matched nothing.)
+ */
 export const LEGACY_PANE_TITLE_DELIMITERS = ['::comux::'] as const;
 const ALL_PANE_TITLE_DELIMITERS = [PANE_TITLE_DELIMITER, ...LEGACY_PANE_TITLE_DELIMITERS];
 
@@ -31,7 +42,7 @@ export function sanitizePaneDisplayName(value: string): string {
 }
 
 export function getPaneDisplayName(
-  pane: Pick<ComuxPane, 'slug' | 'displayName'>
+  pane: Pick<PsychePane, 'slug' | 'displayName'>
 ): string {
   const displayName = typeof pane.displayName === 'string'
     ? sanitizePaneDisplayName(pane.displayName)
@@ -51,7 +62,7 @@ function encodePaneTmuxTitle(
 }
 
 function getCustomPaneDisplayName(
-  pane: Pick<ComuxPane, 'displayName'>
+  pane: Pick<PsychePane, 'displayName'>
 ): string | undefined {
   if (typeof pane.displayName !== 'string') {
     return undefined;
@@ -62,7 +73,7 @@ function getCustomPaneDisplayName(
 }
 
 function getStablePaneTmuxTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -89,7 +100,7 @@ function getStablePaneTmuxTitle(
 }
 
 export function getPaneTmuxDisplayTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -102,7 +113,7 @@ export function getPaneTmuxDisplayTitle(
  * worktree panes so duplicate slugs across projects do not collide.
  */
 export function getPaneTmuxTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -120,7 +131,7 @@ export function getPaneTmuxTitle(
  * delimiter migrations.
  */
 export function getPaneTitleCandidates(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string[] {

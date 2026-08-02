@@ -3,14 +3,14 @@
  */
 
 import { execSync } from 'child_process';
-import type { ComuxPane } from '../../types.js';
+import type { PsychePane } from '../../types.js';
 import type { ActionResult, ActionContext } from '../types.js';
 
 /**
  * Copy worktree path to clipboard
  */
 export async function copyPath(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext
 ): Promise<ActionResult> {
   if (!pane.worktreePath) {

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -62,8 +62,8 @@ describe('WorktreeCleanupService', () => {
   });
 
   function createManagedWorktree(projectRoot: string, slug: string, mtime: Date): string {
-    const worktreePath = join(projectRoot, '.comux', 'worktrees', slug);
-    mkdirSync(join(worktreePath, '.comux'), { recursive: true });
+    const worktreePath = join(projectRoot, '.psyche', 'worktrees', slug);
+    mkdirSync(join(worktreePath, '.psyche'), { recursive: true });
     utimesSync(worktreePath, mtime, mtime);
     return worktreePath;
   }
@@ -71,7 +71,7 @@ describe('WorktreeCleanupService', () => {
   it('removes nested worktrees and deletes the pane branch from every repo in a multi-repo workspace cleanup', async () => {
     detectAllWorktreesMock.mockReturnValue([
       {
-        worktreePath: '/test/project/.comux/worktrees/react',
+        worktreePath: '/test/project/.psyche/worktrees/react',
         parentRepoPath: '/test/project',
         repoName: 'project',
         branch: 'react',
@@ -81,7 +81,7 @@ describe('WorktreeCleanupService', () => {
         depth: 0,
       },
       {
-        worktreePath: '/test/project/.comux/worktrees/react/docs-ui',
+        worktreePath: '/test/project/.psyche/worktrees/react/docs-ui',
         parentRepoPath: '/test/project/docs-ui',
         repoName: 'docs-ui',
         branch: 'react',
@@ -91,7 +91,7 @@ describe('WorktreeCleanupService', () => {
         depth: 1,
       },
       {
-        worktreePath: '/test/project/.comux/worktrees/react/theme-schemas',
+        worktreePath: '/test/project/.psyche/worktrees/react/theme-schemas',
         parentRepoPath: '/test/project/theme-schemas',
         repoName: 'theme-schemas',
         branch: 'react',
@@ -105,13 +105,13 @@ describe('WorktreeCleanupService', () => {
     const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
     (WorktreeCleanupService as any).instance = undefined;
 
-    const pane: ComuxPane = {
-      id: 'comux-1',
+    const pane: PsychePane = {
+      id: 'psyche-1',
       slug: 'react',
       branchName: 'react',
       prompt: '',
       paneId: '%1',
-      worktreePath: '/test/project/.comux/worktrees/react',
+      worktreePath: '/test/project/.psyche/worktrees/react',
     };
 
     const service = WorktreeCleanupService.getInstance() as any;
@@ -130,20 +130,20 @@ describe('WorktreeCleanupService', () => {
     const worktreeRemovalCalls = gitCalls.filter((call) => call.args[0] === 'worktree');
     expect(worktreeRemovalCalls).toEqual(expect.arrayContaining([
       {
-        args: ['worktree', 'remove', '/test/project/.comux/worktrees/react/docs-ui', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/docs-ui', '--force'],
         cwd: '/test/project/docs-ui',
       },
       {
-        args: ['worktree', 'remove', '/test/project/.comux/worktrees/react/theme-schemas', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/theme-schemas', '--force'],
         cwd: '/test/project/theme-schemas',
       },
       {
-        args: ['worktree', 'remove', '/test/project/.comux/worktrees/react', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
         cwd: '/test/project',
       },
     ]));
     expect(worktreeRemovalCalls.at(-1)).toEqual({
-      args: ['worktree', 'remove', '/test/project/.comux/worktrees/react', '--force'],
+      args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
       cwd: '/test/project',
     });
 
@@ -178,7 +178,7 @@ describe('WorktreeCleanupService', () => {
   });
 
   it('prunes the oldest inactive managed worktrees when the configured cap is exceeded', async () => {
-    const projectRoot = mkdtempSync(join(tmpdir(), 'comux-prune-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'psyche-prune-'));
     tempDirs.push(projectRoot);
     const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
     const middle = createManagedWorktree(projectRoot, 'middle', new Date('2026-01-02T00:00:00Z'));
@@ -193,7 +193,7 @@ describe('WorktreeCleanupService', () => {
       projectRoot,
       activePanes: [
         {
-          id: 'comux-active',
+          id: 'psyche-active',
           slug: 'active',
           prompt: '',
           paneId: '%2',
@@ -223,7 +223,7 @@ describe('WorktreeCleanupService', () => {
   });
 
   it('does not prune when active panes already occupy the configured cap', async () => {
-    const projectRoot = mkdtempSync(join(tmpdir(), 'comux-prune-'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'psyche-prune-'));
     tempDirs.push(projectRoot);
     const old = createManagedWorktree(projectRoot, 'old', new Date('2026-01-01T00:00:00Z'));
     const activeA = createManagedWorktree(projectRoot, 'active-a', new Date('2026-01-02T00:00:00Z'));

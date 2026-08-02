@@ -6,7 +6,7 @@ const fsMock = vi.hoisted(() => ({
 
 const tmuxServiceMock = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
-  getCurrentSessionNameSync: vi.fn(() => 'comux-test'),
+  getCurrentSessionNameSync: vi.fn(() => 'psyche-test'),
   paneExists: vi.fn(async () => true),
   setSessionOptionSync: vi.fn(),
   setPaneTitle: vi.fn(async () => {}),
@@ -112,21 +112,21 @@ describe('reopenWorktree', () => {
 
     const result = await reopenWorktree({
       slug: 'reopen-me',
-      worktreePath: '/repo/.comux/worktrees/reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
       projectRoot: '/repo',
       existingPanes: [],
       sessionProjectRoot: '/repo',
-      sessionConfigPath: '/repo/.comux/comux.config.json',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
     });
 
     expect(tmuxServiceMock.sendShellCommand).toHaveBeenCalledWith(
       '%1',
       expect.stringMatching(
-        /^export COMUX_PANE_ID='comux-\d+'; export COMUX_TMUX_PANE_ID='%1'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox$/
+        /^export PSYCHE_PANE_ID='psyche-\d+'; export PSYCHE_TMUX_PANE_ID='%1'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox$/
       )
     );
     expect(tmuxServiceMock.setSessionOptionSync).toHaveBeenCalledWith(
-      'comux-test',
+      'psyche-test',
       'pane-border-status',
       'top'
     );
@@ -139,11 +139,11 @@ describe('reopenWorktree', () => {
 
     await reopenWorktree({
       slug: 'reopen-me',
-      worktreePath: '/repo/.comux/worktrees/reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
       projectRoot: '/repo',
       existingPanes: [
         {
-          id: 'comux-1',
+          id: 'psyche-1',
           slug: 'shell-1',
           prompt: '',
           paneId: '%9',
@@ -152,7 +152,7 @@ describe('reopenWorktree', () => {
         },
       ],
       sessionProjectRoot: '/repo',
-      sessionConfigPath: '/repo/.comux/comux.config.json',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
     });
 
     expect(destroyWelcomePaneCoordinatedMock).toHaveBeenCalledWith('/repo');
@@ -170,11 +170,11 @@ describe('reopenWorktree', () => {
 
     const result = await reopenWorktree({
       slug: 'reopen-me',
-      worktreePath: '/repo/.comux/worktrees/reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
       projectRoot: '/repo',
       existingPanes: [],
       sessionProjectRoot: '/repo',
-      sessionConfigPath: '/repo/.comux/comux.config.json',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
     });
 
     expect(result.pane.projectName).toBe('Renamed Repo');

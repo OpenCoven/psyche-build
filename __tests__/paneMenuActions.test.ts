@@ -4,9 +4,9 @@ import {
   PaneAction,
   TOGGLE_PANE_VISIBILITY_ACTION,
 } from "../src/actions/types.js"
-import type { ComuxPane } from "../src/types.js"
+import type { PsychePane } from "../src/types.js"
 
-function pane(id: string, overrides: Partial<ComuxPane> = {}): ComuxPane {
+function pane(id: string, overrides: Partial<PsychePane> = {}): PsychePane {
   const projectRoot = overrides.projectRoot || "/repo-a"
   const slug = overrides.slug || `pane-${id}`
 
@@ -16,7 +16,7 @@ function pane(id: string, overrides: Partial<ComuxPane> = {}): ComuxPane {
     prompt: `prompt-${id}`,
     paneId: `%${id}`,
     projectRoot,
-    worktreePath: `${projectRoot}/.comux/worktrees/${slug}`,
+    worktreePath: `${projectRoot}/.psyche/worktrees/${slug}`,
     ...overrides,
   }
 }

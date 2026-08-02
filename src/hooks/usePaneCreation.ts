@@ -1,16 +1,19 @@
 import path from 'path';
 import * as os from 'os';
-import type { ComuxPane, MergeTargetReference } from '../types.js';
+import type { PsychePane, MergeTargetReference } from '../types.js';
 import { createPane } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
-import { getAgentSlugSuffix, type AgentName } from '../utils/agentLaunch.js';
+import { type AgentName } from '../utils/agentLaunch.js';
+import { Orchestrator } from '../orchestration/orchestrator.js';
+import { createLocalPaneBackend } from '../orchestration/localPaneBackend.js';
+import { buildMultiAgentTaskRequest } from '../orchestration/adapters.js';
 import { generateSlug } from '../utils/slug.js';
 import { SettingsManager } from '../utils/settingsManager.js';
 
 interface Params {
-  panes: ComuxPane[];
-  savePanes: (p: ComuxPane[]) => Promise<void>;
+  panes: PsychePane[];
+  savePanes: (p: PsychePane[]) => Promise<void>;
   projectName: string;
   sessionProjectRoot: string;
   panesFile: string;
@@ -21,7 +24,7 @@ interface Params {
 }
 
 interface CreateNewPaneOptions {
-  existingPanes?: ComuxPane[];
+  existingPanes?: PsychePane[];
   slugSuffix?: string;
   slugBase?: string;
   targetProjectRoot?: string;
@@ -37,7 +40,7 @@ function getParallelPaneCreationLimit(totalAgents: number): number {
     return 1;
   }
 
-  const overrideRaw = process.env.COMUX_PANE_CREATE_CONCURRENCY;
+  const overrideRaw = process.env.PSYCHE_PANE_CREATE_CONCURRENCY;
   if (overrideRaw) {
     const override = Number.parseInt(overrideRaw, 10);
     if (Number.isFinite(override) && override > 0) {
@@ -59,7 +62,7 @@ function getParallelPaneCreationLimit(totalAgents: number): number {
 
 function enqueueManagedWorktreePruning(
   projectRoots: string[],
-  activePanes: ComuxPane[]
+  activePanes: PsychePane[]
 ): void {
   const uniqueProjectRoots = Array.from(new Set(projectRoots));
 
@@ -91,7 +94,7 @@ export default function usePaneCreation({
   const openInEditor = async (currentPrompt: string, setPrompt: (v: string) => void) => {
     try {
       const fs = await import('fs');
-      const tmpFile = path.join(os.tmpdir(), `comux-prompt-${Date.now()}.md`);
+      const tmpFile = path.join(os.tmpdir(), `psyche-prompt-${Date.now()}.md`);
       fs.writeFileSync(tmpFile, currentPrompt || '# Enter your Claude prompt here\n\n');
       const editor = process.env.EDITOR || process.env.VISUAL || 'nano';
       process.stdout.write('\x1b[2J\x1b[H');
@@ -112,7 +115,7 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<ComuxPane> => {
+  ): Promise<PsychePane> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -143,7 +146,7 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<ComuxPane | null> => {
+  ): Promise<PsychePane | null> => {
     const panesForCreation = options.existingPanes ?? panes;
 
     try {
@@ -179,7 +182,7 @@ export default function usePaneCreation({
       CreateNewPaneOptions,
       'existingPanes' | 'targetProjectRoot' | 'startPointBranch' | 'mergeTargetChain'
     > = {}
-  ): Promise<ComuxPane[]> => {
+  ): Promise<PsychePane[]> => {
     const panesForCreation = options.existingPanes ?? panes;
     const dedupedAgents = selectedAgents.filter(
       (agent, index) => selectedAgents.indexOf(agent) === index
@@ -190,8 +193,11 @@ export default function usePaneCreation({
     }
 
     const isMultiLaunch = dedupedAgents.length > 1;
+    // Sibling lanes share a slug stem so they read as variants of one task
+    // (fix-auth-codex, fix-auth-claude) rather than unrelated names.
     const slugBase = isMultiLaunch ? await generateSlug(prompt) : undefined;
     const parallelLimit = getParallelPaneCreationLimit(dedupedAgents.length);
+    const targetProjectRoot = options.targetProjectRoot || sessionProjectRoot;
 
     try {
       setIsCreatingPane(true);
@@ -203,62 +209,41 @@ export default function usePaneCreation({
         setStatusMessage(`Creating ${dedupedAgents.length} pane${dedupedAgents.length === 1 ? '' : 's'}...`);
       }
 
-      const createdByIndex: Array<ComuxPane | null> = new Array(dedupedAgents.length).fill(null);
-
-      const firstAgent = dedupedAgents[0];
-      const firstPane = await createPaneInternal(prompt, firstAgent, {
-        existingPanes: panesForCreation,
-        slugSuffix: isMultiLaunch ? getAgentSlugSuffix(firstAgent) : undefined,
+      const backend = createLocalPaneBackend({
+        projectName,
+        sessionProjectRoot,
+        sessionConfigPath: panesFile,
+        basePanes: panesForCreation,
+        availableAgents,
         slugBase,
-        targetProjectRoot: options.targetProjectRoot,
+      });
+      const orchestrator = new Orchestrator({ executeLane: backend.execute });
+
+      const result = await orchestrator.execute(buildMultiAgentTaskRequest({
+        taskId: `task-${Date.now()}`,
+        projectRoot: targetProjectRoot,
+        prompt,
+        agents: dedupedAgents,
         startPointBranch: options.startPointBranch,
         mergeTargetChain: options.mergeTargetChain,
-      });
-      createdByIndex[0] = firstPane;
+        concurrency: parallelLimit,
+      }));
 
-      const remainingAgents = dedupedAgents.slice(1);
-      const workerCount = Math.min(parallelLimit, remainingAgents.length);
-      let nextTaskIndex = 0;
-      const failures: Array<{ agent: AgentName; error: unknown }> = [];
-
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (nextTaskIndex < remainingAgents.length) {
-          const currentTaskIndex = nextTaskIndex;
-          nextTaskIndex += 1;
-          const selectedAgent = remainingAgents[currentTaskIndex];
-          const agentResultIndex = currentTaskIndex + 1;
-
-          try {
-            const createdSoFar = createdByIndex.filter(
-              (pane): pane is ComuxPane => pane !== null
-            );
-            const pane = await createPaneInternal(prompt, selectedAgent, {
-              existingPanes: [...panesForCreation, ...createdSoFar],
-              slugSuffix: getAgentSlugSuffix(selectedAgent),
-              slugBase,
-              targetProjectRoot: options.targetProjectRoot,
-              startPointBranch: options.startPointBranch,
-              mergeTargetChain: options.mergeTargetChain,
-            });
-            createdByIndex[agentResultIndex] = pane;
-          } catch (error) {
-            failures.push({ agent: selectedAgent, error });
-            LogService.getInstance().error(
-              `Failed to create pane for agent ${selectedAgent}`,
-              'usePaneCreation',
-              undefined,
-              error instanceof Error ? error : undefined
-            );
-          }
-        }
-      });
-
-      await Promise.all(workers);
-
-      const createdPanes = createdByIndex.filter(
-        (pane): pane is ComuxPane => pane !== null
+      const createdPanes = result.lanes.flatMap((lane) =>
+        lane.status === 'completed' && lane.pane ? [lane.pane] : []
       );
+      const failures = result.lanes.filter((lane) => lane.status === 'failed');
 
+      for (const failure of failures) {
+        if (failure.status !== 'failed') continue;
+        LogService.getInstance().error(
+          `Lane "${failure.id}" failed: ${failure.error.message}`,
+          'usePaneCreation'
+        );
+      }
+
+      // Successful lanes are persisted even when siblings failed — a partial
+      // result still leaves usable work behind.
       if (createdPanes.length > 0) {
         const updatedPanes = [...panesForCreation, ...createdPanes];
         await savePanes(updatedPanes);

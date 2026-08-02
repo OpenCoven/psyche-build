@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ============================================
-   comux Documentation — Theme & Custom Styles
+   psyche Documentation — Theme & Custom Styles
    ============================================ */
 
 @theme {
@@ -475,7 +475,7 @@ a {
   margin-bottom: 32px;
 }
 
-.comux-video {
+.psyche-video {
   width: 100%;
   border-radius: 12px;
   border: 1px solid var(--color-border-light);
@@ -712,12 +712,8 @@ a {
   margin-bottom: 12px;
 }
 
-.sa-logo {
-  display: none;
-}
-
 .sa-banner-header::before {
-  content: 'comux';
+  content: 'Psyche Build';
   font-family: var(--font-display);
   font-size: 28px;
   font-weight: 600;

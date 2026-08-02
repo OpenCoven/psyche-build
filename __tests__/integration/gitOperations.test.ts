@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ComuxPane } from '../../src/types.js';
+import type { PsychePane } from '../../src/types.js';
 import type { ActionContext } from '../../src/actions/types.js';
 import { createMockGitRepo, addWorktree, type MockGitRepo } from '../fixtures/integration/gitRepo.js';
 
@@ -183,7 +183,7 @@ describe('Git Operations Integration Tests', () => {
     it('should create worktree from main branch', async () => {
       const { execSync } = await import('child_process');
 
-      execSync('git worktree add "/test/.comux/worktrees/feature-branch" -b feature-branch', {
+      execSync('git worktree add "/test/.psyche/worktrees/feature-branch" -b feature-branch', {
         encoding: 'utf-8',
         cwd: '/test',
       });
@@ -191,7 +191,7 @@ describe('Git Operations Integration Tests', () => {
       // Verify worktree was added to mock repo
       expect(gitRepo.worktrees).toHaveLength(1);
       expect(gitRepo.worktrees[0]).toMatchObject({
-        path: '/test/.comux/worktrees/feature-branch',
+        path: '/test/.psyche/worktrees/feature-branch',
         branch: 'feature-branch',
       });
     });
@@ -199,7 +199,7 @@ describe('Git Operations Integration Tests', () => {
     it('should create new branch for worktree', async () => {
       const { execSync } = await import('child_process');
 
-      execSync('git worktree add "/test/.comux/worktrees/new-feature" -b new-feature', {
+      execSync('git worktree add "/test/.psyche/worktrees/new-feature" -b new-feature', {
         cwd: '/test',
       });
 
@@ -214,7 +214,7 @@ describe('Git Operations Integration Tests', () => {
       const { execSync } = await import('child_process');
 
       execSync(
-        'git worktree add "/test/.comux/worktrees/hotfix" -b hotfix abc123',
+        'git worktree add "/test/.psyche/worktrees/hotfix" -b hotfix abc123',
         { cwd: '/test' }
       );
 
@@ -238,7 +238,7 @@ describe('Git Operations Integration Tests', () => {
       const { execSync } = await import('child_process');
 
       expect(() => {
-        execSync('git worktree add "/root/.comux/worktrees/test" -b test', {
+        execSync('git worktree add "/root/.psyche/worktrees/test" -b test', {
           cwd: '/test',
         });
       }).toThrow('Permission denied');
@@ -261,7 +261,7 @@ describe('Git Operations Integration Tests', () => {
     it('should detect main branch from origin/HEAD', async () => {
       const { getMainBranch } = await import('../../src/utils/git.js');
 
-      const mainBranch = getMainBranch('/test');
+      const mainBranch = getMainBranch();
 
       expect(mainBranch).toBe('main');
       expect(mockExecSync).toHaveBeenCalledWith(
@@ -281,7 +281,7 @@ describe('Git Operations Integration Tests', () => {
 
       const { getMainBranch } = await import('../../src/utils/git.js');
 
-      const mainBranch = getMainBranch('/test');
+      const mainBranch = getMainBranch();
 
       // Should fallback to 'main'
       expect(mainBranch).toBe('main');
@@ -317,7 +317,7 @@ describe('Git Operations Integration Tests', () => {
     it('should merge main into worktree (step 1)', async () => {
       const { mergeMainIntoWorktree } = await import('../../src/utils/mergeExecution.js');
 
-      const result = mergeMainIntoWorktree('/test/.comux/worktrees/feature', 'main');
+      const result = mergeMainIntoWorktree('/test/.psyche/worktrees/feature', 'main');
 
       expect(result.success).toBe(true);
       expect(mockExecSync).toHaveBeenCalledWith(
@@ -353,12 +353,12 @@ describe('Git Operations Integration Tests', () => {
 
       const { mergeMainIntoWorktree } = await import('../../src/utils/mergeExecution.js');
 
-      const result = mergeMainIntoWorktree('/test/.comux/worktrees/feature', 'main');
+      const result = mergeMainIntoWorktree('/test/.psyche/worktrees/feature', 'main');
 
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
       // Error message could be "CONFLICT" or "Merge conflicts detected"
-      expect(result.error.toLowerCase()).toMatch(/conflict/i);
+      expect(result.error?.toLowerCase()).toMatch(/conflict/i);
     });
 
     it('should detect conflicting files', async () => {
@@ -382,7 +382,7 @@ describe('Git Operations Integration Tests', () => {
 
       const { mergeMainIntoWorktree } = await import('../../src/utils/mergeExecution.js');
 
-      const result = mergeMainIntoWorktree('/test/.comux/worktrees/feature', 'main');
+      const result = mergeMainIntoWorktree('/test/.psyche/worktrees/feature', 'main');
 
       expect(result.success).toBe(false);
       expect(result.conflictFiles).toBeDefined();
@@ -418,7 +418,7 @@ describe('Git Operations Integration Tests', () => {
 
       const result = cleanupAfterMerge(
         '/test',
-        '/test/.comux/worktrees/feature',
+        '/test/.psyche/worktrees/feature',
         'feature-branch'
       );
 
@@ -516,13 +516,13 @@ index abc123..def456 100644
 
   describe('Worktree Validation', () => {
     it('should check if path is inside worktree', async () => {
-      gitRepo = addWorktree(gitRepo, '/test/.comux/worktrees/feature', 'feature');
+      gitRepo = addWorktree(gitRepo, '/test/.psyche/worktrees/feature', 'feature');
 
       mockExecSync.mockImplementation((cmd: string, options?: any) => {
         if (cmd.includes('worktree list')) {
           return options?.encoding === 'utf-8'
-            ? '/test/.comux/worktrees/feature abc123 [feature]'
-            : Buffer.from('/test/.comux/worktrees/feature abc123 [feature]');
+            ? '/test/.psyche/worktrees/feature abc123 [feature]'
+            : Buffer.from('/test/.psyche/worktrees/feature abc123 [feature]');
         }
         return options?.encoding === 'utf-8' ? '' : Buffer.from('');
       });
@@ -534,13 +534,13 @@ index abc123..def456 100644
         cwd: '/test',
       });
 
-      expect(worktrees).toContain('/test/.comux/worktrees/feature');
+      expect(worktrees).toContain('/test/.psyche/worktrees/feature');
     });
 
     it('should handle missing worktree directory', async () => {
       mockExecSync.mockImplementation((cmd: string) => {
         if (cmd.includes('worktree remove')) {
-          throw new Error("fatal: '/test/.comux/worktrees/missing' is not a working tree");
+          throw new Error("fatal: '/test/.psyche/worktrees/missing' is not a working tree");
         }
         return Buffer.from('');
       });
@@ -548,7 +548,7 @@ index abc123..def456 100644
       const { execSync } = await import('child_process');
 
       expect(() => {
-        execSync('git worktree remove "/test/.comux/worktrees/missing"', {
+        execSync('git worktree remove "/test/.psyche/worktrees/missing"', {
           cwd: '/test',
         });
       }).toThrow('not a working tree');
@@ -566,14 +566,14 @@ index abc123..def456 100644
 
       // Without --force, should fail
       expect(() => {
-        execSync('git worktree remove "/test/.comux/worktrees/feature"', {
+        execSync('git worktree remove "/test/.psyche/worktrees/feature"', {
           cwd: '/test',
         });
       }).toThrow('modified or untracked files');
 
       // With --force, should succeed
       expect(() => {
-        execSync('git worktree remove "/test/.comux/worktrees/feature" --force', {
+        execSync('git worktree remove "/test/.psyche/worktrees/feature" --force', {
           cwd: '/test',
         });
       }).not.toThrow();

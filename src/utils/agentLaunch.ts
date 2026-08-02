@@ -1,14 +1,22 @@
+import { existsSync } from 'node:fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   buildPromptReadAndDeleteSnippet,
-  shellQuote,
   writePromptFile,
 } from './promptStore.js';
 import {
   buildCodexHookedCommand,
 } from './codexHooks.js';
+import { ensureGeminiFolderTrusted } from './geminiTrust.js';
+import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
+/**
+ * Registry order is user-visible: it drives the new-pane agent picker, the
+ * enabled-agents settings list, and the default-enabled set. Coven Code leads
+ * because it is this project's own coding harness.
+ */
 export const AGENT_IDS = [
+  'coven-code',
   'claude',
   'opencode',
   'codex',
@@ -20,7 +28,6 @@ export const AGENT_IDS = [
   'cursor',
   'copilot',
   'crush',
-  'coven-code',
 ] as const;
 
 export type AgentName = typeof AGENT_IDS[number];
@@ -486,7 +493,7 @@ export function buildAgentLaunchOptions(
 }
 
 /**
- * Resolve CLI permission flags for a given agent and comux permissionMode.
+ * Resolve CLI permission flags for a given agent and psyche permissionMode.
  */
 export function getPermissionFlags(
   agent: AgentName,
@@ -563,107 +570,127 @@ export function buildAgentResumeOrLaunchCommand(
  * Shared by `createPane()` (new worktree panes) and `attachAgentToWorktree()`
  * (sibling panes reusing an existing worktree).
  */
-export async function launchAgentInPane(opts: {
+export interface LaunchAgentInPaneOptions {
   paneId: string;
   agent: AgentName;
   prompt: string;
   slug: string;
   projectRoot: string;
-  comuxPaneId?: string;
+  /** Worktree the agent runs in, when the lane has one. */
+  worktreePath?: string;
+  permissionMode?: PermissionMode;
+  psychePaneId?: string;
   codexHookEventFile?: string;
-  permissionMode?: '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
-}): Promise<void> {
-  const { paneId, agent, prompt, slug, projectRoot, permissionMode } = opts;
-  const tmuxService = TmuxService.getInstance();
+  /** Injectable for tests. */
+  tmuxService?: Pick<
+    TmuxService,
+    'sendShellCommand' | 'sendTmuxKeys' | 'getPaneCurrentCommand'
+  >;
+}
+
+/**
+ * Start an agent in an already-created tmux pane.
+ *
+ * This is the single launch path for every entry in AGENT_REGISTRY. It drives
+ * the registry rather than branching per agent — an earlier version hardcoded
+ * claude/codex/opencode and silently did nothing for the other nine, including
+ * coven-code.
+ *
+ * Claude's workspace-trust monitoring is deliberately NOT handled here: it
+ * lives in paneCreation, which would be a circular import.
+ */
+export async function launchAgentInPane(
+  options: LaunchAgentInPaneOptions
+): Promise<void> {
+  const {
+    paneId,
+    agent,
+    prompt,
+    slug,
+    projectRoot,
+    worktreePath,
+    permissionMode,
+    psychePaneId,
+    codexHookEventFile,
+    tmuxService = TmuxService.getInstance(),
+  } = options;
+
+  if (agent === 'gemini') {
+    const workspacePath = worktreePath && existsSync(worktreePath)
+      ? worktreePath
+      : projectRoot;
+    ensureGeminiFolderTrusted(workspacePath);
+  }
+
   const hasInitialPrompt = !!(prompt && prompt.trim());
+  const promptTransport = getPromptTransport(agent);
+  // send-keys agents are launched bare, then typed into once their TUI is up.
+  const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
 
-  if (agent === 'claude') {
-    const permissionFlags = getPermissionFlags('claude', permissionMode);
-    const permissionSuffix = permissionFlags ? ` ${permissionFlags}` : '';
-    let claudeCmd: string;
-    if (hasInitialPrompt) {
-      let promptFilePath: string | null = null;
-      try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
-      } catch {
-        // Fall back to inline escaping if prompt file write fails
-      }
-
-      if (promptFilePath) {
-        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        claudeCmd = `${promptBootstrap}; claude "$COMUX_PROMPT_CONTENT"${permissionSuffix}`;
-      } else {
-        const escapedPrompt = prompt
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`')
-          .replace(/\$/g, '\\$');
-        claudeCmd = `claude "${escapedPrompt}"${permissionSuffix}`;
-      }
-    } else {
-      claudeCmd = `claude${permissionSuffix}`;
+  let baselineCommand: string | undefined;
+  if (shouldSendPromptViaTmux) {
+    try {
+      baselineCommand = await tmuxService.getPaneCurrentCommand(paneId);
+    } catch {
+      baselineCommand = undefined;
     }
-    await tmuxService.sendShellCommand(paneId, claudeCmd);
-    await tmuxService.sendTmuxKeys(paneId, 'Enter');
-  } else if (agent === 'codex') {
-    let codexCmd: string;
-    if (hasInitialPrompt) {
-      let promptFilePath: string | null = null;
-      try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
-      } catch {
-        // Fall back to inline escaping if prompt file write fails
-      }
+  }
 
-      if (promptFilePath) {
-        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        codexCmd = `${promptBootstrap}; ${buildInitialPromptCommand(
-          'codex',
-          '"$COMUX_PROMPT_CONTENT"',
-          permissionMode
-        )}`;
-      } else {
-        codexCmd = buildInitialPromptCommand(
-          'codex',
-          shellQuote(prompt),
-          permissionMode
-        );
-      }
-    } else {
-      codexCmd = buildAgentCommand('codex', permissionMode);
+  let launchCommand: string;
+  if (hasInitialPrompt && !shouldSendPromptViaTmux) {
+    // Prefer a prompt file so the prompt never has to survive shell quoting.
+    let promptFilePath: string | null = null;
+    try {
+      promptFilePath = await writePromptFile(projectRoot, slug, prompt);
+    } catch {
+      // Fall back to inline escaping if the prompt file cannot be written.
     }
-    codexCmd = buildCodexHookedCommand(codexCmd, {
-      comuxPaneId: opts.comuxPaneId || '',
+
+    if (promptFilePath) {
+      const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
+      launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
+        agent,
+        '"$PSYCHE_PROMPT_CONTENT"',
+        permissionMode
+      )}`;
+    } else {
+      const escapedPrompt = prompt
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/`/g, '\\`')
+        .replace(/\$/g, '\\$');
+      launchCommand = buildInitialPromptCommand(
+        agent,
+        `"${escapedPrompt}"`,
+        permissionMode
+      );
+    }
+  } else {
+    launchCommand = buildAgentCommand(agent, permissionMode);
+  }
+
+  if (agent === 'codex') {
+    launchCommand = buildCodexHookedCommand(launchCommand, {
+      psychePaneId: psychePaneId || '',
       tmuxPaneId: paneId,
-      eventFile: opts.codexHookEventFile,
+      eventFile: codexHookEventFile,
     });
-    await tmuxService.sendShellCommand(paneId, codexCmd);
-    await tmuxService.sendTmuxKeys(paneId, 'Enter');
-  } else if (agent === 'opencode') {
-    let opencodeCmd: string;
-    if (hasInitialPrompt) {
-      let promptFilePath: string | null = null;
-      try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
-      } catch {
-        // Fall back to inline escaping if prompt file write fails
-      }
+  }
 
-      if (promptFilePath) {
-        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        opencodeCmd = `${promptBootstrap}; opencode --prompt "$COMUX_PROMPT_CONTENT"`;
-      } else {
-        const escapedPrompt = prompt
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`')
-          .replace(/\$/g, '\\$');
-        opencodeCmd = `opencode --prompt "${escapedPrompt}"`;
-      }
-    } else {
-      opencodeCmd = 'opencode';
-    }
-    await tmuxService.sendShellCommand(paneId, opencodeCmd);
-    await tmuxService.sendTmuxKeys(paneId, 'Enter');
+  await tmuxService.sendShellCommand(paneId, launchCommand);
+  await tmuxService.sendTmuxKeys(paneId, 'Enter');
+
+  if (shouldSendPromptViaTmux) {
+    await sendPromptViaTmux({
+      paneId,
+      prompt,
+      tmuxService: tmuxService as TmuxService,
+      expectedCommand: getAgentProcessName(agent),
+      baselineCommand,
+      prePromptKeys: getSendKeysPrePrompt(agent),
+      submitKeys: getSendKeysSubmit(agent),
+      postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
+      readyDelayMs: getSendKeysReadyDelayMs(agent),
+    });
   }
 }

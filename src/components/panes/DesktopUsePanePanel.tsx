@@ -1,20 +1,20 @@
 import React, { memo } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import type { ComuxThemeName } from '../../types.js';
-import { COLORS, getComuxThemeAccent } from '../../theme/colors.js';
+import type { PsycheThemeName } from '../../types.js';
+import { COLORS, getPsycheThemeAccent } from '../../theme/colors.js';
 import type { DesktopUsePaneState } from '../../utils/covenDesktopUse.js';
 
 interface DesktopUsePanePanelProps {
   state?: DesktopUsePaneState;
   selected: boolean;
-  themeName: ComuxThemeName;
+  themeName: PsycheThemeName;
 }
 
 const ROW_WIDTH = 40;
 
 const DesktopUsePanePanel: React.FC<DesktopUsePanePanelProps> = memo(({ state, selected, themeName }) => {
-  const accent = getComuxThemeAccent(themeName);
+  const accent = getPsycheThemeAccent(themeName);
 
   if (!state) {
     return (

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ComuxPane } from '../../src/types.js';
+import type { PsychePane } from '../../src/types.js';
 import type { ActionContext } from '../../src/actions/types.js';
 import {
   createMockTmuxSession,
@@ -19,7 +19,8 @@ import {
 import { createMockExecSync, createMockOpenRouterAPI } from '../helpers/integration/mockCommands.js';
 
 const fsMock = vi.hoisted(() => ({
-  readFileSync: vi.fn(() => JSON.stringify({ controlPaneId: '%0' })),
+  readFileSync: vi.fn((_target?: unknown, _options?: unknown): string =>
+    JSON.stringify({ controlPaneId: '%0' })),
   writeFileSync: vi.fn(),
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock('child_process', () => ({
 }));
 
 // Mock StateManager
-const mockGetPanes = vi.fn(() => []);
+const mockGetPanes = vi.fn((): PsychePane[] => []);
 const mockSetPanes = vi.fn();
 const mockGetState = vi.fn(() => ({ projectRoot: '/test' }));
 const mockPauseConfigWatcher = vi.fn();
@@ -100,14 +101,14 @@ describe('Pane Lifecycle Integration Tests', () => {
     mockEnqueueCleanup.mockReset();
 
     // Create fresh test environment
-    tmuxSession = createMockTmuxSession('comux-test', 1);
+    tmuxSession = createMockTmuxSession('psyche-test', 1);
     gitRepo = createMockGitRepo('main');
     createdWorktreePaths = new Set<string>();
     killedPaneIds = new Set<string>();
 
     fsMock.existsSync.mockImplementation((target) => {
       const value = String(target);
-      if (value.includes('/.comux/worktrees/')) {
+      if (value.includes('/.psyche/worktrees/')) {
         return createdWorktreePaths.has(value);
       }
       return true;
@@ -129,7 +130,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       // Tmux display-message (get current pane id or session name)
       if (cmd.includes('display-message')) {
         if (cmd.includes('#{session_name}')) {
-          return returnValue('comux-test');
+          return returnValue('psyche-test');
         }
         return returnValue('%0');
       }
@@ -138,7 +139,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       if (cmd.includes('list-panes')) {
         return returnValue(
           [
-            '%0:comux-control:80x24',
+            '%0:psyche-control:80x24',
             '%1:test:80x24',
           ]
             .filter((line) => {
@@ -167,7 +168,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       if (cmd.includes('worktree add')) {
         const pathMatch = cmd.match(/git worktree add "([^"]+)"/);
         const branchMatch = cmd.match(/-b "([^"]+)"/) || cmd.match(/git worktree add "[^"]+" "([^"]+)"/);
-        const worktreePath = pathMatch?.[1] || '/test/.comux/worktrees/test-slug';
+        const worktreePath = pathMatch?.[1] || '/test/.psyche/worktrees/test-slug';
         const branchName = branchMatch?.[1] || 'test-slug';
         createdWorktreePaths.add(worktreePath);
         createdWorktreePaths.add(`${worktreePath}/.git`);
@@ -254,7 +255,7 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       expect(mockExecSync.mock.calls.some(([cmd]) =>
         typeof cmd === 'string'
-        && cmd.includes('tmux set -t comux-test pane-border-status top')
+        && cmd.includes('tmux set -t psyche-test pane-border-status top')
       )).toBe(true);
 
       expect(mockExecSync.mock.calls.some(([cmd]) =>
@@ -286,10 +287,10 @@ describe('Pane Lifecycle Integration Tests', () => {
     it('should validate remote tracking baseBranch values without forcing refs/heads', async () => {
       fsMock.readFileSync.mockImplementation((target) => {
         const value = String(target);
-        if (value.endsWith('/.comux/settings.json')) {
+        if (value.endsWith('/.psyche/settings.json')) {
           return JSON.stringify({ baseBranch: 'origin/main' });
         }
-        if (value.endsWith('/.comux/comux.config.json')) {
+        if (value.endsWith('/.psyche/psyche.config.json')) {
           return JSON.stringify({ controlPaneId: '%0' });
         }
         return JSON.stringify({});
@@ -321,7 +322,7 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should attach a fresh pane to an existing worktree without recreating it', async () => {
       const { createPane } = await import('../../src/utils/paneCreation.js');
-      const existingWorktreePath = '/test/.comux/worktrees/resume-me';
+      const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
       createdWorktreePaths.add(existingWorktreePath);
       createdWorktreePaths.add(`${existingWorktreePath}/.git`);
 
@@ -387,12 +388,12 @@ describe('Pane Lifecycle Integration Tests', () => {
           projectName: 'test-project',
           existingPanes: [
             {
-              id: 'comux-1',
+              id: 'psyche-1',
               slug: 'existing',
               prompt: 'existing pane',
               paneId: '%5',
               projectRoot: '/primary/repo',
-              worktreePath: '/primary/repo/.comux/worktrees/existing',
+              worktreePath: '/primary/repo/.psyche/worktrees/existing',
             },
           ],
           projectRoot: '/target/repo',
@@ -409,7 +410,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       const worktreeCall = mockExecSync.mock.calls.find(([cmd]) =>
         typeof cmd === 'string' && cmd.includes('git worktree add')
       );
-      expect(worktreeCall?.[0]).toContain('cd "/target/repo" && git worktree add "/target/repo/.comux/worktrees/target-slug"');
+      expect(worktreeCall?.[0]).toContain('cd "/target/repo" && git worktree add "/target/repo/.psyche/worktrees/target-slug"');
     });
 
     it('should destroy the welcome pane when tracked shell panes make the pane list non-empty', async () => {
@@ -422,7 +423,7 @@ describe('Pane Lifecycle Integration Tests', () => {
           projectName: 'test-project',
           existingPanes: [
             {
-              id: 'comux-1',
+              id: 'psyche-1',
               slug: 'shell-1',
               prompt: '',
               paneId: '%5',
@@ -458,7 +459,7 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       // Should fallback to timestamp-based slug
       if ('pane' in result) {
-        expect(result.pane.slug).toMatch(/comux-\d+/);
+        expect(result.pane.slug).toMatch(/psyche-\d+/);
       }
     });
 
@@ -519,7 +520,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       // Point at an "existing" worktree path that isn't tracked as created
       // → fs.existsSync(worktreePath + '/.git') returns false → throws inside
       // the worktree-creation try/catch before any agent command is sent.
-      const missingWorktreePath = '/test/.comux/worktrees/does-not-exist';
+      const missingWorktreePath = '/test/.psyche/worktrees/does-not-exist';
 
       await expect(
         createPane(
@@ -629,15 +630,16 @@ describe('Pane Lifecycle Integration Tests', () => {
     it('should present choice dialog for worktree panes', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
 
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
-        worktreePath: '/test/.comux/worktrees/test-branch',
+        worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -660,15 +662,16 @@ describe('Pane Lifecycle Integration Tests', () => {
     it('should kill tmux pane when closing', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
 
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
-        worktreePath: '/test/.comux/worktrees/test-branch',
+        worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -693,15 +696,16 @@ describe('Pane Lifecycle Integration Tests', () => {
     it('should queue worktree cleanup with kill_and_clean option', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
 
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
-        worktreePath: '/test/.comux/worktrees/test-branch',
+        worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -730,15 +734,16 @@ describe('Pane Lifecycle Integration Tests', () => {
         throw new Error('enqueue failed');
       });
 
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
-        worktreePath: '/test/.comux/worktrees/test-branch',
+        worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -761,15 +766,16 @@ describe('Pane Lifecycle Integration Tests', () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
       const { triggerHook } = await import('../../src/utils/hooks.js');
 
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
-        worktreePath: '/test/.comux/worktrees/test-branch',
+        worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -830,12 +836,12 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should preserve worktree and slug during rebind', async () => {
       // Test that rebinding doesn't recreate worktree
-      const testPane: ComuxPane = {
-        id: 'comux-1',
+      const testPane: PsychePane = {
+        id: 'psyche-1',
         slug: 'existing-branch',
         prompt: 'original prompt',
         paneId: '%1', // Old, dead pane
-        worktreePath: '/test/.comux/worktrees/existing-branch',
+        worktreePath: '/test/.psyche/worktrees/existing-branch',
       };
 
       // Rebinding would update paneId but keep slug and worktreePath

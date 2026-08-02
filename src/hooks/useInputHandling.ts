@@ -3,7 +3,7 @@ import path from "path"
 import { useInput } from "ink"
 import { runPairAction } from "../actions/implementations/pairAction.js"
 import { runDevicesAction } from "../actions/implementations/devicesAction.js"
-import type { ComuxPane, SidebarProject } from "../types.js"
+import type { PsychePane, SidebarProject } from "../types.js"
 import type { TrackProjectActivity } from "../types/activity.js"
 import { StateManager } from "../shared/StateManager.js"
 import { TmuxService } from "../services/TmuxService.js"
@@ -37,14 +37,14 @@ import {
   getProjectActionByIndex,
   type ProjectActionItem,
 } from "../utils/projectActions.js"
-import { createShellPane, getNextComuxId } from "../utils/shellPaneDetection.js"
+import { createShellPane, getNextPsycheId } from "../utils/shellPaneDetection.js"
 import type { AgentName } from "../utils/agentLaunch.js"
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
   partitionPanesByProject,
 } from "../utils/paneVisibility.js"
-import { buildFilesOnlyCommand } from "../utils/comuxCommand.js"
+import { buildFilesOnlyCommand } from "../utils/psycheCommand.js"
 import {
   addSidebarProject,
   getAutoSidebarProjectColorTheme,
@@ -118,7 +118,7 @@ import {
 // Type for the action system returned by useActionSystem hook
 interface ActionSystem {
   actionState: any
-  executeAction: (actionId: any, pane: ComuxPane, params?: any) => Promise<void>
+  executeAction: (actionId: any, pane: PsychePane, params?: any) => Promise<void>
   executeCallback: (callback: (() => Promise<any>) | null, options?: { showProgress?: boolean; progressMessage?: string }) => Promise<void>
   clearDialog: (dialogType: any) => void
   clearStatus: () => void
@@ -127,7 +127,7 @@ interface ActionSystem {
 
 interface UseInputHandlingParams {
   // State
-  panes: ComuxPane[]
+  panes: PsychePane[]
   selectedIndex: number
   setSelectedIndex: (index: number) => void
   isCreatingPane: boolean
@@ -154,7 +154,7 @@ interface UseInputHandlingParams {
   projectSettings: any
   saveSettings: (settings: any) => Promise<void>
   settingsManager: any
-  refreshComuxSettings: (projectRoot?: string) => void
+  refreshPsycheSettings: (projectRoot?: string) => void
 
   // Services
   popupManager: PopupManager
@@ -165,16 +165,16 @@ interface UseInputHandlingParams {
   // Callbacks
   setStatusMessage: (message: string) => void
   copyNonGitFiles: (worktreePath: string, sourceProjectRoot?: string) => Promise<void>
-  runCommandInternal: (type: "test" | "dev", pane: ComuxPane) => Promise<void>
+  runCommandInternal: (type: "test" | "dev", pane: PsychePane) => Promise<void>
   handlePaneCreationWithAgent: (prompt: string, targetProjectRoot?: string) => Promise<void>
   openRitual: (ritual: RitualDefinition, activeProjectRoot?: string) => Promise<void>
-  handleCreateChildWorktree: (pane: ComuxPane) => Promise<void>
+  handleCreateChildWorktree: (pane: PsychePane) => Promise<void>
   handleReopenWorktree: (
     candidate: ResumableBranchCandidate,
     targetProjectRoot?: string
   ) => Promise<void>
-  setDevSourceFromPane: (pane: ComuxPane) => Promise<void>
-  savePanes: (panes: ComuxPane[]) => Promise<void>
+  setDevSourceFromPane: (pane: PsychePane) => Promise<void>
+  savePanes: (panes: PsychePane[]) => Promise<void>
   sidebarProjects: SidebarProject[]
   saveSidebarProjects: (projects: SidebarProject[]) => Promise<SidebarProject[]>
   loadPanes: () => Promise<void>
@@ -206,7 +206,7 @@ interface UseInputHandlingParams {
 
 /**
  * Hook that handles all keyboard input for the TUI
- * Extracted from ComuxApp.tsx to reduce component complexity
+ * Extracted from PsycheApp.tsx to reduce component complexity
  */
 const SIDEBAR_DOUBLE_CLICK_INTERVAL_MS = 800
 
@@ -235,7 +235,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     projectSettings,
     saveSettings,
     settingsManager,
-    refreshComuxSettings,
+    refreshPsycheSettings,
     popupManager,
     actionSystem,
     controlPaneId,
@@ -333,7 +333,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       // Persist shell pane immediately with project metadata so grouping is stable.
       const shellPane = await createShellPane(
         newPaneId,
-        getNextComuxId(panes)
+        getNextPsycheId(panes)
       )
       shellPane.projectRoot = targetProjectRoot
       shellPane.projectName = getSidebarProjectDisplayName(
@@ -377,9 +377,9 @@ export function useInputHandling(params: UseInputHandlingParams) {
       const newPaneId = await tmuxService.splitPane({ cwd: targetProjectRoot })
       await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
 
-      const nextId = getNextComuxId(panes)
-      const desktopPane: ComuxPane = {
-        id: `comux-${nextId}`,
+      const nextId = getNextPsycheId(panes)
+      const desktopPane: PsychePane = {
+        id: `psyche-${nextId}`,
         slug: `desktop-use-${nextId}`,
         displayName: "desktop-use",
         prompt,
@@ -482,7 +482,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     })),
   })
 
-  const sendDesktopUseQuickAction = async (pane: ComuxPane, action: DesktopUseQuickAction) => {
+  const sendDesktopUseQuickAction = async (pane: PsychePane, action: DesktopUseQuickAction) => {
     const sessionId = getDesktopUseSessionId(pane)
     if (!sessionId) {
       setStatusMessage("Desktop-use pane has no Coven session")
@@ -520,7 +520,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     }
   }
 
-  const openTerminalInWorktree = async (selectedPane: ComuxPane) => {
+  const openTerminalInWorktree = async (selectedPane: PsychePane) => {
     if (!selectedPane.worktreePath) {
       setStatusMessage("Cannot open terminal: this pane has no worktree")
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -541,7 +541,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const shellPane = await createShellPane(
         newPaneId,
-        getNextComuxId(panes)
+        getNextPsycheId(panes)
       )
       shellPane.projectRoot = targetProjectRoot
       shellPane.projectName = getSidebarProjectDisplayName(
@@ -564,7 +564,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     }
   }
 
-  const openFileBrowserInWorktree = async (selectedPane: ComuxPane) => {
+  const openFileBrowserInWorktree = async (selectedPane: PsychePane) => {
     if (!selectedPane.worktreePath) {
       setStatusMessage("Cannot open file browser: this pane has no worktree")
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -610,8 +610,8 @@ export function useInputHandling(params: UseInputHandlingParams) {
         suffix += 1
       }
 
-      const browserPane: ComuxPane = {
-        id: `comux-${getNextComuxId(panes)}`,
+      const browserPane: PsychePane = {
+        id: `psyche-${getNextPsycheId(panes)}`,
         slug,
         prompt: "",
         paneId: newPaneId,
@@ -803,7 +803,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     return action?.projectName || path.basename(targetProjectRoot) || "project"
   }
 
-  const startPaneInlineRename = (pane: ComuxPane) => {
+  const startPaneInlineRename = (pane: PsychePane) => {
     if (!setInlineRename) {
       return
     }
@@ -841,7 +841,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     startProjectInlineRename(getActiveProjectRoot())
   }
 
-  const persistWorktreeDisplayName = (pane: ComuxPane, displayName?: string) => {
+  const persistWorktreeDisplayName = (pane: PsychePane, displayName?: string) => {
     if (!pane.worktreePath) {
       return
     }
@@ -880,7 +880,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         return
       }
 
-      const updatedPane: ComuxPane = { ...pane, displayName: nextDisplayName }
+      const updatedPane: PsychePane = { ...pane, displayName: nextDisplayName }
       const updatedPanes = panes.map((candidate) =>
         candidate.id === pane.id ? updatedPane : candidate
       )
@@ -1150,7 +1150,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
   const handleSaveCurrentSetupAsRitual = async (activeProjectRoot: string) => {
     const ritualName = await popupManager.launchInputPopup(
       "Save Ritual",
-      "Name this reusable setup. comux will save projects, pane kinds, prompts, and agent preferences.",
+      "Name this reusable setup. psyche will save projects, pane kinds, prompts, and agent preferences.",
       "Review Stack",
       "",
       activeProjectRoot
@@ -1296,7 +1296,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     initializeHooksDirectory(hooksProjectRoot)
 
     const prompt =
-      "I would like to create or edit my comux hooks in .comux-hooks. Please read AGENTS.md or CLAUDE.md first, then ask me what I want to create or modify."
+      "I would like to create or edit my psyche hooks in .psyche-hooks. Please read AGENTS.md or CLAUDE.md first, then ask me what I want to create or modify."
     await handlePaneCreationWithAgent(prompt, hooksProjectRoot)
   }
 
@@ -1312,7 +1312,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
   }
 
   const syncWelcomePaneForPanes = async (
-    nextPanes: ComuxPane[],
+    nextPanes: PsychePane[],
     targetProjectRoot: string = getActiveProjectRoot()
   ) => {
     if (!controlPaneId) {
@@ -1349,7 +1349,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     }
   }
 
-  const togglePaneVisibility = async (selectedPane: ComuxPane) => {
+  const togglePaneVisibility = async (selectedPane: PsychePane) => {
     const tmuxService = TmuxService.getInstance()
 
     try {
@@ -1369,7 +1369,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       } else {
         await tmuxService.breakPaneToWindow(
           selectedPane.paneId,
-          `comux-hidden-${selectedPane.id}`
+          `psyche-hidden-${selectedPane.id}`
         )
       }
 
@@ -1401,7 +1401,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     }
   }
 
-  const toggleOtherPanesVisibility = async (selectedPane: ComuxPane) => {
+  const toggleOtherPanesVisibility = async (selectedPane: PsychePane) => {
     const action = getBulkVisibilityAction(panes, selectedPane)
     if (!action) {
       setStatusMessage("No other panes to toggle")
@@ -1431,7 +1431,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         if (hidden) {
           await tmuxService.breakPaneToWindow(
             pane.paneId,
-            `comux-hidden-${pane.id}`
+            `psyche-hidden-${pane.id}`
           )
           continue
         }
@@ -1525,7 +1525,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       for (const pane of panesToHide) {
         await TmuxService.getInstance().breakPaneToWindow(
           pane.paneId,
-          `comux-hidden-${pane.id}`
+          `psyche-hidden-${pane.id}`
         )
       }
 
@@ -1564,7 +1564,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
   }
 
   const openPaneMenu = async (
-    pane: ComuxPane,
+    pane: PsychePane,
     options: { anchorToPane?: boolean } = {}
   ) => {
     const actionId = await popupManager.launchKebabMenuPopup(
@@ -1627,7 +1627,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     })
   }
 
-  const attachAgentsToPane = async (selectedPane: ComuxPane) => {
+  const attachAgentsToPane = async (selectedPane: PsychePane) => {
     if (!selectedPane.worktreePath) {
       setStatusMessage("Cannot attach agent: this pane has no worktree")
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -1682,7 +1682,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       )
 
       const { attachAgentToWorktree } = await import("../utils/attachAgent.js")
-      const createdPanes: ComuxPane[] = []
+      const createdPanes: PsychePane[] = []
       const failedAgents: AgentName[] = []
 
       for (const agent of selectedAgents) {
@@ -1786,7 +1786,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
   const executePaneShortcut = async (
     shortcut: RemotePaneActionShortcut,
-    selectedPane: ComuxPane,
+    selectedPane: PsychePane,
     options: { anchorMenuToPane?: boolean } = {}
   ) => {
     switch (shortcut) {
@@ -1863,14 +1863,14 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       for (const action of queuedActions) {
         if (isInteractionBlocked()) {
-          setStatusMessage(`comux is busy; ignored remote pane action ${action.shortcut}`)
+          setStatusMessage(`psyche is busy; ignored remote pane action ${action.shortcut}`)
           setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
           continue
         }
 
         const paneIndex = panes.findIndex((pane) => pane.paneId === action.targetPaneId)
         if (paneIndex === -1) {
-          setStatusMessage(`Focused pane is not managed by comux: ${action.targetPaneId}`)
+          setStatusMessage(`Focused pane is not managed by psyche: ${action.targetPaneId}`)
           setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_LONG)
           continue
         }
@@ -1897,10 +1897,10 @@ export function useInputHandling(params: UseInputHandlingParams) {
     }
 
     void queueDrain()
-    process.on("comux-external-command-signal" as any, handleRemoteSignal)
+    process.on("psyche-external-command-signal" as any, handleRemoteSignal)
 
     return () => {
-      process.off("comux-external-command-signal" as any, handleRemoteSignal)
+      process.off("psyche-external-command-signal" as any, handleRemoteSignal)
     }
   }, [
     actionSystem,
@@ -2197,7 +2197,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
               )
               await saveSidebarProjects(updatedProjects)
               effectiveSidebarProjects = updatedProjects
-              refreshComuxSettings(activeProjectRoot)
+              refreshPsycheSettings(activeProjectRoot)
               savedCount += 1
               lastScope = update.scope
               themeSettingsChanged = true
@@ -2212,11 +2212,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
               ? "colorTheme"
               : update.key
             projectSettingsManager.updateSetting(
-              resolvedUpdateKey as keyof import("../types.js").ComuxSettings,
+              resolvedUpdateKey as keyof import("../types.js").PsycheSettings,
               update.value,
               update.scope
             )
-            refreshComuxSettings(activeProjectRoot)
+            refreshPsycheSettings(activeProjectRoot)
             savedCount += 1
             lastScope = update.scope
             if (resolvedUpdateKey === "colorTheme") {

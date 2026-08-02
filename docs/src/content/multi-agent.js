@@ -6,7 +6,7 @@ export function render() {
     <p class="lead">Run multiple agents on the same task — either as A/B pairs in separate worktrees, or stacked on the same worktree for collaborative work.</p>
 
     <h2>A/B Agent Pairs</h2>
-    <p>When you create a new pane, comux offers <strong>A/B pair options</strong> alongside the standard single-agent choices. Selecting a pair launches two panes — one per agent — both receiving the same prompt in separate worktrees.</p>
+    <p>When you create a new pane, psyche offers <strong>A/B pair options</strong> alongside the standard single-agent choices. Selecting a pair launches two panes — one per agent — both receiving the same prompt in separate worktrees.</p>
     <p>For example, with Claude Code and opencode installed, you'll see:</p>
     <pre><code data-lang="bash">1. Claude Code
 2. OpenCode
@@ -17,7 +17,7 @@ export function render() {
     <ol>
       <li>Press <kbd>n</kbd> and enter your prompt</li>
       <li>Select an A/B pair from the agent list</li>
-      <li>comux generates a shared base slug from your prompt (e.g. <code>fix-auth</code>)</li>
+      <li>psyche generates a shared base slug from your prompt (e.g. <code>fix-auth</code>)</li>
       <li>Two panes are created with agent-specific suffixes:
         <ul>
           <li><code>fix-auth-claude-code</code> &mdash; running Claude Code</li>
@@ -28,7 +28,7 @@ export function render() {
     </ol>
 
     <h2>Slug Suffixes</h2>
-    <p>When creating a pair, comux appends the agent name to the shared slug:</p>
+    <p>When creating a pair, psyche appends the agent name to the shared slug:</p>
     <table>
       <thead>
         <tr><th>Agent</th><th>Suffix</th></tr>
@@ -70,6 +70,6 @@ export function render() {
     <p>Press <kbd>A</kbd> (Shift+A) to open a plain shell in the selected pane's worktree. This is handy for running manual commands, inspecting files, or monitoring builds alongside an agent.</p>
 
     <h3>Closing Shared Worktrees</h3>
-    <p>When you close a pane whose worktree is still in use by other panes, comux will warn you and only offer to close the pane itself — the worktree stays intact until the last pane using it is closed.</p>
+    <p>When you close a pane whose worktree is still in use by other panes, psyche will warn you and only offer to close the pane itself — the worktree stays intact until the last pane using it is closed.</p>
   `;
 }

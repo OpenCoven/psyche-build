@@ -1,4 +1,4 @@
-export const GITHUB_STARS_API = 'https://api.github.com/repos/BunsDev/comux';
+export const GITHUB_STARS_API = 'https://api.github.com/repos/OpenCoven/psyche-build';
 export const GITHUB_STARS_ACCEPT = 'application/vnd.github.v3+json';
 export const STARS_CACHE_TTL_SECONDS = 60;
 export const STARS_STALE_REVALIDATE_SECONDS = STARS_CACHE_TTL_SECONDS * 5;
@@ -8,7 +8,7 @@ export function parseGithubStarCount(data) {
   return typeof count === 'number' ? count : null;
 }
 
-export async function fetchGithubStarCount(fetchImpl = fetch, userAgent = 'comux-docs') {
+export async function fetchGithubStarCount(fetchImpl = fetch, userAgent = 'psyche-build-docs') {
   const headers = { Accept: GITHUB_STARS_ACCEPT };
   if (userAgent) headers['User-Agent'] = userAgent;
 

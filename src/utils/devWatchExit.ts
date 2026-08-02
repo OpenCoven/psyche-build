@@ -5,7 +5,7 @@ const DEV_WATCH_TERMINATION_SIGNALS = new Set<NodeJS.Signals>([
 
 export function shouldUseQuietDevWatchExit(signal?: NodeJS.Signals): boolean {
   return (
-    process.env.COMUX_DEV_WATCH === 'true' &&
+    process.env.PSYCHE_DEV_WATCH === 'true' &&
     signal !== undefined &&
     DEV_WATCH_TERMINATION_SIGNALS.has(signal)
   );

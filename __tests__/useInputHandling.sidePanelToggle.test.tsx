@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { useInputHandling } from '../src/hooks/useInputHandling.js';
-import type { ComuxPane } from '../src/types.js';
+import type { PopupManager } from '../src/services/PopupManager.js';
+import type { PsychePane } from '../src/types.js';
 import type { CovenSessionsLoadState } from '../src/utils/covenSessions.js';
 
 vi.mock('../src/utils/remotePaneActions.js', () => ({
@@ -13,9 +14,9 @@ vi.mock('../src/utils/remotePaneActions.js', () => ({
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function pane(overrides: Partial<ComuxPane> = {}): ComuxPane {
+function pane(overrides: Partial<PsychePane> = {}): PsychePane {
   return {
-    id: 'comux-1',
+    id: 'psyche-1',
     slug: 'thread-a',
     prompt: '',
     paneId: '%1',
@@ -31,9 +32,9 @@ function Harness({
   setStatusMessage = vi.fn(),
   covenSessionsState,
 }: {
-  onToggleSidePanel: ReturnType<typeof vi.fn>;
+  onToggleSidePanel: (...args: any[]) => any;
   sidePanelCollapsed?: boolean;
-  setStatusMessage?: ReturnType<typeof vi.fn>;
+  setStatusMessage?: (...args: any[]) => any;
   covenSessionsState?: CovenSessionsLoadState;
 }) {
   const params = {
@@ -60,10 +61,11 @@ function Harness({
     projectSettings: {},
     saveSettings: vi.fn(),
     settingsManager: {},
+    // Only the methods this test exercises; PopupManager has ~29 members.
     popupManager: {
       launchKebabMenuPopup: vi.fn(async () => null),
       launchSettingsPopup: vi.fn(async () => null),
-    },
+    } as unknown as PopupManager,
     actionSystem: {
       actionState: {},
       executeAction: vi.fn(),
@@ -82,13 +84,14 @@ function Harness({
     handleCreateChildWorktree: vi.fn(),
     handleReopenWorktree: vi.fn(),
     setDevSourceFromPane: vi.fn(),
+    refreshPsycheSettings: vi.fn(),
     savePanes: vi.fn(),
     sidebarProjects: [{ projectRoot: '/repo', projectName: 'Repo' }],
     saveSidebarProjects: vi.fn(async (projects) => projects),
     loadPanes: vi.fn(),
     cleanExit: vi.fn(),
     getAvailableAgentsForProject: vi.fn(() => []),
-    panesFile: '/tmp/comux.config.json',
+    panesFile: '/tmp/psyche.config.json',
     projectRoot: '/repo',
     projectActionItems: [],
     covenSessionsState,
@@ -102,7 +105,7 @@ function Harness({
 
   useInputHandling(params as Parameters<typeof useInputHandling>[0]);
 
-  return <Text>comux</Text>;
+  return <Text>psyche</Text>;
 }
 
 function StatefulHarness({
@@ -110,7 +113,7 @@ function StatefulHarness({
   onStateChange,
 }: {
   initialCollapsed?: boolean;
-  onStateChange: ReturnType<typeof vi.fn>;
+  onStateChange: (...args: any[]) => any;
 }) {
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(initialCollapsed);
   const onToggleSidePanel = () => {

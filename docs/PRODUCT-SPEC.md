@@ -1,15 +1,15 @@
-# comux Product Spec
+# Psyche Build Product Spec
 
 - **Status:** early public product
-- **Package:** `comux`
-- **Command:** `comux`
-- **One-liner:** comux is a project-scoped cockpit for coordinating parallel coding agents in visible tmux/worktree sessions.
+- **Package:** `psyche-build`
+- **Command:** `psyche`
+- **One-liner:** Psyche Build is a project-scoped multiagent coding harness that runs parallel agent lanes in visible tmux/worktree sessions.
 
 ## Thesis
 
 Parallel coding agents are useful only when the work stays visible, scoped, and recoverable.
 
-comux gives developers one cockpit for launching agent lanes, watching terminals, keeping branches isolated, and bringing work back through explicit review. It focuses the proven terminal-cockpit primitives — tmux panes, git worktrees, agent launchers, rituals, file browsing, and merge flows — with clean comux branding and a public package that can stand alone.
+Psyche Build gives developers one cockpit for launching agent lanes, watching terminals, keeping branches isolated, and bringing work back through explicit review. It focuses the proven terminal-cockpit primitives — tmux panes, git worktrees, agent launchers, rituals, file browsing, and merge flows — with clean Psyche Build branding and a public package that can stand alone.
 
 > Branch, develop, inspect, and merge — all in parallel.
 
@@ -19,7 +19,7 @@ comux gives developers one cockpit for launching agent lanes, watching terminals
 Human / OpenMeow / OpenClaw
           │
           ▼
-    comux tmux cockpit
+  Psyche Build tmux cockpit
           │
           ├─ projects
           ├─ panes
@@ -33,18 +33,18 @@ Human / OpenMeow / OpenClaw
 
 ## Core model
 
-- **Project** — an explicit repo/workspace launched into comux.
+- **Project** — an explicit repo/workspace launched into Psyche Build.
 - **Cockpit** — the visible terminal control surface.
 - **Pane** — one terminal workspace, often backed by a worktree and agent process.
 - **Worktree** — an isolated git checkout for a task or branch.
-- **Agent** — Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
+- **Agent** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
 - **Ritual** — a reusable project setup recipe for opening a known pane layout.
 - **Conductor** — a human, OpenClaw familiar, Cody/OpenMeow, or bridge process coordinating work.
-- **Coven session** — an optional Coven-managed harness session that comux can launch or open when a local Coven daemon is available.
+- **Coven session** — an optional Coven-managed harness session that Psyche Build can launch or open when a local Coven daemon is available.
 
 ## Target user
 
-comux is for developers and maintainers who want multiple coding agents working at once without losing track of branches, terminals, tests, blockers, or handoffs.
+Psyche Build is for developers and maintainers who want multiple coding agents working at once without losing track of branches, terminals, tests, blockers, or handoffs.
 
 The early user is comfortable with terminal tools and wants:
 
@@ -67,7 +67,7 @@ Every worker should be inspectable as a terminal pane. No mysterious hidden jobs
 
 ### 3. Human-legible review
 
-comux helps with merge, PR, and cleanup flows, but review remains explicit and understandable.
+Psyche Build helps with merge, PR, and cleanup flows, but review remains explicit and understandable.
 
 ### 4. Repeatable setup
 
@@ -79,7 +79,7 @@ OpenMeow, OpenClaw, Coven, and future clients should talk to structured local st
 
 ## Capability targets
 
-comux should keep the core user promise sharp:
+Psyche Build should keep the core user promise sharp:
 
 - tmux pane orchestration;
 - git worktree isolation;
@@ -93,9 +93,9 @@ comux should keep the core user promise sharp:
 - merge, PR, and cleanup workflows;
 - lifecycle hooks.
 
-comux-specific additions:
+Psyche Build-specific additions:
 
-- public `comux` npm package and command;
+- public `psyche-build` npm package and `psyche` command;
 - cleaned public docs and branding;
 - local bridge/daemon direction;
 - Coven session list/open/launch integration;
@@ -105,7 +105,7 @@ comux-specific additions:
 
 ### Included now / near-term
 
-- Public npm package `comux`.
+- Public npm package `psyche`.
 - TypeScript + Ink tmux cockpit.
 - Project-scoped tmux session.
 - Pane/worktree creation.
@@ -177,23 +177,23 @@ ledger.
 
 ## First demo loop
 
-1. Open a repo in comux.
+1. Open a repo in Psyche Build.
 2. Press `n` and describe a coding task.
 3. Pick Codex, Claude, or another configured agent.
-4. comux creates an isolated worktree and terminal pane.
+4. Psyche Build creates an isolated worktree and terminal pane.
 5. The agent works visibly.
 6. Press `f` to inspect files or `m` to open the pane menu.
 7. Merge, create a PR, attach another agent, or close the pane explicitly.
 8. Press `u` to open a reusable ritual when starting a known workflow.
 9. If Coven is running, open or launch a Coven-managed session from the bridge path.
 
-If this loop is boringly reliable, comux is doing its job.
+If this loop is boringly reliable, Psyche Build is doing its job.
 
 ## Relationship to OpenMeow, OpenClaw, and Coven
 
 - **OpenMeow** is the lightweight intake surface: toss the task.
 - **Cody/OpenClaw** is the conductor: decide what needs doing and report back.
 - **Coven** is the harness substrate: run and expose managed coding sessions.
-- **comux** is the cockpit: keep the visible terminal/worktree control plane understandable.
+- **Psyche Build** is the cockpit: keep the visible terminal/worktree control plane understandable.
 
-These integrations should make comux more useful, but comux must remain valuable as a standalone CLI.
+These integrations should make Psyche Build more useful, but Psyche Build must remain valuable as a standalone CLI.

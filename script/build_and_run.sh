@@ -3,9 +3,9 @@ set -euo pipefail
 
 MODE="${1:-run}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TAURI_DIR="$ROOT_DIR/native/macos/comux-tauri"
-APP_NAME="comux-tauri"
-APP_BUNDLE="$TAURI_DIR/src-tauri/target/debug/bundle/macos/comux.app"
+TAURI_DIR="$ROOT_DIR/native/macos/psyche-build-tauri"
+APP_NAME="psyche-build-tauri"
+APP_BUNDLE="$TAURI_DIR/src-tauri/target/debug/bundle/macos/psyche.app"
 TAURI_CLI_VERSION="2.11.1"
 LOCAL_TAURI_CLI="$ROOT_DIR/.codex/tools/tauri-cli/bin/cargo-tauri"
 

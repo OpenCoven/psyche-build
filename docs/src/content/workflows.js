@@ -3,15 +3,15 @@ export const meta = { title: 'Workflows' };
 export function render() {
   return `
     <h1>Workflows</h1>
-    <p class="lead">These are the common comux loops: launch work, compare agents, inspect the result, merge cleanly, and keep background panes visible enough to trust.</p>
+    <p class="lead">These are the common psyche loops: launch work, compare agents, inspect the result, merge cleanly, and keep background panes visible enough to trust.</p>
 
     <h2>Ship a Small Fix with One Agent</h2>
     <ol>
-      <li>Run <code>comux</code> from the repository you want to edit.</li>
+      <li>Run <code>psyche</code> from the repository you want to edit.</li>
       <li>Press <kbd>n</kbd>, describe the fix, and choose an installed agent.</li>
       <li>Press <kbd>j</kbd> to watch the agent when you need detail, or stay in the sidebar and let status tracking run.</li>
       <li>Press <kbd>f</kbd> to inspect changed files in read-only mode.</li>
-      <li>Press <kbd>m</kbd>, choose <strong>Merge</strong>, and let comux auto-commit, merge, and clean up.</li>
+      <li>Press <kbd>m</kbd>, choose <strong>Merge</strong>, and let psyche auto-commit, merge, and clean up.</li>
     </ol>
 
     <h2>Compare Two Agents on the Same Prompt</h2>
@@ -19,7 +19,7 @@ export function render() {
     <ol>
       <li>Press <kbd>n</kbd> and enter the task once.</li>
       <li>Select an A/B pair such as <strong>Claude Code + Codex</strong>.</li>
-      <li>comux creates two separate worktrees with the same prompt and agent-specific suffixes.</li>
+      <li>psyche creates two separate worktrees with the same prompt and agent-specific suffixes.</li>
       <li>Use <kbd>j</kbd>, <kbd>f</kbd>, and the pane menu to compare implementation quality.</li>
       <li>Merge the better branch and close the other pane when you are done.</li>
     </ol>
@@ -39,7 +39,7 @@ export function render() {
     </table>
 
     <h2>Review Before Merge</h2>
-    <p>Use the file browser as the first review pass when you want signal without giving up the comux control view.</p>
+    <p>Use the file browser as the first review pass when you want signal without giving up the psyche control view.</p>
     <ol>
       <li>Select the pane you want to review.</li>
       <li>Press <kbd>f</kbd> to open the worktree file browser.</li>
@@ -50,20 +50,20 @@ export function render() {
     </ol>
 
     <h2>Run a Safer Merge</h2>
-    <p>A merge is safest when validation runs inside the worktree before the branch returns to main. Put that validation in <code>.comux-hooks/pre_merge</code> so the merge path is repeatable.</p>
+    <p>A merge is safest when validation runs inside the worktree before the branch returns to main. Put that validation in <code>.psyche-hooks/pre_merge</code> so the merge path is repeatable.</p>
     <pre><code data-lang="bash">#!/bin/bash
 set -euo pipefail
 
-cd "$COMUX_WORKTREE_PATH"
+cd "$PSYCHE_WORKTREE_PATH"
 pnpm install --frozen-lockfile
 pnpm run typecheck
 pnpm run test</code></pre>
-    <p>Make the hook executable with <code>chmod +x .comux-hooks/pre_merge</code>. If the hook exits non-zero, comux stops the merge.</p>
+    <p>Make the hook executable with <code>chmod +x .psyche-hooks/pre_merge</code>. If the hook exits non-zero, psyche stops the merge.</p>
 
     <h2>Work Across Multiple Repos</h2>
     <p>Attach related repositories when one task spans frontend, backend, docs, or tooling.</p>
     <ol>
-      <li>Start comux in the first repository.</li>
+      <li>Start psyche in the first repository.</li>
       <li>Press <kbd>p</kbd> and select another repository.</li>
       <li>Create panes inside that attached project from the same session.</li>
       <li>Use <kbd>←</kbd> and <kbd>→</kbd> to move between project groups.</li>

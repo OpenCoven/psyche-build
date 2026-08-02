@@ -1,20 +1,20 @@
 import React, { memo } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import type { ComuxPane, ComuxThemeName } from '../../types.js';
+import type { PsychePane, PsycheThemeName } from '../../types.js';
 import { COLORS } from '../../theme/colors.js';
-import { getComuxThemeAccent } from '../../theme/colors.js';
+import { getPsycheThemeAccent } from '../../theme/colors.js';
 import { getAgentShortLabel } from '../../utils/agentLaunch.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
 import InlineNameEditor from '../ui/InlineNameEditor.js';
 import type { InlineRenameState } from '../../utils/inlineRename.js';
 
 interface PaneCardProps {
-  pane: ComuxPane;
+  pane: PsychePane;
   isDevSource: boolean;
   selected: boolean;
   themeName?: string;
-  projectThemeName?: ComuxThemeName;
+  projectThemeName?: PsycheThemeName;
   inlineRename?: InlineRenameState | null;
 }
 
@@ -90,10 +90,10 @@ const PaneCard: React.FC<PaneCardProps> = memo(({
   const maxSlugWidth = Math.max(0, LEFT_COLUMN_WIDTH - fixedLeftWidth);
   const slugText = clipToWidth(paneName, maxSlugWidth);
   const projectSelectedColor = projectThemeName
-    ? getComuxThemeAccent(projectThemeName)
+    ? getPsycheThemeAccent(projectThemeName)
     : COLORS.selected;
   const paneSelectedColor = pane.colorTheme
-    ? getComuxThemeAccent(pane.colorTheme)
+    ? getPsycheThemeAccent(pane.colorTheme)
     : projectSelectedColor;
   const slugColor = isFileBrowserPane || isDesktopUsePane
     ? COLORS.accent

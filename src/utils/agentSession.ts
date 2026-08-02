@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { AgentSessionReference, ComuxConfig } from '../types.js';
+import type { AgentSessionReference, PsycheConfig } from '../types.js';
 import { atomicWriteJson } from './atomicWrite.js';
 
 export interface CodexSessionEventData {
@@ -88,7 +88,7 @@ export async function persistPaneAgentSessionReference(
   if (!panesFile) return;
 
   const raw = await fs.readFile(panesFile, 'utf8');
-  const parsed = JSON.parse(raw) as ComuxConfig | ComuxConfig['panes'];
+  const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
   if (Array.isArray(parsed)) return;
 
   const panes = Array.isArray(parsed.panes) ? parsed.panes : [];

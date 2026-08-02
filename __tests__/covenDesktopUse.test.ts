@@ -19,7 +19,7 @@ const session: CovenSessionSummary = {
 describe('desktop-use Coven state helpers', () => {
   it('recognizes desktop-use pane records', () => {
     expect(isDesktopUsePane({
-      id: 'comux-1',
+      id: 'psyche-1',
       slug: 'desktop-use',
       prompt: '',
       paneId: '%1',

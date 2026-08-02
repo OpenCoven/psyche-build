@@ -1,7 +1,7 @@
 import path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import type { ComuxPane, ComuxConfig, MergeTargetReference } from '../types.js';
+import type { PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   ensurePaneBorderStatusForCurrentSession,
@@ -18,30 +18,14 @@ import { atomicWriteJsonSync } from './atomicWrite.js';
 import { LogService } from '../services/LogService.js';
 import {
   appendSlugSuffix,
-  buildAgentCommand,
-  buildInitialPromptCommand,
-  getAgentProcessName,
-  getPromptTransport,
-  getSendKeysPostPasteDelayMs,
-  getSendKeysPrePrompt,
-  getSendKeysReadyDelayMs,
-  getSendKeysSubmit,
+  launchAgentInPane,
   type AgentName,
 } from './agentLaunch.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
-import {
-  buildPromptReadAndDeleteSnippet,
-  writePromptFile,
-} from './promptStore.js';
-import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { isValidBranchName } from './git.js';
-import { ensureComuxRuntimeIgnored } from './gitignore.js';
-import { sendPromptViaTmux } from './agentPromptDispatch.js';
+import { ensurePsycheRuntimeIgnored } from './gitignore.js';
 import { readWorktreeMetadata, writeWorktreeMetadata } from './worktreeMetadata.js';
-import {
-  buildCodexHookedCommand,
-  installCodexPaneHooks,
-} from './codexHooks.js';
+import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
@@ -59,15 +43,15 @@ export interface CreatePaneOptions {
   startPointBranch?: string;
   mergeTargetChain?: MergeTargetReference[];
   projectName: string;
-  existingPanes: ComuxPane[];
+  existingPanes: PsychePane[];
   projectRoot?: string; // Target repository root for the new pane
   skipAgentSelection?: boolean; // Explicitly allow creating pane with no agent
-  sessionConfigPath?: string; // Shared comux config file for the current session
+  sessionConfigPath?: string; // Shared psyche config file for the current session
   sessionProjectRoot?: string; // Session root that owns sidebar/welcome pane state
 }
 
 export interface CreatePaneResult {
-  pane: ComuxPane;
+  pane: PsychePane;
   needsAgentChoice: boolean;
 }
 
@@ -174,8 +158,8 @@ export async function createPane(
 
   // Trigger before_pane_create hook
   await triggerHook('before_pane_create', projectRoot, undefined, {
-    COMUX_PROMPT: prompt,
-    COMUX_AGENT: agent || 'unknown',
+    PSYCHE_PROMPT: prompt,
+    PSYCHE_AGENT: agent || 'unknown',
   });
 
   // Validate branchPrefix before use
@@ -197,18 +181,18 @@ export async function createPane(
   const tmuxService = TmuxService.getInstance();
 
   const worktreePath = existingWorktree?.worktreePath
-    || path.join(projectRoot, '.comux', 'worktrees', slug);
+    || path.join(projectRoot, '.psyche', 'worktrees', slug);
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
   // Load config to get control pane info
   const configPath = optionsSessionConfigPath
-    || path.join(sessionProjectRoot, '.comux', 'comux.config.json');
+    || path.join(sessionProjectRoot, '.psyche', 'psyche.config.json');
   let controlPaneId: string | undefined;
   let configSidebarProjects: SidebarProject[] = [];
 
   try {
     const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: ComuxConfig = JSON.parse(configContent);
+    const config: PsycheConfig = JSON.parse(configContent);
     controlPaneId = config.controlPaneId;
     configSidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
     paneProjectName = getSidebarProjectDisplayName(
@@ -269,9 +253,9 @@ export async function createPane(
       paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
     } else {
       // Subsequent panes - always split horizontally, let layout manager organize
-      // Get actual comux pane IDs (not welcome pane) from existingPanes
-      const comuxPaneIds = existingPanes.map(p => p.paneId);
-      const targetPane = comuxPaneIds[comuxPaneIds.length - 1]; // Split from the most recent comux pane
+      // Get actual psyche pane IDs (not welcome pane) from existingPanes
+      const psychePaneIds = existingPanes.map(p => p.paneId);
+      const targetPane = psychePaneIds[psychePaneIds.length - 1]; // Split from the most recent psyche pane
 
       // Always split horizontally - the layout manager will organize panes optimally
       paneInfo = splitPane({ targetPane, cwd: projectRoot });
@@ -291,7 +275,7 @@ export async function createPane(
 
       try {
         const configContent = fs.readFileSync(configPath, 'utf-8');
-        const config: ComuxConfig = JSON.parse(configContent);
+        const config: PsycheConfig = JSON.parse(configContent);
         config.controlPaneId = currentPaneId;
         config.lastUpdated = new Date().toISOString();
         atomicWriteJsonSync(configPath, config);
@@ -308,8 +292,8 @@ export async function createPane(
       if (isFirstContentPane) {
         paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
       } else {
-        const comuxPaneIds = existingPanes.map(p => p.paneId);
-        const targetPane = comuxPaneIds[comuxPaneIds.length - 1];
+        const psychePaneIds = existingPanes.map(p => p.paneId);
+        const targetPane = psychePaneIds[psychePaneIds.length - 1];
         paneInfo = splitPane({ targetPane, cwd: projectRoot });
       }
     } else {
@@ -348,17 +332,17 @@ export async function createPane(
 
   // Trigger pane_created hook (after pane created, before worktree)
   await triggerHook('pane_created', projectRoot, undefined, {
-    COMUX_PANE_ID: `comux-${Date.now()}`,
-    COMUX_SLUG: slug,
-    COMUX_PROMPT: prompt,
-    COMUX_AGENT: agent || 'unknown',
-    COMUX_TMUX_PANE_ID: paneInfo,
+    PSYCHE_PANE_ID: `psyche-${Date.now()}`,
+    PSYCHE_SLUG: slug,
+    PSYCHE_PROMPT: prompt,
+    PSYCHE_AGENT: agent || 'unknown',
+    PSYCHE_TMUX_PANE_ID: paneInfo,
   });
 
   // Check if this is a hooks editing session (before worktree creation)
   const isHooksEditingSession = !!prompt && (
-    /(create|edit|modify).*(comux|\.)?.*hooks/i.test(prompt)
-    || /\.comux-hooks/i.test(prompt)
+    /(create|edit|modify).*(psyche|\.)?.*hooks/i.test(prompt)
+    || /\.psyche-hooks/i.test(prompt)
   );
 
   // Create git worktree and cd into it
@@ -373,7 +357,7 @@ export async function createPane(
       await new Promise((resolve) => setTimeout(resolve, 300));
     } else {
       // IMPORTANT: Prune stale worktrees first to avoid conflicts
-      // This must run synchronously from comux, not in the pane
+      // This must run synchronously from psyche, not in the pane
       try {
         execSync('git worktree prune', {
           encoding: 'utf-8',
@@ -464,7 +448,7 @@ export async function createPane(
     }
 
     try {
-      const { addedEntries } = ensureComuxRuntimeIgnored(worktreePath);
+      const { addedEntries } = ensurePsycheRuntimeIgnored(worktreePath);
       if (addedEntries.length > 0) {
         LogService.getInstance().debug(
           `Added ${addedEntries.join(', ')} to worktree .gitignore for ${slug}`,
@@ -473,7 +457,7 @@ export async function createPane(
       }
     } catch (gitignoreError) {
       LogService.getInstance().warn(
-        `Failed to ensure comux runtime gitignore entries for ${slug}: ${gitignoreError}`,
+        `Failed to ensure psyche runtime gitignore entries for ${slug}: ${gitignoreError}`,
         'paneCreation'
       );
     }
@@ -493,7 +477,7 @@ export async function createPane(
       );
     }
 
-    // Initialize .comux-hooks if this is a hooks editing session
+    // Initialize .psyche-hooks if this is a hooks editing session
     if (isHooksEditingSession) {
       initializeHooksDirectory(worktreePath);
     }
@@ -530,8 +514,8 @@ export async function createPane(
   // pane context. The hook must succeed before we launch the agent — a
   // failing hook means the worktree is in an unknown state and running a
   // prompt against it would be dangerous.
-  const newPane: ComuxPane = {
-    id: `comux-${Date.now()}`,
+  const newPane: PsychePane = {
+    id: `psyche-${Date.now()}`,
     slug,
     displayName: existingWorktreeMetadata?.displayName,
     branchName: branchName !== slug ? branchName : undefined,
@@ -576,22 +560,16 @@ export async function createPane(
   }
 
   // Launch agent if specified
-  const hasInitialPrompt = !!(prompt && prompt.trim());
-
   if (agent) {
-    if (agent === 'gemini') {
-      const geminiWorkspacePath = fs.existsSync(worktreePath)
-        ? worktreePath
-        : projectRoot;
-      ensureGeminiFolderTrusted(geminiWorkspacePath);
-    }
-
+    // Codex hooks must be installed before launch so the wrapped command can
+    // point at the event file. Kept here because it needs the worktree path
+    // and the persisted pane id.
     let codexHookEventFile: string | undefined;
     if (agent === 'codex') {
       try {
         codexHookEventFile = installCodexPaneHooks({
           worktreePath,
-          comuxPaneId: newPane.id,
+          psychePaneId: newPane.id,
           tmuxPaneId: paneInfo,
         }).eventFile;
       } catch (error) {
@@ -603,76 +581,23 @@ export async function createPane(
       }
     }
 
-    const promptTransport = getPromptTransport(agent);
-    const shouldSendPromptViaTmux = hasInitialPrompt && promptTransport === 'send-keys';
-    let baselineCommand: string | undefined;
-    if (shouldSendPromptViaTmux) {
-      try {
-        baselineCommand = await tmuxService.getPaneCurrentCommand(paneInfo);
-      } catch {
-        baselineCommand = undefined;
-      }
-    }
-
-    let launchCommand: string;
-    if (hasInitialPrompt && !shouldSendPromptViaTmux) {
-      let promptFilePath: string | null = null;
-      try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
-      } catch {
-        // Fall back to inline escaping if prompt file write fails
-      }
-
-      if (promptFilePath) {
-        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
-          agent,
-          '"$COMUX_PROMPT_CONTENT"',
-          settings.permissionMode
-        )}`;
-      } else {
-        const escapedPrompt = prompt
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`')
-          .replace(/\$/g, '\\$');
-        launchCommand = buildInitialPromptCommand(
-          agent,
-          `"${escapedPrompt}"`,
-          settings.permissionMode
-        );
-      }
-    } else {
-      launchCommand = buildAgentCommand(agent, settings.permissionMode);
-    }
-
-    if (agent === 'codex') {
-      launchCommand = buildCodexHookedCommand(launchCommand, {
-        comuxPaneId: newPane.id,
-        tmuxPaneId: paneInfo,
-        eventFile: codexHookEventFile,
-      });
-    }
-
-    await tmuxService.sendShellCommand(paneInfo, launchCommand);
-    await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-    if (shouldSendPromptViaTmux) {
-      await sendPromptViaTmux({
-        paneId: paneInfo,
-        prompt,
-        tmuxService,
-        expectedCommand: getAgentProcessName(agent),
-        baselineCommand,
-        prePromptKeys: getSendKeysPrePrompt(agent),
-        submitKeys: getSendKeysSubmit(agent),
-        postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
-        readyDelayMs: getSendKeysReadyDelayMs(agent),
-      });
-    }
+    await launchAgentInPane({
+      paneId: paneInfo,
+      agent,
+      prompt,
+      slug,
+      projectRoot,
+      worktreePath,
+      permissionMode: settings.permissionMode,
+      psychePaneId: newPane.id,
+      codexHookEventFile,
+      tmuxService,
+    });
 
     if (agent === 'claude') {
-      // Auto-approve trust prompts for Claude (workspace trust, not edit permissions)
+      // Auto-approve trust prompts for Claude (workspace trust, not edit
+      // permissions). Lives here rather than in the shared launcher because
+      // agentLaunch importing this module would be circular.
       autoApproveTrustPrompt(paneInfo, prompt).catch(() => {
         // Ignore errors in background monitoring
       });
@@ -688,7 +613,7 @@ export async function createPane(
   if (isFirstContentPane) {
     try {
       const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: ComuxConfig = JSON.parse(configContent);
+      const config: PsycheConfig = JSON.parse(configContent);
 
       // Add the new pane to the config (panesCount becomes 1)
       config.panes = [...existingPanes, newPane];
@@ -713,9 +638,9 @@ export async function createPane(
   // Switch back to the original pane
   await tmuxService.selectPane(originalPaneId);
 
-  // Re-set the title for the comux pane
+  // Re-set the title for the psyche pane
   try {
-    await tmuxService.setPaneTitle(originalPaneId, "comux");
+    await tmuxService.setPaneTitle(originalPaneId, "psyche");
   } catch {
     // Ignore if setting title fails
   }

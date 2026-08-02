@@ -1,9 +1,9 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { ComuxPane } from '../../types.js';
+import type { PsychePane } from '../../types.js';
 
 interface CloseOptionsDialogProps {
-  pane: ComuxPane;
+  pane: PsychePane;
   selectedIndex: number; // 0..3
 }
 

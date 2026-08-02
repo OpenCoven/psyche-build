@@ -1,15 +1,15 @@
 /**
- * comux MCP server (stdio JSON-RPC 2.0).
+ * psyche MCP server (stdio JSON-RPC 2.0).
  *
- * Exposes comux's pane/ritual/worktree surface to MCP-capable clients
+ * Exposes psyche's pane/ritual/worktree surface to MCP-capable clients
  * (coven-code, Claude Code, OpenCode, etc.) so any familiar can fan work
- * into parallel comux panes mid-conversation without leaving its session.
+ * into parallel psyche panes mid-conversation without leaving its session.
  *
  * Wire-up on the client side (e.g. ~/.coven-code/settings.json):
  *
  *   {
  *     "mcp_servers": [
- *       { "name": "comux", "command": "comux", "args": ["mcp"], "type": "stdio" }
+ *       { "name": "psyche", "command": "psyche", "args": ["mcp"], "type": "stdio" }
  *     ]
  *   }
  *
@@ -18,7 +18,7 @@
  * of pulling in `@modelcontextprotocol/sdk` so this first ship has zero new
  * runtime dependencies — easy to revisit if the surface grows.
  *
- * Reuses comux's existing pane primitives from `../daemon/panes.ts` so the
+ * Reuses psyche's existing pane primitives from `../daemon/panes.ts` so the
  * MCP path and the Ink TUI path share state and don't fork.
  */
 
@@ -27,9 +27,24 @@ import { createInterface } from 'node:readline';
 import { capturePaneSync, listPanes } from '../daemon/panes.js';
 import type { PaneSummary } from '../daemon/protocol.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
+import {
+  killBridgePane,
+  spawnBridgePane,
+  type BridgeKillResult,
+  type BridgeSpawnRequest,
+  type BridgeSpawnResult,
+} from '../daemon/bridge.js';
+import { tmuxSessionNameForRoot } from '../services/bridge/tmuxControl.js';
+import { Orchestrator } from '../orchestration/orchestrator.js';
+import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
+import {
+  ORCHESTRATION_LANE_MODES,
+  type OrchestrationTaskRequest,
+  type OrchestrationTaskResult,
+} from '../orchestration/types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_NAME = 'comux';
+export const SERVER_NAME = 'psyche';
 const SERVER_VERSION = '0.0.1';
 
 // ---- JSON-RPC plumbing ----------------------------------------------------
@@ -67,10 +82,6 @@ function writeResponse(res: JsonRpcResponse): void {
   process.stdout.write(JSON.stringify(res) + '\n');
 }
 
-function ok<T>(id: JsonRpcId, result: T): void {
-  writeResponse({ jsonrpc: '2.0', id, result });
-}
-
 function fail(id: JsonRpcId, code: number, message: string, data?: unknown): void {
   writeResponse({ jsonrpc: '2.0', id, error: { code, message, data } });
 }
@@ -84,24 +95,69 @@ interface ToolDef {
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
+/**
+ * Side-effecting collaborators, injectable so tools/call can be tested without
+ * a live tmux server or a real git repository.
+ */
+export interface McpDeps {
+  spawnPane: (
+    projectRoot: string,
+    sessionName: string,
+    request: BridgeSpawnRequest,
+  ) => Promise<BridgeSpawnResult>;
+  killPane: (projectRoot: string, paneId: string) => Promise<BridgeKillResult>;
+  sessionNameForRoot: (projectRoot: string) => string;
+  executeTask: (
+    request: OrchestrationTaskRequest,
+    sessionName: string,
+  ) => Promise<{
+    result: OrchestrationTaskResult;
+    spawned: Map<string, BridgeSpawnResult>;
+  }>;
+}
+
+export const defaultMcpDeps: McpDeps = {
+  spawnPane: (projectRoot, sessionName, request) =>
+    spawnBridgePane(projectRoot, sessionName, request),
+  killPane: (projectRoot, paneId) => killBridgePane(projectRoot, paneId),
+  sessionNameForRoot: tmuxSessionNameForRoot,
+  executeTask: async (request, sessionName) => {
+    const backend = createBridgePaneBackend({ sessionName });
+    const orchestrator = new Orchestrator({ executeLane: backend.execute });
+    const result = await orchestrator.execute(request);
+    return { result, spawned: backend.spawned() };
+  },
+};
+
+let deps: McpDeps = defaultMcpDeps;
+
+/** Test seam. Returns a restore function. */
+export function setMcpDeps(next: Partial<McpDeps>): () => void {
+  const previous = deps;
+  deps = { ...deps, ...next };
+  return () => {
+    deps = previous;
+  };
+}
+
 function resolveProjectRoot(args: Record<string, unknown>): string {
   const raw = args.project_root ?? args.projectRoot;
   if (typeof raw === 'string' && raw.length > 0) return raw;
-  return process.env.COMUX_PROJECT_ROOT ?? process.cwd();
+  return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
 }
 
-const TOOLS: ToolDef[] = [
+export const TOOLS: ToolDef[] = [
   {
-    name: 'comux_list_panes',
+    name: 'psyche_list_panes',
     description:
-      'List all comux panes for the active project. Each entry includes the tmux pane id, working directory, branch, agent, and human-readable title.',
+      'List all psyche panes for the active project. Each entry includes the tmux pane id, working directory, branch, agent, and human-readable title.',
     inputSchema: {
       type: 'object',
       properties: {
         project_root: {
           type: 'string',
           description:
-            'Absolute path to the project root whose panes to list. Defaults to $COMUX_PROJECT_ROOT then process.cwd() if omitted.',
+            'Absolute path to the project root whose panes to list. Defaults to $PSYCHE_PROJECT_ROOT then process.cwd() if omitted.',
         },
       },
     },
@@ -116,9 +172,95 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_create_pane',
+    name: 'psyche_execute_task',
     description:
-      '[STUB — wiring in progress] Create a new comux pane with the given prompt, agent, and optional worktree/branch. Returns the new pane id once the daemon-driven path is hooked up.',
+      'Run one task across several parallel lanes. Each lane gets its own git worktree, branch, tmux pane, and harness, all seeded with the same prompt — the way to compare two agents on one problem, or to split work across several. Lanes run with bounded concurrency and fail independently: the task reports completed, partial, or failed, and successful lanes stay usable when siblings fail.',
+    inputSchema: {
+      type: 'object',
+      required: ['prompt', 'lanes'],
+      properties: {
+        prompt: { type: 'string', description: 'Prompt seeded into every lane.' },
+        lanes: {
+          type: 'array',
+          minItems: 1,
+          description: 'One entry per parallel worker.',
+          items: {
+            type: 'object',
+            required: ['id'],
+            properties: {
+              id: { type: 'string', description: 'Unique lane id, e.g. the agent name.' },
+              agent: {
+                type: 'string',
+                description: 'Harness id. Omit together with mode "terminal" for a plain shell.',
+              },
+              mode: {
+                type: 'string',
+                enum: [...ORCHESTRATION_LANE_MODES],
+                description:
+                  'Defaults to isolated-worktree. shared-worktree and coven-session are not available on this path yet.',
+              },
+            },
+          },
+        },
+        task_id: { type: 'string', description: 'Stable id for this task. Generated when omitted.' },
+        concurrency: { type: 'number', description: 'Max lanes running at once. Defaults to the lane count, capped at 4.' },
+        branch: { type: 'string', description: 'Start-point branch for the new worktrees.' },
+        project_root: { type: 'string' },
+      },
+    },
+    handler: async (args) => {
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) {
+        throw Object.assign(new Error('psyche_execute_task requires `prompt`'), { code: ERR_INVALID_PARAMS });
+      }
+      const rawLanes = Array.isArray(args.lanes) ? args.lanes : [];
+      if (rawLanes.length === 0) {
+        throw Object.assign(new Error('psyche_execute_task requires at least one lane'), { code: ERR_INVALID_PARAMS });
+      }
+
+      const projectRoot = resolveProjectRoot(args);
+      const request: OrchestrationTaskRequest = {
+        taskId: typeof args.task_id === 'string' && args.task_id.trim()
+          ? args.task_id.trim()
+          : `mcp-task-${Date.now()}`,
+        projectRoot,
+        prompt,
+        ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
+        ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
+        lanes: rawLanes.map((raw) => {
+          const lane = (raw ?? {}) as Record<string, unknown>;
+          const agent = typeof lane.agent === 'string' ? lane.agent : undefined;
+          return {
+            id: String(lane.id ?? '').trim(),
+            mode: (typeof lane.mode === 'string' ? lane.mode : agent ? 'isolated-worktree' : 'terminal') as never,
+            ...(agent ? { agent: agent as never } : {}),
+          };
+        }),
+      };
+
+      const { result, spawned } = await deps.executeTask(request, deps.sessionNameForRoot(projectRoot));
+
+      return {
+        task_id: result.taskId,
+        status: result.status,
+        lanes: result.lanes.map((lane) => {
+          const spawn = spawned.get(lane.id);
+          return {
+            id: lane.id,
+            status: lane.status,
+            ...(spawn
+              ? { pane_id: spawn.id, worktree_path: spawn.worktreePath, branch: spawn.branch }
+              : {}),
+            ...(lane.status === 'failed' ? { error: lane.error } : {}),
+          };
+        }),
+      };
+    },
+  },
+  {
+    name: 'psyche_create_pane',
+    description:
+      'Create a new psyche pane: a fresh git worktree and branch off the project root, a tmux pane, and the chosen harness launched with the prompt. Returns the tmux pane id, worktree path, and branch. The psyche tmux session for this project must already be running.',
     inputSchema: {
       type: 'object',
       required: ['prompt', 'agent'],
@@ -127,55 +269,83 @@ const TOOLS: ToolDef[] = [
         agent: {
           type: 'string',
           description:
-            "Harness id (`claude`, `codex`, `opencode`, `coven-code`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
-        },
-        worktree: {
-          type: 'string',
-          description: 'Existing worktree path. If omitted, comux creates a new worktree from the project root.',
+            "Harness id (`coven-code`, `claude`, `codex`, `opencode`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
         },
         branch: {
           type: 'string',
-          description: 'Branch name for the new worktree. If omitted, comux derives one from the prompt slug.',
+          description: 'Branch name for the new worktree. If omitted, psyche derives one from the prompt slug.',
+        },
+        title: { type: 'string', description: 'Human-readable pane title. Defaults to the derived slug.' },
+        project_root: { type: 'string' },
+      },
+    },
+    handler: async (args) => {
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) {
+        throw Object.assign(new Error('psyche_create_pane requires `prompt`'), { code: ERR_INVALID_PARAMS });
+      }
+      const agent = String(args.agent ?? '').trim();
+      if (!agent) {
+        throw Object.assign(new Error('psyche_create_pane requires `agent`'), { code: ERR_INVALID_PARAMS });
+      }
+      const projectRoot = resolveProjectRoot(args);
+      const result = await deps.spawnPane(projectRoot, deps.sessionNameForRoot(projectRoot), {
+        requestId: `mcp-${Date.now()}`,
+        cwd: projectRoot,
+        agent,
+        prompt,
+        branch: typeof args.branch === 'string' ? args.branch : undefined,
+        title: typeof args.title === 'string' ? args.title : undefined,
+      });
+      return {
+        pane_id: result.id,
+        worktree_path: result.worktreePath,
+        branch: result.branch,
+        pane: result.pane,
+      };
+    },
+  },
+  {
+    name: 'psyche_kill_pane',
+    description:
+      'Terminate a psyche pane and remove it from the project config. Does NOT delete the pane\'s git worktree or branch — those are returned so you can inspect or merge the work, and removing them stays an explicit action in the psyche TUI.',
+    inputSchema: {
+      type: 'object',
+      required: ['pane_id'],
+      properties: {
+        pane_id: {
+          type: 'string',
+          description: 'Pane id from `psyche_list_panes` — either the tmux pane id (e.g. `%3`) or the psyche pane id.',
         },
         project_root: { type: 'string' },
       },
     },
-    handler: async (_args) => {
-      // TODO(step-2b): wire to comux's pane-creation flow
-      // (src/utils/paneCreation.ts → TmuxService.createPane + AgentLaunch).
-      // Tonight ships the shape; behaviour lands in the next commit.
-      throw new Error(
-        'comux_create_pane is not yet wired — coming in the next MCP commit. Use the comux TUI for now.',
-      );
+    handler: async (args) => {
+      const paneId = String(args.pane_id ?? '').trim();
+      if (!paneId) {
+        throw Object.assign(new Error('psyche_kill_pane requires `pane_id`'), { code: ERR_INVALID_PARAMS });
+      }
+      const projectRoot = resolveProjectRoot(args);
+      const result = await deps.killPane(projectRoot, paneId);
+      return {
+        pane_id: result.paneId,
+        id: result.id,
+        killed: result.killed,
+        worktree_path: result.worktreePath,
+        branch: result.branch,
+        note: 'Worktree and branch were left in place. Remove them from the psyche TUI if you no longer need the work.',
+      };
     },
   },
   {
-    name: 'comux_kill_pane',
+    name: 'psyche_get_pane_output',
     description:
-      '[STUB — wiring in progress] Terminate the named comux pane and clean up its worktree.',
+      "Capture the current visible buffer plus scrollback of a psyche pane. Returns ANSI-escaped text — strip codes on the caller if you just want the plain content. Use this to read what a running agent has produced so far without attaching.",
     inputSchema: {
       type: 'object',
       required: ['pane_id'],
       properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `comux_list_panes`.' },
-        project_root: { type: 'string' },
-      },
-    },
-    handler: async (_args) => {
-      throw new Error(
-        'comux_kill_pane is not yet wired — coming in the next MCP commit. Use the comux TUI for now.',
-      );
-    },
-  },
-  {
-    name: 'comux_get_pane_output',
-    description:
-      "Capture the current visible buffer plus scrollback of a comux pane. Returns ANSI-escaped text — strip codes on the caller if you just want the plain content. Use this to read what a running agent has produced so far without attaching.",
-    inputSchema: {
-      type: 'object',
-      required: ['pane_id'],
-      properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `comux_list_panes`.' },
+        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `psyche_list_panes`.' },
         strip_ansi: {
           type: 'boolean',
           description: 'When true, strip ANSI escape sequences before returning. Default false (preserves colour for terminal renderers).',
@@ -185,7 +355,7 @@ const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const paneId = String(args.pane_id ?? '').trim();
       if (!paneId) {
-        throw Object.assign(new Error('comux_get_pane_output requires `pane_id`'), { code: ERR_INVALID_PARAMS });
+        throw Object.assign(new Error('psyche_get_pane_output requires `pane_id`'), { code: ERR_INVALID_PARAMS });
       }
       const buf = capturePaneSync(paneId);
       let text = buf.toString('utf8');
@@ -198,9 +368,9 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_list_rituals',
+    name: 'psyche_list_rituals',
     description:
-      "List every ritual available to the active project — both comux built-ins (Start Coding, Terminal First, Review Stack, Release Check, Fix OpenClaw, …) and project-saved rituals from `<projectRoot>/.comux/rituals/`. Each entry includes its id, name, scope (`builtin`|`project`), description, and pane spec.",
+      "List every ritual available to the active project — both psyche built-ins (Start Coding, Terminal First, Review Stack, Release Check, Fix OpenClaw, …) and project-saved rituals from `<projectRoot>/.psyche/rituals/`. Each entry includes its id, name, scope (`builtin`|`project`), description, and pane spec.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -220,7 +390,7 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_list_worktrees',
+    name: 'psyche_list_worktrees',
     description:
       "List every git worktree associated with the active project's repository, including the path, branch, current HEAD sha, and whether it is the main worktree. Useful when you need to know which branches are already checked out before suggesting a new pane.",
     inputSchema: {
@@ -321,7 +491,16 @@ async function handleToolsCall(params: unknown): Promise<unknown> {
   };
 }
 
-async function dispatch(req: JsonRpcRequest): Promise<void> {
+/**
+ * Handle one JSON-RPC request and return the response.
+ *
+ * Returns null for notifications, which by protocol get no reply. Kept
+ * separate from the stdio loop so tests can exercise the real tool dispatch
+ * without spawning a process or touching stdout.
+ */
+export async function handleMcpRequest(
+  req: JsonRpcRequest,
+): Promise<JsonRpcResponse | null> {
   const id = req.id ?? null;
   try {
     let result: unknown;
@@ -330,8 +509,7 @@ async function dispatch(req: JsonRpcRequest): Promise<void> {
         result = await handleInitialize(req.params);
         break;
       case 'notifications/initialized':
-        // Notifications have no response.
-        return;
+        return null;
       case 'tools/list':
         result = await handleToolsList(req.params);
         break;
@@ -342,15 +520,23 @@ async function dispatch(req: JsonRpcRequest): Promise<void> {
         result = {};
         break;
       default:
-        fail(id, ERR_METHOD_NOT_FOUND, `Method not found: ${req.method}`);
-        return;
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: { code: ERR_METHOD_NOT_FOUND, message: `Method not found: ${req.method}` },
+        };
     }
-    ok(id, result);
+    return { jsonrpc: '2.0', id, result };
   } catch (err) {
     const code = (err as { code?: number }).code ?? ERR_INTERNAL;
     const message = err instanceof Error ? err.message : String(err);
-    fail(id, code, message);
+    return { jsonrpc: '2.0', id, error: { code, message } };
   }
+}
+
+async function dispatch(req: JsonRpcRequest): Promise<void> {
+  const response = await handleMcpRequest(req);
+  if (response) writeResponse(response);
 }
 
 // ---- stdio loop -----------------------------------------------------------

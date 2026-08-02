@@ -1,7 +1,7 @@
 node_modules
 **/node_modules
-.comux
-.comux/**
+.psyche
+.psyche/**
 .worktrees
 .worktrees/**
 native

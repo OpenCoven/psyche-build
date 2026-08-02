@@ -1,5 +1,5 @@
 import path from 'path';
-import type { ComuxPane, SidebarProject } from '../types.js';
+import type { PsychePane, SidebarProject } from '../types.js';
 import {
   groupPanesByProject,
   type PaneProjectGroup,
@@ -24,7 +24,7 @@ export interface ProjectActionLayout {
 
 export interface PostCloseSelection {
   selectedIndex: number;
-  pane?: ComuxPane;
+  pane?: PsychePane;
   action?: ProjectActionItem;
 }
 
@@ -39,7 +39,7 @@ function sameRoot(a: string, b: string): boolean {
  * - Multi-project mode (>=2 groups): one pair of cards under each project group
  */
 export function buildProjectActionLayout(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   sidebarProjects: SidebarProject[],
   fallbackProjectRoot: string,
   fallbackProjectName: string
@@ -118,7 +118,7 @@ export function getProjectActionByIndex(
 }
 
 export function resolveSelectionAfterPaneClose(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   closingPaneId: string,
   sidebarProjects: SidebarProject[],
   fallbackProjectRoot: string,
@@ -133,7 +133,7 @@ export function resolveSelectionAfterPaneClose(
 
   let closingGroup: PaneProjectGroup | undefined;
   let closingGroupPaneIndex = -1;
-  let closingPane: ComuxPane | undefined;
+  let closingPane: PsychePane | undefined;
 
   for (const group of currentLayout.groups) {
     const groupIndex = group.panes.findIndex(

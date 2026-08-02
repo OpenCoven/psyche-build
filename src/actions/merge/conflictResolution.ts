@@ -6,7 +6,7 @@
  */
 
 import type { ActionResult, ActionContext } from '../types.js';
-import type { ComuxPane } from '../../types.js';
+import type { PsychePane } from '../../types.js';
 import { TmuxService } from '../../services/TmuxService.js';
 import { getPaneBranchName } from '../../utils/git.js';
 import {
@@ -20,7 +20,7 @@ import {
  * Create a new pane for AI-assisted conflict resolution
  */
 export async function createConflictResolutionPaneForMerge(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   targetBranch: string,
   targetRepoPath: string
@@ -86,7 +86,7 @@ export async function createConflictResolutionPaneForMerge(
  * Actually create and launch the conflict resolution pane
  */
 async function createAndLaunchConflictPane(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   targetBranch: string,
   targetRepoPath: string,
@@ -139,7 +139,7 @@ async function createAndLaunchConflictPane(
           console.error(`[conflictResolution] Current panes: ${currentPanes.map(p => p.id).join(', ')}`);
 
           // Remove conflict pane from state
-          const panesWithoutConflictPane = currentPanes.filter((p: ComuxPane) => p.id !== conflictPane.id);
+          const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
           console.error(`[conflictResolution] Removing conflict pane ${conflictPane.id}, remaining: ${panesWithoutConflictPane.map(p => p.id).join(', ')}`);
           await context.savePanes(panesWithoutConflictPane);
 

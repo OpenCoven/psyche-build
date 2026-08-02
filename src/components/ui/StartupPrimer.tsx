@@ -19,7 +19,7 @@ const StartupPrimer: React.FC<StartupPrimerProps> = memo(({ show }) => {
       paddingX={1}
       marginTop={1}
     >
-      <Text bold color={COLORS.accent}>New to comux</Text>
+      <Text bold color={COLORS.accent}>New to psyche</Text>
       <Text dimColor>Sidebar focused: arrows move, Enter activates, n agent, t terminal, e renames.</Text>
       <Text dimColor>Mouse mode: click a thread/worktree to select; double-click to rename.</Text>
       <Text dimColor>Pane focused: Ctrl-b then Left returns to the sidebar.</Text>

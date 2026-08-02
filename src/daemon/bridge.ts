@@ -4,9 +4,22 @@ import net from 'node:net';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { AGENT_IDS, buildAgentCommand, buildInitialPromptCommand, type AgentName } from '../utils/agentLaunch.js';
+import {
+  AGENT_IDS,
+  buildAgentCommand,
+  buildInitialPromptCommand,
+  getAgentProcessName,
+  getPromptTransport,
+  getSendKeysPostPasteDelayMs,
+  getSendKeysPrePrompt,
+  getSendKeysReadyDelayMs,
+  getSendKeysSubmit,
+  type AgentName,
+} from '../utils/agentLaunch.js';
+import { sendPromptViaTmux } from '../utils/agentPromptDispatch.js';
+import { TmuxService } from '../services/TmuxService.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
-import type { ComuxConfig } from '../types.js';
+import type { PsycheConfig } from '../types.js';
 import {
   isAgenticCapability,
   type AgenticCapabilityRouter,
@@ -36,13 +49,29 @@ export interface BridgeSpawnRequest {
   agent?: string;
   title?: string;
   prompt?: string;
+  /** Existing branch or ref from which to create the generated pane branch. */
+  startPointBranch?: string;
   branch?: string;
+}
+
+export interface BridgeSpawnPromptKeysRequest {
+  paneId: string;
+  prompt: string;
+  agent: AgentName;
 }
 
 export interface BridgeSpawnDeps {
   tmuxSessionExists: (name: string) => boolean;
   createTmuxPane: (sessionName: string, cwd: string, title?: string) => string;
   sendTmuxCommand: (paneId: string, command: string) => void;
+  /**
+   * Type a prompt into a send-keys agent's TUI after it starts.
+   *
+   * Optional so existing partial deps objects keep working — note that
+   * __tests__ is outside tsconfig's `include`, so a required field here would
+   * not be a compile error for callers in tests, just a runtime TypeError.
+   */
+  sendPromptKeys?: (request: BridgeSpawnPromptKeysRequest) => Promise<void>;
 }
 
 export interface BridgeSpawnResult {
@@ -126,7 +155,7 @@ interface RawConfigPane extends Record<string, unknown> {
   lastUpdated?: string;
 }
 
-interface BridgeConfig extends Omit<Partial<ComuxConfig>, 'panes'> {
+interface BridgeConfig extends Omit<Partial<PsycheConfig>, 'panes'> {
   panes?: RawConfigPane[];
 }
 
@@ -142,11 +171,11 @@ export async function resolveScopedCwd(projectRoot: string, cwd?: string): Promi
   try {
     requestedReal = await realpath(requestedPath);
   } catch {
-    throw new Error(`cwd does not exist inside the comux project root`);
+    throw new Error(`cwd does not exist inside the psyche project root`);
   }
 
   if (!isPathInsideOrEqual(rootReal, requestedReal)) {
-    throw new Error(`cwd is outside the comux project root`);
+    throw new Error(`cwd is outside the psyche project root`);
   }
 
   return { projectRoot: rootReal, requestedCwd: requestedReal };
@@ -224,7 +253,7 @@ export async function launchProjectCovenSession(
   });
   const sessionRoot = await realpath(session.projectRoot);
   if (!isPathInsideOrEqual(scoped.projectRoot, sessionRoot)) {
-    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this comux project scope');
+    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this psyche project scope');
   }
   return { ...session, projectRoot: sessionRoot };
 }
@@ -274,7 +303,7 @@ export async function routeProjectCovenSessionCapability(
   if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
     throw bridgeError(
       'coven_session_scope_violation',
-      'Coven session is outside this comux project scope',
+      'Coven session is outside this psyche project scope',
     );
   }
   if (!LIVE_CAPABILITY_SESSION_STATUSES.has(session.status)) {
@@ -328,10 +357,10 @@ export async function openProjectCovenSession(
   const scopedSessions = await listProjectCovenSessions(projectRoot, client);
   const session = scopedSessions.find((candidate) => candidate.id === sessionId);
   if (!session) {
-    throw bridgeError('coven_session_not_found', 'Coven session is not in this comux project scope');
+    throw bridgeError('coven_session_not_found', 'Coven session is not in this psyche project scope');
   }
   if (!deps.tmuxSessionExists(sessionName)) {
-    throw bridgeError('tmux_session_missing', 'comux tmux session is not running; start comux for this project first');
+    throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
 
   const title = `coven:${session.title || session.id.slice(0, 8)}`;
@@ -341,7 +370,7 @@ export async function openProjectCovenSession(
   const now = new Date().toISOString();
   const config = await readBridgeConfig(projectRoot);
   const pane: RawConfigPane = {
-    id: `comux-${Date.now()}`,
+    id: `psyche-${Date.now()}`,
     slug: uniqueCovenPaneSlug(config, session),
     title,
     displayName: title,
@@ -689,7 +718,7 @@ export async function resolveConfiguredPaneId(projectRoot: string, paneId: strin
   const config = await readBridgeConfig(projectRoot);
   const pane = findRawPane(config, paneId);
   if (!pane) {
-    throw bridgeError('pane_not_found', 'pane is not registered in this comux project');
+    throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
   }
   return String(pane.paneId ?? pane.id ?? paneId);
 }
@@ -715,7 +744,7 @@ export async function readPaneStatus(
     status: typeof pane.agentStatus === 'string' ? pane.agentStatus : 'unknown',
     pane: summary,
     metadata: {
-      comuxId: typeof pane.id === 'string' ? pane.id : undefined,
+      psycheId: typeof pane.id === 'string' ? pane.id : undefined,
       title: typeof pane.title === 'string' ? pane.title : typeof pane.displayName === 'string' ? pane.displayName : undefined,
       agent: typeof pane.agent === 'string' ? pane.agent : undefined,
       branch: typeof pane.branchName === 'string' ? pane.branchName : typeof pane.branch === 'string' ? pane.branch : undefined,
@@ -724,6 +753,76 @@ export async function readPaneStatus(
       lastActivity: typeof pane.lastUpdated === 'string' ? pane.lastUpdated : undefined,
     },
   };
+}
+
+/**
+ * Serializes worktree-name allocation across concurrent spawns.
+ *
+ * uniqueSlug and resolveSpawnBranch are check-then-act: they scan the
+ * filesystem and git refs for a free name, but nothing reserves it until
+ * `git worktree add` runs. Two lanes spawning at once therefore pick the SAME
+ * slug, and the second worktree add dies with "already exists". That never
+ * surfaced while fan-out lived only in the TUI, which created panes one at a
+ * time; running lanes in parallel exposed it immediately.
+ *
+ * The critical section is allocation through creation — the step that actually
+ * claims the name. Pane setup and agent launch stay outside it, so lanes still
+ * overlap for the slow parts.
+ */
+let worktreeClaim: Promise<unknown> = Promise.resolve();
+
+async function claimWorktree<T>(work: () => Promise<T>): Promise<T> {
+  const previous = worktreeClaim;
+  let release!: () => void;
+  worktreeClaim = new Promise<void>((resolve) => { release = resolve; });
+  // A failed claim must not wedge the queue, so predecessors are awaited for
+  // ordering only.
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Serializes read-modify-write on the project config.
+ *
+ * readBridgeConfig -> mutate -> writeBridgeConfig is check-then-act on a whole
+ * file. Concurrent spawns each read the same snapshot, append their own pane,
+ * and the last write wins — so spawning three lanes at once persisted two.
+ * Like the worktree claim, this only became reachable when lanes started
+ * running in parallel.
+ */
+let configMutation: Promise<unknown> = Promise.resolve();
+
+async function mutateBridgeConfig<T>(
+  projectRoot: string,
+  mutate: (config: BridgeConfig) => T | Promise<T>,
+): Promise<T> {
+  const previous = configMutation;
+  let release!: () => void;
+  configMutation = new Promise<void>((resolve) => { release = resolve; });
+  await previous.catch(() => undefined);
+  try {
+    const config = await readBridgeConfig(projectRoot);
+    const result = await mutate(config);
+    await writeBridgeConfig(projectRoot, config);
+    return result;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Date.now() alone collides when several panes are created inside one
+ * millisecond, which concurrent lanes do routinely.
+ */
+let paneIdCounter = 0;
+
+function nextBridgePaneId(): string {
+  paneIdCounter += 1;
+  return `psyche-${Date.now()}-${paneIdCounter}`;
 }
 
 export async function spawnBridgePane(
@@ -737,24 +836,43 @@ export async function spawnBridgePane(
     typeof request?.cwd === 'string' ? request.cwd : undefined,
   );
   if (!deps.tmuxSessionExists(sessionName)) {
-    throw bridgeError('tmux_session_missing', 'comux tmux session is not running; start comux for this project first');
+    throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
 
   const agent = normalizeAgent(request.agent);
-  const slug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
-  const branch = await resolveSpawnBranch(scoped.projectRoot, request.branch, slug);
-  const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
-  const worktreePath = path.join(worktreesRoot, slug);
-  assertGeneratedWorktreePath(scoped.projectRoot, worktreePath);
+  const { slug, branch, worktreePath } = await claimWorktree(async () => {
+    const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
+    const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
+    const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
+    const nextWorktreePath = path.join(worktreesRoot, nextSlug);
+    assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
 
-  createGitWorktree(scoped.projectRoot, worktreePath, branch);
+    createGitWorktree(
+      scoped.projectRoot,
+      nextWorktreePath,
+      nextBranch,
+      request.startPointBranch,
+    );
+    return { slug: nextSlug, branch: nextBranch, worktreePath: nextWorktreePath };
+  });
 
+  // Everything past the claim can fail — tmux can refuse to split, the config
+  // write can fail. A worktree already exists by then, so a failed lane would
+  // otherwise leak one plus its branch. Roll them back rather than leaving
+  // orphans behind for the user to find later.
+  try {
+    return await finishSpawn();
+  } catch (error) {
+    removeGitWorktree(scoped.projectRoot, worktreePath, branch);
+    throw error;
+  }
+
+  async function finishSpawn(): Promise<BridgeSpawnResult> {
   const title = request.title || slug;
   const paneId = deps.createTmuxPane(sessionName, worktreePath, title);
   const now = new Date().toISOString();
-  const config = await readBridgeConfig(scoped.projectRoot);
   const pane: RawConfigPane = {
-    id: `comux-${Date.now()}`,
+    id: nextBridgePaneId(),
     slug,
     title,
     displayName: title,
@@ -770,16 +888,26 @@ export async function spawnBridgePane(
     agentStatus: agent ? 'working' : 'idle',
     lastUpdated: now,
   };
-  config.projectName = config.projectName || path.basename(scoped.projectRoot);
-  config.projectRoot = scoped.projectRoot;
-  config.settings = config.settings || {};
-  config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-  config.lastUpdated = now;
-  await writeBridgeConfig(scoped.projectRoot, config);
+  const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
+    config.projectName = config.projectName || path.basename(scoped.projectRoot);
+    config.projectRoot = scoped.projectRoot;
+    config.settings = config.settings || {};
+    config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
+    config.lastUpdated = now;
+    return config.settings;
+  });
 
   if (agent) {
-    const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, config.settings?.permissionMode);
+    const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, settings?.permissionMode);
     deps.sendTmuxCommand(paneId, launchCommand);
+
+    // send-keys agents were launched bare above; type the prompt into their
+    // TUI once it is up. Without this the prompt is silently dropped.
+    const prompt = request.prompt;
+    if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
+      const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
+      await sendPromptKeys({ paneId, prompt, agent });
+    }
   }
 
   return {
@@ -788,6 +916,118 @@ export async function spawnBridgePane(
     worktreePath,
     branch,
   };
+  }
+}
+
+/**
+ * Best-effort rollback of a worktree this spawn just created.
+ *
+ * Only ever called for a worktree allocated moments earlier in the same call,
+ * so there is no user work to lose. Failures are swallowed: the caller is
+ * already reporting a lane failure, and a cleanup error must not replace the
+ * real one.
+ */
+function removeGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
+  try {
+    execFileSync('git', ['-C', projectRoot, 'worktree', 'remove', '--force', worktreePath], {
+      stdio: 'ignore',
+    });
+  } catch {
+    // Already gone, or never fully created.
+  }
+  try {
+    execFileSync('git', ['-C', projectRoot, 'branch', '-D', branch], { stdio: 'ignore' });
+  } catch {
+    // Branch may not exist if the worktree add itself failed.
+  }
+}
+
+export interface BridgeKillDeps {
+  tmuxPaneExists: (paneId: string) => boolean | undefined;
+  killTmuxPane: (paneId: string) => void;
+}
+
+export interface BridgeKillResult {
+  id: string;
+  paneId: string;
+  /** True when a live tmux pane was actually killed. */
+  killed: boolean;
+  /** Left on disk deliberately — see the note on killBridgePane. */
+  worktreePath?: string;
+  branch?: string;
+}
+
+export const defaultKillDeps: BridgeKillDeps = {
+  tmuxPaneExists,
+  killTmuxPane,
+};
+
+/**
+ * Terminate a pane registered in this project and drop its config record.
+ *
+ * Deliberately NON-destructive to git state: the worktree and branch are left
+ * exactly as they are, and are returned so the caller can report what remains.
+ * Deleting them is a separate, explicit act — the TUI's close/merge flows ask
+ * first, because a worktree can hold uncommitted work and a branch can be the
+ * only reference to it. An MCP client killing a pane must not be able to
+ * destroy work as a side effect.
+ *
+ * Killing a pane whose tmux pane is already gone is not an error; the config
+ * record is still removed so the project stops advertising a dead pane.
+ */
+export async function killBridgePane(
+  projectRoot: string,
+  paneId: string,
+  deps: BridgeKillDeps = defaultKillDeps,
+): Promise<BridgeKillResult> {
+  const scoped = await resolveScopedCwd(projectRoot);
+  const config = await readBridgeConfig(scoped.projectRoot);
+  const found = findRawPane(config, paneId);
+  if (!found) {
+    throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
+  }
+
+  const tmuxPaneId = String(found.paneId ?? found.id ?? paneId);
+  const psychePaneId = String(found.id ?? tmuxPaneId);
+  const pane = found;
+
+  let killed = false;
+  if (deps.tmuxPaneExists(tmuxPaneId) !== false) {
+    try {
+      deps.killTmuxPane(tmuxPaneId);
+      killed = true;
+    } catch (error) {
+      throw bridgeError(
+        'pane_kill_failed',
+        `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // Re-read under the mutation lock and match by id: the snapshot above may be
+  // stale if a concurrent spawn appended since, and dropping the record by
+  // object identity against a stale copy would filter nothing.
+  await mutateBridgeConfig(scoped.projectRoot, (current) => {
+    const panes = Array.isArray(current.panes) ? current.panes : [];
+    current.panes = panes.filter(
+      (candidate) => candidate.id !== pane.id && candidate.paneId !== pane.paneId,
+    );
+    current.lastUpdated = new Date().toISOString();
+  });
+
+  return {
+    id: psychePaneId,
+    paneId: tmuxPaneId,
+    killed,
+    worktreePath: typeof pane.worktreePath === 'string' ? pane.worktreePath : undefined,
+    branch: typeof pane.branchName === 'string'
+      ? pane.branchName
+      : typeof pane.branch === 'string' ? pane.branch : undefined,
+  };
+}
+
+export function killTmuxPane(paneId: string): void {
+  execFileSync('tmux', ['kill-pane', '-t', paneId], { stdio: 'ignore' });
 }
 
 export function tmuxPaneExists(paneId: string): boolean | undefined {
@@ -827,7 +1067,33 @@ export function sendTmuxCommand(paneId: string, command: string): void {
   execFileSync('tmux', ['send-keys', '-t', paneId, command, 'C-m'], { stdio: 'ignore' });
 }
 
+export async function sendPromptKeysToPane(
+  request: BridgeSpawnPromptKeysRequest,
+): Promise<void> {
+  const { paneId, prompt, agent } = request;
+  const tmuxService = TmuxService.getInstance();
+  let baselineCommand: string | undefined;
+  try {
+    baselineCommand = await tmuxService.getPaneCurrentCommand(paneId);
+  } catch {
+    baselineCommand = undefined;
+  }
+
+  await sendPromptViaTmux({
+    paneId,
+    prompt,
+    tmuxService,
+    expectedCommand: getAgentProcessName(agent),
+    baselineCommand,
+    prePromptKeys: getSendKeysPrePrompt(agent),
+    submitKeys: getSendKeysSubmit(agent),
+    postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
+    readyDelayMs: getSendKeysReadyDelayMs(agent),
+  });
+}
+
 export const defaultSpawnDeps: BridgeSpawnDeps = {
+  sendPromptKeys: sendPromptKeysToPane,
   tmuxSessionExists: (name) => {
     try {
       execFileSync('tmux', ['has-session', '-t', name], { stdio: 'ignore' });
@@ -864,7 +1130,7 @@ async function writeBridgeConfig(projectRoot: string, config: BridgeConfig): Pro
 }
 
 function bridgeConfigPath(projectRoot: string): string {
-  return path.join(projectRoot, '.comux', 'comux.config.json');
+  return path.join(projectRoot, '.psyche', 'psyche.config.json');
 }
 
 function findRawPane(config: BridgeConfig, paneId: string): RawConfigPane | undefined {
@@ -911,18 +1177,18 @@ function slugFromRequest(request: BridgeSpawnRequest): string {
 async function uniqueSlug(projectRoot: string, baseSlug: string): Promise<string> {
   for (let i = 0; i < 100; i++) {
     const slug = i === 0 ? baseSlug : `${baseSlug}-${i + 1}`;
-    const worktreePath = path.join(projectRoot, '.comux', 'worktrees', slug);
+    const worktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
     try {
       await realpath(worktreePath);
     } catch {
       return slug;
     }
   }
-  throw bridgeError('slug_exhausted', 'could not allocate a unique comux worktree slug');
+  throw bridgeError('slug_exhausted', 'could not allocate a unique psyche worktree slug');
 }
 
 async function resolveSpawnBranch(projectRoot: string, requestedBranch: string | undefined, slug: string): Promise<string> {
-  const base = requestedBranch || `comux/${slug}`;
+  const base = requestedBranch || `psyche/${slug}`;
   if (!isValidBridgeBranchName(base)) {
     throw bridgeError('invalid_branch', 'branch must be a safe local git branch name');
   }
@@ -933,10 +1199,15 @@ async function resolveSpawnBranch(projectRoot: string, requestedBranch: string |
     const branch = i === 0 ? base : `${base}-${i + 1}`;
     if (!gitBranchExists(projectRoot, branch)) return branch;
   }
-  throw bridgeError('branch_exhausted', 'could not allocate a unique comux branch');
+  throw bridgeError('branch_exhausted', 'could not allocate a unique psyche branch');
 }
 
-function createGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
+function createGitWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  branch: string,
+  startPointBranch?: string,
+): void {
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
     execFileSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' });
@@ -944,7 +1215,9 @@ function createGitWorktree(projectRoot: string, worktreePath: string, branch: st
     if (gitBranchExists(projectRoot, branch)) {
       execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, branch], { stdio: 'pipe' });
     } else {
-      execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch], { stdio: 'pipe' });
+      const args = ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch];
+      if (startPointBranch) args.push(startPointBranch);
+      execFileSync('git', args, { stdio: 'pipe' });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -975,20 +1248,20 @@ function isValidBridgeBranchName(branch: string): boolean {
 }
 
 async function ensureGeneratedWorktreesRoot(projectRoot: string): Promise<string> {
-  const worktreesRoot = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesRoot = path.join(projectRoot, '.psyche', 'worktrees');
   await mkdir(worktreesRoot, { recursive: true });
   const rootReal = await realpath(projectRoot);
   const worktreesReal = await realpath(worktreesRoot);
   if (!isPathInsideOrEqual(rootReal, worktreesReal)) {
-    throw bridgeError('invalid_worktree_path', 'project .comux/worktrees resolves outside the daemon project root');
+    throw bridgeError('invalid_worktree_path', 'project .psyche/worktrees resolves outside the daemon project root');
   }
   return worktreesRoot;
 }
 
 function assertGeneratedWorktreePath(projectRoot: string, worktreePath: string): void {
-  const worktreesRoot = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesRoot = path.join(projectRoot, '.psyche', 'worktrees');
   if (!isPathInsideOrEqual(worktreesRoot, worktreePath) || worktreePath === worktreesRoot) {
-    throw bridgeError('invalid_worktree_path', 'generated worktree path escaped the project .comux/worktrees directory');
+    throw bridgeError('invalid_worktree_path', 'generated worktree path escaped the project .psyche/worktrees directory');
   }
 }
 
@@ -997,16 +1270,20 @@ async function buildLaunchCommand(
   slug: string,
   agent: AgentName,
   prompt: string | undefined,
-  permissionMode: ComuxConfig['settings']['permissionMode'],
+  permissionMode: PsycheConfig['settings']['permissionMode'],
 ): Promise<string> {
-  if (!prompt || !prompt.trim()) {
+  // send-keys agents take no prompt on the command line — it is typed into
+  // their TUI after launch. Writing a prompt file here would read it into a
+  // variable, delete the file, and then run a bare command, destroying the
+  // prompt with no trace.
+  if (!prompt || !prompt.trim() || getPromptTransport(agent) === 'send-keys') {
     return buildAgentCommand(agent, permissionMode);
   }
 
   const promptFile = await writePromptFile(projectRoot, slug, prompt);
   return `${buildPromptReadAndDeleteSnippet(promptFile)}; ${buildInitialPromptCommand(
     agent,
-    '"$COMUX_PROMPT_CONTENT"',
+    '"$PSYCHE_PROMPT_CONTENT"',
     permissionMode,
   )}`;
 }

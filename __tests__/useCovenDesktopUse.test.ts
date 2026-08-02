@@ -6,7 +6,7 @@ import {
 } from '../src/hooks/useCovenDesktopUse.js';
 import type { CovenClient } from '../src/daemon/bridge.js';
 import type { CovenSessionEvent, CovenSessionSummary } from '../src/daemon/protocol.js';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 const session: CovenSessionSummary = {
   id: 'session-1',
@@ -27,7 +27,7 @@ const event = (id: string, createdAt: string, seq?: number): CovenSessionEvent =
   createdAt,
 });
 
-const pane = (id: string, sessionId = 'session-1'): ComuxPane => ({
+const pane = (id: string, sessionId = 'session-1'): PsychePane => ({
   id,
   slug: id,
   prompt: '',

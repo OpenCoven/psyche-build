@@ -14,7 +14,7 @@ describe('toggleAutopilotAction', () => {
   });
 
   it('should enable autopilot when currently disabled', async () => {
-    const mockPane = createMockPane({ id: 'comux-1', slug: 'test', autopilot: false });
+    const mockPane = createMockPane({ id: 'psyche-1', slug: 'test', autopilot: false });
     const mockContext = createMockContext([mockPane]);
     const savePanesSpy = vi.spyOn(mockContext, 'savePanes');
     const onPaneUpdateSpy = vi.fn();
@@ -25,7 +25,7 @@ describe('toggleAutopilotAction', () => {
     // Verify panes were saved with autopilot enabled
     expect(savePanesSpy).toHaveBeenCalledWith([
       expect.objectContaining({
-        id: 'comux-1',
+        id: 'psyche-1',
         autopilot: true,
       }),
     ]);
@@ -41,7 +41,7 @@ describe('toggleAutopilotAction', () => {
   });
 
   it('should disable autopilot when currently enabled', async () => {
-    const mockPane = createMockPane({ id: 'comux-1', slug: 'test', autopilot: true });
+    const mockPane = createMockPane({ id: 'psyche-1', slug: 'test', autopilot: true });
     const mockContext = createMockContext([mockPane]);
     const savePanesSpy = vi.spyOn(mockContext, 'savePanes');
 
@@ -50,7 +50,7 @@ describe('toggleAutopilotAction', () => {
     // Verify autopilot was disabled
     expect(savePanesSpy).toHaveBeenCalledWith([
       expect.objectContaining({
-        id: 'comux-1',
+        id: 'psyche-1',
         autopilot: false,
       }),
     ]);
@@ -59,9 +59,9 @@ describe('toggleAutopilotAction', () => {
   });
 
   it('should only update the specified pane in multi-pane context', async () => {
-    const pane1 = createMockPane({ id: 'comux-1', autopilot: false });
-    const pane2 = createMockPane({ id: 'comux-2', autopilot: true });
-    const pane3 = createMockPane({ id: 'comux-3', autopilot: false });
+    const pane1 = createMockPane({ id: 'psyche-1', autopilot: false });
+    const pane2 = createMockPane({ id: 'psyche-2', autopilot: true });
+    const pane3 = createMockPane({ id: 'psyche-3', autopilot: false });
     const mockContext = createMockContext([pane1, pane2, pane3]);
     const savePanesSpy = vi.spyOn(mockContext, 'savePanes');
 
@@ -69,9 +69,9 @@ describe('toggleAutopilotAction', () => {
 
     // Verify only pane2's autopilot was toggled
     expect(savePanesSpy).toHaveBeenCalledWith([
-      expect.objectContaining({ id: 'comux-1', autopilot: false }),
-      expect.objectContaining({ id: 'comux-2', autopilot: false }), // Toggled
-      expect.objectContaining({ id: 'comux-3', autopilot: false }),
+      expect.objectContaining({ id: 'psyche-1', autopilot: false }),
+      expect.objectContaining({ id: 'psyche-2', autopilot: false }), // Toggled
+      expect.objectContaining({ id: 'psyche-3', autopilot: false }),
     ]);
   });
 

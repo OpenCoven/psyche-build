@@ -28,14 +28,14 @@ export interface GitStatus {
   summary: string;
 }
 
-const COMUX_HOOK_SCAFFOLD_PATHS = new Set([
-  '.comux-hooks',
-  '.comux-hooks/',
-  '.comux-hooks/AGENTS.md',
-  '.comux-hooks/CLAUDE.md',
-  '.comux-hooks/README.md',
-  '.comux-hooks/examples',
-  '.comux-hooks/examples/',
+const PSYCHE_HOOK_SCAFFOLD_PATHS = new Set([
+  '.psyche-hooks',
+  '.psyche-hooks/',
+  '.psyche-hooks/AGENTS.md',
+  '.psyche-hooks/CLAUDE.md',
+  '.psyche-hooks/README.md',
+  '.psyche-hooks/examples',
+  '.psyche-hooks/examples/',
 ]);
 
 function parseGitStatusLine(line: string): { statusCode: string; filename: string } {
@@ -51,9 +51,9 @@ function parseGitStatusLine(line: string): { statusCode: string; filename: strin
 
 function shouldIgnoreGitStatusEntry(statusCode: string, filename: string): boolean {
   if (
-    filename === '.comux'
-    || filename === '.comux/'
-    || filename.startsWith('.comux/')
+    filename === '.psyche'
+    || filename === '.psyche/'
+    || filename.startsWith('.psyche/')
   ) {
     return true;
   }
@@ -63,8 +63,8 @@ function shouldIgnoreGitStatusEntry(statusCode: string, filename: string): boole
   }
 
   return (
-    COMUX_HOOK_SCAFFOLD_PATHS.has(filename)
-    || filename.startsWith('.comux-hooks/examples/')
+    PSYCHE_HOOK_SCAFFOLD_PATHS.has(filename)
+    || filename.startsWith('.psyche-hooks/examples/')
   );
 }
 
@@ -417,7 +417,7 @@ export function commitChanges(
  */
 export function stashChanges(repoPath: string): { success: boolean; error?: string } {
   try {
-    execSync('git stash push -u -m "comux: auto-stash before merge"', {
+    execSync('git stash push -u -m "psyche: auto-stash before merge"', {
       cwd: repoPath,
       stdio: 'pipe',
     });

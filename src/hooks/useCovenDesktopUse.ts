@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { createCovenClient, type CovenClient } from '../daemon/bridge.js';
 import type { CovenSessionEvent } from '../daemon/protocol.js';
 import {
@@ -31,12 +31,12 @@ export function createDesktopUseLoadCache(): DesktopUseLoadCache {
 }
 
 export async function loadCovenDesktopUseStates(
-  desktopPanes: ComuxPane[],
+  desktopPanes: PsychePane[],
   client: Pick<CovenClient, 'getSession' | 'listEvents'>,
   cache: DesktopUseLoadCache = createDesktopUseLoadCache(),
 ): Promise<DesktopUseStateMap> {
   const next = new Map<string, DesktopUsePaneState>();
-  const panesBySessionId = new Map<string, ComuxPane[]>();
+  const panesBySessionId = new Map<string, PsychePane[]>();
 
   for (const pane of desktopPanes) {
     const sessionId = getDesktopUseSessionId(pane);
@@ -104,7 +104,7 @@ function mergeCachedEvents(previousEvents: CovenSessionEvent[], newEvents: Coven
 }
 
 export function useCovenDesktopUse(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   options: UseCovenDesktopUseOptions = {},
 ): DesktopUseStateMap {
   const desktopPanes = useMemo(

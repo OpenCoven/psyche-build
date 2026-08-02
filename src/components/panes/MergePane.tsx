@@ -155,8 +155,8 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
       }
     }
 
-    // Step 2: Get the main repository path (parent of .comux/worktrees)
-    const mainRepoPath = pane.worktreePath?.replace(/\/\.comux\/worktrees\/[^/]+$/, '');
+    // Step 2: Get the main repository path (parent of .psyche/worktrees)
+    const mainRepoPath = pane.worktreePath?.replace(/\/\.psyche\/worktrees\/[^/]+$/, '');
     if (!mainRepoPath) {
       setError('Could not determine main repository path');
       setStatus('error');
@@ -207,7 +207,7 @@ export default function MergePane({ pane, onComplete, onCancel, mainBranch }: Me
     setStatus('resolving-with-agent');
 
     // Get the main repository path
-    const mainRepoPath = pane.worktreePath?.replace(/\/\.comux\/worktrees\/[^/]+$/, '');
+    const mainRepoPath = pane.worktreePath?.replace(/\/\.psyche\/worktrees\/[^/]+$/, '');
 
     // Exit the app and launch agent with conflict resolution prompt
     const fullPrompt = agentPrompt || `Fix the merge conflicts in the following files: ${conflictFiles.join(', ')}. Resolve them appropriately based on the changes from branch ${pane.slug} (${pane.prompt}) and ensure the code remains functional.`;

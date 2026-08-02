@@ -2,8 +2,8 @@ import { createConnection, type Socket } from 'node:net';
 import os from 'os';
 import path from 'path';
 import {
-  supportsNativeComuxHelper,
-  type ComuxHelperPreviewSoundMessage,
+  supportsNativePsycheHelper,
+  type PsycheHelperPreviewSoundMessage,
 } from './focusDetection.js';
 import type { NotificationSoundId } from './notificationSounds.js';
 import { getNotificationSoundDefinition } from './notificationSounds.js';
@@ -16,8 +16,8 @@ export interface NotificationSoundPreviewPlayer {
 export function buildNotificationSoundPreviewMessage(
   soundId: NotificationSoundId,
   platform: NodeJS.Platform = process.platform
-): ComuxHelperPreviewSoundMessage | null {
-  if (!supportsNativeComuxHelper(platform)) {
+): PsycheHelperPreviewSoundMessage | null {
+  if (!supportsNativePsycheHelper(platform)) {
     return null;
   }
 
@@ -28,13 +28,13 @@ export function buildNotificationSoundPreviewMessage(
   };
 }
 
-export function getComuxHelperSocketPath(homeDirectory: string = os.homedir()): string {
-  return path.join(homeDirectory, '.comux', 'native-helper', 'run', 'comux-helper.sock');
+export function getPsycheHelperSocketPath(homeDirectory: string = os.homedir()): string {
+  return path.join(homeDirectory, '.psyche', 'native-helper', 'run', 'psyche-helper.sock');
 }
 
 export function createNotificationSoundPreviewPlayer(
   platform: NodeJS.Platform = process.platform,
-  socketPath: string = getComuxHelperSocketPath()
+  socketPath: string = getPsycheHelperSocketPath()
 ): NotificationSoundPreviewPlayer {
   let activeSocket: Socket | null = null;
 

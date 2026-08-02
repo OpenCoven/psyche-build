@@ -1,4 +1,4 @@
-export interface ComuxHelperSubscribeMessage {
+export interface PsycheHelperSubscribeMessage {
   type: 'subscribe';
   instanceId: string;
   titleToken: string;
@@ -6,7 +6,7 @@ export interface ComuxHelperSubscribeMessage {
   terminalProgram?: string;
 }
 
-export interface ComuxHelperNotifyMessage {
+export interface PsycheHelperNotifyMessage {
   type: 'notify';
   title: string;
   subtitle?: string;
@@ -18,12 +18,12 @@ export interface ComuxHelperNotifyMessage {
   tmuxSocketPath?: string;
 }
 
-export interface ComuxHelperPreviewSoundMessage {
+export interface PsycheHelperPreviewSoundMessage {
   type: 'preview-sound';
   soundName?: string;
 }
 
-export interface ComuxHelperFocusStateMessage {
+export interface PsycheHelperFocusStateMessage {
   type: 'focus-state';
   instanceId: string;
   fullyFocused: boolean;
@@ -39,8 +39,8 @@ export function buildFocusToken(instanceId: string): string {
 }
 
 export function buildFocusWindowTitle(projectName: string, token: string): string {
-  const cleanProjectName = projectName.trim() || 'comux';
-  return `comux ${cleanProjectName} [${token}]`;
+  const cleanProjectName = projectName.trim() || 'psyche';
+  return `psyche ${cleanProjectName} [${token}]`;
 }
 
 export function buildTerminalTitleSequence(title: string, insideTmux: boolean): string {
@@ -94,6 +94,6 @@ export function parseTmuxSocketPath(tmuxEnv?: string): string | undefined {
   return socketPath || undefined;
 }
 
-export function supportsNativeComuxHelper(platform: NodeJS.Platform = process.platform): boolean {
+export function supportsNativePsycheHelper(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'darwin';
 }

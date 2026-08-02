@@ -12,7 +12,7 @@ const distIndexPath = path.join(projectRoot, 'dist', 'index.js');
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf-8'));
 const packageName = packageJson.name;
 
-const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'comux-smoke-'));
+const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-smoke-'));
 const installDir = path.join(tempRoot, 'install');
 
 let tarballName = '';
@@ -31,7 +31,7 @@ if (!fs.existsSync(mainPath)) {
   console.error('Missing package main:', mainPath);
   process.exit(1);
 }
-const helperPath = path.join(root, 'native', 'macos', 'prebuilt', 'comux-helper.app', 'Contents', 'MacOS', 'comux-helper');
+const helperPath = path.join(root, 'native', 'macos', 'prebuilt', 'psyche-helper.app', 'Contents', 'MacOS', 'psyche-helper');
 if (!fs.existsSync(helperPath)) {
   console.error('Missing prebuilt helper:', helperPath);
   process.exit(1);
@@ -43,8 +43,8 @@ if (process.platform === 'darwin') {
     process.exit(1);
   }
 }
-console.log('comux helper smoke passed:', helperPath);
-console.log('comux package smoke passed:', mainPath);
+console.log('psyche helper smoke passed:', helperPath);
+console.log('psyche package smoke passed:', mainPath);
 `;
 
 function run(command, cwd, stdio = 'pipe') {
@@ -70,7 +70,7 @@ try {
   tarballPath = path.join(projectRoot, tarballName);
 
   const tarballContents = run(`tar -tzf "${tarballPath}"`, projectRoot, 'pipe');
-  const packagedHelperBinaryPath = 'package/native/macos/prebuilt/comux-helper.app/Contents/MacOS/comux-helper';
+  const packagedHelperBinaryPath = 'package/native/macos/prebuilt/psyche-helper.app/Contents/MacOS/psyche-helper';
   if (!tarballContents.split('\n').includes(packagedHelperBinaryPath)) {
     throw new Error(`npm pack is missing the packaged macOS helper: ${packagedHelperBinaryPath}`);
   }

@@ -9,11 +9,27 @@ export interface CodexHookInstallResult {
 
 type ShellAssignment = [key: string, value: string];
 
+/**
+ * Stop-hook scripts this tool owns and may replace on reinstall.
+ *
+ * `comux-stop-hook.cjs` is the pre-rename name and is listed deliberately.
+ * Codex hook configs live in each worktree's `.codex/hooks.json` — outside
+ * this repo — so a config written before the rename still references it. If
+ * we only matched the current name, that stale entry would never be filtered
+ * out and Codex would keep firing a Stop hook whose script no longer exists,
+ * ENOENT-ing on every turn, forever. This list is only ever used to *remove*
+ * entries; nothing reads or writes the old path.
+ */
+const MANAGED_STOP_HOOK_SCRIPTS = [
+  'psyche-stop-hook.cjs',
+  'comux-stop-hook.cjs',
+] as const;
+
 function escapeForSingleQuotedJs(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-function mergeComuxStopHook(hooksPath: string, hookCommand: string): void {
+function mergePsycheStopHook(hooksPath: string, hookCommand: string): void {
   let hooksConfig: any = {};
   if (fs.existsSync(hooksPath)) {
     try {
@@ -36,7 +52,7 @@ function mergeComuxStopHook(hooksPath: string, hookCommand: string): void {
     const handlers = Array.isArray(group?.hooks) ? group.hooks : [];
     return !handlers.some((handler: any) => (
       typeof handler?.command === 'string'
-      && handler.command.includes('comux-stop-hook.cjs')
+      && MANAGED_STOP_HOOK_SCRIPTS.some((script) => handler.command.includes(script))
     ));
   });
   nextStopHooks.push({
@@ -45,7 +61,7 @@ function mergeComuxStopHook(hooksPath: string, hookCommand: string): void {
         type: 'command',
         command: hookCommand,
         timeout: 5,
-        statusMessage: 'Notifying comux',
+        statusMessage: 'Notifying psyche',
       },
     ],
   });
@@ -56,17 +72,17 @@ function mergeComuxStopHook(hooksPath: string, hookCommand: string): void {
 
 export function installCodexPaneHooks(opts: {
   worktreePath: string;
-  comuxPaneId: string;
+  psychePaneId: string;
   tmuxPaneId: string;
 }): CodexHookInstallResult {
   const codexDir = path.join(opts.worktreePath, '.codex');
   const hookDir = path.join(codexDir, 'hooks');
-  const stateDir = path.join(codexDir, 'comux');
+  const stateDir = path.join(codexDir, 'psyche');
   fs.mkdirSync(hookDir, { recursive: true });
   fs.mkdirSync(stateDir, { recursive: true });
 
-  const eventFile = path.join(stateDir, `${opts.comuxPaneId}.json`);
-  const hookScriptPath = path.join(hookDir, 'comux-stop-hook.cjs');
+  const eventFile = path.join(stateDir, `${opts.psychePaneId}.json`);
+  const hookScriptPath = path.join(hookDir, 'psyche-stop-hook.cjs');
   const hookScript = `#!/usr/bin/env node
 const fs = require('fs');
 
@@ -85,9 +101,9 @@ process.stdin.on('end', () => {
 
   const event = {
     source: 'codex-stop-hook',
-    comuxPaneId: process.env.COMUX_PANE_ID || '',
-    tmuxPaneId: process.env.COMUX_TMUX_PANE_ID || '',
-    expectedComuxPaneId: '${escapeForSingleQuotedJs(opts.comuxPaneId)}',
+    psychePaneId: process.env.PSYCHE_PANE_ID || '',
+    tmuxPaneId: process.env.PSYCHE_TMUX_PANE_ID || '',
+    expectedPsychePaneId: '${escapeForSingleQuotedJs(opts.psychePaneId)}',
     expectedTmuxPaneId: '${escapeForSingleQuotedJs(opts.tmuxPaneId)}',
     hookEventName: payload.hook_event_name || payload.hookEventName || '',
     turnId: payload.turn_id || payload.turnId || '',
@@ -102,7 +118,7 @@ process.stdin.on('end', () => {
     process.exit(0);
   }
 
-  if (event.comuxPaneId !== event.expectedComuxPaneId) {
+  if (event.psychePaneId !== event.expectedPsychePaneId) {
     process.exit(0);
   }
 
@@ -119,30 +135,30 @@ process.stdin.on('end', () => {
   fs.chmodSync(hookScriptPath, 0o755);
 
   const hooksPath = path.join(codexDir, 'hooks.json');
-  mergeComuxStopHook(hooksPath, `node ${shellQuote(hookScriptPath)}`);
+  mergePsycheStopHook(hooksPath, `node ${shellQuote(hookScriptPath)}`);
 
   return { eventFile };
 }
 
 function buildCodexPaneAssignments(opts: {
-  comuxPaneId: string;
+  psychePaneId: string;
   tmuxPaneId: string;
   eventFile?: string;
 }): ShellAssignment[] {
   const assignments: ShellAssignment[] = [
-    ['COMUX_PANE_ID', opts.comuxPaneId],
-    ['COMUX_TMUX_PANE_ID', opts.tmuxPaneId],
+    ['PSYCHE_PANE_ID', opts.psychePaneId],
+    ['PSYCHE_TMUX_PANE_ID', opts.tmuxPaneId],
   ];
 
   if (opts.eventFile) {
-    assignments.push(['COMUX_CODEX_HOOK_EVENT_FILE', opts.eventFile]);
+    assignments.push(['PSYCHE_CODEX_HOOK_EVENT_FILE', opts.eventFile]);
   }
 
   return assignments;
 }
 
 export function buildCodexPaneEnvironmentPrefix(opts: {
-  comuxPaneId: string;
+  psychePaneId: string;
   tmuxPaneId: string;
   eventFile?: string;
 }): string {
@@ -152,7 +168,7 @@ export function buildCodexPaneEnvironmentPrefix(opts: {
 }
 
 export function buildCodexPaneExportSnippet(opts: {
-  comuxPaneId: string;
+  psychePaneId: string;
   tmuxPaneId: string;
   eventFile?: string;
 }): string {
@@ -169,7 +185,7 @@ export function enableCodexHooksFlag(command: string): string {
 export function buildCodexHookedCommand(
   command: string,
   opts: {
-    comuxPaneId: string;
+    psychePaneId: string;
     tmuxPaneId: string;
     eventFile?: string;
   }

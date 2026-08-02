@@ -50,7 +50,7 @@ function readTrustedFoldersConfig(filePath: string): TrustedFoldersConfig {
  * Ensure Gemini treats the given workspace path as trusted.
  *
  * Gemini blocks interactive startup prompts in untrusted folders, which
- * prevents comux initial prompt bootstrap from running in fresh worktrees.
+ * prevents psyche initial prompt bootstrap from running in fresh worktrees.
  */
 export function ensureGeminiFolderTrusted(workspacePath: string): void {
   const trustedFoldersPath = getTrustedFoldersPath();

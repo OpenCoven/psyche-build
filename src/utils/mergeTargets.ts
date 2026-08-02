@@ -1,5 +1,5 @@
 import fs from 'fs';
-import type { ComuxPane, MergeTargetReference } from '../types.js';
+import type { PsychePane, MergeTargetReference } from '../types.js';
 import { branchExists, getCurrentBranch, getPaneBranchName } from './git.js';
 import { hasCommitsToMerge } from './mergeValidation.js';
 import { deriveProjectRootFromWorktreePath } from './paneProject.js';
@@ -35,7 +35,7 @@ export function formatMergeTargetLabel(target: MergeTargetReference): string {
 }
 
 export function createMergeTargetChain(
-  parentPane: ComuxPane,
+  parentPane: PsychePane,
   projectRoot: string
 ): MergeTargetReference[] {
   if (!parentPane.worktreePath) {
@@ -66,7 +66,7 @@ export function createMergeTargetChain(
   ];
 }
 
-function getDefaultMergeTarget(pane: ComuxPane): MergeTargetResolution | null {
+function getDefaultMergeTarget(pane: PsychePane): MergeTargetResolution | null {
   const projectRoot = deriveProjectRootFromWorktreePath(pane.worktreePath) || pane.projectRoot;
   if (!projectRoot) {
     return null;
@@ -127,7 +127,7 @@ function isTargetMergedIntoNextTarget(
   );
 }
 
-export function resolveMergeTarget(pane: ComuxPane): MergeTargetResolution | null {
+export function resolveMergeTarget(pane: PsychePane): MergeTargetResolution | null {
   const mergeTargetChain = Array.isArray(pane.mergeTargetChain)
     ? pane.mergeTargetChain.filter((target) => !!target?.branchName)
     : [];
@@ -171,7 +171,7 @@ export function resolveMergeTarget(pane: ComuxPane): MergeTargetResolution | nul
 }
 
 export function buildFallbackMergeMessage(
-  pane: ComuxPane,
+  pane: PsychePane,
   resolution: MergeTargetResolution,
   paneName: string = getPaneDisplayName(pane)
 ): string {
@@ -190,6 +190,6 @@ export function buildFallbackMergeMessage(
   return `${parentLabel} is no longer available. Merge "${paneName}" directly into ${resolution.targetLabel} instead?`;
 }
 
-export function buildMissingMergeTargetMessage(pane: ComuxPane): string {
+export function buildMissingMergeTargetMessage(pane: PsychePane): string {
   return `Unable to find a valid merge target for "${getPaneDisplayName(pane)}". Reopen its parent worktree or check out the expected target branch before merging.`;
 }

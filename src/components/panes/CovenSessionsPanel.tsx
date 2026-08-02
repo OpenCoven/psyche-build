@@ -1,8 +1,8 @@
 import React, { memo, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
-import { COLORS, getComuxThemeAccent } from '../../theme/colors.js';
-import type { ComuxThemeName } from '../../types.js';
+import { COLORS, getPsycheThemeAccent } from '../../theme/colors.js';
+import type { PsycheThemeName } from '../../types.js';
 import {
   covenSessionsForProject,
   pickCovenSessionToOpen,
@@ -14,7 +14,7 @@ interface CovenSessionsPanelProps {
   projectRoot: string;
   state: CovenSessionsLoadState;
   isActive: boolean;
-  themeName: ComuxThemeName;
+  themeName: PsycheThemeName;
 }
 
 const ROW_WIDTH = 40;
@@ -26,7 +26,7 @@ const CovenSessionsPanel: React.FC<CovenSessionsPanelProps> = memo(({
   isActive,
   themeName,
 }) => {
-  const accent = getComuxThemeAccent(themeName);
+  const accent = getPsycheThemeAccent(themeName);
   const sessions = useMemo(
     () => covenSessionsForProject(projectRoot, state.sessions),
     [projectRoot, state.sessions]

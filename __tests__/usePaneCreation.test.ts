@@ -1,0 +1,157 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import type { PsychePane } from '../src/types.js';
+
+const createPaneMock = vi.fn();
+vi.mock('../src/utils/paneCreation.js', () => ({
+  createPane: (...args: unknown[]) => createPaneMock(...args),
+}));
+vi.mock('../src/utils/slug.js', () => ({
+  generateSlug: vi.fn(async () => 'fix-auth'),
+}));
+
+const enqueuePrune = vi.fn();
+vi.mock('../src/services/WorktreeCleanupService.js', () => ({
+  WorktreeCleanupService: {
+    getInstance: () => ({ enqueuePruneManagedWorktrees: enqueuePrune }),
+  },
+}));
+
+const usePaneCreation = (await import('../src/hooks/usePaneCreation.js')).default;
+
+const ROOT = process.cwd();
+
+function pane(id: string): PsychePane {
+  return { id, slug: id, prompt: '', paneId: `%${id}`, projectRoot: ROOT } as PsychePane;
+}
+
+function harness(existing: PsychePane[] = []) {
+  const savePanes = vi.fn(async (_panes: PsychePane[]) => {});
+  const loadPanes = vi.fn(async () => {});
+  const statuses: string[] = [];
+  const api = usePaneCreation({
+    panes: existing,
+    savePanes,
+    projectName: 'repo',
+    sessionProjectRoot: ROOT,
+    panesFile: `${ROOT}/.psyche/psyche.config.json`,
+    setIsCreatingPane: vi.fn(),
+    setStatusMessage: (msg: string) => { statuses.push(msg); },
+    loadPanes,
+    availableAgents: ['coven-code', 'claude', 'codex'],
+  });
+  return { api, savePanes, loadPanes, statuses };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+describe('createPanesForAgents', () => {
+  it('creates one pane per selected agent', async () => {
+    let n = 0;
+    createPaneMock.mockImplementation(async () => ({
+      pane: pane(`psyche-${++n}`),
+      needsAgentChoice: false,
+    }));
+    const h = harness();
+
+    const created = await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude']);
+
+    expect(created).toHaveLength(2);
+    expect(createPaneMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('deduplicates repeated agent selections', async () => {
+    createPaneMock.mockImplementation(async () => ({ pane: pane('p'), needsAgentChoice: false }));
+    const h = harness();
+
+    await h.api.createPanesForAgents('Fix auth', ['claude', 'claude', 'claude']);
+
+    expect(createPaneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns early without touching anything when no agents are selected', async () => {
+    const h = harness();
+    expect(await h.api.createPanesForAgents('Fix auth', [])).toEqual([]);
+    expect(createPaneMock).not.toHaveBeenCalled();
+    expect(h.savePanes).not.toHaveBeenCalled();
+  });
+
+  // Persisting once at the end is what makes the fan-out atomic from the
+  // config's point of view rather than N interleaved writes.
+  it('persists all created panes in a single save', async () => {
+    let n = 0;
+    createPaneMock.mockImplementation(async () => ({
+      pane: pane(`psyche-${++n}`),
+      needsAgentChoice: false,
+    }));
+    const h = harness([pane('existing')]);
+
+    await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude', 'codex']);
+
+    expect(h.savePanes).toHaveBeenCalledTimes(1);
+    expect(h.savePanes.mock.calls[0][0]).toHaveLength(4);
+    expect(h.loadPanes).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one slug stem across sibling lanes', async () => {
+    createPaneMock.mockImplementation(async () => ({ pane: pane('p'), needsAgentChoice: false }));
+    const h = harness();
+
+    await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude']);
+
+    for (const call of createPaneMock.mock.calls) {
+      expect(call[0].slugBase).toBe('fix-auth');
+    }
+    const suffixes = createPaneMock.mock.calls.map((call) => call[0].slugSuffix);
+    expect(new Set(suffixes).size).toBe(2);
+  });
+
+  describe('partial failure', () => {
+    it('keeps and persists the lanes that succeeded', async () => {
+      createPaneMock.mockImplementation(async (options: any) => {
+        if (options.agent === 'claude') throw new Error('claude lane exploded');
+        return { pane: pane(`psyche-${options.agent}`), needsAgentChoice: false };
+      });
+      const h = harness();
+
+      const created = await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude', 'codex']);
+
+      expect(created.map((p) => p.id)).toEqual(['psyche-coven-code', 'psyche-codex']);
+      expect(h.savePanes).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports how many lanes failed', async () => {
+      createPaneMock.mockImplementation(async (options: any) => {
+        if (options.agent === 'claude') throw new Error('nope');
+        return { pane: pane('p'), needsAgentChoice: false };
+      });
+      const h = harness();
+
+      await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude']);
+
+      expect(h.statuses).toContain('Created 1/2 panes (1 failed)');
+    });
+
+    it('does not persist when every lane fails', async () => {
+      createPaneMock.mockImplementation(async () => { throw new Error('all broken'); });
+      const h = harness();
+
+      const created = await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude']);
+
+      expect(created).toEqual([]);
+      expect(h.savePanes).not.toHaveBeenCalled();
+      expect(h.statuses).toContain('Created 0/2 panes (2 failed)');
+    });
+  });
+
+  it('reports plain success when every lane completes', async () => {
+    createPaneMock.mockImplementation(async () => ({ pane: pane('p'), needsAgentChoice: false }));
+    const h = harness();
+
+    await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude']);
+
+    expect(h.statuses).toContain('Created 2 panes');
+  });
+});

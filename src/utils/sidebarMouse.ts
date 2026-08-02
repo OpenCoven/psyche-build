@@ -1,4 +1,4 @@
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import type {
   ProjectActionItem,
   ProjectActionLayout,
@@ -20,7 +20,7 @@ export type SidebarMouseTarget =
     }
   | {
       kind: 'pane';
-      pane: ComuxPane;
+      pane: PsychePane;
       index: number;
     }
   | {

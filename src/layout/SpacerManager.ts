@@ -3,9 +3,8 @@ import { TmuxService } from '../services/TmuxService.js';
 import type { LayoutConfig } from '../utils/layoutManager.js';
 import type { LayoutConfiguration } from './LayoutCalculator.js';
 import { resolveDistPath } from '../utils/runtimePaths.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
-// Spacer pane identifier
-const SPACER_PANE_TITLE = 'comux-spacer';
 const MIN_SPACER_WIDTH = 20; // Minimum width for spacer pane (tmux may reject layouts with tiny panes)
 
 /**

@@ -39,14 +39,14 @@ export const PairBanner: React.FC<Props> = ({ code, expiresAt, onDismiss }) => {
   return (
     <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1}>
       <Text>
-        <Text color="magenta" bold>comux pair</Text>
+        <Text color="magenta" bold>psyche pair</Text>
         {"  "}
         <Text bold>{formatted}</Text>
         {"  "}
         <Text dimColor>expires in {mm}:{String(ss).padStart(2, "0")}</Text>
       </Text>
       <Text dimColor>
-        Open comux on your iPhone, tap "Add Mac", enter the code. Press q to dismiss.
+        Open psyche on your iPhone, tap "Add Mac", enter the code. Press q to dismiss.
       </Text>
     </Box>
   );

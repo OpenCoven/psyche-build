@@ -8,16 +8,16 @@ let tmpHome: string;
 vi.mock("../../src/services/bridge/paths", async () => {
   // Lazy resolve — tmpHome is set in beforeEach below.
   return {
-    get bridgeDir() { return path.join(tmpHome, ".comux", "bridge"); },
-    get tokensPath() { return path.join(tmpHome, ".comux", "bridge", "devices.json"); },
-    get certPath() { return path.join(tmpHome, ".comux", "bridge", "cert.pem"); },
-    get keyPath() { return path.join(tmpHome, ".comux", "bridge", "key.pem"); },
+    get bridgeDir() { return path.join(tmpHome, ".psyche", "bridge"); },
+    get tokensPath() { return path.join(tmpHome, ".psyche", "bridge", "devices.json"); },
+    get certPath() { return path.join(tmpHome, ".psyche", "bridge", "cert.pem"); },
+    get keyPath() { return path.join(tmpHome, ".psyche", "bridge", "key.pem"); },
   };
 });
 
 describe("TokenStore", () => {
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "comux-tokens-"));
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "psyche-tokens-"));
   });
   afterEach(async () => {
     await fs.rm(tmpHome, { recursive: true, force: true });
@@ -72,8 +72,8 @@ describe("TokenStore", () => {
   });
 
   it("starts with an empty store when devices.json is corrupted", async () => {
-    await fs.mkdir(path.join(tmpHome, ".comux", "bridge"), { recursive: true });
-    await fs.writeFile(path.join(tmpHome, ".comux", "bridge", "devices.json"), "{bad json", "utf8");
+    await fs.mkdir(path.join(tmpHome, ".psyche", "bridge"), { recursive: true });
+    await fs.writeFile(path.join(tmpHome, ".psyche", "bridge", "devices.json"), "{bad json", "utf8");
 
     const { TokenStore } = await import("../../src/services/bridge/TokenStore");
     const store = new TokenStore();

@@ -1,10 +1,10 @@
 import path from 'path';
-import type { ComuxPane, SidebarProject } from '../types.js';
+import type { PsychePane, SidebarProject } from '../types.js';
 import { getPaneProjectName, getPaneProjectRoot } from './paneProject.js';
 import { normalizeSidebarProjects } from './sidebarProjects.js';
 
 export interface GroupedPane {
-  pane: ComuxPane;
+  pane: PsychePane;
   index: number;
 }
 
@@ -46,7 +46,7 @@ function sortWithAttachedAgents(panes: GroupedPane[]): GroupedPane[] {
  * Group panes by project while preserving the original pane ordering.
  */
 export function groupPanesByProject(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   fallbackProjectRoot: string,
   fallbackProjectName: string,
   sidebarProjects: SidebarProject[] = []

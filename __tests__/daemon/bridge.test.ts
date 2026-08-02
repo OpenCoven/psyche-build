@@ -34,8 +34,8 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 async function writeConfig(root: string, config: unknown): Promise<void> {
-  await mkdir(path.join(root, '.comux'), { recursive: true });
-  await writeFile(path.join(root, '.comux', 'comux.config.json'), JSON.stringify(config, null, 2));
+  await mkdir(path.join(root, '.psyche'), { recursive: true });
+  await writeFile(path.join(root, '.psyche', 'psyche.config.json'), JSON.stringify(config, null, 2));
 }
 
 afterEach(async () => {
@@ -45,14 +45,14 @@ afterEach(async () => {
 
 describe('daemon bridge project scope helpers', () => {
   it('rejects cwd outside the daemon project root', async () => {
-    const root = await tempDir('comux-bridge-root-');
-    const outside = await tempDir('comux-bridge-outside-');
+    const root = await tempDir('psyche-bridge-root-');
+    const outside = await tempDir('psyche-bridge-outside-');
 
-    await expect(resolveScopedCwd(root, outside)).rejects.toThrow(/outside the comux project root/);
+    await expect(resolveScopedCwd(root, outside)).rejects.toThrow(/outside the psyche project root/);
   });
 
   it('returns the daemon-scoped project for list and open', async () => {
-    const root = await tempDir('comux-bridge-project-');
+    const root = await tempDir('psyche-bridge-project-');
     await mkdir(path.join(root, 'src'));
 
     await expect(listScopedProjects(root)).resolves.toEqual([
@@ -77,8 +77,8 @@ describe('daemon bridge project scope helpers', () => {
 
 describe('daemon bridge Coven helpers', () => {
   it('only displays Coven sessions inside the current project root', async () => {
-    const root = await tempDir('comux-bridge-coven-root-');
-    const outside = await tempDir('comux-bridge-coven-outside-');
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const outside = await tempDir('psyche-bridge-coven-outside-');
     await mkdir(path.join(root, 'worktree'));
 
     const sessions = await listProjectCovenSessions(root, {
@@ -116,8 +116,8 @@ describe('daemon bridge Coven helpers', () => {
     expect(sessions.map((session) => session.id)).toEqual(['inside-root', 'inside-child']);
   });
 
-  it('launches a Coven session scoped to the current comux project', async () => {
-    const root = await tempDir('comux-bridge-coven-launch-');
+  it('launches a Coven session scoped to the current psyche project', async () => {
+    const root = await tempDir('psyche-bridge-coven-launch-');
     await mkdir(path.join(root, 'app'));
     const launches: unknown[] = [];
 
@@ -153,7 +153,7 @@ describe('daemon bridge Coven helpers', () => {
   });
 
   it('routes a capability only after resolving an authoritative scoped Coven session', async () => {
-    const root = await tempDir('comux-bridge-capability-route-');
+    const root = await tempDir('psyche-bridge-capability-route-');
     await mkdir(path.join(root, 'worktree'));
     const lifecycle: string[] = [];
     const router = new AgenticCapabilityRouter({
@@ -233,8 +233,8 @@ describe('daemon bridge Coven helpers', () => {
   });
 
   it('does not execute Psyche for a session outside the project boundary', async () => {
-    const root = await tempDir('comux-bridge-capability-root-');
-    const outside = await tempDir('comux-bridge-capability-outside-');
+    const root = await tempDir('psyche-bridge-capability-root-');
+    const outside = await tempDir('psyche-bridge-capability-outside-');
     let executed = false;
     const router = new AgenticCapabilityRouter({
       strategies: [{
@@ -277,7 +277,7 @@ describe('daemon bridge Coven helpers', () => {
   it.each(['created', 'completed', 'failed', 'killed', 'orphaned', 'archived'] as const)(
     'does not execute Psyche for a %s session',
     async (status) => {
-      const root = await tempDir(`comux-bridge-capability-${status}-`);
+      const root = await tempDir(`psyche-bridge-capability-${status}-`);
       let executed = false;
       const router = new AgenticCapabilityRouter({
         strategies: [{
@@ -319,8 +319,8 @@ describe('daemon bridge Coven helpers', () => {
   );
 
   it('rejects Coven launch cwd outside the current project before calling Coven', async () => {
-    const root = await tempDir('comux-bridge-coven-launch-root-');
-    const outside = await tempDir('comux-bridge-coven-launch-outside-');
+    const root = await tempDir('psyche-bridge-coven-launch-root-');
+    const outside = await tempDir('psyche-bridge-coven-launch-outside-');
 
     await expect(launchProjectCovenSession(
       root,
@@ -335,16 +335,16 @@ describe('daemon bridge Coven helpers', () => {
           throw new Error('should not launch outside project scope');
         },
       },
-    )).rejects.toThrow(/outside the comux project root/);
+    )).rejects.toThrow(/outside the psyche project root/);
   });
 
-  it('opens an in-scope Coven session as a comux shell pane', async () => {
-    const root = await tempDir('comux-bridge-coven-open-');
+  it('opens an in-scope Coven session as a psyche shell pane', async () => {
+    const root = await tempDir('psyche-bridge-coven-open-');
     const commands: string[] = [];
 
     const result = await openProjectCovenSession(
       root,
-      'comux-test',
+      'psyche-test',
       'session-1',
       {
         listSessions: async () => [
@@ -372,7 +372,7 @@ describe('daemon bridge Coven helpers', () => {
       },
     );
 
-    const config = JSON.parse(await readFile(path.join(root, '.comux', 'comux.config.json'), 'utf8'));
+    const config = JSON.parse(await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'));
     expect(result.id).toBe('%42');
     expect(result.pane.title).toBe('coven:Fix tests');
     expect(commands).toEqual(['%42:coven attach session-1']);
@@ -385,10 +385,10 @@ describe('daemon bridge Coven helpers', () => {
   });
 
   it('refuses to open Coven sessions outside the current project scope', async () => {
-    const root = await tempDir('comux-bridge-coven-root-');
-    const outside = await tempDir('comux-bridge-coven-outside-');
+    const root = await tempDir('psyche-bridge-coven-root-');
+    const outside = await tempDir('psyche-bridge-coven-outside-');
 
-    await expect(openProjectCovenSession(root, 'comux-test', 'outside', {
+    await expect(openProjectCovenSession(root, 'psyche-test', 'outside', {
       listSessions: async () => [
         {
           id: 'outside',
@@ -404,7 +404,7 @@ describe('daemon bridge Coven helpers', () => {
       tmuxSessionExists: () => true,
       createTmuxPane: () => { throw new Error('should not create pane'); },
       sendTmuxCommand: () => { throw new Error('should not send command'); },
-    })).rejects.toThrow(/not in this comux project scope/);
+    })).rejects.toThrow(/not in this psyche project scope/);
   });
 
   it('builds safe Coven attach commands only for safe ids', () => {
@@ -529,7 +529,7 @@ describe('daemon bridge Coven API client', () => {
       delete process.env.COVEN_PORT;
       delete process.env.COVEN_SOCKET;
       delete process.env.COVEN_URL;
-      const home = await tempDir('comux-coven-home-');
+      const home = await tempDir('psyche-coven-home-');
       process.env.HOME = home;
 
       expect(resolveCovenEndpoint({})).toEqual({ socketPath: path.join(home, '.coven', 'coven.sock') });
@@ -757,7 +757,7 @@ describe('daemon bridge pane helpers', () => {
   });
 
   it('does not probe tmux for panes outside the project config', async () => {
-    const root = await tempDir('comux-bridge-status-missing-');
+    const root = await tempDir('psyche-bridge-status-missing-');
     await writeConfig(root, { panes: [], settings: {} });
 
     await expect(readPaneStatus(root, '%999', () => {
@@ -765,18 +765,18 @@ describe('daemon bridge pane helpers', () => {
     })).resolves.toEqual({ id: '%999', status: 'unknown' });
   });
 
-  it('reports pane status from comux config metadata', async () => {
-    const root = await tempDir('comux-bridge-status-');
+  it('reports pane status from psyche config metadata', async () => {
+    const root = await tempDir('psyche-bridge-status-');
     await writeConfig(root, {
       projectName: 'demo',
       projectRoot: root,
       panes: [
         {
-          id: 'comux-1',
+          id: 'psyche-1',
           paneId: '%7',
           title: 'Fix tests',
-          worktreePath: '/repo/.comux/worktrees/fix-tests',
-          branchName: 'comux/fix-tests',
+          worktreePath: '/repo/.psyche/worktrees/fix-tests',
+          branchName: 'psyche/fix-tests',
           agent: 'codex',
           agentStatus: 'waiting',
           needsAttention: true,
@@ -793,18 +793,18 @@ describe('daemon bridge pane helpers', () => {
       status: 'waiting',
       pane: {
         id: '%7',
-        cwd: '/repo/.comux/worktrees/fix-tests',
-        branch: 'comux/fix-tests',
+        cwd: '/repo/.psyche/worktrees/fix-tests',
+        branch: 'psyche/fix-tests',
         agent: 'codex',
         title: 'Fix tests',
         lastActivity: '2026-04-27T00:00:00.000Z',
       },
       metadata: {
-        comuxId: 'comux-1',
+        psycheId: 'psyche-1',
         title: 'Fix tests',
         agent: 'codex',
-        branch: 'comux/fix-tests',
-        cwd: '/repo/.comux/worktrees/fix-tests',
+        branch: 'psyche/fix-tests',
+        cwd: '/repo/.psyche/worktrees/fix-tests',
         needsAttention: true,
         lastActivity: '2026-04-27T00:00:00.000Z',
       },
@@ -812,10 +812,10 @@ describe('daemon bridge pane helpers', () => {
   });
 
   it('rejects spawn cwd outside the daemon project root before tmux or git work', async () => {
-    const root = await tempDir('comux-bridge-spawn-root-');
-    const outside = await tempDir('comux-bridge-spawn-outside-');
+    const root = await tempDir('psyche-bridge-spawn-root-');
+    const outside = await tempDir('psyche-bridge-spawn-outside-');
 
-    await expect(spawnBridgePane(root, 'comux-demo', {
+    await expect(spawnBridgePane(root, 'psyche-demo', {
       requestId: 'req-1',
       cwd: outside,
       title: 'outside',
@@ -829,14 +829,14 @@ describe('daemon bridge pane helpers', () => {
       sendTmuxCommand: () => {
         throw new Error('agent should not launch');
       },
-    })).rejects.toThrow(/outside the comux project root/);
+    })).rejects.toThrow(/outside the psyche project root/);
   });
 
-  it('requires an existing comux tmux session before creating a worktree', async () => {
-    const root = await tempDir('comux-bridge-missing-session-');
+  it('requires an existing psyche tmux session before creating a worktree', async () => {
+    const root = await tempDir('psyche-bridge-missing-session-');
     execSync('git init', { cwd: root, stdio: 'ignore' });
 
-    await expect(spawnBridgePane(root, 'comux-demo', {
+    await expect(spawnBridgePane(root, 'psyche-demo', {
       requestId: 'req-2',
       cwd: root,
       title: 'missing session',
@@ -852,7 +852,7 @@ describe('daemon bridge pane helpers', () => {
   });
 
   it('creates a scoped worktree pane and persists metadata through injectable tmux helpers', async () => {
-    const root = await tempDir('comux-bridge-spawn-');
+    const root = await tempDir('psyche-bridge-spawn-');
     execSync('git init', { cwd: root, stdio: 'ignore' });
     execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
     execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
@@ -867,7 +867,7 @@ describe('daemon bridge pane helpers', () => {
     });
 
     const commands: string[] = [];
-    const result = await spawnBridgePane(root, 'comux-demo', {
+    const result = await spawnBridgePane(root, 'psyche-demo', {
       requestId: 'req-3',
       cwd: root,
       title: 'Fix bug',
@@ -876,7 +876,7 @@ describe('daemon bridge pane helpers', () => {
     }, {
       tmuxSessionExists: () => true,
       createTmuxPane: (_sessionName, cwd, title) => {
-        expect(cwd).toMatch(/\.comux\/worktrees\/fix-bug$/);
+        expect(cwd).toMatch(/\.psyche\/worktrees\/fix-bug$/);
         expect(title).toBe('Fix bug');
         return '%42';
       },
@@ -885,32 +885,68 @@ describe('daemon bridge pane helpers', () => {
 
     expect(result).toMatchObject({
       id: '%42',
-      branch: 'comux/fix-bug',
+      branch: 'psyche/fix-bug',
       pane: {
         id: '%42',
-        cwd: path.join(root, '.comux', 'worktrees', 'fix-bug'),
-        branch: 'comux/fix-bug',
+        cwd: path.join(root, '.psyche', 'worktrees', 'fix-bug'),
+        branch: 'psyche/fix-bug',
         agent: 'codex',
         title: 'Fix bug',
       },
     });
     expect(commands).toHaveLength(1);
-    expect(commands[0]).toContain('COMUX_PROMPT_FILE=');
+    expect(commands[0]).toContain('PSYCHE_PROMPT_FILE=');
     expect(commands[0]).toContain('codex');
 
-    const raw = await readFile(path.join(root, '.comux', 'comux.config.json'), 'utf8');
+    const raw = await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8');
     expect(JSON.parse(raw)).toMatchObject({
       panes: [
         {
-          id: expect.stringMatching(/^comux-/),
+          id: expect.stringMatching(/^psyche-/),
           paneId: '%42',
           slug: 'fix-bug',
           title: 'Fix bug',
-          worktreePath: path.join(root, '.comux', 'worktrees', 'fix-bug'),
-          branchName: 'comux/fix-bug',
+          worktreePath: path.join(root, '.psyche', 'worktrees', 'fix-bug'),
+          branchName: 'psyche/fix-bug',
           agent: 'codex',
         },
       ],
     });
+  });
+
+  it('creates a generated pane branch from the requested start-point branch', async () => {
+    const root = await tempDir('psyche-bridge-start-point-');
+    execSync('git init', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.email test@example.invalid', { cwd: root, stdio: 'ignore' });
+    execSync('git config user.name Test', { cwd: root, stdio: 'ignore' });
+    await writeFile(path.join(root, 'README.md'), '# demo\n');
+    execSync('git add README.md && git -c commit.gpgsign=false commit -m init', { cwd: root, stdio: 'ignore' });
+    execSync('git branch -M main', { cwd: root, stdio: 'ignore' });
+    await writeConfig(root, {
+      projectName: 'demo',
+      projectRoot: root,
+      panes: [],
+      settings: {},
+      lastUpdated: '2026-04-27T00:00:00.000Z',
+    });
+
+    const result = await spawnBridgePane(root, 'psyche-demo', {
+      requestId: 'req-start-point',
+      cwd: root,
+      title: 'From main',
+      startPointBranch: 'main',
+    }, {
+      tmuxSessionExists: () => true,
+      createTmuxPane: () => '%43',
+      sendTmuxCommand: () => undefined,
+    });
+
+    expect(result.branch).toBe('psyche/from-main');
+    expect(execSync('git branch --show-current', { cwd: result.worktreePath, encoding: 'utf8' }).trim())
+      .toBe('psyche/from-main');
+    expect(() => execSync('git merge-base --is-ancestor main HEAD', {
+      cwd: result.worktreePath,
+      stdio: 'ignore',
+    })).not.toThrow();
   });
 });

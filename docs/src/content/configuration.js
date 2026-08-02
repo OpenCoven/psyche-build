@@ -3,7 +3,7 @@ export const meta = { title: 'Configuration' };
 export function render() {
   return `
     <h1>Configuration</h1>
-    <p class="lead">comux uses a layered configuration system with global, team, and project-level settings. Project settings override global settings, and global settings override optional team defaults committed in the repo.</p>
+    <p class="lead">psyche uses a layered configuration system with global, team, and project-level settings. Project settings override global settings, and global settings override optional team defaults committed in the repo.</p>
 
     <h2>Configuration Files</h2>
     <table>
@@ -11,10 +11,10 @@ export function render() {
         <tr><th>File</th><th>Scope</th><th>Purpose</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>~/.comux.global.json</code></td><td>Global</td><td>Default settings for all projects</td></tr>
-        <tr><td><code>.comux.defaults.json</code></td><td>Team</td><td>Repo-committed defaults shared across the project</td></tr>
-        <tr><td><code>.comux/settings.json</code></td><td>Project</td><td>Project-specific overrides</td></tr>
-        <tr><td><code>.comux/comux.config.json</code></td><td>Project</td><td>Pane tracking (managed by comux)</td></tr>
+        <tr><td><code>~/.psyche.global.json</code></td><td>Global</td><td>Default settings for all projects</td></tr>
+        <tr><td><code>.psyche.defaults.json</code></td><td>Team</td><td>Repo-committed defaults shared across the project</td></tr>
+        <tr><td><code>.psyche/settings.json</code></td><td>Project</td><td>Project-specific overrides</td></tr>
+        <tr><td><code>.psyche/psyche.config.json</code></td><td>Project</td><td>Pane tracking (managed by psyche)</td></tr>
       </tbody>
     </table>
 
@@ -34,7 +34,7 @@ export function render() {
       <tbody>
         <tr><td><strong>Type</strong></td><td><code>'' | 'plan' | 'acceptEdits' | 'bypassPermissions'</code></td></tr>
         <tr><td><strong>Default</strong></td><td><code>'bypassPermissions'</code></td></tr>
-        <tr><td><strong>Description</strong></td><td>Controls the permission flags comux passes to launched agents. Use empty string to defer to each agent's own defaults.</td></tr>
+        <tr><td><strong>Description</strong></td><td>Controls the permission flags psyche passes to launched agents. Use empty string to defer to each agent's own defaults.</td></tr>
       </tbody>
     </table>
 
@@ -43,7 +43,7 @@ export function render() {
       <tbody>
         <tr><td><strong>Type</strong></td><td><code>AgentName | ''</code></td></tr>
         <tr><td><strong>Default</strong></td><td><code>''</code> (ask each time)</td></tr>
-        <tr><td><strong>Description</strong></td><td>Skip the agent selection dialog and always use this agent for new panes. Set it to any supported agent ID such as <code>claude</code>, <code>codex</code>, or <code>gemini</code>. Use an empty string to be prompted each time.</td></tr>
+        <tr><td><strong>Description</strong></td><td>Skip the agent selection dialog and always use this agent for new panes. Set it to any supported agent ID such as <code>coven-code</code>, <code>claude</code>, or <code>codex</code>. Use an empty string to be prompted each time.</td></tr>
       </tbody>
     </table>
 
@@ -61,7 +61,7 @@ export function render() {
       <tbody>
         <tr><td><strong>Type</strong></td><td><code>NotificationSoundId[]</code></td></tr>
         <tr><td><strong>Default</strong></td><td><code>['default-system-sound']</code></td></tr>
-        <tr><td><strong>Description</strong></td><td>Select which macOS helper sounds comux randomizes between for background attention notifications. If the list is empty or invalid, comux falls back to the default system sound.</td></tr>
+        <tr><td><strong>Description</strong></td><td>Select which macOS helper sounds psyche randomizes between for background attention notifications. If the list is empty or invalid, psyche falls back to the default system sound.</td></tr>
       </tbody>
     </table>
 
@@ -120,8 +120,8 @@ export function render() {
     <pre><code data-lang="json">{
   "enableAutopilotByDefault": true,
   "permissionMode": "bypassPermissions",
-  "defaultAgent": "claude",
-  "enabledAgents": ["claude", "codex", "gemini"],
+  "defaultAgent": "coven-code",
+  "enabledAgents": ["coven-code", "claude", "codex"],
   "enabledNotificationSounds": ["default-system-sound", "harp"],
   "useTmuxHooks": false,
   "baseBranch": "develop",
@@ -129,10 +129,10 @@ export function render() {
   "minPaneWidth": 50,
   "maxPaneWidth": 80
 }</code></pre>
-    <p><code>.comux.defaults.json</code> lives at the repo root and is intended for safe, team-wide defaults that you want in version control. Personal overrides still belong in <code>.comux/settings.json</code> or <code>~/.comux.global.json</code>.</p>
+    <p><code>.psyche.defaults.json</code> lives at the repo root and is intended for safe, team-wide defaults that you want in version control. Personal overrides still belong in <code>.psyche/settings.json</code> or <code>~/.psyche.global.json</code>.</p>
 
     <h2>macOS Attention Notifications</h2>
-    <p>On macOS, comux ships with a native helper that can send attention notifications for background panes. This is progressive enhancement only: comux continues working on Linux and Windows without it.</p>
+    <p>On macOS, psyche ships with a native helper that can send attention notifications for background panes. This is progressive enhancement only: psyche continues working on Linux and Windows without it.</p>
     <ul>
       <li>Notifications are only sent for panes that are not currently fully focused</li>
       <li><code>enabledNotificationSounds</code> controls which helper sounds are eligible for random selection</li>
@@ -140,16 +140,16 @@ export function render() {
     </ul>
 
     <h2>Setting Precedence</h2>
-    <p>When the same key is defined in multiple places, comux resolves it in this order:</p>
+    <p>When the same key is defined in multiple places, psyche resolves it in this order:</p>
     <ol>
-      <li>Project settings (<code>.comux/settings.json</code>) — highest priority</li>
-      <li>Global settings (<code>~/.comux.global.json</code>) — fallback</li>
-      <li>Team defaults (<code>.comux.defaults.json</code>) — shared repo baseline</li>
+      <li>Project settings (<code>.psyche/settings.json</code>) — highest priority</li>
+      <li>Global settings (<code>~/.psyche.global.json</code>) — fallback</li>
+      <li>Team defaults (<code>.psyche.defaults.json</code>) — shared repo baseline</li>
       <li>Built-in defaults — if neither file defines the setting</li>
     </ol>
 
     <h2>OpenRouter Configuration</h2>
-    <p>comux uses <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> for AI-powered features like smart branch naming and commit message generation.</p>
+    <p>psyche uses <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> for AI-powered features like smart branch naming and commit message generation.</p>
 
     <h3>Setting Up</h3>
     <ol>
@@ -177,16 +177,16 @@ echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.zshrc</code></pre>
     </table>
 
     <h3>Without OpenRouter</h3>
-    <p>If <code>OPENROUTER_API_KEY</code> is not set, comux still works but with reduced functionality:</p>
+    <p>If <code>OPENROUTER_API_KEY</code> is not set, psyche still works but with reduced functionality:</p>
     <ul>
-      <li>Branch names fall back to <code>comux-{timestamp}</code></li>
-      <li>Commit messages fall back to <code>comux: auto-commit changes</code></li>
+      <li>Branch names fall back to <code>psyche-{timestamp}</code></li>
+      <li>Commit messages fall back to <code>psyche: auto-commit changes</code></li>
       <li>Pane status detection uses heuristics instead of LLM analysis</li>
     </ul>
 
     <div class="callout callout-tip">
       <div class="callout-title">Tip</div>
-      OpenRouter provides free credits for new accounts, and the models comux uses (gpt-4o-mini, grok-4-fast) are very inexpensive. Even heavy usage costs only pennies per day.
+      OpenRouter provides free credits for new accounts, and the models psyche uses (gpt-4o-mini, grok-4-fast) are very inexpensive. Even heavy usage costs only pennies per day.
     </div>
 
     <h2>Environment Variables</h2>
@@ -196,7 +196,7 @@ echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.zshrc</code></pre>
       </thead>
       <tbody>
         <tr><td><code>OPENROUTER_API_KEY</code></td><td>API key for OpenRouter AI features</td></tr>
-        <tr><td><code>COMUX_SESSION</code></td><td>Override the tmux session name</td></tr>
+        <tr><td><code>PSYCHE_SESSION</code></td><td>Override the tmux session name</td></tr>
       </tbody>
     </table>
   `;

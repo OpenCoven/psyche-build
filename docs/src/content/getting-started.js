@@ -3,13 +3,13 @@ export const meta = { title: 'Getting Started' };
 export function render() {
   return `
     <h1>Getting Started</h1>
-    <p>Get comux running in under a minute. All you need is tmux and Node.js; install a supported AI coding agent when you want prompt-launched agent panes.</p>
+    <p>Get psyche running in under a minute. All you need is tmux and Node.js; install a supported AI coding agent when you want prompt-launched agent panes.</p>
 
-    <h2>Install comux</h2>
-    <pre><code data-lang="bash">npm install -g comux</code></pre>
+    <h2>Install psyche</h2>
+    <pre><code data-lang="bash">npm install -g psyche-build</code></pre>
 
     <h2>Set Up OpenRouter (Recommended)</h2>
-    <p>Before your first run, we recommend setting up an <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> API key. comux uses it to generate smart branch names from your prompts and AI-powered commit messages when merging. Without it, branch names fall back to <code>comux-{timestamp}</code> and commit messages will be generic.</p>
+    <p>Before your first run, we recommend setting up an <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> API key. psyche uses it to generate smart branch names from your prompts and AI-powered commit messages when merging. Without it, branch names fall back to <code>psyche-{timestamp}</code> and commit messages will be generic.</p>
     <pre><code data-lang="bash">export OPENROUTER_API_KEY="sk-or-..."</code></pre>
     <p>Add this to your shell profile (<code>~/.zshrc</code> or <code>~/.bashrc</code>) so it persists across sessions. See <a href="#configuration">Configuration</a> for model options and details.</p>
 
@@ -21,13 +21,13 @@ export function render() {
       </li>
       <li>
         <p><strong>Check setup:</strong></p>
-        <pre><code data-lang="bash">comux doctor</code></pre>
+        <pre><code data-lang="bash">psyche doctor</code></pre>
         <p>Doctor confirms tmux and git, shows whether any supported agent CLIs are detected, and explains which Coven features are optional.</p>
       </li>
       <li>
-        <p><strong>Launch comux:</strong></p>
-        <pre><code data-lang="bash">comux</code></pre>
-        <p>comux will create or attach to a project-scoped tmux session named like <code>comux-your-project-a1b2c3d4</code> and show the TUI.</p>
+        <p><strong>Launch psyche:</strong></p>
+        <pre><code data-lang="bash">psyche</code></pre>
+        <p>psyche will create or attach to a project-scoped tmux session named like <code>psyche-your-project-a1b2c3d4</code> and show the TUI.</p>
       </li>
       <li>
         <p><strong>Create your first pane:</strong> Press <kbd>n</kbd> to create a new pane. You'll be prompted for:</p>
@@ -38,10 +38,10 @@ export function render() {
       </li>
       <li>
         <p><strong>Watch the agent work:</strong> Press <kbd>j</kbd> to jump to the pane and see the agent running.</p>
-        <p>comux keeps tracking that pane even when it is in the background. On macOS, background panes can send native notifications when they settle into a waiting or attention-needed state.</p>
+        <p>psyche keeps tracking that pane even when it is in the background. On macOS, background panes can send native notifications when they settle into a waiting or attention-needed state.</p>
       </li>
       <li>
-        <p><strong>Merge when done:</strong> Navigate back to the comux sidebar, select the pane, and press <kbd>m</kbd> to open the pane menu where you can merge the work back to your main branch.</p>
+        <p><strong>Merge when done:</strong> Navigate back to the psyche sidebar, select the pane, and press <kbd>m</kbd> to open the pane menu where you can merge the work back to your main branch.</p>
       </li>
     </ol>
 
@@ -60,27 +60,27 @@ export function render() {
 
     <div class="callout callout-info">
       <div class="callout-title">macOS notifications</div>
-      On macOS, comux can launch its native helper automatically and deliver background attention notifications. Open <kbd>s</kbd> settings and adjust <strong>Attention Notification Sounds</strong> if you want a different sound set.
+      On macOS, psyche can launch its native helper automatically and deliver background attention notifications. Open <kbd>s</kbd> settings and adjust <strong>Attention Notification Sounds</strong> if you want a different sound set.
     </div>
 
     <h2>What Gets Created</h2>
-    <p>When you first run comux in a project, it creates a <code>.comux/</code> directory:</p>
+    <p>When you first run psyche in a project, it creates a <code>.psyche/</code> directory:</p>
     <div class="file-tree">your-project/
-├── .comux/                  # comux data (gitignored)
-│   ├── comux.config.json    # Pane tracking
+├── .psyche/                  # psyche data (gitignored)
+│   ├── psyche.config.json    # Pane tracking
 │   ├── settings.json       # Project settings
 │   └── worktrees/          # Git worktrees
 │       └── fix-auth/       # One per pane
-└── .comux-hooks/            # Lifecycle hooks (optional)</div>
+└── .psyche-hooks/            # Lifecycle hooks (optional)</div>
 
     <div class="callout callout-tip">
       <div class="callout-title">Tip</div>
-      Add <code>.comux/</code> to your project's <code>.gitignore</code>. comux will suggest this on first run.
+      Add <code>.psyche/</code> to your project's <code>.gitignore</code>. psyche will suggest this on first run.
     </div>
 
     <h2>tmux Configuration</h2>
-    <p>If tmux is new on your machine, start with <code>comux doctor</code>. Use <code>comux doctor --fix</code> to install the comux-managed tmux config block and apply safe live-session repairs. The command backs up an existing config and only edits the block between <code># &gt;&gt;&gt; comux</code> and <code># &lt;&lt;&lt; comux</code>.</p>
-    <p>On first run, comux will detect if you have no tmux config and offer to install a recommended preset (dark or light theme). This handles pane borders, navigation bindings, mouse support, and clipboard integration automatically.</p>
+    <p>If tmux is new on your machine, start with <code>psyche doctor</code>. Use <code>psyche doctor --fix</code> to install the psyche-managed tmux config block and apply safe live-session repairs. The command backs up an existing config and only edits the block between <code># &gt;&gt;&gt; psyche</code> and <code># &lt;&lt;&lt; psyche</code>.</p>
+    <p>On first run, psyche will detect if you have no tmux config and offer to install a recommended preset (dark or light theme). This handles pane borders, navigation bindings, mouse support, and clipboard integration automatically.</p>
     <p>If you'd rather configure tmux manually, edit <code>~/.tmux.conf</code> (or <code>~/.config/tmux/tmux.conf</code>). Here's a solid starting point:</p>
     <pre><code data-lang="bash"># Extended keys for Ctrl-Shift-Arrow support
 set -g extended-keys on
@@ -120,7 +120,7 @@ set -ga terminal-overrides ',xterm-256color:Ms=\\E]52;c;%p2%s\\007'
 set -ga terminal-overrides ',*:Ss=\\E[%p1%d q:Se=\\E[2 q'
 set -ga update-environment "TERM_PROGRAM"</code></pre>
     <p>After editing, reload with <code>tmux source-file ~/.tmux.conf</code> or restart tmux.</p>
-    <p>comux also applies its clipboard and passthrough compatibility settings to comux-managed sessions at runtime. These settings improve terminal clipboard behavior, but tmux may still block rich image-paste flows that rely on terminal-specific clipboard protocols.</p>
+    <p>psyche also applies its clipboard and passthrough compatibility settings to psyche-managed sessions at runtime. These settings improve terminal clipboard behavior, but tmux may still block rich image-paste flows that rely on terminal-specific clipboard protocols.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">Note</div>
@@ -128,14 +128,14 @@ set -ga update-environment "TERM_PROGRAM"</code></pre>
     </div>
 
     <h2>Standalone vs Coven</h2>
-    <p>comux does not require Coven for the core cockpit. Without Coven, you can create tmux panes, open plain terminals, launch installed agent CLIs, isolate work in git worktrees, inspect files, merge, create PRs, and run rituals.</p>
-    <p>When a local Coven daemon is available, comux adds harness-aware session actions: list scoped Coven sessions, open them in panes, and launch new scoped Coven sessions for the current project.</p>
+    <p>psyche does not require Coven for the core cockpit. Without Coven, you can create tmux panes, open plain terminals, launch installed agent CLIs, isolate work in git worktrees, inspect files, merge, create PRs, and run rituals.</p>
+    <p>When a local Coven daemon is available, psyche adds harness-aware session actions: list scoped Coven sessions, open them in panes, and launch new scoped Coven sessions for the current project.</p>
 
     <h2>Next Steps</h2>
     <ul>
       <li><a href="#/core-concepts">Core Concepts</a> — understand worktrees, panes, and the merge flow</li>
       <li><a href="#/keyboard-shortcuts">Keyboard Shortcuts</a> — navigate the TUI efficiently</li>
-      <li><a href="#/configuration">Configuration</a> — customize comux settings</li>
+      <li><a href="#/configuration">Configuration</a> — customize psyche settings</li>
     </ul>
 
     <a href="https://discord.gg/opencoven" target="_blank" rel="noopener" class="discord-cta">

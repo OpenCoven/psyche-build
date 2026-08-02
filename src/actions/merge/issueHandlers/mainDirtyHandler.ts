@@ -4,7 +4,7 @@
  */
 
 import type { ActionResult, ActionContext } from '../../types.js';
-import type { ComuxPane } from '../../../types.js';
+import type { PsychePane } from '../../../types.js';
 import { handleCommitWithOptions } from '../commitMessageHandler.js';
 import { LogService } from '../../../services/LogService.js';
 
@@ -18,7 +18,7 @@ export async function handleMainDirty(
   issue: MainDirtyIssue,
   mainBranch: string,
   mainRepoPath: string,
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   retryMerge: () => Promise<ActionResult>
 ): Promise<ActionResult> {

@@ -1,5 +1,5 @@
 import path from "path";
-import type { ComuxPane } from "../types.js";
+import type { PsychePane } from "../types.js";
 import { getPaneProjectRoot } from "./paneProject.js";
 
 export type PaneBulkVisibilityAction = "hide-others" | "show-others";
@@ -9,14 +9,14 @@ function sameProjectRoot(a: string, b: string): boolean {
   return path.resolve(a) === path.resolve(b);
 }
 
-export function getVisiblePanes(panes: ComuxPane[]): ComuxPane[] {
+export function getVisiblePanes(panes: PsychePane[]): PsychePane[] {
   return panes.filter((pane) => !pane.hidden);
 }
 
 export function syncHiddenStateFromCurrentWindow(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   currentWindowPaneIds: string[]
-): ComuxPane[] {
+): PsychePane[] {
   if (currentWindowPaneIds.length === 0) {
     return panes;
   }
@@ -28,8 +28,8 @@ export function syncHiddenStateFromCurrentWindow(
 }
 
 export function getBulkVisibilityAction(
-  panes: ComuxPane[],
-  selectedPane: ComuxPane
+  panes: PsychePane[],
+  selectedPane: PsychePane
 ): PaneBulkVisibilityAction | null {
   const otherPanes = panes.filter((pane) => pane.id !== selectedPane.id);
   if (otherPanes.length === 0) {
@@ -48,12 +48,12 @@ export function getBulkVisibilityAction(
 }
 
 export function partitionPanesByProject(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   targetProjectRoot: string,
   fallbackProjectRoot: string
-): { projectPanes: ComuxPane[]; otherPanes: ComuxPane[] } {
-  const projectPanes: ComuxPane[] = [];
-  const otherPanes: ComuxPane[] = [];
+): { projectPanes: PsychePane[]; otherPanes: PsychePane[] } {
+  const projectPanes: PsychePane[] = [];
+  const otherPanes: PsychePane[] = [];
 
   for (const pane of panes) {
     const paneProjectRoot = getPaneProjectRoot(pane, fallbackProjectRoot);
@@ -68,7 +68,7 @@ export function partitionPanesByProject(
 }
 
 export function getProjectVisibilityAction(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   targetProjectRoot: string,
   fallbackProjectRoot: string
 ): PaneProjectVisibilityAction | null {

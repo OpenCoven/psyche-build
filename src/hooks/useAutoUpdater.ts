@@ -104,12 +104,12 @@ export default function useAutoUpdater(autoUpdater: any | undefined, setStatusMe
 
     try {
       setIsUpdating(true);
-      setStatusMessage('Updating comux...');
+      setStatusMessage('Updating psyche...');
 
       const success = await autoUpdater.performUpdate(updateInfo);
 
       if (success) {
-        setStatusMessage('Update completed successfully! Please restart comux.');
+        setStatusMessage('Update completed successfully! Please restart psyche.');
         setTimeout(() => {
           process.exit(0);
         }, 3000);

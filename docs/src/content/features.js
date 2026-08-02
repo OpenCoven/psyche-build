@@ -3,7 +3,7 @@ export const meta = { title: 'Feature Map' };
 export function render() {
   return `
     <h1>Feature Map</h1>
-    <p class="lead">Use this page as a map of what comux can do and where to go next. comux is local-first: it coordinates tmux panes, git worktrees, agents, review tools, merge automation, and notifications from one project-scoped TUI.</p>
+    <p class="lead">Use this page as a map of what psyche can do and where to go next. psyche is local-first: it coordinates tmux panes, git worktrees, agents, review tools, merge automation, and notifications from one project-scoped TUI.</p>
 
     <h2>At a Glance</h2>
     <table>
@@ -11,12 +11,12 @@ export function render() {
         <tr><th>Feature</th><th>Use it when</th><th>Start here</th></tr>
       </thead>
       <tbody>
-        <tr><td>Project sessions</td><td>You want one stable comux session per repository</td><td><a href="#/core-concepts">Core Concepts</a></td></tr>
+        <tr><td>Project sessions</td><td>You want one stable psyche session per repository</td><td><a href="#/core-concepts">Core Concepts</a></td></tr>
         <tr><td>Worktree panes</td><td>You want several agents working without touching the same checkout</td><td><a href="#/getting-started">Getting Started</a></td></tr>
         <tr><td>Agent registry</td><td>You use Claude Code, Codex, opencode, Gemini, Qwen, Amp, Cursor, Copilot, Cline, Crush, or pi</td><td><a href="#/agents">Agents</a></td></tr>
         <tr><td>A/B agent pairs</td><td>You want two agents to attempt the same task independently</td><td><a href="#/multi-agent">Multi-Agent</a></td></tr>
         <tr><td>Shared-worktree agents</td><td>You want another agent or shell attached to an existing branch</td><td><a href="#/workflows">Workflows</a></td></tr>
-        <tr><td>File browser</td><td>You want to inspect files and diffs without leaving comux</td><td><a href="#/workflows">Workflows</a></td></tr>
+        <tr><td>File browser</td><td>You want to inspect files and diffs without leaving psyche</td><td><a href="#/workflows">Workflows</a></td></tr>
         <tr><td>Pane visibility controls</td><td>You want to focus one pane or one project without stopping background work</td><td><a href="#/keyboard-shortcuts">Keyboard Shortcuts</a></td></tr>
         <tr><td>Two-phase merge</td><td>You want conflicts resolved in worktrees before anything lands on main</td><td><a href="#/merging">Merging</a></td></tr>
         <tr><td>Hooks</td><td>You want project-specific setup, validation, or merge automation</td><td><a href="#/hooks">Hooks</a></td></tr>
@@ -25,16 +25,16 @@ export function render() {
     </table>
 
     <h2>Parallel Work</h2>
-    <p>Each comux pane maps to a git worktree and branch. That means one agent can refactor a parser, another can fix tests, and a third can inspect the result without requiring stash juggling or checkout switching.</p>
+    <p>Each psyche pane maps to a git worktree and branch. That means one agent can refactor a parser, another can fix tests, and a third can inspect the result without requiring stash juggling or checkout switching.</p>
     <ul>
-      <li><strong>Project-scoped tmux sessions:</strong> running <code>comux</code> inside a repo creates or attaches to the same stable session for that repo.</li>
+      <li><strong>Project-scoped tmux sessions:</strong> running <code>psyche</code> inside a repo creates or attaches to the same stable session for that repo.</li>
       <li><strong>One worktree per work pane:</strong> agent panes get isolated filesystem state and their own branch.</li>
       <li><strong>Child worktrees:</strong> use <kbd>b</kbd> when you need a follow-up branch from an existing pane's current state.</li>
       <li><strong>Plain terminals:</strong> use <kbd>t</kbd> for a new shell worktree or <kbd>A</kbd> to add a shell to the selected worktree.</li>
     </ul>
 
     <h2>Review and Navigation</h2>
-    <p>comux gives you several ways to inspect work before merging it.</p>
+    <p>psyche gives you several ways to inspect work before merging it.</p>
     <ul>
       <li><strong>Sidebar status:</strong> panes show their slug, prompt, project group, hidden state, and attention state.</li>
       <li><strong>Read-only file browser:</strong> press <kbd>f</kbd> to inspect the selected worktree, filter files, and switch between source and diff views.</li>
@@ -43,7 +43,7 @@ export function render() {
     </ul>
 
     <h2>Automation Boundaries</h2>
-    <p>comux automates repetitive development tasks, but the important state stays visible.</p>
+    <p>psyche automates repetitive development tasks, but the important state stays visible.</p>
     <ul>
       <li><strong>OpenRouter-assisted naming:</strong> prompts can become useful branch slugs when <code>OPENROUTER_API_KEY</code> is configured.</li>
       <li><strong>Commit message generation:</strong> merge auto-commit can summarize the diff before merging.</li>
@@ -52,14 +52,14 @@ export function render() {
     </ul>
 
     <h2>Merge and Cleanup</h2>
-    <p>The merge flow is intentionally conservative. comux auto-commits worktree changes, merges the target branch into the worktree first, and only merges back to the target branch after that succeeds.</p>
+    <p>The merge flow is intentionally conservative. psyche auto-commits worktree changes, merges the target branch into the worktree first, and only merges back to the target branch after that succeeds.</p>
     <div class="callout callout-info">
       <div class="callout-title">Review point</div>
       If conflicts appear, they stay in the worktree branch. Fix them there, rerun validation, then retry the merge from the pane menu.
     </div>
 
     <h2>Native macOS Helper</h2>
-    <p>On macOS, comux can use its bundled helper app to determine whether the comux terminal window is truly focused and to send native notifications for background panes that need attention. On other platforms, the helper path stays inert and comux continues to work as a tmux-based TUI.</p>
+    <p>On macOS, psyche can use its bundled helper app to determine whether the psyche terminal window is truly focused and to send native notifications for background panes that need attention. On other platforms, the helper path stays inert and psyche continues to work as a tmux-based TUI.</p>
 
     <h2>Where to Go Next</h2>
     <ul>

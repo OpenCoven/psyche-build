@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import fs from 'fs/promises';
 import { useCallback } from 'react';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
@@ -11,17 +11,17 @@ import { deriveProjectRootFromWorktreePath } from '../utils/paneProject.js';
 import { useTemporaryStatus } from './useTemporaryStatus.js';
 
 interface Params {
-  panes: ComuxPane[];
-  savePanes: (p: ComuxPane[]) => Promise<void>;
+  panes: PsychePane[];
+  savePanes: (p: PsychePane[]) => Promise<void>;
   setStatusMessage: (msg: string) => void;
   setShowMergeConfirmation: (v: boolean) => void;
-  setMergedPane: (pane: ComuxPane | null) => void;
+  setMergedPane: (pane: PsychePane | null) => void;
 }
 
 export default function useWorktreeActions({ panes, savePanes, setStatusMessage, setShowMergeConfirmation, setMergedPane }: Params) {
   const showTemporary = useTemporaryStatus(setStatusMessage);
 
-  const closePane = useCallback(async (pane: ComuxPane) => {
+  const closePane = useCallback(async (pane: PsychePane) => {
     try {
       const tmuxService = TmuxService.getInstance();
 
@@ -48,7 +48,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
     }
   }, [panes, savePanes, showTemporary]);
 
-  const mergeWorktree = useCallback(async (pane: ComuxPane) => {
+  const mergeWorktree = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {
       setStatusMessage('No worktree to merge');
       setTimeout(() => setStatusMessage(''), 2000);
@@ -80,8 +80,8 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
           process.stderr.write('1. Manually resolve the merge conflicts in your editor\n');
           process.stderr.write('2. Stage the resolved files: git add <resolved-files>\n');
           process.stderr.write('3. Complete the merge: git commit\n');
-          process.stderr.write('4. Run comux again to continue managing your panes\n');
-          process.stderr.write('\nExiting comux now...\n\n');
+          process.stderr.write('4. Run psyche again to continue managing your panes\n');
+          process.stderr.write('\nExiting psyche now...\n\n');
           process.stdout.write('\x1b[2J\x1b[H');
           process.stdout.write('\x1b[3J');
           try {
@@ -110,7 +110,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
     }
   }, [setStatusMessage, setMergedPane, setShowMergeConfirmation]);
 
-  const mergeAndPrune = useCallback(async (pane: ComuxPane) => {
+  const mergeAndPrune = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {
       setStatusMessage('No worktree to merge');
       setTimeout(() => setStatusMessage(''), 2000);
@@ -141,8 +141,8 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
           process.stderr.write('1. Manually resolve the merge conflicts in your editor\n');
           process.stderr.write('2. Stage the resolved files: git add <resolved-files>\n');
           process.stderr.write('3. Complete the merge: git commit\n');
-          process.stderr.write('4. Run comux again to continue managing your panes\n');
-          process.stderr.write('\nExiting comux now...\n\n');
+          process.stderr.write('4. Run psyche again to continue managing your panes\n');
+          process.stderr.write('\nExiting psyche now...\n\n');
           process.stdout.write('\x1b[2J\x1b[H');
           process.stdout.write('\x1b[3J');
           try {
@@ -169,7 +169,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
     }
   }, [closePane, setStatusMessage]);
 
-  const deleteUnsavedChanges = useCallback(async (pane: ComuxPane) => {
+  const deleteUnsavedChanges = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {
       await closePane(pane);
       return;
@@ -190,7 +190,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
     }
   }, [closePane, setStatusMessage]);
 
-  const handleCloseOption = useCallback(async (option: number, pane: ComuxPane) => {
+  const handleCloseOption = useCallback(async (option: number, pane: PsychePane) => {
     switch (option) {
       case 0:
         await mergeAndPrune(pane);

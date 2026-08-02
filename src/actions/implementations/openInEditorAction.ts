@@ -3,7 +3,7 @@
  */
 
 import { execSync } from 'child_process';
-import type { ComuxPane } from '../../types.js';
+import type { PsychePane } from '../../types.js';
 import type { ActionResult, ActionContext } from '../types.js';
 
 export function getDefaultEditor(platform: NodeJS.Platform = process.platform): string {
@@ -14,7 +14,7 @@ export function getDefaultEditor(platform: NodeJS.Platform = process.platform): 
  * Open worktree in external editor
  */
 export async function openInEditor(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   params?: { editor?: string }
 ): Promise<ActionResult> {

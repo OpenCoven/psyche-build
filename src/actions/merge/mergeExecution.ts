@@ -6,7 +6,7 @@
  */
 
 import type { ActionResult, ActionContext } from "../types.js"
-import type { ComuxPane } from "../../types.js"
+import type { PsychePane } from "../../types.js"
 import { triggerHook } from "../../utils/hooks.js"
 import { getPaneBranchName } from "../../utils/git.js"
 
@@ -14,7 +14,7 @@ import { getPaneBranchName } from "../../utils/git.js"
  * Execute merge with conflict handling
  */
 export async function executeMergeWithConflictHandling(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   mainBranch: string,
   mainRepoPath: string,
@@ -99,7 +99,7 @@ export async function executeMergeWithConflictHandling(
  * @param skipWorktreeMerge - Set to true when resuming after conflict resolution (step 1 already done)
  */
 export async function executeMerge(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   mainBranch: string,
   mainRepoPath: string,
@@ -223,7 +223,7 @@ export async function executeMerge(
     `[mergeExecution] About to trigger post_merge hook for ${pane.slug}`
   )
   await triggerHook("post_merge", mainRepoPath, pane, {
-    COMUX_TARGET_BRANCH: mainBranch,
+    PSYCHE_TARGET_BRANCH: mainBranch,
   })
   console.error(`[mergeExecution] post_merge hook completed for ${pane.slug}`)
 

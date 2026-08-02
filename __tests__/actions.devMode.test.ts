@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest"
 import { getAvailableActions, PaneAction } from "../src/actions/types.js"
-import type { ComuxPane } from "../src/types.js"
+import type { PsychePane } from "../src/types.js"
 
-const pane: ComuxPane = {
+const pane: PsychePane = {
   id: "1",
   slug: "feature-a",
   prompt: "test",
   paneId: "%1",
-  worktreePath: "/tmp/repo/.comux/worktrees/feature-a",
+  worktreePath: "/tmp/repo/.psyche/worktrees/feature-a",
 }
 
 describe("dev-only action visibility", () => {
@@ -57,7 +57,7 @@ describe("dev-only action visibility", () => {
   })
 
   it("hides open_terminal_in_worktree for shell panes", () => {
-    const shellPane: ComuxPane = {
+    const shellPane: PsychePane = {
       id: "2",
       slug: "shell-1",
       prompt: "",

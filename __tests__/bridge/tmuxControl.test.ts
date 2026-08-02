@@ -34,8 +34,8 @@ describe('unescapeTmuxOutput', () => {
 
   it('mixes escapes and literals', () => {
     // `\033]0;title\007` — OSC set-title sequence
-    const out = unescapeTmuxOutput('\\033]0;comux\\007');
-    expect(out.toString('utf8')).toBe('\x1b]0;comux\x07');
+    const out = unescapeTmuxOutput('\\033]0;psyche\\007');
+    expect(out.toString('utf8')).toBe('\x1b]0;psyche\x07');
   });
 });
 

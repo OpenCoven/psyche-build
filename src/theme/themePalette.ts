@@ -1,6 +1,6 @@
-import type { ComuxThemeName } from '../types.js';
+import type { PsycheThemeName } from '../types.js';
 
-export const COMUX_THEME_NAMES = [
+export const PSYCHE_THEME_NAMES = [
   'red',
   'blue',
   'yellow',
@@ -9,11 +9,11 @@ export const COMUX_THEME_NAMES = [
   'purple',
   'cyan',
   'magenta',
-] as const satisfies readonly ComuxThemeName[];
+] as const satisfies readonly PsycheThemeName[];
 
-export const DEFAULT_COMUX_THEME: ComuxThemeName = 'orange';
+export const DEFAULT_PSYCHE_THEME: PsycheThemeName = 'orange';
 
-export const COMUX_THEME_LABELS: Record<ComuxThemeName, string> = {
+export const PSYCHE_THEME_LABELS: Record<PsycheThemeName, string> = {
   red: 'Crimson',
   blue: 'Indigo',
   yellow: 'Gold',
@@ -24,14 +24,14 @@ export const COMUX_THEME_LABELS: Record<ComuxThemeName, string> = {
   magenta: 'Orchid',
 };
 
-export function isComuxThemeName(value: unknown): value is ComuxThemeName {
-  return typeof value === 'string' && (COMUX_THEME_NAMES as readonly string[]).includes(value);
+export function isPsycheThemeName(value: unknown): value is PsycheThemeName {
+  return typeof value === 'string' && (PSYCHE_THEME_NAMES as readonly string[]).includes(value);
 }
 
-export function normalizeComuxTheme(value: unknown): ComuxThemeName {
-  return isComuxThemeName(value) ? value : DEFAULT_COMUX_THEME;
+export function normalizePsycheTheme(value: unknown): PsycheThemeName {
+  return isPsycheThemeName(value) ? value : DEFAULT_PSYCHE_THEME;
 }
 
-export function getComuxThemeLabel(value: unknown): string {
-  return COMUX_THEME_LABELS[normalizeComuxTheme(value)];
+export function getPsycheThemeLabel(value: unknown): string {
+  return PSYCHE_THEME_LABELS[normalizePsycheTheme(value)];
 }

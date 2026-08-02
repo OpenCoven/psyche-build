@@ -3,6 +3,7 @@ import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { recalculateAndApplyLayout } from './layoutManager.js';
 import { execSync } from 'child_process';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 // Layout configuration - adjust these to change layout behavior
 export const SIDEBAR_WIDTH = 40;
@@ -94,7 +95,7 @@ export const getContentPaneIds = (controlPaneId: string): string[] => {
     // Filter out spacer pane
     try {
       const title = tmuxService.getPaneTitleSync(id);
-      return title !== 'comux-spacer';
+      return title !== SPACER_PANE_TITLE;
     } catch {
       return true; // Include pane if we can't get title
     }
@@ -112,7 +113,7 @@ export const ensurePaneBorderStatusForCurrentSession = (): void => {
 
 /**
  * Creates initial sidebar layout by splitting from control pane
- * @param controlPaneId The pane ID running comux TUI (left sidebar)
+ * @param controlPaneId The pane ID running psyche TUI (left sidebar)
  * @param cwd Optional working directory for the new content pane
  * @returns The newly created content area pane ID
  */
@@ -184,7 +185,7 @@ export const generateSidebarGridLayout = (
     try {
       const lastPaneId = contentPanes[contentPanes.length - 1];
       const title = tmuxService.getPaneTitleSync(lastPaneId);
-      return title === 'comux-spacer';
+      return title === SPACER_PANE_TITLE;
     } catch {
       return false;
     }

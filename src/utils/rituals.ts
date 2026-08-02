@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { SidebarProject, ComuxPane } from '../types.js';
+import type { SidebarProject, PsychePane } from '../types.js';
 import {
   isAgentName,
   type AgentName,
@@ -82,7 +82,7 @@ export interface ProjectRitualManifest {
 export interface CaptureRitualOptions {
   name: string;
   projectRoot: string;
-  panes: ComuxPane[];
+  panes: PsychePane[];
   sidebarProjects: SidebarProject[];
 }
 
@@ -216,11 +216,11 @@ export function getBuiltInRituals(): RitualDefinition[] {
 }
 
 export function getProjectRitualsDir(projectRoot: string): string {
-  return path.join(projectRoot, '.comux', 'rituals');
+  return path.join(projectRoot, '.psyche', 'rituals');
 }
 
 export function getProjectRitualManifestPath(projectRoot: string): string {
-  return path.join(projectRoot, '.comux', 'rituals.json');
+  return path.join(projectRoot, '.psyche', 'rituals.json');
 }
 
 export function ritualIdFromName(name: string): string {

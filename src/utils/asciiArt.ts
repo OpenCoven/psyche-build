@@ -4,7 +4,7 @@ import fs from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
 import { resolveDistPath } from "./runtimePaths.js"
-import { getActiveComuxTheme } from "../theme/colors.js"
+import { getActivePsycheTheme } from "../theme/colors.js"
 
 export interface RenderAsciiArtOptions {
   paneId: string
@@ -70,7 +70,7 @@ export async function renderAsciiArt(
     : path.resolve(scriptPath)
   await tmuxService.sendKeys(
     paneId,
-    `'COMUX_THEME=${getActiveComuxTheme()} node "${absolutePath}"' Enter`
+    `'PSYCHE_THEME=${getActivePsycheTheme()} node "${absolutePath}"' Enter`
   )
   await new Promise((resolve) => setTimeout(resolve, 150))
 }
@@ -79,19 +79,19 @@ export async function renderAsciiArt(
  * Predefined ASCII art designs
  */
 export const ASCII_ART = {
-  comuxWelcome: `
+  psycheWelcome: `
 ╭─────────────────────────────────────────────────────────╮
 │                                                         │
 │                                                         │
-│  ██████     ██████    ███    ███   ██    ██   ██   ██   │
-│ ██         ██    ██   ████  ████   ██    ██    ██ ██    │
-│ ██         ██    ██   ██ ████ ██   ██    ██     ███     │
-│ ██         ██    ██   ██  ██  ██   ██    ██    ██ ██    │
-│  ██████     ██████    ██      ██    ██████    ██   ██   │
+│   ██████    ██████  ██   ██   ██████  ██   ██  ██████   │
+│   ██   ██  ██        ██ ██   ██       ██   ██  ██       │
+│   ██████    █████     ███    ██       ███████  █████    │
+│   ██            ██     ██    ██       ██   ██  ██       │
+│   ██       ██████      ██     ██████  ██   ██  ██████   │
 │                                                         │
 │                                                         │
-│              AI developer agent multiplexer             │
-│              Press [n] to create a new agent            │
+│                Multiagent coding harness                │
+│           Press [n] to open a new agent lane            │
 │                                                         │
 ╰─────────────────────────────────────────────────────────╯
   `,

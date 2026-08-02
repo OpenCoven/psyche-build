@@ -3,15 +3,15 @@ import { readFileSync } from 'fs';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { SIDEBAR_WIDTH } from './layoutManager.js';
-import type { ComuxConfig, ComuxThemeName } from '../types.js';
+import type { PsycheConfig, PsycheThemeName } from '../types.js';
 import {
-  applyComuxTheme,
-  syncComuxThemeFromSettings,
+  applyPsycheTheme,
+  syncPsycheThemeFromSettings,
 } from '../theme/colors.js';
 import { execFileSync, execSync } from 'child_process';
 import { buildTmuxSessionThemeOptions } from './tmuxThemeOptions.js';
 
-export const WELCOME_PANE_THEME_OPTION = '@comux_welcome_theme';
+export const WELCOME_PANE_THEME_OPTION = '@psyche_welcome_theme';
 
 /**
  * Creates a welcome pane in the tmux session
@@ -24,7 +24,7 @@ export const WELCOME_PANE_THEME_OPTION = '@comux_welcome_theme';
 export async function createWelcomePane(
   controlPaneId: string,
   cwd?: string,
-  themeName?: ComuxThemeName
+  themeName?: PsycheThemeName
 ): Promise<string | undefined> {
   const logService = LogService.getInstance();
   const tmuxService = TmuxService.getInstance();
@@ -75,7 +75,7 @@ export async function createWelcomePane(
       // Silently ignore layout errors
     }
 
-    // Switch focus back to the control pane (comux sidebar)
+    // Switch focus back to the control pane (psyche sidebar)
     try {
       execSync(`tmux select-pane -t '${controlPaneId}'`, { stdio: 'pipe' });
     } catch {
@@ -132,15 +132,15 @@ export async function welcomePaneExists(welcomePaneId: string | undefined): Prom
   return await tmuxService.paneExists(welcomePaneId);
 }
 
-function applyThemeForSession(projectRoot?: string, themeName?: ComuxThemeName): ComuxThemeName {
+function applyThemeForSession(projectRoot?: string, themeName?: PsycheThemeName): PsycheThemeName {
   if (themeName) {
-    return applyComuxTheme(themeName);
+    return applyPsycheTheme(themeName);
   }
 
-  return syncComuxThemeFromSettings(projectRoot);
+  return syncPsycheThemeFromSettings(projectRoot);
 }
 
-function setWelcomePaneTheme(paneId: string, themeName: ComuxThemeName): void {
+function setWelcomePaneTheme(paneId: string, themeName: PsycheThemeName): void {
   TmuxService.getInstance().setPaneOptionSync(
     paneId,
     WELCOME_PANE_THEME_OPTION,
@@ -151,7 +151,7 @@ function setWelcomePaneTheme(paneId: string, themeName: ComuxThemeName): void {
 export function applyTmuxThemeToSession(
   sessionName: string,
   projectRoot?: string,
-  themeName?: ComuxThemeName
+  themeName?: PsycheThemeName
 ): void {
   const resolvedThemeName = applyThemeForSession(projectRoot, themeName);
 
@@ -165,10 +165,10 @@ export function applyTmuxThemeToSession(
 export async function refreshWelcomePaneTheme(
   panesFile: string,
   projectRoot?: string,
-  themeName?: ComuxThemeName
+  themeName?: PsycheThemeName
 ): Promise<void> {
   try {
-    const config = JSON.parse(readFileSync(panesFile, 'utf8')) as ComuxConfig;
+    const config = JSON.parse(readFileSync(panesFile, 'utf8')) as PsycheConfig;
     if (!config.welcomePaneId) {
       return;
     }

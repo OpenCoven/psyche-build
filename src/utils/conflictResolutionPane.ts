@@ -4,7 +4,7 @@
  * Utilities for creating a new pane specifically for AI-assisted merge conflict resolution
  */
 
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   enforceControlPaneSize,
@@ -40,7 +40,7 @@ export interface ConflictResolutionPaneOptions {
   targetRepoPath: string;    // Path to the target repository (where merge will happen)
   agent: AgentName;
   projectName: string;
-  existingPanes: ComuxPane[];
+  existingPanes: PsychePane[];
 }
 
 /**
@@ -48,7 +48,7 @@ export interface ConflictResolutionPaneOptions {
  */
 export async function createConflictResolutionPane(
   options: ConflictResolutionPaneOptions
-): Promise<ComuxPane> {
+): Promise<PsychePane> {
   const { sourceBranch, targetBranch, targetRepoPath, agent, projectName, existingPanes } = options;
   const tmuxService = TmuxService.getInstance();
   const { SettingsManager } = await import('./settingsManager.js');
@@ -151,7 +151,7 @@ export async function createConflictResolutionPane(
       const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
       launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
         agent,
-        '"$COMUX_PROMPT_CONTENT"',
+        '"$PSYCHE_PROMPT_CONTENT"',
         settings.permissionMode
       )}`;
       promptFilePath = null;
@@ -205,8 +205,8 @@ export async function createConflictResolutionPane(
   await tmuxService.selectPane(paneInfo);
 
   // Create the pane object
-  const newPane: ComuxPane = {
-    id: `comux-${Date.now()}`,
+  const newPane: PsychePane = {
+    id: `psyche-${Date.now()}`,
     slug,
     prompt,
     paneId: paneInfo,
@@ -220,9 +220,9 @@ export async function createConflictResolutionPane(
   // Switch back to the original pane
   await tmuxService.selectPane(originalPaneId);
 
-  // Re-set the title for the comux pane
+  // Re-set the title for the psyche pane
   try {
-    await tmuxService.setPaneTitle(originalPaneId, "comux");
+    await tmuxService.setPaneTitle(originalPaneId, "psyche");
   } catch {
     // Ignore if setting title fails
   }

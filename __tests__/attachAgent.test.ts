@@ -4,7 +4,7 @@ import { generateSiblingSlugForTargetPane } from '../src/utils/attachAgent.js';
 describe('generateSiblingSlugForTargetPane', () => {
   it('increments from existing attached-agent siblings', () => {
     const slug = generateSiblingSlugForTargetPane(
-      { slug: 'cli-login', worktreePath: '/repo/.comux/worktrees/cli-login' },
+      { slug: 'cli-login', worktreePath: '/repo/.psyche/worktrees/cli-login' },
       [
         { slug: 'cli-login' },
         { slug: 'cli-login-a2' },
@@ -16,7 +16,7 @@ describe('generateSiblingSlugForTargetPane', () => {
 
   it('uses worktree directory as base when attaching from a suffixed sibling', () => {
     const slug = generateSiblingSlugForTargetPane(
-      { slug: 'cli-login-a2', worktreePath: '/repo/.comux/worktrees/cli-login' },
+      { slug: 'cli-login-a2', worktreePath: '/repo/.psyche/worktrees/cli-login' },
       [
         { slug: 'cli-login' },
         { slug: 'cli-login-a2' },
@@ -28,7 +28,7 @@ describe('generateSiblingSlugForTargetPane', () => {
 
   it('always uses highest sibling suffix + 1', () => {
     const slug = generateSiblingSlugForTargetPane(
-      { slug: 'cli-login-a4', worktreePath: '/repo/.comux/worktrees/cli-login' },
+      { slug: 'cli-login-a4', worktreePath: '/repo/.psyche/worktrees/cli-login' },
       [
         { slug: 'cli-login' },
         { slug: 'cli-login-a2' },
@@ -41,7 +41,7 @@ describe('generateSiblingSlugForTargetPane', () => {
 
   it('preserves legitimate branch/worktree names that end in -aN', () => {
     const slug = generateSiblingSlugForTargetPane(
-      { slug: 'feature-a2', worktreePath: '/repo/.comux/worktrees/feature-a2' },
+      { slug: 'feature-a2', worktreePath: '/repo/.psyche/worktrees/feature-a2' },
       [{ slug: 'feature-a2' }],
     );
 

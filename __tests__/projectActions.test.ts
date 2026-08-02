@@ -1,6 +1,6 @@
 import path from 'path';
 import { describe, expect, it } from 'vitest';
-import type { ComuxPane, SidebarProject } from '../src/types.js';
+import type { PsychePane, SidebarProject } from '../src/types.js';
 import {
   buildProjectActionLayout,
   buildVisualNavigationRows,
@@ -9,21 +9,21 @@ import {
 
 const repo = (name: string) => path.resolve(`/${name}`);
 
-function pane(id: string, slug: string, projectRoot: string): ComuxPane {
+function pane(id: string, slug: string, projectRoot: string): PsychePane {
   return {
     id,
     slug,
     prompt: `prompt-${slug}`,
-    paneId: `%${id.replace('comux-', '')}`,
+    paneId: `%${id.replace('psyche-', '')}`,
     projectRoot,
   };
 }
 
 describe('projectActions', () => {
   it('adds remove-project only for empty non-root sidebar projects', () => {
-    const panes: ComuxPane[] = [
-      pane('comux-1', 'main-pane', repo('repo-main')),
-      pane('comux-2', 'aux-pane', repo('repo-aux')),
+    const panes: PsychePane[] = [
+      pane('psyche-1', 'main-pane', repo('repo-main')),
+      pane('psyche-2', 'aux-pane', repo('repo-aux')),
     ];
     const sidebarProjects: SidebarProject[] = [
       { projectRoot: repo('repo-main'), projectName: 'repo-main' },
@@ -64,11 +64,11 @@ describe('projectActions', () => {
   });
 
   it('selects the next pane down in the same project after closing a pane', () => {
-    const panes: ComuxPane[] = [
-      pane('comux-1', 'main-pane', repo('repo-main')),
-      pane('comux-2', 'aux-one', repo('repo-aux')),
-      pane('comux-3', 'aux-two', repo('repo-aux')),
-      pane('comux-4', 'main-two', repo('repo-main')),
+    const panes: PsychePane[] = [
+      pane('psyche-1', 'main-pane', repo('repo-main')),
+      pane('psyche-2', 'aux-one', repo('repo-aux')),
+      pane('psyche-3', 'aux-two', repo('repo-aux')),
+      pane('psyche-4', 'main-two', repo('repo-main')),
     ];
     const sidebarProjects: SidebarProject[] = [
       { projectRoot: repo('repo-main'), projectName: 'repo-main' },
@@ -88,9 +88,9 @@ describe('projectActions', () => {
   });
 
   it('selects the project new-agent action when closing the last pane in that project', () => {
-    const panes: ComuxPane[] = [
-      pane('comux-1', 'main-pane', repo('repo-main')),
-      pane('comux-2', 'aux-one', repo('repo-aux')),
+    const panes: PsychePane[] = [
+      pane('psyche-1', 'main-pane', repo('repo-main')),
+      pane('psyche-2', 'aux-one', repo('repo-aux')),
     ];
     const sidebarProjects: SidebarProject[] = [
       { projectRoot: repo('repo-main'), projectName: 'repo-main' },

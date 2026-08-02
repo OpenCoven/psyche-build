@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import { execAsync, execAsyncRace } from './execAsync.js';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 
 /** Regex for characters allowed in git branch names and branch prefixes */
 export const SAFE_BRANCH_CHARS = /^[a-zA-Z0-9._\/-]*$/;
@@ -15,7 +15,7 @@ const HAS_DOT_DOT = /\.\./;
  * Get the git branch name for a pane.
  * Returns branchName if set (prefix-based), otherwise falls back to slug.
  */
-export function getPaneBranchName(pane: ComuxPane): string {
+export function getPaneBranchName(pane: PsychePane): string {
   return pane.branchName || pane.slug;
 }
 
@@ -251,7 +251,7 @@ export async function getOrphanedWorktreesAsync(
   projectRoot: string,
   activePaneSlugs: string[]
 ): Promise<OrphanedWorktree[]> {
-  const worktreesDir = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesDir = path.join(projectRoot, '.psyche', 'worktrees');
 
   try {
     await fsPromises.access(worktreesDir);
@@ -320,7 +320,7 @@ export async function getOrphanedWorktreesAsync(
 }
 
 /**
- * Gets a list of orphaned worktrees - worktrees that exist in .comux/worktrees
+ * Gets a list of orphaned worktrees - worktrees that exist in .psyche/worktrees
  * but don't have an active pane tracking them
  * @deprecated Use getOrphanedWorktreesAsync for non-blocking operation
  */
@@ -328,7 +328,7 @@ export function getOrphanedWorktrees(
   projectRoot: string,
   activePaneSlugs: string[]
 ): OrphanedWorktree[] {
-  const worktreesDir = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesDir = path.join(projectRoot, '.psyche', 'worktrees');
 
   if (!fs.existsSync(worktreesDir)) {
     return [];

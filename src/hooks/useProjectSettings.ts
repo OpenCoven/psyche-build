@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import type { ProjectSettings } from '../types.js';
 
 // Config structure matching what we save
-interface ComuxConfig {
+interface PsycheConfig {
   projectName?: string;
   projectRoot?: string;
   panes?: any[];
@@ -23,7 +23,7 @@ export default function useProjectSettings(settingsFile: string) {
         // Handle both old format (direct settings) and new format (config with settings field)
         if (parsed.settings !== undefined || parsed.panes !== undefined) {
           // New config format
-          const config = parsed as ComuxConfig;
+          const config = parsed as PsycheConfig;
           setProjectSettings(config.settings || {});
         } else {
           // Old format or direct settings
@@ -38,7 +38,7 @@ export default function useProjectSettings(settingsFile: string) {
 
   const saveSettings = async (settings: ProjectSettings) => {
     // Read existing config to preserve other fields
-    let config: ComuxConfig = {};
+    let config: PsycheConfig = {};
     try {
       const content = await fs.readFile(settingsFile, 'utf-8');
       const parsed = JSON.parse(content);

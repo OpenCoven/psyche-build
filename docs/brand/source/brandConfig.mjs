@@ -15,18 +15,18 @@ export const BRAND_OUTPUTS = {
 };
 
 export const BRAND_PATHS = {
-  wordmarkSource: 'docs/brand/source/comux-wordmark.svg',
-  markSource: 'docs/brand/source/comux-mark.svg',
-  heroSource: 'docs/brand/source/comux-hero.svg',
-  ogSource: 'docs/brand/source/comux-og.svg',
-  motionSceneSource: 'docs/brand/source/comux-motion-scene.mjs',
-  publicWordmark: 'docs/public/comux.svg',
+  wordmarkSource: 'docs/brand/source/psyche-wordmark.svg',
+  markSource: 'docs/brand/source/psyche-mark.svg',
+  heroSource: 'docs/brand/source/psyche-hero.svg',
+  ogSource: 'docs/brand/source/psyche-og.svg',
+  motionSceneSource: 'docs/brand/source/psyche-motion-scene.mjs',
+  publicWordmark: 'docs/public/psyche.svg',
   publicMark: 'docs/public/favicon.svg',
-  publicHero: 'docs/public/comux.svg',
+  publicHero: 'docs/public/psyche.svg',
   publicFaviconRaster: 'docs/public/favicon.svg',
   publicOgRaster: 'docs/public/og.svg',
   publicVideo: '',
-  repoWordmarkVector: 'comux.svg',
+  repoWordmarkVector: 'psyche.svg',
   repoWordmarkRaster: '',
   nativeHelperIcon: '',
 };

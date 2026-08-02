@@ -1,26 +1,26 @@
-# comux + Coven demo loop
+# psyche + Coven demo loop
 
 This loop is the public OpenCoven story in the smallest useful form:
 
-1. Open a project in comux.
+1. Open a project in psyche.
 2. Launch or attach a Coven-backed Codex or Claude Code session.
 3. Watch the work as a visible pane/session.
-4. Inspect files and diffs from comux.
+4. Inspect files and diffs from psyche.
 5. Merge, create a PR, archive, or clean up explicitly.
 
-The upstream OpenCoven roadmap tracks this same slice under the comux "Next" milestone:
+The upstream OpenCoven roadmap tracks this same slice under the psyche "Next" milestone:
 https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md
 
 ## Prerequisites
 
-Install comux and Coven, then verify both from the same shell:
+Install psyche and Coven, then verify both from the same shell:
 
 ```bash
-npm install -g comux
+npm install -g psyche-build
 npx @opencoven/cli doctor
 ```
 
-Coven is optional. comux still works as a standalone tmux/worktree cockpit when Coven is not installed or the daemon is stopped.
+Coven is optional. psyche still works as a standalone tmux/worktree cockpit when Coven is not installed or the daemon is stopped.
 
 For the Coven-backed path, start the local daemon:
 
@@ -36,12 +36,12 @@ From the repository you want to work in:
 
 ```bash
 cd /path/to/project
-comux
+psyche
 ```
 
-Inside comux:
+Inside psyche:
 
-1. Press `n` to create a normal comux agent pane, or press `d` to launch the desktop-use Coven pane.
+1. Press `n` to create a normal psyche agent pane, or press `d` to launch the desktop-use Coven pane.
 2. For a CLI-launched Coven session, run one of these in a terminal pane:
 
    ```bash
@@ -53,9 +53,9 @@ Inside comux:
 4. Use `j` to watch the pane, `f` to inspect files and diffs, and `m` to open the pane menu.
 5. Finish with an explicit action: merge, create a GitHub PR, close/archive the session, or clean up the worktree.
 
-## Current Coven contract verified by comux
+## Current Coven contract verified by psyche
 
-comux talks to the local Coven daemon through `/api/v1`:
+psyche talks to the local Coven daemon through `/api/v1`:
 
 - `GET /api/v1/health`
 - `GET /api/v1/sessions`
@@ -64,17 +64,17 @@ comux talks to the local Coven daemon through `/api/v1`:
 - `GET /api/v1/events?sessionId=...`
 - `POST /api/v1/sessions/:id/input`
 
-The current stable daemon contract is `apiVersion: "coven.daemon.v1"`. Event reads use the paginated event envelope with `nextCursor.afterSeq`, and comux keeps polling from that sequence cursor instead of replaying the whole event log.
+The current stable daemon contract is `apiVersion: "coven.daemon.v1"`. Event reads use the paginated event envelope with `nextCursor.afterSeq`, and psyche keeps polling from that sequence cursor instead of replaying the whole event log.
 
 The older `coven sessions --json` adapter remains available only as an explicit legacy fallback for visibility-only compatibility. The default list, launch, open, and event paths use the local daemon API.
 
 ## Unavailable states
 
-If Coven is missing or stopped, comux keeps running:
+If Coven is missing or stopped, psyche keeps running:
 
 - the side panel shows a compact Coven unavailable state;
 - desktop-use launch failures point at `coven daemon start`;
-- ordinary comux panes, worktrees, file browsing, merge, PR, and cleanup flows still work.
+- ordinary psyche panes, worktrees, file browsing, merge, PR, and cleanup flows still work.
 
 Use this recovery checklist:
 

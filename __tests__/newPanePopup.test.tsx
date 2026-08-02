@@ -31,7 +31,7 @@ afterEach(() => {
 
 describe('NewPanePopupApp', () => {
   it('requires a second escape press to clear a non-empty prompt', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comux-new-pane-popup-'));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-new-pane-popup-'));
     tempDirs.push(tempDir);
     const resultFile = path.join(tempDir, 'result.json');
 

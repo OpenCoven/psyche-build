@@ -16,9 +16,9 @@ interface OnboardingState {
   [key: string]: unknown;
 }
 
-const ONBOARDING_STATE_RELATIVE_PATH = path.join('.comux', 'onboarding.json');
-const OPENROUTER_BLOCK_START = '# >>> comux openrouter >>>';
-const OPENROUTER_BLOCK_END = '# <<< comux openrouter <<<';
+const ONBOARDING_STATE_RELATIVE_PATH = path.join('.psyche', 'onboarding.json');
+const OPENROUTER_BLOCK_START = '# >>> psyche openrouter >>>';
+const OPENROUTER_BLOCK_END = '# <<< psyche openrouter <<<';
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

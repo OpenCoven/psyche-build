@@ -4,13 +4,13 @@ import { execSync } from 'node:child_process';
 import type { PaneSummary } from './protocol.js';
 
 /**
- * Read comux's on-disk config for a project root and return a summary list.
+ * Read psyche's on-disk config for a project root and return a summary list.
  *
- * comux persists panes in `<projectRoot>/.comux/comux.config.json`. For v0,
+ * psyche persists panes in `<projectRoot>/.psyche/psyche.config.json`. For v0,
  * the daemon is scoped to one project root (passed in from the CLI).
  */
 export async function listPanes(projectRoot: string): Promise<PaneSummary[]> {
-  const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
   let raw: string;
   try {
@@ -32,8 +32,8 @@ export async function listPanes(projectRoot: string): Promise<PaneSummary[]> {
   }
 
   // `id` must be the tmux pane identifier (`%3`) because every downstream
-  // op (send-keys, capture-pane, resize-pane) keys on it. The comux-internal
-  // id (`comux-2`) falls back as `title` so the rail has something readable.
+  // op (send-keys, capture-pane, resize-pane) keys on it. The psyche-internal
+  // id (`psyche-2`) falls back as `title` so the rail has something readable.
   return config.panes.map((p): PaneSummary => {
     const tmuxId = String(p.paneId ?? p.id ?? '');
     const fallbackTitle =

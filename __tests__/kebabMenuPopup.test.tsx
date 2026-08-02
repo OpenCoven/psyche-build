@@ -5,7 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { KebabMenuPopupApp } from '../src/components/popups/kebabMenuPopup.js';
-import type { PaneMenuAction } from '../src/actions/types.js';
+import { PaneAction, type PaneMenuAction } from '../src/actions/types.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -19,19 +19,19 @@ afterEach(() => {
 
 describe('KebabMenuPopupApp', () => {
   it('selects a menu action from its visible shortcut', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'comux-kebab-popup-'));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-kebab-popup-'));
     tempDirs.push(tempDir);
     const resultFile = path.join(tempDir, 'result.json');
 
     const actions: PaneMenuAction[] = [
       {
-        id: 'view',
+        id: PaneAction.VIEW,
         label: 'View',
         description: 'Jump to this pane',
         shortcut: 'j',
       },
       {
-        id: 'close',
+        id: PaneAction.CLOSE,
         label: 'Close',
         description: 'Close this pane',
         shortcut: 'x',

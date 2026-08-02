@@ -48,7 +48,7 @@ export interface DaemonOptions {
   capabilityStrategies: readonly AgenticCapabilityStrategy[];
 }
 
-const DEFAULT_PORT = Number(process.env.COMUX_DAEMON_PORT ?? 47123);
+const DEFAULT_PORT = Number(process.env.PSYCHE_DAEMON_PORT ?? 47123);
 
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
@@ -88,11 +88,11 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   });
 
   // eslint-disable-next-line no-console
-  console.log(`comux daemon listening on 127.0.0.1:${port}`);
+  console.log(`psyche daemon listening on 127.0.0.1:${port}`);
   // eslint-disable-next-line no-console
   console.log(`project root:  ${projectRoot}`);
   // eslint-disable-next-line no-console
-  console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start comux first)'}`);
+  console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start psyche first)'}`);
   // eslint-disable-next-line no-console
   console.log(`token file:    ${tokenFilePath()}`);
 
@@ -111,7 +111,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
 
   const shutdown = (signal: string) => {
     // eslint-disable-next-line no-console
-    console.log(`\ncomux daemon shutting down (${signal})`);
+    console.log(`\npsyche daemon shutting down (${signal})`);
     tmux.stop();
     wss.close();
     process.exit(0);
@@ -506,7 +506,7 @@ export async function updatePaneMeta(
   paneId: string,
   patch: { title?: string; agent?: string },
 ): Promise<void> {
-  const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
   const raw = await readFile(configPath, 'utf8');
   const config = JSON.parse(raw) as { panes?: Array<Record<string, unknown>> };
   const panes = Array.isArray(config.panes) ? config.panes : [];

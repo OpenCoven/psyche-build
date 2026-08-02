@@ -2,8 +2,8 @@ import React, { memo, useMemo } from "react"
 import { Box, Text } from "ink"
 import stringWidth from "string-width"
 import type {
-  ComuxPane,
-  ComuxThemeName,
+  PsychePane,
+  PsycheThemeName,
   SidebarProject,
 } from "../../types.js"
 import type { AgentStatusMap } from "../../hooks/useAgentStatus.js"
@@ -12,8 +12,8 @@ import CovenSessionsPanel from "./CovenSessionsPanel.js"
 import DesktopUsePanePanel from "./DesktopUsePanePanel.js"
 import { COLORS } from "../../theme/colors.js"
 import {
-  getComuxThemeAccent,
-  getComuxThemeActiveBorderHex,
+  getPsycheThemeAccent,
+  getPsycheThemeActiveBorderHex,
 } from "../../theme/colors.js"
 import Spinner from "../indicators/Spinner.js"
 import {
@@ -27,12 +27,12 @@ import type { CovenSessionsLoadState } from "../../utils/covenSessions.js"
 import type { DesktopUseStateMap } from "../../hooks/useCovenDesktopUse.js"
 
 interface PanesGridProps {
-  panes: ComuxPane[]
+  panes: PsychePane[]
   selectedIndex: number
   activeProjectRoot?: string
   isLoading: boolean
   themeName: string
-  projectThemeByRoot: Map<string, ComuxThemeName>
+  projectThemeByRoot: Map<string, PsycheThemeName>
   agentStatuses?: AgentStatusMap
   activeDevSourcePath?: string
   sidebarProjects: SidebarProject[]
@@ -115,9 +115,9 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
     return selectedAction?.projectRoot
   }, [activeProjectRootProp, selectedIndex, paneGroups, actionLayout.actionItems])
 
-  const getProjectThemeName = (projectRoot: string): ComuxThemeName =>
+  const getProjectThemeName = (projectRoot: string): PsycheThemeName =>
     projectThemeByRoot.get(projectRoot)
-    || themeName as ComuxThemeName
+    || themeName as PsycheThemeName
 
   const renderActionRow = (
     actions: ProjectActionItem[],
@@ -125,7 +125,7 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
     isActiveGroup: boolean
   ) => {
     const actionThemeName = getProjectThemeName(actions[0]?.projectRoot || fallbackProjectRoot)
-    const actionAccent = getComuxThemeAccent(actionThemeName)
+    const actionAccent = getPsycheThemeAccent(actionThemeName)
 
     const renderLabel = (action: ProjectActionItem) => {
       const isSelected = selIdx === action.index
@@ -169,7 +169,7 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
           {(() => {
             const isActive = activeProjectRoot === group.projectRoot
             const groupThemeName = getProjectThemeName(group.projectRoot)
-            const accentColor = getComuxThemeAccent(groupThemeName)
+            const accentColor = getPsycheThemeAccent(groupThemeName)
             const busy = isProjectBusy?.(group.projectRoot) ?? false
             const spinnerWidth = busy ? 2 : 0
             const isEditingProjectName = inlineRename?.target.kind === "project"
@@ -182,7 +182,7 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
             const fill = "⣿".repeat(remaining)
             const fillColor = isActive ? accentColor : COLORS.border
             const titleColor = isActive
-              ? getComuxThemeActiveBorderHex(groupThemeName)
+              ? getPsycheThemeActiveBorderHex(groupThemeName)
               : COLORS.unselected
             return (
               <Text>

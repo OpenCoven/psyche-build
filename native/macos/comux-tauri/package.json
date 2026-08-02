@@ -1,9 +1,0 @@
-{
-  "name": "comux-tauri",
-  "private": true,
-  "version": "0.0.7",
-  "scripts": {
-    "build": "cargo tauri build",
-    "dev": "cargo tauri dev"
-  }
-}

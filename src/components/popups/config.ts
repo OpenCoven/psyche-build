@@ -1,7 +1,7 @@
 import { COLORS, TMUX_COLORS } from '../../theme/colors.js';
 
 /**
- * Centralized configuration for all comux popups
+ * Centralized configuration for all psyche popups
  * Single source of truth for popup styling and behavior
  */
 export const POPUP_CONFIG = {

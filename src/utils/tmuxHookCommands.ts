@@ -8,16 +8,16 @@ function escapeForDoubleQuotes(value: string): string {
 }
 
 /**
- * Builds the pane-exited hook command used by comux.
+ * Builds the pane-exited hook command used by psyche.
  *
  * It performs two actions:
  * 1) Best-effort control-pane recovery if the control pane was killed.
- * 2) Notifies the current comux process via SIGUSR2 for normal pane sync.
+ * 2) Notifies the current psyche process via SIGUSR2 for normal pane sync.
  */
 export function buildPaneExitedHookCommand(pid: number): string {
   const recoveryScriptPath = resolveDistPath('utils', 'controlPaneRecovery.js');
   const escapedScriptPath = escapeForDoubleQuotes(recoveryScriptPath);
-  return `run-shell "COMUX_RECOVERY_EXITED_PANE=#{hook_pane} node \\"${escapedScriptPath}\\" >/dev/null 2>&1; kill -USR2 ${pid} 2>/dev/null || true # comux-hook"`;
+  return `run-shell "PSYCHE_RECOVERY_EXITED_PANE=#{hook_pane} node \\"${escapedScriptPath}\\" >/dev/null 2>&1; kill -USR2 ${pid} 2>/dev/null || true # psyche-hook"`;
 }
 
 /**
@@ -32,7 +32,7 @@ export function buildPaneExitedHookCommandForSession(
   const escapedScriptPath = escapeForDoubleQuotes(recoveryScriptPath);
   const encodedSessionName = Buffer.from(sessionName, 'utf-8').toString('base64');
 
-  return `run-shell "COMUX_RECOVERY_SESSION_B64=${encodedSessionName} COMUX_RECOVERY_EXITED_PANE=#{hook_pane} node \\"${escapedScriptPath}\\" >/dev/null 2>&1; kill -USR2 ${pid} 2>/dev/null || true # comux-hook"`;
+  return `run-shell "PSYCHE_RECOVERY_SESSION_B64=${encodedSessionName} PSYCHE_RECOVERY_EXITED_PANE=#{hook_pane} node \\"${escapedScriptPath}\\" >/dev/null 2>&1; kill -USR2 ${pid} 2>/dev/null || true # psyche-hook"`;
 }
 
 /**
@@ -46,8 +46,8 @@ export function buildPaneFocusHookCommandForSession(
 ): string {
   const escapedSessionName = escapeForDoubleQuotes(sessionName);
   const notifyController = typeof pid === 'number'
-    ? `; run-shell -b "kill -USR2 ${pid} 2>/dev/null || true # comux-hook"`
+    ? `; run-shell -b "kill -USR2 ${pid} 2>/dev/null || true # psyche-hook"`
     : '';
 
-  return `if-shell -F "#{!=:#{@comux_active_border_style},}" "set-option -F -t \\"${escapedSessionName}\\" pane-active-border-style \\"#{@comux_active_border_style}\\""${notifyController}`;
+  return `if-shell -F "#{!=:#{@psyche_active_border_style},}" "set-option -F -t \\"${escapedSessionName}\\" pane-active-border-style \\"#{@psyche_active_border_style}\\""${notifyController}`;
 }

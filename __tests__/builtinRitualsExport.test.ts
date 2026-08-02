@@ -10,9 +10,9 @@ const exportedPath = path.join(
   projectRoot,
   'native',
   'macos',
-  'comux-app',
+  'psyche-app',
   'Sources',
-  'ComuxApp',
+  'PsycheApp',
   'Resources',
   'builtin-rituals.json',
 );

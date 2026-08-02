@@ -36,7 +36,7 @@ export function PopupWrapper<T = any>({
   const { exit } = useApp();
 
   useEffect(() => {
-    const readyFile = process.env.COMUX_POPUP_READY_FILE;
+    const readyFile = process.env.PSYCHE_POPUP_READY_FILE;
     if (!readyFile) return;
 
     try {

@@ -1,7 +1,7 @@
 /**
  * TmuxHookManager - Manages tmux hooks for event-driven updates
  *
- * Instead of polling every 5 seconds, tmux hooks notify comux immediately
+ * Instead of polling every 5 seconds, tmux hooks notify psyche immediately
  * when panes are created, closed, or resized. This reduces CPU usage and
  * improves responsiveness.
  *
@@ -155,7 +155,7 @@ export class TmuxHookManager extends EventEmitter {
     try {
       // Quick check - just look for our signature hook
       await execAsync(
-        `tmux show-hooks -t '${this.sessionName}' 2>/dev/null | grep -q 'comux-hook'`,
+        `tmux show-hooks -t '${this.sessionName}' 2>/dev/null | grep -q 'psyche-hook'`,
         { silent: true, timeout: 1000 }
       );
       return true;
@@ -186,11 +186,11 @@ export class TmuxHookManager extends EventEmitter {
       );
       const hookCommands = [
         // Pane split (new pane created)
-        `tmux set-hook -t '${this.sessionName}' after-split-window 'run-shell "kill -USR2 ${this.pid} 2>/dev/null || true # comux-hook"'`,
+        `tmux set-hook -t '${this.sessionName}' after-split-window 'run-shell "kill -USR2 ${this.pid} 2>/dev/null || true # psyche-hook"'`,
         // Pane closed (includes control-pane recovery if needed)
         `tmux set-hook -t '${this.sessionName}' pane-exited '${paneExitedHookCommand}'`,
         // Window/client resized
-        `tmux set-hook -t '${this.sessionName}' client-resized 'run-shell "kill -USR2 ${this.pid} 2>/dev/null || true # comux-hook"'`,
+        `tmux set-hook -t '${this.sessionName}' client-resized 'run-shell "kill -USR2 ${this.pid} 2>/dev/null || true # psyche-hook"'`,
         // Pane focus changed
         `tmux set-hook -t '${this.sessionName}' after-select-pane '${paneFocusHookCommand}'`,
       ];
@@ -210,7 +210,7 @@ export class TmuxHookManager extends EventEmitter {
   }
 
   /**
-   * Remove all comux hooks from this session
+   * Remove all psyche hooks from this session
    */
   async uninstallHooks(): Promise<boolean> {
     if (!this.sessionName) return false;

@@ -1,12 +1,12 @@
 /**
- * Standardized Action System for comux
+ * Standardized Action System for psyche
  *
  * This module defines the core action types and response structures used across
- * all comux interfaces (TUI, Web UI, Native Apps, etc.). By standardizing action
+ * all psyche interfaces (TUI, Web UI, Native Apps, etc.). By standardizing action
  * responses, we ensure consistent behavior and UI patterns across all interfaces.
  */
 
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
@@ -88,14 +88,14 @@ export interface ActionResult {
  * Context provided to action functions
  */
 export interface ActionContext {
-  panes: ComuxPane[];
+  panes: PsychePane[];
   currentPaneId?: string;
   sessionName: string;
   projectName: string;
-  savePanes: (panes: ComuxPane[]) => Promise<void>;
+  savePanes: (panes: PsychePane[]) => Promise<void>;
 
   // Optional callbacks for specific actions
-  onPaneUpdate?: (pane: ComuxPane) => void;
+  onPaneUpdate?: (pane: PsychePane) => void;
   onPaneRemove?: (paneId: string) => void | Promise<void>;
   onActionResult?: (result: ActionResult) => Promise<void>;
 }
@@ -104,7 +104,7 @@ export interface ActionContext {
  * Standard action function signature
  */
 export type ActionFunction = (
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext,
   params?: any
 ) => Promise<ActionResult>;
@@ -310,7 +310,7 @@ const HIDDEN_MENU_ACTIONS = new Set<PaneAction>([
  * Get available actions for a pane based on its state
  */
 export function getAvailableActions(
-  pane: ComuxPane,
+  pane: PsychePane,
   projectSettings?: any,
   isDevMode: boolean = false
 ): ActionMetadata[] {
@@ -367,8 +367,8 @@ function getProjectVisibilityMenuAction(
 }
 
 export function getPaneMenuActions(
-  pane: ComuxPane,
-  panes: ComuxPane[],
+  pane: PsychePane,
+  panes: PsychePane[],
   projectSettings?: any,
   isDevMode: boolean = false,
   projectRoot: string = pane.projectRoot || ''

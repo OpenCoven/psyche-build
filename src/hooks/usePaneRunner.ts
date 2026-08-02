@@ -1,13 +1,13 @@
 import { execSync } from 'child_process';
 import fs from 'fs/promises';
-import type { ComuxPane, ProjectSettings } from '../types.js';
+import type { PsychePane, ProjectSettings } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 
 interface Params {
-  panes: ComuxPane[];
-  savePanes: (p: ComuxPane[]) => Promise<void>;
+  panes: PsychePane[];
+  savePanes: (p: PsychePane[]) => Promise<void>;
   projectSettings: ProjectSettings;
   setStatusMessage: (msg: string) => void;
   setRunningCommand: (v: boolean) => void;
@@ -17,11 +17,11 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
   const copyNonGitFiles = async (worktreePath: string, sourceProjectRoot?: string) => {
     try {
       setStatusMessage('Copying non-git files from main...');
-      const derivedRoot = worktreePath.replace(/[\\\/]\.comux[\\\/]worktrees[\\\/][^\\\/]+$/, '');
+      const derivedRoot = worktreePath.replace(/[\\\/]\.psyche[\\\/]worktrees[\\\/][^\\\/]+$/, '');
       const projectRoot = sourceProjectRoot
         || (derivedRoot !== worktreePath ? derivedRoot : undefined)
         || execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', stdio: 'pipe' }).trim();
-      const rsyncCmd = `rsync -avz --exclude='.git' --exclude='.comux' --exclude='node_modules' --exclude='dist' --exclude='build' --exclude='.next' --exclude='.turbo' "${projectRoot}/" "${worktreePath}/"`;
+      const rsyncCmd = `rsync -avz --exclude='.git' --exclude='.psyche' --exclude='node_modules' --exclude='dist' --exclude='build' --exclude='.next' --exclude='.turbo' "${projectRoot}/" "${worktreePath}/"`;
       execSync(rsyncCmd, { stdio: 'pipe' });
       setStatusMessage('Non-git files copied successfully');
       setTimeout(() => setStatusMessage(''), 2000);
@@ -31,7 +31,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
     }
   };
 
-  const runCommandInternal = async (type: 'test' | 'dev', pane: ComuxPane) => {
+  const runCommandInternal = async (type: 'test' | 'dev', pane: PsychePane) => {
     if (!pane.worktreePath) {
       setStatusMessage('No worktree path for this pane');
       setTimeout(() => setStatusMessage(''), 2000);
@@ -58,15 +58,15 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
 
       const windowName = `${pane.slug}-${type}`;
       const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
-      const logFile = `/tmp/comux-${pane.id}-${type}.log`;
+      const logFile = `/tmp/psyche-${pane.id}-${type}.log`;
       const fullCommand = `cd "${pane.worktreePath}" && ${command} 2>&1 | tee ${logFile}`;
       await tmuxService.sendKeys(windowId, `'${fullCommand.replace(/'/g, "'\\''")}' Enter`);
 
-      const updatedPane: ComuxPane = {
+      const updatedPane: PsychePane = {
         ...pane,
         [type === 'test' ? 'testWindowId' : 'devWindowId']: windowId,
         [type === 'test' ? 'testStatus' : 'devStatus']: 'running'
-      } as ComuxPane;
+      } as PsychePane;
 
       const updatedPanes = panes.map(p => p.id === pane.id ? updatedPane : p);
       await savePanes(updatedPanes);
@@ -133,7 +133,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
     } catch {}
   };
 
-  const attachBackgroundWindow = async (pane: ComuxPane, type: 'test' | 'dev') => {
+  const attachBackgroundWindow = async (pane: PsychePane, type: 'test' | 'dev') => {
     const windowId = type === 'test' ? pane.testWindowId : pane.devWindowId;
     if (!windowId) {
       setStatusMessage(`No ${type} window to attach`);

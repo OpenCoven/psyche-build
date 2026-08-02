@@ -85,10 +85,10 @@ function resolveDistIndexPath(): string {
 
 async function recoverControlPaneIfNeeded(): Promise<void> {
   let decodedSession = '';
-  if (process.env.COMUX_RECOVERY_SESSION_B64) {
+  if (process.env.PSYCHE_RECOVERY_SESSION_B64) {
     try {
       decodedSession = Buffer.from(
-        process.env.COMUX_RECOVERY_SESSION_B64,
+        process.env.PSYCHE_RECOVERY_SESSION_B64,
         'base64'
       ).toString('utf-8');
     } catch {
@@ -98,18 +98,18 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
 
   const resolvedSessionFromTmux = runTmux(['display-message', '-p', '#S']);
   const sessionName = decodedSession
-    || process.env.COMUX_RECOVERY_SESSION
+    || process.env.PSYCHE_RECOVERY_SESSION
     || (resolvedSessionFromTmux.ok ? resolvedSessionFromTmux.stdout : '')
     || '';
 
-  const exitedPaneIdRaw = process.env.COMUX_RECOVERY_EXITED_PANE || '';
+  const exitedPaneIdRaw = process.env.PSYCHE_RECOVERY_EXITED_PANE || '';
   const exitedPaneId = exitedPaneIdRaw.startsWith('#{') ? '' : exitedPaneIdRaw;
 
   if (!sessionName) {
     return;
   }
 
-  const configPath = getSessionOption(sessionName, '@comux_config_path');
+  const configPath = getSessionOption(sessionName, '@psyche_config_path');
   if (!configPath) {
     return;
   }
@@ -152,17 +152,17 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
     return;
   }
 
-  // If comux already exists in another pane, just update config ownership.
-  const existingComuxPane = panes.find((pane) => pane.paneTitle === 'comux');
-  if (existingComuxPane) {
-    config.controlPaneId = existingComuxPane.paneId;
+  // If psyche already exists in another pane, just update config ownership.
+  const existingPsychePane = panes.find((pane) => pane.paneTitle === 'psyche');
+  if (existingPsychePane) {
+    config.controlPaneId = existingPsychePane.paneId;
     config.controlPaneSize = SIDEBAR_WIDTH;
     config.lastUpdated = new Date().toISOString();
     await atomicWriteJson(configPath, config);
     return;
   }
 
-  const projectRootFromOption = getSessionOption(sessionName, '@comux_project_root');
+  const projectRootFromOption = getSessionOption(sessionName, '@psyche_project_root');
   const projectRoot = projectRootFromOption
     || (typeof config.projectRoot === 'string' ? config.projectRoot : '')
     || path.dirname(path.dirname(configPath));
@@ -172,7 +172,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
     return;
   }
 
-  // Recreate a left sidebar pane and launch comux there.
+  // Recreate a left sidebar pane and launch psyche there.
   const splitResult = runTmux([
     'split-window',
     '-b',
@@ -192,7 +192,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   }
 
   const newControlPaneId = splitResult.stdout.trim();
-  runTmux(['select-pane', '-t', newControlPaneId, '-T', 'comux']);
+  runTmux(['select-pane', '-t', newControlPaneId, '-T', 'psyche']);
   runTmux(['send-keys', '-t', newControlPaneId, `node "${resolveDistIndexPath()}"`, 'Enter']);
 
   config.controlPaneId = newControlPaneId;

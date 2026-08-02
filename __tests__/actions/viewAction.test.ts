@@ -25,7 +25,7 @@ describe('viewAction', () => {
 
   it('should successfully jump to pane and return navigation result', async () => {
     const mockPane = createMockPane({
-      id: 'comux-1',
+      id: 'psyche-1',
       slug: 'test-pane',
       paneId: '%42',
     });
@@ -43,7 +43,7 @@ describe('viewAction', () => {
     );
 
     // Verify result
-    expectNavigation(result, 'comux-1');
+    expectNavigation(result, 'psyche-1');
     expect(result.message).toContain('test-pane');
     expect(result.dismissable).toBe(true);
   });
@@ -103,13 +103,13 @@ describe('viewAction', () => {
   });
 
   it('should set correct target pane ID for navigation', async () => {
-    const mockPane = createMockPane({ id: 'comux-42' });
+    const mockPane = createMockPane({ id: 'psyche-42' });
     const mockContext = createMockContext([mockPane]);
 
     vi.mocked(execSync).mockReturnValue(Buffer.from(''));
 
     const result = await viewPane(mockPane, mockContext);
 
-    expect(result.targetPaneId).toBe('comux-42');
+    expect(result.targetPaneId).toBe('psyche-42');
   });
 });

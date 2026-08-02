@@ -18,7 +18,7 @@ import { getPaneBranchName, isValidBranchName } from '../src/utils/git.js';
 describe('getPaneBranchName', () => {
   it('returns branchName when set', () => {
     const pane = {
-      id: 'comux-1', slug: 'fix-auth', branchName: 'feat/fix-auth',
+      id: 'psyche-1', slug: 'fix-auth', branchName: 'feat/fix-auth',
       prompt: 'test', paneId: '%1',
     };
     expect(getPaneBranchName(pane)).toBe('feat/fix-auth');
@@ -26,7 +26,7 @@ describe('getPaneBranchName', () => {
 
   it('falls back to slug when branchName is not set', () => {
     const pane = {
-      id: 'comux-1', slug: 'fix-auth',
+      id: 'psyche-1', slug: 'fix-auth',
       prompt: 'test', paneId: '%1',
     };
     expect(getPaneBranchName(pane)).toBe('fix-auth');
@@ -34,7 +34,7 @@ describe('getPaneBranchName', () => {
 
   it('falls back to slug when branchName is undefined', () => {
     const pane = {
-      id: 'comux-1', slug: 'fix-auth', branchName: undefined,
+      id: 'psyche-1', slug: 'fix-auth', branchName: undefined,
       prompt: 'test', paneId: '%1',
     };
     expect(getPaneBranchName(pane)).toBe('fix-auth');
@@ -150,14 +150,14 @@ describe('slug and branchName separation', () => {
   it('worktree path uses slug, not branchName', () => {
     const projectRoot = '/home/user/project';
     const slug = 'fix-auth';
-    const worktreePath = `${projectRoot}/.comux/worktrees/${slug}`;
+    const worktreePath = `${projectRoot}/.psyche/worktrees/${slug}`;
 
-    expect(worktreePath).toBe('/home/user/project/.comux/worktrees/fix-auth');
+    expect(worktreePath).toBe('/home/user/project/.psyche/worktrees/fix-auth');
     expect(worktreePath.split('/').pop()).toBe('fix-auth');
   });
 
   it('branchName stored on pane only when different from slug', () => {
-    const slug = 'fix-auth';
+    const slug: string = 'fix-auth';
 
     // With prefix: branchName is stored
     const withPrefix = 'feat/fix-auth' !== slug ? 'feat/fix-auth' : undefined;
@@ -270,38 +270,38 @@ describe('nonexistent baseBranch validation', () => {
 
 describe('baseBranch in worktree creation command', () => {
   it('produces correct command with baseBranch as start-point', () => {
-    const worktreePath = '/project/.comux/worktrees/fix-auth';
+    const worktreePath = '/project/.psyche/worktrees/fix-auth';
     const branchName = 'feat/fix-auth';
     const baseBranch = 'main';
 
     const startPoint = baseBranch ? ` "${baseBranch}"` : '';
     const cmd = `git worktree add "${worktreePath}" -b "${branchName}"${startPoint}`;
 
-    expect(cmd).toBe('git worktree add "/project/.comux/worktrees/fix-auth" -b "feat/fix-auth" "main"');
+    expect(cmd).toBe('git worktree add "/project/.psyche/worktrees/fix-auth" -b "feat/fix-auth" "main"');
   });
 
   it('produces correct command without baseBranch (uses HEAD)', () => {
-    const worktreePath = '/project/.comux/worktrees/fix-auth';
+    const worktreePath = '/project/.psyche/worktrees/fix-auth';
     const branchName = 'fix-auth';
     const baseBranch = '';
 
     const startPoint = baseBranch ? ` "${baseBranch}"` : '';
     const cmd = `git worktree add "${worktreePath}" -b "${branchName}"${startPoint}`;
 
-    expect(cmd).toBe('git worktree add "/project/.comux/worktrees/fix-auth" -b "fix-auth"');
+    expect(cmd).toBe('git worktree add "/project/.psyche/worktrees/fix-auth" -b "fix-auth"');
   });
 
   it('uses existing branch without -b flag when branch exists', () => {
-    const worktreePath = '/project/.comux/worktrees/fix-auth';
+    const worktreePath = '/project/.psyche/worktrees/fix-auth';
     const branchName = 'feat/fix-auth';
 
     const cmd = `git worktree add "${worktreePath}" "${branchName}"`;
 
-    expect(cmd).toBe('git worktree add "/project/.comux/worktrees/fix-auth" "feat/fix-auth"');
+    expect(cmd).toBe('git worktree add "/project/.psyche/worktrees/fix-auth" "feat/fix-auth"');
   });
 });
 
-// ─── COMUX_BRANCH hook env ───
+// ─── PSYCHE_BRANCH hook env ───
 
 describe('hooks environment uses branchName', () => {
   it('uses branchName when set', () => {

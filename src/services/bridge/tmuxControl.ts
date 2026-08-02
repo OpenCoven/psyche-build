@@ -11,8 +11,8 @@ import path from 'node:path';
  * commands terminated with \n; responses come back as %begin/%end blocks
  * but we don't use them yet — most ops are fire-and-forget for now.
  *
- * Lifted from meow/comux-daemon-ws commit cda47c5 into src/services/bridge/
- * per docs/superpowers/plans/2026-04-25-comux-bridge-daemon.md.
+ * Lifted from meow/psyche-daemon-ws commit cda47c5 into src/services/bridge/
+ * per docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md.
  */
 export class TmuxControl extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -172,14 +172,14 @@ export function tmuxDimensionArg(value: unknown, label: string): number {
 }
 
 /**
- * Mirrors `Comux.buildSessionNameForRoot` in src/index.ts so the daemon
- * derives the same session name comux itself uses.
+ * Mirrors `Psyche.buildSessionNameForRoot` in src/index.ts so the daemon
+ * derives the same session name psyche itself uses.
  */
 export function tmuxSessionNameForRoot(projectRoot: string): string {
   const projectName = path.basename(projectRoot);
   const projectHash = createHash('md5').update(projectRoot).digest('hex').substring(0, 8);
   const ident = `${projectName}-${projectHash}`.replace(/\./g, '-');
-  return `comux-${ident}`;
+  return `psyche-${ident}`;
 }
 
 export function tmuxSessionExists(name: string): boolean {

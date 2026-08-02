@@ -26,7 +26,7 @@ async function handleStars(request: Request): Promise<Response> {
   }
 
   try {
-    const stars = await fetchGithubStarCount(fetch, 'comux-docs-worker');
+    const stars = await fetchGithubStarCount(fetch, 'psyche-build-docs-worker');
     if (stars == null) {
       return Response.json(
         { stars: null },

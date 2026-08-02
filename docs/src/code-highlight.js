@@ -9,7 +9,7 @@ const COMMENTS = /(\/\/.*$|\/\*[\s\S]*?\*\/)/gm;
 const NUMBERS = /\b(\d+\.?\d*)\b/g;
 const FUNCTIONS = /\b([a-zA-Z_]\w*)\s*(?=\()/g;
 const SHELL_COMMENT = /^(\s*#.*)$/gm;
-const SHELL_CMD = /^(\s*)(npm|npx|pnpm|yarn|curl|git|cd|mkdir|cat|echo|tmux|comux|ls|rm|cp|mv|sudo|brew|apt|pip|node|deno|bun|chmod|export)\b/gm;
+const SHELL_CMD = /^(\s*)(npm|npx|pnpm|yarn|curl|git|cd|mkdir|cat|echo|tmux|psyche|ls|rm|cp|mv|sudo|brew|apt|pip|node|deno|bun|chmod|export)\b/gm;
 const SHELL_FLAG = /\s(--?[\w-]+)/g;
 const JSON_KEY = /("[\w-]+")\s*:/g;
 

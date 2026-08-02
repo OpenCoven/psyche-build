@@ -11,9 +11,9 @@ describe('mergeValidation', () => {
     vi.mocked(execSync).mockReset();
   });
 
-  it('ignores comux metadata directories when checking git status', () => {
+  it('ignores psyche metadata directories when checking git status', () => {
     vi.mocked(execSync).mockReturnValue(
-      '?? .comux/\nM  .comux/worktrees/feature-a\n'
+      '?? .psyche/\nM  .psyche/worktrees/feature-a\n'
     );
 
     const status = getGitStatus('/repo');
@@ -28,11 +28,11 @@ describe('mergeValidation', () => {
   it('ignores untracked hook scaffolding but preserves real hook changes', () => {
     vi.mocked(execSync).mockReturnValue(
       [
-        '?? .comux-hooks/',
-        '?? .comux-hooks/AGENTS.md',
-        '?? .comux-hooks/examples/pre_merge.example',
-        ' M .comux-hooks/pre_merge',
-        '?? .comux-hooks/custom_hook',
+        '?? .psyche-hooks/',
+        '?? .psyche-hooks/AGENTS.md',
+        '?? .psyche-hooks/examples/pre_merge.example',
+        ' M .psyche-hooks/pre_merge',
+        '?? .psyche-hooks/custom_hook',
       ].join('\n')
     );
 
@@ -41,14 +41,14 @@ describe('mergeValidation', () => {
     expect(status).toEqual({
       hasChanges: true,
       files: [
-        '.comux-hooks/pre_merge',
-        '.comux-hooks/custom_hook',
+        '.psyche-hooks/pre_merge',
+        '.psyche-hooks/custom_hook',
       ],
-      summary: ' M .comux-hooks/pre_merge\n?? .comux-hooks/custom_hook',
+      summary: ' M .psyche-hooks/pre_merge\n?? .psyche-hooks/custom_hook',
     });
   });
 
-  it('keeps non-comux files in the dirty-state result', () => {
+  it('keeps non-psyche files in the dirty-state result', () => {
     vi.mocked(execSync).mockReturnValue(
       ' M src/index.ts\nM package.json\n'
     );

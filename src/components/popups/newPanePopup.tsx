@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Standalone popup for creating a new comux pane
+ * Standalone popup for creating a new psyche pane
  * Runs in a tmux popup modal and writes result to a file
  */
 
@@ -26,7 +26,7 @@ const PROJECT_NAME = path.basename(FILE_SCAN_ROOT)
 const ESC_CLEAR_CONFIRMATION_MS = 500
 
 // Debug logging to file
-const DEBUG_LOG = path.join(FILE_SCAN_ROOT, '.comux', 'file-picker-debug.log')
+const DEBUG_LOG = path.join(FILE_SCAN_ROOT, '.psyche', 'file-picker-debug.log')
 function debugLog(message: string, data?: any) {
   const timestamp = new Date().toISOString()
   const logLine = `[${timestamp}] ${message} ${data ? JSON.stringify(data, null, 2) : ''}\n`

@@ -1,24 +1,25 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT } from '../constants/timing.js';
-import type { ComuxConfig } from './usePaneLoading.js';
+import type { PsycheConfig } from './usePaneLoading.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
  * This keeps rebinding stable while allowing a separate user-facing display name.
  */
 export async function enforcePaneTitles(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   allPaneIds: string[],
   controlPaneId?: string
 ): Promise<void> {
@@ -35,13 +36,13 @@ export async function enforcePaneTitles(
     // Fall back to per-pane title lookups below.
   }
 
-  // Enforce control pane title stays "comux"
+  // Enforce control pane title stays "psyche"
   if (controlPaneId) {
     try {
       const controlTitle = titleByPaneId.get(controlPaneId)
         ?? await tmuxService.getPaneTitle(controlPaneId);
-      if (controlTitle !== 'comux') {
-        await tmuxService.setPaneTitle(controlPaneId, 'comux');
+      if (controlTitle !== 'psyche') {
+        await tmuxService.setPaneTitle(controlPaneId, 'psyche');
       }
     } catch {
       // Ignore - control pane might not exist yet
@@ -82,9 +83,9 @@ export async function enforcePaneTitles(
  */
 export async function savePanesToFile(
   panesFile: string,
-  panes: ComuxPane[],
+  panes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
-): Promise<ComuxPane[]> {
+): Promise<PsychePane[]> {
   return withWriteLock(async () => {
     let activePanes = panes;
 
@@ -99,7 +100,7 @@ export async function savePanesToFile(
           pane.paneId &&
           pane.paneId.startsWith('%') &&
           pane.title &&
-          pane.title !== 'comux-spacer'
+          pane.title !== SPACER_PANE_TITLE
         ) {
           titleToId.set(pane.title.trim(), pane.paneId);
         }
@@ -120,7 +121,7 @@ export async function savePanesToFile(
     }
 
     // Read existing config to preserve other fields
-    let config: ComuxConfig = { panes: [] };
+    let config: PsycheConfig = { panes: [] };
     try {
       const content = await fs.readFile(panesFile, 'utf-8');
       const parsed = JSON.parse(content);
@@ -160,15 +161,15 @@ export async function savePanesToFile(
  *
  * CRITICAL FIX: On initial load, shell panes with stale IDs are immediately removed.
  * Shell panes cannot be recreated (they have no worktreePath), so keeping them
- * with stale IDs causes comux to hang when trying to interact with non-existent panes.
+ * with stale IDs causes psyche to hang when trying to interact with non-existent panes.
  */
 export function rebindAndFilterPanes(
-  loadedPanes: ComuxPane[],
+  loadedPanes: PsychePane[],
   titleToId: Map<string, string>,
   allPaneIds: string[],
   isInitialLoad: boolean
-): { activePanes: ComuxPane[]; shellPanesRemoved: boolean; worktreePanesToRecreate: ComuxPane[] } {
-  const worktreePanesToRecreate: ComuxPane[] = [];
+): { activePanes: PsychePane[]; shellPanesRemoved: boolean; worktreePanesToRecreate: PsychePane[] } {
+  const worktreePanesToRecreate: PsychePane[] = [];
   const lifecycleManager = PaneLifecycleManager.getInstance();
 
   // LogService.getInstance().debug(
@@ -209,7 +210,7 @@ export function rebindAndFilterPanes(
 
       // CRITICAL FIX: Remove shell panes that are no longer present
       // Shell panes have no worktreePath, so they cannot be recreated.
-      // Keeping them with stale paneIds causes comux to hang when:
+      // Keeping them with stale paneIds causes psyche to hang when:
       // 1. Trying to send keys to non-existent panes
       // 2. Trying to get pane status/content
       // 3. Trying to apply layouts with stale pane IDs
@@ -261,12 +262,12 @@ export function rebindAndFilterPanes(
  */
 export async function saveUpdatedPaneConfig(
   panesFile: string,
-  activePanes: ComuxPane[],
+  activePanes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
 ): Promise<void> {
   await withWriteLock(async () => {
     // Re-read config in case it changed
-    let currentConfig: ComuxConfig = { panes: [] };
+    let currentConfig: PsycheConfig = { panes: [] };
     try {
       const content = await fs.readFile(panesFile, 'utf-8');
       const parsed = JSON.parse(content);

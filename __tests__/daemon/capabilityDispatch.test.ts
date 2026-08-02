@@ -15,7 +15,7 @@ afterEach(async () => {
 
 describe('daemon capability dispatch', () => {
   it('exposes session-scoped capability execution through the authenticated protocol', async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'comux-capability-dispatch-')));
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'psyche-capability-dispatch-')));
     tempRoots.push(root);
     const request: Extract<ClientRequest, { type: 'coven.capabilities.execute' }> = {
       type: 'coven.capabilities.execute',

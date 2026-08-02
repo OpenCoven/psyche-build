@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -318,7 +319,7 @@ export class TmuxService {
   }
 
   /**
-   * Get the pane currently selected in the active comux window.
+   * Get the pane currently selected in the active psyche window.
    *
    * This uses pane_active from list-panes instead of display-message so it
    * reflects tmux focus changes after this process was launched.
@@ -517,7 +518,7 @@ export class TmuxService {
 
       try {
         const title = await this.getPaneTitle(id);
-        if (title !== 'comux-spacer') {
+        if (title !== SPACER_PANE_TITLE) {
           contentPanes.push(id);
         }
       } catch {
@@ -996,7 +997,7 @@ export class TmuxService {
    *   - tmux automatically manages window size to fit client
    *   - window_height = client_height (tmux handles status bar internally)
    *
-   * When window-size is "manual" (comux uses this):
+   * When window-size is "manual" (psyche uses this):
    *   - You control window dimensions explicitly
    *   - total_terminal = window_height + status_bar_height
    *   - When setting window size: window_height = client_height - status_bar_height
