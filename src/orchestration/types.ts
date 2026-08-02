@@ -1,4 +1,4 @@
-import type { ComuxPane, MergeTargetReference } from '../types.js';
+import type { PsychePane, MergeTargetReference } from '../types.js';
 import type { AgentName, PermissionMode } from '../utils/agentLaunch.js';
 
 export const ORCHESTRATION_LANE_MODES = [
@@ -67,7 +67,7 @@ export interface OrchestrationLaneResultBase {
 
 export interface OrchestrationLaneSuccess extends OrchestrationLaneResultBase {
   status: 'completed';
-  pane?: ComuxPane;
+  pane?: PsychePane;
   sessionId?: string;
 }
 
