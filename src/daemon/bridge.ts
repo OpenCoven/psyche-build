@@ -753,6 +753,76 @@ export async function readPaneStatus(
   };
 }
 
+/**
+ * Serializes worktree-name allocation across concurrent spawns.
+ *
+ * uniqueSlug and resolveSpawnBranch are check-then-act: they scan the
+ * filesystem and git refs for a free name, but nothing reserves it until
+ * `git worktree add` runs. Two lanes spawning at once therefore pick the SAME
+ * slug, and the second worktree add dies with "already exists". That never
+ * surfaced while fan-out lived only in the TUI, which created panes one at a
+ * time; running lanes in parallel exposed it immediately.
+ *
+ * The critical section is allocation through creation — the step that actually
+ * claims the name. Pane setup and agent launch stay outside it, so lanes still
+ * overlap for the slow parts.
+ */
+let worktreeClaim: Promise<unknown> = Promise.resolve();
+
+async function claimWorktree<T>(work: () => Promise<T>): Promise<T> {
+  const previous = worktreeClaim;
+  let release!: () => void;
+  worktreeClaim = new Promise<void>((resolve) => { release = resolve; });
+  // A failed claim must not wedge the queue, so predecessors are awaited for
+  // ordering only.
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Serializes read-modify-write on the project config.
+ *
+ * readBridgeConfig -> mutate -> writeBridgeConfig is check-then-act on a whole
+ * file. Concurrent spawns each read the same snapshot, append their own pane,
+ * and the last write wins — so spawning three lanes at once persisted two.
+ * Like the worktree claim, this only became reachable when lanes started
+ * running in parallel.
+ */
+let configMutation: Promise<unknown> = Promise.resolve();
+
+async function mutateBridgeConfig<T>(
+  projectRoot: string,
+  mutate: (config: BridgeConfig) => T | Promise<T>,
+): Promise<T> {
+  const previous = configMutation;
+  let release!: () => void;
+  configMutation = new Promise<void>((resolve) => { release = resolve; });
+  await previous.catch(() => undefined);
+  try {
+    const config = await readBridgeConfig(projectRoot);
+    const result = await mutate(config);
+    await writeBridgeConfig(projectRoot, config);
+    return result;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Date.now() alone collides when several panes are created inside one
+ * millisecond, which concurrent lanes do routinely.
+ */
+let paneIdCounter = 0;
+
+function nextBridgePaneId(): string {
+  paneIdCounter += 1;
+  return `psyche-${Date.now()}-${paneIdCounter}`;
+}
+
 export async function spawnBridgePane(
   projectRoot: string,
   sessionName: string,
@@ -768,20 +838,34 @@ export async function spawnBridgePane(
   }
 
   const agent = normalizeAgent(request.agent);
-  const slug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
-  const branch = await resolveSpawnBranch(scoped.projectRoot, request.branch, slug);
-  const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
-  const worktreePath = path.join(worktreesRoot, slug);
-  assertGeneratedWorktreePath(scoped.projectRoot, worktreePath);
+  const { slug, branch, worktreePath } = await claimWorktree(async () => {
+    const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
+    const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
+    const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
+    const nextWorktreePath = path.join(worktreesRoot, nextSlug);
+    assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
 
-  createGitWorktree(scoped.projectRoot, worktreePath, branch);
+    createGitWorktree(scoped.projectRoot, nextWorktreePath, nextBranch);
+    return { slug: nextSlug, branch: nextBranch, worktreePath: nextWorktreePath };
+  });
 
+  // Everything past the claim can fail — tmux can refuse to split, the config
+  // write can fail. A worktree already exists by then, so a failed lane would
+  // otherwise leak one plus its branch. Roll them back rather than leaving
+  // orphans behind for the user to find later.
+  try {
+    return await finishSpawn();
+  } catch (error) {
+    removeGitWorktree(scoped.projectRoot, worktreePath, branch);
+    throw error;
+  }
+
+  async function finishSpawn(): Promise<BridgeSpawnResult> {
   const title = request.title || slug;
   const paneId = deps.createTmuxPane(sessionName, worktreePath, title);
   const now = new Date().toISOString();
-  const config = await readBridgeConfig(scoped.projectRoot);
   const pane: RawConfigPane = {
-    id: `psyche-${Date.now()}`,
+    id: nextBridgePaneId(),
     slug,
     title,
     displayName: title,
@@ -797,15 +881,17 @@ export async function spawnBridgePane(
     agentStatus: agent ? 'working' : 'idle',
     lastUpdated: now,
   };
-  config.projectName = config.projectName || path.basename(scoped.projectRoot);
-  config.projectRoot = scoped.projectRoot;
-  config.settings = config.settings || {};
-  config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-  config.lastUpdated = now;
-  await writeBridgeConfig(scoped.projectRoot, config);
+  const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
+    config.projectName = config.projectName || path.basename(scoped.projectRoot);
+    config.projectRoot = scoped.projectRoot;
+    config.settings = config.settings || {};
+    config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
+    config.lastUpdated = now;
+    return config.settings;
+  });
 
   if (agent) {
-    const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, config.settings?.permissionMode);
+    const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, settings?.permissionMode);
     deps.sendTmuxCommand(paneId, launchCommand);
 
     // send-keys agents were launched bare above; type the prompt into their
@@ -823,6 +909,30 @@ export async function spawnBridgePane(
     worktreePath,
     branch,
   };
+  }
+}
+
+/**
+ * Best-effort rollback of a worktree this spawn just created.
+ *
+ * Only ever called for a worktree allocated moments earlier in the same call,
+ * so there is no user work to lose. Failures are swallowed: the caller is
+ * already reporting a lane failure, and a cleanup error must not replace the
+ * real one.
+ */
+function removeGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
+  try {
+    execFileSync('git', ['-C', projectRoot, 'worktree', 'remove', '--force', worktreePath], {
+      stdio: 'ignore',
+    });
+  } catch {
+    // Already gone, or never fully created.
+  }
+  try {
+    execFileSync('git', ['-C', projectRoot, 'branch', '-D', branch], { stdio: 'ignore' });
+  } catch {
+    // Branch may not exist if the worktree add itself failed.
+  }
 }
 
 export interface BridgeKillDeps {
@@ -865,13 +975,14 @@ export async function killBridgePane(
 ): Promise<BridgeKillResult> {
   const scoped = await resolveScopedCwd(projectRoot);
   const config = await readBridgeConfig(scoped.projectRoot);
-  const pane = findRawPane(config, paneId);
-  if (!pane) {
+  const found = findRawPane(config, paneId);
+  if (!found) {
     throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
   }
 
-  const tmuxPaneId = String(pane.paneId ?? pane.id ?? paneId);
-  const psychePaneId = String(pane.id ?? tmuxPaneId);
+  const tmuxPaneId = String(found.paneId ?? found.id ?? paneId);
+  const psychePaneId = String(found.id ?? tmuxPaneId);
+  const pane = found;
 
   let killed = false;
   if (deps.tmuxPaneExists(tmuxPaneId) !== false) {
@@ -886,10 +997,16 @@ export async function killBridgePane(
     }
   }
 
-  const panes = Array.isArray(config.panes) ? config.panes : [];
-  config.panes = panes.filter((candidate) => candidate !== pane);
-  config.lastUpdated = new Date().toISOString();
-  await writeBridgeConfig(scoped.projectRoot, config);
+  // Re-read under the mutation lock and match by id: the snapshot above may be
+  // stale if a concurrent spawn appended since, and dropping the record by
+  // object identity against a stale copy would filter nothing.
+  await mutateBridgeConfig(scoped.projectRoot, (current) => {
+    const panes = Array.isArray(current.panes) ? current.panes : [];
+    current.panes = panes.filter(
+      (candidate) => candidate.id !== pane.id && candidate.paneId !== pane.paneId,
+    );
+    current.lastUpdated = new Date().toISOString();
+  });
 
   return {
     id: psychePaneId,

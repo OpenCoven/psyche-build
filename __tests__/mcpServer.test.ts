@@ -41,6 +41,7 @@ describe('MCP tool registry', () => {
     const response = await handleMcpRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect((response as any).result.tools.map((t: any) => t.name).sort()).toEqual([
       'psyche_create_pane',
+      'psyche_execute_task',
       'psyche_get_pane_output',
       'psyche_kill_pane',
       'psyche_list_panes',
@@ -232,5 +233,124 @@ describe('psyche_kill_pane', () => {
 
     const response = await call('psyche_kill_pane', { pane_id: '%99' });
     expect(response.error?.message).toMatch(/not registered/);
+  });
+});
+
+describe('psyche_execute_task', () => {
+  function executor(overrides: Record<string, unknown> = {}) {
+    return vi.fn(async (request: any) => ({
+      result: {
+        taskId: request.taskId,
+        traceId: request.taskId,
+        status: 'completed' as const,
+        startedAt: 'a',
+        completedAt: 'b',
+        lanes: request.lanes.map((lane: any) => ({
+          id: lane.id, status: 'completed' as const, startedAt: 'a', completedAt: 'b',
+        })),
+        ...overrides,
+      },
+      spawned: new Map<string, any>(request.lanes.map((lane: any) => [lane.id, {
+        id: `%${lane.id}`,
+        pane: {} as never,
+        worktreePath: `/w/${lane.id}`,
+        branch: `psyche/${lane.id}`,
+      }])),
+    }));
+  }
+
+  it('builds one lane per requested entry and reports each result', async () => {
+    const executeTask = executor();
+    inject({ executeTask, sessionNameForRoot: () => 'psyche-repo' });
+
+    const body = payload(await call('psyche_execute_task', {
+      prompt: 'Fix the failing tests',
+      lanes: [{ id: 'coven-code', agent: 'coven-code' }, { id: 'claude', agent: 'claude' }],
+      project_root: '/repo',
+    }));
+
+    const [request, sessionName] = executeTask.mock.calls[0] as any[];
+    expect(sessionName).toBe('psyche-repo');
+    expect(request.lanes).toEqual([
+      { id: 'coven-code', mode: 'isolated-worktree', agent: 'coven-code' },
+      { id: 'claude', mode: 'isolated-worktree', agent: 'claude' },
+    ]);
+
+    expect(body.status).toBe('completed');
+    expect(body.lanes).toHaveLength(2);
+    expect(body.lanes[0]).toMatchObject({
+      id: 'coven-code', status: 'completed', pane_id: '%coven-code', branch: 'psyche/coven-code',
+    });
+  });
+
+  it('defaults a lane with no agent to a terminal', async () => {
+    const executeTask = executor();
+    inject({ executeTask, sessionNameForRoot: () => 's' });
+
+    await call('psyche_execute_task', { prompt: 'p', lanes: [{ id: 'shell' }] });
+
+    expect((executeTask.mock.calls[0] as any[])[0].lanes[0])
+      .toEqual({ id: 'shell', mode: 'terminal' });
+  });
+
+  it('forwards concurrency and start-point branch', async () => {
+    const executeTask = executor();
+    inject({ executeTask, sessionNameForRoot: () => 's' });
+
+    await call('psyche_execute_task', {
+      prompt: 'p', lanes: [{ id: 'a', agent: 'codex' }], concurrency: 2, branch: 'develop',
+    });
+
+    expect((executeTask.mock.calls[0] as any[])[0]).toMatchObject({
+      concurrency: 2, startPointBranch: 'develop',
+    });
+  });
+
+  // Partial outcomes are the point of multi-lane execution: a failed sibling
+  // must not hide the lanes that produced usable work.
+  it('reports partial outcomes with per-lane errors', async () => {
+    const executeTask = vi.fn(async (request: any) => ({
+      result: {
+        taskId: request.taskId, traceId: 't', status: 'partial' as const,
+        startedAt: 'a', completedAt: 'b',
+        lanes: [
+          { id: 'good', status: 'completed' as const, startedAt: 'a', completedAt: 'b' },
+          {
+            id: 'bad', status: 'failed' as const, startedAt: 'a', completedAt: 'b',
+            error: { code: 'lane_execution_failed' as const, message: 'boom' },
+          },
+        ],
+      },
+      spawned: new Map<string, any>([['good', {
+        id: '%1', pane: {} as never, worktreePath: '/w', branch: 'b',
+      }]]),
+    }));
+    inject({ executeTask, sessionNameForRoot: () => 's' });
+
+    const body = payload(await call('psyche_execute_task', {
+      prompt: 'p',
+      lanes: [{ id: 'good', agent: 'codex' }, { id: 'bad', agent: 'claude' }],
+    }));
+
+    expect(body.status).toBe('partial');
+    expect(body.lanes[0]).toMatchObject({ id: 'good', status: 'completed', pane_id: '%1' });
+    expect(body.lanes[1]).toMatchObject({
+      id: 'bad', status: 'failed', error: { code: 'lane_execution_failed', message: 'boom' },
+    });
+    expect(body.lanes[1].pane_id).toBeUndefined();
+  });
+
+  it.each([
+    ['no prompt', { lanes: [{ id: 'a' }] }],
+    ['no lanes', { prompt: 'p', lanes: [] }],
+    ['missing lanes entirely', { prompt: 'p' }],
+  ])('rejects a request with %s', async (_case, args) => {
+    const executeTask = vi.fn();
+    inject({ executeTask, sessionNameForRoot: () => 's' });
+
+    const response = await call('psyche_execute_task', args);
+
+    expect(response.error?.code).toBe(-32602);
+    expect(executeTask).not.toHaveBeenCalled();
   });
 });

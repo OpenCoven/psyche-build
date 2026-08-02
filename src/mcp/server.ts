@@ -35,6 +35,13 @@ import {
   type BridgeSpawnResult,
 } from '../daemon/bridge.js';
 import { tmuxSessionNameForRoot } from '../services/bridge/tmuxControl.js';
+import { Orchestrator } from '../orchestration/orchestrator.js';
+import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
+import {
+  ORCHESTRATION_LANE_MODES,
+  type OrchestrationTaskRequest,
+  type OrchestrationTaskResult,
+} from '../orchestration/types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = 'psyche';
@@ -100,6 +107,13 @@ export interface McpDeps {
   ) => Promise<BridgeSpawnResult>;
   killPane: (projectRoot: string, paneId: string) => Promise<BridgeKillResult>;
   sessionNameForRoot: (projectRoot: string) => string;
+  executeTask: (
+    request: OrchestrationTaskRequest,
+    sessionName: string,
+  ) => Promise<{
+    result: OrchestrationTaskResult;
+    spawned: Map<string, BridgeSpawnResult>;
+  }>;
 }
 
 export const defaultMcpDeps: McpDeps = {
@@ -107,6 +121,12 @@ export const defaultMcpDeps: McpDeps = {
     spawnBridgePane(projectRoot, sessionName, request),
   killPane: (projectRoot, paneId) => killBridgePane(projectRoot, paneId),
   sessionNameForRoot: tmuxSessionNameForRoot,
+  executeTask: async (request, sessionName) => {
+    const backend = createBridgePaneBackend({ sessionName });
+    const orchestrator = new Orchestrator({ executeLane: backend.execute });
+    const result = await orchestrator.execute(request);
+    return { result, spawned: backend.spawned() };
+  },
 };
 
 let deps: McpDeps = defaultMcpDeps;
@@ -148,6 +168,92 @@ export const TOOLS: ToolDef[] = [
         project_root: projectRoot,
         count: panes.length,
         panes,
+      };
+    },
+  },
+  {
+    name: 'psyche_execute_task',
+    description:
+      'Run one task across several parallel lanes. Each lane gets its own git worktree, branch, tmux pane, and harness, all seeded with the same prompt — the way to compare two agents on one problem, or to split work across several. Lanes run with bounded concurrency and fail independently: the task reports completed, partial, or failed, and successful lanes stay usable when siblings fail.',
+    inputSchema: {
+      type: 'object',
+      required: ['prompt', 'lanes'],
+      properties: {
+        prompt: { type: 'string', description: 'Prompt seeded into every lane.' },
+        lanes: {
+          type: 'array',
+          minItems: 1,
+          description: 'One entry per parallel worker.',
+          items: {
+            type: 'object',
+            required: ['id'],
+            properties: {
+              id: { type: 'string', description: 'Unique lane id, e.g. the agent name.' },
+              agent: {
+                type: 'string',
+                description: 'Harness id. Omit together with mode "terminal" for a plain shell.',
+              },
+              mode: {
+                type: 'string',
+                enum: [...ORCHESTRATION_LANE_MODES],
+                description:
+                  'Defaults to isolated-worktree. shared-worktree and coven-session are not available on this path yet.',
+              },
+            },
+          },
+        },
+        task_id: { type: 'string', description: 'Stable id for this task. Generated when omitted.' },
+        concurrency: { type: 'number', description: 'Max lanes running at once. Defaults to the lane count, capped at 4.' },
+        branch: { type: 'string', description: 'Start-point branch for the new worktrees.' },
+        project_root: { type: 'string' },
+      },
+    },
+    handler: async (args) => {
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) {
+        throw Object.assign(new Error('psyche_execute_task requires `prompt`'), { code: ERR_INVALID_PARAMS });
+      }
+      const rawLanes = Array.isArray(args.lanes) ? args.lanes : [];
+      if (rawLanes.length === 0) {
+        throw Object.assign(new Error('psyche_execute_task requires at least one lane'), { code: ERR_INVALID_PARAMS });
+      }
+
+      const projectRoot = resolveProjectRoot(args);
+      const request: OrchestrationTaskRequest = {
+        taskId: typeof args.task_id === 'string' && args.task_id.trim()
+          ? args.task_id.trim()
+          : `mcp-task-${Date.now()}`,
+        projectRoot,
+        prompt,
+        ...(typeof args.branch === 'string' ? { startPointBranch: args.branch } : {}),
+        ...(typeof args.concurrency === 'number' ? { concurrency: args.concurrency } : {}),
+        lanes: rawLanes.map((raw) => {
+          const lane = (raw ?? {}) as Record<string, unknown>;
+          const agent = typeof lane.agent === 'string' ? lane.agent : undefined;
+          return {
+            id: String(lane.id ?? '').trim(),
+            mode: (typeof lane.mode === 'string' ? lane.mode : agent ? 'isolated-worktree' : 'terminal') as never,
+            ...(agent ? { agent: agent as never } : {}),
+          };
+        }),
+      };
+
+      const { result, spawned } = await deps.executeTask(request, deps.sessionNameForRoot(projectRoot));
+
+      return {
+        task_id: result.taskId,
+        status: result.status,
+        lanes: result.lanes.map((lane) => {
+          const spawn = spawned.get(lane.id);
+          return {
+            id: lane.id,
+            status: lane.status,
+            ...(spawn
+              ? { pane_id: spawn.id, worktree_path: spawn.worktreePath, branch: spawn.branch }
+              : {}),
+            ...(lane.status === 'failed' ? { error: lane.error } : {}),
+          };
+        }),
       };
     },
   },

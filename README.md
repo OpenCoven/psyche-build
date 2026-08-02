@@ -130,6 +130,7 @@ Psyche Build panes without leaving its session.
 |---|---|
 | `psyche_list_panes` | List panes for the project, with pane id, branch, agent, and title |
 | `psyche_create_pane` | New worktree + branch + tmux pane, with the chosen harness launched on a prompt |
+| `psyche_execute_task` | Run one prompt across several parallel lanes, each with its own worktree and harness |
 | `psyche_kill_pane` | Terminate a pane and deregister it |
 | `psyche_get_pane_output` | Read a pane's buffer and scrollback without attaching |
 | `psyche_list_rituals` | List built-in and project rituals |

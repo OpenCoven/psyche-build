@@ -104,6 +104,7 @@ describe('renamed runtime contracts', () => {
     it('pins every tool name clients dispatch on', () => {
       expect(TOOLS.map((tool) => tool.name).sort()).toEqual([
         'psyche_create_pane',
+        'psyche_execute_task',
         'psyche_get_pane_output',
         'psyche_kill_pane',
         'psyche_list_panes',

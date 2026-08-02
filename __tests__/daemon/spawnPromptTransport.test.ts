@@ -121,3 +121,93 @@ describe('spawnBridgePane prompt transports', () => {
     expect(order).toEqual(['launch:cline', 'keys']);
   });
 });
+
+// Regression: uniqueSlug and resolveSpawnBranch are check-then-act — they scan
+// for a free name, but nothing reserves it until `git worktree add` runs. Two
+// concurrent spawns picked the SAME slug and the second died with
+// "already exists". Invisible while fan-out lived only in the TUI, which
+// created panes one at a time; running lanes in parallel exposed it at once.
+describe('concurrent spawnBridgePane allocation', () => {
+  it('gives every concurrent lane a distinct slug and branch', async () => {
+    const h = harness();
+    const results = await Promise.all(
+      ['a', 'b', 'c'].map((id) =>
+        spawnBridgePane(
+          root,
+          'psyche-test',
+          { requestId: id, cwd: root, agent: 'coven-code', prompt: 'Fix the failing auth tests' },
+          h.deps,
+        )),
+    );
+
+    const worktrees = results.map((r) => r.worktreePath);
+    const branches = results.map((r) => r.branch);
+    expect(new Set(worktrees).size).toBe(3);
+    expect(new Set(branches).size).toBe(3);
+    for (const worktreePath of worktrees) {
+      expect(fs.existsSync(worktreePath)).toBe(true);
+    }
+  });
+
+  it('registers every concurrent lane in the config', async () => {
+    const h = harness();
+    await Promise.all(['a', 'b', 'c'].map((id) =>
+      spawnBridgePane(
+        root,
+        'psyche-test',
+        { requestId: id, cwd: root, agent: 'coven-code', prompt: 'Same prompt' },
+        h.deps,
+      )));
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes).toHaveLength(3);
+  });
+});
+
+describe('failed lane cleanup', () => {
+  // The worktree exists before the pane does, so a failure after the claim
+  // would otherwise leave an orphan worktree and branch behind.
+  it('removes the worktree and branch when pane creation fails', async () => {
+    const h = harness();
+    h.deps.createTmuxPane = () => { throw new Error('no space for a new pane'); };
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'r', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      h.deps,
+    )).rejects.toThrow(/no space/);
+
+    const worktreesDir = path.join(root, '.psyche', 'worktrees');
+    const leftover = fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir) : [];
+    expect(leftover).toEqual([]);
+
+    // Parentheses are shell metacharacters, so the format must be quoted.
+    const branches = execSync("git for-each-ref --format='%(refname:short)' refs/heads", { cwd: root })
+      .toString().split('\n').filter(Boolean);
+    expect(branches.filter((b) => b.startsWith('psyche/'))).toEqual([]);
+  });
+
+  it('frees the slug so a retry gets the original name', async () => {
+    const failing = harness();
+    failing.deps.createTmuxPane = () => { throw new Error('boom'); };
+    await expect(spawnBridgePane(
+      root, 'psyche-test',
+      { requestId: 'r1', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      failing.deps,
+    )).rejects.toThrow();
+
+    const ok = harness();
+    const result = await spawnBridgePane(
+      root, 'psyche-test',
+      { requestId: 'r2', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      ok.deps,
+    );
+
+    // Not fix-auth-2: the failed attempt left nothing behind to collide with.
+    expect(path.basename(result.worktreePath)).toBe('fix-auth');
+    expect(result.branch).toBe('psyche/fix-auth');
+  });
+});
