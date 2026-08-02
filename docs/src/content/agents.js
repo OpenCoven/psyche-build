@@ -3,7 +3,7 @@ export const meta = { title: 'Agents' };
 export function render() {
   return `
     <h1>Agents</h1>
-    <p class="lead">psyche supports 11 AI coding agents. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
+    <p class="lead">Psyche Build supports 12 AI coding agents, led by <strong>Coven Code</strong> — OpenCoven's own CLI coding harness. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
 
     <h2>Agent Detection</h2>
     <p>Run <code>psyche doctor</code> to see whether this shell can find a supported agent CLI. psyche can still create plain terminal panes when none are installed; install at least one supported CLI when you want prompt-launched agent panes.</p>
@@ -22,27 +22,27 @@ export function render() {
     <p>If only one agent is found, psyche uses it automatically. If multiple agents are available, you'll be prompted to choose (unless <code>defaultAgent</code> is set in <a href="#/configuration">configuration</a>).</p>
 
     <h2>Enabling Agents</h2>
-    <p>Only Claude Code, OpenCode, and Codex are enabled by default. To use other agents, open settings by pressing <kbd>s</kbd> and toggle on the agents you want available in the agent selector.</p>
+    <p>Coven Code, Claude Code, OpenCode, and Codex are enabled by default. To use other agents, open settings by pressing <kbd>s</kbd> and toggle on the agents you want available in the agent selector.</p>
 
     <h2>Default Agent</h2>
     <p>To focus your preferred agent first in the agent selection dialog, set a default agent:</p>
     <ul>
       <li><strong>TUI:</strong> Press <kbd>s</kbd> → set "Default Agent"</li>
-      <li><strong>Config:</strong> Add <code>"defaultAgent": "claude"</code> to your settings JSON</li>
-      <li><strong>API:</strong> <code>PATCH /api/settings</code> with <code>{"defaultAgent": "claude"}</code></li>
+      <li><strong>Config:</strong> Add <code>"defaultAgent": "coven-code"</code> to your settings JSON</li>
+      <li><strong>API:</strong> <code>PATCH /api/settings</code> with <code>{"defaultAgent": "coven-code"}</code></li>
     </ul>
 
     <h2>Permission Modes</h2>
     <p>The <code>permissionMode</code> setting controls what flags psyche passes to each agent:</p>
     <table>
       <thead>
-        <tr><th>permissionMode</th><th>Claude Code</th><th>Codex</th><th>opencode</th></tr>
+        <tr><th>permissionMode</th><th>Coven Code</th><th>Claude Code</th><th>Codex</th><th>opencode</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>''</code> (empty)</td><td>No flags</td><td>No flags</td><td>No flags</td></tr>
-        <tr><td><code>plan</code></td><td><code>--permission-mode plan</code></td><td>No flags</td><td>No flags</td></tr>
-        <tr><td><code>acceptEdits</code></td><td><code>--permission-mode acceptEdits</code></td><td><code>--ask-for-approval untrusted --sandbox danger-full-access</code></td><td>No flags</td></tr>
-        <tr><td><code>bypassPermissions</code></td><td><code>--dangerously-skip-permissions</code></td><td><code>--dangerously-bypass-approvals-and-sandbox</code></td><td>No flags</td></tr>
+        <tr><td><code>''</code> (empty)</td><td>No flags</td><td>No flags</td><td>No flags</td><td>No flags</td></tr>
+        <tr><td><code>plan</code></td><td><code>--permission-mode plan</code></td><td><code>--permission-mode plan</code></td><td>No flags</td><td>No flags</td></tr>
+        <tr><td><code>acceptEdits</code></td><td><code>--permission-mode accept-edits</code></td><td><code>--permission-mode acceptEdits</code></td><td><code>--ask-for-approval untrusted --sandbox danger-full-access</code></td><td>No flags</td></tr>
+        <tr><td><code>bypassPermissions</code></td><td><code>--permission-mode bypass-permissions</code></td><td><code>--dangerously-skip-permissions</code></td><td><code>--dangerously-bypass-approvals-and-sandbox</code></td><td>No flags</td></tr>
       </tbody>
     </table>
 

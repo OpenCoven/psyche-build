@@ -43,7 +43,7 @@ export function render() {
       <tbody>
         <tr><td><strong>Type</strong></td><td><code>AgentName | ''</code></td></tr>
         <tr><td><strong>Default</strong></td><td><code>''</code> (ask each time)</td></tr>
-        <tr><td><strong>Description</strong></td><td>Skip the agent selection dialog and always use this agent for new panes. Set it to any supported agent ID such as <code>claude</code>, <code>codex</code>, or <code>gemini</code>. Use an empty string to be prompted each time.</td></tr>
+        <tr><td><strong>Description</strong></td><td>Skip the agent selection dialog and always use this agent for new panes. Set it to any supported agent ID such as <code>coven-code</code>, <code>claude</code>, or <code>codex</code>. Use an empty string to be prompted each time.</td></tr>
       </tbody>
     </table>
 
@@ -120,8 +120,8 @@ export function render() {
     <pre><code data-lang="json">{
   "enableAutopilotByDefault": true,
   "permissionMode": "bypassPermissions",
-  "defaultAgent": "claude",
-  "enabledAgents": ["claude", "codex", "gemini"],
+  "defaultAgent": "coven-code",
+  "enabledAgents": ["coven-code", "claude", "codex"],
   "enabledNotificationSounds": ["default-system-sound", "harp"],
   "useTmuxHooks": false,
   "baseBranch": "develop",

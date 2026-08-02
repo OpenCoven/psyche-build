@@ -10,7 +10,13 @@ import {
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
+/**
+ * Registry order is user-visible: it drives the new-pane agent picker, the
+ * enabled-agents settings list, and the default-enabled set. Coven Code leads
+ * because it is this project's own coding harness.
+ */
 export const AGENT_IDS = [
+  'coven-code',
   'claude',
   'opencode',
   'codex',
@@ -22,7 +28,6 @@ export const AGENT_IDS = [
   'cursor',
   'copilot',
   'crush',
-  'coven-code',
 ] as const;
 
 export type AgentName = typeof AGENT_IDS[number];

@@ -127,7 +127,7 @@ export const TOOLS: ToolDef[] = [
         agent: {
           type: 'string',
           description:
-            "Harness id (`claude`, `codex`, `opencode`, `coven-code`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
+            "Harness id (`coven-code`, `claude`, `codex`, `opencode`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
         },
         worktree: {
           type: 'string',
