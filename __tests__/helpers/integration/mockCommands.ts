@@ -27,7 +27,9 @@ export interface CommandMockContext {
  * Create a mock execSync function that responds to common commands
  */
 export function createMockExecSync(context: CommandMockContext) {
-  return vi.fn((command: string, options?: any) => {
+  // execSync returns a string when an encoding is set and a Buffer otherwise,
+  // so the mock has to allow both or callers cannot supply their own impls.
+  return vi.fn((command: string, options?: any): string | Buffer => {
     const cmd = command.toString().trim();
 
     // Tmux commands

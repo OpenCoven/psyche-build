@@ -261,7 +261,7 @@ describe('Git Operations Integration Tests', () => {
     it('should detect main branch from origin/HEAD', async () => {
       const { getMainBranch } = await import('../../src/utils/git.js');
 
-      const mainBranch = getMainBranch('/test');
+      const mainBranch = getMainBranch();
 
       expect(mainBranch).toBe('main');
       expect(mockExecSync).toHaveBeenCalledWith(
@@ -281,7 +281,7 @@ describe('Git Operations Integration Tests', () => {
 
       const { getMainBranch } = await import('../../src/utils/git.js');
 
-      const mainBranch = getMainBranch('/test');
+      const mainBranch = getMainBranch();
 
       // Should fallback to 'main'
       expect(mainBranch).toBe('main');
@@ -358,7 +358,7 @@ describe('Git Operations Integration Tests', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
       // Error message could be "CONFLICT" or "Merge conflicts detected"
-      expect(result.error.toLowerCase()).toMatch(/conflict/i);
+      expect(result.error?.toLowerCase()).toMatch(/conflict/i);
     });
 
     it('should detect conflicting files', async () => {

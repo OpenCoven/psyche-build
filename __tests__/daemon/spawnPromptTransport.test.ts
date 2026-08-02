@@ -3,7 +3,10 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnBridgePane } from '../../src/daemon/bridge.js';
+import {
+  spawnBridgePane,
+  type BridgeSpawnPromptKeysRequest,
+} from '../../src/daemon/bridge.js';
 
 let root: string;
 
@@ -22,7 +25,7 @@ afterEach(() => {
 
 function harness() {
   const commands: string[] = [];
-  const sendPromptKeys = vi.fn(async () => {});
+  const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
   return {
     commands,
     sendPromptKeys,

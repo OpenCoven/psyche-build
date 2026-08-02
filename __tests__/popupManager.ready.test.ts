@@ -70,7 +70,7 @@ describe('PopupManager popup readiness tracking', () => {
       const value = await work();
       activityEvents.push('finish');
       return value;
-    });
+    }) as unknown as PopupManagerConfig['trackProjectActivity'] & ReturnType<typeof vi.fn>;
 
     const manager = createPopupManager(trackProjectActivity) as any;
     manager.checkPopupSupport = vi.fn(() => true);

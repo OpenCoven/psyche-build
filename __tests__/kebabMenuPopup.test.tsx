@@ -5,7 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { KebabMenuPopupApp } from '../src/components/popups/kebabMenuPopup.js';
-import type { PaneMenuAction } from '../src/actions/types.js';
+import { PaneAction, type PaneMenuAction } from '../src/actions/types.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -25,13 +25,13 @@ describe('KebabMenuPopupApp', () => {
 
     const actions: PaneMenuAction[] = [
       {
-        id: 'view',
+        id: PaneAction.VIEW,
         label: 'View',
         description: 'Jump to this pane',
         shortcut: 'j',
       },
       {
-        id: 'close',
+        id: PaneAction.CLOSE,
         label: 'Close',
         description: 'Close this pane',
         shortcut: 'x',

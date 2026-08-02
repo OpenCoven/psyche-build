@@ -55,7 +55,8 @@
     "dev:watch": "pnpm run generate:hooks-docs && tsc && pnpm run dev:watch:run",
     "dev:watch:run": "node scripts/dev-watch-run.js",
     "dev:doctor": "pnpm run generate:hooks-docs && tsc && node ./psyche doctor",
-    "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit",
+    "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "test": "vitest --run",
     "prepublishOnly": "pnpm run build",
     "smoke:pack": "npm pack --dry-run"

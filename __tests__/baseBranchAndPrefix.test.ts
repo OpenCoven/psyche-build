@@ -157,7 +157,7 @@ describe('slug and branchName separation', () => {
   });
 
   it('branchName stored on pane only when different from slug', () => {
-    const slug = 'fix-auth';
+    const slug: string = 'fix-auth';
 
     // With prefix: branchName is stored
     const withPrefix = 'feat/fix-auth' !== slug ? 'feat/fix-auth' : undefined;

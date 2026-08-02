@@ -74,6 +74,12 @@ pnpm run typecheck
 pnpm run test
 ```
 
+`pnpm run typecheck` covers both trees: `tsc --noEmit` for `src/`, then
+`typecheck:tests` for `__tests__/` via `tsconfig.test.json`. The test tree
+needs its own config because the base one sets `rootDir` to `./src` so `tsc`
+emits `dist/` with the right layout — which means `__tests__` can never be part
+of it. Run `pnpm run typecheck:tests` alone when you only touched tests.
+
 4. For docs/package changes, also verify package contents:
 
 ```bash

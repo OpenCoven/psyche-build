@@ -1,0 +1,18 @@
+{
+  // Typecheck-only config for the test tree.
+  //
+  // The base tsconfig sets rootDir to ./src so `tsc` emits dist/ with the right
+  // layout, which means __tests__ can never be part of it. Without this file
+  // the test tree is not typechecked at all — a required field added to an
+  // injectable deps interface, for example, shows up as a runtime TypeError in
+  // a test rather than a compile error.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*", "__tests__/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

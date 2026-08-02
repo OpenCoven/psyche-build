@@ -19,7 +19,6 @@ export function createMockContext(
     },
     onPaneUpdate: undefined,
     onPaneRemove: undefined,
-    forceRepaint: undefined,
     ...overrides,
   };
 }

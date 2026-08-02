@@ -6,6 +6,8 @@ import { useInputHandling } from '../src/hooks/useInputHandling.js';
 import { TmuxService } from '../src/services/TmuxService.js';
 import type { InlineRenameState } from '../src/utils/inlineRename.js';
 import type { PsychePane } from '../src/types.js';
+import type { PopupManager } from '../src/services/PopupManager.js';
+import type { TrackProjectActivity } from '../src/types/activity.js';
 
 vi.mock('../src/utils/remotePaneActions.js', () => ({
   drainRemotePaneActions: vi.fn(async () => []),
@@ -36,12 +38,12 @@ function Harness({
   cleanExit = vi.fn(),
 }: {
   panes: PsychePane[];
-  savePanes: ReturnType<typeof vi.fn>;
+  savePanes: (...args: any[]) => any;
   selectedIndex?: number;
-  setSelectedIndex?: ReturnType<typeof vi.fn>;
-  setStatusMessage?: ReturnType<typeof vi.fn>;
+  setSelectedIndex?: (...args: any[]) => any;
+  setStatusMessage?: (...args: any[]) => any;
   ignoreInput?: boolean;
-  cleanExit?: ReturnType<typeof vi.fn>;
+  cleanExit?: (...args: any[]) => any;
 }) {
   const [inlineRename, setInlineRename] = useState<InlineRenameState | null>(null);
 
@@ -69,9 +71,10 @@ function Harness({
     projectSettings: {},
     saveSettings: vi.fn(),
     settingsManager: {},
+    // Only the one method this test exercises; PopupManager has ~29 members.
     popupManager: {
       launchKebabMenuPopup: vi.fn(async () => null),
-    },
+    } as unknown as PopupManager,
     actionSystem: {
       actionState: {},
       executeAction: vi.fn(),
@@ -81,7 +84,7 @@ function Harness({
       setActionState: vi.fn(),
     },
     controlPaneId: undefined,
-    trackProjectActivity: vi.fn(async (work: () => unknown) => await work()),
+    trackProjectActivity: (async (work: () => unknown) => await work()) as TrackProjectActivity,
     setStatusMessage,
     copyNonGitFiles: vi.fn(),
     runCommandInternal: vi.fn(),
@@ -90,6 +93,7 @@ function Harness({
     handleCreateChildWorktree: vi.fn(),
     handleReopenWorktree: vi.fn(),
     setDevSourceFromPane: vi.fn(),
+    refreshPsycheSettings: vi.fn(),
     savePanes,
     sidebarProjects: [{ projectRoot: '/repo', projectName: 'Repo' }],
     saveSidebarProjects: vi.fn(async (projects) => projects),

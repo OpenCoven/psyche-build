@@ -62,9 +62,9 @@ function Harness({
   popupManager: any;
   trackProjectActivity?: any;
   handleReopenWorktree?: any;
-  setStatusMessage?: ReturnType<typeof vi.fn>;
-  saveSidebarProjects?: ReturnType<typeof vi.fn>;
-  completeStartupPrimer?: ReturnType<typeof vi.fn>;
+  setStatusMessage?: (...args: any[]) => any;
+  saveSidebarProjects?: (...args: any[]) => any;
+  completeStartupPrimer?: (...args: any[]) => any;
   showStartupPrimer?: boolean;
 }) {
   useInputHandling({
@@ -109,6 +109,8 @@ function Harness({
     handleCreateChildWorktree: vi.fn(),
     handleReopenWorktree,
     setDevSourceFromPane: vi.fn(),
+    refreshPsycheSettings: vi.fn(),
+    openRitual: vi.fn(),
     savePanes: vi.fn(),
     sidebarProjects: [
       { projectRoot: '/repo-root', projectName: 'repo-root' },

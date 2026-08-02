@@ -19,7 +19,8 @@ import {
 import { createMockExecSync, createMockOpenRouterAPI } from '../helpers/integration/mockCommands.js';
 
 const fsMock = vi.hoisted(() => ({
-  readFileSync: vi.fn(() => JSON.stringify({ controlPaneId: '%0' })),
+  readFileSync: vi.fn((_target?: unknown, _options?: unknown): string =>
+    JSON.stringify({ controlPaneId: '%0' })),
   writeFileSync: vi.fn(),
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock('child_process', () => ({
 }));
 
 // Mock StateManager
-const mockGetPanes = vi.fn(() => []);
+const mockGetPanes = vi.fn((): PsychePane[] => []);
 const mockSetPanes = vi.fn();
 const mockGetState = vi.fn(() => ({ projectRoot: '/test' }));
 const mockPauseConfigWatcher = vi.fn();
@@ -638,6 +639,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -669,6 +671,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -702,6 +705,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -739,6 +743,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -770,6 +775,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'test-session',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
