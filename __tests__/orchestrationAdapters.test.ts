@@ -230,4 +230,49 @@ describe('createLocalPaneBackend', () => {
     const backend = backendWith(vi.fn(async () => ({ pane: null, needsAgentChoice: true })));
     await expect(backend.execute(lane())).rejects.toMatchObject({ code: 'unsupported_agent' });
   });
+
+  // createPane's first call may build the sidebar layout and destroy the
+  // welcome pane; two of those at once race over the same tmux window.
+  describe('first-lane gate', () => {
+    it('does not start a second lane until the first settles', async () => {
+      const events: string[] = [];
+      let releaseFirst: (() => void) | undefined;
+      const createPaneFn = vi.fn(async (options: any) => {
+        const id = options.agent as string;
+        events.push(`start:${id}`);
+        if (id === 'codex') {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        }
+        events.push(`end:${id}`);
+        return { pane: pane(`psyche-${id}`), needsAgentChoice: false };
+      });
+      const backend = backendWith(createPaneFn);
+
+      const first = backend.execute(lane({ id: 'codex', agent: 'codex' }));
+      const second = backend.execute(lane({ id: 'claude', agent: 'claude' }));
+
+      await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+      expect(events).toEqual(['start:codex']);
+
+      releaseFirst!();
+      await Promise.all([first, second]);
+
+      expect(events).toEqual(['start:codex', 'end:codex', 'start:claude', 'end:claude']);
+    });
+
+    it('lets siblings proceed when the first lane fails', async () => {
+      const createPaneFn = vi.fn(async (options: any) => {
+        if (options.agent === 'codex') throw new Error('first lane exploded');
+        return { pane: pane('psyche-claude'), needsAgentChoice: false };
+      });
+      const backend = backendWith(createPaneFn);
+
+      const first = backend.execute(lane({ id: 'codex', agent: 'codex' }));
+      const second = backend.execute(lane({ id: 'claude', agent: 'claude' }));
+
+      await expect(first).rejects.toThrow('first lane exploded');
+      await expect(second).resolves.toMatchObject({ pane: { id: 'psyche-claude' } });
+    });
+  });
+
 });

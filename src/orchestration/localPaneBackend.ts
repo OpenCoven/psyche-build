@@ -43,7 +43,14 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
   const createPaneFn = options.createPaneFn ?? createPane;
   const created: PsychePane[] = [];
 
-  const execute: LaneBackend = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
+  // The first createPane call in a session may build the sidebar layout and
+  // destroy the welcome pane. Two of those running at once race over the same
+  // tmux window, so later lanes wait for the first to settle. This is a
+  // createPane constraint, which is why it lives here rather than in the
+  // coordinator's scheduling.
+  let firstLane: Promise<LaneExecutionOutput> | null = null;
+
+  const runLane = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
     if (lane.mode === 'coven-session') {
       throw new OrchestrationError(
         'unsupported_lane_mode',
@@ -90,6 +97,21 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     created.push(result.pane);
 
     return { pane: result.pane };
+  };
+
+  const execute: LaneBackend = (lane) => {
+    // The claim and the assignment below are both synchronous, so exactly one
+    // lane can win the gate no matter how many workers call in.
+    const gate = firstLane;
+    const work = (async () => {
+      // A failed first lane must not wedge its siblings, so the gate is
+      // awaited for sequencing only — its outcome is the orchestrator's to
+      // report, not ours to propagate.
+      if (gate) await gate.catch(() => undefined);
+      return runLane(lane);
+    })();
+    if (!firstLane) firstLane = work;
+    return work;
   };
 
   return { execute, createdPanes: () => [...created] };
