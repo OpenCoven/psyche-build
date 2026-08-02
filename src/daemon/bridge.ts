@@ -4,7 +4,20 @@ import net from 'node:net';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { AGENT_IDS, buildAgentCommand, buildInitialPromptCommand, type AgentName } from '../utils/agentLaunch.js';
+import {
+  AGENT_IDS,
+  buildAgentCommand,
+  buildInitialPromptCommand,
+  getAgentProcessName,
+  getPromptTransport,
+  getSendKeysPostPasteDelayMs,
+  getSendKeysPrePrompt,
+  getSendKeysReadyDelayMs,
+  getSendKeysSubmit,
+  type AgentName,
+} from '../utils/agentLaunch.js';
+import { sendPromptViaTmux } from '../utils/agentPromptDispatch.js';
+import { TmuxService } from '../services/TmuxService.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import type { PsycheConfig } from '../types.js';
 import {
@@ -39,10 +52,24 @@ export interface BridgeSpawnRequest {
   branch?: string;
 }
 
+export interface BridgeSpawnPromptKeysRequest {
+  paneId: string;
+  prompt: string;
+  agent: AgentName;
+}
+
 export interface BridgeSpawnDeps {
   tmuxSessionExists: (name: string) => boolean;
   createTmuxPane: (sessionName: string, cwd: string, title?: string) => string;
   sendTmuxCommand: (paneId: string, command: string) => void;
+  /**
+   * Type a prompt into a send-keys agent's TUI after it starts.
+   *
+   * Optional so existing partial deps objects keep working — note that
+   * __tests__ is outside tsconfig's `include`, so a required field here would
+   * not be a compile error for callers in tests, just a runtime TypeError.
+   */
+  sendPromptKeys?: (request: BridgeSpawnPromptKeysRequest) => Promise<void>;
 }
 
 export interface BridgeSpawnResult {
@@ -780,6 +807,14 @@ export async function spawnBridgePane(
   if (agent) {
     const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, config.settings?.permissionMode);
     deps.sendTmuxCommand(paneId, launchCommand);
+
+    // send-keys agents were launched bare above; type the prompt into their
+    // TUI once it is up. Without this the prompt is silently dropped.
+    const prompt = request.prompt;
+    if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
+      const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
+      await sendPromptKeys({ paneId, prompt, agent });
+    }
   }
 
   return {
@@ -908,7 +943,33 @@ export function sendTmuxCommand(paneId: string, command: string): void {
   execFileSync('tmux', ['send-keys', '-t', paneId, command, 'C-m'], { stdio: 'ignore' });
 }
 
+export async function sendPromptKeysToPane(
+  request: BridgeSpawnPromptKeysRequest,
+): Promise<void> {
+  const { paneId, prompt, agent } = request;
+  const tmuxService = TmuxService.getInstance();
+  let baselineCommand: string | undefined;
+  try {
+    baselineCommand = await tmuxService.getPaneCurrentCommand(paneId);
+  } catch {
+    baselineCommand = undefined;
+  }
+
+  await sendPromptViaTmux({
+    paneId,
+    prompt,
+    tmuxService,
+    expectedCommand: getAgentProcessName(agent),
+    baselineCommand,
+    prePromptKeys: getSendKeysPrePrompt(agent),
+    submitKeys: getSendKeysSubmit(agent),
+    postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
+    readyDelayMs: getSendKeysReadyDelayMs(agent),
+  });
+}
+
 export const defaultSpawnDeps: BridgeSpawnDeps = {
+  sendPromptKeys: sendPromptKeysToPane,
   tmuxSessionExists: (name) => {
     try {
       execFileSync('tmux', ['has-session', '-t', name], { stdio: 'ignore' });
@@ -1080,7 +1141,11 @@ async function buildLaunchCommand(
   prompt: string | undefined,
   permissionMode: PsycheConfig['settings']['permissionMode'],
 ): Promise<string> {
-  if (!prompt || !prompt.trim()) {
+  // send-keys agents take no prompt on the command line — it is typed into
+  // their TUI after launch. Writing a prompt file here would read it into a
+  // variable, delete the file, and then run a bare command, destroying the
+  // prompt with no trace.
+  if (!prompt || !prompt.trim() || getPromptTransport(agent) === 'send-keys') {
     return buildAgentCommand(agent, permissionMode);
   }
 
