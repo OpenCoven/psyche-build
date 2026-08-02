@@ -8,6 +8,7 @@ import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { resolveProjectRootFromPath } from './projectRoot.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 /**
  * Detects the shell type running in a tmux pane
@@ -119,7 +120,7 @@ export async function getUntrackedPanes(
       if (!paneId || !paneId.startsWith('%')) continue;
 
       // CRITICAL: Skip internal psyche panes by title
-      if (title === 'psyche-spacer') {
+      if (title === SPACER_PANE_TITLE) {
         continue;
       }
       if (title && title.startsWith('psyche v')) {

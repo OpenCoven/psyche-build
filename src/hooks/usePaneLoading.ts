@@ -21,6 +21,7 @@ import {
   syncHiddenStateFromCurrentWindow,
 } from '../utils/paneVisibility.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -99,7 +100,7 @@ export async function fetchTmuxPaneIds(maxRetries = 2): Promise<{
       const titleToId = new Map<string, string>();
 
       for (const pane of paneInfo) {
-        if (!pane.paneId || !pane.paneId.startsWith('%') || pane.title === 'psyche-spacer') {
+        if (!pane.paneId || !pane.paneId.startsWith('%') || pane.title === SPACER_PANE_TITLE) {
           continue;
         }
         allPaneIds.push(pane.paneId);

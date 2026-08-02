@@ -1,3 +1,10 @@
+/**
+ * Title given to the filler pane that keeps content panes from stretching
+ * too wide. Panes with this title are excluded from every pane listing, so
+ * the value is a real runtime contract with a live tmux server, not a label.
+ */
+export const SPACER_PANE_TITLE = 'psyche-spacer';
+
 export const DEFAULT_MAX_PANE_WIDTH = 80;
 export const MIN_MAX_PANE_WIDTH = 40;
 export const MAX_MAX_PANE_WIDTH = 300;

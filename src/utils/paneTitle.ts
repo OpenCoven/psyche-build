@@ -4,7 +4,18 @@ import type { PsychePane } from '../types.js';
 import { getPaneProjectName, getPaneProjectRoot } from './paneProject.js';
 
 export const PANE_TITLE_DELIMITER = '__psyche__';
-export const LEGACY_PANE_TITLE_DELIMITERS = ['::psyche::'] as const;
+/**
+ * Delimiters that were actually written into pane titles by earlier releases.
+ *
+ * These must NOT be renamed along with the current delimiter. The whole point
+ * of the list is to recognize titles that already exist in a running tmux
+ * server, so it has to name the string that is really out there. `::psyche::`
+ * never shipped; `::comux::` did.
+ *
+ * (The vmux -> comux rename got this wrong in fe18067, renaming the legacy
+ * entry too and leaving a list that matched nothing.)
+ */
+export const LEGACY_PANE_TITLE_DELIMITERS = ['::comux::'] as const;
 const ALL_PANE_TITLE_DELIMITERS = [PANE_TITLE_DELIMITER, ...LEGACY_PANE_TITLE_DELIMITERS];
 
 // Tmux's s/foo/bar/: modifier uses ":" to separate the target variable, so the

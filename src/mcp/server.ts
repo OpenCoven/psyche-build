@@ -29,7 +29,7 @@ import type { PaneSummary } from '../daemon/protocol.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_NAME = 'psyche';
+export const SERVER_NAME = 'psyche';
 const SERVER_VERSION = '0.0.1';
 
 // ---- JSON-RPC plumbing ----------------------------------------------------
@@ -90,7 +90,7 @@ function resolveProjectRoot(args: Record<string, unknown>): string {
   return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
 }
 
-const TOOLS: ToolDef[] = [
+export const TOOLS: ToolDef[] = [
   {
     name: 'psyche_list_panes',
     description:

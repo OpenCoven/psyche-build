@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -517,7 +518,7 @@ export class TmuxService {
 
       try {
         const title = await this.getPaneTitle(id);
-        if (title !== 'psyche-spacer') {
+        if (title !== SPACER_PANE_TITLE) {
           contentPanes.push(id);
         }
       } catch {

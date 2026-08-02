@@ -12,6 +12,7 @@ import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
+import { SPACER_PANE_TITLE } from '../constants/layout.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -99,7 +100,7 @@ export async function savePanesToFile(
           pane.paneId &&
           pane.paneId.startsWith('%') &&
           pane.title &&
-          pane.title !== 'psyche-spacer'
+          pane.title !== SPACER_PANE_TITLE
         ) {
           titleToId.set(pane.title.trim(), pane.paneId);
         }

@@ -83,7 +83,10 @@ describe('tmux doctor', () => {
 
       const text = formatTmuxDoctorText(result);
 
-      expect(text).toMatch(/psyche can run|usable/i);
+      // Asserted without an alternation on purpose: `/psyche can run|usable/`
+      // passes off the `usable` branch even when the brand string is wrong.
+      expect(text).toContain('psyche can run');
+      expect(text).not.toMatch(/comux/i);
       expect(text).toContain('recommended');
     } finally {
       await fs.rm(homeDir, { recursive: true, force: true });
