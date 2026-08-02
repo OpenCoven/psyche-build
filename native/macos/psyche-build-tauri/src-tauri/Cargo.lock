@@ -523,7 +523,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "comux-tauri"
+name = "psyche-build-tauri"
 version = "0.0.7"
 dependencies = [
  "env_logger",
