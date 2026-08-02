@@ -27,6 +27,14 @@ import { createInterface } from 'node:readline';
 import { capturePaneSync, listPanes } from '../daemon/panes.js';
 import type { PaneSummary } from '../daemon/protocol.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
+import {
+  killBridgePane,
+  spawnBridgePane,
+  type BridgeKillResult,
+  type BridgeSpawnRequest,
+  type BridgeSpawnResult,
+} from '../daemon/bridge.js';
+import { tmuxSessionNameForRoot } from '../services/bridge/tmuxControl.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = 'psyche';
@@ -67,10 +75,6 @@ function writeResponse(res: JsonRpcResponse): void {
   process.stdout.write(JSON.stringify(res) + '\n');
 }
 
-function ok<T>(id: JsonRpcId, result: T): void {
-  writeResponse({ jsonrpc: '2.0', id, result });
-}
-
 function fail(id: JsonRpcId, code: number, message: string, data?: unknown): void {
   writeResponse({ jsonrpc: '2.0', id, error: { code, message, data } });
 }
@@ -82,6 +86,38 @@ interface ToolDef {
   description: string;
   inputSchema: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
+}
+
+/**
+ * Side-effecting collaborators, injectable so tools/call can be tested without
+ * a live tmux server or a real git repository.
+ */
+export interface McpDeps {
+  spawnPane: (
+    projectRoot: string,
+    sessionName: string,
+    request: BridgeSpawnRequest,
+  ) => Promise<BridgeSpawnResult>;
+  killPane: (projectRoot: string, paneId: string) => Promise<BridgeKillResult>;
+  sessionNameForRoot: (projectRoot: string) => string;
+}
+
+export const defaultMcpDeps: McpDeps = {
+  spawnPane: (projectRoot, sessionName, request) =>
+    spawnBridgePane(projectRoot, sessionName, request),
+  killPane: (projectRoot, paneId) => killBridgePane(projectRoot, paneId),
+  sessionNameForRoot: tmuxSessionNameForRoot,
+};
+
+let deps: McpDeps = defaultMcpDeps;
+
+/** Test seam. Returns a restore function. */
+export function setMcpDeps(next: Partial<McpDeps>): () => void {
+  const previous = deps;
+  deps = { ...deps, ...next };
+  return () => {
+    deps = previous;
+  };
 }
 
 function resolveProjectRoot(args: Record<string, unknown>): string {
@@ -118,7 +154,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'psyche_create_pane',
     description:
-      '[STUB — wiring in progress] Create a new psyche pane with the given prompt, agent, and optional worktree/branch. Returns the new pane id once the daemon-driven path is hooked up.',
+      'Create a new psyche pane: a fresh git worktree and branch off the project root, a tmux pane, and the chosen harness launched with the prompt. Returns the tmux pane id, worktree path, and branch. The psyche tmux session for this project must already be running.',
     inputSchema: {
       type: 'object',
       required: ['prompt', 'agent'],
@@ -129,42 +165,70 @@ export const TOOLS: ToolDef[] = [
           description:
             "Harness id (`coven-code`, `claude`, `codex`, `opencode`, `cline`, `gemini`, `qwen`, `amp`, `pi`, `cursor`, `copilot`, `crush`).",
         },
-        worktree: {
-          type: 'string',
-          description: 'Existing worktree path. If omitted, psyche creates a new worktree from the project root.',
-        },
         branch: {
           type: 'string',
           description: 'Branch name for the new worktree. If omitted, psyche derives one from the prompt slug.',
         },
+        title: { type: 'string', description: 'Human-readable pane title. Defaults to the derived slug.' },
         project_root: { type: 'string' },
       },
     },
-    handler: async (_args) => {
-      // TODO(step-2b): wire to psyche's pane-creation flow
-      // (src/utils/paneCreation.ts → TmuxService.createPane + AgentLaunch).
-      // Tonight ships the shape; behaviour lands in the next commit.
-      throw new Error(
-        'psyche_create_pane is not yet wired — coming in the next MCP commit. Use the psyche TUI for now.',
-      );
+    handler: async (args) => {
+      const prompt = String(args.prompt ?? '').trim();
+      if (!prompt) {
+        throw Object.assign(new Error('psyche_create_pane requires `prompt`'), { code: ERR_INVALID_PARAMS });
+      }
+      const agent = String(args.agent ?? '').trim();
+      if (!agent) {
+        throw Object.assign(new Error('psyche_create_pane requires `agent`'), { code: ERR_INVALID_PARAMS });
+      }
+      const projectRoot = resolveProjectRoot(args);
+      const result = await deps.spawnPane(projectRoot, deps.sessionNameForRoot(projectRoot), {
+        requestId: `mcp-${Date.now()}`,
+        cwd: projectRoot,
+        agent,
+        prompt,
+        branch: typeof args.branch === 'string' ? args.branch : undefined,
+        title: typeof args.title === 'string' ? args.title : undefined,
+      });
+      return {
+        pane_id: result.id,
+        worktree_path: result.worktreePath,
+        branch: result.branch,
+        pane: result.pane,
+      };
     },
   },
   {
     name: 'psyche_kill_pane',
     description:
-      '[STUB — wiring in progress] Terminate the named psyche pane and clean up its worktree.',
+      'Terminate a psyche pane and remove it from the project config. Does NOT delete the pane\'s git worktree or branch — those are returned so you can inspect or merge the work, and removing them stays an explicit action in the psyche TUI.',
     inputSchema: {
       type: 'object',
       required: ['pane_id'],
       properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `psyche_list_panes`.' },
+        pane_id: {
+          type: 'string',
+          description: 'Pane id from `psyche_list_panes` — either the tmux pane id (e.g. `%3`) or the psyche pane id.',
+        },
         project_root: { type: 'string' },
       },
     },
-    handler: async (_args) => {
-      throw new Error(
-        'psyche_kill_pane is not yet wired — coming in the next MCP commit. Use the psyche TUI for now.',
-      );
+    handler: async (args) => {
+      const paneId = String(args.pane_id ?? '').trim();
+      if (!paneId) {
+        throw Object.assign(new Error('psyche_kill_pane requires `pane_id`'), { code: ERR_INVALID_PARAMS });
+      }
+      const projectRoot = resolveProjectRoot(args);
+      const result = await deps.killPane(projectRoot, paneId);
+      return {
+        pane_id: result.paneId,
+        id: result.id,
+        killed: result.killed,
+        worktree_path: result.worktreePath,
+        branch: result.branch,
+        note: 'Worktree and branch were left in place. Remove them from the psyche TUI if you no longer need the work.',
+      };
     },
   },
   {
@@ -321,7 +385,16 @@ async function handleToolsCall(params: unknown): Promise<unknown> {
   };
 }
 
-async function dispatch(req: JsonRpcRequest): Promise<void> {
+/**
+ * Handle one JSON-RPC request and return the response.
+ *
+ * Returns null for notifications, which by protocol get no reply. Kept
+ * separate from the stdio loop so tests can exercise the real tool dispatch
+ * without spawning a process or touching stdout.
+ */
+export async function handleMcpRequest(
+  req: JsonRpcRequest,
+): Promise<JsonRpcResponse | null> {
   const id = req.id ?? null;
   try {
     let result: unknown;
@@ -330,8 +403,7 @@ async function dispatch(req: JsonRpcRequest): Promise<void> {
         result = await handleInitialize(req.params);
         break;
       case 'notifications/initialized':
-        // Notifications have no response.
-        return;
+        return null;
       case 'tools/list':
         result = await handleToolsList(req.params);
         break;
@@ -342,15 +414,23 @@ async function dispatch(req: JsonRpcRequest): Promise<void> {
         result = {};
         break;
       default:
-        fail(id, ERR_METHOD_NOT_FOUND, `Method not found: ${req.method}`);
-        return;
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: { code: ERR_METHOD_NOT_FOUND, message: `Method not found: ${req.method}` },
+        };
     }
-    ok(id, result);
+    return { jsonrpc: '2.0', id, result };
   } catch (err) {
     const code = (err as { code?: number }).code ?? ERR_INTERNAL;
     const message = err instanceof Error ? err.message : String(err);
-    fail(id, code, message);
+    return { jsonrpc: '2.0', id, error: { code, message } };
   }
+}
+
+async function dispatch(req: JsonRpcRequest): Promise<void> {
+  const response = await handleMcpRequest(req);
+  if (response) writeResponse(response);
 }
 
 // ---- stdio loop -----------------------------------------------------------

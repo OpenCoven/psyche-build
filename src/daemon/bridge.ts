@@ -790,6 +790,87 @@ export async function spawnBridgePane(
   };
 }
 
+export interface BridgeKillDeps {
+  tmuxPaneExists: (paneId: string) => boolean | undefined;
+  killTmuxPane: (paneId: string) => void;
+}
+
+export interface BridgeKillResult {
+  id: string;
+  paneId: string;
+  /** True when a live tmux pane was actually killed. */
+  killed: boolean;
+  /** Left on disk deliberately — see the note on killBridgePane. */
+  worktreePath?: string;
+  branch?: string;
+}
+
+export const defaultKillDeps: BridgeKillDeps = {
+  tmuxPaneExists,
+  killTmuxPane,
+};
+
+/**
+ * Terminate a pane registered in this project and drop its config record.
+ *
+ * Deliberately NON-destructive to git state: the worktree and branch are left
+ * exactly as they are, and are returned so the caller can report what remains.
+ * Deleting them is a separate, explicit act — the TUI's close/merge flows ask
+ * first, because a worktree can hold uncommitted work and a branch can be the
+ * only reference to it. An MCP client killing a pane must not be able to
+ * destroy work as a side effect.
+ *
+ * Killing a pane whose tmux pane is already gone is not an error; the config
+ * record is still removed so the project stops advertising a dead pane.
+ */
+export async function killBridgePane(
+  projectRoot: string,
+  paneId: string,
+  deps: BridgeKillDeps = defaultKillDeps,
+): Promise<BridgeKillResult> {
+  const scoped = await resolveScopedCwd(projectRoot);
+  const config = await readBridgeConfig(scoped.projectRoot);
+  const pane = findRawPane(config, paneId);
+  if (!pane) {
+    throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
+  }
+
+  const tmuxPaneId = String(pane.paneId ?? pane.id ?? paneId);
+  const psychePaneId = String(pane.id ?? tmuxPaneId);
+
+  let killed = false;
+  if (deps.tmuxPaneExists(tmuxPaneId) !== false) {
+    try {
+      deps.killTmuxPane(tmuxPaneId);
+      killed = true;
+    } catch (error) {
+      throw bridgeError(
+        'pane_kill_failed',
+        `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const panes = Array.isArray(config.panes) ? config.panes : [];
+  config.panes = panes.filter((candidate) => candidate !== pane);
+  config.lastUpdated = new Date().toISOString();
+  await writeBridgeConfig(scoped.projectRoot, config);
+
+  return {
+    id: psychePaneId,
+    paneId: tmuxPaneId,
+    killed,
+    worktreePath: typeof pane.worktreePath === 'string' ? pane.worktreePath : undefined,
+    branch: typeof pane.branchName === 'string'
+      ? pane.branchName
+      : typeof pane.branch === 'string' ? pane.branch : undefined,
+  };
+}
+
+export function killTmuxPane(paneId: string): void {
+  execFileSync('tmux', ['kill-pane', '-t', paneId], { stdio: 'ignore' });
+}
+
 export function tmuxPaneExists(paneId: string): boolean | undefined {
   try {
     execFileSync('tmux', ['display-message', '-p', '-t', paneId, '#{pane_id}'], { stdio: 'ignore' });
