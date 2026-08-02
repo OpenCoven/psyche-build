@@ -1,6 +1,6 @@
 # Coven session visibility
 
-comux treats Coven as an optional local runtime. comux stays useful on its own, and when a local Coven daemon is available it can show, launch, and attach Coven-managed sessions beside normal comux panes.
+psyche treats Coven as an optional local runtime. psyche stays useful on its own, and when a local Coven daemon is available it can show, launch, and attach Coven-managed sessions beside normal psyche panes.
 
 ## Demo loop
 
@@ -23,12 +23,12 @@ GET  /api/v1/events?sessionId=...
 POST /api/v1/sessions/:id/input
 ```
 
-comux first checks `GET /api/v1/health` and accepts the current stable `apiVersion: "coven.daemon.v1"` contract. Event polling accepts the current paginated envelope and stores `nextCursor.afterSeq`-style sequence progress by reading event `seq` values.
+psyche first checks `GET /api/v1/health` and accepts the current stable `apiVersion: "coven.daemon.v1"` contract. Event polling accepts the current paginated envelope and stores `nextCursor.afterSeq`-style sequence progress by reading event `seq` values.
 
 ### Optional agentic capability routing
 
 After Coven creates a session, an orchestration caller may route a capability
-against that authoritative session through the authenticated comux daemon
+against that authoritative session through the authenticated psyche daemon
 message `coven.capabilities.execute`:
 
     {
@@ -72,7 +72,7 @@ The legacy visibility-only CLI fallback is still supported for tests and older l
 coven sessions --json
 ```
 
-If the daemon or command is missing, unsupported, invalid JSON, or too slow, comux keeps running and shows a compact unavailable state. No unpublished Coven APIs are imported.
+If the daemon or command is missing, unsupported, invalid JSON, or too slow, psyche keeps running and shows a compact unavailable state. No unpublished Coven APIs are imported.
 
 ## Proposed JSON contract
 
@@ -113,27 +113,27 @@ or:
 ]
 ```
 
-Required fields for comux visibility are `id` and `projectRoot`/`project_root`. Everything else is optional and rendered opportunistically.
+Required fields for psyche visibility are `id` and `projectRoot`/`project_root`. Everything else is optional and rendered opportunistically.
 
 ## Current UI behavior
 
-- Sessions are filtered to the active comux project roots before rendering.
+- Sessions are filtered to the active psyche project roots before rendering.
 - Sessions whose project roots cannot be verified are hidden.
 - The side panel renders a small `☾ Coven sessions` section under each project with matching running, completed, and archived sessions.
-- The active project shows `[o]pen`; pressing `o` opens the latest matching session as a comux shell pane with `coven attach <session-id>`.
+- The active project shows `[o]pen`; pressing `o` opens the latest matching session as a psyche shell pane with `coven attach <session-id>`.
 - Empty and unavailable states are non-fatal and stay inside the side panel.
 - Desktop-use panes launch through the daemon API and attach with `coven attach <session-id>`.
 - Socket/daemon failures are reported as action-oriented messages, such as starting Coven with `coven daemon start`.
 
 ## Known gaps
 
-- Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. comux therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
+- Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. psyche therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
 - The same local binary does not expose `coven --version`; use `coven --help` to confirm command availability for now.
 
 ## Known gaps
 
-- Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. comux therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
+- Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. psyche therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
 - The same local binary does not expose `coven --version`; use `coven --help` to confirm command availability for now.
 
 Future slices can add per-session selection, summon/archive controls, and live event timelines without changing this adapter boundary.
-See [comux + Coven demo loop](COVEN-DEMO-LOOP.md) for the end-to-end demo path and the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md) for the upstream milestone.
+See [psyche + Coven demo loop](COVEN-DEMO-LOOP.md) for the end-to-end demo path and the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md) for the upstream milestone.

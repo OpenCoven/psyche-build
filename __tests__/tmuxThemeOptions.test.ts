@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildTmuxSessionThemeOptions } from '../src/utils/tmuxThemeOptions.js';
 
 describe('tmux theme options', () => {
-  it('themes the tmux chrome from the active comux theme', () => {
+  it('themes the tmux chrome from the active psyche theme', () => {
     expect(buildTmuxSessionThemeOptions('orange')).toEqual([
       ['window-style', 'fg=default,bg=default'],
       ['window-active-style', 'fg=default,bg=default'],

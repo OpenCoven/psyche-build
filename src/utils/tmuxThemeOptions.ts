@@ -1,6 +1,6 @@
-import type { ComuxThemeName } from '../types.js';
+import type { PsycheThemeName } from '../types.js';
 import {
-  getComuxThemePalette,
+  getPsycheThemePalette,
   TMUX_COLORS,
 } from '../theme/colors.js';
 
@@ -10,9 +10,9 @@ export type TmuxSessionThemeOption = readonly [
 ];
 
 export function buildTmuxSessionThemeOptions(
-  themeName: ComuxThemeName
+  themeName: PsycheThemeName
 ): TmuxSessionThemeOption[] {
-  const activeBorder = getComuxThemePalette(themeName).activeBorder;
+  const activeBorder = getPsycheThemePalette(themeName).activeBorder;
 
   return [
     ['window-style', 'fg=default,bg=default'],

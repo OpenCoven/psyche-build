@@ -2,14 +2,14 @@
  * Hooks System
  *
  * Executes user-defined scripts at key lifecycle events.
- * Hook scripts are stored in .comux/hooks/ and receive context via environment variables.
+ * Hook scripts are stored in .psyche/hooks/ and receive context via environment variables.
  */
 
 import { execSync, spawn } from 'child_process';
 import { existsSync, accessSync, constants, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { HOOKS_DOCUMENTATION, HOOKS_README, EXAMPLE_HOOKS } from './hooksDocs.js';
 import { LogService } from '../services/LogService.js';
 
@@ -34,22 +34,22 @@ export type HookType =
  */
 export interface HookEnvironment {
   // Always present
-  COMUX_ROOT: string;
-  COMUX_SERVER_PORT?: string;
+  PSYCHE_ROOT: string;
+  PSYCHE_SERVER_PORT?: string;
 
   // Pane-specific (present for most hooks)
-  COMUX_PANE_ID?: string;
-  COMUX_SLUG?: string;
-  COMUX_PROMPT?: string;
-  COMUX_AGENT?: string;
-  COMUX_TMUX_PANE_ID?: string;
+  PSYCHE_PANE_ID?: string;
+  PSYCHE_SLUG?: string;
+  PSYCHE_PROMPT?: string;
+  PSYCHE_AGENT?: string;
+  PSYCHE_TMUX_PANE_ID?: string;
 
   // Worktree-specific
-  COMUX_WORKTREE_PATH?: string;
-  COMUX_BRANCH?: string;
+  PSYCHE_WORKTREE_PATH?: string;
+  PSYCHE_BRANCH?: string;
 
   // Merge-specific
-  COMUX_TARGET_BRANCH?: string;
+  PSYCHE_TARGET_BRANCH?: string;
 
   // Additional custom data
   [key: string]: string | undefined;
@@ -57,15 +57,15 @@ export interface HookEnvironment {
 
 /**
  * Find a hook script with priority resolution:
- * 1. .comux-hooks/ (version controlled, team hooks)
- * 2. .comux/hooks/ (gitignored, local overrides)
- * 3. ~/.comux/hooks/ (global user hooks)
+ * 1. .psyche-hooks/ (version controlled, team hooks)
+ * 2. .psyche/hooks/ (gitignored, local overrides)
+ * 3. ~/.psyche/hooks/ (global user hooks)
  */
 export function findHook(projectRoot: string, hookName: HookType): string | null {
   const searchPaths = [
-    path.join(projectRoot, '.comux-hooks', hookName),        // Team hooks (VC)
-    path.join(projectRoot, '.comux', 'hooks', hookName),     // Local override
-    path.join(os.homedir(), '.comux', 'hooks', hookName),    // Global hooks
+    path.join(projectRoot, '.psyche-hooks', hookName),        // Team hooks (VC)
+    path.join(projectRoot, '.psyche', 'hooks', hookName),     // Local override
+    path.join(os.homedir(), '.psyche', 'hooks', hookName),    // Global hooks
   ];
 
   for (const hookPath of searchPaths) {
@@ -91,11 +91,11 @@ export function findHook(projectRoot: string, hookName: HookType): string | null
  */
 export async function buildHookEnvironment(
   projectRoot: string,
-  pane?: ComuxPane,
+  pane?: PsychePane,
   extraData?: Record<string, string>
 ): Promise<HookEnvironment> {
   const env: HookEnvironment = {
-    COMUX_ROOT: projectRoot,
+    PSYCHE_ROOT: projectRoot,
     ...process.env, // Inherit parent environment
   };
 
@@ -103,20 +103,20 @@ export async function buildHookEnvironment(
   const { StateManager } = await import('../shared/StateManager.js');
   const state = StateManager.getInstance().getState();
   if (state.serverPort) {
-    env.COMUX_SERVER_PORT = String(state.serverPort);
+    env.PSYCHE_SERVER_PORT = String(state.serverPort);
   }
 
   // Add pane-specific data
   if (pane) {
-    env.COMUX_PANE_ID = pane.id;
-    env.COMUX_SLUG = pane.slug;
-    env.COMUX_PROMPT = pane.prompt;
-    env.COMUX_AGENT = pane.agent || 'unknown';
-    env.COMUX_TMUX_PANE_ID = pane.paneId;
+    env.PSYCHE_PANE_ID = pane.id;
+    env.PSYCHE_SLUG = pane.slug;
+    env.PSYCHE_PROMPT = pane.prompt;
+    env.PSYCHE_AGENT = pane.agent || 'unknown';
+    env.PSYCHE_TMUX_PANE_ID = pane.paneId;
 
     if (pane.worktreePath) {
-      env.COMUX_WORKTREE_PATH = pane.worktreePath;
-      env.COMUX_BRANCH = pane.branchName || pane.slug; // Branch name (may differ from slug with prefix)
+      env.PSYCHE_WORKTREE_PATH = pane.worktreePath;
+      env.PSYCHE_BRANCH = pane.branchName || pane.slug; // Branch name (may differ from slug with prefix)
     }
   }
 
@@ -131,13 +131,13 @@ export async function buildHookEnvironment(
 /**
  * Execute a hook script asynchronously
  *
- * Hooks run in the background and don't block comux operations.
+ * Hooks run in the background and don't block psyche operations.
  * Errors are logged but don't crash the application.
  */
 export async function triggerHook(
   hookName: HookType,
   projectRoot: string,
-  pane?: ComuxPane,
+  pane?: PsychePane,
   extraData?: Record<string, string>
 ): Promise<void> {
   // Initialize hooks directory on first use (lazy init)
@@ -204,7 +204,7 @@ export async function triggerHook(
 export async function triggerHookSync(
   hookName: HookType,
   projectRoot: string,
-  pane?: ComuxPane,
+  pane?: PsychePane,
   extraData?: Record<string, string>,
   timeoutMs: number = 30000
 ): Promise<{ success: boolean; output?: string; error?: string }> {
@@ -275,11 +275,11 @@ export function listAvailableHooks(projectRoot: string): HookType[] {
 }
 
 /**
- * Initialize .comux-hooks/ directory with documentation and examples
+ * Initialize .psyche-hooks/ directory with documentation and examples
  * This gets called the first time hooks are accessed or when user explicitly initializes
  */
 export function initializeHooksDirectory(projectRoot: string): void {
-  const hooksDir = path.join(projectRoot, '.comux-hooks');
+  const hooksDir = path.join(projectRoot, '.psyche-hooks');
   const agentsPath = path.join(hooksDir, 'AGENTS.md');
   const claudePath = path.join(hooksDir, 'CLAUDE.md');
   const readmePath = path.join(hooksDir, 'README.md');
@@ -299,7 +299,7 @@ export function initializeHooksDirectory(projectRoot: string): void {
     return;
   }
 
-  const initMsg = 'Initializing .comux-hooks/ directory (or repairing missing docs)...';
+  const initMsg = 'Initializing .psyche-hooks/ directory (or repairing missing docs)...';
   LogService.getInstance().debug(initMsg, 'hooks');
 
   try {
@@ -371,13 +371,13 @@ export function initializeHooksDirectory(projectRoot: string): void {
     }
 
     if (madeChanges) {
-      const completeMsg = '✅ Initialized .comux-hooks/ with documentation and examples';
+      const completeMsg = '✅ Initialized .psyche-hooks/ with documentation and examples';
       const readmeMsg = '📝 Read AGENTS.md or CLAUDE.md to get started';
       LogService.getInstance().debug(completeMsg, 'hooks');
       LogService.getInstance().debug(readmeMsg, 'hooks');
     }
   } catch (error) {
-    const errMsg = `Failed to initialize .comux-hooks/ directory: ${error instanceof Error ? error.message : String(error)}`;
+    const errMsg = `Failed to initialize .psyche-hooks/ directory: ${error instanceof Error ? error.message : String(error)}`;
     LogService.getInstance().warn(errMsg, 'hooks');
     // Don't throw - hooks initialization is not critical
   }

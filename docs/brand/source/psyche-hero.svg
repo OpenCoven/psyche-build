@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 300" role="img" aria-label="COMUX">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 300" role="img" aria-label="PSYCHE">
   <defs>
     <linearGradient id="fill" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#d8b4fe"/>
@@ -16,5 +16,5 @@
     </filter>
   </defs>
   <rect width="1280" height="300" rx="48" fill="#050507"/>
-  <text x="640" y="152" text-anchor="middle" dominant-baseline="middle" fill="url(#fill)" filter="url(#glow)" font-family="Georgia, 'Times New Roman', ui-serif, serif" font-size="178" font-weight="800" letter-spacing="-4">COMUX</text>
+  <text x="640" y="152" text-anchor="middle" dominant-baseline="middle" fill="url(#fill)" filter="url(#glow)" font-family="Georgia, 'Times New Roman', ui-serif, serif" font-size="178" font-weight="800" letter-spacing="-4">PSYCHE</text>
 </svg>

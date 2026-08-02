@@ -1,15 +1,15 @@
 /**
- * comux MCP server (stdio JSON-RPC 2.0).
+ * psyche MCP server (stdio JSON-RPC 2.0).
  *
- * Exposes comux's pane/ritual/worktree surface to MCP-capable clients
+ * Exposes psyche's pane/ritual/worktree surface to MCP-capable clients
  * (coven-code, Claude Code, OpenCode, etc.) so any familiar can fan work
- * into parallel comux panes mid-conversation without leaving its session.
+ * into parallel psyche panes mid-conversation without leaving its session.
  *
  * Wire-up on the client side (e.g. ~/.coven-code/settings.json):
  *
  *   {
  *     "mcp_servers": [
- *       { "name": "comux", "command": "comux", "args": ["mcp"], "type": "stdio" }
+ *       { "name": "psyche", "command": "psyche", "args": ["mcp"], "type": "stdio" }
  *     ]
  *   }
  *
@@ -18,7 +18,7 @@
  * of pulling in `@modelcontextprotocol/sdk` so this first ship has zero new
  * runtime dependencies — easy to revisit if the surface grows.
  *
- * Reuses comux's existing pane primitives from `../daemon/panes.ts` so the
+ * Reuses psyche's existing pane primitives from `../daemon/panes.ts` so the
  * MCP path and the Ink TUI path share state and don't fork.
  */
 
@@ -29,7 +29,7 @@ import type { PaneSummary } from '../daemon/protocol.js';
 import { getBuiltInRituals, listProjectRituals } from '../utils/rituals.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
-const SERVER_NAME = 'comux';
+const SERVER_NAME = 'psyche';
 const SERVER_VERSION = '0.0.1';
 
 // ---- JSON-RPC plumbing ----------------------------------------------------
@@ -87,21 +87,21 @@ interface ToolDef {
 function resolveProjectRoot(args: Record<string, unknown>): string {
   const raw = args.project_root ?? args.projectRoot;
   if (typeof raw === 'string' && raw.length > 0) return raw;
-  return process.env.COMUX_PROJECT_ROOT ?? process.cwd();
+  return process.env.PSYCHE_PROJECT_ROOT ?? process.cwd();
 }
 
 const TOOLS: ToolDef[] = [
   {
-    name: 'comux_list_panes',
+    name: 'psyche_list_panes',
     description:
-      'List all comux panes for the active project. Each entry includes the tmux pane id, working directory, branch, agent, and human-readable title.',
+      'List all psyche panes for the active project. Each entry includes the tmux pane id, working directory, branch, agent, and human-readable title.',
     inputSchema: {
       type: 'object',
       properties: {
         project_root: {
           type: 'string',
           description:
-            'Absolute path to the project root whose panes to list. Defaults to $COMUX_PROJECT_ROOT then process.cwd() if omitted.',
+            'Absolute path to the project root whose panes to list. Defaults to $PSYCHE_PROJECT_ROOT then process.cwd() if omitted.',
         },
       },
     },
@@ -116,9 +116,9 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_create_pane',
+    name: 'psyche_create_pane',
     description:
-      '[STUB — wiring in progress] Create a new comux pane with the given prompt, agent, and optional worktree/branch. Returns the new pane id once the daemon-driven path is hooked up.',
+      '[STUB — wiring in progress] Create a new psyche pane with the given prompt, agent, and optional worktree/branch. Returns the new pane id once the daemon-driven path is hooked up.',
     inputSchema: {
       type: 'object',
       required: ['prompt', 'agent'],
@@ -131,51 +131,51 @@ const TOOLS: ToolDef[] = [
         },
         worktree: {
           type: 'string',
-          description: 'Existing worktree path. If omitted, comux creates a new worktree from the project root.',
+          description: 'Existing worktree path. If omitted, psyche creates a new worktree from the project root.',
         },
         branch: {
           type: 'string',
-          description: 'Branch name for the new worktree. If omitted, comux derives one from the prompt slug.',
+          description: 'Branch name for the new worktree. If omitted, psyche derives one from the prompt slug.',
         },
         project_root: { type: 'string' },
       },
     },
     handler: async (_args) => {
-      // TODO(step-2b): wire to comux's pane-creation flow
+      // TODO(step-2b): wire to psyche's pane-creation flow
       // (src/utils/paneCreation.ts → TmuxService.createPane + AgentLaunch).
       // Tonight ships the shape; behaviour lands in the next commit.
       throw new Error(
-        'comux_create_pane is not yet wired — coming in the next MCP commit. Use the comux TUI for now.',
+        'psyche_create_pane is not yet wired — coming in the next MCP commit. Use the psyche TUI for now.',
       );
     },
   },
   {
-    name: 'comux_kill_pane',
+    name: 'psyche_kill_pane',
     description:
-      '[STUB — wiring in progress] Terminate the named comux pane and clean up its worktree.',
+      '[STUB — wiring in progress] Terminate the named psyche pane and clean up its worktree.',
     inputSchema: {
       type: 'object',
       required: ['pane_id'],
       properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `comux_list_panes`.' },
+        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `psyche_list_panes`.' },
         project_root: { type: 'string' },
       },
     },
     handler: async (_args) => {
       throw new Error(
-        'comux_kill_pane is not yet wired — coming in the next MCP commit. Use the comux TUI for now.',
+        'psyche_kill_pane is not yet wired — coming in the next MCP commit. Use the psyche TUI for now.',
       );
     },
   },
   {
-    name: 'comux_get_pane_output',
+    name: 'psyche_get_pane_output',
     description:
-      "Capture the current visible buffer plus scrollback of a comux pane. Returns ANSI-escaped text — strip codes on the caller if you just want the plain content. Use this to read what a running agent has produced so far without attaching.",
+      "Capture the current visible buffer plus scrollback of a psyche pane. Returns ANSI-escaped text — strip codes on the caller if you just want the plain content. Use this to read what a running agent has produced so far without attaching.",
     inputSchema: {
       type: 'object',
       required: ['pane_id'],
       properties: {
-        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `comux_list_panes`.' },
+        pane_id: { type: 'string', description: 'tmux pane id (e.g. `%3`) returned by `psyche_list_panes`.' },
         strip_ansi: {
           type: 'boolean',
           description: 'When true, strip ANSI escape sequences before returning. Default false (preserves colour for terminal renderers).',
@@ -185,7 +185,7 @@ const TOOLS: ToolDef[] = [
     handler: async (args) => {
       const paneId = String(args.pane_id ?? '').trim();
       if (!paneId) {
-        throw Object.assign(new Error('comux_get_pane_output requires `pane_id`'), { code: ERR_INVALID_PARAMS });
+        throw Object.assign(new Error('psyche_get_pane_output requires `pane_id`'), { code: ERR_INVALID_PARAMS });
       }
       const buf = capturePaneSync(paneId);
       let text = buf.toString('utf8');
@@ -198,9 +198,9 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_list_rituals',
+    name: 'psyche_list_rituals',
     description:
-      "List every ritual available to the active project — both comux built-ins (Start Coding, Terminal First, Review Stack, Release Check, Fix OpenClaw, …) and project-saved rituals from `<projectRoot>/.comux/rituals/`. Each entry includes its id, name, scope (`builtin`|`project`), description, and pane spec.",
+      "List every ritual available to the active project — both psyche built-ins (Start Coding, Terminal First, Review Stack, Release Check, Fix OpenClaw, …) and project-saved rituals from `<projectRoot>/.psyche/rituals/`. Each entry includes its id, name, scope (`builtin`|`project`), description, and pane spec.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -220,7 +220,7 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'comux_list_worktrees',
+    name: 'psyche_list_worktrees',
     description:
       "List every git worktree associated with the active project's repository, including the path, branch, current HEAD sha, and whether it is the main worktree. Useful when you need to know which branches are already checked out before suggesting a new pane.",
     inputSchema: {

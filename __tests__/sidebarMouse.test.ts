@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SidebarProject, ComuxPane } from '../src/types.js';
+import type { SidebarProject, PsychePane } from '../src/types.js';
 import { buildProjectActionLayout } from '../src/utils/projectActions.js';
 import {
   isPrimaryMousePress,
@@ -7,7 +7,7 @@ import {
   resolveSidebarMouseTarget,
 } from '../src/utils/sidebarMouse.js';
 
-function pane(id: string, slug: string, projectRoot: string): ComuxPane {
+function pane(id: string, slug: string, projectRoot: string): PsychePane {
   return {
     id,
     slug,

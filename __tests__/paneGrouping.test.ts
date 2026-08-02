@@ -1,27 +1,27 @@
 import path from 'path';
 import { describe, it, expect } from 'vitest';
 import { groupPanesByProject } from '../src/utils/paneGrouping.js';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 const repo = (name: string) => path.resolve(`/${name}`);
 
-function pane(id: string, slug: string, projectRoot?: string): ComuxPane {
+function pane(id: string, slug: string, projectRoot?: string): PsychePane {
   return {
     id,
     slug,
     prompt: `prompt-${slug}`,
-    paneId: `%${id.replace('comux-', '')}`,
+    paneId: `%${id.replace('psyche-', '')}`,
     projectRoot,
   };
 }
 
 describe('groupPanesByProject', () => {
   it('groups panes by project while preserving pane order', () => {
-    const panes: ComuxPane[] = [
-      pane('comux-1', 'a1', repo('repo-a')),
-      pane('comux-2', 'a2', repo('repo-a')),
-      pane('comux-3', 'b1', repo('repo-b')),
-      pane('comux-4', 'a3', repo('repo-a')),
+    const panes: PsychePane[] = [
+      pane('psyche-1', 'a1', repo('repo-a')),
+      pane('psyche-2', 'a2', repo('repo-a')),
+      pane('psyche-3', 'b1', repo('repo-b')),
+      pane('psyche-4', 'a3', repo('repo-a')),
     ];
 
     const groups = groupPanesByProject(panes, repo('repo-main'), 'repo-main');
@@ -40,7 +40,7 @@ describe('groupPanesByProject', () => {
   });
 
   it('falls back to session project root for panes without metadata', () => {
-    const panes: ComuxPane[] = [pane('comux-1', 'main-pane')];
+    const panes: PsychePane[] = [pane('psyche-1', 'main-pane')];
 
     const groups = groupPanesByProject(panes, repo('repo-main'), 'repo-main');
     expect(groups).toHaveLength(1);
@@ -49,9 +49,9 @@ describe('groupPanesByProject', () => {
   });
 
   it('includes empty sidebar projects and keeps sidebar ordering stable', () => {
-    const panes: ComuxPane[] = [
-      pane('comux-1', 'main-pane', repo('repo-main')),
-      pane('comux-2', 'aux-pane', repo('repo-aux')),
+    const panes: PsychePane[] = [
+      pane('psyche-1', 'main-pane', repo('repo-main')),
+      pane('psyche-2', 'aux-pane', repo('repo-aux')),
     ];
 
     const groups = groupPanesByProject(

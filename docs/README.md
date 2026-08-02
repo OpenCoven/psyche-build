@@ -1,6 +1,6 @@
-# comux Documentation Site
+# psyche Documentation Site
 
-Single-page marketing and documentation site for comux.
+Single-page marketing and documentation site for psyche.
 
 ## Development
 
@@ -21,8 +21,8 @@ npm run preview
 ## Features
 
 - Single-page app with scroll-spy navigation
-- Polished public docs layout for comux
-- comux install, workflow, configuration, hook, and troubleshooting pages
+- Polished public docs layout for psyche
+- psyche install, workflow, configuration, hook, and troubleshooting pages
 - Agent catalog and keyboard shortcut reference
 - Cloudflare Workers deployment config
 
@@ -37,7 +37,7 @@ npm run preview
 
 - [Demo loop](DEMO-LOOP.md)
 - [Coven sessions](COVEN-SESSIONS.md)
-- [comux + Coven demo loop](COVEN-DEMO-LOOP.md)
+- [psyche + Coven demo loop](COVEN-DEMO-LOOP.md)
 - [Coven session visibility](COVEN-SESSIONS.md)
 - [Product spec](PRODUCT-SPEC.md)
 - [Smoke test](SMOKE.md)

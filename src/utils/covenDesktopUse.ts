@@ -1,5 +1,5 @@
 import type { CovenSessionEvent, CovenSessionSummary } from '../daemon/protocol.js';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 
 export type DesktopUseQuickAction = 'screenshot' | 'inspect' | 'permissions' | 'approve' | 'deny' | 'test';
 
@@ -30,11 +30,11 @@ export interface DesktopUsePaneState {
 const MAX_ACTIONS = 5;
 const SUMMARY_LIMIT = 120;
 
-export function isDesktopUsePane(pane: ComuxPane): boolean {
+export function isDesktopUsePane(pane: PsychePane): boolean {
   return pane.type === 'desktop-use' || pane.shellType === 'desktop-use' || pane.shellType === 'computer-control';
 }
 
-export function getDesktopUseSessionId(pane: ComuxPane): string | undefined {
+export function getDesktopUseSessionId(pane: PsychePane): string | undefined {
   const desktopUse = pane.desktopUse;
   if (desktopUse?.sessionId) return desktopUse.sessionId;
   const covenSession = pane.covenSession;
@@ -61,10 +61,10 @@ export function buildDesktopUseQuickInput(action: DesktopUseQuickAction): string
 
 export function buildInitialDesktopUsePrompt(projectName: string): string {
   return [
-    `You are the comux desktop-use control lane for ${projectName}.`,
+    `You are the psyche desktop-use control lane for ${projectName}.`,
     'Use the computer_use tool for desktop observation/control through OpenSide.',
     'Start by running an inspect/frontmost observation, then wait for explicit approval before interactive actions.',
-    'Report concise state updates so comux can display current action, permissions, screenshots, and accessibility summaries.',
+    'Report concise state updates so psyche can display current action, permissions, screenshots, and accessibility summaries.',
   ].join('\n');
 }
 

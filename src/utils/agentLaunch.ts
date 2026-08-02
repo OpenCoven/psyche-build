@@ -486,7 +486,7 @@ export function buildAgentLaunchOptions(
 }
 
 /**
- * Resolve CLI permission flags for a given agent and comux permissionMode.
+ * Resolve CLI permission flags for a given agent and psyche permissionMode.
  */
 export function getPermissionFlags(
   agent: AgentName,
@@ -569,7 +569,7 @@ export async function launchAgentInPane(opts: {
   prompt: string;
   slug: string;
   projectRoot: string;
-  comuxPaneId?: string;
+  psychePaneId?: string;
   codexHookEventFile?: string;
   permissionMode?: '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 }): Promise<void> {
@@ -591,7 +591,7 @@ export async function launchAgentInPane(opts: {
 
       if (promptFilePath) {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        claudeCmd = `${promptBootstrap}; claude "$COMUX_PROMPT_CONTENT"${permissionSuffix}`;
+        claudeCmd = `${promptBootstrap}; claude "$PSYCHE_PROMPT_CONTENT"${permissionSuffix}`;
       } else {
         const escapedPrompt = prompt
           .replace(/\\/g, '\\\\')
@@ -619,7 +619,7 @@ export async function launchAgentInPane(opts: {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
         codexCmd = `${promptBootstrap}; ${buildInitialPromptCommand(
           'codex',
-          '"$COMUX_PROMPT_CONTENT"',
+          '"$PSYCHE_PROMPT_CONTENT"',
           permissionMode
         )}`;
       } else {
@@ -633,7 +633,7 @@ export async function launchAgentInPane(opts: {
       codexCmd = buildAgentCommand('codex', permissionMode);
     }
     codexCmd = buildCodexHookedCommand(codexCmd, {
-      comuxPaneId: opts.comuxPaneId || '',
+      psychePaneId: opts.psychePaneId || '',
       tmuxPaneId: paneId,
       eventFile: opts.codexHookEventFile,
     });
@@ -651,7 +651,7 @@ export async function launchAgentInPane(opts: {
 
       if (promptFilePath) {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        opencodeCmd = `${promptBootstrap}; opencode --prompt "$COMUX_PROMPT_CONTENT"`;
+        opencodeCmd = `${promptBootstrap}; opencode --prompt "$PSYCHE_PROMPT_CONTENT"`;
       } else {
         const escapedPrompt = prompt
           .replace(/\\/g, '\\\\')

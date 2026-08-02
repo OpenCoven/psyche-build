@@ -1,21 +1,21 @@
-interface ComuxProcessShutdownState {
+interface PsycheProcessShutdownState {
   claimed: boolean;
   owner?: string;
 }
 
-type GlobalWithComuxShutdownState = typeof globalThis & {
-  __comuxProcessShutdownState?: ComuxProcessShutdownState;
+type GlobalWithPsycheShutdownState = typeof globalThis & {
+  __psycheProcessShutdownState?: PsycheProcessShutdownState;
 };
 
-function getShutdownState(): ComuxProcessShutdownState {
-  const globalWithState = globalThis as GlobalWithComuxShutdownState;
-  if (!globalWithState.__comuxProcessShutdownState) {
-    globalWithState.__comuxProcessShutdownState = {
+function getShutdownState(): PsycheProcessShutdownState {
+  const globalWithState = globalThis as GlobalWithPsycheShutdownState;
+  if (!globalWithState.__psycheProcessShutdownState) {
+    globalWithState.__psycheProcessShutdownState = {
       claimed: false,
     };
   }
 
-  return globalWithState.__comuxProcessShutdownState;
+  return globalWithState.__psycheProcessShutdownState;
 }
 
 export function claimProcessShutdown(owner: string): boolean {

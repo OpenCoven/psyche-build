@@ -35,7 +35,7 @@ describe("wireProtocol", () => {
         serverId: "srv-1",
         serverName: "studio",
         protocolVersion: PROTOCOL_VERSION,
-        projectName: "comux",
+        projectName: "psyche",
       },
     });
     expect(out.indexOf('"serverId"')).toBeLessThan(out.indexOf('"serverName"'));

@@ -7,23 +7,23 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function resolveComuxExecutable(): string {
+export function resolvePsycheExecutable(): string {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
-  const localComuxPath = path.resolve(currentDir, '..', '..', 'comux');
+  const localPsychePath = path.resolve(currentDir, '..', '..', 'psyche');
 
-  if (fs.existsSync(localComuxPath)) {
-    return localComuxPath;
+  if (fs.existsSync(localPsychePath)) {
+    return localPsychePath;
   }
 
-  return 'comux';
+  return 'psyche';
 }
 
 export function buildFilesOnlyCommand(): string {
-  return `${shellQuote(resolveComuxExecutable())} --files-only`;
+  return `${shellQuote(resolvePsycheExecutable())} --files-only`;
 }
 
 export function buildRemotePaneActionCommand(
   shortcut: RemotePaneActionShortcut
 ): string {
-  return `${shellQuote(resolveComuxExecutable())} --remote-pane-action ${shortcut}`;
+  return `${shellQuote(resolvePsycheExecutable())} --remote-pane-action ${shortcut}`;
 }

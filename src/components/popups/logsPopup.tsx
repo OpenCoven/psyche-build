@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Logs Popup - Scrollable log viewer for comux
+ * Logs Popup - Scrollable log viewer for psyche
  *
  * Displays all logs with filtering options:
  * - All logs
@@ -192,7 +192,7 @@ const LogsPopupApp: React.FC<LogsPopupAppProps> = ({ allLogs, stats, panes = [],
       }).join('\n');
 
       // Write to temp file
-      const tempFile = path.join(os.tmpdir(), `comux-logs-${Date.now()}.txt`);
+      const tempFile = path.join(os.tmpdir(), `psyche-logs-${Date.now()}.txt`);
       try {
         fs.writeFileSync(tempFile, logsText);
       } catch (error) {
@@ -342,7 +342,7 @@ const LogsPopupApp: React.FC<LogsPopupAppProps> = ({ allLogs, stats, panes = [],
             {levelLabel}
             {'] '}
           </Text>
-          <Text dimColor>[{log.source || 'comux'}]</Text>
+          <Text dimColor>[{log.source || 'psyche'}]</Text>
           <Text color={color}>
             {' '}
             {log.message}

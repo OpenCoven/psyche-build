@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
-import type { ComuxSettings, SettingsScope, EffectiveSettingsScope, SettingDefinition } from '../types.js';
+import type { PsycheSettings, SettingsScope, EffectiveSettingsScope, SettingDefinition } from '../types.js';
 import {
   DEFAULT_MIN_PANE_WIDTH,
   DEFAULT_MAX_PANE_WIDTH,
@@ -25,19 +25,19 @@ import {
   type NotificationSoundId,
 } from './notificationSounds.js';
 import {
-  DEFAULT_COMUX_THEME,
-  COMUX_THEME_NAMES,
-  getComuxThemeLabel,
-  isComuxThemeName,
+  DEFAULT_PSYCHE_THEME,
+  PSYCHE_THEME_NAMES,
+  getPsycheThemeLabel,
+  isPsycheThemeName,
 } from '../theme/themePalette.js';
 
-const GLOBAL_SETTINGS_PATH = join(homedir(), '.comux.global.json');
-const TEAM_DEFAULTS_FILENAME = '.comux.defaults.json';
+const GLOBAL_SETTINGS_PATH = join(homedir(), '.psyche.global.json');
+const TEAM_DEFAULTS_FILENAME = '.psyche.defaults.json';
 const PERMISSION_MODES = ['', 'plan', 'acceptEdits', 'bypassPermissions'] as const;
 const MIN_MAX_MANAGED_WORKTREES = 1;
 const MAX_MAX_MANAGED_WORKTREES = 500;
 const DEFAULT_MAX_MANAGED_WORKTREES = 12;
-function isPermissionMode(value: string): value is NonNullable<ComuxSettings['permissionMode']> {
+function isPermissionMode(value: string): value is NonNullable<PsycheSettings['permissionMode']> {
   return (PERMISSION_MODES as readonly string[]).includes(value);
 }
 
@@ -68,13 +68,13 @@ function isValidMinPaneWidth(value: unknown): value is number {
   );
 }
 
-function sanitizeLoadedSettings(value: unknown): ComuxSettings {
+function sanitizeLoadedSettings(value: unknown): PsycheSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
   }
 
   const parsed = value as Record<string, unknown>;
-  const sanitized: ComuxSettings = {};
+  const sanitized: PsycheSettings = {};
 
   if (typeof parsed.permissionMode === 'string' && isPermissionMode(parsed.permissionMode)) {
     sanitized.permissionMode = parsed.permissionMode;
@@ -108,7 +108,7 @@ function sanitizeLoadedSettings(value: unknown): ComuxSettings {
     sanitized.showFooterTips = parsed.showFooterTips;
   }
 
-  if (typeof parsed.colorTheme === 'string' && isComuxThemeName(parsed.colorTheme)) {
+  if (typeof parsed.colorTheme === 'string' && isPsycheThemeName(parsed.colorTheme)) {
     sanitized.colorTheme = parsed.colorTheme;
   }
 
@@ -142,8 +142,8 @@ function sanitizeLoadedSettings(value: unknown): ComuxSettings {
   return sanitized;
 }
 
-function cloneSettingsArrays(settings: ComuxSettings): ComuxSettings {
-  const cloned: ComuxSettings = { ...settings };
+function cloneSettingsArrays(settings: PsycheSettings): PsycheSettings {
+  const cloned: PsycheSettings = { ...settings };
 
   if (Array.isArray(cloned.enabledAgents)) {
     cloned.enabledAgents = [...cloned.enabledAgents];
@@ -156,8 +156,8 @@ function cloneSettingsArrays(settings: ComuxSettings): ComuxSettings {
   return cloned;
 }
 
-const DEFAULT_SETTINGS: ComuxSettings = {
-  // Most permissive defaults for new comux setups.
+const DEFAULT_SETTINGS: PsycheSettings = {
+  // Most permissive defaults for new psyche setups.
   permissionMode: 'bypassPermissions',
   enableAutopilotByDefault: true,
   minPaneWidth: DEFAULT_MIN_PANE_WIDTH,
@@ -165,7 +165,7 @@ const DEFAULT_SETTINGS: ComuxSettings = {
   enabledAgents: getDefaultEnabledAgents(),
   enabledNotificationSounds: getDefaultNotificationSoundSelection(),
   showFooterTips: true,
-  colorTheme: DEFAULT_COMUX_THEME,
+  colorTheme: DEFAULT_PSYCHE_THEME,
   maxManagedWorktrees: DEFAULT_MAX_MANAGED_WORKTREES,
 };
 
@@ -214,23 +214,23 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     key: 'enabledNotificationSounds' as any,
     label: 'Attention Notification Sounds',
-    description: 'Select the macOS helper sounds that comux randomizes between for background alerts',
+    description: 'Select the macOS helper sounds that psyche randomizes between for background alerts',
     type: 'action' as any,
   },
   {
     key: 'showFooterTips',
     label: 'Show Footer Tips',
-    description: 'Rotate short comux tips in the footer. Disable this if you prefer a quieter sidebar.',
+    description: 'Rotate short psyche tips in the footer. Disable this if you prefer a quieter sidebar.',
     type: 'boolean',
   },
   {
     key: 'colorTheme',
     label: 'Color Theme',
-    description: 'Choose the accent color for the comux UI and welcome pane',
+    description: 'Choose the accent color for the psyche UI and welcome pane',
     type: 'select',
-    options: COMUX_THEME_NAMES.map((themeName) => ({
+    options: PSYCHE_THEME_NAMES.map((themeName) => ({
       value: themeName,
-      label: getComuxThemeLabel(themeName),
+      label: getPsycheThemeLabel(themeName),
     })),
   },
   {
@@ -260,7 +260,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     key: 'maxManagedWorktrees',
     label: 'Max Managed Worktrees',
-    description: 'Maximum comux-managed worktrees to keep per project. Old inactive worktrees are pruned after new panes are created.',
+    description: 'Maximum psyche-managed worktrees to keep per project. Old inactive worktrees are pruned after new panes are created.',
     type: 'number',
     min: MIN_MAX_MANAGED_WORKTREES,
     max: MAX_MAX_MANAGED_WORKTREES,
@@ -290,7 +290,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     key: 'hooks' as any,
     label: 'Manage Hooks',
-    description: 'View and edit comux lifecycle hooks',
+    description: 'View and edit psyche lifecycle hooks',
     type: 'action' as any,
   },
 ];
@@ -299,19 +299,19 @@ export class SettingsManager {
   private globalPath: string;
   private projectPath: string;
   private teamDefaultsPath: string;
-  private globalSettings: ComuxSettings = {};
-  private projectSettings: ComuxSettings = {};
-  private teamDefaults: ComuxSettings = {};
+  private globalSettings: PsycheSettings = {};
+  private projectSettings: PsycheSettings = {};
+  private teamDefaults: PsycheSettings = {};
 
   constructor(projectRoot?: string) {
     const root = projectRoot || process.cwd();
     this.globalPath = GLOBAL_SETTINGS_PATH;
-    this.projectPath = join(root, '.comux', 'settings.json');
+    this.projectPath = join(root, '.psyche', 'settings.json');
     this.teamDefaultsPath = join(root, TEAM_DEFAULTS_FILENAME);
     this.loadSettings();
   }
 
-  private loadSettingsFile(filePath: string, label: string): ComuxSettings {
+  private loadSettingsFile(filePath: string, label: string): PsycheSettings {
     if (!existsSync(filePath)) {
       return {};
     }
@@ -344,7 +344,7 @@ export class SettingsManager {
   }
 
   private resolveGlobalPaneWidths(
-    overrides?: Partial<Pick<ComuxSettings, 'minPaneWidth' | 'maxPaneWidth'>>
+    overrides?: Partial<Pick<PsycheSettings, 'minPaneWidth' | 'maxPaneWidth'>>
   ): { minPaneWidth: number; maxPaneWidth: number } {
     const hasMinOverride = overrides?.minPaneWidth !== undefined;
     const hasMaxOverride = overrides?.maxPaneWidth !== undefined;
@@ -370,7 +370,7 @@ export class SettingsManager {
   /**
    * Get merged settings (project > global > team defaults > built-in defaults)
    */
-  getSettings(): ComuxSettings {
+  getSettings(): PsycheSettings {
     const merged = cloneSettingsArrays({
       ...DEFAULT_SETTINGS,
       ...this.teamDefaults,
@@ -389,7 +389,7 @@ export class SettingsManager {
   /**
    * Get a specific setting value (with project override)
    */
-  getSetting<K extends keyof ComuxSettings>(key: K): ComuxSettings[K] {
+  getSetting<K extends keyof PsycheSettings>(key: K): PsycheSettings[K] {
     const merged = this.getSettings();
     return merged[key];
   }
@@ -397,23 +397,23 @@ export class SettingsManager {
   /**
    * Get global settings only
    */
-  getGlobalSettings(): ComuxSettings {
+  getGlobalSettings(): PsycheSettings {
     return cloneSettingsArrays(this.globalSettings);
   }
 
   /**
    * Get project settings only
    */
-  getProjectSettings(): ComuxSettings {
+  getProjectSettings(): PsycheSettings {
     return cloneSettingsArrays(this.projectSettings);
   }
 
   /**
    * Update a setting at the specified scope
    */
-  updateSetting<K extends keyof ComuxSettings>(
+  updateSetting<K extends keyof PsycheSettings>(
     key: K,
-    value: ComuxSettings[K],
+    value: PsycheSettings[K],
     scope: SettingsScope
   ): void {
     // Validate branch-related settings
@@ -425,7 +425,7 @@ export class SettingsManager {
     if (key === 'permissionMode' && typeof value === 'string' && !isPermissionMode(value)) {
       throw new Error(`Invalid permissionMode: "${value}"`);
     }
-    if (key === 'colorTheme' && !isComuxThemeName(value)) {
+    if (key === 'colorTheme' && !isPsycheThemeName(value)) {
       throw new Error(`Invalid colorTheme: "${String(value)}"`);
     }
     if (key === 'enabledAgents') {
@@ -464,7 +464,7 @@ export class SettingsManager {
 
     // Pane width settings are always stored globally, regardless of requested scope.
     if (key === 'minPaneWidth' || key === 'maxPaneWidth') {
-      const paneWidthOverrides: Partial<Pick<ComuxSettings, 'minPaneWidth' | 'maxPaneWidth'>> = {};
+      const paneWidthOverrides: Partial<Pick<PsycheSettings, 'minPaneWidth' | 'maxPaneWidth'>> = {};
       if (key === 'minPaneWidth') {
         paneWidthOverrides.minPaneWidth = value as number;
       } else {
@@ -502,11 +502,11 @@ export class SettingsManager {
   /**
    * Update multiple settings at once
    */
-  updateSettings(settings: Partial<ComuxSettings>, scope: SettingsScope): void {
+  updateSettings(settings: Partial<PsycheSettings>, scope: SettingsScope): void {
     if (typeof settings.permissionMode === 'string' && !isPermissionMode(settings.permissionMode)) {
       throw new Error(`Invalid permissionMode: "${settings.permissionMode}"`);
     }
-    if (settings.colorTheme !== undefined && !isComuxThemeName(settings.colorTheme)) {
+    if (settings.colorTheme !== undefined && !isPsycheThemeName(settings.colorTheme)) {
       throw new Error(`Invalid colorTheme: "${String(settings.colorTheme)}"`);
     }
     if (settings.enabledAgents !== undefined) {
@@ -555,12 +555,12 @@ export class SettingsManager {
       );
     }
 
-    const settingsToApply: Partial<ComuxSettings> = { ...settings };
+    const settingsToApply: Partial<PsycheSettings> = { ...settings };
     let projectSettingsChanged = false;
     let paneWidthsUpdated = false;
 
     if (settingsToApply.minPaneWidth !== undefined || settingsToApply.maxPaneWidth !== undefined) {
-      const paneWidthOverrides: Partial<Pick<ComuxSettings, 'minPaneWidth' | 'maxPaneWidth'>> = {};
+      const paneWidthOverrides: Partial<Pick<PsycheSettings, 'minPaneWidth' | 'maxPaneWidth'>> = {};
       if (settingsToApply.minPaneWidth !== undefined) {
         paneWidthOverrides.minPaneWidth = settingsToApply.minPaneWidth;
       }
@@ -615,7 +615,7 @@ export class SettingsManager {
   /**
    * Remove a setting from the specified scope
    */
-  removeSetting(key: keyof ComuxSettings, scope: SettingsScope): void {
+  removeSetting(key: keyof PsycheSettings, scope: SettingsScope): void {
     if (scope === 'global') {
       delete this.globalSettings[key];
       this.saveGlobalSettings();
@@ -654,7 +654,7 @@ export class SettingsManager {
   /**
    * Check if a setting is overridden at the project level
    */
-  isProjectOverride(key: keyof ComuxSettings): boolean {
+  isProjectOverride(key: keyof PsycheSettings): boolean {
     if (key === 'minPaneWidth' || key === 'maxPaneWidth') {
       return false;
     }
@@ -664,14 +664,14 @@ export class SettingsManager {
   /**
    * Get team defaults (committed to repo, read-only)
    */
-  getTeamDefaults(): ComuxSettings {
+  getTeamDefaults(): PsycheSettings {
     return cloneSettingsArrays(this.teamDefaults);
   }
 
   /**
    * Get the effective scope for a setting (where it's currently defined)
    */
-  getEffectiveScope(key: keyof ComuxSettings): EffectiveSettingsScope | null {
+  getEffectiveScope(key: keyof PsycheSettings): EffectiveSettingsScope | null {
     if (key === 'minPaneWidth') {
       return this.globalSettings.minPaneWidth !== undefined ? 'global' : null;
     }

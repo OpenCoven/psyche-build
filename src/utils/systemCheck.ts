@@ -129,7 +129,7 @@ export function compareVersions(a: number[], b: number[]): number {
 }
 
 /**
- * Validate all system requirements for comux
+ * Validate all system requirements for psyche
  * Returns validation result with errors and warnings
  */
 export async function validateSystemRequirements(): Promise<ValidationResult> {

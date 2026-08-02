@@ -5,7 +5,7 @@ import type { LayoutConfiguration } from './LayoutCalculator.js';
 import { resolveDistPath } from '../utils/runtimePaths.js';
 
 // Spacer pane identifier
-const SPACER_PANE_TITLE = 'comux-spacer';
+const SPACER_PANE_TITLE = 'psyche-spacer';
 const MIN_SPACER_WIDTH = 20; // Minimum width for spacer pane (tmux may reject layouts with tiny panes)
 
 /**

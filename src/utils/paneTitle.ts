@@ -1,10 +1,10 @@
 import { createHash } from 'crypto';
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { getPaneProjectName, getPaneProjectRoot } from './paneProject.js';
 
-export const PANE_TITLE_DELIMITER = '__comux__';
-export const LEGACY_PANE_TITLE_DELIMITERS = ['::comux::'] as const;
+export const PANE_TITLE_DELIMITER = '__psyche__';
+export const LEGACY_PANE_TITLE_DELIMITERS = ['::psyche::'] as const;
 const ALL_PANE_TITLE_DELIMITERS = [PANE_TITLE_DELIMITER, ...LEGACY_PANE_TITLE_DELIMITERS];
 
 // Tmux's s/foo/bar/: modifier uses ":" to separate the target variable, so the
@@ -31,7 +31,7 @@ export function sanitizePaneDisplayName(value: string): string {
 }
 
 export function getPaneDisplayName(
-  pane: Pick<ComuxPane, 'slug' | 'displayName'>
+  pane: Pick<PsychePane, 'slug' | 'displayName'>
 ): string {
   const displayName = typeof pane.displayName === 'string'
     ? sanitizePaneDisplayName(pane.displayName)
@@ -51,7 +51,7 @@ function encodePaneTmuxTitle(
 }
 
 function getCustomPaneDisplayName(
-  pane: Pick<ComuxPane, 'displayName'>
+  pane: Pick<PsychePane, 'displayName'>
 ): string | undefined {
   if (typeof pane.displayName !== 'string') {
     return undefined;
@@ -62,7 +62,7 @@ function getCustomPaneDisplayName(
 }
 
 function getStablePaneTmuxTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -89,7 +89,7 @@ function getStablePaneTmuxTitle(
 }
 
 export function getPaneTmuxDisplayTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -102,7 +102,7 @@ export function getPaneTmuxDisplayTitle(
  * worktree panes so duplicate slugs across projects do not collide.
  */
 export function getPaneTmuxTitle(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string {
@@ -120,7 +120,7 @@ export function getPaneTmuxTitle(
  * delimiter migrations.
  */
 export function getPaneTitleCandidates(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot?: string,
   fallbackProjectName?: string
 ): string[] {

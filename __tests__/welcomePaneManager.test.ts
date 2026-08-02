@@ -42,10 +42,10 @@ describe('welcomePaneManager', () => {
     vi.clearAllMocks();
     vi.spyOn(Date, 'now').mockImplementation(() => 1_700_000_000_000 + (nowTick++ * 1_000));
 
-    tempProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'comux-welcome-pane-'));
-    const comuxDir = path.join(tempProjectRoot, '.comux');
-    fs.mkdirSync(comuxDir, { recursive: true });
-    configPath = path.join(comuxDir, 'comux.config.json');
+    tempProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-welcome-pane-'));
+    const psycheDir = path.join(tempProjectRoot, '.psyche');
+    fs.mkdirSync(psycheDir, { recursive: true });
+    configPath = path.join(psycheDir, 'psyche.config.json');
 
     fs.writeFileSync(configPath, JSON.stringify({
       projectName: 'test-project',
@@ -95,7 +95,7 @@ describe('welcomePaneManager', () => {
     expect(updatedConfig.welcomePaneId).toBe('%88');
   });
 
-  it('destroys the welcome pane when comux panes become visible again', async () => {
+  it('destroys the welcome pane when psyche panes become visible again', async () => {
     mockWelcomePaneExists.mockResolvedValue(true);
 
     fs.writeFileSync(configPath, JSON.stringify({

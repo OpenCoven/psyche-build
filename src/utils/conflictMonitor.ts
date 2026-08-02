@@ -6,7 +6,7 @@
  * 2. Triggers cleanup flow
  */
 
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { execSync } from 'child_process';
 

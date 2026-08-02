@@ -1,15 +1,15 @@
 import { watch, type FSWatcher } from 'chokidar';
 import { EventEmitter } from 'events';
 import { readFile } from 'fs/promises';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { LogService } from './LogService.js';
 
 export interface ConfigData {
-  panes: ComuxPane[];
+  panes: PsychePane[];
 }
 
 /**
- * Watches the comux.config.json file for changes and emits events
+ * Watches the psyche.config.json file for changes and emits events
  * when the file is modified. Only emits when actual changes occur.
  */
 export class ConfigWatcher extends EventEmitter {

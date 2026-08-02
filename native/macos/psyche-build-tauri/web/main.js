@@ -1,4 +1,4 @@
-// comux — Tauri prototype workspace shell
+// psyche — Tauri prototype workspace shell
 // One module, no bundler. Uses UMD globals (Terminal, FitAddon) and the
 // global Tauri API surface exposed via `withGlobalTauri: true`.
 
@@ -15,7 +15,7 @@
     host.innerHTML = "";
     var pre = document.createElement("pre");
     pre.className = "boot-error";
-    pre.textContent = "comux boot error\n\n" + msg;
+    pre.textContent = "psyche boot error\n\n" + msg;
     host.appendChild(pre);
   }
 
@@ -33,7 +33,7 @@
   if (!window.__TAURI__ || !window.__TAURI__.core || !window.__TAURI__.event) {
     showBootError(
       "Tauri global API is not present. This page was opened outside the Tauri runtime.\n\n" +
-        "Launch it with:\n  cd native/macos/comux-tauri\n  pnpm dev\n\n" +
+        "Launch it with:\n  cd native/macos/psyche-build-tauri\n  pnpm dev\n\n" +
         "Opening web/index.html as file:// or in a normal browser will not inject window.__TAURI__."
     );
     return;
@@ -110,8 +110,8 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      ensureProjectComux(project);
-      setStatus("no pane — launching comux…", "");
+      ensureProjectPsyche(project);
+      setStatus("no pane — launching psyche…", "");
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -123,13 +123,13 @@
   }
 
   var commandHistory = [];
-  var RECENT_COMMANDS_KEY = "comux.tauri.recentCommands.v1";
+  var RECENT_COMMANDS_KEY = "psyche.tauri.recentCommands.v1";
   var recentCommands = loadRecentCommands();
 
   var HARD_MAX_PROJECTS = 10;
   var HARD_MAX_BROWSER_TABS_PER_PROJECT = 10;
-  var SETTINGS_KEY = "comux.tauri.settings.v1";
-  var WORKSPACE_STATE_KEY = "comux.tauri.workspace.v1";
+  var SETTINGS_KEY = "psyche.tauri.settings.v1";
+  var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var isRestoringWorkspace = false;
   var saveWorkspaceTimer = 0;
@@ -237,7 +237,7 @@
   function setProjectStatus(project, level) {
     project = project || activeProject();
     var statusLevel = level || "ok";
-    if (statusLevel === "ok") setStatus("comux is ready", "ok");
+    if (statusLevel === "ok") setStatus("psyche is ready", "ok");
     else if (statusLevel === "") setStatus(project ? project.name : "ready", "");
     else setStatus(project ? project.name : "ready", statusLevel);
   }
@@ -434,7 +434,7 @@
     mountTerminal(thread);
     focusThread(id);
     // Run fit() now so the PTY starts at the actual visible size, not at
-    // xterm.js's default 80x24. Otherwise comux/Ink draw the first frame at
+    // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
     // the wrong size and leave artifacts.
     requestAnimationFrame(function () {
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
@@ -825,7 +825,7 @@
     if (activeProjectThreads().length > 0) return;
     var empty = document.createElement("div");
     empty.className = "terminal-empty";
-    empty.textContent = activeProject() ? "No terminal pane yet — opening Comux…" : "Drop/open a project to begin";
+    empty.textContent = activeProject() ? "No terminal pane yet — opening Psyche…" : "Drop/open a project to begin";
     terminalHost.appendChild(empty);
   }
 
@@ -869,9 +869,9 @@
   // 8. Tab strip render
   // ============================================================
 
-  // Tabs == projects. Each project tab spawns comux on add (`spawnDefaultThreadIn`)
+  // Tabs == projects. Each project tab spawns psyche on add (`spawnDefaultThreadIn`)
   // and clicking the tab restores the project's last-active thread. Threads
-  // themselves are managed inside the embedded comux/tmux UI — they aren't
+  // themselves are managed inside the embedded psyche/tmux UI — they aren't
   // surfaced as separate tabs at the shell level.
   function refreshTabs() {
     if (editingContext && editingContext.surface === "tabs") return;
@@ -901,7 +901,7 @@
         "</span>" +
         '<button class="close" title="Close project (⌘W)">×</button>';
 
-      // Single click → activate this project's comux (restores last-active thread).
+      // Single click → activate this project's psyche (restores last-active thread).
       tab.addEventListener("click", function (e) {
         if (e.target.classList.contains("close")) return;
         setActiveProject(project.id);
@@ -931,7 +931,7 @@
     var addBtn = document.createElement("button");
     addBtn.className = "tab-add";
     addBtn.textContent = "+";
-    addBtn.title = "Open new project + launch comux (⌘O)";
+    addBtn.title = "Open new project + launch psyche (⌘O)";
     addBtn.addEventListener("click", function () { openProjectPicker(); });
     tabStripEl.appendChild(addBtn);
   }
@@ -959,7 +959,7 @@
     if (head === "/preview" || head === "/browser" || head === "/browser-tab") return "Browser";
     if (head === "/open-project" || head === "/rename-project" || head === "/settings") return "Project";
     if (head === "/skills" || head === "/reload-skills") return "Agent";
-    return "Comux";
+    return "Psyche";
   }
 
   var commands = [
@@ -969,9 +969,9 @@
       run: function () { spawnDefaultThread(); },
     },
     {
-      cmd: "/new-comux",
-      desc: "Spawn a thread running the comux TUI",
-      run: function () { spawnComuxThread(); },
+      cmd: "/new-psyche",
+      desc: "Spawn a thread running the psyche TUI",
+      run: function () { spawnPsycheThread(); },
     },
     {
       cmd: "/close",
@@ -1196,7 +1196,7 @@
 
   function builtinPaletteEntries() {
     return commands.map(function (c) {
-      return { cmd: c.cmd, desc: c.desc, badge: "comux", kind: "builtin", group: commandGroupFor(c.cmd), hint: "Tab" };
+      return { cmd: c.cmd, desc: c.desc, badge: "psyche", kind: "builtin", group: commandGroupFor(c.cmd), hint: "Tab" };
     });
   }
 
@@ -1348,7 +1348,7 @@
     var safe = String(raw || "default").split("").filter(function (c) {
       return /[A-Za-z0-9_-]/.test(c);
     }).join("").slice(0, 64) || "default";
-    return "comux-browser-" + safe;
+    return "psyche-browser-" + safe;
   }
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
@@ -1651,7 +1651,7 @@
       createContextualTab();
       e.preventDefault(); return;
     }
-    // ⌘O opens a new project (folder picker → addProject → comux).
+    // ⌘O opens a new project (folder picker → addProject → psyche).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active project tab (and its threads).
     if (e.key === "w") {
@@ -1721,7 +1721,7 @@
       if (!selected || typeof selected !== "string") return; // user cancelled
       var project = addProject(selected);
       if (project) {
-        ensureProjectComux(project);
+        ensureProjectPsyche(project);
         setProjectStatus(project, "ok");
       }
     } catch (err) {
@@ -1729,28 +1729,28 @@
     }
   }
 
-  function ensureProjectComux(project) {
+  function ensureProjectPsyche(project) {
     if (!project) return null;
-    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.kind === "comux" && t.status !== "exited"; });
+    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.kind === "psyche" && t.status !== "exited"; });
     if (existing) { focusThread(existing.id); return existing; }
     return spawnDefaultThreadIn(project);
   }
 
   function spawnDefaultThreadIn(project) {
-    if (state.env && state.env.comux_entry && state.env.node_path) {
+    if (state.env && state.env.psyche_entry && state.env.node_path) {
       var shell = (state.env.default_shell) || "/bin/zsh";
       var quoted = function (s) {
         return "'" + String(s).replace(/'/g, "'\\''") + "'";
       };
-      var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.comux_entry);
+      var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
       createThread({
         project: project,
-        name: "comux",
-        kind: "comux",
+        name: "psyche",
+        kind: "psyche",
         command: shell,
         args: ["-l", "-c", cmd],
         projectRoot: project.root,
-        env: tauriComuxEnv(),
+        env: tauriPsycheEnv(),
       });
     } else {
       createThread({
@@ -1776,46 +1776,46 @@
     });
   }
 
-  function spawnComuxThread() {
-    if (!state.env || !state.env.node_path || !state.env.comux_entry) {
+  function spawnPsycheThread() {
+    if (!state.env || !state.env.node_path || !state.env.psyche_entry) {
       writeToActive(
-        "\r\n\x1b[33m[/new-comux]\x1b[0m comux entry not found.\r\n" +
+        "\r\n\x1b[33m[/new-psyche]\x1b[0m psyche entry not found.\r\n" +
         "Make sure dist/index.js exists in the worktree (run `pnpm run build`) " +
         "and that node is on PATH.\r\n"
       );
       return null;
     }
-    // Spawn comux through a login shell so it inherits your full user
-    // environment. Wrap with a tmux socket isolation so the embedded comux
+    // Spawn psyche through a login shell so it inherits your full user
+    // environment. Wrap with a tmux socket isolation so the embedded psyche
     // doesn't collide with any tmux server already running outside the app.
     var shell = (state.env.default_shell) || "/bin/zsh";
     var quoted = function (s) {
       return "'" + String(s).replace(/'/g, "'\\''") + "'";
     };
-    var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.comux_entry);
+    var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
     return createThread({
-      name: "comux",
-      kind: "comux",
+      name: "psyche",
+      kind: "psyche",
       command: shell,
       args: ["-l", "-c", cmd],
       projectRoot: state.env.repo_root,
-      env: tauriComuxEnv(),
+      env: tauriPsycheEnv(),
     });
   }
 
   /**
-   * Environment vars that isolate a comux instance from the user's regular
+   * Environment vars that isolate a psyche instance from the user's regular
    * tmux server. We point TMUX_TMPDIR at a Tauri-specific directory; tmux
    * creates its socket there and cannot see / be seen by any tmux running on
-   * the default socket. We also clear TMUX so comux doesn't think it is
+   * the default socket. We also clear TMUX so psyche doesn't think it is
    * already inside a tmux session inherited from the parent process.
    */
-  function tauriComuxEnv() {
+  function tauriPsycheEnv() {
     var home = (state.env && state.env.home) || "";
-    var tmpdir = home ? home + "/.comux/macos-app/tmux" : "/tmp/comux-tauri";
+    var tmpdir = home ? home + "/.psyche/macos-app/tmux" : "/tmp/psyche-build-tauri";
     return {
-      COMUX_TAURI: "1",
-      COMUX_NATIVE_CONTAINER: "1",
+      PSYCHE_TAURI: "1",
+      PSYCHE_NATIVE_CONTAINER: "1",
       TMUX_TMPDIR: tmpdir,
       TMUX: "",
       npm_config_prefix: "",
@@ -1840,7 +1840,7 @@
       }
       if (!project) project = addProject(bootRoot);
       if (project) {
-        ensureProjectComux(project);
+        ensureProjectPsyche(project);
         var activeTab = currentBrowserTab(project);
         if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
         restoreProjectLayout(project);

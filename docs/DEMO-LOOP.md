@@ -1,6 +1,6 @@
-# comux + Coven demo loop
+# psyche + Coven demo loop
 
-This walkthrough covers the local developer loop for using comux as the visible cockpit for Coven-backed coding sessions.
+This walkthrough covers the local developer loop for using psyche as the visible cockpit for Coven-backed coding sessions.
 
 ## Prerequisites
 
@@ -9,7 +9,7 @@ This walkthrough covers the local developer loop for using comux as the visible 
 - Git 2.20+
 - Coven installed locally
 
-Before opening comux, confirm Coven is available and the daemon is running:
+Before opening psyche, confirm Coven is available and the daemon is running:
 
 ```bash
 coven doctor
@@ -19,29 +19,29 @@ coven status
 
 If `coven start` or `coven status` is unavailable in your installed Coven build, use `coven daemon --help` and follow the daemon command shown there.
 
-## Open a project in comux
+## Open a project in psyche
 
 From the repository you want to work on:
 
 ```bash
-comux
+psyche
 ```
 
-comux opens a tmux cockpit scoped to that project. The sidebar remains the control surface for panes, projects, Coven sessions, and review actions.
+psyche opens a tmux cockpit scoped to that project. The sidebar remains the control surface for panes, projects, Coven sessions, and review actions.
 
 ## Launch a Coven-backed session
 
-Press `n` for New Pane, describe the coding task, and choose Codex, Claude Code, or another configured launcher. When the local Coven bridge path is available, the session can be launched as a Coven-managed harness session while still appearing as a visible comux pane.
+Press `n` for New Pane, describe the coding task, and choose Codex, Claude Code, or another configured launcher. When the local Coven bridge path is available, the session can be launched as a Coven-managed harness session while still appearing as a visible psyche pane.
 
-For desktop-use sessions, press `d`; comux creates a pane and attaches to the Coven session with `coven attach <session-id>`.
+For desktop-use sessions, press `d`; psyche creates a pane and attaches to the Coven session with `coven attach <session-id>`.
 
 ## Watch it
 
 The sidebar polls Coven every 15 seconds. Matching sessions appear under `☾ Coven sessions` for the project.
 
 - Use the arrow keys to move between panes and project rows.
-- Press `o` on the active project to open the latest matching Coven session as a visible comux pane.
-- If Coven is not running, comux keeps running and shows a compact hint instead of failing the cockpit.
+- Press `o` on the active project to open the latest matching Coven session as a visible psyche pane.
+- If Coven is not running, psyche keeps running and shows a compact hint instead of failing the cockpit.
 
 ## Inspect files and diffs
 
@@ -59,13 +59,13 @@ Press `m` on the relevant pane to use the explicit review and handoff actions:
 - attach another agent;
 - archive, close, or clean up the pane when the work is done.
 
-comux should not push, merge, publish, delete, or clean up work without an explicit user action.
+psyche should not push, merge, publish, delete, or clean up work without an explicit user action.
 
 ## Troubleshooting
 
 ### Coven is not installed
 
-Install the public CLI, then reopen comux:
+Install the public CLI, then reopen psyche:
 
 ```bash
 npm i -g @opencoven/cli
@@ -88,14 +88,14 @@ coven daemon --help
 
 ### Coven sessions do not appear
 
-comux reads sessions through:
+psyche reads sessions through:
 
 ```bash
 coven sessions --json --all
 coven sessions --json
 ```
 
-If your Coven build only prints a table, comux will show Coven as unavailable until the JSON sessions contract is available again. Track the broader Coven direction in the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md).
+If your Coven build only prints a table, psyche will show Coven as unavailable until the JSON sessions contract is available again. Track the broader Coven direction in the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md).
 
 ### Opening a session fails
 
@@ -105,4 +105,4 @@ Run:
 coven attach <session-id>
 ```
 
-If attach fails directly in the terminal, fix the Coven runtime first. If direct attach works but comux cannot open it, capture the comux status message and the output of `coven sessions --json`.
+If attach fails directly in the terminal, fix the Coven runtime first. If direct attach works but psyche cannot open it, capture the psyche status message and the output of `coven sessions --json`.

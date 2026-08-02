@@ -39,7 +39,7 @@ function getProjectRoot() {
 function buildSessionName(projectRoot) {
   const projectName = path.basename(projectRoot);
   const projectHash = createHash('md5').update(projectRoot).digest('hex').slice(0, 8);
-  return `comux-${`${projectName}-${projectHash}`.replace(/\./g, '-')}`;
+  return `psyche-${`${projectName}-${projectHash}`.replace(/\./g, '-')}`;
 }
 
 function readJson(filePath) {
@@ -85,10 +85,10 @@ function pathEq(a, b) {
 const projectRoot = getProjectRoot();
 const cwd = process.cwd();
 const sessionName = buildSessionName(projectRoot);
-const configPath = path.join(projectRoot, '.comux', 'comux.config.json');
+const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 const config = readJson(configPath);
 
-console.log('comux dev doctor');
+console.log('psyche dev doctor');
 console.log(`project root: ${projectRoot}`);
 console.log(`working dir:  ${cwd}`);
 console.log(`session:      ${sessionName}`);
@@ -184,12 +184,12 @@ if (generatedDocsPath) {
 }
 
 const hookDirCandidates = [
-  path.join(cwd, '.comux-hooks'),
-  path.join(projectRoot, '.comux-hooks'),
+  path.join(cwd, '.psyche-hooks'),
+  path.join(projectRoot, '.psyche-hooks'),
 ];
 const hookDir = hookDirCandidates.find((candidate) => fs.existsSync(candidate));
 if (!hookDir) {
-  status('warn', 'Local hooks', '.comux-hooks not found');
+  status('warn', 'Local hooks', '.psyche-hooks not found');
 } else {
   const requiredHooks = ['worktree_created', 'pre_merge'];
   const missingHooks = requiredHooks.filter((hook) => !fs.existsSync(path.join(hookDir, hook)));
@@ -203,8 +203,8 @@ if (!hookDir) {
 console.log('');
 if (hasCriticalIssue) {
   console.log('Suggested fixes:');
-  console.log('1. Run `pnpm dev` from the comux worktree you want to use as source.');
-  console.log('2. In comux DEV mode, use [DEV] Use as Source (or S) to toggle source/root.');
+  console.log('1. Run `pnpm dev` from the psyche worktree you want to use as source.');
+  console.log('2. In psyche DEV mode, use [DEV] Use as Source (or S) to toggle source/root.');
   console.log('3. Re-run `pnpm dev:doctor` to confirm watch + source health.');
   process.exitCode = 1;
 } else {

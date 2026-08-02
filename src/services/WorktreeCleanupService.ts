@@ -1,14 +1,14 @@
 import { spawn } from 'child_process';
 import { existsSync, readdirSync, statSync } from 'fs';
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { triggerHook } from '../utils/hooks.js';
 import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
 
 interface WorktreeCleanupJob {
-  pane: ComuxPane;
+  pane: PsychePane;
   paneProjectRoot: string;
   mainRepoPath: string;
   deleteBranch: boolean;
@@ -16,7 +16,7 @@ interface WorktreeCleanupJob {
 
 interface WorktreePruneJob {
   projectRoot: string;
-  activePanes: ComuxPane[];
+  activePanes: PsychePane[];
   maxManagedWorktrees: number;
 }
 
@@ -58,7 +58,7 @@ function pathsOverlap(left: string, right: string): boolean {
 
 /**
  * Queues worktree deletions in the background so large filesystem cleanup
- * never blocks the main comux event loop.
+ * never blocks the main psyche event loop.
  */
 export class WorktreeCleanupService {
   private static instance: WorktreeCleanupService;
@@ -176,7 +176,7 @@ export class WorktreeCleanupService {
   }
 
   private getBranchDeletionTargets(
-    pane: ComuxPane,
+    pane: PsychePane,
     mainRepoPath: string
   ): BranchDeletionTarget[] {
     const branchName = getPaneBranchName(pane);
@@ -204,7 +204,7 @@ export class WorktreeCleanupService {
   }
 
   private getWorktreeRemovalTargets(
-    pane: ComuxPane,
+    pane: PsychePane,
     mainRepoPath: string
   ): WorktreeRemovalTarget[] {
     if (!pane.worktreePath) {
@@ -277,7 +277,7 @@ export class WorktreeCleanupService {
       return [];
     }
 
-    const managedRoot = path.join(job.projectRoot, '.comux', 'worktrees');
+    const managedRoot = path.join(job.projectRoot, '.psyche', 'worktrees');
     if (!existsSync(managedRoot)) {
       return [];
     }

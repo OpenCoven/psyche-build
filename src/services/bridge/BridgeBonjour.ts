@@ -2,7 +2,7 @@ import { Bonjour } from "bonjour-service";
 import { PROTOCOL_VERSION } from "./wireProtocol.js";
 
 /**
- * Publishes the running daemon as `_comux._tcp.local.` so iOS clients on
+ * Publishes the running daemon as `_psyche._tcp.local.` so iOS clients on
  * the same LAN find it via Bonjour. TXT record carries protocol version
  * + serverId so iOS can dedupe and reject mismatched protocol versions
  * before connecting.
@@ -18,7 +18,7 @@ export class BridgeBonjour {
     this.bj = new Bonjour();
     this.service = this.bj.publish({
       name: opts.name,
-      type: "comux",
+      type: "psyche",
       port: opts.port,
       protocol: "tcp",
       txt: {

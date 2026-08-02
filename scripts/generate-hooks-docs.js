@@ -3,7 +3,7 @@
  * Generate AGENTS.md documentation from TypeScript types
  *
  * This script extracts hook types, environment variables, and generates
- * comprehensive documentation that gets embedded in the comux binary.
+ * comprehensive documentation that gets embedded in the psyche binary.
  */
 
 import { readFileSync, writeFileSync } from 'fs';
@@ -32,35 +32,35 @@ const hookTypes = hookTypesMatch
 console.log(`📋 Found ${hookTypes.length} hook types`);
 
 // Generate AGENTS.md content
-const agentsMd = `# comux Hooks System - Agent Reference
+const agentsMd = `# psyche Hooks System - Agent Reference
 
 **Auto-generated documentation for AI agents**
 
-This document contains everything an AI agent needs to create, modify, and understand comux hooks. It is automatically generated from the comux source code and embedded in the binary.
+This document contains everything an AI agent needs to create, modify, and understand psyche hooks. It is automatically generated from the psyche source code and embedded in the binary.
 
 ## What You're Working On
 
-You are editing hooks for **comux**, a tmux pane manager that creates AI-powered development workflows. Each pane runs in its own git worktree with an AI agent.
+You are editing hooks for **psyche**, a tmux pane manager that creates AI-powered development workflows. Each pane runs in its own git worktree with an AI agent.
 
 ## Your Goal
 
-Create executable bash scripts in \`.comux-hooks/\` that run automatically at key lifecycle events.
+Create executable bash scripts in \`.psyche-hooks/\` that run automatically at key lifecycle events.
 
 ## Quick Start
 
-1. **Create a hook file**: \`touch .comux-hooks/worktree_created\`
-2. **Make it executable**: \`chmod +x .comux-hooks/worktree_created\`
+1. **Create a hook file**: \`touch .psyche-hooks/worktree_created\`
+2. **Make it executable**: \`chmod +x .psyche-hooks/worktree_created\`
 3. **Add shebang**: Start with \`#!/bin/bash\`
-4. **Use environment variables**: Access \`$COMUX_ROOT\`, \`$COMUX_WORKTREE_PATH\`, etc.
+4. **Use environment variables**: Access \`$PSYCHE_ROOT\`, \`$PSYCHE_WORKTREE_PATH\`, etc.
 5. **Test it**: Set env vars manually and run the script
 
 ## Hook Execution Model
 
 - **Non-blocking**: Hooks run in background (detached processes)
-- **Silent failures**: Hook errors are logged but don't stop comux
+- **Silent failures**: Hook errors are logged but don't stop psyche
 - **Environment-based**: All context passed via environment variables
-- **Version controlled**: Hooks in \`.comux-hooks/\` are shared with team
-- **Priority resolution**: \`.comux-hooks/\` → \`.comux/hooks/\` → \`~/.comux/hooks/\`
+- **Version controlled**: Hooks in \`.psyche-hooks/\` are shared with team
+- **Priority resolution**: \`.psyche-hooks/\` → \`.psyche/hooks/\` → \`~/.psyche/hooks/\`
 
 ## Available Hooks
 
@@ -70,37 +70,37 @@ ${generateHooksTable()}
 
 ### Always Available
 \`\`\`bash
-COMUX_ROOT="/path/to/project"           # Project root directory
-COMUX_SERVER_PORT="3142"                # HTTP server port
+PSYCHE_ROOT="/path/to/project"           # Project root directory
+PSYCHE_SERVER_PORT="3142"                # HTTP server port
 \`\`\`
 
 ### Pane Context (most hooks)
 \`\`\`bash
-COMUX_PANE_ID="comux-1234567890"         # comux pane identifier
-COMUX_SLUG="fix-auth-bug"               # Branch/worktree name
-COMUX_PROMPT="Fix authentication bug"   # User's prompt
-COMUX_AGENT="claude"                    # Agent type (registry id, e.g. claude, codex, opencode)
-COMUX_TMUX_PANE_ID="%38"                # tmux pane ID
+PSYCHE_PANE_ID="psyche-1234567890"         # psyche pane identifier
+PSYCHE_SLUG="fix-auth-bug"               # Branch/worktree name
+PSYCHE_PROMPT="Fix authentication bug"   # User's prompt
+PSYCHE_AGENT="claude"                    # Agent type (registry id, e.g. claude, codex, opencode)
+PSYCHE_TMUX_PANE_ID="%38"                # tmux pane ID
 \`\`\`
 
 ### Worktree Context
 \`\`\`bash
-COMUX_WORKTREE_PATH="/path/.comux/worktrees/fix-auth-bug"
-COMUX_BRANCH="fix-auth-bug"             # Same as slug
+PSYCHE_WORKTREE_PATH="/path/.psyche/worktrees/fix-auth-bug"
+PSYCHE_BRANCH="fix-auth-bug"             # Same as slug
 \`\`\`
 
 ### Merge Context
 \`\`\`bash
-COMUX_TARGET_BRANCH="main"              # Branch being merged into
+PSYCHE_TARGET_BRANCH="main"              # Branch being merged into
 \`\`\`
 
 ## HTTP Callback API
 
-Interactive hooks (\`run_test\` and \`run_dev\`) can update comux UI via HTTP.
+Interactive hooks (\`run_test\` and \`run_dev\`) can update psyche UI via HTTP.
 
 ### Update Test Status
 \`\`\`bash
-curl -X PUT "http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/test" \\
+curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test" \\
   -H "Content-Type: application/json" \\
   -d '{"status": "running", "output": "optional test output"}'
 
@@ -109,7 +109,7 @@ curl -X PUT "http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/test" 
 
 ### Update Dev Server
 \`\`\`bash
-curl -X PUT "http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/dev" \\
+curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/dev" \\
   -H "Content-Type: application/json" \\
   -d '{"status": "running", "url": "http://localhost:3000"}'
 
@@ -122,9 +122,9 @@ curl -X PUT "http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/dev" \
 ### Pattern 1: Install Dependencies
 \`\`\`bash
 #!/bin/bash
-# .comux-hooks/worktree_created
+# .psyche-hooks/worktree_created
 
-cd "$COMUX_WORKTREE_PATH"
+cd "$PSYCHE_WORKTREE_PATH"
 
 if [ -f "pnpm-lock.yaml" ]; then
   pnpm install --prefer-offline &
@@ -144,17 +144,17 @@ fi
 ### Pattern 2: Copy Configuration
 \`\`\`bash
 #!/bin/bash
-# .comux-hooks/worktree_created
+# .psyche-hooks/worktree_created
 
 # Copy environment file
-if [ -f "$COMUX_ROOT/.env.local" ]; then
-  cp "$COMUX_ROOT/.env.local" "$COMUX_WORKTREE_PATH/.env.local"
+if [ -f "$PSYCHE_ROOT/.env.local" ]; then
+  cp "$PSYCHE_ROOT/.env.local" "$PSYCHE_WORKTREE_PATH/.env.local"
 fi
 
 # Copy other config files
 for file in .env.development .npmrc .yarnrc; do
-  if [ -f "$COMUX_ROOT/$file" ]; then
-    cp "$COMUX_ROOT/$file" "$COMUX_WORKTREE_PATH/$file"
+  if [ -f "$PSYCHE_ROOT/$file" ]; then
+    cp "$PSYCHE_ROOT/$file" "$PSYCHE_WORKTREE_PATH/$file"
   fi
 done
 \`\`\`
@@ -162,18 +162,18 @@ done
 ### Pattern 3: Run Tests with Status Updates
 \`\`\`bash
 #!/bin/bash
-# .comux-hooks/run_test
+# .psyche-hooks/run_test
 
 set -e
-cd "$COMUX_WORKTREE_PATH"
-API="http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/test"
+cd "$PSYCHE_WORKTREE_PATH"
+API="http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test"
 
 # Update: starting
 curl -s -X PUT "$API" -H "Content-Type: application/json" \\
   -d '{"status": "running"}' > /dev/null
 
 # Run tests and capture output
-OUTPUT_FILE="/tmp/comux-test-$COMUX_PANE_ID.txt"
+OUTPUT_FILE="/tmp/psyche-test-$PSYCHE_PANE_ID.txt"
 if pnpm test > "$OUTPUT_FILE" 2>&1; then
   STATUS="passed"
 else
@@ -194,14 +194,14 @@ rm -f "$OUTPUT_FILE"
 ### Pattern 4: Dev Server with Tunnel
 \`\`\`bash
 #!/bin/bash
-# .comux-hooks/run_dev
+# .psyche-hooks/run_dev
 
 set -e
-cd "$COMUX_WORKTREE_PATH"
-API="http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/dev"
+cd "$PSYCHE_WORKTREE_PATH"
+API="http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/dev"
 
 # Start dev server in background
-LOG_FILE="/tmp/comux-dev-$COMUX_PANE_ID.log"
+LOG_FILE="/tmp/psyche-dev-$PSYCHE_PANE_ID.log"
 pnpm dev > "$LOG_FILE" 2>&1 &
 DEV_PID=$!
 
@@ -231,18 +231,18 @@ echo "[Hook] Dev server running at $URL (PID: $DEV_PID)"
 ### Pattern 5: Post-Merge Deployment
 \`\`\`bash
 #!/bin/bash
-# .comux-hooks/post_merge
+# .psyche-hooks/post_merge
 
 set -e
-cd "$COMUX_ROOT"
+cd "$PSYCHE_ROOT"
 
 # Only deploy from main/master
-if [ "$COMUX_TARGET_BRANCH" != "main" ] && [ "$COMUX_TARGET_BRANCH" != "master" ]; then
+if [ "$PSYCHE_TARGET_BRANCH" != "main" ] && [ "$PSYCHE_TARGET_BRANCH" != "master" ]; then
   exit 0
 fi
 
 # Push to remote
-git push origin "$COMUX_TARGET_BRANCH"
+git push origin "$PSYCHE_TARGET_BRANCH"
 
 # Trigger deployment (example: Vercel)
 if [ -n "$VERCEL_TOKEN" ]; then
@@ -253,10 +253,10 @@ if [ -n "$VERCEL_TOKEN" ]; then
 fi
 
 # Close GitHub issue if prompt contains #123
-ISSUE=$(echo "$COMUX_PROMPT" | grep -oP '#\\K\\d+' | head -1)
+ISSUE=$(echo "$PSYCHE_PROMPT" | grep -oP '#\\K\\d+' | head -1)
 if [ -n "$ISSUE" ] && command -v gh &> /dev/null; then
   gh issue close "$ISSUE" \\
-    -c "Resolved in $COMUX_SLUG, merged to $COMUX_TARGET_BRANCH" \\
+    -c "Resolved in $PSYCHE_SLUG, merged to $PSYCHE_TARGET_BRANCH" \\
     2>/dev/null || true
 fi
 \`\`\`
@@ -265,10 +265,10 @@ fi
 
 1. **Always start with shebang**: \`#!/bin/bash\`
 2. **Set error handling**: \`set -e\` (exit on error)
-3. **Make executable**: \`chmod +x .comux-hooks/hook_name\`
+3. **Make executable**: \`chmod +x .psyche-hooks/hook_name\`
 4. **Background long operations**: Append \`&\` to avoid blocking
 5. **Check for required tools**: \`command -v tool &> /dev/null\`
-6. **Log for debugging**: \`echo "[Hook] message" >> "$COMUX_ROOT/.comux/hooks.log"\`
+6. **Log for debugging**: \`echo "[Hook] message" >> "$PSYCHE_ROOT/.psyche/hooks.log"\`
 7. **Handle missing vars gracefully**: \`[ -z "$VAR" ] && exit 0\`
 8. **Use silent curl**: \`curl -s\` to avoid noise in logs
 9. **Clean up temp files**: Remove files in \`/tmp/\`
@@ -279,16 +279,16 @@ fi
 ### Manual Testing
 \`\`\`bash
 # 1. Set environment variables
-export COMUX_ROOT="$(pwd)"
-export COMUX_PANE_ID="test-pane"
-export COMUX_SLUG="test-branch"
-export COMUX_WORKTREE_PATH="$(pwd)"
-export COMUX_SERVER_PORT="3142"
-export COMUX_AGENT="claude"
-export COMUX_PROMPT="Test prompt"
+export PSYCHE_ROOT="$(pwd)"
+export PSYCHE_PANE_ID="test-pane"
+export PSYCHE_SLUG="test-branch"
+export PSYCHE_WORKTREE_PATH="$(pwd)"
+export PSYCHE_SERVER_PORT="3142"
+export PSYCHE_AGENT="claude"
+export PSYCHE_PROMPT="Test prompt"
 
 # 2. Run hook directly
-./.comux-hooks/worktree_created
+./.psyche-hooks/worktree_created
 
 # 3. Check exit code
 echo $?  # Should be 0 for success
@@ -297,12 +297,12 @@ echo $?  # Should be 0 for success
 ### Syntax Check
 \`\`\`bash
 # Check for syntax errors without running
-bash -n ./.comux-hooks/worktree_created
+bash -n ./.psyche-hooks/worktree_created
 \`\`\`
 
 ### Shellcheck (if available)
 \`\`\`bash
-shellcheck ./.comux-hooks/worktree_created
+shellcheck ./.psyche-hooks/worktree_created
 \`\`\`
 
 ## Project Context Analysis
@@ -357,11 +357,11 @@ fi
 
 ## Common Mistakes to Avoid
 
-❌ **Blocking operations**: \`sleep 60\` (blocks comux)
+❌ **Blocking operations**: \`sleep 60\` (blocks psyche)
 ✅ **Background long tasks**: \`slow_operation &\`
 
 ❌ **Hardcoded paths**: \`/Users/me/project\`
-✅ **Use variables**: \`"$COMUX_ROOT"\`
+✅ **Use variables**: \`"$PSYCHE_ROOT"\`
 
 ❌ **Assuming tools exist**: \`pnpm install\`
 ✅ **Check first**: \`command -v pnpm && pnpm install\`
@@ -372,7 +372,7 @@ fi
 ❌ **Forgetting executable bit**: Hook won't run
 ✅ **Make executable**: \`chmod +x\`
 
-❌ **Noisy output**: Clutters comux logs
+❌ **Noisy output**: Clutters psyche logs
 ✅ **Silent operations**: \`curl -s\`, \`> /dev/null 2>&1\`
 
 ❌ **Not testing**: Deploy and hope
@@ -382,11 +382,11 @@ fi
 
 If a hook isn't working:
 
-1. **Check if file exists**: \`ls -la .comux-hooks/\`
+1. **Check if file exists**: \`ls -la .psyche-hooks/\`
 2. **Check permissions**: Should show \`x\` in \`rwxr-xr-x\`
-3. **Check syntax**: \`bash -n .comux-hooks/hook_name\`
+3. **Check syntax**: \`bash -n .psyche-hooks/hook_name\`
 4. **Test manually**: Set env vars and run
-5. **Check logs**: comux logs to stderr with \`[Hooks]\` prefix
+5. **Check logs**: psyche logs to stderr with \`[Hooks]\` prefix
 6. **Simplify**: Remove complex parts, test basic version
 7. **Check tool availability**: \`command -v required_tool\`
 
@@ -404,7 +404,7 @@ set -e  # Exit on error
 
 When creating a new hook:
 
-- [ ] Create file in \`.comux-hooks/\`
+- [ ] Create file in \`.psyche-hooks/\`
 - [ ] Add shebang: \`#!/bin/bash\`
 - [ ] Make executable: \`chmod +x\`
 - [ ] Add \`set -e\` for error handling
@@ -418,13 +418,13 @@ When creating a new hook:
 ## Getting Help
 
 - **Full documentation**: See \`HOOKS.md\` in project root
-- **Claude-specific tips**: See \`CLAUDE.md\` in \`.comux-hooks/\`
-- **Examples**: Check \`.comux-hooks/examples/\` directory
-- **comux API**: See \`API.md\` for REST endpoints
+- **Claude-specific tips**: See \`CLAUDE.md\` in \`.psyche-hooks/\`
+- **Examples**: Check \`.psyche-hooks/examples/\` directory
+- **psyche API**: See \`API.md\` for REST endpoints
 
 ---
 
-*This documentation was auto-generated from comux source code.*
+*This documentation was auto-generated from psyche source code.*
 *Version: ${docsVersion}*
 `;
 

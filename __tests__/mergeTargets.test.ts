@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 const mocked = vi.hoisted(() => ({
   existsSync: vi.fn(),
@@ -16,7 +16,7 @@ vi.mock('fs', () => ({
 vi.mock('../src/utils/git.js', () => ({
   getCurrentBranch: mocked.getCurrentBranch,
   branchExists: mocked.branchExists,
-  getPaneBranchName: (pane: ComuxPane) => pane.branchName || pane.slug,
+  getPaneBranchName: (pane: PsychePane) => pane.branchName || pane.slug,
 }));
 
 vi.mock('../src/utils/mergeValidation.js', () => ({
@@ -46,7 +46,7 @@ describe('merge target resolution', () => {
         slug: 'feature-parent',
         prompt: 'parent',
         paneId: '%1',
-        worktreePath: '/repo/.comux/worktrees/feature-parent',
+        worktreePath: '/repo/.psyche/worktrees/feature-parent',
       },
       '/repo'
     );
@@ -55,7 +55,7 @@ describe('merge target resolution', () => {
       {
         slug: 'feature-parent',
         branchName: 'feature-parent',
-        worktreePath: '/repo/.comux/worktrees/feature-parent',
+        worktreePath: '/repo/.psyche/worktrees/feature-parent',
       },
       {
         slug: 'main',
@@ -73,7 +73,7 @@ describe('merge target resolution', () => {
       slug: 'feature-a',
       prompt: 'test',
       paneId: '%1',
-      worktreePath: '/repo/.comux/worktrees/feature-a',
+      worktreePath: '/repo/.psyche/worktrees/feature-a',
     });
 
     expect(resolution).toMatchObject({
@@ -85,11 +85,11 @@ describe('merge target resolution', () => {
 
   it('uses the parent worktree when it still exists and has not been merged upstream', () => {
     mocked.existsSync.mockImplementation((value: string) => (
-      value === '/repo/.comux/worktrees/feature-parent'
+      value === '/repo/.psyche/worktrees/feature-parent'
       || value === '/repo'
     ));
     mocked.getCurrentBranch.mockImplementation((value: string) => (
-      value === '/repo/.comux/worktrees/feature-parent' ? 'feature-parent' : 'main'
+      value === '/repo/.psyche/worktrees/feature-parent' ? 'feature-parent' : 'main'
     ));
     mocked.branchExists.mockReturnValue(true);
     mocked.hasCommitsToMerge.mockReturnValue(true);
@@ -99,12 +99,12 @@ describe('merge target resolution', () => {
       slug: 'feature-child',
       prompt: 'test',
       paneId: '%2',
-      worktreePath: '/repo/.comux/worktrees/feature-child',
+      worktreePath: '/repo/.psyche/worktrees/feature-child',
       mergeTargetChain: [
         {
           slug: 'feature-parent',
           branchName: 'feature-parent',
-          worktreePath: '/repo/.comux/worktrees/feature-parent',
+          worktreePath: '/repo/.psyche/worktrees/feature-parent',
         },
         {
           slug: 'main',
@@ -115,7 +115,7 @@ describe('merge target resolution', () => {
     });
 
     expect(resolution).toMatchObject({
-      targetRepoPath: '/repo/.comux/worktrees/feature-parent',
+      targetRepoPath: '/repo/.psyche/worktrees/feature-parent',
       targetBranch: 'feature-parent',
       requiresConfirmation: false,
     });
@@ -130,12 +130,12 @@ describe('merge target resolution', () => {
       slug: 'feature-child',
       prompt: 'test',
       paneId: '%3',
-      worktreePath: '/repo/.comux/worktrees/feature-child',
+      worktreePath: '/repo/.psyche/worktrees/feature-child',
       mergeTargetChain: [
         {
           slug: 'feature-parent',
           branchName: 'feature-parent',
-          worktreePath: '/repo/.comux/worktrees/feature-parent',
+          worktreePath: '/repo/.psyche/worktrees/feature-parent',
         },
         {
           slug: 'main',
@@ -164,11 +164,11 @@ describe('merge target resolution', () => {
 
   it('falls back to the next ancestor when the parent branch is already merged upstream', () => {
     mocked.existsSync.mockImplementation((value: string) => (
-      value === '/repo/.comux/worktrees/feature-parent'
+      value === '/repo/.psyche/worktrees/feature-parent'
       || value === '/repo'
     ));
     mocked.getCurrentBranch.mockImplementation((value: string) => (
-      value === '/repo/.comux/worktrees/feature-parent' ? 'feature-parent' : 'main'
+      value === '/repo/.psyche/worktrees/feature-parent' ? 'feature-parent' : 'main'
     ));
     mocked.branchExists.mockReturnValue(true);
     mocked.hasCommitsToMerge.mockReturnValue(false);
@@ -178,12 +178,12 @@ describe('merge target resolution', () => {
       slug: 'feature-child',
       prompt: 'test',
       paneId: '%4',
-      worktreePath: '/repo/.comux/worktrees/feature-child',
+      worktreePath: '/repo/.psyche/worktrees/feature-child',
       mergeTargetChain: [
         {
           slug: 'feature-parent',
           branchName: 'feature-parent',
-          worktreePath: '/repo/.comux/worktrees/feature-parent',
+          worktreePath: '/repo/.psyche/worktrees/feature-parent',
         },
         {
           slug: 'main',

@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { ComuxPane, SidebarProject } from '../types.js';
+import type { PsychePane, SidebarProject } from '../types.js';
 import { splitPane } from '../utils/tmux.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
@@ -23,10 +23,10 @@ import {
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 
 // Separate config structure to match new format
-export interface ComuxConfig {
+export interface PsycheConfig {
   projectName?: string;
   projectRoot?: string;
-  panes: ComuxPane[];
+  panes: PsychePane[];
   sidebarProjects?: SidebarProject[];
   settings?: any;
   lastUpdated?: string;
@@ -35,14 +35,14 @@ export interface ComuxConfig {
 }
 
 interface PaneLoadResult {
-  panes: ComuxPane[];
+  panes: PsychePane[];
   allPaneIds: string[];
   titleToId: Map<string, string>;
 }
 
 async function restoreAgentSessionForPane(
   tmuxService: TmuxService,
-  pane: ComuxPane,
+  pane: PsychePane,
   paneId: string
 ): Promise<void> {
   if (!pane.agent) {
@@ -61,7 +61,7 @@ async function restoreAgentSessionForPane(
     try {
       codexHookEventFile = installCodexPaneHooks({
         worktreePath: pane.worktreePath,
-        comuxPaneId: pane.id,
+        psychePaneId: pane.id,
         tmuxPaneId: paneId,
       }).eventFile;
     } catch {
@@ -69,7 +69,7 @@ async function restoreAgentSessionForPane(
     }
 
     command = buildCodexHookedCommand(command, {
-      comuxPaneId: pane.id,
+      psychePaneId: pane.id,
       tmuxPaneId: paneId,
       eventFile: codexHookEventFile,
     });
@@ -99,7 +99,7 @@ export async function fetchTmuxPaneIds(maxRetries = 2): Promise<{
       const titleToId = new Map<string, string>();
 
       for (const pane of paneInfo) {
-        if (!pane.paneId || !pane.paneId.startsWith('%') || pane.title === 'comux-spacer') {
+        if (!pane.paneId || !pane.paneId.startsWith('%') || pane.title === 'psyche-spacer') {
           continue;
         }
         allPaneIds.push(pane.paneId);
@@ -129,7 +129,7 @@ export async function fetchTmuxPaneIds(maxRetries = 2): Promise<{
  * Reads and parses the panes config file
  * Handles both old array format and new config format
  */
-export async function loadPanesFromFile(panesFile: string): Promise<ComuxPane[]> {
+export async function loadPanesFromFile(panesFile: string): Promise<PsychePane[]> {
   const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
 
   try {
@@ -137,9 +137,9 @@ export async function loadPanesFromFile(panesFile: string): Promise<ComuxPane[]>
     const parsed: any = JSON.parse(content);
 
     if (Array.isArray(parsed)) {
-      return syncPaneColorThemes(parsed as ComuxPane[], [], fallbackProjectRoot);
+      return syncPaneColorThemes(parsed as PsychePane[], [], fallbackProjectRoot);
     } else {
-      const config = parsed as ComuxConfig;
+      const config = parsed as PsycheConfig;
       const projectRoot = config.projectRoot || fallbackProjectRoot;
       const panes = Array.isArray(config.panes) ? config.panes : [];
       const sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
@@ -158,7 +158,7 @@ export async function loadPanesFromFile(panesFile: string): Promise<ComuxPane[]>
 
 export async function loadSidebarProjectsFromFile(
   panesFile: string,
-  panes?: ComuxPane[]
+  panes?: PsychePane[]
 ): Promise<SidebarProject[]> {
   const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
 
@@ -166,8 +166,8 @@ export async function loadSidebarProjectsFromFile(
     const content = await fs.readFile(panesFile, 'utf-8');
     const parsed: any = JSON.parse(content);
     const config = Array.isArray(parsed)
-      ? { panes: parsed as ComuxPane[] }
-      : parsed as ComuxConfig;
+      ? { panes: parsed as PsychePane[] }
+      : parsed as PsycheConfig;
     const configPanes = Array.isArray(config.panes) ? config.panes : [];
     const effectivePanes = panes || configPanes;
     const projectRoot = config.projectRoot || fallbackProjectRoot;
@@ -194,7 +194,7 @@ export async function loadSidebarProjectsFromFile(
  * Only called on initial load
  */
 export async function recreateMissingPanes(
-  missingPanes: ComuxPane[],
+  missingPanes: PsychePane[],
   panesFile: string
 ): Promise<void> {
   if (missingPanes.length === 0) return;
@@ -239,10 +239,10 @@ export async function recreateMissingPanes(
  * being intentionally closed (prevents race condition with close/merge actions)
  */
 export async function recreateKilledWorktreePanes(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   allPaneIds: string[],
   panesFile: string
-): Promise<ComuxPane[]> {
+): Promise<PsychePane[]> {
   const lifecycleManager = PaneLifecycleManager.getInstance();
   const sessionProjectRoot = path.dirname(path.dirname(panesFile));
 
@@ -351,7 +351,7 @@ export async function recreateKilledWorktreePanes(
  *
  * CRITICAL FIX: On initial load, stale shell panes are removed immediately.
  * Shell panes have no worktreePath so they cannot be recreated - keeping them
- * with stale paneIds causes comux to hang when trying to interact with them.
+ * with stale paneIds causes psyche to hang when trying to interact with them.
  */
 export async function loadAndProcessPanes(
   panesFile: string,

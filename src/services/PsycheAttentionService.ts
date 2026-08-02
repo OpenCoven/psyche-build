@@ -7,11 +7,11 @@ import {
   type StatusUpdateEvent,
 } from './StatusDetector.js';
 import {
-  ComuxFocusService,
-  type ComuxFocusChangedEvent,
-} from './ComuxFocusService.js';
+  PsycheFocusService,
+  type PsycheFocusChangedEvent,
+} from './PsycheFocusService.js';
 import { LogService } from './LogService.js';
-import { supportsNativeComuxHelper } from '../utils/focusDetection.js';
+import { supportsNativePsycheHelper } from '../utils/focusDetection.js';
 
 interface AttentionCandidate {
   paneId: string;
@@ -23,8 +23,8 @@ interface AttentionCandidate {
   fingerprint: string;
 }
 
-interface ComuxAttentionServiceOptions {
-  focusService: ComuxFocusService;
+interface PsycheAttentionServiceOptions {
+  focusService: PsycheFocusService;
 }
 
 export interface PaneAttentionChangedEvent {
@@ -33,7 +33,7 @@ export interface PaneAttentionChangedEvent {
   needsAttention: boolean;
 }
 
-export class ComuxAttentionService extends EventEmitter {
+export class PsycheAttentionService extends EventEmitter {
   private readonly logger = LogService.getInstance();
   private readonly statusDetector = getStatusDetector();
   private readonly candidates = new Map<string, AttentionCandidate>();
@@ -43,12 +43,12 @@ export class ComuxAttentionService extends EventEmitter {
   private readonly activeAttentionPanes = new Map<string, string>();
   private active = false;
 
-  constructor(private readonly options: ComuxAttentionServiceOptions) {
+  constructor(private readonly options: PsycheAttentionServiceOptions) {
     super();
   }
 
   start(): void {
-    if (this.active || !supportsNativeComuxHelper()) {
+    if (this.active || !supportsNativePsycheHelper()) {
       return;
     }
 
@@ -115,7 +115,7 @@ export class ComuxAttentionService extends EventEmitter {
     void this.maybeNotify(event.paneId);
   };
 
-  private readonly handleFocusChanged = (_event: ComuxFocusChangedEvent): void => {
+  private readonly handleFocusChanged = (_event: PsycheFocusChangedEvent): void => {
     for (const paneId of this.candidates.keys()) {
       void this.maybeNotify(paneId);
     }

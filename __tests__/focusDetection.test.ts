@@ -5,7 +5,7 @@ import {
   buildTerminalTitleSequence,
   mapTerminalProgramToBundleId,
   parseTmuxSocketPath,
-  supportsNativeComuxHelper,
+  supportsNativePsycheHelper,
 } from '../src/utils/focusDetection.js';
 
 describe('focusDetection utils', () => {
@@ -14,12 +14,12 @@ describe('focusDetection utils', () => {
   });
 
   it('builds a focus window title including the token', () => {
-    expect(buildFocusWindowTitle('comux', 'dmx-abc123')).toBe('comux comux [dmx-abc123]');
+    expect(buildFocusWindowTitle('psyche', 'dmx-abc123')).toBe('psyche psyche [dmx-abc123]');
   });
 
   it('wraps terminal titles for tmux passthrough when needed', () => {
-    expect(buildTerminalTitleSequence('comux demo', false)).toBe('\u001b]2;comux demo\u0007');
-    expect(buildTerminalTitleSequence('comux demo', true)).toContain('\u001bPtmux;');
+    expect(buildTerminalTitleSequence('psyche demo', false)).toBe('\u001b]2;psyche demo\u0007');
+    expect(buildTerminalTitleSequence('psyche demo', true)).toContain('\u001bPtmux;');
   });
 
   it('maps known terminal programs to bundle ids', () => {
@@ -36,9 +36,9 @@ describe('focusDetection utils', () => {
     expect(parseTmuxSocketPath(undefined)).toBeUndefined();
   });
 
-  it('only enables the native comux helper on macOS', () => {
-    expect(supportsNativeComuxHelper('darwin')).toBe(true);
-    expect(supportsNativeComuxHelper('linux')).toBe(false);
-    expect(supportsNativeComuxHelper('win32')).toBe(false);
+  it('only enables the native psyche helper on macOS', () => {
+    expect(supportsNativePsycheHelper('darwin')).toBe(true);
+    expect(supportsNativePsycheHelper('linux')).toBe(false);
+    expect(supportsNativePsycheHelper('win32')).toBe(false);
   });
 });

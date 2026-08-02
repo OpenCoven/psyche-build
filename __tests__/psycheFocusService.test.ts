@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { parseHelperSocketOwnerProcessIds } from '../src/services/ComuxFocusService.js';
+import { parseHelperSocketOwnerProcessIds } from '../src/services/PsycheFocusService.js';
 
-describe('ComuxFocusService helper restart', () => {
+describe('PsycheFocusService helper restart', () => {
   it('only returns processes that own the helper socket path', () => {
-    const socketPath = '/Users/test/.comux/native-helper/run/comux-helper.sock';
+    const socketPath = '/Users/test/.psyche/native-helper/run/psyche-helper.sock';
     const lsofOutput = [
       'COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME',
-      `comux-help 35876 test    3u  unix 0x123      0t0      ${socketPath}`,
-      `comux-help 35876 test    4u  unix 0x456      0t0      ${socketPath}`,
+      `psyche-help 35876 test    3u  unix 0x123      0t0      ${socketPath}`,
+      `psyche-help 35876 test    4u  unix 0x456      0t0      ${socketPath}`,
       'node      39503 test   19u  unix 0x789      0t0      ->0x456',
       'node      39504 test   20u  unix 0xabc      0t0      ->0x123',
     ].join('\n');
@@ -16,10 +16,10 @@ describe('ComuxFocusService helper restart', () => {
   });
 
   it('filters out the current process id', () => {
-    const socketPath = '/Users/test/.comux/native-helper/run/comux-helper.sock';
+    const socketPath = '/Users/test/.psyche/native-helper/run/psyche-helper.sock';
     const lsofOutput = [
       'COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME',
-      `comux-help 12345 test    3u  unix 0x123      0t0      ${socketPath}`,
+      `psyche-help 12345 test    3u  unix 0x123      0t0      ${socketPath}`,
     ].join('\n');
 
     expect(parseHelperSocketOwnerProcessIds(lsofOutput, socketPath, 12345)).toEqual([]);

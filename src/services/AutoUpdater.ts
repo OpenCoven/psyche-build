@@ -99,7 +99,7 @@ export class AutoUpdater {
   async getCachedUpdateInfo(): Promise<UpdateInfo | null> {
     const settings = await this.loadSettings();
 
-    // Ignore stale cache after the running comux version changes.
+    // Ignore stale cache after the running psyche version changes.
     if (settings.cachedCurrentVersion !== packageJson.version) {
       return null;
     }
@@ -177,7 +177,7 @@ export class AutoUpdater {
 
   async detectInstallMethod(): Promise<{ packageManager: 'npm' | 'pnpm' | 'yarn' | null, installMethod: 'global' | 'local' | 'unknown' }> {
     try {
-      // Check if comux is globally installed and how
+      // Check if psyche is globally installed and how
       
       // Method 1: Check npm global packages
       try {
@@ -221,25 +221,25 @@ export class AutoUpdater {
         // Expected - yarn might not be available or package not globally installed
       }
 
-      // Method 4: Check where comux is installed by looking at the executable path
+      // Method 4: Check where psyche is installed by looking at the executable path
       try {
-        const comuxPath = execSync('which comux', {
+        const psychePath = execSync('which psyche', {
           encoding: 'utf-8',
           stdio: 'pipe'
         }).trim();
         
-        if (comuxPath.includes('/.npm/') || comuxPath.includes('/npm/')) {
+        if (psychePath.includes('/.npm/') || psychePath.includes('/npm/')) {
           return { packageManager: 'npm', installMethod: 'global' };
-        } else if (comuxPath.includes('/.pnpm/')) {
+        } else if (psychePath.includes('/.pnpm/')) {
           return { packageManager: 'pnpm', installMethod: 'global' };
-        } else if (comuxPath.includes('/.yarn/')) {
+        } else if (psychePath.includes('/.yarn/')) {
           return { packageManager: 'yarn', installMethod: 'global' };
-        } else if (comuxPath.includes('/node_modules/.bin/')) {
+        } else if (psychePath.includes('/node_modules/.bin/')) {
           // Local installation
           return { packageManager: null, installMethod: 'local' };
         }
       } catch {
-        // Expected - which command might not be available or comux not in PATH
+        // Expected - which command might not be available or psyche not in PATH
       }
 
       return { packageManager: null, installMethod: 'unknown' };

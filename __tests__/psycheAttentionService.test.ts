@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ComuxAttentionService } from '../src/services/ComuxAttentionService.js';
+import { PsycheAttentionService } from '../src/services/PsycheAttentionService.js';
 import { getStatusDetector, resetStatusDetector } from '../src/services/StatusDetector.js';
 
 const originalPlatform = process.platform;
@@ -49,7 +49,7 @@ async function flushAsyncWork(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-describe('ComuxAttentionService', () => {
+describe('PsycheAttentionService', () => {
   beforeEach(() => {
     setPlatform('darwin');
   });
@@ -62,7 +62,7 @@ describe('ComuxAttentionService', () => {
 
   it('suppresses startup attention notifications until pane activity is observed', async () => {
     const focusService = new MockFocusService();
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
@@ -91,7 +91,7 @@ describe('ComuxAttentionService', () => {
 
   it('notifies once a pane returns to attention after working', async () => {
     const focusService = new MockFocusService();
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
@@ -134,7 +134,7 @@ describe('ComuxAttentionService', () => {
   it('flashes the pane instead of sending a native notification when the terminal window is focused', async () => {
     const focusService = new MockFocusService();
     focusService.getPaneAttentionSurface.mockResolvedValue('same-window');
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
@@ -164,17 +164,17 @@ describe('ComuxAttentionService', () => {
   it('does not send a native notification when the tmux pane is already fully focused', async () => {
     const focusService = new MockFocusService();
     focusService.getPaneAttentionSurface.mockResolvedValue('fully-focused');
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
     emitStatusUpdated({
-      paneId: 'comux-pane-7',
+      paneId: 'psyche-pane-7',
       status: 'working',
     });
 
     emitAttentionNeeded({
-      paneId: 'comux-pane-7',
+      paneId: 'psyche-pane-7',
       tmuxPaneId: '%12',
       status: 'idle',
       title: 'Stay here',
@@ -193,7 +193,7 @@ describe('ComuxAttentionService', () => {
   it('still sends a native notification when the pane is selected but the terminal window is in the background', async () => {
     const focusService = new MockFocusService();
     focusService.getPaneAttentionSurface.mockResolvedValue('background');
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
@@ -227,7 +227,7 @@ describe('ComuxAttentionService', () => {
 
   it('clears pending attention when the user interacts with the pane', async () => {
     const focusService = new MockFocusService();
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 
@@ -266,7 +266,7 @@ describe('ComuxAttentionService', () => {
 
   it('does not notify again while an existing attention alert is still active', async () => {
     const focusService = new MockFocusService();
-    const service = new ComuxAttentionService({ focusService: focusService as any });
+    const service = new PsycheAttentionService({ focusService: focusService as any });
 
     service.start();
 

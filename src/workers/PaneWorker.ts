@@ -280,7 +280,7 @@ class PaneWorker {
       return undefined;
     }
 
-    return path.join(this.worktreePath, '.codex', 'comux', `${this.paneId}.json`);
+    return path.join(this.worktreePath, '.codex', 'psyche', `${this.paneId}.json`);
   }
 
   private maybeHandleCodexTurnStopped(output: string, fingerprint: string): boolean {
@@ -312,7 +312,7 @@ class PaneWorker {
       return false;
     }
 
-    if (event.comuxPaneId !== this.paneId) {
+    if (event.psychePaneId !== this.paneId) {
       return false;
     }
 

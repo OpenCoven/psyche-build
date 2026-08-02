@@ -29,10 +29,10 @@ const TmuxHooksPromptDialog: React.FC<TmuxHooksPromptDialogProps> = memo(({
       </Box>
 
       <Box marginBottom={1} flexDirection="column">
-        <Text>comux can install tmux hooks to detect pane changes instantly.</Text>
+        <Text>psyche can install tmux hooks to detect pane changes instantly.</Text>
         <Text>This uses less CPU than polling and improves responsiveness.</Text>
         <Text dimColor>
-          {'\n'}The hooks send signals to comux when panes are created, closed, or resized.
+          {'\n'}The hooks send signals to psyche when panes are created, closed, or resized.
         </Text>
       </Box>
 

@@ -40,11 +40,11 @@ import {
 import { SettingsManager } from "./utils/settingsManager.js"
 import { useServices } from "./hooks/useServices.js"
 import { PaneLifecycleManager } from "./services/PaneLifecycleManager.js"
-import { ComuxFocusService } from "./services/ComuxFocusService.js"
+import { PsycheFocusService } from "./services/PsycheFocusService.js"
 import {
-  ComuxAttentionService,
+  PsycheAttentionService,
   type PaneAttentionChangedEvent,
-} from "./services/ComuxAttentionService.js"
+} from "./services/PsycheAttentionService.js"
 import { reopenWorktree } from "./utils/reopenWorktree.js"
 import {
   resumeBranchWorkspace,
@@ -79,9 +79,9 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const ACTIVE_PANE_SYNC_INTERVAL_MS = 125
 import type {
-  ComuxPane,
-  ComuxAppProps,
-  ComuxThemeName,
+  PsychePane,
+  PsycheAppProps,
+  PsycheThemeName,
   MergeTargetReference,
 } from "./types.js"
 import PanesGrid from "./components/panes/PanesGrid.js"
@@ -101,9 +101,9 @@ import {
 } from "./utils/projectActions.js"
 import { getPaneProjectRoot } from "./utils/paneProject.js"
 import {
-  applyComuxTheme,
+  applyPsycheTheme,
   COLORS,
-  getComuxThemePalette,
+  getPsycheThemePalette,
 } from "./theme/colors.js"
 import {
   applyTmuxThemeToSession,
@@ -132,7 +132,7 @@ import {
 } from "./utils/rituals.js"
 import {
   createShellPane,
-  getNextComuxId,
+  getNextPsycheId,
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
 
@@ -145,7 +145,7 @@ const SidePanelRail: React.FC = () => (
   </Box>
 )
 
-const ComuxApp: React.FC<ComuxAppProps> = ({
+const PsycheApp: React.FC<PsycheAppProps> = ({
   panesFile,
   projectName,
   sessionName,
@@ -157,7 +157,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
 }) => {
   const { stdout } = useStdout()
   const terminalHeight = stdout?.rows || 40
-  const isDevMode = process.env.COMUX_DEV === "true"
+  const isDevMode = process.env.PSYCHE_DEV === "true"
   const sessionProjectRoot = projectRoot || process.cwd()
 
   /* panes state moved to usePanes */
@@ -278,9 +278,9 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
   const [hooksPromptIndex, setHooksPromptIndex] = useState(0)
   // undefined = not yet determined, true = use hooks, false = use polling
   const [useHooks, setUseHooks] = useState<boolean | undefined>(undefined)
-  const [focusService] = useState(() => new ComuxFocusService({ projectName, projectRoot }))
+  const [focusService] = useState(() => new PsycheFocusService({ projectName, projectRoot }))
   const [attentionService] = useState(
-    () => new ComuxAttentionService({ focusService })
+    () => new PsycheAttentionService({ focusService })
   )
 
   useEffect(() => {
@@ -395,7 +395,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
         setUseHooks(true)
         // Save the preference
         settingsManager.updateSetting('useTmuxHooks', true, 'global')
-        refreshComuxSettings()
+        refreshPsycheSettings()
       } else {
         // Need to ask user - show prompt
         setShowHooksPrompt(true)
@@ -426,7 +426,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
           return prevPanes
         }
 
-        const updatedPane: ComuxPane = {
+        const updatedPane: PsychePane = {
           ...pane,
           needsAttention: event.needsAttention,
         }
@@ -516,7 +516,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
         if (paneIndex === -1) return prevPanes
 
         const pane = prevPanes[paneIndex]
-        const updated: ComuxPane = {
+        const updated: PsychePane = {
           ...pane,
           agentStatus: event.status,
         }
@@ -617,7 +617,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
     // Check if tmux supports popups (3.2+) and enable mouse mode for click-outside-to-close
     const popupSupport = supportsPopups()
     setPopupsSupported(popupSupport)
-    // Enable mouse mode only for this comux session (not global)
+    // Enable mouse mode only for this psyche session (not global)
     ensureMouseMode(sessionName)
   }, [sessionName])
 
@@ -685,7 +685,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
   )
   const focusHint = focusedPane
     ? "pane focused: Ctrl-b Left returns, Alt+Shift+M opens menu"
-    : "comux keys active: arrows Enter n t u e ?"
+    : "psyche keys active: arrows Enter n t u e ?"
   const activeProjectRoot = selectedProjectRoot
   const resolveProjectThemeName = React.useCallback((activeProjectRoot: string) => {
     return resolveProjectColorTheme(activeProjectRoot, sidebarProjects)
@@ -705,11 +705,11 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
     [panes]
   )
   const controlPaneActiveBorderStyle = useMemo(
-    () => `fg=colour${getComuxThemePalette(selectedThemeName).activeBorder}`,
+    () => `fg=colour${getPsycheThemePalette(selectedThemeName).activeBorder}`,
     [selectedThemeName]
   )
   const projectThemeByRoot = useMemo(() => {
-    const themeMap = new Map<string, ComuxThemeName>()
+    const themeMap = new Map<string, PsycheThemeName>()
 
     for (const group of projectActionLayout.groups) {
       const paneTheme = group.panes.find((entry) => entry.pane.colorTheme)?.pane.colorTheme
@@ -721,9 +721,9 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
 
     return themeMap
   }, [projectActionLayout.groups, resolveProjectThemeName, themeRefreshNonce])
-  applyComuxTheme(selectedThemeName)
+  applyPsycheTheme(selectedThemeName)
 
-  const refreshComuxSettings = (_activeProjectRoot: string = selectedProjectRoot) => {
+  const refreshPsycheSettings = (_activeProjectRoot: string = selectedProjectRoot) => {
     setSettings(new SettingsManager(sessionProjectRoot).getSettings())
     setThemeRefreshNonce((current) => current + 1)
   }
@@ -787,19 +787,19 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
 
       for (const paneId of Array.from(cachedPrefixes.keys())) {
         if (!activePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@comux_title_prefix')
+          tmuxService.unsetPaneOptionSync(paneId, '@psyche_title_prefix')
           cachedPrefixes.delete(paneId)
         }
       }
       for (const paneId of Array.from(cachedLabels.keys())) {
         if (!activePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@comux_title_label')
+          tmuxService.unsetPaneOptionSync(paneId, '@psyche_title_label')
           cachedLabels.delete(paneId)
         }
       }
       for (const paneId of Array.from(cachedActiveBorderStyles.keys())) {
         if (!activeBorderStylePaneIds.has(paneId)) {
-          tmuxService.unsetPaneOptionSync(paneId, '@comux_active_border_style')
+          tmuxService.unsetPaneOptionSync(paneId, '@psyche_active_border_style')
           cachedActiveBorderStyles.delete(paneId)
         }
       }
@@ -821,22 +821,22 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
           sessionProjectRoot,
           projectName
         )
-        const activeBorderStyle = `fg=colour${getComuxThemePalette(paneThemeName).activeBorder}`
+        const activeBorderStyle = `fg=colour${getPsycheThemePalette(paneThemeName).activeBorder}`
 
         if (cachedPrefixes.get(pane.paneId) !== prefixValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@comux_title_prefix', prefixValue)
+          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_prefix', prefixValue)
           cachedPrefixes.set(pane.paneId, prefixValue)
         }
 
         if (cachedLabels.get(pane.paneId) !== labelValue) {
-          tmuxService.setPaneOptionSync(pane.paneId, '@comux_title_label', labelValue)
+          tmuxService.setPaneOptionSync(pane.paneId, '@psyche_title_label', labelValue)
           cachedLabels.set(pane.paneId, labelValue)
         }
 
         if (cachedActiveBorderStyles.get(pane.paneId) !== activeBorderStyle) {
           tmuxService.setPaneOptionSync(
             pane.paneId,
-            '@comux_active_border_style',
+            '@psyche_active_border_style',
             activeBorderStyle
           )
           cachedActiveBorderStyles.set(pane.paneId, activeBorderStyle)
@@ -854,7 +854,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
       if (controlPaneId && cachedActiveBorderStyles.get(controlPaneId) !== controlPaneActiveBorderStyle) {
         tmuxService.setPaneOptionSync(
           controlPaneId,
-          '@comux_active_border_style',
+          '@psyche_active_border_style',
           controlPaneActiveBorderStyle
         )
         cachedActiveBorderStyles.set(controlPaneId, controlPaneActiveBorderStyle)
@@ -1049,9 +1049,9 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
 
   const createTerminalPaneForRitual = async (
     targetProjectRoot: string,
-    existingPanes: ComuxPane[],
+    existingPanes: PsychePane[],
     ritualPane?: { name?: string; command?: string }
-  ): Promise<ComuxPane | null> => {
+  ): Promise<PsychePane | null> => {
     try {
       setIsCreatingPane(true)
       setStatusMessage("Creating ritual terminal pane...")
@@ -1062,7 +1062,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
 
       const shellPane = await createShellPane(
         newPaneId,
-        getNextComuxId(existingPanes)
+        getNextPsycheId(existingPanes)
       )
       if (ritualPane?.name?.trim()) {
         shellPane.displayName = ritualPane.name.trim()
@@ -1192,7 +1192,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
     return () => bridgeDaemon.setRitualLauncher(null);
   }, [bridgeDaemon]);
 
-  const handleCreateChildWorktree = async (parentPane: ComuxPane) => {
+  const handleCreateChildWorktree = async (parentPane: PsychePane) => {
     if (!parentPane.worktreePath) {
       setStatusMessage("Selected pane has no worktree path")
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -1389,7 +1389,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
     )
   }
 
-  const handleSetDevSourceFromPane = async (pane: ComuxPane) => {
+  const handleSetDevSourceFromPane = async (pane: PsychePane) => {
     if (!isDevMode) {
       setStatusMessage("Source switching is only available in dev mode")
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -1711,7 +1711,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
       process.stdout.write("\x1b[0m") // Reset all attributes
 
       // Never inject control keys into the pane during shutdown.
-      // An orphaned comux dev process can outlive the UI and replay them forever.
+      // An orphaned psyche dev process can outlive the UI and replay them forever.
       if (process.env.TMUX) {
         try {
           const tmuxService = TmuxService.getInstance()
@@ -1723,7 +1723,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
       process.stdout.write("\x1b[2J\x1b[H")
 
       // Show clean goodbye message
-      process.stdout.write("\n  Run comux again to resume. Goodbye 👋\n\n")
+      process.stdout.write("\n  Run psyche again to resume. Goodbye 👋\n\n")
 
       // Exit process
       process.exit(0)
@@ -1744,20 +1744,20 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
         setShowHooksPrompt(false)
         setUseHooks(true)
         settingsManager.updateSetting('useTmuxHooks', true, 'global')
-        refreshComuxSettings()
+        refreshPsycheSettings()
       } else if (input === 'n') {
         // No - use polling
         setShowHooksPrompt(false)
         setUseHooks(false)
         settingsManager.updateSetting('useTmuxHooks', false, 'global')
-        refreshComuxSettings()
+        refreshPsycheSettings()
       } else if (key.return) {
         // Select current option
         setShowHooksPrompt(false)
         const selected = hooksPromptIndex === 0
         setUseHooks(selected)
         settingsManager.updateSetting('useTmuxHooks', selected, 'global')
-        refreshComuxSettings()
+        refreshPsycheSettings()
       }
     },
     { isActive: showHooksPrompt }
@@ -1788,7 +1788,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
     projectSettings,
     saveSettings,
     settingsManager,
-    refreshComuxSettings,
+    refreshPsycheSettings,
     popupManager,
     actionSystem,
     controlPaneId,
@@ -1831,7 +1831,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
   //   - Footer tip: +1 line when footer tips are enabled
   //   - Toast (active): wrapped lines + header + marginBottom
   //   - Toast (queued, transitioning): header + marginBottom (2 lines)
-  //   - Debug info: +1 line if DEBUG_COMUX
+  //   - Debug info: +1 line if DEBUG_PSYCHE
   //   - Status line: +1 line if updateAvailable/currentBranch/debugMessage
   //   - Status messages: +1 line per active message
   const showFooterHelp = !showCommandPrompt && !sidePanelCollapsed
@@ -1871,7 +1871,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
       }
 
       // Add debug info
-      if (process.env.DEBUG_COMUX) {
+      if (process.env.DEBUG_PSYCHE) {
         footerLines += 1
       }
     }
@@ -1981,7 +1981,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
         footerTip={currentFooterTip}
         focusHint={focusHint}
         gridInfo={(() => {
-          if (!process.env.DEBUG_COMUX) return undefined
+          if (!process.env.DEBUG_PSYCHE) return undefined
           const rows = navigationRows.length
           const cols = Math.max(1, ...navigationRows.map((row) => row.length))
           const pos = getCardGridPosition(selectedIndex)
@@ -1999,7 +1999,7 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
           )}
           {updateAvailable && updateInfo && (
             <Text color={COLORS.error} bold>
-              Update available: npm i -g comux@latest{" "}
+              Update available: npm i -g psyche@latest{" "}
             </Text>
           )}
           {currentBranch && (
@@ -2014,4 +2014,4 @@ const ComuxApp: React.FC<ComuxAppProps> = ({
   )
 }
 
-export default ComuxApp
+export default PsycheApp

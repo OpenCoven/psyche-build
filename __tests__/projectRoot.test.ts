@@ -10,7 +10,7 @@ import {
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
-  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'comux-project-root-'));
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'psyche-project-root-'));
   tempDirs.push(tempDir);
   return tempDir;
 }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 const tmuxServiceMock = vi.hoisted(() => ({
   setPaneTitle: vi.fn(async () => {}),
@@ -35,23 +35,23 @@ describe('pane restoration', () => {
   it('resumes restored worktree panes with their original agent command', async () => {
     const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
 
-    const pane: ComuxPane = {
-      id: 'comux-1',
+    const pane: PsychePane = {
+      id: 'psyche-1',
       slug: 'feature-codex',
       prompt: 'fix the failing tests',
       paneId: '%2',
-      worktreePath: '/repo/.comux/worktrees/feature-codex',
+      worktreePath: '/repo/.psyche/worktrees/feature-codex',
       projectRoot: '/repo',
       agent: 'codex',
       permissionMode: 'bypassPermissions',
     };
 
-    await recreateMissingPanes([pane], '/repo/.comux/comux.config.json');
+    await recreateMissingPanes([pane], '/repo/.psyche/psyche.config.json');
 
     expect(tmuxServiceMock.sendShellCommand).toHaveBeenCalledWith(
       '%9',
       expect.stringContaining(
-        "export COMUX_PANE_ID='comux-1'; export COMUX_TMUX_PANE_ID='%9'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox"
+        "export PSYCHE_PANE_ID='psyche-1'; export PSYCHE_TMUX_PANE_ID='%9'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox"
       )
     );
     expect(tmuxServiceMock.sendTmuxKeys).toHaveBeenCalledWith('%9', 'Enter');

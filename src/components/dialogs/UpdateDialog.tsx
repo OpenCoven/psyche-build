@@ -11,7 +11,7 @@ const UpdateDialog: React.FC<UpdateDialogProps> = ({ updateInfo }) => {
   return (
     <Box borderStyle="double" borderColor={COLORS.accent} paddingX={1} marginTop={1}>
       <Box flexDirection="column">
-        <Text color={COLORS.accent} bold>🎉 comux Update Available!</Text>
+        <Text color={COLORS.accent} bold>🎉 psyche Update Available!</Text>
         <Text>
           Current version: <Text color={COLORS.info}>{updateInfo.currentVersion}</Text>
         </Text>
@@ -30,7 +30,7 @@ const UpdateDialog: React.FC<UpdateDialogProps> = ({ updateInfo }) => {
             </Text>
           ) : (
             <Text>
-              Manual update required: <Text color={COLORS.info}>{updateInfo.packageManager || 'npm'} update -g comux</Text>
+              Manual update required: <Text color={COLORS.info}>{updateInfo.packageManager || 'npm'} update -g psyche</Text>
               {'\n'}[S]kip this version • [L]ater
             </Text>
           )}

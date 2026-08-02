@@ -28,7 +28,7 @@ function easeInOutSine(value) {
 function extractSvgParts(svgText) {
   const match = svgText.match(/<svg[^>]*viewBox\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*)<\/svg>/i);
   if (!match) {
-    throw new Error('comux-wordmark.svg missing a parseable root <svg> with viewBox');
+    throw new Error('psyche-wordmark.svg missing a parseable root <svg> with viewBox');
   }
 
   return {
@@ -59,7 +59,7 @@ export async function createMotionFingerprint({ root, renderOptions = BRAND_MOTI
   ]);
 
   return createHash('sha256')
-    .update('comux-motion-fingerprint-v1')
+    .update('psyche-motion-fingerprint-v1')
     .update(motionSceneSource)
     .update(brandConfigSource)
     .update(wordmarkSource)
@@ -156,7 +156,7 @@ export async function renderMotionVideo({ root, outputPath, renderOptions = BRAN
   const resolvedOutputPath = path.isAbsolute(outputPath) ? outputPath : path.join(root, outputPath);
   await fs.mkdir(path.dirname(resolvedOutputPath), { recursive: true });
 
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'comux-brand-motion-'));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'psyche-brand-motion-'));
   const frameTotal = renderOptions.fps * renderOptions.seconds;
   const fingerprint = await createMotionFingerprint({ root, renderOptions });
 
@@ -196,9 +196,9 @@ export async function renderMotionVideo({ root, outputPath, renderOptions = BRAN
         '-metadata',
         'creation_time=1970-01-01T00:00:00Z',
         '-metadata',
-        'encoder=comux-brand-pipeline',
+        'encoder=psyche-brand-pipeline',
         '-metadata',
-        `comment=comux-motion-fingerprint:${fingerprint}`,
+        `comment=psyche-motion-fingerprint:${fingerprint}`,
         '-threads',
         '1',
         '-r',

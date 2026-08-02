@@ -3,11 +3,11 @@ export const meta = { title: 'Agents' };
 export function render() {
   return `
     <h1>Agents</h1>
-    <p class="lead">comux supports 11 AI coding agents. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
+    <p class="lead">psyche supports 11 AI coding agents. Each agent is automatically detected if its CLI is installed and available in your PATH.</p>
 
     <h2>Agent Detection</h2>
-    <p>Run <code>comux doctor</code> to see whether this shell can find a supported agent CLI. comux can still create plain terminal panes when none are installed; install at least one supported CLI when you want prompt-launched agent panes.</p>
-    <p>comux automatically detects installed agents by searching:</p>
+    <p>Run <code>psyche doctor</code> to see whether this shell can find a supported agent CLI. psyche can still create plain terminal panes when none are installed; install at least one supported CLI when you want prompt-launched agent panes.</p>
+    <p>psyche automatically detects installed agents by searching:</p>
     <ol>
       <li>Your shell's command path (<code>command -v</code>)</li>
       <li>Common installation directories:
@@ -19,7 +19,7 @@ export function render() {
         </ul>
       </li>
     </ol>
-    <p>If only one agent is found, comux uses it automatically. If multiple agents are available, you'll be prompted to choose (unless <code>defaultAgent</code> is set in <a href="#/configuration">configuration</a>).</p>
+    <p>If only one agent is found, psyche uses it automatically. If multiple agents are available, you'll be prompted to choose (unless <code>defaultAgent</code> is set in <a href="#/configuration">configuration</a>).</p>
 
     <h2>Enabling Agents</h2>
     <p>Only Claude Code, OpenCode, and Codex are enabled by default. To use other agents, open settings by pressing <kbd>s</kbd> and toggle on the agents you want available in the agent selector.</p>
@@ -33,7 +33,7 @@ export function render() {
     </ul>
 
     <h2>Permission Modes</h2>
-    <p>The <code>permissionMode</code> setting controls what flags comux passes to each agent:</p>
+    <p>The <code>permissionMode</code> setting controls what flags psyche passes to each agent:</p>
     <table>
       <thead>
         <tr><th>permissionMode</th><th>Claude Code</th><th>Codex</th><th>opencode</th></tr>
@@ -47,7 +47,7 @@ export function render() {
     </table>
 
     <h2>Autopilot Mode</h2>
-    <p>When <code>enableAutopilotByDefault</code> is enabled in <a href="#/configuration">settings</a>, comux will automatically accept agent option dialogs when no risk is detected. This reduces manual intervention while agents work.</p>
+    <p>When <code>enableAutopilotByDefault</code> is enabled in <a href="#/configuration">settings</a>, psyche will automatically accept agent option dialogs when no risk is detected. This reduces manual intervention while agents work.</p>
     <p>This setting controls dialog handling and is separate from <code>permissionMode</code>.</p>
 
     <div class="callout callout-warning">
@@ -56,12 +56,12 @@ export function render() {
     </div>
 
     <h2>Agent Status Detection</h2>
-    <p>comux monitors each agent pane to determine its current state. This is used to show status indicators in the sidebar.</p>
+    <p>psyche monitors each agent pane to determine its current state. This is used to show status indicators in the sidebar.</p>
     <p>The detection works by:</p>
     <ol>
       <li><strong>Activity tracking</strong> — if the terminal content is changing, the agent is considered "working"</li>
-      <li><strong>LLM analysis</strong> — when activity stops, comux uses a lightweight LLM (grok-4-fast, free tier) to analyze the terminal content and determine if the agent is waiting for input, showing a dialog, or idle</li>
-      <li><strong>User typing detection</strong> — if the user is typing, comux avoids false positives</li>
+      <li><strong>LLM analysis</strong> — when activity stops, psyche uses a lightweight LLM (grok-4-fast, free tier) to analyze the terminal content and determine if the agent is waiting for input, showing a dialog, or idle</li>
+      <li><strong>User typing detection</strong> — if the user is typing, psyche avoids false positives</li>
     </ol>
     <p>Each pane has its own worker thread that polls every second without blocking the main UI.</p>
   `;

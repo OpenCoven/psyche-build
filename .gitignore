@@ -4,7 +4,7 @@ dist/
 .DS_Store
 .env
 .env.*
-.comux*
+.psyche*
 .vmux/
 coverage/
 playwright-report/

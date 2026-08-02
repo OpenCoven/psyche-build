@@ -2,13 +2,13 @@
  * Attach a second (or Nth) agent to an existing worktree pane.
  *
  * Creates a new tmux pane that `cd`s into the same worktree directory,
- * launches the chosen agent, and returns a sibling ComuxPane that shares
+ * launches the chosen agent, and returns a sibling PsychePane that shares
  * the same worktreePath/branchName/projectRoot.
  */
 
 import * as fs from 'fs';
 import path from 'path';
-import type { ComuxPane, ComuxConfig } from '../types.js';
+import type { PsychePane, PsycheConfig } from '../types.js';
 import type { AgentName } from './agentLaunch.js';
 import { launchAgentInPane } from './agentLaunch.js';
 import { autoApproveTrustPrompt } from './paneCreation.js';
@@ -22,10 +22,10 @@ import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 
 export interface AttachAgentOptions {
-  targetPane: ComuxPane;
+  targetPane: PsychePane;
   prompt: string;
   agent: AgentName;
-  existingPanes: ComuxPane[];
+  existingPanes: PsychePane[];
   sessionProjectRoot: string;
   sessionConfigPath: string;
 }
@@ -34,8 +34,8 @@ export interface AttachAgentOptions {
  * Generate a unique sibling slug like `fix-auth-a2`, `fix-auth-a3`, etc.
  */
 export function generateSiblingSlugForTargetPane(
-  targetPane: Pick<ComuxPane, 'slug' | 'worktreePath'>,
-  existingPanes: ReadonlyArray<Pick<ComuxPane, 'slug'>>,
+  targetPane: Pick<PsychePane, 'slug' | 'worktreePath'>,
+  existingPanes: ReadonlyArray<Pick<PsychePane, 'slug'>>,
 ): string {
   // Always anchor attached-agent slugs to the real worktree directory name.
   // This avoids repeated suffixes when attaching from an already attached pane.
@@ -59,7 +59,7 @@ export function generateSiblingSlugForTargetPane(
 
 export async function attachAgentToWorktree(
   options: AttachAgentOptions
-): Promise<{ pane: ComuxPane }> {
+): Promise<{ pane: PsychePane }> {
   const {
     targetPane,
     prompt,
@@ -87,15 +87,15 @@ export async function attachAgentToWorktree(
   let controlPaneId: string | undefined;
   try {
     const configContent = fs.readFileSync(sessionConfigPath, 'utf-8');
-    const config: ComuxConfig = JSON.parse(configContent);
+    const config: PsycheConfig = JSON.parse(configContent);
     controlPaneId = config.controlPaneId;
   } catch {
     controlPaneId = originalPaneId;
   }
 
   // Split from the last existing pane (standard grid placement)
-  const comuxPaneIds = existingPanes.map(p => p.paneId);
-  const splitTarget = comuxPaneIds[comuxPaneIds.length - 1];
+  const psychePaneIds = existingPanes.map(p => p.paneId);
+  const splitTarget = psychePaneIds[psychePaneIds.length - 1];
   const paneInfo = splitPane({ targetPane: splitTarget, cwd: projectRoot });
 
   // Wait for pane to be ready
@@ -137,20 +137,20 @@ export async function attachAgentToWorktree(
   // Small delay for cd to complete
   await new Promise(r => setTimeout(r, 300));
 
-  const comuxPaneId = `comux-${Date.now()}`;
+  const psychePaneId = `psyche-${Date.now()}`;
   let codexHookEventFile: string | undefined;
   if (agent === 'codex') {
     try {
       codexHookEventFile = installCodexPaneHooks({
         worktreePath: targetPane.worktreePath,
-        comuxPaneId,
+        psychePaneId,
         tmuxPaneId: paneInfo,
       }).eventFile;
     } catch (error) {
       LogService.getInstance().warn(
         `Failed to install Codex hooks for ${slug}: ${error instanceof Error ? error.message : String(error)}`,
         'attachAgent',
-        comuxPaneId
+        psychePaneId
       );
     }
   }
@@ -162,7 +162,7 @@ export async function attachAgentToWorktree(
     prompt,
     slug,
     projectRoot,
-    comuxPaneId,
+    psychePaneId,
     codexHookEventFile,
     permissionMode: settings.permissionMode,
   });
@@ -178,8 +178,8 @@ export async function attachAgentToWorktree(
   await tmuxService.selectPane(paneInfo);
 
   // Build the sibling pane object — shares worktree/branch with target
-  const newPane: ComuxPane = {
-    id: comuxPaneId,
+  const newPane: PsychePane = {
+    id: psychePaneId,
     slug,
     branchName: targetPane.branchName,
     prompt: prompt || 'No initial prompt',
@@ -196,9 +196,9 @@ export async function attachAgentToWorktree(
   // Switch focus back to control pane
   await tmuxService.selectPane(originalPaneId);
 
-  // Re-set the comux sidebar title
+  // Re-set the psyche sidebar title
   try {
-    await tmuxService.setPaneTitle(originalPaneId, "comux");
+    await tmuxService.setPaneTitle(originalPaneId, "psyche");
   } catch {
     // Ignore title errors
   }

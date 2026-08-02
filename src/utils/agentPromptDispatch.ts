@@ -122,7 +122,7 @@ export async function sendPromptViaTmux(
     await sleep(readyDelayMs);
   }
 
-  const bufferName = `comux-prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const bufferName = `psyche-prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const interKeyDelayMs = 120;
   const interSubmitDelayMs = 60;
 

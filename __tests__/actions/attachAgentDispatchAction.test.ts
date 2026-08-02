@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { executeAction, PaneAction } from '../../src/actions/index.js';
 import type { ActionContext } from '../../src/actions/types.js';
-import type { ComuxPane } from '../../src/types.js';
+import type { PsychePane } from '../../src/types.js';
 
-const pane: ComuxPane = {
+const pane: PsychePane = {
   id: 'pane-1',
   slug: 'feature-1',
   prompt: 'test prompt',
   paneId: '%1',
-  worktreePath: '/tmp/repo/.comux/worktrees/feature-1',
+  worktreePath: '/tmp/repo/.psyche/worktrees/feature-1',
 };
 
 const context: ActionContext = {

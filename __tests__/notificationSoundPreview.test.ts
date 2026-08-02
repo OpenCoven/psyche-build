@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildNotificationSoundPreviewMessage,
-  getComuxHelperSocketPath,
+  getPsycheHelperSocketPath,
 } from '../src/utils/notificationSoundPreview.js';
 
 describe('notification sound preview commands', () => {
@@ -17,7 +17,7 @@ describe('notification sound preview commands', () => {
   it('routes bundled sound previews through the helper resource name', () => {
     expect(buildNotificationSoundPreviewMessage('harp', 'darwin')).toEqual({
       type: 'preview-sound',
-      soundName: 'comux-harp.caf',
+      soundName: 'psyche-harp.caf',
     });
   });
 
@@ -26,8 +26,8 @@ describe('notification sound preview commands', () => {
   });
 
   it('uses the default helper socket path', () => {
-    expect(getComuxHelperSocketPath('/tmp/home')).toBe(
-      '/tmp/home/.comux/native-helper/run/comux-helper.sock'
+    expect(getPsycheHelperSocketPath('/tmp/home')).toBe(
+      '/tmp/home/.psyche/native-helper/run/psyche-helper.sock'
     );
   });
 });

@@ -369,14 +369,14 @@ describe('SettingsManager defaults', () => {
         existsSync: vi.fn((filePath: string) => {
           const normalizedPath = normalizeMockPath(filePath);
           return (
-            normalizedPath.endsWith('.comux.defaults.json')
-            || normalizedPath.endsWith('.comux.global.json')
-            || normalizedPath.endsWith('/.comux/settings.json')
+            normalizedPath.endsWith('.psyche.defaults.json')
+            || normalizedPath.endsWith('.psyche.global.json')
+            || normalizedPath.endsWith('/.psyche/settings.json')
           );
         }),
         readFileSync: vi.fn((filePath: string) => {
           const normalizedPath = normalizeMockPath(filePath);
-          if (normalizedPath.endsWith('.comux.defaults.json')) {
+          if (normalizedPath.endsWith('.psyche.defaults.json')) {
             return JSON.stringify({
               defaultAgent: 'codex',
               branchPrefix: 'feat/',
@@ -384,13 +384,13 @@ describe('SettingsManager defaults', () => {
             });
           }
 
-          if (normalizedPath.endsWith('.comux.global.json')) {
+          if (normalizedPath.endsWith('.psyche.global.json')) {
             return JSON.stringify({
               colorTheme: 'red',
             });
           }
 
-          if (normalizedPath.endsWith('/.comux/settings.json')) {
+          if (normalizedPath.endsWith('/.psyche/settings.json')) {
             return JSON.stringify({
               branchPrefix: 'fix/',
             });
@@ -426,7 +426,7 @@ describe('SettingsManager defaults', () => {
       const actual = await importOriginal<typeof import('fs')>();
       return {
         ...actual,
-        existsSync: vi.fn((path: string) => path.endsWith('.comux.defaults.json')),
+        existsSync: vi.fn((path: string) => path.endsWith('.psyche.defaults.json')),
         readFileSync: vi.fn(() => JSON.stringify({
           permissionMode: 'fullAuto',
           enableAutopilotByDefault: true,
@@ -473,7 +473,7 @@ describe('SettingsManager defaults', () => {
       const actual = await importOriginal<typeof import('fs')>();
       return {
         ...actual,
-        existsSync: vi.fn((path: string) => path.endsWith('.comux.defaults.json')),
+        existsSync: vi.fn((path: string) => path.endsWith('.psyche.defaults.json')),
         readFileSync: vi.fn(() => '{ invalid json'),
         writeFileSync: vi.fn(),
         mkdirSync: vi.fn(),

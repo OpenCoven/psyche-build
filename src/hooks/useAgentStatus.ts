@@ -1,10 +1,10 @@
 import { useEffect, useState, useRef } from 'react';
-import type { ComuxPane, AgentStatus } from '../types.js';
+import type { PsychePane, AgentStatus } from '../types.js';
 import { getStatusDetector } from '../services/StatusDetector.js';
 import { LogService } from '../services/LogService.js';
 
 interface UseAgentStatusParams {
-  panes: ComuxPane[];
+  panes: PsychePane[];
   suspend: boolean; // true when dialogs are open to avoid UI freezing
   onPaneRemoved?: (paneId: string) => void; // callback when a pane no longer exists
 }

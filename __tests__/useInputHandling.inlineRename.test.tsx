@@ -5,7 +5,7 @@ import { Text } from 'ink';
 import { useInputHandling } from '../src/hooks/useInputHandling.js';
 import { TmuxService } from '../src/services/TmuxService.js';
 import type { InlineRenameState } from '../src/utils/inlineRename.js';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 
 vi.mock('../src/utils/remotePaneActions.js', () => ({
   drainRemotePaneActions: vi.fn(async () => []),
@@ -14,9 +14,9 @@ vi.mock('../src/utils/remotePaneActions.js', () => ({
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function pane(overrides: Partial<ComuxPane> = {}): ComuxPane {
+function pane(overrides: Partial<PsychePane> = {}): PsychePane {
   return {
-    id: 'comux-1',
+    id: 'psyche-1',
     slug: 'thread-a',
     prompt: '',
     paneId: '%1',
@@ -35,7 +35,7 @@ function Harness({
   ignoreInput = false,
   cleanExit = vi.fn(),
 }: {
-  panes: ComuxPane[];
+  panes: PsychePane[];
   savePanes: ReturnType<typeof vi.fn>;
   selectedIndex?: number;
   setSelectedIndex?: ReturnType<typeof vi.fn>;
@@ -96,7 +96,7 @@ function Harness({
     loadPanes: vi.fn(),
     cleanExit,
     getAvailableAgentsForProject: vi.fn(() => []),
-    panesFile: '/tmp/comux.config.json',
+    panesFile: '/tmp/psyche.config.json',
     projectRoot: '/repo',
     projectActionItems: [],
     findCardInDirection: vi.fn(() => null),
@@ -104,7 +104,7 @@ function Harness({
     setInlineRename,
   });
 
-  return <Text>comux</Text>;
+  return <Text>psyche</Text>;
 }
 
 describe('useInputHandling inline rename', () => {
@@ -144,7 +144,7 @@ describe('useInputHandling inline rename', () => {
 
     expect(savePanes).toHaveBeenCalledWith([
       expect.objectContaining({
-        id: 'comux-1',
+        id: 'psyche-1',
         slug: 'thread-a',
         displayName: 'thread-a-renamed',
       }),
@@ -160,8 +160,8 @@ describe('useInputHandling inline rename', () => {
     const { stdin, unmount } = render(
       <Harness
         panes={[
-          pane({ id: 'comux-1', slug: 'thread-a', paneId: '%1' }),
-          pane({ id: 'comux-2', slug: 'thread-b', paneId: '%2' }),
+          pane({ id: 'psyche-1', slug: 'thread-a', paneId: '%1' }),
+          pane({ id: 'psyche-2', slug: 'thread-b', paneId: '%2' }),
         ]}
         savePanes={savePanes}
         setSelectedIndex={setSelectedIndex}
@@ -187,8 +187,8 @@ describe('useInputHandling inline rename', () => {
     const { stdin, unmount } = render(
       <Harness
         panes={[
-          pane({ id: 'comux-1', slug: 'thread-a', paneId: '%1' }),
-          pane({ id: 'comux-2', slug: 'thread-b', paneId: '%2' }),
+          pane({ id: 'psyche-1', slug: 'thread-a', paneId: '%1' }),
+          pane({ id: 'psyche-2', slug: 'thread-b', paneId: '%2' }),
         ]}
         savePanes={savePanes}
       />
@@ -206,11 +206,11 @@ describe('useInputHandling inline rename', () => {
 
     expect(savePanes).toHaveBeenCalledWith([
       expect.objectContaining({
-        id: 'comux-1',
+        id: 'psyche-1',
         slug: 'thread-a',
       }),
       expect.objectContaining({
-        id: 'comux-2',
+        id: 'psyche-2',
         slug: 'thread-b',
         displayName: 'thread-b-renamed',
       }),

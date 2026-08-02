@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { useInputHandling } from '../src/hooks/useInputHandling.js';
-import type { ComuxPane } from '../src/types.js';
+import type { PsychePane } from '../src/types.js';
 import type { CovenSessionsLoadState } from '../src/utils/covenSessions.js';
 
 vi.mock('../src/utils/remotePaneActions.js', () => ({
@@ -13,9 +13,9 @@ vi.mock('../src/utils/remotePaneActions.js', () => ({
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function pane(overrides: Partial<ComuxPane> = {}): ComuxPane {
+function pane(overrides: Partial<PsychePane> = {}): PsychePane {
   return {
-    id: 'comux-1',
+    id: 'psyche-1',
     slug: 'thread-a',
     prompt: '',
     paneId: '%1',
@@ -88,7 +88,7 @@ function Harness({
     loadPanes: vi.fn(),
     cleanExit: vi.fn(),
     getAvailableAgentsForProject: vi.fn(() => []),
-    panesFile: '/tmp/comux.config.json',
+    panesFile: '/tmp/psyche.config.json',
     projectRoot: '/repo',
     projectActionItems: [],
     covenSessionsState,
@@ -102,7 +102,7 @@ function Harness({
 
   useInputHandling(params as Parameters<typeof useInputHandling>[0]);
 
-  return <Text>comux</Text>;
+  return <Text>psyche</Text>;
 }
 
 function StatefulHarness({

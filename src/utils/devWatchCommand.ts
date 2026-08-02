@@ -1,7 +1,7 @@
 /**
- * Build a shell-safe command for restarting comux dev watch from a source path.
+ * Build a shell-safe command for restarting psyche dev watch from a source path.
  * For respawned tmux panes, we append an interactive shell so the pane stays open
- * after comux exits intentionally.
+ * after psyche exits intentionally.
  */
 
 const escapeForDoubleQuotedShell = (value: string): string =>

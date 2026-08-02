@@ -22,28 +22,28 @@ describe('tmuxRuntimeCompatibility', () => {
   });
 
   it('builds runtime commands for missing compatibility settings', () => {
-    const commands = buildTmuxRuntimeCompatibilityCommands('comux-test', {
+    const commands = buildTmuxRuntimeCompatibilityCommands('psyche-test', {
       terminalOverrides: [],
       updateEnvironment: [],
     });
 
     expect(commands).toEqual([
-      ['set-option', '-q', '-t', 'comux-test', 'set-clipboard', 'on'],
-      ['set-option', '-q', '-t', 'comux-test', 'allow-passthrough', 'all'],
-      ['set-option', '-q', '-ag', '-t', 'comux-test', 'update-environment', 'TERM_PROGRAM'],
-      ['set-option', '-q', '-ag', '-t', 'comux-test', 'terminal-overrides', 'xterm-256color:Ms=\\E]52;c;%p2%s\\007'],
+      ['set-option', '-q', '-t', 'psyche-test', 'set-clipboard', 'on'],
+      ['set-option', '-q', '-t', 'psyche-test', 'allow-passthrough', 'all'],
+      ['set-option', '-q', '-ag', '-t', 'psyche-test', 'update-environment', 'TERM_PROGRAM'],
+      ['set-option', '-q', '-ag', '-t', 'psyche-test', 'terminal-overrides', 'xterm-256color:Ms=\\E]52;c;%p2%s\\007'],
     ]);
   });
 
   it('does not duplicate array entries already present', () => {
-    const commands = buildTmuxRuntimeCompatibilityCommands('comux-test', {
+    const commands = buildTmuxRuntimeCompatibilityCommands('psyche-test', {
       terminalOverrides: ['linux*:AX@', 'xterm-256color:Ms=\\E]52;c;%p2%s\\007'],
       updateEnvironment: ['DISPLAY', 'TERM_PROGRAM'],
     });
 
     expect(commands).toEqual([
-      ['set-option', '-q', '-t', 'comux-test', 'set-clipboard', 'on'],
-      ['set-option', '-q', '-t', 'comux-test', 'allow-passthrough', 'all'],
+      ['set-option', '-q', '-t', 'psyche-test', 'set-clipboard', 'on'],
+      ['set-option', '-q', '-t', 'psyche-test', 'allow-passthrough', 'all'],
     ]);
   });
 });

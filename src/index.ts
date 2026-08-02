@@ -11,7 +11,7 @@ import React from 'react';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { createInterface } from 'node:readline/promises';
-import ComuxApp from './ComuxApp.js';
+import PsycheApp from './PsycheApp.js';
 import FileBrowserApp from './FileBrowserApp.js';
 import { AutoUpdater } from './services/AutoUpdater.js';
 import { StateManager } from './shared/StateManager.js';
@@ -36,7 +36,7 @@ import {
 import { ensureTmuxRuntimeCompatibility } from './utils/tmuxRuntimeCompatibility.js';
 import { claimProcessShutdown } from './utils/processShutdown.js';
 import { sendTmuxShellCommand } from './utils/tmuxSendKeys.js';
-import { ensureComuxRuntimeIgnored } from './utils/gitignore.js';
+import { ensurePsycheRuntimeIgnored } from './utils/gitignore.js';
 import {
   addSidebarProject,
   getAutoSidebarProjectColorTheme,
@@ -49,9 +49,9 @@ import {
   buildRemotePaneActionBindingCommandArgs,
   buildRemotePaneActionCleanupCommandArgs,
   clearRemotePaneActions,
-  COMUX_CONTROLLER_PID_OPTION,
-  COMUX_CONTROL_PANE_OPTION,
-  COMUX_REMOTE_PANE_MODE_OPTION,
+  PSYCHE_CONTROLLER_PID_OPTION,
+  PSYCHE_CONTROL_PANE_OPTION,
+  PSYCHE_REMOTE_PANE_MODE_OPTION,
   enqueueRemotePaneAction,
   getCurrentTmuxPaneId as getFocusedTmuxPaneId,
   getCurrentTmuxSessionName as getFocusedTmuxSessionName,
@@ -75,7 +75,7 @@ import {
   TMUX_PANE_TITLE_LABEL_FORMAT,
   TMUX_PANE_TITLE_PREFIX_FORMAT,
 } from './utils/paneTitlePrefix.js';
-import type { ComuxConfig, ComuxPane } from './types.js';
+import type { PsycheConfig, PsychePane } from './types.js';
 import { BridgeDaemon } from './services/bridge/BridgeDaemon.js';
 import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtocol.js';
 import { tmuxSessionNameForRoot } from './services/bridge/tmuxControl.js';
@@ -128,7 +128,7 @@ async function handleDoctorCli(): Promise<number> {
 
 async function handleRemotePaneActionCli(shortcutArg: string): Promise<number> {
   if (!isRemotePaneActionShortcut(shortcutArg)) {
-    showTmuxMessage(`Unsupported comux pane action: ${shortcutArg}`);
+    showTmuxMessage(`Unsupported psyche pane action: ${shortcutArg}`);
     return 1;
   }
 
@@ -136,26 +136,26 @@ async function handleRemotePaneActionCli(shortcutArg: string): Promise<number> {
   const targetPaneId = getFocusedTmuxPaneId();
 
   if (!sessionName || !targetPaneId) {
-    showTmuxMessage('comux remote pane actions require an active tmux pane');
+    showTmuxMessage('psyche remote pane actions require an active tmux pane');
     return 1;
   }
 
-  const controllerPid = getTmuxSessionOption(sessionName, COMUX_CONTROLLER_PID_OPTION);
+  const controllerPid = getTmuxSessionOption(sessionName, PSYCHE_CONTROLLER_PID_OPTION);
   if (!controllerPid || !/^\d+$/.test(controllerPid)) {
-    showTmuxMessage('No active comux controller found for this session');
+    showTmuxMessage('No active psyche controller found for this session');
     return 1;
   }
 
-  const controlPaneId = getTmuxSessionOption(sessionName, COMUX_CONTROL_PANE_OPTION);
+  const controlPaneId = getTmuxSessionOption(sessionName, PSYCHE_CONTROL_PANE_OPTION);
   if (controlPaneId && controlPaneId === targetPaneId) {
-    showTmuxMessage('Focused pane is already the comux control pane');
+    showTmuxMessage('Focused pane is already the psyche control pane');
     return 1;
   }
 
   try {
     process.kill(Number(controllerPid), 0);
   } catch {
-    showTmuxMessage('The comux controller for this session is not running');
+    showTmuxMessage('The psyche controller for this session is not running');
     return 1;
   }
 
@@ -165,12 +165,12 @@ async function handleRemotePaneActionCli(shortcutArg: string): Promise<number> {
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    showTmuxMessage(`Failed to queue comux pane action: ${message}`);
+    showTmuxMessage(`Failed to queue psyche pane action: ${message}`);
     return 1;
   }
 }
 
-class Comux {
+class Psyche {
   private panesFile: string;
   private settingsFile: string;
   private projectName: string;
@@ -190,11 +190,11 @@ class Comux {
     // Create a stable, collision-safe session name for this project root
     this.sessionName = this.buildSessionNameForRoot(this.projectRoot);
 
-    // Store config in .comux directory inside project root
-    const comuxDir = path.join(this.projectRoot, '.comux');
-    const configFile = path.join(comuxDir, 'comux.config.json');
+    // Store config in .psyche directory inside project root
+    const psycheDir = path.join(this.projectRoot, '.psyche');
+    const configFile = path.join(psycheDir, 'psyche.config.json');
 
-    // Always use the .comux directory config location
+    // Always use the .psyche directory config location
     this.panesFile = configFile;
     this.settingsFile = configFile; // Same file for all config
 
@@ -209,8 +209,8 @@ class Comux {
     // Set up global signal handlers for clean exit
     this.setupGlobalSignalHandlers();
 
-    // Ensure .comux directory exists and is in .gitignore
-    await this.ensureComuxDirectory();
+    // Ensure .psyche directory exists and is in .gitignore
+    await this.ensurePsycheDirectory();
 
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();
@@ -236,8 +236,8 @@ class Comux {
     }
 
     const inTmux = process.env.TMUX !== undefined;
-    const isDev = process.env.COMUX_DEV === 'true';
-    const isDevWatch = process.env.COMUX_DEV_WATCH === 'true';
+    const isDev = process.env.PSYCHE_DEV === 'true';
+    const isDevWatch = process.env.PSYCHE_DEV_WATCH === 'true';
     const currentTmuxSessionName = inTmux
       ? this.getCurrentTmuxSessionName()
       : null;
@@ -247,16 +247,16 @@ class Comux {
       ensureTmuxRuntimeCompatibility(sessionNameForCurrentTmux);
     }
 
-    // Running comux from another project while already inside a comux session:
+    // Running psyche from another project while already inside a psyche session:
     // offer to attach this project to the current sidebar/session instead.
     if (
       inTmux &&
       currentTmuxSessionName &&
-      currentTmuxSessionName.startsWith('comux-') &&
+      currentTmuxSessionName.startsWith('psyche-') &&
       currentTmuxSessionName !== this.sessionName
     ) {
       const shouldAttachToCurrent = await this.promptYesNo(
-        `Detected active comux session '${currentTmuxSessionName}'. Add project '${this.projectName}' to this session's sidebar?`,
+        `Detected active psyche session '${currentTmuxSessionName}'. Add project '${this.projectName}' to this session's sidebar?`,
         true
       );
 
@@ -344,26 +344,26 @@ class Comux {
         // Batch all session configuration commands into a single tmux call for faster startup
         // This reduces 5 process spawns to 1, significantly improving startup time
         this.applySessionPaneBorderOptions(this.sessionName, 'inherit');
-        execSync(`tmux select-pane -t ${this.sessionName} -T "comux"`, { stdio: 'inherit' });
-        // Send comux command to the new session (use dev command if in dev mode)
-        // Determine the comux command to use
-        let comuxCommand: string;
+        execSync(`tmux select-pane -t ${this.sessionName} -T "psyche"`, { stdio: 'inherit' });
+        // Send psyche command to the new session (use dev command if in dev mode)
+        // Determine the psyche command to use
+        let psycheCommand: string;
         if (isDev) {
-          comuxCommand = buildDevWatchCommand(devDirectory);
+          psycheCommand = buildDevWatchCommand(devDirectory);
         } else {
           // Check if we're running from a local installation
-          // __dirname is 'dist' when compiled, so '../comux' points to the wrapper
-          const localComuxPath = path.join(__dirname, '..', 'comux');
-          if (fsSync.existsSync(localComuxPath)) {
-            // Use absolute path to local comux (works for both local builds and global installs)
-            comuxCommand = `"${localComuxPath}"`;
+          // __dirname is 'dist' when compiled, so '../psyche' points to the wrapper
+          const localPsychePath = path.join(__dirname, '..', 'psyche');
+          if (fsSync.existsSync(localPsychePath)) {
+            // Use absolute path to local psyche (works for both local builds and global installs)
+            psycheCommand = `"${localPsychePath}"`;
           } else {
-            // Fallback to global comux command
-            comuxCommand = 'comux';
+            // Fallback to global psyche command
+            psycheCommand = 'psyche';
           }
         }
 
-        sendTmuxShellCommand(this.sessionName, comuxCommand, 'inherit');
+        sendTmuxShellCommand(this.sessionName, psycheCommand, 'inherit');
       }
       execSync(`tmux attach-session -t ${this.sessionName}`, { stdio: 'inherit' });
       return;
@@ -377,17 +377,17 @@ class Comux {
     //   // Ignore if it fails
     // }
 
-    // Set pane title for the current pane running comux
+    // Set pane title for the current pane running psyche
     // TODO(future): Re-enable control pane title once UI shift issue is resolved
     // Setting the title can cause visual artifacts in some tmux configurations
-    // Original code: execSync(`tmux select-pane -T "comux v${version} - ${project}"`)
+    // Original code: execSync(`tmux select-pane -T "psyche v${version} - ${project}"`)
     // See: Title updates are currently handled by enforcePaneTitles() in usePaneSync.ts
 
     try {
       const activeSessionName = this.getCurrentTmuxSessionName() || this.sessionName;
       this.applySessionPaneBorderOptions(activeSessionName, 'pipe');
     } catch {
-      // Best effort - comux still works without reapplying border format here.
+      // Best effort - psyche still works without reapplying border format here.
     }
 
     // Get current pane ID (control pane for left sidebar)
@@ -416,8 +416,8 @@ class Comux {
         .map((paneId: string) => paneId.trim())
         .filter(Boolean);
 
-      // Preserve an existing valid control pane ID when comux is launched from a non-control pane.
-      // This prevents nested comux UIs from accidentally hijacking control-pane ownership.
+      // Preserve an existing valid control pane ID when psyche is launched from a non-control pane.
+      // This prevents nested psyche UIs from accidentally hijacking control-pane ownership.
       const preservedControlPaneId =
         typeof oldControlPaneId === 'string' && sessionPaneIds.includes(oldControlPaneId)
           ? oldControlPaneId
@@ -454,7 +454,7 @@ class Comux {
         await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
       }
 
-      // Create welcome pane if there are no comux panes and no existing welcome pane
+      // Create welcome pane if there are no psyche panes and no existing welcome pane
       // Check if welcome pane actually exists, not just if it's in config (handles tmux restarts)
       const { welcomePaneExists } = await import('./utils/welcomePane.js');
       const normalizePathForComparison = (candidatePath?: string): string | null => {
@@ -599,7 +599,7 @@ class Comux {
         }
       }
 
-      // Check for untracked panes (terminal panes created outside comux tracking)
+      // Check for untracked panes (terminal panes created outside psyche tracking)
       const trackedPaneIds = config.panes?.map((p: any) => p.paneId) ?? [];
       const untrackedPanes = await getUntrackedPanes(
         sessionNameForCurrentTmux,
@@ -646,7 +646,7 @@ class Comux {
 
     const metadataSessionName = currentTmuxSessionName || this.getCurrentTmuxSessionName() || this.sessionName;
     const shouldPublishMetadata =
-      !metadataSessionName.startsWith('comux-') || metadataSessionName === this.sessionName;
+      !metadataSessionName.startsWith('psyche-') || metadataSessionName === this.sessionName;
     if (shouldPublishMetadata) {
       this.publishSessionMetadata(metadataSessionName, controlPaneId);
       this.clearRemotePaneModeIndicators(metadataSessionName);
@@ -665,7 +665,7 @@ class Comux {
         projectName: this.projectName || null,
         sessionName: tmuxSessionNameForRoot(this.projectRoot),
         paneProvider: (): PaneSnapshot[] => {
-          return this.stateManager.getPanes().map((p: ComuxPane): PaneSnapshot => {
+          return this.stateManager.getPanes().map((p: PsychePane): PaneSnapshot => {
             let status: PaneSnapshot['status'];
             switch (p.agentStatus) {
               case 'working':
@@ -738,7 +738,7 @@ class Comux {
             projectId: ritual.scope === 'builtin' ? null : projectRoot,
           }));
         },
-        launchRitual: async () => { throw new Error("comux UI not ready — try again in a moment"); },
+        launchRitual: async () => { throw new Error("psyche UI not ready — try again in a moment"); },
       });
 
       const { port, fingerprint } = await this.bridgeDaemon.start();
@@ -777,7 +777,7 @@ class Comux {
       bridgeDaemon: this.bridgeDaemon,
     };
 
-    const app = render(React.createElement(ComuxApp, appProps), {
+    const app = render(React.createElement(PsycheApp, appProps), {
       exitOnCtrlC: false  // Disable automatic exit on Ctrl+C
     });
 
@@ -792,7 +792,7 @@ class Comux {
     const projectHash = createHash('md5').update(projectRoot).digest('hex').substring(0, 8);
     const projectIdentifier = `${projectName}-${projectHash}`;
     const sanitizedProjectIdentifier = projectIdentifier.replace(/\./g, '-');
-    return `comux-${sanitizedProjectIdentifier}`;
+    return `psyche-${sanitizedProjectIdentifier}`;
   }
 
   private getCurrentTmuxSessionName(): string | null {
@@ -871,12 +871,12 @@ class Comux {
 
   private publishSessionMetadata(sessionName: string, controlPaneId?: string): void {
     try {
-      spawnSync('tmux', ['set-option', '-t', sessionName, '@comux_project_root', this.projectRoot], { stdio: 'pipe' });
-      spawnSync('tmux', ['set-option', '-t', sessionName, '@comux_project_name', this.projectName], { stdio: 'pipe' });
-      spawnSync('tmux', ['set-option', '-t', sessionName, '@comux_config_path', this.panesFile], { stdio: 'pipe' });
-      spawnSync('tmux', ['set-option', '-t', sessionName, COMUX_CONTROLLER_PID_OPTION, String(process.pid)], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-t', sessionName, '@psyche_project_root', this.projectRoot], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-t', sessionName, '@psyche_project_name', this.projectName], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-t', sessionName, '@psyche_config_path', this.panesFile], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-t', sessionName, PSYCHE_CONTROLLER_PID_OPTION, String(process.pid)], { stdio: 'pipe' });
       if (controlPaneId) {
-        spawnSync('tmux', ['set-option', '-t', sessionName, COMUX_CONTROL_PANE_OPTION, controlPaneId], { stdio: 'pipe' });
+        spawnSync('tmux', ['set-option', '-t', sessionName, PSYCHE_CONTROL_PANE_OPTION, controlPaneId], { stdio: 'pipe' });
       }
     } catch {
       // Metadata is best-effort only
@@ -887,13 +887,13 @@ class Comux {
     sessionName: string = this.getCurrentTmuxSessionName() || this.sessionName
   ) {
     try {
-      const activeControllerPid = this.getTmuxOptionValue(sessionName, COMUX_CONTROLLER_PID_OPTION);
+      const activeControllerPid = this.getTmuxOptionValue(sessionName, PSYCHE_CONTROLLER_PID_OPTION);
       if (activeControllerPid !== String(process.pid)) {
         return;
       }
 
-      spawnSync('tmux', ['set-option', '-u', '-t', sessionName, COMUX_CONTROLLER_PID_OPTION], { stdio: 'pipe' });
-      spawnSync('tmux', ['set-option', '-u', '-t', sessionName, COMUX_CONTROL_PANE_OPTION], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-u', '-t', sessionName, PSYCHE_CONTROLLER_PID_OPTION], { stdio: 'pipe' });
+      spawnSync('tmux', ['set-option', '-u', '-t', sessionName, PSYCHE_CONTROL_PANE_OPTION], { stdio: 'pipe' });
     } catch {
       // Metadata cleanup is best-effort only.
     }
@@ -946,7 +946,7 @@ class Comux {
       for (const paneId of paneIds) {
         spawnSync(
           'tmux',
-          ['set-option', '-u', '-p', '-t', paneId, COMUX_REMOTE_PANE_MODE_OPTION],
+          ['set-option', '-u', '-p', '-t', paneId, PSYCHE_REMOTE_PANE_MODE_OPTION],
           { stdio: 'pipe' }
         );
       }
@@ -959,7 +959,7 @@ class Comux {
     sessionName: string = this.getCurrentTmuxSessionName() || this.sessionName
   ) {
     try {
-      const activeControllerPid = this.getTmuxOptionValue(sessionName, COMUX_CONTROLLER_PID_OPTION);
+      const activeControllerPid = this.getTmuxOptionValue(sessionName, PSYCHE_CONTROLLER_PID_OPTION);
       if (activeControllerPid !== String(process.pid)) {
         return;
       }
@@ -979,7 +979,7 @@ class Comux {
           .filter(Boolean)
           .some((name) =>
             name !== sessionName
-            && this.getTmuxOptionValue(name, COMUX_CONTROLLER_PID_OPTION) !== null
+            && this.getTmuxOptionValue(name, PSYCHE_CONTROLLER_PID_OPTION) !== null
           );
         if (otherControllerExists) {
           return;
@@ -1048,7 +1048,7 @@ class Comux {
           if (seenRoots.has(candidateRoot)) continue;
           seenRoots.add(candidateRoot);
 
-          const configPath = path.join(candidateRoot, '.comux', 'comux.config.json');
+          const configPath = path.join(candidateRoot, '.psyche', 'psyche.config.json');
           if (!fsSync.existsSync(configPath)) {
             continue;
           }
@@ -1073,16 +1073,16 @@ class Comux {
   }
 
   private getExistingSessionContext(sessionName: string): ExistingSessionContext | null {
-    const optionProjectRoot = this.getTmuxOptionValue(sessionName, '@comux_project_root');
-    const optionProjectName = this.getTmuxOptionValue(sessionName, '@comux_project_name');
-    const optionConfigPath = this.getTmuxOptionValue(sessionName, '@comux_config_path');
+    const optionProjectRoot = this.getTmuxOptionValue(sessionName, '@psyche_project_root');
+    const optionProjectName = this.getTmuxOptionValue(sessionName, '@psyche_project_name');
+    const optionConfigPath = this.getTmuxOptionValue(sessionName, '@psyche_config_path');
 
     const sessionProjectRoot =
       optionProjectRoot
       || (optionConfigPath ? path.dirname(path.dirname(optionConfigPath)) : undefined);
     const sessionConfigPath =
       optionConfigPath
-      || (sessionProjectRoot ? path.join(sessionProjectRoot, '.comux', 'comux.config.json') : undefined);
+      || (sessionProjectRoot ? path.join(sessionProjectRoot, '.psyche', 'psyche.config.json') : undefined);
 
     if (
       sessionProjectRoot &&
@@ -1104,7 +1104,7 @@ class Comux {
     const context = this.getExistingSessionContext(sessionName);
     if (!context) {
       console.log(chalk.yellow(
-        `Unable to locate config for session '${sessionName}'. Run comux inside that project once, then try again.`
+        `Unable to locate config for session '${sessionName}'. Run psyche inside that project once, then try again.`
       ));
       return false;
     }
@@ -1115,10 +1115,10 @@ class Comux {
 
     try {
       const configRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const config: ComuxConfig = JSON.parse(configRaw);
+      const config: PsycheConfig = JSON.parse(configRaw);
       const existingPanes = Array.isArray(config.panes) ? config.panes : [];
       const latestConfigRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const latestConfig: ComuxConfig = JSON.parse(latestConfigRaw);
+      const latestConfig: PsycheConfig = JSON.parse(latestConfigRaw);
       const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
       const normalizedProjects = normalizeSidebarProjects(
         latestConfig.sidebarProjects,
@@ -1222,14 +1222,14 @@ class Comux {
     }
   }
 
-  private async ensureComuxDirectory() {
-    const comuxDir = path.join(this.projectRoot, '.comux');
-    const worktreesDir = path.join(comuxDir, 'worktrees');
-    const promptsDir = path.join(comuxDir, 'prompts');
+  private async ensurePsycheDirectory() {
+    const psycheDir = path.join(this.projectRoot, '.psyche');
+    const worktreesDir = path.join(psycheDir, 'worktrees');
+    const promptsDir = path.join(psycheDir, 'prompts');
 
-    // Create .comux directory if it doesn't exist
-    if (!await this.fileExists(comuxDir)) {
-      await fs.mkdir(comuxDir, { recursive: true });
+    // Create .psyche directory if it doesn't exist
+    if (!await this.fileExists(psycheDir)) {
+      await fs.mkdir(psycheDir, { recursive: true });
     }
 
     // Create worktrees directory if it doesn't exist
@@ -1242,7 +1242,7 @@ class Comux {
       await fs.mkdir(promptsDir, { recursive: true });
     }
 
-    const { addedEntries } = ensureComuxRuntimeIgnored(this.projectRoot);
+    const { addedEntries } = ensurePsycheRuntimeIgnored(this.projectRoot);
     if (addedEntries.length > 0) {
       LogService.getInstance().debug(
         `Added ${addedEntries.join(', ')} to .gitignore`,
@@ -1288,10 +1288,10 @@ class Comux {
   private applySessionPaneBorderOptions(sessionName: string, stdio: 'pipe' | 'inherit' = 'pipe') {
     const sessionOptions = [
       `set-option -t ${sessionName} pane-border-status top`,
-      `set-option -t ${sessionName} pane-border-format " #{?@comux_attention,#[bold]![ready] #[default],}${TMUX_PANE_TITLE_PREFIX_FORMAT}${TMUX_PANE_TITLE_LABEL_FORMAT} "`,
+      `set-option -t ${sessionName} pane-border-format " #{?@psyche_attention,#[bold]![ready] #[default],}${TMUX_PANE_TITLE_PREFIX_FORMAT}${TMUX_PANE_TITLE_LABEL_FORMAT} "`,
       // Session-scoped mouse on so the Ink sidebar's click/dbl-click handlers
       // receive mouse events. Session-scoped (-t) means we don't touch the
-      // user's global tmux preferences. ensureMouseMode() in ComuxApp also
+      // user's global tmux preferences. ensureMouseMode() in PsycheApp also
       // tries to set this on mount, but that races with session creation —
       // applying it here guarantees it's on before the control pane spawns.
       `set-option -t ${sessionName} mouse on`,
@@ -1303,7 +1303,7 @@ class Comux {
 
   private setupResizeHook(sessionName: string = this.sessionName) {
     try {
-      // Set up session-specific hook that sends SIGUSR1 to comux process on resize
+      // Set up session-specific hook that sends SIGUSR1 to psyche process on resize
       // This works inside tmux where normal SIGWINCH may not propagate
       const pid = process.pid;
       execSync(`tmux set-hook -t '${sessionName}' client-resized 'run-shell "kill -USR1 ${pid} 2>/dev/null || true"'`, { stdio: 'pipe' });
@@ -1315,13 +1315,13 @@ class Comux {
 
   private setupPaneSplitHook(sessionName: string = this.sessionName) {
     try {
-      // Set up hooks that send SIGUSR2 to comux process for pane events
+      // Set up hooks that send SIGUSR2 to psyche process for pane events
       // This allows immediate detection of pane changes
       const pid = process.pid;
       const paneExitedHookCommand = buildPaneExitedHookCommandForSession(pid, sessionName);
 
       // Detect manually created panes via Ctrl+b %
-      execSync(`tmux set-hook -t '${sessionName}' after-split-window 'run-shell "kill -USR2 ${pid} 2>/dev/null || true # comux-hook"'`, { stdio: 'pipe' });
+      execSync(`tmux set-hook -t '${sessionName}' after-split-window 'run-shell "kill -USR2 ${pid} 2>/dev/null || true # psyche-hook"'`, { stdio: 'pipe' });
 
       // Detect pane closures via Ctrl+b x or process exit.
       // If the control pane is closed, this also recreates a replacement pane.
@@ -1428,7 +1428,7 @@ class Comux {
       // Wait a moment for clearing to settle, then show goodbye message
       setTimeout(() => {
         process.stdout.write('\x1b[2J\x1b[H');
-        process.stdout.write('\n\n  comux session ended.\n\n');
+        process.stdout.write('\n\n  psyche session ended.\n\n');
         process.exit(0);
       }, 100);
     };
@@ -1448,7 +1448,7 @@ class Comux {
       LogService.getInstance().debug('Pane split detected via SIGUSR2, triggering immediate detection', 'shellDetection');
       // Emit a custom event to trigger immediate shell pane detection
       process.emit('pane-split-detected' as any);
-      process.emit('comux-external-command-signal' as any);
+      process.emit('psyche-external-command-signal' as any);
     });
 
     // Handle uncaught exceptions and unhandled rejections
@@ -1480,7 +1480,7 @@ class Comux {
   }
 
   if (process.argv[2] === 'mcp') {
-    // stdio MCP server — exposes comux's pane/ritual/worktree surface to
+    // stdio MCP server — exposes psyche's pane/ritual/worktree surface to
     // MCP-capable clients (coven-code, Claude Code, OpenCode, etc.).
     // Lives in src/mcp/server.ts; reuses src/daemon primitives for state.
     const { runMcpServer } = await import('./mcp/server.js');
@@ -1502,7 +1502,7 @@ class Comux {
 
   // Only proceed if system requirements are met
   if (validationResult.canRun) {
-    const comux = new Comux();
-    comux.init().catch(() => process.exit(1));
+    const psyche = new Psyche();
+    psyche.init().catch(() => process.exit(1));
   }
 })();

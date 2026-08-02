@@ -45,14 +45,14 @@ describe("BridgeDaemon", () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
       serverName: "test",
-      projectName: "comux",
+      projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => [{
-        id: "%1", displayName: "comux", kind: "control",
-        projectId: "p1", projectName: "comux",
+        id: "%1", displayName: "psyche", kind: "control",
+        projectId: "p1", projectName: "psyche",
         worktreePath: null, agent: null, status: "unknown",
       }],
-      projectProvider: () => [{ id: "p1", displayName: "comux", attentionCount: 0 }],
+      projectProvider: () => [{ id: "p1", displayName: "psyche", attentionCount: 0 }],
       ...noopRituals,
       tokenStore: new FakeTokenStore() as any,
     });
@@ -96,14 +96,14 @@ describe("BridgeDaemon", () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
       serverName: "test",
-      projectName: "comux",
+      projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => [{
-        id: "%1", displayName: "comux", kind: "control",
-        projectId: "p1", projectName: "comux",
+        id: "%1", displayName: "psyche", kind: "control",
+        projectId: "p1", projectName: "psyche",
         worktreePath: null, agent: null, status: "unknown",
       }],
-      projectProvider: () => [{ id: "p1", displayName: "comux", attentionCount: 0 }],
+      projectProvider: () => [{ id: "p1", displayName: "psyche", attentionCount: 0 }],
       ...noopRituals,
       tokenStore,
     });
@@ -156,7 +156,7 @@ describe("BridgeDaemon", () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
       serverName: "test",
-      projectName: "comux",
+      projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => [],
       projectProvider: () => [],
@@ -209,21 +209,21 @@ describe("BridgeDaemon", () => {
 
     let panes: PaneSnapshot[] = [{
       id: "%1",
-      displayName: "comux",
+      displayName: "psyche",
       kind: "control",
       projectId: "p1",
-      projectName: "comux",
+      projectName: "psyche",
       worktreePath: null,
       agent: null,
       status: "unknown",
     }];
-    let projects: Project[] = [{ id: "p1", displayName: "comux", attentionCount: 0 }];
+    let projects: Project[] = [{ id: "p1", displayName: "psyche", attentionCount: 0 }];
     const launchCalls: Array<{ projectId: string; ritualId: string; params: Record<string, string> }> = [];
 
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
       serverName: "test",
-      projectName: "comux",
+      projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => panes,
       projectProvider: () => projects,
@@ -235,12 +235,12 @@ describe("BridgeDaemon", () => {
           displayName: "Ritual pane",
           kind: "worktree",
           projectId,
-          projectName: "comux",
-          worktreePath: "/tmp/comux-worktree",
+          projectName: "psyche",
+          worktreePath: "/tmp/psyche-worktree",
           agent: "codex",
           status: "working",
         }];
-        projects = [{ id: "p1", displayName: "comux", attentionCount: 1 }];
+        projects = [{ id: "p1", displayName: "psyche", attentionCount: 1 }];
       },
       tokenStore,
     });
@@ -293,7 +293,7 @@ describe("BridgeDaemon", () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
       serverName: "test",
-      projectName: "comux",
+      projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => {
         throw new Error("pane provider failed");
@@ -383,7 +383,7 @@ describe("BridgeDaemon", () => {
     }];
 
     const daemon = new BridgeDaemon({
-      serverId: "test", serverName: "test", projectName: "comux",
+      serverId: "test", serverName: "test", projectName: "psyche",
       sessionName: "test-session",
       paneProvider: () => [],
       projectProvider: () => [],

@@ -1,5 +1,5 @@
 /**
- * comux daemon WS protocol (v0).
+ * psyche daemon WS protocol (v0).
  *
  * Clients send JSON control frames; binary frames carry PTY IO.
  * A single WS connection can multiplex multiple attached panes via
@@ -90,7 +90,7 @@ export interface PaneStatusResult {
   status: string;
   pane?: PaneSummary;
   metadata?: {
-    comuxId?: string;
+    psycheId?: string;
     title?: string;
     agent?: string;
     branch?: string;

@@ -1,4 +1,4 @@
-import type { ComuxPane } from '../../types.js';
+import type { PsychePane } from '../../types.js';
 import type { ActionContext, ActionResult } from '../types.js';
 import { handleCommitWithOptions } from '../merge/commitMessageHandler.js';
 import { getPaneBranchName } from '../../utils/git.js';
@@ -41,7 +41,7 @@ function buildMissingPullRequestTargetMessage(paneName: string): string {
 }
 
 async function handlePullRequestUncommitted(
-  pane: ComuxPane,
+  pane: PsychePane,
   mergeTarget: MergeTargetResolution,
   retryCreatePullRequest: () => Promise<ActionResult>
 ): Promise<ActionResult> {
@@ -153,7 +153,7 @@ function buildFallbackPullRequestConfirmation(
 }
 
 export async function createPullRequest(
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext
 ): Promise<ActionResult> {
   const paneName = getPaneDisplayName(pane);

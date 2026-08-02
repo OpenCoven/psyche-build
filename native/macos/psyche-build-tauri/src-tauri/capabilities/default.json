@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/macOS-schema.json",
   "identifier": "default",
-  "description": "Capability for the main comux Tauri window",
+  "description": "Capability for the main psyche Tauri window",
   "windows": ["main"],
   "permissions": [
     "core:default",

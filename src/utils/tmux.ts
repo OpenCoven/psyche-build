@@ -94,7 +94,7 @@ export const getContentPaneIds = (controlPaneId: string): string[] => {
     // Filter out spacer pane
     try {
       const title = tmuxService.getPaneTitleSync(id);
-      return title !== 'comux-spacer';
+      return title !== 'psyche-spacer';
     } catch {
       return true; // Include pane if we can't get title
     }
@@ -112,7 +112,7 @@ export const ensurePaneBorderStatusForCurrentSession = (): void => {
 
 /**
  * Creates initial sidebar layout by splitting from control pane
- * @param controlPaneId The pane ID running comux TUI (left sidebar)
+ * @param controlPaneId The pane ID running psyche TUI (left sidebar)
  * @param cwd Optional working directory for the new content pane
  * @returns The newly created content area pane ID
  */
@@ -184,7 +184,7 @@ export const generateSidebarGridLayout = (
     try {
       const lastPaneId = contentPanes[contentPanes.length - 1];
       const title = tmuxService.getPaneTitleSync(lastPaneId);
-      return title === 'comux-spacer';
+      return title === 'psyche-spacer';
     } catch {
       return false;
     }

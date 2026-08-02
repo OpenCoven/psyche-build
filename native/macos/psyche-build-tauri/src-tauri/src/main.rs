@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    comux_tauri_lib::run()
+    psyche_build_tauri_lib::run()
 }

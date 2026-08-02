@@ -21,7 +21,7 @@ vi.mock('child_process', () => ({
   }),
 }));
 
-describe('comux native helper progressive enhancement', () => {
+describe('psyche native helper progressive enhancement', () => {
   beforeEach(() => {
     vi.resetModules();
     setPlatform('linux');
@@ -52,8 +52,8 @@ describe('comux native helper progressive enhancement', () => {
   });
 
   it('skips native notification delivery entirely on non-macOS platforms', async () => {
-    const { ComuxFocusService } = await import('../src/services/ComuxFocusService.js');
-    const service = new ComuxFocusService({ projectName: 'comux' });
+    const { PsycheFocusService } = await import('../src/services/PsycheFocusService.js');
+    const service = new PsycheFocusService({ projectName: 'psyche' });
 
     await expect(service.start()).resolves.toBeUndefined();
     await expect(

@@ -15,24 +15,24 @@ import {
   getTmuxConfigCandidatePaths,
 } from './tmuxConfigOnboarding.js';
 import {
-  hasComuxManagedTmuxConfigBlock,
-  writeComuxManagedTmuxConfig,
+  hasPsycheManagedTmuxConfigBlock,
+  writePsycheManagedTmuxConfig,
 } from './tmuxManagedConfig.js';
 import { buildTmuxSessionThemeOptions } from './tmuxThemeOptions.js';
 import {
   buildRemotePaneActionBindingCommandArgs,
   buildRemotePaneActionCleanupCommandArgs,
-  COMUX_CONTROL_PANE_OPTION,
-  COMUX_CONTROLLER_PID_OPTION,
+  PSYCHE_CONTROL_PANE_OPTION,
+  PSYCHE_CONTROLLER_PID_OPTION,
 } from './remotePaneActions.js';
 import {
   TMUX_PANE_TITLE_LABEL_FORMAT,
   TMUX_PANE_TITLE_PREFIX_FORMAT,
 } from './paneTitlePrefix.js';
 import {
-  syncComuxThemeFromSettings,
+  syncPsycheThemeFromSettings,
 } from '../theme/colors.js';
-import type { ComuxThemeName } from '../types.js';
+import type { PsycheThemeName } from '../types.js';
 
 export type TmuxDoctorSeverity = 'ok' | 'warning' | 'error';
 
@@ -82,7 +82,7 @@ export interface TmuxDoctorRuntime {
   env?: NodeJS.ProcessEnv;
   run?: (command: string, args: string[]) => CommandResult;
   projectRoot?: string;
-  themeName?: ComuxThemeName;
+  themeName?: PsycheThemeName;
   findAgentCommand?: (definition: AgentRegistryEntry) => string | null;
 }
 
@@ -90,7 +90,7 @@ interface ResolvedTmuxDoctorRuntime {
   homeDir: string;
   env: NodeJS.ProcessEnv;
   run: (command: string, args: string[]) => CommandResult;
-  themeName: ComuxThemeName;
+  themeName: PsycheThemeName;
   findAgentCommand?: (definition: AgentRegistryEntry) => string | null;
 }
 
@@ -100,11 +100,11 @@ export interface RunTmuxDoctorOptions {
 }
 
 function buildExpectedSessionOptions(
-  themeName: ComuxThemeName
+  themeName: PsycheThemeName
 ): Array<readonly [option: string, value: string]> {
   return [
     ['pane-border-status', 'top'],
-    ['pane-border-format', ` #{?@comux_attention,#[bold]![ready] #[default],}${TMUX_PANE_TITLE_PREFIX_FORMAT}${TMUX_PANE_TITLE_LABEL_FORMAT} `],
+    ['pane-border-format', ` #{?@psyche_attention,#[bold]![ready] #[default],}${TMUX_PANE_TITLE_PREFIX_FORMAT}${TMUX_PANE_TITLE_LABEL_FORMAT} `],
     ...buildTmuxSessionThemeOptions(themeName),
   ];
 }
@@ -118,8 +118,8 @@ function defaultRun(command: string, args: string[]): CommandResult {
   };
 }
 
-function resolveDoctorTheme(runtime?: TmuxDoctorRuntime): ComuxThemeName {
-  return runtime?.themeName || syncComuxThemeFromSettings(runtime?.projectRoot || process.cwd());
+function resolveDoctorTheme(runtime?: TmuxDoctorRuntime): PsycheThemeName {
+  return runtime?.themeName || syncPsycheThemeFromSettings(runtime?.projectRoot || process.cwd());
 }
 
 function getRuntime(options?: RunTmuxDoctorOptions): ResolvedTmuxDoctorRuntime {
@@ -309,7 +309,7 @@ function buildAgentCliCheck(runtime: ResolvedTmuxDoctorRuntime): TmuxDoctorCheck
     id: 'agent-cli-guidance',
     label: 'agent CLIs',
     severity: 'warning',
-    message: `No supported agent CLI detected. comux can still open plain terminal panes; install one of the default agents (${defaultEnabled}) or enable another supported CLI in settings.`,
+    message: `No supported agent CLI detected. psyche can still open plain terminal panes; install one of the default agents (${defaultEnabled}) or enable another supported CLI in settings.`,
     fix: `Supported agent CLIs: ${supported}`,
   };
 }
@@ -319,7 +319,7 @@ function buildCovenGuidanceCheck(): TmuxDoctorCheck {
     id: 'coven-guidance',
     label: 'Coven integration',
     severity: 'ok',
-    message: 'Coven is optional. Without it, comux still manages tmux panes, git worktrees, agents, merge, and PR flows; with a local Coven daemon, comux can also list, open, and launch scoped Coven harness sessions.',
+    message: 'Coven is optional. Without it, psyche still manages tmux panes, git worktrees, agents, merge, and PR flows; with a local Coven daemon, psyche can also list, open, and launch scoped Coven harness sessions.',
   };
 }
 
@@ -420,7 +420,7 @@ export async function runTmuxDoctor(
   checks.push(buildCovenGuidanceCheck());
 
   const configContents = await readConfigContents(runtime.homeDir);
-  const managedConfig = configContents.find((entry) => hasComuxManagedTmuxConfigBlock(entry.content));
+  const managedConfig = configContents.find((entry) => hasPsycheManagedTmuxConfigBlock(entry.content));
   const existingConfig = configContents.find((entry) => entry.content.trim().length > 0);
 
   if (managedConfig) {
@@ -429,7 +429,7 @@ export async function runTmuxDoctor(
       id: 'tmux-managed-config',
       label: 'tmux config',
       severity: 'ok',
-      message: `comux managed config block found in ${managedConfig.path}`,
+      message: `psyche managed config block found in ${managedConfig.path}`,
     });
   } else {
     checks.push({
@@ -437,13 +437,13 @@ export async function runTmuxDoctor(
       label: 'tmux config',
       severity: 'warning',
       message: existingConfig
-        ? `Recommended comux tmux config block is not installed in ${existingConfig.path}`
-        : 'Recommended comux tmux config block is not installed yet',
-      fix: 'Run comux doctor --fix to add the recommended comux tmux config block',
+        ? `Recommended psyche tmux config block is not installed in ${existingConfig.path}`
+        : 'Recommended psyche tmux config block is not installed yet',
+      fix: 'Run psyche doctor --fix to add the recommended psyche tmux config block',
     });
 
     if (options.fix) {
-      const writeResult = await writeComuxManagedTmuxConfig(runtime.homeDir, 'dark');
+      const writeResult = await writePsycheManagedTmuxConfig(runtime.homeDir, 'dark');
       configPath = writeResult.configPath;
       backupPath = writeResult.backupPath;
       fixed = writeResult.changed || fixed;
@@ -451,7 +451,7 @@ export async function runTmuxDoctor(
       checks[checks.length - 1] = {
         ...checks[checks.length - 1],
         severity: 'ok',
-        message: `comux managed config block ${writeResult.action} at ${writeResult.configPath}`,
+        message: `psyche managed config block ${writeResult.action} at ${writeResult.configPath}`,
         fixed: writeResult.changed,
       };
     }
@@ -482,7 +482,7 @@ export async function runTmuxDoctor(
       'tmux mouse',
       mouse,
       'on',
-      'Run comux doctor --fix to enable mouse mode'
+      'Run psyche doctor --fix to enable mouse mode'
     ));
 
     const setClipboard = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, 'set-clipboard']);
@@ -491,7 +491,7 @@ export async function runTmuxDoctor(
       'tmux clipboard',
       setClipboard,
       'on',
-      'Run comux doctor --fix to enable tmux clipboard passthrough'
+      'Run psyche doctor --fix to enable tmux clipboard passthrough'
     ));
 
     const allowPassthrough = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, 'allow-passthrough']);
@@ -500,7 +500,7 @@ export async function runTmuxDoctor(
       'tmux passthrough',
       allowPassthrough,
       'all',
-      'Run comux doctor --fix to enable tmux passthrough'
+      'Run psyche doctor --fix to enable tmux passthrough'
     ));
 
     const extendedKeys = readTmuxOption(runtime, ['show-options', '-gv', 'extended-keys']);
@@ -509,7 +509,7 @@ export async function runTmuxDoctor(
       'tmux extended keys',
       extendedKeys,
       'on',
-      'Run comux doctor --fix to enable extended keys'
+      'Run psyche doctor --fix to enable extended keys'
     ));
 
     for (const [option, expected] of expectedSessionOptions) {
@@ -519,20 +519,20 @@ export async function runTmuxDoctor(
         option,
         actual,
         expected,
-        'Run comux doctor --fix to apply comux session styling'
+        'Run psyche doctor --fix to apply psyche session styling'
       ));
     }
 
-    if (sessionName.startsWith('comux-')) {
-      const controllerPid = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, COMUX_CONTROLLER_PID_OPTION]);
-      const controlPane = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, COMUX_CONTROL_PANE_OPTION]);
+    if (sessionName.startsWith('psyche-')) {
+      const controllerPid = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, PSYCHE_CONTROLLER_PID_OPTION]);
+      const controlPane = readTmuxOption(runtime, ['show-options', '-v', '-t', sessionName, PSYCHE_CONTROL_PANE_OPTION]);
       checks.push({
-        id: 'comux-session-options',
-        label: 'comux session metadata',
+        id: 'psyche-session-options',
+        label: 'psyche session metadata',
         severity: controllerPid && controlPane ? 'ok' : 'warning',
         message: controllerPid && controlPane
-          ? 'comux controller metadata is present'
-          : 'comux controller metadata is missing; remote pane shortcuts may not work until comux is running',
+          ? 'psyche controller metadata is present'
+          : 'psyche controller metadata is missing; remote pane shortcuts may not work until psyche is running',
       });
     }
 
@@ -575,7 +575,7 @@ export function getTmuxDoctorExitCode(result: TmuxDoctorResult): number {
 
 export function formatTmuxDoctorText(result: TmuxDoctorResult): string {
   const lines = [
-    chalk.hex('#a78bfa').bold('comux doctor'),
+    chalk.hex('#a78bfa').bold('psyche doctor'),
     '',
     ...result.checks.map((check) => {
       const marker = check.severity === 'ok'
@@ -593,10 +593,10 @@ export function formatTmuxDoctorText(result: TmuxDoctorResult): string {
   }
 
   if (!result.healthy && result.usable && !result.fixed) {
-    lines.push('', chalk.yellow('comux can run; recommended setup warnings remain.'));
-    lines.push(chalk.yellow('Run comux doctor --fix to apply safe repairs.'));
+    lines.push('', chalk.yellow('psyche can run; recommended setup warnings remain.'));
+    lines.push(chalk.yellow('Run psyche doctor --fix to apply safe repairs.'));
   } else if (!result.healthy && result.usable && result.fixed) {
-    lines.push('', chalk.yellow('comux can run. Some warnings remain because they require comux to be running in this session.'));
+    lines.push('', chalk.yellow('psyche can run. Some warnings remain because they require psyche to be running in this session.'));
   }
 
   return lines.join('\n');

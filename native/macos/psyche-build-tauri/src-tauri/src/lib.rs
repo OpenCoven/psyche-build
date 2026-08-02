@@ -12,7 +12,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
 };
 
-const BROWSER_LABEL_PREFIX: &str = "comux-browser-";
+const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
 fn safe_browser_label(label: Option<String>) -> String {
     let raw = label.unwrap_or_else(|| "default".to_string());
@@ -122,14 +122,14 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     }
     // Build a sane child environment. When the .app is launched from
     // Finder/Dock, launchd hands us a stripped PATH that lacks
-    // /opt/homebrew/bin, so comux can't find tmux/git/gh/etc. Augment PATH
+    // /opt/homebrew/bin, so psyche can't find tmux/git/gh/etc. Augment PATH
     // with the conventional locations, and provide reasonable defaults for
     // TERM / COLORTERM / LANG so xterm.js renders unicode + truecolor.
     cmd.env("PATH", augmented_path());
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("COMUX_TAURI", "1");
-    cmd.env("COMUX_NATIVE_CONTAINER", "1");
+    cmd.env("PSYCHE_TAURI", "1");
+    cmd.env("PSYCHE_NATIVE_CONTAINER", "1");
     if std::env::var("LANG").is_err() {
         cmd.env("LANG", "en_US.UTF-8");
     }
@@ -306,8 +306,8 @@ fn ensure_browser(
                         }};
                         var title = document.title || location.hostname || location.href;
                         emit("browser:title", {{ label: browserLabel, title: title, url: location.href }});
-                        if (!window.__COMUX_BROWSER_SHORTCUTS_INSTALLED__) {{
-                          window.__COMUX_BROWSER_SHORTCUTS_INSTALLED__ = true;
+                        if (!window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__) {{
+                          window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
                           window.addEventListener("keydown", function(event) {{
                             try {{
                               if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
@@ -443,14 +443,14 @@ fn browser_eval(app: AppHandle, label: Option<String>, script: String) -> Result
 
 // ----------------------------------------------------------------------------
 // Environment introspection so the JS layer can locate `node` + the bundled
-// comux entrypoint when the app is invoked from a worktree (dev mode).
+// psyche entrypoint when the app is invoked from a worktree (dev mode).
 // ----------------------------------------------------------------------------
 
 #[derive(Serialize, Default)]
 pub struct AppEnvironment {
     pub home: Option<String>,
     pub repo_root: Option<String>,
-    pub comux_entry: Option<String>,
+    pub psyche_entry: Option<String>,
     pub node_path: Option<String>,
     pub default_shell: String,
 }
@@ -467,8 +467,8 @@ fn app_environment() -> AppEnvironment {
 
     // Heuristic: if the binary is being run from a built .app inside a
     // worktree, the worktree root is a couple of levels up from the .app.
-    let repo_root = locate_comux_repo();
-    let comux_entry = repo_root.as_ref().and_then(|root| {
+    let repo_root = locate_psyche_repo();
+    let psyche_entry = repo_root.as_ref().and_then(|root| {
         let candidate = format!("{}/dist/index.js", root);
         if std::path::Path::new(&candidate).exists() {
             Some(candidate)
@@ -480,7 +480,7 @@ fn app_environment() -> AppEnvironment {
     AppEnvironment {
         home,
         repo_root,
-        comux_entry,
+        psyche_entry,
         node_path,
         default_shell,
     }
@@ -860,7 +860,7 @@ fn which_on_path(binary: &str) -> Option<String> {
     None
 }
 
-fn locate_comux_repo() -> Option<String> {
+fn locate_psyche_repo() -> Option<String> {
     // Walk up from the current executable looking for a directory that
     // contains both `dist/index.js` and `package.json`.
     let exe = std::env::current_exe().ok()?;

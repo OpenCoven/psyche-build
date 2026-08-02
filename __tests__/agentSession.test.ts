@@ -9,7 +9,7 @@ import {
 } from '../src/utils/agentSession.js';
 
 async function tempDir(): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), 'comux-agent-session-'));
+  return mkdtemp(path.join(os.tmpdir(), 'psyche-agent-session-'));
 }
 
 describe('agent session persistence', () => {
@@ -41,7 +41,7 @@ describe('agent session persistence', () => {
 
       const reference = await buildCodexAgentSessionReference({
         transcriptPath,
-        cwd: '/repo/.comux/worktrees/example',
+        cwd: '/repo/.psyche/worktrees/example',
         turnId: 'turn-1',
         source: 'codex-stop-hook',
         timestamp: Date.parse('2026-04-27T06:37:00.000Z'),
@@ -51,7 +51,7 @@ describe('agent session persistence', () => {
         agent: 'codex',
         id: 'codex-session-456',
         transcriptPath,
-        cwd: '/repo/.comux/worktrees/example',
+        cwd: '/repo/.psyche/worktrees/example',
         lastTurnId: 'turn-1',
         source: 'codex-stop-hook',
         updatedAt: '2026-04-27T06:37:00.000Z',
@@ -61,17 +61,17 @@ describe('agent session persistence', () => {
     }
   });
 
-  it('persists the Codex agent session reference inside the comux config pane', async () => {
+  it('persists the Codex agent session reference inside the psyche config pane', async () => {
     const dir = await tempDir();
     try {
-      const configPath = path.join(dir, 'comux.config.json');
+      const configPath = path.join(dir, 'psyche.config.json');
       await writeFile(
         configPath,
         JSON.stringify({
           projectName: 'repo',
           projectRoot: dir,
           panes: [
-            { id: 'comux-1', slug: 'feature-a', prompt: 'hi', paneId: '%1', agent: 'codex' },
+            { id: 'psyche-1', slug: 'feature-a', prompt: 'hi', paneId: '%1', agent: 'codex' },
           ],
           settings: {},
           lastUpdated: '2026-04-27T00:00:00.000Z',
@@ -79,7 +79,7 @@ describe('agent session persistence', () => {
         'utf8'
       );
 
-      await persistPaneAgentSessionReference(configPath, 'comux-1', {
+      await persistPaneAgentSessionReference(configPath, 'psyche-1', {
         agent: 'codex',
         id: 'codex-session-789',
         transcriptPath: '/tmp/codex-session.jsonl',

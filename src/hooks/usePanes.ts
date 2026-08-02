@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import fs from 'fs/promises';
 import path from 'path';
 import PQueue from 'p-queue';
-import type { ComuxConfig, ComuxPane, SidebarProject } from '../types.js';
+import type { PsycheConfig, PsychePane, SidebarProject } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
 import {
@@ -53,8 +53,8 @@ export default function usePanes(
   controlPaneId?: string,
   useHooks?: boolean // undefined = not yet decided, true = use hooks, false = use polling
 ) {
-  const [panes, setPanes] = useState<ComuxPane[]>([]);
-  const panesRef = useRef<ComuxPane[]>([]);
+  const [panes, setPanes] = useState<PsychePane[]>([]);
+  const panesRef = useRef<PsychePane[]>([]);
   const [sidebarProjects, setSidebarProjects] = useState<SidebarProject[]>([]);
   const sidebarProjectsRef = useRef<SidebarProject[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -210,7 +210,7 @@ export default function usePanes(
     }
   };
 
-  const savePanes = async (newPanes: ComuxPane[]) => {
+  const savePanes = async (newPanes: PsychePane[]) => {
     const updatedPanes = await savePanesToFile(panesFile, newPanes, withWriteLock);
     panesRef.current = updatedPanes;
     setPanes(updatedPanes);
@@ -231,7 +231,7 @@ export default function usePanes(
   const saveSidebarProjects = async (newSidebarProjects: SidebarProject[]) => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
-      let config: ComuxConfig = {
+      let config: PsycheConfig = {
         projectName: path.basename(fallbackProjectRoot),
         projectRoot: fallbackProjectRoot,
         panes: panesRef.current,

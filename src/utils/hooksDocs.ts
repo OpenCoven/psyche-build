@@ -1,11 +1,11 @@
 /**
  * Embedded Hooks Documentation
  *
- * This file contains all documentation that gets written to .comux-hooks/
+ * This file contains all documentation that gets written to .psyche-hooks/
  * when the directory is initialized. The AGENTS_MD content is auto-generated
  * and imported from generated-agents-doc.ts when available.
  */
-const AGENTS_MD_FALLBACK = `# comux Hooks
+const AGENTS_MD_FALLBACK = `# psyche Hooks
 
 Full AGENTS.md hook documentation has not been generated in this checkout yet.
 
@@ -15,7 +15,7 @@ Run:
 pnpm run generate:hooks-docs
 \`\`\`
 
-Then restart comux.
+Then restart psyche.
 `;
 
 let AGENTS_MD: string;
@@ -36,11 +36,11 @@ try {
 export const HOOKS_DOCUMENTATION = AGENTS_MD;
 
 /**
- * README for the .comux-hooks/ directory
+ * README for the .psyche-hooks/ directory
  */
-export const HOOKS_README = `# comux Hooks
+export const HOOKS_README = `# psyche Hooks
 
-This directory contains hooks that run automatically at key lifecycle events in comux.
+This directory contains hooks that run automatically at key lifecycle events in psyche.
 
 ## Quick Start
 
@@ -60,8 +60,8 @@ This directory contains hooks that run automatically at key lifecycle events in 
 
 4. **Test it**:
    \`\`\`bash
-   export COMUX_ROOT="\$(pwd)"
-   export COMUX_WORKTREE_PATH="\$(pwd)"
+   export PSYCHE_ROOT="\$(pwd)"
+   export PSYCHE_WORKTREE_PATH="\$(pwd)"
    ./worktree_created
    \`\`\`
 
@@ -104,11 +104,11 @@ export const EXAMPLE_WORKTREE_CREATED = `#!/bin/bash
 
 set -e  # Exit on error
 
-echo "[Hook] Setting up worktree: $COMUX_SLUG"
+echo "[Hook] Setting up worktree: $PSYCHE_SLUG"
 
-cd "$COMUX_WORKTREE_PATH"
+cd "$PSYCHE_WORKTREE_PATH"
 
-# Install dependencies in background (don't block comux)
+# Install dependencies in background (don't block psyche)
 if [ -f "pnpm-lock.yaml" ]; then
   echo "[Hook] Installing dependencies with pnpm..."
   pnpm install --prefer-offline &
@@ -121,17 +121,17 @@ elif [ -f "yarn.lock" ]; then
 fi
 
 # Copy environment file if it exists
-if [ -f "$COMUX_ROOT/.env.local" ]; then
+if [ -f "$PSYCHE_ROOT/.env.local" ]; then
   echo "[Hook] Copying .env.local"
-  cp "$COMUX_ROOT/.env.local" "$COMUX_WORKTREE_PATH/.env.local"
+  cp "$PSYCHE_ROOT/.env.local" "$PSYCHE_WORKTREE_PATH/.env.local"
 fi
 
 # Keep existing git author identity.
 # Do not set git user.name/user.email in this hook.
 
 # Create a log entry
-echo "[\$(date)] Created worktree: $COMUX_SLUG | Agent: $COMUX_AGENT | Prompt: $COMUX_PROMPT" \\
-  >> "$COMUX_ROOT/.comux/worktree_history.log"
+echo "[\$(date)] Created worktree: $PSYCHE_SLUG | Agent: $PSYCHE_AGENT | Prompt: $PSYCHE_PROMPT" \\
+  >> "$PSYCHE_ROOT/.psyche/worktree_history.log"
 
 echo "[Hook] Worktree setup complete!"
 `;
@@ -143,14 +143,14 @@ export const EXAMPLE_RUN_DEV = `#!/bin/bash
 # Example: run_dev hook
 #
 # This hook starts a dev server and optionally creates a tunnel for sharing.
-# It reports the server URL back to comux via the HTTP API.
+# It reports the server URL back to psyche via the HTTP API.
 
 set -e
 
-echo "[Hook] Starting dev server for $COMUX_SLUG"
+echo "[Hook] Starting dev server for $PSYCHE_SLUG"
 
-cd "$COMUX_WORKTREE_PATH"
-API_URL="http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/dev"
+cd "$PSYCHE_WORKTREE_PATH"
+API_URL="http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/dev"
 
 # Update status: starting
 curl -s -X PUT "$API_URL" \\
@@ -159,7 +159,7 @@ curl -s -X PUT "$API_URL" \\
 
 # Start dev server in background
 # Adjust the command for your project (pnpm dev, npm run dev, vite, etc.)
-LOG_FILE="/tmp/comux-dev-$COMUX_PANE_ID.log"
+LOG_FILE="/tmp/psyche-dev-$PSYCHE_PANE_ID.log"
 pnpm dev > "$LOG_FILE" 2>&1 &
 DEV_PID=$!
 
@@ -193,7 +193,7 @@ echo "[Hook] Dev server running at $LOCAL_URL"
 # For now, just use local URL (uncomment tunnel code above to enable)
 FINAL_URL="$LOCAL_URL"
 
-# Report status back to comux
+# Report status back to psyche
 curl -s -X PUT "$API_URL" \\
   -H "Content-Type: application/json" \\
   -d "{\\"status\\": \\"running\\", \\"url\\": \\"$FINAL_URL\\"}" > /dev/null
@@ -209,15 +209,15 @@ echo "[Hook] Log file: $LOG_FILE"
 export const EXAMPLE_RUN_TEST = `#!/bin/bash
 # Example: run_test hook
 #
-# This hook runs tests and reports the status back to comux via the HTTP API.
-# Status updates appear in real-time in the comux UI.
+# This hook runs tests and reports the status back to psyche via the HTTP API.
+# Status updates appear in real-time in the psyche UI.
 
 set -e
 
-echo "[Hook] Running tests for $COMUX_SLUG"
+echo "[Hook] Running tests for $PSYCHE_SLUG"
 
-cd "$COMUX_WORKTREE_PATH"
-API_URL="http://localhost:$COMUX_SERVER_PORT/api/panes/$COMUX_PANE_ID/test"
+cd "$PSYCHE_WORKTREE_PATH"
+API_URL="http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test"
 
 # Update status: running
 curl -s -X PUT "$API_URL" \\
@@ -227,7 +227,7 @@ curl -s -X PUT "$API_URL" \\
 echo "[Hook] Running test suite..."
 
 # Capture test output
-OUTPUT_FILE="/tmp/comux-test-$COMUX_PANE_ID.txt"
+OUTPUT_FILE="/tmp/psyche-test-$PSYCHE_PANE_ID.txt"
 
 # Run tests (adjust command for your project)
 # Examples:
@@ -248,7 +248,7 @@ fi
 # Get output (truncate if too long)
 OUTPUT=\$(head -c 5000 "$OUTPUT_FILE")
 
-# Report results back to comux
+# Report results back to psyche
 curl -s -X PUT "$API_URL" \\
   -H "Content-Type: application/json" \\
   -d "\$(jq -n \\
@@ -259,7 +259,7 @@ curl -s -X PUT "$API_URL" \\
 # Cleanup
 rm -f "$OUTPUT_FILE"
 
-echo "[Hook] Test results reported to comux"
+echo "[Hook] Test results reported to psyche"
 
 # Exit with test status
 if [ "$STATUS" = "passed" ]; then
@@ -280,14 +280,14 @@ export const EXAMPLE_POST_MERGE = `#!/bin/bash
 
 set -e
 
-echo "[Hook] Post-merge processing for $COMUX_SLUG → $COMUX_TARGET_BRANCH"
+echo "[Hook] Post-merge processing for $PSYCHE_SLUG → $PSYCHE_TARGET_BRANCH"
 
-cd "$COMUX_ROOT"
+cd "$PSYCHE_ROOT"
 
 # Push to remote if merging to main/master
-if [ "$COMUX_TARGET_BRANCH" = "main" ] || [ "$COMUX_TARGET_BRANCH" = "master" ]; then
-  echo "[Hook] Pushing to origin/$COMUX_TARGET_BRANCH"
-  git push origin "$COMUX_TARGET_BRANCH"
+if [ "$PSYCHE_TARGET_BRANCH" = "main" ] || [ "$PSYCHE_TARGET_BRANCH" = "master" ]; then
+  echo "[Hook] Pushing to origin/$PSYCHE_TARGET_BRANCH"
+  git push origin "$PSYCHE_TARGET_BRANCH"
 
   # Optional: Trigger deployment
   # if [ -n "$VERCEL_TOKEN" ]; then
@@ -306,12 +306,12 @@ if [ "$COMUX_TARGET_BRANCH" = "main" ] || [ "$COMUX_TARGET_BRANCH" = "master" ];
 fi
 
 # Close related GitHub issue (if prompt contains #123 format)
-ISSUE_NUM=\$(echo "$COMUX_PROMPT" | grep -oP '#\\K\\d+' | head -1)
+ISSUE_NUM=\$(echo "$PSYCHE_PROMPT" | grep -oP '#\\K\\d+' | head -1)
 if [ -n "$ISSUE_NUM" ]; then
   echo "[Hook] Closing GitHub issue #$ISSUE_NUM"
   if command -v gh &> /dev/null; then
     gh issue close "$ISSUE_NUM" \\
-      -c "Resolved in branch $COMUX_SLUG, merged to $COMUX_TARGET_BRANCH" \\
+      -c "Resolved in branch $PSYCHE_SLUG, merged to $PSYCHE_TARGET_BRANCH" \\
       2>/dev/null || echo "[Hook] Warning: Failed to close issue (maybe already closed?)"
   else
     echo "[Hook] GitHub CLI (gh) not found, skipping issue close"
@@ -324,13 +324,13 @@ fi
 #   curl -s -X POST "$SLACK_WEBHOOK" \\
 #     -H "Content-Type: application/json" \\
 #     -d "{
-#       \\"text\\": \\"Merged: $COMUX_SLUG → $COMUX_TARGET_BRANCH\\",
+#       \\"text\\": \\"Merged: $PSYCHE_SLUG → $PSYCHE_TARGET_BRANCH\\",
 #       \\"blocks\\": [
 #         {
 #           \\"type\\": \\"section\\",
 #           \\"text\\": {
 #             \\"type\\": \\"mrkdwn\\",
-#             \\"text\\": \\"*Branch Merged* :rocket:\\n\\n*From:* \\\`$COMUX_SLUG\\\`\\n*To:* \\\`$COMUX_TARGET_BRANCH\\\`\\n*Task:* $COMUX_PROMPT\\"
+#             \\"text\\": \\"*Branch Merged* :rocket:\\n\\n*From:* \\\`$PSYCHE_SLUG\\\`\\n*To:* \\\`$PSYCHE_TARGET_BRANCH\\\`\\n*Task:* $PSYCHE_PROMPT\\"
 #           }
 #         }
 #       ]

@@ -4,7 +4,7 @@
  * Detects manually-created tmux panes and determines their shell type.
  */
 
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { resolveProjectRootFromPath } from './projectRoot.js';
@@ -87,9 +87,9 @@ export interface UntrackedPaneInfo {
 }
 
 /**
- * Gets all untracked tmux panes (panes not in comux config)
+ * Gets all untracked tmux panes (panes not in psyche config)
  * @param sessionName The tmux session name
- * @param trackedPaneIds Array of pane IDs already tracked by comux
+ * @param trackedPaneIds Array of pane IDs already tracked by psyche
  * @param controlPaneId Optional control pane ID to exclude
  * @param welcomePaneId Optional welcome pane ID to exclude
  * @returns Array of untracked pane information
@@ -118,11 +118,11 @@ export async function getUntrackedPanes(
 
       if (!paneId || !paneId.startsWith('%')) continue;
 
-      // CRITICAL: Skip internal comux panes by title
-      if (title === 'comux-spacer') {
+      // CRITICAL: Skip internal psyche panes by title
+      if (title === 'psyche-spacer') {
         continue;
       }
-      if (title && title.startsWith('comux v')) {
+      if (title && title.startsWith('psyche v')) {
         continue;
       }
       if (title === 'Welcome') {
@@ -137,8 +137,8 @@ export async function getUntrackedPanes(
         continue;
       }
 
-      // CRITICAL: Skip panes running comux itself (node process running comux)
-      if (command && (command === 'node' || command.includes('comux'))) {
+      // CRITICAL: Skip panes running psyche itself (node process running psyche)
+      if (command && (command === 'node' || command.includes('psyche'))) {
         continue;
       }
 
@@ -179,13 +179,13 @@ async function detectPaneProjectInfo(
 }
 
 /**
- * Creates a ComuxPane object for a shell pane
+ * Creates a PsychePane object for a shell pane
  * @param paneId The tmux pane ID
- * @param nextId The next available comux ID number
+ * @param nextId The next available psyche ID number
  * @param existingTitle Optional existing title (used for display but not for tracking)
- * @returns ComuxPane object for the shell pane
+ * @returns PsychePane object for the shell pane
  */
-export async function createShellPane(paneId: string, nextId: number, existingTitle?: string): Promise<ComuxPane> {
+export async function createShellPane(paneId: string, nextId: number, existingTitle?: string): Promise<PsychePane> {
   const tmuxService = TmuxService.getInstance();
   const shellType = await detectShellType(paneId);
   const paneProjectInfo = await detectPaneProjectInfo(paneId);
@@ -207,7 +207,7 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
   }
 
   return {
-    id: `comux-${nextId}`,
+    id: `psyche-${nextId}`,
     slug,
     prompt: '', // No prompt for manually created panes
     paneId,
@@ -219,17 +219,17 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
 }
 
 /**
- * Gets the next available comux ID number
+ * Gets the next available psyche ID number
  * @param existingPanes Array of existing panes
  * @returns Next available ID number
  */
-export function getNextComuxId(existingPanes: ComuxPane[]): number {
+export function getNextPsycheId(existingPanes: PsychePane[]): number {
   if (existingPanes.length === 0) return 1;
 
   // Extract numeric IDs from all panes
   const ids = existingPanes
     .map(p => {
-      const match = p.id.match(/^comux-(\d+)$/);
+      const match = p.id.match(/^psyche-(\d+)$/);
       return match ? parseInt(match[1], 10) : 0;
     })
     .filter(id => id > 0);

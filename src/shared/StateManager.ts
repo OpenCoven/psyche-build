@@ -1,11 +1,11 @@
 import { EventEmitter } from 'events';
-import type { ComuxPane, ProjectSettings, LogEntry } from '../types.js';
+import type { PsychePane, ProjectSettings, LogEntry } from '../types.js';
 import { ConfigWatcher } from '../services/ConfigWatcher.js';
 import { LogService } from '../services/LogService.js';
 import { ToastService, type Toast } from '../services/ToastService.js';
 
-export interface ComuxState {
-  panes: ComuxPane[];
+export interface PsycheState {
+  panes: PsychePane[];
   projectName: string;
   sessionName: string;
   projectRoot: string;
@@ -23,8 +23,8 @@ export interface ComuxState {
 
 export class StateManager extends EventEmitter {
   private static instance: StateManager;
-  private state: ComuxState;
-  private updateCallbacks: Set<(state: ComuxState) => void> = new Set();
+  private state: PsycheState;
+  private updateCallbacks: Set<(state: PsycheState) => void> = new Set();
   private configWatcher: ConfigWatcher | null = null;
   private debugMessageCallback: ((message: string) => void) | undefined;
   private logService: LogService;
@@ -90,11 +90,11 @@ export class StateManager extends EventEmitter {
     return StateManager.instance;
   }
 
-  getState(): ComuxState {
+  getState(): PsycheState {
     return { ...this.state };
   }
 
-  updatePanes(panes: ComuxPane[]): void {
+  updatePanes(panes: PsychePane[]): void {
     this.state.panes = [...panes];
     this.notifyListeners();
   }
@@ -140,15 +140,15 @@ export class StateManager extends EventEmitter {
     this.notifyListeners();
   }
 
-  getPaneById(id: string): ComuxPane | undefined {
+  getPaneById(id: string): PsychePane | undefined {
     return this.state.panes.find(pane => pane.id === id);
   }
 
-  getPanes(): ComuxPane[] {
+  getPanes(): PsychePane[] {
     return [...this.state.panes];
   }
 
-  subscribe(callback: (state: ComuxState) => void): () => void {
+  subscribe(callback: (state: PsycheState) => void): () => void {
     this.updateCallbacks.add(callback);
     return () => {
       this.updateCallbacks.delete(callback);

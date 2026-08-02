@@ -25,7 +25,7 @@ export interface WorktreeInfo {
   /** Main branch in parent repo (main, master, etc.) */
   mainBranch: string;
 
-  /** Whether this is the root worktree (the comux pane's worktree) */
+  /** Whether this is the root worktree (the psyche pane's worktree) */
   isRoot: boolean;
 
   /** Relative path from root worktree (for display), "." for root */

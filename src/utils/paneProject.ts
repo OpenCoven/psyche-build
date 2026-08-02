@@ -1,11 +1,11 @@
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 
-const WORKTREE_PATH_PATTERN = /[\\\/]\.comux[\\\/]worktrees[\\\/][^\\\/]+$/;
+const WORKTREE_PATH_PATTERN = /[\\\/]\.psyche[\\\/]worktrees[\\\/][^\\\/]+$/;
 
 /**
- * Derive repository root from a comux worktree path.
- * Example: /repo/.comux/worktrees/feature-a -> /repo
+ * Derive repository root from a psyche worktree path.
+ * Example: /repo/.psyche/worktrees/feature-a -> /repo
  */
 export function deriveProjectRootFromWorktreePath(worktreePath?: string): string | undefined {
   if (!worktreePath) return undefined;
@@ -18,7 +18,7 @@ export function deriveProjectRootFromWorktreePath(worktreePath?: string): string
  * then the session project root as fallback.
  */
 export function getPaneProjectRoot(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot: string
 ): string {
   const fromPane = pane.projectRoot?.trim();
@@ -34,7 +34,7 @@ export function getPaneProjectRoot(
  * Resolve a display name for a pane's project.
  */
 export function getPaneProjectName(
-  pane: ComuxPane,
+  pane: PsychePane,
   fallbackProjectRoot: string,
   fallbackProjectName?: string
 ): string {

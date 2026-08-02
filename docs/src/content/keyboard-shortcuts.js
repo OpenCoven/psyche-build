@@ -3,10 +3,10 @@ export const meta = { title: 'Keyboard Shortcuts' };
 export function render() {
   return `
     <h1>Keyboard Shortcuts</h1>
-    <p class="lead">comux is designed for keyboard-first navigation. All major actions are available through single-key shortcuts.</p>
+    <p class="lead">psyche is designed for keyboard-first navigation. All major actions are available through single-key shortcuts.</p>
 
     <h2>Pane Management</h2>
-    <p><kbd>Alt+Shift+M</kbd> opens the pane menu for the currently focused tmux pane. comux renders the same pane menu used in the sidebar, but positions it over the active pane so you can act on that pane without moving focus back to the control sidebar first.</p>
+    <p><kbd>Alt+Shift+M</kbd> opens the pane menu for the currently focused tmux pane. psyche renders the same pane menu used in the sidebar, but positions it over the active pane so you can act on that pane without moving focus back to the control sidebar first.</p>
     <table class="shortcut-table">
       <thead>
         <tr><th>Key</th><th>Action</th></tr>
@@ -53,7 +53,7 @@ export function render() {
         <tr><td><kbd>l</kbd></td><td>View application logs</td></tr>
         <tr><td><kbd>L</kbd></td><td>Reset sidebar layout (re-enforce pane sizing)</td></tr>
         <tr><td><kbd>?</kbd></td><td>Show keyboard shortcuts help</td></tr>
-        <tr><td><kbd>q</kbd></td><td>Quit comux</td></tr>
+        <tr><td><kbd>q</kbd></td><td>Quit psyche</td></tr>
       </tbody>
     </table>
 
@@ -72,7 +72,7 @@ export function render() {
 
     <div class="callout callout-tip">
       <div class="callout-title">Tip</div>
-      You can paste large prompts using your terminal's paste function. comux supports bracketed paste mode and will handle multi-line pastes correctly.
+      You can paste large prompts using your terminal's paste function. psyche supports bracketed paste mode and will handle multi-line pastes correctly.
     </div>
 
     <h2>File Browser</h2>

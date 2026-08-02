@@ -65,10 +65,10 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 spawnChild('TypeScript watcher', 'pnpm', ['exec', 'tsc', '--watch', '--preserveWatchOutput']);
-spawnChild('comux runtime', process.execPath, ['--watch', 'dist/index.js'], {
+spawnChild('psyche runtime', process.execPath, ['--watch', 'dist/index.js'], {
   env: {
     ...process.env,
-    COMUX_DEV: 'true',
-    COMUX_DEV_WATCH: 'true',
+    PSYCHE_DEV: 'true',
+    PSYCHE_DEV_WATCH: 'true',
   },
 });

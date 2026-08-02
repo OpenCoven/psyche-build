@@ -12,7 +12,7 @@ export function useDebugInfo(__dirname: string) {
   // Get current git branch on mount (only for dev builds)
   useEffect(() => {
     const isDev =
-      process.env.COMUX_DEV === "true" || __dirname.includes("dist") === false
+      process.env.PSYCHE_DEV === "true" || __dirname.includes("dist") === false
     if (isDev) {
       try {
         const branch = execSync("git rev-parse --abbrev-ref HEAD", {

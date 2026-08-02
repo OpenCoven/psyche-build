@@ -1,9 +1,9 @@
 import { SettingsManager } from '../utils/settingsManager.js';
-import type { ComuxThemeName } from '../types.js';
+import type { PsycheThemeName } from '../types.js';
 import {
-  DEFAULT_COMUX_THEME,
-  isComuxThemeName,
-  normalizeComuxTheme,
+  DEFAULT_PSYCHE_THEME,
+  isPsycheThemeName,
+  normalizePsycheTheme,
 } from './themePalette.js';
 
 interface ThemePalette {
@@ -20,7 +20,7 @@ const ANSI_16_HEX_COLORS = [
   '#0000ff', '#ff00ff', '#00ffff', '#ffffff',
 ] as const;
 
-const THEME_PALETTES: Record<ComuxThemeName, ThemePalette> = {
+const THEME_PALETTES: Record<PsycheThemeName, ThemePalette> = {
   red: {
     accentHex: '#ff5f5f',
     activeBorder: '203',
@@ -109,14 +109,14 @@ export const DECORATIVE_THEME = {
   tail: Array.from({ length: 8 }, () => ''),
 } as const;
 
-let activeThemeName: ComuxThemeName = DEFAULT_COMUX_THEME;
+let activeThemeName: PsycheThemeName = DEFAULT_PSYCHE_THEME;
 
-export function getComuxThemePalette(themeName: unknown): ThemePalette {
-  return THEME_PALETTES[normalizeComuxTheme(themeName)];
+export function getPsycheThemePalette(themeName: unknown): ThemePalette {
+  return THEME_PALETTES[normalizePsycheTheme(themeName)];
 }
 
-export function getComuxThemeAccent(themeName: unknown): string {
-  return getComuxThemePalette(themeName).accentHex;
+export function getPsycheThemeAccent(themeName: unknown): string {
+  return getPsycheThemePalette(themeName).accentHex;
 }
 
 function xterm256IndexToHex(colorIndex: number): string | undefined {
@@ -145,14 +145,14 @@ function xterm256IndexToHex(colorIndex: number): string | undefined {
     .join('')}`;
 }
 
-export function getComuxThemeActiveBorderHex(themeName: unknown): string {
-  const activeBorderIndex = Number.parseInt(getComuxThemePalette(themeName).activeBorder, 10);
+export function getPsycheThemeActiveBorderHex(themeName: unknown): string {
+  const activeBorderIndex = Number.parseInt(getPsycheThemePalette(themeName).activeBorder, 10);
   const activeBorderHex = xterm256IndexToHex(activeBorderIndex);
-  return activeBorderHex || getComuxThemeAccent(themeName);
+  return activeBorderHex || getPsycheThemeAccent(themeName);
 }
 
-export function applyComuxTheme(themeName: ComuxThemeName): ComuxThemeName {
-  const nextTheme = getComuxThemePalette(themeName);
+export function applyPsycheTheme(themeName: PsycheThemeName): PsycheThemeName {
+  const nextTheme = getPsycheThemePalette(themeName);
   activeThemeName = themeName;
 
   assignMutableRecord(COLORS as unknown as Record<string, string>, {
@@ -173,22 +173,22 @@ export function applyComuxTheme(themeName: ComuxThemeName): ComuxThemeName {
   return activeThemeName;
 }
 
-export function getActiveComuxTheme(): ComuxThemeName {
+export function getActivePsycheTheme(): PsycheThemeName {
   return activeThemeName;
 }
 
-export function syncComuxThemeFromSettings(projectRoot?: string): ComuxThemeName {
+export function syncPsycheThemeFromSettings(projectRoot?: string): PsycheThemeName {
   try {
     const settings = new SettingsManager(projectRoot || process.cwd()).getSettings();
-    return applyComuxTheme(normalizeComuxTheme(settings.colorTheme));
+    return applyPsycheTheme(normalizePsycheTheme(settings.colorTheme));
   } catch {
-    return applyComuxTheme(DEFAULT_COMUX_THEME);
+    return applyPsycheTheme(DEFAULT_PSYCHE_THEME);
   }
 }
 
 // Keep module consumers working without explicit setup.
-if (process.env.COMUX_THEME && isComuxThemeName(process.env.COMUX_THEME)) {
-  applyComuxTheme(process.env.COMUX_THEME);
+if (process.env.PSYCHE_THEME && isPsycheThemeName(process.env.PSYCHE_THEME)) {
+  applyPsycheTheme(process.env.PSYCHE_THEME);
 } else {
-  syncComuxThemeFromSettings(process.cwd());
+  syncPsycheThemeFromSettings(process.cwd());
 }

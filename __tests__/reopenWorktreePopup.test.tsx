@@ -29,7 +29,7 @@ describe('ReopenWorktreePopupApp', () => {
 
     const { stdin, lastFrame, unmount } = render(
       <ReopenWorktreePopupApp
-        resultFile="/tmp/comux-reopen-worktree-result.json"
+        resultFile="/tmp/psyche-reopen-worktree-result.json"
         projectName="repo-selected"
         worktrees={worktrees}
         initialState={{
@@ -110,7 +110,7 @@ describe('ReopenWorktreePopupApp', () => {
 
     const { stdin, lastFrame, unmount } = render(
       <ReopenWorktreePopupApp
-        resultFile="/tmp/comux-reopen-worktree-result.json"
+        resultFile="/tmp/psyche-reopen-worktree-result.json"
         projectName="repo-selected"
         worktrees={worktrees}
         initialState={{
@@ -162,7 +162,7 @@ describe('ReopenWorktreePopupApp', () => {
 
     const { stdin, lastFrame, unmount } = render(
       <ReopenWorktreePopupApp
-        resultFile="/tmp/comux-reopen-worktree-result.json"
+        resultFile="/tmp/psyche-reopen-worktree-result.json"
         projectName="repo-selected"
         worktrees={worktrees}
         initialState={{
@@ -202,7 +202,7 @@ describe('ReopenWorktreePopupApp', () => {
 
     const { stdin, lastFrame, unmount } = render(
       <ReopenWorktreePopupApp
-        resultFile="/tmp/comux-reopen-worktree-result.json"
+        resultFile="/tmp/psyche-reopen-worktree-result.json"
         projectName="repo-selected"
         worktrees={worktrees}
         initialState={{
@@ -264,7 +264,7 @@ describe('ReopenWorktreePopupApp', () => {
 
     const { stdin, lastFrame, unmount } = render(
       <ReopenWorktreePopupApp
-        resultFile="/tmp/comux-reopen-worktree-result.json"
+        resultFile="/tmp/psyche-reopen-worktree-result.json"
         projectName="repo-selected"
         worktrees={worktrees}
         projectRoot="/repo-selected"

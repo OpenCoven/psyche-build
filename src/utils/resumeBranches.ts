@@ -2,7 +2,7 @@ import { exec, execSync } from 'child_process';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import path from 'path';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import type { AgentName } from './agentLaunch.js';
 import { triggerHook } from './hooks.js';
 import { getOrphanedWorktrees, isValidBranchName } from './git.js';
@@ -13,7 +13,7 @@ import { writeWorktreeMetadata } from './worktreeMetadata.js';
 
 const REMOTE_FALLBACK = 'origin';
 const RESUME_SCAN_EXCLUDED_DIRS = new Set([
-  '.comux',
+  '.psyche',
   '.git',
   'node_modules',
   'vendor',
@@ -53,7 +53,7 @@ export interface ResumeBranchWorkspaceOptions {
   branchName: string;
   agent: AgentName;
   projectRoot: string;
-  existingPanes: ComuxPane[];
+  existingPanes: PsychePane[];
   sessionConfigPath?: string;
   sessionProjectRoot?: string;
 }
@@ -495,9 +495,9 @@ function hasReusableWorktreeForBranch(
 function getAvailableSlug(
   branchName: string,
   projectRoot: string,
-  existingPanes: ComuxPane[]
+  existingPanes: PsychePane[]
 ): string {
-  const worktreesDir = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesDir = path.join(projectRoot, '.psyche', 'worktrees');
   const reserved = new Set(existingPanes.map((pane) => pane.slug));
   const baseSlug = deriveBaseSlug(branchName);
   let candidate = baseSlug;
@@ -941,17 +941,17 @@ async function triggerChildWorktreeHook(
   agent: AgentName
 ): Promise<void> {
   await triggerHook('worktree_created', projectRoot, undefined, {
-    COMUX_SLUG: slug,
-    COMUX_PROMPT: 'No initial prompt',
-    COMUX_AGENT: agent,
-    COMUX_WORKTREE_PATH: worktreePath,
-    COMUX_BRANCH: branchName,
+    PSYCHE_SLUG: slug,
+    PSYCHE_PROMPT: 'No initial prompt',
+    PSYCHE_AGENT: agent,
+    PSYCHE_WORKTREE_PATH: worktreePath,
+    PSYCHE_BRANCH: branchName,
   });
 }
 
 export async function resumeBranchWorkspace(
   options: ResumeBranchWorkspaceOptions
-): Promise<{ pane: ComuxPane }> {
+): Promise<{ pane: PsychePane }> {
   const {
     branchName,
     agent,
@@ -963,7 +963,7 @@ export async function resumeBranchWorkspace(
 
   const workspaceStates = await getWorkspaceBranchStatesAsync(projectRoot, branchName);
   const slug = getAvailableSlug(branchName, projectRoot, existingPanes);
-  const rootWorktreePath = path.join(projectRoot, '.comux', 'worktrees', slug);
+  const rootWorktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
   const settings = new SettingsManager(projectRoot).getSettings();
 
   if (!agent) {

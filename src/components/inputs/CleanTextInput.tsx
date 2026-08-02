@@ -422,7 +422,7 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
 
     // Regular text input with paste detection and buffering
     if (input && !key.ctrl && !key.meta) {
-      // Ignore the first character input if flag is set (prevents 'n' from comux menu)
+      // Ignore the first character input if flag is set (prevents 'n' from psyche menu)
       if (ignoreNextInput && input.length === 1) {
         setIgnoreNextInput(false);
         return;

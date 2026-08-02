@@ -7,9 +7,9 @@ import { Box, Text, render, useApp, useInput } from 'ink';
 import { LogService } from '../services/LogService.js';
 import { COLORS } from '../theme/colors.js';
 import {
-  hasComuxManagedTmuxConfigBlock,
-  COMUX_TMUX_CONFIG_VERSION,
-  writeComuxManagedTmuxConfig,
+  hasPsycheManagedTmuxConfigBlock,
+  PSYCHE_TMUX_CONFIG_VERSION,
+  writePsycheManagedTmuxConfig,
   type TmuxPresetTheme,
 } from './tmuxManagedConfig.js';
 
@@ -27,7 +27,7 @@ interface OnboardingState {
   };
 }
 
-const ONBOARDING_STATE_RELATIVE_PATH = path.join('.comux', 'onboarding.json');
+const ONBOARDING_STATE_RELATIVE_PATH = path.join('.psyche', 'onboarding.json');
 
 /**
  * Candidate config locations used by tmux on modern systems.
@@ -195,17 +195,17 @@ const TmuxConfigOnboardingPrompt: React.FC<TmuxConfigOnboardingPromptProps> = ({
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={COLORS.accent} paddingX={1} marginTop={1}>
-      <Text bold color={COLORS.accent}>Welcome to comux</Text>
+      <Text bold color={COLORS.accent}>Welcome to psyche</Text>
       <Box marginTop={1} flexDirection="column">
-        <Text>comux uses tmux panes to run agents and terminals side by side.</Text>
+        <Text>psyche uses tmux panes to run agents and terminals side by side.</Text>
         <Text dimColor>
           {hasExistingConfig
-            ? 'Your tmux config will be preserved; comux will add only its marked block.'
-            : 'No tmux config was found; comux can create one with its marked block.'}
+            ? 'Your tmux config will be preserved; psyche will add only its marked block.'
+            : 'No tmux config was found; psyche can create one with its marked block.'}
         </Text>
       </Box>
       <Box marginTop={1} flexDirection="column">
-        <Text>comux works best with a few tmux settings for pane borders, navigation, and clipboard behavior.</Text>
+        <Text>psyche works best with a few tmux settings for pane borders, navigation, and clipboard behavior.</Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
@@ -228,7 +228,7 @@ const TmuxConfigOnboardingPrompt: React.FC<TmuxConfigOnboardingPromptProps> = ({
 
 /**
  * First-run onboarding for tmux config presets.
- * - If a comux-managed block already exists, mark onboarding complete.
+ * - If a psyche-managed block already exists, mark onboarding complete.
  * - If user config exists without the block, offer to append only the managed block.
  * - If no config exists, ask once and optionally create the managed block.
  */
@@ -261,13 +261,13 @@ export async function runTmuxConfigOnboardingIfNeeded(
       })
     );
     const hasTmuxConfig = existingConfigContents.some((content) => content.trim().length > 0);
-    const hasManagedBlock = existingConfigContents.some(hasComuxManagedTmuxConfigBlock);
+    const hasManagedBlock = existingConfigContents.some(hasPsycheManagedTmuxConfigBlock);
     if (hasManagedBlock) {
       await writeOnboardingState(
         homeDir,
         'existing-config',
-        candidatePaths[existingConfigContents.findIndex(hasComuxManagedTmuxConfigBlock)],
-        COMUX_TMUX_CONFIG_VERSION,
+        candidatePaths[existingConfigContents.findIndex(hasPsycheManagedTmuxConfigBlock)],
+        PSYCHE_TMUX_CONFIG_VERSION,
         runtime.now
       );
       return;
@@ -286,7 +286,7 @@ export async function runTmuxConfigOnboardingIfNeeded(
     const outcome = await prompt(hasTmuxConfig);
     if (outcome === 'install-dark' || outcome === 'install-light') {
       const theme: TmuxPresetTheme = outcome === 'install-dark' ? 'dark' : 'light';
-      const result = await writeComuxManagedTmuxConfig(homeDir, theme);
+      const result = await writePsycheManagedTmuxConfig(homeDir, theme);
       const sourceConfig = runtime.sourceConfig || sourceTmuxConfig;
       sourceConfig(result.configPath);
       await writeOnboardingState(

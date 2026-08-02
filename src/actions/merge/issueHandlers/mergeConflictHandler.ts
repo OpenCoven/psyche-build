@@ -4,7 +4,7 @@
  */
 
 import type { ActionResult, ActionContext } from '../../types.js';
-import type { ComuxPane } from '../../../types.js';
+import type { PsychePane } from '../../../types.js';
 import { getPaneDisplayName } from '../../../utils/paneTitle.js';
 
 export interface MergeConflictIssue {
@@ -17,7 +17,7 @@ export async function handleMergeConflict(
   issue: MergeConflictIssue,
   mainBranch: string,
   mainRepoPath: string,
-  pane: ComuxPane,
+  pane: PsychePane,
   context: ActionContext
 ): Promise<ActionResult> {
   const paneName = getPaneDisplayName(pane);

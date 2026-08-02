@@ -1,17 +1,17 @@
-# comux smoke test
+# psyche smoke test
 
 Use this loop to verify the current public CLI/core path.
 
 ## Package checks
 
-From the comux checkout:
+From the psyche checkout:
 
 ```bash
 pnpm install --ignore-scripts
 pnpm run typecheck
 pnpm run test
 pnpm run build
-node ./comux doctor --json
+node ./psyche doctor --json
 npm pack --dry-run --json
 ```
 
@@ -30,44 +30,44 @@ Use this check when touching setup, doctor, agent discovery, or Coven docs.
 
 ```bash
 pnpm run dev:doctor
-node ./comux doctor
-node ./comux doctor --json
+node ./psyche doctor
+node ./psyche doctor --json
 ```
 
 Expected:
 
-- Text output says whether comux can run, even when recommended setup warnings remain.
+- Text output says whether psyche can run, even when recommended setup warnings remain.
 - If no supported agent CLI is detected, doctor explains that plain terminal panes still work and lists the supported agent CLIs.
 - Doctor explains that Coven is optional for core tmux/worktree/agent/merge/PR workflows.
 - JSON output includes stable check IDs for automation: `agent-cli-guidance` and `coven-guidance`.
-- `comux doctor --fix` only applies safe tmux repairs and the managed tmux config block.
+- `psyche doctor --fix` only applies safe tmux repairs and the managed tmux config block.
 
 ## Interactive cockpit smoke
 
-Use a disposable git repository outside the comux checkout so worktree creation cannot touch the project under test.
+Use a disposable git repository outside the psyche checkout so worktree creation cannot touch the project under test.
 
-Replace `/path/to/comux/checkout/comux` with the executable from your checkout, or use an installed `comux` binary after packaging.
+Replace `/path/to/psyche/checkout/psyche` with the executable from your checkout, or use an installed `psyche` binary after packaging.
 
 ```bash
-rm -rf /tmp/comux-smoke
-mkdir -p /tmp/comux-smoke
-cd /tmp/comux-smoke
+rm -rf /tmp/psyche-smoke
+mkdir -p /tmp/psyche-smoke
+cd /tmp/psyche-smoke
 
 git init
 git config user.email smoke@example.com
-git config user.name "comux smoke"
+git config user.name "psyche smoke"
 echo '# smoke' > README.md
 git add README.md
 git commit -m "init smoke repo"
 
-node /path/to/comux/checkout/comux
+node /path/to/psyche/checkout/psyche
 # or, if installed:
-comux
+psyche
 ```
 
 Expected:
 
-- comux opens the terminal cockpit for the disposable project.
+- psyche opens the terminal cockpit for the disposable project.
 - `n` creates an agent/worktree pane.
 - `t` creates a plain terminal pane.
 - `u` opens rituals.
@@ -76,7 +76,7 @@ Expected:
 - `h` / `H` hide and restore pane visibility.
 - `p` adds another project to the sidebar.
 - `r` can reopen a closed worktree.
-- Closing comux leaves no orphaned controller process.
+- Closing psyche leaves no orphaned controller process.
 
 ## Coven integration smoke
 
@@ -86,8 +86,8 @@ Expected:
 
 - `coven doctor` and the local Coven daemon/status command report a usable runtime.
 - When Coven is running for the same project, the sidebar shows matching `☾ Coven sessions` entries.
-- Pressing `o` on the active project opens the latest matching session as a visible comux pane with `coven attach <session-id>`.
-- When Coven is not installed or not running, the active project shows the compact unavailable hint and comux keeps running.
+- Pressing `o` on the active project opens the latest matching session as a visible psyche pane with `coven attach <session-id>`.
+- When Coven is not installed or not running, the active project shows the compact unavailable hint and psyche keeps running.
 
 ## Merge / PR smoke
 
@@ -97,18 +97,18 @@ Expected:
 
 - A worktree pane can be reviewed from the pane menu.
 - Merge and PR actions remain explicit menu choices.
-- comux does not push, merge, publish, delete, or clean up work without a user action.
+- psyche does not push, merge, publish, delete, or clean up work without a user action.
 - Hooks can run on worktree create / pre-merge / post-merge when configured.
 
 ## Coven bridge smoke
 
 When a local Coven daemon is available for the same project:
 
-- comux can list/open Coven sessions through the daemon bridge.
+- psyche can list/open Coven sessions through the daemon bridge.
 - launching a Coven session is scoped to the current project root.
 - out-of-project `cwd` values are rejected before work starts.
 - opening a Coven session creates a pane that runs `coven attach <session-id>`.
 - desktop-use event polling follows Coven `seq` cursors from the `/api/v1/events` envelope.
-- stopped or missing daemons surface a recoverable `coven daemon start` message instead of breaking normal comux panes.
+- stopped or missing daemons surface a recoverable `coven daemon start` message instead of breaking normal psyche panes.
 
 Keep this smoke conservative: it should prove project scoping and visibility, not hidden automation.

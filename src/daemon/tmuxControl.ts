@@ -171,14 +171,14 @@ export function tmuxDimensionArg(value: unknown, label: string): number {
 }
 
 /**
- * Mirrors `Comux.buildSessionNameForRoot` in src/index.ts so the daemon
- * derives the same session name comux itself uses.
+ * Mirrors `Psyche.buildSessionNameForRoot` in src/index.ts so the daemon
+ * derives the same session name psyche itself uses.
  */
 export function tmuxSessionNameForRoot(projectRoot: string): string {
   const projectName = path.basename(projectRoot);
   const projectHash = createHash('md5').update(projectRoot).digest('hex').substring(0, 8);
   const ident = `${projectName}-${projectHash}`.replace(/\./g, '-');
-  return `comux-${ident}`;
+  return `psyche-${ident}`;
 }
 
 export function tmuxSessionExists(name: string): boolean {

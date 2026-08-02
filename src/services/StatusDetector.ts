@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import type { ComuxPane, AgentStatus, OptionChoice, PotentialHarm, AgentSessionReference } from '../types.js';
+import type { PsychePane, AgentStatus, OptionChoice, PotentialHarm, AgentSessionReference } from '../types.js';
 import { WorkerMessageBus } from './WorkerMessageBus.js';
 import { PaneWorkerManager } from './PaneWorkerManager.js';
 import { PaneAnalyzer } from './PaneAnalyzer.js';
@@ -49,7 +49,7 @@ export class StatusDetector extends EventEmitter {
   private paneAnalyzer: PaneAnalyzer;
   private paneStatuses = new Map<string, AgentStatus>();
   private llmRequests = new Map<string, AbortController>();
-  private paneIdMap = new Map<string, string>(); // comux pane ID -> tmux pane ID
+  private paneIdMap = new Map<string, string>(); // psyche pane ID -> tmux pane ID
   private isShuttingDown = false;
 
   constructor() {
@@ -103,7 +103,7 @@ export class StatusDetector extends EventEmitter {
   /**
    * Start monitoring a set of panes
    */
-  async monitorPanes(panes: ComuxPane[]): Promise<void> {
+  async monitorPanes(panes: PsychePane[]): Promise<void> {
     if (this.isShuttingDown) return;
 
     // Update pane ID mappings
@@ -273,7 +273,7 @@ export class StatusDetector extends EventEmitter {
           throw new Error(`No tmux pane ID found for ${paneId}`);
         }
 
-        // Run LLM analysis with abort signal (pass comux pane ID for friendly logging)
+        // Run LLM analysis with abort signal (pass psyche pane ID for friendly logging)
         const analysis = await this.paneAnalyzer.analyzePane(
           tmuxPaneId,
           controller.signal,
@@ -567,7 +567,7 @@ export class StatusDetector extends EventEmitter {
   }
 
   /**
-   * Get tmux pane ID for a comux pane
+   * Get tmux pane ID for a psyche pane
    */
   private async getTmuxPaneId(paneId: string): Promise<string | null> {
     return this.paneIdMap.get(paneId) || null;

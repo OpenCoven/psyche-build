@@ -13,16 +13,16 @@ import {
   createInitialTUIState,
   type TUIActionState
 } from '../adapters/tuiActionHandler.js';
-import type { ComuxPane } from '../types.js';
+import type { PsychePane } from '../types.js';
 import type { TrackProjectActivity } from '../types/activity.js';
 
 interface UseActionSystemParams {
-  panes: ComuxPane[];
-  savePanes: (panes: ComuxPane[]) => Promise<void>;
+  panes: PsychePane[];
+  savePanes: (panes: PsychePane[]) => Promise<void>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
-  onPaneUpdate?: (pane: ComuxPane) => void;
+  onPaneUpdate?: (pane: PsychePane) => void;
   onPaneRemove?: (paneId: string) => void | Promise<void>;
   onActionResult?: (result: ActionResult) => Promise<void>;
   trackProjectActivity: TrackProjectActivity;
@@ -209,7 +209,7 @@ export default function useActionSystem({
   // Execute an action and handle the result
   const executeActionWithHandling = useCallback(async (
     actionId: PaneAction,
-    pane: ComuxPane,
+    pane: PsychePane,
     params?: any
   ) => {
     const projectRoot = pane.projectRoot || defaultProjectRoot;

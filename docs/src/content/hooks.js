@@ -3,13 +3,13 @@ export const meta = { title: 'Hooks' };
 export function render() {
   return `
     <h1>Hooks</h1>
-    <p class="lead">comux provides 11 lifecycle hooks that let you run custom scripts at key moments — from pane creation to merge completion. Hooks are simple shell scripts that receive context via environment variables.</p>
+    <p class="lead">psyche provides 11 lifecycle hooks that let you run custom scripts at key moments — from pane creation to merge completion. Hooks are simple shell scripts that receive context via environment variables.</p>
 
     <h2>Creating Hooks with AI</h2>
-    <p>The easiest way to create and edit hooks is with comux's AI-assisted authoring:</p>
+    <p>The easiest way to create and edit hooks is with psyche's AI-assisted authoring:</p>
     <ol>
-      <li>Focus the main comux pane and press <kbd>h</kbd></li>
-      <li>comux initializes a <code>.comux-hooks/</code> directory with documentation and example hooks</li>
+      <li>Focus the main psyche pane and press <kbd>h</kbd></li>
+      <li>psyche initializes a <code>.psyche-hooks/</code> directory with documentation and example hooks</li>
       <li>A new pane opens with an AI agent that walks you through creating or editing hooks for your project</li>
     </ol>
     <p>The agent understands all available hook types and environment variables, so you can describe what you want in plain language — like "install dependencies when a worktree is created" or "run tests before merging" — and it will write the scripts for you.</p>
@@ -20,16 +20,16 @@ export function render() {
     </div>
 
     <h2>Manual Setup</h2>
-    <p>You can also create hooks by hand. Hooks are shell scripts placed in a hooks directory. comux searches for hooks in this priority order:</p>
+    <p>You can also create hooks by hand. Hooks are shell scripts placed in a hooks directory. psyche searches for hooks in this priority order:</p>
     <ol>
-      <li><code>.comux-hooks/</code> — project root (highest priority)</li>
-      <li><code>.comux/hooks/</code> — inside the comux data directory</li>
-      <li><code>~/.comux/hooks/</code> — global hooks (lowest priority)</li>
+      <li><code>.psyche-hooks/</code> — project root (highest priority)</li>
+      <li><code>.psyche/hooks/</code> — inside the psyche data directory</li>
+      <li><code>~/.psyche/hooks/</code> — global hooks (lowest priority)</li>
     </ol>
     <p>The first directory found is used. Scripts must be executable (<code>chmod +x</code>).</p>
     <p>To create the directory manually:</p>
-    <pre><code data-lang="bash">mkdir -p .comux-hooks
-chmod +x .comux-hooks/*</code></pre>
+    <pre><code data-lang="bash">mkdir -p .psyche-hooks
+chmod +x .psyche-hooks/*</code></pre>
 
     <h2>Available Hooks</h2>
     <p>Each hook is a script file named exactly as shown below. All hooks receive environment variables with context about the current operation.</p>
@@ -41,11 +41,11 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug (branch name) for the new pane</td></tr>
-        <tr><td><code>COMUX_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
-        <tr><td><code>COMUX_PANE_AGENT</code></td><td>The selected agent (claude, opencode, codex)</td></tr>
-        <tr><td><code>COMUX_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>COMUX_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name) for the new pane</td></tr>
+        <tr><td><code>PSYCHE_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
+        <tr><td><code>PSYCHE_PANE_AGENT</code></td><td>The selected agent (claude, opencode, codex)</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -54,14 +54,14 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID (e.g. comux-1)</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
-        <tr><td><code>COMUX_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
-        <tr><td><code>COMUX_PANE_AGENT</code></td><td>The agent being used</td></tr>
-        <tr><td><code>COMUX_TMUX_PANE_ID</code></td><td>The tmux pane ID (e.g. %38)</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>COMUX_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>COMUX_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID (e.g. psyche-1)</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
+        <tr><td><code>PSYCHE_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
+        <tr><td><code>PSYCHE_PANE_AGENT</code></td><td>The agent being used</td></tr>
+        <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID (e.g. %38)</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -70,11 +70,11 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the new worktree</td></tr>
-        <tr><td><code>COMUX_BRANCH_NAME</code></td><td>Git branch name</td></tr>
-        <tr><td><code>COMUX_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>COMUX_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the new worktree</td></tr>
+        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch name</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
+        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -88,10 +88,10 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
       </tbody>
     </table>
 
@@ -100,8 +100,8 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
       </tbody>
     </table>
 
@@ -112,9 +112,9 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>COMUX_BRANCH_NAME</code></td><td>Git branch name</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch name</td></tr>
       </tbody>
     </table>
 
@@ -123,8 +123,8 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_BRANCH_NAME</code></td><td>Git branch that was deleted</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch that was deleted</td></tr>
       </tbody>
     </table>
 
@@ -135,11 +135,11 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>COMUX_BRANCH_NAME</code></td><td>Branch being merged</td></tr>
-        <tr><td><code>COMUX_MAIN_BRANCH</code></td><td>Target branch (e.g. main)</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Branch being merged</td></tr>
+        <tr><td><code>PSYCHE_MAIN_BRANCH</code></td><td>Target branch (e.g. main)</td></tr>
       </tbody>
     </table>
 
@@ -148,10 +148,10 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_BRANCH_NAME</code></td><td>Branch that was merged</td></tr>
-        <tr><td><code>COMUX_MAIN_BRANCH</code></td><td>Target branch</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Branch that was merged</td></tr>
+        <tr><td><code>PSYCHE_MAIN_BRANCH</code></td><td>Target branch</td></tr>
       </tbody>
     </table>
 
@@ -162,10 +162,10 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>COMUX_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
       </tbody>
     </table>
 
@@ -174,30 +174,30 @@ chmod +x .comux-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_PANE_ID</code></td><td>The comux pane ID</td></tr>
-        <tr><td><code>COMUX_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>COMUX_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>COMUX_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
+        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
+        <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
       </tbody>
     </table>
 
     <h2>HTTP Callback API</h2>
-    <p>The <code>run_test</code> and <code>run_dev</code> hooks support HTTP callbacks. When these hooks run, comux also exposes a callback URL via environment variable:</p>
+    <p>The <code>run_test</code> and <code>run_dev</code> hooks support HTTP callbacks. When these hooks run, psyche also exposes a callback URL via environment variable:</p>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>COMUX_CALLBACK_URL</code></td><td>URL to POST results back to comux</td></tr>
+        <tr><td><code>PSYCHE_CALLBACK_URL</code></td><td>URL to POST results back to psyche</td></tr>
       </tbody>
     </table>
-    <p>This lets you report test results or dev server status back to the comux dashboard.</p>
+    <p>This lets you report test results or dev server status back to the psyche dashboard.</p>
 
     <h2>Example Hooks</h2>
 
     <h3>Install dependencies on worktree creation</h3>
     <pre><code data-lang="bash">#!/bin/bash
-# .comux-hooks/worktree_created
+# .psyche-hooks/worktree_created
 
-cd "$COMUX_WORKTREE_PATH"
+cd "$PSYCHE_WORKTREE_PATH"
 
 # Install Node.js dependencies
 if [ -f "pnpm-lock.yaml" ]; then
@@ -210,9 +210,9 @@ fi</code></pre>
 
     <h3>Run tests before merge</h3>
     <pre><code data-lang="bash">#!/bin/bash
-# .comux-hooks/pre_merge
+# .psyche-hooks/pre_merge
 
-cd "$COMUX_WORKTREE_PATH"
+cd "$PSYCHE_WORKTREE_PATH"
 npm test
 
 # If tests fail, the non-zero exit code will abort the merge
@@ -223,14 +223,14 @@ fi</code></pre>
 
     <h3>Notify on merge completion</h3>
     <pre><code data-lang="bash">#!/bin/bash
-# .comux-hooks/post_merge
+# .psyche-hooks/post_merge
 
 # Send a desktop notification (macOS)
-osascript -e "display notification \\"Merged $COMUX_PANE_SLUG into $COMUX_MAIN_BRANCH\\" with title \\"comux\\""</code></pre>
+osascript -e "display notification \\"Merged $PSYCHE_PANE_SLUG into $PSYCHE_MAIN_BRANCH\\" with title \\"psyche\\""</code></pre>
 
     <div class="callout callout-warning">
       <div class="callout-title">Important</div>
-      Hook scripts must be executable. Run <code>chmod +x .comux-hooks/*</code> after creating them. Hooks that exit with a non-zero status code will abort the operation for <code>pre_merge</code> and <code>before_pane_create</code>.
+      Hook scripts must be executable. Run <code>chmod +x .psyche-hooks/*</code> after creating them. Hooks that exit with a non-zero status code will abort the operation for <code>pre_merge</code> and <code>before_pane_create</code>.
     </div>
   `;
 }

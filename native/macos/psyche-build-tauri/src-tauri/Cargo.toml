@@ -1,11 +1,11 @@
 [package]
-name = "comux-tauri"
+name = "psyche-build-tauri"
 version = "0.0.7"
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "comux_tauri_lib"
+name = "psyche_build_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

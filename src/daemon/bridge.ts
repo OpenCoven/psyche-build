@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { AGENT_IDS, buildAgentCommand, buildInitialPromptCommand, type AgentName } from '../utils/agentLaunch.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
-import type { ComuxConfig } from '../types.js';
+import type { PsycheConfig } from '../types.js';
 import {
   isAgenticCapability,
   type AgenticCapabilityRouter,
@@ -126,7 +126,7 @@ interface RawConfigPane extends Record<string, unknown> {
   lastUpdated?: string;
 }
 
-interface BridgeConfig extends Omit<Partial<ComuxConfig>, 'panes'> {
+interface BridgeConfig extends Omit<Partial<PsycheConfig>, 'panes'> {
   panes?: RawConfigPane[];
 }
 
@@ -142,11 +142,11 @@ export async function resolveScopedCwd(projectRoot: string, cwd?: string): Promi
   try {
     requestedReal = await realpath(requestedPath);
   } catch {
-    throw new Error(`cwd does not exist inside the comux project root`);
+    throw new Error(`cwd does not exist inside the psyche project root`);
   }
 
   if (!isPathInsideOrEqual(rootReal, requestedReal)) {
-    throw new Error(`cwd is outside the comux project root`);
+    throw new Error(`cwd is outside the psyche project root`);
   }
 
   return { projectRoot: rootReal, requestedCwd: requestedReal };
@@ -224,7 +224,7 @@ export async function launchProjectCovenSession(
   });
   const sessionRoot = await realpath(session.projectRoot);
   if (!isPathInsideOrEqual(scoped.projectRoot, sessionRoot)) {
-    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this comux project scope');
+    throw bridgeError('coven_session_scope_violation', 'Coven launched a session outside this psyche project scope');
   }
   return { ...session, projectRoot: sessionRoot };
 }
@@ -274,7 +274,7 @@ export async function routeProjectCovenSessionCapability(
   if (!isPathInsideOrEqual(rootReal, sessionRoot)) {
     throw bridgeError(
       'coven_session_scope_violation',
-      'Coven session is outside this comux project scope',
+      'Coven session is outside this psyche project scope',
     );
   }
   if (!LIVE_CAPABILITY_SESSION_STATUSES.has(session.status)) {
@@ -328,10 +328,10 @@ export async function openProjectCovenSession(
   const scopedSessions = await listProjectCovenSessions(projectRoot, client);
   const session = scopedSessions.find((candidate) => candidate.id === sessionId);
   if (!session) {
-    throw bridgeError('coven_session_not_found', 'Coven session is not in this comux project scope');
+    throw bridgeError('coven_session_not_found', 'Coven session is not in this psyche project scope');
   }
   if (!deps.tmuxSessionExists(sessionName)) {
-    throw bridgeError('tmux_session_missing', 'comux tmux session is not running; start comux for this project first');
+    throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
 
   const title = `coven:${session.title || session.id.slice(0, 8)}`;
@@ -341,7 +341,7 @@ export async function openProjectCovenSession(
   const now = new Date().toISOString();
   const config = await readBridgeConfig(projectRoot);
   const pane: RawConfigPane = {
-    id: `comux-${Date.now()}`,
+    id: `psyche-${Date.now()}`,
     slug: uniqueCovenPaneSlug(config, session),
     title,
     displayName: title,
@@ -689,7 +689,7 @@ export async function resolveConfiguredPaneId(projectRoot: string, paneId: strin
   const config = await readBridgeConfig(projectRoot);
   const pane = findRawPane(config, paneId);
   if (!pane) {
-    throw bridgeError('pane_not_found', 'pane is not registered in this comux project');
+    throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
   }
   return String(pane.paneId ?? pane.id ?? paneId);
 }
@@ -715,7 +715,7 @@ export async function readPaneStatus(
     status: typeof pane.agentStatus === 'string' ? pane.agentStatus : 'unknown',
     pane: summary,
     metadata: {
-      comuxId: typeof pane.id === 'string' ? pane.id : undefined,
+      psycheId: typeof pane.id === 'string' ? pane.id : undefined,
       title: typeof pane.title === 'string' ? pane.title : typeof pane.displayName === 'string' ? pane.displayName : undefined,
       agent: typeof pane.agent === 'string' ? pane.agent : undefined,
       branch: typeof pane.branchName === 'string' ? pane.branchName : typeof pane.branch === 'string' ? pane.branch : undefined,
@@ -737,7 +737,7 @@ export async function spawnBridgePane(
     typeof request?.cwd === 'string' ? request.cwd : undefined,
   );
   if (!deps.tmuxSessionExists(sessionName)) {
-    throw bridgeError('tmux_session_missing', 'comux tmux session is not running; start comux for this project first');
+    throw bridgeError('tmux_session_missing', 'psyche tmux session is not running; start psyche for this project first');
   }
 
   const agent = normalizeAgent(request.agent);
@@ -754,7 +754,7 @@ export async function spawnBridgePane(
   const now = new Date().toISOString();
   const config = await readBridgeConfig(scoped.projectRoot);
   const pane: RawConfigPane = {
-    id: `comux-${Date.now()}`,
+    id: `psyche-${Date.now()}`,
     slug,
     title,
     displayName: title,
@@ -864,7 +864,7 @@ async function writeBridgeConfig(projectRoot: string, config: BridgeConfig): Pro
 }
 
 function bridgeConfigPath(projectRoot: string): string {
-  return path.join(projectRoot, '.comux', 'comux.config.json');
+  return path.join(projectRoot, '.psyche', 'psyche.config.json');
 }
 
 function findRawPane(config: BridgeConfig, paneId: string): RawConfigPane | undefined {
@@ -911,18 +911,18 @@ function slugFromRequest(request: BridgeSpawnRequest): string {
 async function uniqueSlug(projectRoot: string, baseSlug: string): Promise<string> {
   for (let i = 0; i < 100; i++) {
     const slug = i === 0 ? baseSlug : `${baseSlug}-${i + 1}`;
-    const worktreePath = path.join(projectRoot, '.comux', 'worktrees', slug);
+    const worktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
     try {
       await realpath(worktreePath);
     } catch {
       return slug;
     }
   }
-  throw bridgeError('slug_exhausted', 'could not allocate a unique comux worktree slug');
+  throw bridgeError('slug_exhausted', 'could not allocate a unique psyche worktree slug');
 }
 
 async function resolveSpawnBranch(projectRoot: string, requestedBranch: string | undefined, slug: string): Promise<string> {
-  const base = requestedBranch || `comux/${slug}`;
+  const base = requestedBranch || `psyche/${slug}`;
   if (!isValidBridgeBranchName(base)) {
     throw bridgeError('invalid_branch', 'branch must be a safe local git branch name');
   }
@@ -933,7 +933,7 @@ async function resolveSpawnBranch(projectRoot: string, requestedBranch: string |
     const branch = i === 0 ? base : `${base}-${i + 1}`;
     if (!gitBranchExists(projectRoot, branch)) return branch;
   }
-  throw bridgeError('branch_exhausted', 'could not allocate a unique comux branch');
+  throw bridgeError('branch_exhausted', 'could not allocate a unique psyche branch');
 }
 
 function createGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
@@ -975,20 +975,20 @@ function isValidBridgeBranchName(branch: string): boolean {
 }
 
 async function ensureGeneratedWorktreesRoot(projectRoot: string): Promise<string> {
-  const worktreesRoot = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesRoot = path.join(projectRoot, '.psyche', 'worktrees');
   await mkdir(worktreesRoot, { recursive: true });
   const rootReal = await realpath(projectRoot);
   const worktreesReal = await realpath(worktreesRoot);
   if (!isPathInsideOrEqual(rootReal, worktreesReal)) {
-    throw bridgeError('invalid_worktree_path', 'project .comux/worktrees resolves outside the daemon project root');
+    throw bridgeError('invalid_worktree_path', 'project .psyche/worktrees resolves outside the daemon project root');
   }
   return worktreesRoot;
 }
 
 function assertGeneratedWorktreePath(projectRoot: string, worktreePath: string): void {
-  const worktreesRoot = path.join(projectRoot, '.comux', 'worktrees');
+  const worktreesRoot = path.join(projectRoot, '.psyche', 'worktrees');
   if (!isPathInsideOrEqual(worktreesRoot, worktreePath) || worktreePath === worktreesRoot) {
-    throw bridgeError('invalid_worktree_path', 'generated worktree path escaped the project .comux/worktrees directory');
+    throw bridgeError('invalid_worktree_path', 'generated worktree path escaped the project .psyche/worktrees directory');
   }
 }
 
@@ -997,7 +997,7 @@ async function buildLaunchCommand(
   slug: string,
   agent: AgentName,
   prompt: string | undefined,
-  permissionMode: ComuxConfig['settings']['permissionMode'],
+  permissionMode: PsycheConfig['settings']['permissionMode'],
 ): Promise<string> {
   if (!prompt || !prompt.trim()) {
     return buildAgentCommand(agent, permissionMode);
@@ -1006,7 +1006,7 @@ async function buildLaunchCommand(
   const promptFile = await writePromptFile(projectRoot, slug, prompt);
   return `${buildPromptReadAndDeleteSnippet(promptFile)}; ${buildInitialPromptCommand(
     agent,
-    '"$COMUX_PROMPT_CONTENT"',
+    '"$PSYCHE_PROMPT_CONTENT"',
     permissionMode,
   )}`;
 }

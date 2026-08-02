@@ -15,7 +15,7 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 async function fakeCoven(script: string): Promise<string> {
-  const dir = await tempDir('comux-fake-coven-');
+  const dir = await tempDir('psyche-fake-coven-');
   const command = path.join(dir, 'coven');
   await writeFile(command, script, 'utf8');
   await chmod(command, 0o755);
@@ -109,10 +109,10 @@ describe('coven session adapter', () => {
     });
   });
 
-  it('filters sessions to verified comux project roots', async () => {
-    const root = await tempDir('comux-coven-root-');
-    const child = await tempDir('comux-coven-root-child-');
-    const outside = await tempDir('comux-coven-outside-');
+  it('filters sessions to verified psyche project roots', async () => {
+    const root = await tempDir('psyche-coven-root-');
+    const child = await tempDir('psyche-coven-root-child-');
+    const outside = await tempDir('psyche-coven-outside-');
     const realRoot = await realpath(root);
 
     // Put the child under the root without relying on symlinks.

@@ -3,23 +3,23 @@ export const meta = { title: 'Merging' };
 export function render() {
   return `
     <h1>Merging</h1>
-    <p class="lead">comux handles the entire merge lifecycle — from auto-committing changes to merging branches and cleaning up worktrees.</p>
+    <p class="lead">psyche handles the entire merge lifecycle — from auto-committing changes to merging branches and cleaning up worktrees.</p>
 
     <h2>The Two-Phase Merge</h2>
-    <p>When you merge a pane, comux performs a safe two-phase merge to minimize the chance of conflicts landing on your main branch:</p>
+    <p>When you merge a pane, psyche performs a safe two-phase merge to minimize the chance of conflicts landing on your main branch:</p>
 
     <h3>Phase 1: Merge Main → Worktree</h3>
-    <p>First, comux merges the latest changes from your main branch <em>into</em> the worktree branch. This ensures any conflicts are resolved in the isolated worktree — not on main.</p>
+    <p>First, psyche merges the latest changes from your main branch <em>into</em> the worktree branch. This ensures any conflicts are resolved in the isolated worktree — not on main.</p>
     <ul>
-      <li>If there are no conflicts, comux proceeds to Phase 2</li>
-      <li>If there are conflicts, the merge is <strong>aborted</strong> and comux reports the conflicting files</li>
+      <li>If there are no conflicts, psyche proceeds to Phase 2</li>
+      <li>If there are conflicts, the merge is <strong>aborted</strong> and psyche reports the conflicting files</li>
     </ul>
 
     <h3>Phase 2: Merge Worktree → Main</h3>
-    <p>After Phase 1 succeeds (all conflicts resolved), comux merges the worktree branch back into main. Since conflicts were already resolved, this should be a clean merge.</p>
+    <p>After Phase 1 succeeds (all conflicts resolved), psyche merges the worktree branch back into main. Since conflicts were already resolved, this should be a clean merge.</p>
 
     <h2>Auto-Commit</h2>
-    <p>Before merging, comux checks for uncommitted changes in the worktree. If there are any, it:</p>
+    <p>Before merging, psyche checks for uncommitted changes in the worktree. If there are any, it:</p>
     <ol>
       <li>Stages all changes</li>
       <li>Generates a commit message using AI (via OpenRouter)</li>
@@ -29,21 +29,21 @@ export function render() {
 
     <div class="callout callout-info">
       <div class="callout-title">Note</div>
-      If OpenRouter is unavailable, comux will use a generic commit message like "comux: auto-commit changes".
+      If OpenRouter is unavailable, psyche will use a generic commit message like "psyche: auto-commit changes".
     </div>
 
     <h2>Handling Merge Conflicts</h2>
     <p>When conflicts are detected during Phase 1:</p>
     <ol>
-      <li>comux aborts the merge to keep the worktree clean</li>
+      <li>psyche aborts the merge to keep the worktree clean</li>
       <li>The conflicting files are listed in the TUI</li>
-      <li>comux offers to <strong>resolve using AI</strong> — this sends the conflicting files to your agent to automatically resolve the conflicts for you</li>
+      <li>psyche offers to <strong>resolve using AI</strong> — this sends the conflicting files to your agent to automatically resolve the conflicts for you</li>
       <li>Alternatively, you can jump to the pane (<kbd>j</kbd>) and resolve conflicts manually</li>
       <li>After resolving, retry the merge from the pane menu</li>
     </ol>
 
     <h2>Cleanup After Merge</h2>
-    <p>After a successful merge, comux:</p>
+    <p>After a successful merge, psyche:</p>
     <ul>
       <li>Removes the git worktree</li>
       <li>Deletes the branch (using <code>git branch -d</code> for safety)</li>
@@ -52,7 +52,7 @@ export function render() {
     </ul>
 
     <h2>Merge Hooks</h2>
-    <p>comux fires lifecycle hooks during the merge process. See <a href="#/hooks">Hooks</a> for details:</p>
+    <p>psyche fires lifecycle hooks during the merge process. See <a href="#/hooks">Hooks</a> for details:</p>
     <ul>
       <li><code>pre_merge</code> — runs before the merge begins</li>
       <li><code>post_merge</code> — runs after a successful merge</li>
@@ -61,11 +61,11 @@ export function render() {
     </ul>
 
     <h2>Multi-Project Merging</h2>
-    <p>When working with <a href="#/multi-project">multiple projects</a> that have nested worktrees, comux merges in the correct order — deepest worktrees first — to avoid conflicts between parent and child projects.</p>
+    <p>When working with <a href="#/multi-project">multiple projects</a> that have nested worktrees, psyche merges in the correct order — deepest worktrees first — to avoid conflicts between parent and child projects.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">A note on merge strategy</div>
-      Lots of people have lots of opinions on how git merges should be done. For now comux simply performs a <code>git merge</code>. If you want or need additional options like rebase, squash, or custom strategies, <a href="https://github.com/BunsDev/comux" target="_blank" rel="noopener">PRs are open</a>.
+      Lots of people have lots of opinions on how git merges should be done. For now psyche simply performs a <code>git merge</code>. If you want or need additional options like rebase, squash, or custom strategies, <a href="https://github.com/OpenCoven/psyche-build" target="_blank" rel="noopener">PRs are open</a>.
     </div>
   `;
 }

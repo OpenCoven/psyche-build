@@ -3,12 +3,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
-const mainJs = readFileSync(join(repoRoot, 'native/macos/comux-tauri/web/main.js'), 'utf8');
-const stylesCss = readFileSync(join(repoRoot, 'native/macos/comux-tauri/web/styles.css'), 'utf8');
-const tauriLib = readFileSync(join(repoRoot, 'native/macos/comux-tauri/src-tauri/src/lib.rs'), 'utf8');
-const indexHtml = readFileSync(join(repoRoot, 'native/macos/comux-tauri/web/index.html'), 'utf8');
+const mainJs = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'), 'utf8');
+const stylesCss = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'), 'utf8');
+const tauriLib = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const indexHtml = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
 const tauriConfig = JSON.parse(
-  readFileSync(join(repoRoot, 'native/macos/comux-tauri/src-tauri/tauri.conf.json'), 'utf8')
+  readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
 
 describe('Tauri desktop tab shortcuts', () => {

@@ -1,8 +1,8 @@
 /**
- * wireProtocol.ts — TypeScript mirror of ComuxCore v2 wire protocol.
+ * wireProtocol.ts — TypeScript mirror of PsycheCore v2 wire protocol.
  *
  * Field names and JSON shape are byte-identical to the Swift encoders in:
- *   native/shared/ComuxCore/Sources/ComuxCore/Messages.swift
+ *   native/shared/PsycheCore/Sources/PsycheCore/Messages.swift
  *
  * Encoding rules (matching Swift's BridgeCoder):
  *   - dateEncodingStrategy = .iso8601  → Date fields are ISO-8601 strings on the wire.
@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 export const PROTOCOL_VERSION = 2;
-export const BONJOUR_SERVICE_TYPE = "_comux._tcp";
+export const BONJOUR_SERVICE_TYPE = "_psyche._tcp";
 
 // ---------------------------------------------------------------------------
 // Shared types

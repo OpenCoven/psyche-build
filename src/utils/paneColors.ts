@@ -1,11 +1,11 @@
 import path from 'path';
-import type { ComuxPane, ComuxThemeName, SidebarProject } from '../types.js';
-import { isComuxThemeName, normalizeComuxTheme } from '../theme/themePalette.js';
+import type { PsychePane, PsycheThemeName, SidebarProject } from '../types.js';
+import { isPsycheThemeName, normalizePsycheTheme } from '../theme/themePalette.js';
 import { getPaneProjectRoot } from './paneProject.js';
 import { getSidebarProjectColorTheme } from './sidebarProjects.js';
 import { SettingsManager } from './settingsManager.js';
 
-type ProjectThemeCache = Map<string, ComuxThemeName>;
+type ProjectThemeCache = Map<string, PsycheThemeName>;
 
 function getCacheKey(projectRoot: string): string {
   return path.resolve(projectRoot);
@@ -15,7 +15,7 @@ export function resolveProjectColorTheme(
   projectRoot: string,
   sidebarProjects: SidebarProject[],
   cache: ProjectThemeCache = new Map()
-): ComuxThemeName {
+): PsycheThemeName {
   const cacheKey = getCacheKey(projectRoot);
   const cachedTheme = cache.get(cacheKey);
   if (cachedTheme) {
@@ -23,19 +23,19 @@ export function resolveProjectColorTheme(
   }
 
   const resolvedTheme = getSidebarProjectColorTheme(sidebarProjects, projectRoot)
-    || normalizeComuxTheme(new SettingsManager(projectRoot).getSettings().colorTheme);
+    || normalizePsycheTheme(new SettingsManager(projectRoot).getSettings().colorTheme);
 
   cache.set(cacheKey, resolvedTheme);
   return resolvedTheme;
 }
 
 export function getPaneColorTheme(
-  pane: ComuxPane,
+  pane: PsychePane,
   sidebarProjects: SidebarProject[],
   fallbackProjectRoot: string,
   cache: ProjectThemeCache = new Map()
-): ComuxThemeName {
-  if (isComuxThemeName(pane.colorTheme)) {
+): PsycheThemeName {
+  if (isPsycheThemeName(pane.colorTheme)) {
     return pane.colorTheme;
   }
 
@@ -47,10 +47,10 @@ export function getPaneColorTheme(
 }
 
 export function syncPaneColorThemes(
-  panes: ComuxPane[],
+  panes: PsychePane[],
   sidebarProjects: SidebarProject[],
   fallbackProjectRoot: string
-): ComuxPane[] {
+): PsychePane[] {
   const projectThemeCache: ProjectThemeCache = new Map();
   let changed = false;
 

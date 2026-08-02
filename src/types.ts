@@ -1,7 +1,7 @@
 import type { AgentName, PermissionMode } from './utils/agentLaunch.js';
 import type { NotificationSoundId } from './utils/notificationSounds.js';
 
-export type ComuxThemeName =
+export type PsycheThemeName =
   | 'red'
   | 'blue'
   | 'yellow'
@@ -35,7 +35,7 @@ export interface MergeTargetReference {
 export interface SidebarProject {
   projectRoot: string;
   projectName: string;
-  colorTheme?: ComuxThemeName;
+  colorTheme?: PsycheThemeName;
   colorThemeSource?: 'auto' | 'manual';
 }
 
@@ -49,17 +49,17 @@ export interface AgentSessionReference {
   source?: string;
 }
 
-export interface ComuxPane {
+export interface PsychePane {
   id: string;
   slug: string;
   displayName?: string; // User-facing pane name (independent from worktree slug/branch)
   branchName?: string; // Git branch name (may differ from slug when branchPrefix is set)
   prompt: string;
   paneId: string;
-  hidden?: boolean; // Pane is detached from the active comux window but still running
+  hidden?: boolean; // Pane is detached from the active psyche window but still running
   projectRoot?: string; // Main repository root this pane belongs to
   projectName?: string; // Display name for pane's project
-  colorTheme?: ComuxThemeName; // Cached effective project accent for fast focus/theme switches
+  colorTheme?: PsycheThemeName; // Cached effective project accent for fast focus/theme switches
   type?: 'worktree' | 'shell' | 'desktop-use';  // Type of pane (defaults to 'worktree' for backward compat)
   shellType?: string;  // Shell type for shell panes (bash, zsh, fish, fb, desktop-use, etc)
   covenSession?: {
@@ -79,7 +79,7 @@ export interface ComuxPane {
     updatedAt?: string;
   };
   worktreePath?: string;
-  browserPath?: string; // Root path when a shell pane is a comux file browser
+  browserPath?: string; // Root path when a shell pane is a psyche file browser
   testWindowId?: string;  // Background window for tests
   testStatus?: 'running' | 'passed' | 'failed';
   testOutput?: string;
@@ -128,7 +128,7 @@ export interface ProjectSettings {
   firstDevRun?: boolean;   // Track if dev has been run before
 }
 
-export interface ComuxSettings {
+export interface PsycheSettings {
   // Agent permission mode
   // '' = agent default behavior (usually prompts for permissions)
   // plan = Claude plan mode only (read/plan focused)
@@ -143,10 +143,10 @@ export interface ComuxSettings {
   enabledAgents?: AgentName[];
   // Which macOS helper notification sounds are eligible for random selection
   enabledNotificationSounds?: NotificationSoundId[];
-  // Rotate short comux tips in the footer
+  // Rotate short psyche tips in the footer
   showFooterTips?: boolean;
   // Accent color theme used across the TUI and welcome pane
-  colorTheme?: ComuxThemeName;
+  colorTheme?: PsycheThemeName;
   // Tmux hooks for event-driven updates (low CPU)
   // true = use hooks, false = use polling, undefined = not yet asked
   useTmuxHooks?: boolean;
@@ -155,7 +155,7 @@ export interface ComuxSettings {
   baseBranch?: string;
   // Prefix for branch names (e.g. 'feat/' produces 'feat/fix-auth')
   branchPrefix?: string;
-  // Maximum number of comux-managed worktrees to keep per project.
+  // Maximum number of psyche-managed worktrees to keep per project.
   // Old inactive managed worktrees are pruned after pane creation.
   maxManagedWorktrees?: number;
   // Preferred minimum content pane width in characters
@@ -168,7 +168,7 @@ export type SettingsScope = 'global' | 'project';
 export type EffectiveSettingsScope = SettingsScope | 'team';
 
 export interface SettingDefinition {
-  key: keyof ComuxSettings | string;
+  key: keyof PsycheSettings | string;
   label: string;
   description: string;
   type: 'boolean' | 'select' | 'text' | 'number' | 'action';
@@ -180,25 +180,25 @@ export interface SettingDefinition {
   shiftStep?: number;
 }
 
-export interface ComuxAppProps {
+export interface PsycheAppProps {
   panesFile: string;
   projectName: string;
   sessionName: string;
   projectRoot?: string;
   settingsFile: string;
   autoUpdater?: any; // AutoUpdater instance
-  controlPaneId?: string; // Pane ID running comux TUI (left sidebar)
+  controlPaneId?: string; // Pane ID running psyche TUI (left sidebar)
   bridgeDaemon?: any; // BridgeDaemon instance (optional, macOS-only progressive enhancement)
 }
 
-export interface ComuxConfig {
+export interface PsycheConfig {
   projectName: string;
   projectRoot: string;
-  panes: ComuxPane[];
+  panes: PsychePane[];
   sidebarProjects?: SidebarProject[];
-  settings: ComuxSettings;
+  settings: PsycheSettings;
   lastUpdated: string;
-  controlPaneId?: string; // Pane ID running comux TUI (left sidebar)
+  controlPaneId?: string; // Pane ID running psyche TUI (left sidebar)
   controlPaneSize?: number; // Fixed sidebar width (40 chars)
   welcomePaneId?: string; // Pane ID for the welcome/placeholder pane
 }
