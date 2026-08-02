@@ -3,8 +3,6 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { createCovenClient, type CovenClient } from '../daemon/bridge.js';
 
-export type CovenSessionsSource = 'coven daemon API' | 'coven sessions --json';
-
 export type CovenSessionVisibilityStatus =
   | 'created'
   | 'starting'
@@ -30,6 +28,7 @@ export interface CovenSessionVisibility {
 }
 
 export type CovenSessionsSource =
+  | 'coven daemon API'
   | 'coven sessions --json --all'
   | 'coven sessions --json';
 

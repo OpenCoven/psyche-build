@@ -26,8 +26,6 @@ import { SIDEBAR_WIDTH } from './utils/layoutManager.js';
 import { validateSystemRequirements, printValidationResults } from './utils/systemCheck.js';
 import { getUntrackedPanes } from './utils/shellPaneDetection.js';
 import { runFirstRunOnboardingIfNeeded } from './utils/onboarding.js';
-import { migrateDmuxConfigIfNeeded } from './utils/migrateDmuxConfig.js';
-import { migrateVmuxConfigIfNeeded } from './utils/migrateVmuxConfig.js';
 import { atomicWriteJson } from './utils/atomicWrite.js';
 import { buildDevWatchCommand, buildDevWatchRespawnCommand } from './utils/devWatchCommand.js';
 import { shouldUseQuietDevWatchExit } from './utils/devWatchExit.js';
@@ -211,17 +209,8 @@ class Comux {
     // Set up global signal handlers for clean exit
     this.setupGlobalSignalHandlers();
 
-    // Migrate legacy vmux project config before initializing comux config.
-    await migrateVmuxConfigIfNeeded(this.projectRoot);
-
     // Ensure .comux directory exists and is in .gitignore
     await this.ensureComuxDirectory();
-
-    // Check for migration from old config location
-    await this.migrateOldConfig();
-
-    // Migrate legacy dmux config if present
-    await migrateDmuxConfigIfNeeded(this.projectRoot);
 
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();
@@ -1259,106 +1248,6 @@ class Comux {
         `Added ${addedEntries.join(', ')} to .gitignore`,
         'Setup'
       );
-    }
-  }
-
-
-  private async migrateOldConfig() {
-    // Check if we're using the new config location
-    const comuxDir = path.join(this.projectRoot, '.comux');
-    const newConfigFile = path.join(comuxDir, 'comux.config.json');
-    const oldParentConfigFile = path.join(path.dirname(this.projectRoot), 'comux.config.json');
-    const homeComuxDir = path.join(process.env.HOME!, '.comux');
-
-    if (this.panesFile === newConfigFile && !await this.fileExists(newConfigFile)) {
-      // Look for old config files to migrate
-      const projectHash = createHash('md5').update(this.projectRoot).digest('hex').substring(0, 8);
-      const projectIdentifier = `${this.projectName}-${projectHash}`;
-      const oldPanesFile = path.join(homeComuxDir, `${projectIdentifier}-panes.json`);
-      const oldSettingsFile = path.join(homeComuxDir, `${projectIdentifier}-settings.json`);
-      const oldUpdateSettingsFile = path.join(homeComuxDir, 'update-settings.json');
-
-      let panes = [];
-      let settings = {};
-      let updateSettings = {};
-
-      // Try to read old panes file
-      if (await this.fileExists(oldPanesFile)) {
-        try {
-          const oldPanesContent = await fs.readFile(oldPanesFile, 'utf-8');
-          panes = JSON.parse(oldPanesContent);
-        } catch {
-          // Intentionally silent - migration is best-effort
-        }
-      }
-
-      // Try to read old settings file
-      if (await this.fileExists(oldSettingsFile)) {
-        try {
-          const oldSettingsContent = await fs.readFile(oldSettingsFile, 'utf-8');
-          settings = JSON.parse(oldSettingsContent);
-        } catch {
-          // Intentionally silent - migration is best-effort
-        }
-      }
-
-      // Try to read old update settings file
-      if (await this.fileExists(oldUpdateSettingsFile)) {
-        try {
-          const oldUpdateContent = await fs.readFile(oldUpdateSettingsFile, 'utf-8');
-          updateSettings = JSON.parse(oldUpdateContent);
-        } catch {
-          // Intentionally silent - migration is best-effort
-        }
-      }
-
-      // Check for config from previous parent directory location
-      if (await this.fileExists(oldParentConfigFile)) {
-        try {
-          const oldConfig = JSON.parse(await fs.readFile(oldParentConfigFile, 'utf-8'));
-          if (oldConfig.panes) panes = oldConfig.panes;
-          if (oldConfig.settings) settings = oldConfig.settings;
-          if (oldConfig.updateSettings) updateSettings = oldConfig.updateSettings;
-        } catch {
-          // Intentionally silent - migration is best-effort
-        }
-      }
-
-      // If we found old config, migrate it
-      if (panes.length > 0 || Object.keys(settings).length > 0 || Object.keys(updateSettings).length > 0) {
-        const migratedConfig = {
-          projectName: this.projectName,
-          projectRoot: this.projectRoot,
-          panes: panes,
-          settings: settings,
-          updateSettings: updateSettings,
-          lastUpdated: new Date().toISOString(),
-          migratedFrom: 'comux-legacy'
-        };
-        await fs.writeFile(newConfigFile, JSON.stringify(migratedConfig, null, 2));
-
-        // Clean up old files after successful migration
-        try {
-          await fs.unlink(oldPanesFile);
-        } catch {
-          // Intentionally silent - cleanup is best-effort
-        }
-        try {
-          await fs.unlink(oldSettingsFile);
-        } catch {
-          // Intentionally silent - cleanup is best-effort
-        }
-        try {
-          await fs.unlink(oldUpdateSettingsFile);
-        } catch {
-          // Intentionally silent - cleanup is best-effort
-        }
-        try {
-          await fs.unlink(oldParentConfigFile);
-        } catch {
-          // Intentionally silent - cleanup is best-effort
-        }
-      }
     }
   }
 
