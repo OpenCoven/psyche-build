@@ -1,6 +1,6 @@
-# Contributing to psyche
+# Contributing to Psyche Build
 
-This project is built while running psyche itself. The goal is a fast, repeatable loop for maintainers and contributors.
+This project is built while running Psyche Build itself. The goal is a fast, repeatable loop for maintainers and contributors.
 
 ## Prerequisites
 
@@ -17,13 +17,13 @@ This project is built while running psyche itself. The goal is a fast, repeatabl
 pnpm install
 ```
 
-2. Start psyche in local dev mode:
+2. Start Psyche Build in local dev mode:
 
 ```bash
 pnpm dev
 ```
 
-`pnpm dev` is the standard maintainer entrypoint for this repo. It generates hook docs, compiles TypeScript, then launches psyche from `dist/index.js` with `PSYCHE_DEV=true`.
+`pnpm dev` is the standard maintainer entrypoint for this repo. It generates hook docs, compiles TypeScript, then launches Psyche Build from `dist/index.js` with `PSYCHE_DEV=true`.
 
 If tmux setup looks wrong, run:
 
@@ -36,8 +36,8 @@ node ./psyche doctor --fix
 
 ## Recommended Daily Workflow
 
-1. Keep one long-lived maintainer checkout for running local psyche (`pnpm dev`).
-2. Create feature panes/worktrees from psyche (`n`) for actual changes.
+1. Keep one long-lived maintainer checkout for running local Psyche Build (`pnpm dev`).
+2. Create feature panes/worktrees from Psyche Build (`n`) for actual changes.
 3. Iterate in feature worktree panes and merge from the pane menu (`m`) when possible.
 4. Close panes with care when you want to preserve worktrees for later.
 5. Reopen closed worktrees with `r` when you need to resume work.
@@ -46,7 +46,7 @@ In DEV mode, source switching is available from the pane menu (`[DEV] Use as Sou
 
 - Select any worktree pane and run source toggle -> that worktree becomes active source.
 - Toggle again on the already-active source pane -> source falls back to project root.
-- If the active source worktree is closed/removed, psyche automatically falls back to project root.
+- If the active source worktree is closed/removed, Psyche Build automatically falls back to project root.
 - The active source pane is marked with `[source]` in the pane list.
 
 This keeps the dev session stable while still using pane-per-branch isolation.
@@ -66,7 +66,7 @@ If this generated file changes only because the date rolled forward, revert it b
 ## Pull Request Workflow
 
 1. One pane/worktree per PR branch.
-2. Merge through psyche when possible to dogfood merge + cleanup paths.
+2. Merge through Psyche Build when possible to dogfood merge + cleanup paths.
 3. Ensure local checks pass:
 
 ```bash

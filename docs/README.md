@@ -35,10 +35,9 @@ npm run preview
 
 ## Related docs
 
-- [Demo loop](DEMO-LOOP.md)
+- [Breaking changes](BREAKING-CHANGES.md)
 - [Coven sessions](COVEN-SESSIONS.md)
 - [psyche + Coven demo loop](COVEN-DEMO-LOOP.md)
-- [Coven session visibility](COVEN-SESSIONS.md)
 - [Product spec](PRODUCT-SPEC.md)
 - [Smoke test](SMOKE.md)
 - [Contributing](../CONTRIBUTING.md)

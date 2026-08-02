@@ -4,11 +4,7 @@ psyche treats Coven as an optional local runtime. psyche stays useful on its own
 
 ## Demo loop
 
-See [DEMO-LOOP.md](./DEMO-LOOP.md) for the full developer walkthrough.
-
-## Demo loop
-
-See [DEMO-LOOP.md](./DEMO-LOOP.md) for the full developer walkthrough.
+See [COVEN-DEMO-LOOP.md](./COVEN-DEMO-LOOP.md) for the full developer walkthrough.
 
 ## Adapter boundary
 

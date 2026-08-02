@@ -41,11 +41,10 @@ chmod +x .psyche-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name) for the new pane</td></tr>
-        <tr><td><code>PSYCHE_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
-        <tr><td><code>PSYCHE_PANE_AGENT</code></td><td>The selected agent (claude, opencode, codex)</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug (branch name) for the new pane</td></tr>
+        <tr><td><code>PSYCHE_PROMPT</code></td><td>The user's prompt text</td></tr>
+        <tr><td><code>PSYCHE_AGENT</code></td><td>The selected agent (claude, opencode, codex)</td></tr>
+        <tr><td><code>PSYCHE_ROOT</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -55,13 +54,12 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID (e.g. psyche-1)</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
-        <tr><td><code>PSYCHE_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
-        <tr><td><code>PSYCHE_PANE_AGENT</code></td><td>The agent being used</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug (branch name)</td></tr>
+        <tr><td><code>PSYCHE_PROMPT</code></td><td>The user's prompt text</td></tr>
+        <tr><td><code>PSYCHE_AGENT</code></td><td>The agent being used</td></tr>
         <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID (e.g. %38)</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_ROOT</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -70,11 +68,10 @@ chmod +x .psyche-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug (branch name)</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug (branch name)</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the new worktree</td></tr>
-        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch name</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_NAME</code></td><td>The project name</td></tr>
-        <tr><td><code>PSYCHE_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
+        <tr><td><code>PSYCHE_BRANCH</code></td><td>Git branch name</td></tr>
+        <tr><td><code>PSYCHE_ROOT</code></td><td>Path to the project root</td></tr>
       </tbody>
     </table>
 
@@ -89,7 +86,7 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
         <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
       </tbody>
@@ -101,7 +98,7 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
       </tbody>
     </table>
 
@@ -112,9 +109,9 @@ chmod +x .psyche-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch name</td></tr>
+        <tr><td><code>PSYCHE_BRANCH</code></td><td>Git branch name</td></tr>
       </tbody>
     </table>
 
@@ -123,8 +120,8 @@ chmod +x .psyche-hooks/*</code></pre>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Git branch that was deleted</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_BRANCH</code></td><td>Git branch that was deleted</td></tr>
       </tbody>
     </table>
 
@@ -136,10 +133,10 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
-        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Branch being merged</td></tr>
-        <tr><td><code>PSYCHE_MAIN_BRANCH</code></td><td>Target branch (e.g. main)</td></tr>
+        <tr><td><code>PSYCHE_BRANCH</code></td><td>Branch being merged</td></tr>
+        <tr><td><code>PSYCHE_TARGET_BRANCH</code></td><td>Target branch (e.g. main)</td></tr>
       </tbody>
     </table>
 
@@ -149,9 +146,9 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
-        <tr><td><code>PSYCHE_BRANCH_NAME</code></td><td>Branch that was merged</td></tr>
-        <tr><td><code>PSYCHE_MAIN_BRANCH</code></td><td>Target branch</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_BRANCH</code></td><td>Branch that was merged</td></tr>
+        <tr><td><code>PSYCHE_TARGET_BRANCH</code></td><td>Target branch</td></tr>
       </tbody>
     </table>
 
@@ -163,7 +160,7 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
         <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
       </tbody>
@@ -175,21 +172,24 @@ chmod +x .psyche-hooks/*</code></pre>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>PSYCHE_PANE_ID</code></td><td>The psyche pane ID</td></tr>
-        <tr><td><code>PSYCHE_PANE_SLUG</code></td><td>The slug</td></tr>
+        <tr><td><code>PSYCHE_SLUG</code></td><td>The slug</td></tr>
         <tr><td><code>PSYCHE_WORKTREE_PATH</code></td><td>Path to the worktree</td></tr>
         <tr><td><code>PSYCHE_TMUX_PANE_ID</code></td><td>The tmux pane ID</td></tr>
       </tbody>
     </table>
 
     <h2>HTTP Callback API</h2>
-    <p>The <code>run_test</code> and <code>run_dev</code> hooks support HTTP callbacks. When these hooks run, psyche also exposes a callback URL via environment variable:</p>
+    <p>The <code>run_test</code> and <code>run_dev</code> hooks can report back over HTTP. Psyche Build exposes the port it is listening on; you build the URL yourself:</p>
     <table>
       <thead><tr><th>Variable</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>PSYCHE_CALLBACK_URL</code></td><td>URL to POST results back to psyche</td></tr>
+        <tr><td><code>PSYCHE_SERVER_PORT</code></td><td>Port of the local HTTP server, e.g. <code>3142</code></td></tr>
       </tbody>
     </table>
-    <p>This lets you report test results or dev server status back to the psyche dashboard.</p>
+    <pre><code data-lang="bash">curl -X PUT "http://localhost:$PSYCHE_SERVER_PORT/api/panes/$PSYCHE_PANE_ID/test" \\
+  -H "Content-Type: application/json" \\
+  -d '{"status":"passed"}'</code></pre>
+    <p>This lets you report test results or dev server status back to the pane.</p>
 
     <h2>Example Hooks</h2>
 
@@ -226,7 +226,7 @@ fi</code></pre>
 # .psyche-hooks/post_merge
 
 # Send a desktop notification (macOS)
-osascript -e "display notification \\"Merged $PSYCHE_PANE_SLUG into $PSYCHE_MAIN_BRANCH\\" with title \\"psyche\\""</code></pre>
+osascript -e "display notification \\"Merged $PSYCHE_SLUG into $PSYCHE_TARGET_BRANCH\\" with title \\"psyche\\""</code></pre>
 
     <div class="callout callout-warning">
       <div class="callout-title">Important</div>
