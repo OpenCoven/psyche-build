@@ -112,6 +112,37 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 - At least one supported agent CLI for agent panes (for example [Coven Code](https://github.com/OpenCoven/coven), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), [Cline CLI](https://docs.cline.bot/cline-cli/getting-started), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Qwen CLI](https://github.com/QwenLM/qwen-code), [Amp CLI](https://ampcode.com/manual), [pi CLI](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), [Cursor CLI](https://docs.cursor.com/en/cli/overview), [Copilot CLI](https://github.com/github/copilot-cli), [Crush CLI](https://github.com/charmbracelet/crush)). Plain terminal panes work without an agent CLI.
 - [OpenRouter API key](https://openrouter.ai/) (optional, for AI branch names, status analysis, and commit messages)
 
+## MCP server
+
+`psyche mcp` exposes the pane surface over MCP (stdio JSON-RPC), so an agent —
+Coven Code, Claude Code, or any MCP-capable client — can fan work into parallel
+Psyche Build panes without leaving its session.
+
+```json
+{
+  "mcp_servers": [
+    { "name": "psyche", "command": "psyche", "args": ["mcp"], "type": "stdio" }
+  ]
+}
+```
+
+| Tool | Does |
+|---|---|
+| `psyche_list_panes` | List panes for the project, with pane id, branch, agent, and title |
+| `psyche_create_pane` | New worktree + branch + tmux pane, with the chosen harness launched on a prompt |
+| `psyche_kill_pane` | Terminate a pane and deregister it |
+| `psyche_get_pane_output` | Read a pane's buffer and scrollback without attaching |
+| `psyche_list_rituals` | List built-in and project rituals |
+| `psyche_list_worktrees` | List git worktrees for the project |
+
+`psyche_create_pane` requires a running Psyche Build tmux session for the
+project — start `psyche` there first.
+
+`psyche_kill_pane` **does not delete the pane's worktree or branch.** It returns
+both so you can inspect or merge the work; removing them stays an explicit
+action in the TUI, because a worktree can hold the only copy of uncommitted
+changes.
+
 ## Coven and OpenCoven
 
 Psyche Build works as a standalone tmux/worktree cockpit. It also speaks to Coven when a local Coven daemon is available, so OpenCoven-managed harness sessions can appear beside normal Psyche Build panes.

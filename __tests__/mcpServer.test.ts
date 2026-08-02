@@ -56,6 +56,19 @@ describe('MCP tool registry', () => {
     }
   });
 
+  // This repo has drifted twice between documented and real behaviour (the
+  // hook env-var table, and the agent count). The MCP surface is the contract
+  // other agents dispatch on, so pin the README against the registry.
+  it('documents exactly the tools it implements', async () => {
+    const { readFileSync } = await import('node:fs');
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const documented = [...new Set(
+      [...readme.matchAll(/`(psyche_[a-z_]+)`/g)].map((m) => m[1]),
+    )].sort();
+
+    expect(documented).toEqual(TOOLS.map((t) => t.name).sort());
+  });
+
   it('returns a JSON-RPC error for an unknown tool', async () => {
     const response = await call('psyche_nope');
     expect(response.error?.code).toBe(-32601);
