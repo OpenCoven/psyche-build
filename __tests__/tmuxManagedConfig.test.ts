@@ -6,10 +6,19 @@ import {
   PSYCHE_TMUX_CONFIG_END,
   PSYCHE_TMUX_CONFIG_START,
   buildPsycheManagedTmuxConfigBlock,
+  hasLegacyComuxManagedTmuxConfigBlock,
   hasPsycheManagedTmuxConfigBlock,
+  stripLegacyComuxManagedTmuxConfigBlock,
   upsertPsycheManagedTmuxConfigBlock,
   writePsycheManagedTmuxConfig,
 } from '../src/utils/tmuxManagedConfig.js';
+
+const LEGACY_BLOCK = [
+  '# >>> comux',
+  '# Managed by comux. Edit outside this block; comux may replace this block.',
+  'bind-key -n M-n run-shell "comux new"',
+  '# <<< comux',
+].join('\n');
 
 describe('tmux managed config', () => {
   it('inserts the psyche block without changing user-owned config', () => {
@@ -62,4 +71,51 @@ describe('tmux managed config', () => {
       await fs.rm(homeDir, { recursive: true, force: true });
     }
   });
+
+  describe('legacy comux block eviction', () => {
+    it('detects a pre-rename comux block', () => {
+      expect(hasLegacyComuxManagedTmuxConfigBlock(LEGACY_BLOCK)).toBe(true);
+      expect(hasLegacyComuxManagedTmuxConfigBlock('set -g mouse on')).toBe(false);
+    });
+
+    it('strips the legacy block while preserving surrounding user config', () => {
+      const existing = `set -g mouse on\n\n${LEGACY_BLOCK}\n\nset -g history-limit 50000\n`;
+      const stripped = stripLegacyComuxManagedTmuxConfigBlock(existing);
+
+      expect(stripped).toContain('set -g mouse on');
+      expect(stripped).toContain('set -g history-limit 50000');
+      expect(stripped).not.toMatch(/comux/i);
+    });
+
+    it('removes the legacy block when installing the psyche block', () => {
+      const block = buildPsycheManagedTmuxConfigBlock('dark');
+      const result = upsertPsycheManagedTmuxConfigBlock(`${LEGACY_BLOCK}\n`, block);
+
+      expect(result.content).not.toMatch(/comux/i);
+      expect(hasPsycheManagedTmuxConfigBlock(result.content)).toBe(true);
+      expect(result.changed).toBe(true);
+    });
+
+    // Regression: `changed` must be computed against the original content. If
+    // it were computed against the stripped copy, a file whose only defect was
+    // a leftover comux block would report unchanged, never be written, and
+    // keep the dead block through every `doctor --fix`.
+    it('reports changed when the psyche block is already current but a legacy block lingers', () => {
+      const block = buildPsycheManagedTmuxConfigBlock('dark');
+      const current = upsertPsycheManagedTmuxConfigBlock('', block);
+      expect(upsertPsycheManagedTmuxConfigBlock(current.content, block).changed).toBe(false);
+
+      const polluted = `${LEGACY_BLOCK}\n\n${current.content}`;
+      const result = upsertPsycheManagedTmuxConfigBlock(polluted, block);
+
+      expect(result.changed).toBe(true);
+      expect(result.content).not.toMatch(/comux/i);
+    });
+
+    it('leaves a config with no legacy block untouched', () => {
+      const existing = 'set -g mouse on\n';
+      expect(stripLegacyComuxManagedTmuxConfigBlock(existing)).toBe(existing);
+    });
+  });
+
 });

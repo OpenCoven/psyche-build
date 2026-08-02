@@ -98,10 +98,47 @@ export function hasPsycheManagedTmuxConfigBlock(content: string): boolean {
   return content.includes(PSYCHE_TMUX_CONFIG_START) && content.includes(PSYCHE_TMUX_CONFIG_END);
 }
 
+/**
+ * Markers written by comux, the name this tool shipped under previously.
+ *
+ * The block they delimit binds keys to a `comux` binary that no longer
+ * exists, so leaving it in ~/.tmux.conf means dead keybindings sitting right
+ * next to the live ones. It is removed rather than migrated — the clean break
+ * applies here too.
+ */
+const LEGACY_COMUX_TMUX_CONFIG_START = '# >>> comux';
+const LEGACY_COMUX_TMUX_CONFIG_END = '# <<< comux';
+
+export function hasLegacyComuxManagedTmuxConfigBlock(content: string): boolean {
+  const startIndex = content.indexOf(LEGACY_COMUX_TMUX_CONFIG_START);
+  const endIndex = content.indexOf(LEGACY_COMUX_TMUX_CONFIG_END);
+  return startIndex !== -1 && endIndex !== -1 && endIndex > startIndex;
+}
+
+export function stripLegacyComuxManagedTmuxConfigBlock(content: string): string {
+  const startIndex = content.indexOf(LEGACY_COMUX_TMUX_CONFIG_START);
+  const endIndex = content.indexOf(LEGACY_COMUX_TMUX_CONFIG_END);
+  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
+    return content;
+  }
+
+  const replaceEnd = endIndex + LEGACY_COMUX_TMUX_CONFIG_END.length;
+  const before = content.slice(0, startIndex).replace(/\s*$/, '');
+  const after = content.slice(replaceEnd).replace(/^\s*/, '');
+  // Normalize to exactly one trailing newline. `after` usually already ends
+  // with one, so appending unconditionally would leave a blank line and make
+  // the result differ from an otherwise-identical config purely by whitespace.
+  const joined = [before, after].filter(Boolean).join('\n\n').replace(/\s*$/, '');
+  return joined ? `${joined}\n` : '';
+}
+
 export function upsertPsycheManagedTmuxConfigBlock(
-  existingContent: string,
+  rawExistingContent: string,
   nextBlock: string
 ): { content: string; action: ManagedTmuxConfigAction; changed: boolean } {
+  // Evict a pre-rename comux block first so `doctor --fix` never leaves two
+  // managed blocks side by side.
+  const existingContent = stripLegacyComuxManagedTmuxConfigBlock(rawExistingContent);
   const normalizedBlock = nextBlock.endsWith('\n') ? nextBlock : `${nextBlock}\n`;
   const startIndex = existingContent.indexOf(PSYCHE_TMUX_CONFIG_START);
   const endIndex = existingContent.indexOf(PSYCHE_TMUX_CONFIG_END);
@@ -118,8 +155,12 @@ export function upsertPsycheManagedTmuxConfigBlock(
 
     return {
       content: nextContent,
-      action: nextContent === existingContent ? 'unchanged' : 'updated',
-      changed: nextContent !== existingContent,
+      // Compare against the ORIGINAL content, not the stripped copy. If the
+      // only change was evicting a legacy comux block, comparing against the
+      // stripped copy would report `unchanged`, the file would never be
+      // written, and the dead block would survive every `doctor --fix`.
+      action: nextContent === rawExistingContent ? 'unchanged' : 'updated',
+      changed: nextContent !== rawExistingContent,
     };
   }
 
@@ -131,7 +172,7 @@ export function upsertPsycheManagedTmuxConfigBlock(
   return {
     content: nextContent,
     action: trimmedExisting ? 'inserted' : 'created',
-    changed: nextContent !== existingContent,
+    changed: nextContent !== rawExistingContent,
   };
 }
 

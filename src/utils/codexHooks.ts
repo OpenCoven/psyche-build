@@ -9,6 +9,22 @@ export interface CodexHookInstallResult {
 
 type ShellAssignment = [key: string, value: string];
 
+/**
+ * Stop-hook scripts this tool owns and may replace on reinstall.
+ *
+ * `comux-stop-hook.cjs` is the pre-rename name and is listed deliberately.
+ * Codex hook configs live in each worktree's `.codex/hooks.json` — outside
+ * this repo — so a config written before the rename still references it. If
+ * we only matched the current name, that stale entry would never be filtered
+ * out and Codex would keep firing a Stop hook whose script no longer exists,
+ * ENOENT-ing on every turn, forever. This list is only ever used to *remove*
+ * entries; nothing reads or writes the old path.
+ */
+const MANAGED_STOP_HOOK_SCRIPTS = [
+  'psyche-stop-hook.cjs',
+  'comux-stop-hook.cjs',
+] as const;
+
 function escapeForSingleQuotedJs(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
@@ -36,7 +52,7 @@ function mergePsycheStopHook(hooksPath: string, hookCommand: string): void {
     const handlers = Array.isArray(group?.hooks) ? group.hooks : [];
     return !handlers.some((handler: any) => (
       typeof handler?.command === 'string'
-      && handler.command.includes('psyche-stop-hook.cjs')
+      && MANAGED_STOP_HOOK_SCRIPTS.some((script) => handler.command.includes(script))
     ));
   });
   nextStopHooks.push({

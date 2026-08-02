@@ -38,6 +38,10 @@ import { claimProcessShutdown } from './utils/processShutdown.js';
 import { sendTmuxShellCommand } from './utils/tmuxSendKeys.js';
 import { ensurePsycheRuntimeIgnored } from './utils/gitignore.js';
 import {
+  detectLegacyComuxState,
+  formatLegacyComuxWarning,
+} from './utils/legacyComuxState.js';
+import {
   addSidebarProject,
   getAutoSidebarProjectColorTheme,
   getSidebarProjectColorTheme,
@@ -211,6 +215,10 @@ class Psyche {
 
     // Ensure .psyche directory exists and is in .gitignore
     await this.ensurePsycheDirectory();
+
+    // Surface leftover comux state. Nothing is migrated; this only makes the
+    // clean break visible instead of letting hooks silently stop firing.
+    this.warnAboutLegacyComuxState();
 
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();
@@ -1220,6 +1228,15 @@ class Psyche {
       // Fallback to current directory if not in a git repo
       return process.cwd();
     }
+  }
+
+  private warnAboutLegacyComuxState() {
+    const findings = detectLegacyComuxState({
+      projectRoot: this.projectRoot,
+      homeDir: process.env.HOME,
+    });
+    if (findings.length === 0) return;
+    console.log(chalk.yellow(formatLegacyComuxWarning(findings)));
   }
 
   private async ensurePsycheDirectory() {
