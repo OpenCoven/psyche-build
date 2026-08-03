@@ -38,6 +38,20 @@
         </div>
         <div class="session-list" id="session-list" role="tree" aria-label="Sessions grouped by project"></div>
         <div class="sidebar-foot">
+          <div class="theme-row">
+            <select id="theme-select" class="theme-select" aria-label="Theme">
+              <option value="coven-purple">Coven Purple</option>
+              <option value="claude-orange">Claude Orange</option>
+              <option value="codex-blackish">Codex Blackish</option>
+              <option value="gemini-blue">Gemini Blue</option>
+              <option value="emerald">Emerald</option>
+              <option value="rose">Rose</option>
+            </select>
+            <label class="solid-toggle" title="Opaque background instead of macOS vibrancy">
+              <input id="solid-bg" type="checkbox" />
+              <span>Solid</span>
+            </label>
+          </div>
           <label class="bg-opacity-row" for="bg-opacity">
             <span class="bg-opacity-label">Background</span>
             <input

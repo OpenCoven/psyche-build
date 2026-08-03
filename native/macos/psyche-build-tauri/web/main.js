@@ -134,7 +134,13 @@
 
   var HARD_MAX_PROJECTS = 10;
   var HARD_MAX_BROWSER_TABS_PER_PROJECT = 10;
+  var THEMES = ["coven-purple", "claude-orange", "codex-blackish", "gemini-blue", "emerald", "rose"];
+  var DEFAULT_THEME = "coven-purple";
   var DEFAULT_BG_OPACITY = 1;
+  // Surfaces are rgba(..., calc(--bg-opacity * own-alpha)) and CSS clamps alpha
+  // to 1, so a multiplier this large drives every one of them fully opaque —
+  // the lowest surface alpha in the sheet is 0.45, and 0.45 * 2.5 > 1.
+  var SOLID_BG_MULTIPLIER = 2.5;
   // Floor is deliberately above 0: at 0 the chrome vanishes entirely and the
   // window becomes unusable with no visible control to undo it.
   var MIN_BG_OPACITY = 0.3;
@@ -156,13 +162,15 @@
     return Math.max(min, Math.min(max, n));
   }
   function loadSettings() {
-    var defaults = { maxProjects: 10, maxBrowserTabsPerProject: 10, bgOpacity: DEFAULT_BG_OPACITY };
+    var defaults = { maxProjects: 10, maxBrowserTabsPerProject: 10, bgOpacity: DEFAULT_BG_OPACITY, theme: DEFAULT_THEME, solidBg: false };
     try {
       var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
       return {
         maxProjects: clampInt(saved.maxProjects, defaults.maxProjects, 1, HARD_MAX_PROJECTS),
         maxBrowserTabsPerProject: clampInt(saved.maxBrowserTabsPerProject, defaults.maxBrowserTabsPerProject, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT),
         bgOpacity: clampFloat(saved.bgOpacity, defaults.bgOpacity, MIN_BG_OPACITY, MAX_BG_OPACITY),
+        theme: THEMES.indexOf(saved.theme) === -1 ? defaults.theme : saved.theme,
+        solidBg: saved.solidBg === true,
       };
     } catch (_) { return defaults; }
   }
@@ -170,6 +178,8 @@
     settings.maxProjects = clampInt(settings.maxProjects, 10, 1, HARD_MAX_PROJECTS);
     settings.maxBrowserTabsPerProject = clampInt(settings.maxBrowserTabsPerProject, 10, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
     settings.bgOpacity = clampFloat(settings.bgOpacity, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
+    if (THEMES.indexOf(settings.theme) === -1) settings.theme = DEFAULT_THEME;
+    settings.solidBg = settings.solidBg === true;
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }
 
@@ -178,10 +188,32 @@
   // --bg-opacity custom property) *and* the xterm theme. The terminal canvas
   // paints its own background, so CSS alone would leave the largest surface in
   // the window stubbornly opaque.
+  // Themes and the solid/vibrant switch are both single attributes on <html>;
+  // the stylesheet does the rest, so nothing here has to know about colours.
+  function applyTheme(name, opts) {
+    var t = THEMES.indexOf(name) === -1 ? DEFAULT_THEME : name;
+    settings.theme = t;
+    document.documentElement.setAttribute("data-theme", t);
+    if (themeSelectEl && themeSelectEl.value !== t) themeSelectEl.value = t;
+    if (!opts || opts.persist !== false) saveSettings();
+  }
+  function applySolidBg(on, opts) {
+    var v = on === true;
+    settings.solidBg = v;
+    document.documentElement.setAttribute("data-surface", v ? "solid" : "vibrant");
+    document.documentElement.style.setProperty(
+      "--bg-opacity", String(v ? SOLID_BG_MULTIPLIER : settings.bgOpacity));
+    if (solidBgEl && solidBgEl.checked !== v) solidBgEl.checked = v;
+    // The opacity slider only bites against the vibrancy material.
+    if (bgOpacityInput) bgOpacityInput.disabled = v;
+    if (!opts || opts.persist !== false) saveSettings();
+  }
   function applyBgOpacity(value, opts) {
     var v = clampFloat(value, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
     settings.bgOpacity = v;
-    document.documentElement.style.setProperty("--bg-opacity", String(v));
+    // Solid mode wins: it pins the multiplier regardless of the slider.
+    document.documentElement.style.setProperty(
+      "--bg-opacity", String(settings.solidBg ? SOLID_BG_MULTIPLIER : v));
     if (bgOpacityInput && bgOpacityInput.value !== String(v)) bgOpacityInput.value = String(v);
     if (bgOpacityValueEl) bgOpacityValueEl.textContent = Math.round(v * 100) + "%";
     if (!opts || opts.persist !== false) saveSettings();
@@ -925,6 +957,8 @@
   // — state.threads is the source of truth, so this renders from the same data
   // the tab strip and terminal host use rather than tracking its own copy.
 
+  var themeSelectEl = document.getElementById("theme-select");
+  var solidBgEl = document.getElementById("solid-bg");
   var bgOpacityInput = document.getElementById("bg-opacity");
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
   var sessionListEl = document.getElementById("session-list");
@@ -1043,7 +1077,15 @@
       applyBgOpacity(bgOpacityInput.value);
     });
   }
+  if (themeSelectEl) {
+    themeSelectEl.addEventListener("change", function () { applyTheme(themeSelectEl.value); });
+  }
+  if (solidBgEl) {
+    solidBgEl.addEventListener("change", function () { applySolidBg(solidBgEl.checked); });
+  }
   // Apply whatever was persisted before the first paint settles.
+  applyTheme(settings.theme, { persist: false });
+  applySolidBg(settings.solidBg, { persist: false });
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
   if (sessionSearchEl) {
@@ -1342,13 +1384,15 @@
     },
     {
       cmd: "/settings",
-      desc: "Show or set: /settings projects 8, /settings browser-tabs 6, /settings bg-opacity 70",
+      desc: "Show or set: projects 8, browser-tabs 6, bg-opacity 70, theme claude-orange, solid on",
       run: function (rest) {
         var parts = rest.split(/\s+/).filter(Boolean);
         function summary() {
           return "projects " + settings.maxProjects + "/" + HARD_MAX_PROJECTS +
             ", browser-tabs " + settings.maxBrowserTabsPerProject + "/" + HARD_MAX_BROWSER_TABS_PER_PROJECT +
-            ", bg-opacity " + Math.round(settings.bgOpacity * 100) + "%";
+            ", bg-opacity " + Math.round(settings.bgOpacity * 100) + "%" +
+            ", theme " + settings.theme +
+            ", solid " + (settings.solidBg ? "on" : "off");
         }
         if (parts.length === 0) {
           writeToActive("\r\n\x1b[36m[settings]\x1b[0m " + summary() + "\r\n");
@@ -1363,8 +1407,16 @@
           var raw = parseFloat(parts[1]);
           if (Number.isFinite(raw) && raw > 1) raw = raw / 100;
           applyBgOpacity(raw);
+        } else if (parts.length >= 2 && parts[0] === "theme") {
+          if (THEMES.indexOf(parts[1]) === -1) {
+            writeToActive("\r\n\x1b[33m[/settings]\x1b[0m themes: " + THEMES.join(", ") + "\r\n");
+            return;
+          }
+          applyTheme(parts[1]);
+        } else if (parts.length >= 2 && parts[0] === "solid") {
+          applySolidBg(parts[1] === "on" || parts[1] === "true" || parts[1] === "1");
         } else {
-          writeToActive("\r\n\x1b[33m[/settings]\x1b[0m try /settings projects 8, /settings browser-tabs 6, or /settings bg-opacity 70\r\n");
+          writeToActive("\r\n\x1b[33m[/settings]\x1b[0m try /settings projects 8, browser-tabs 6, bg-opacity 70, theme claude-orange, or solid on\r\n");
           return;
         }
         saveSettings();
