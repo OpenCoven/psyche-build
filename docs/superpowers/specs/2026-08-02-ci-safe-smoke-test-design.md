@@ -40,6 +40,13 @@ The existing `pnpm test` remains unchanged. This keeps the fast unit suite
 portable while making `pnpm smoke` the explicit release and CI gate for
 environments that provision tmux.
 
+`pnpm smoke` **complements `pnpm smoke:pack`, it does not replace it.** The two
+check different things and both belong in the release flow described by
+`docs/RELEASE.md`: `smoke:pack` is `npm pack --dry-run`, which verifies what the
+published tarball would contain, while `pnpm smoke` verifies that the built
+cockpit actually starts. A package can pack correctly and still fail to launch,
+and vice versa.
+
 ## Test Structure
 
 Place the test at `__tests__/psyche.smoke.test.ts`, following the repository's

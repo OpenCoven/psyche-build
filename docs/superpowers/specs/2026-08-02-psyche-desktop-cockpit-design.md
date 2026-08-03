@@ -1,5 +1,10 @@
 # Psyche Desktop Cockpit
 
+> **Status: implemented.** Written 2026-08-02, landed 2026-08-03 as a record of a
+> decision already carried out — the Comux strip-out is done, the Tauri app is
+> renamed to `dev.opencoven.psyche`, and the cockpit exists. Read this for why
+> the desktop workspace is shaped the way it is, not as pending work.
+
 ## Goal
 
 Make Psyche Build the desktop coding workspace that succeeds the original
