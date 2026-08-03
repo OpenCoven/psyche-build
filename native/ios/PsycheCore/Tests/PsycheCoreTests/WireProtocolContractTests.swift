@@ -29,9 +29,14 @@ final class WireProtocolContractTests: XCTestCase {
     private func loadFixtures(_ file: String) throws -> [String: Data] {
         let url = Self.fixtureDirectory.appendingPathComponent(file)
         let raw = try Data(contentsOf: url)
+        // Deliberately a failure, not an XCTSkip: an empty or malformed fixture
+        // file is exactly the contract breaking, and a skip would let it pass
+        // CI unnoticed — the silent-pass failure mode these tests exist to stop.
         guard let object = try JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
-            throw XCTSkip("\(file) is not a JSON object")
+            XCTFail("\(file) is not a JSON object — the fixture file is malformed or empty")
+            return [:]
         }
+        XCTAssertFalse(object.isEmpty, "\(file) contains no fixtures")
         return try object.mapValues {
             try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
         }

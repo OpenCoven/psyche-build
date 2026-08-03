@@ -69,18 +69,33 @@ describe('wire protocol contract', () => {
   });
 
   describe('every fixture parses into the union', () => {
+    // decodeClientMessage rejects a null or array payload outright, so assert
+    // the same precondition here — otherwise a fixture with `payload: []`
+    // passes this test and still blows up at runtime.
     it.each(Object.keys(clientFixtures))('client: %s', (name) => {
       const message = clientFixtures[name] as ClientMessage;
       expect(typeof message.type).toBe('string');
-      expect(message).toHaveProperty('payload');
       expect((CLIENT_MESSAGE_TYPES as readonly string[])).toContain(message.type);
+
+      const payload = (message as { payload: unknown }).payload;
+      expect(payload).not.toBeNull();
+      expect(typeof payload).toBe('object');
+      expect(Array.isArray(payload)).toBe(false);
     });
+
+    // Server payloads are deliberately looser: paneList and projectList carry
+    // arrays. Assert object-or-array, and pin which types are the array ones.
+    const ARRAY_PAYLOAD_TYPES = new Set(['paneList', 'paneListChanged', 'projectList']);
 
     it.each(Object.keys(serverFixtures))('server: %s', (name) => {
       const message = serverFixtures[name] as ServerMessage;
       expect(typeof message.type).toBe('string');
-      expect(message).toHaveProperty('payload');
       expect((SERVER_MESSAGE_TYPES as readonly string[])).toContain(message.type);
+
+      const payload = (message as { payload: unknown }).payload;
+      expect(payload).not.toBeNull();
+      expect(typeof payload).toBe('object');
+      expect(Array.isArray(payload)).toBe(ARRAY_PAYLOAD_TYPES.has(message.type));
     });
   });
 
@@ -104,10 +119,13 @@ describe('wire protocol contract', () => {
     // with CodingKeys. The wire form is what both must agree on.
     it('uses the Id wire spelling, never ID', () => {
       const all = JSON.stringify({ ...clientFixtures, ...serverFixtures });
-      expect(all).not.toMatch(/"[a-z]+ID"/);
-      expect(all).toContain('"paneId"');
-      expect(all).toContain('"clientId"');
-      expect(all).toContain('"projectId"');
+      // Trailing colon constrains this to object keys. Without it a *value*
+      // like "someID" false-positives, so the assertion would fail for a
+      // reason that has nothing to do with the wire contract.
+      expect(all).not.toMatch(/"[A-Za-z]*ID":/);
+      expect(all).toMatch(/"paneId":/);
+      expect(all).toMatch(/"clientId":/);
+      expect(all).toMatch(/"projectId":/);
     });
 
     it('exercises null for every nullable field', () => {
