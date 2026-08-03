@@ -65,8 +65,8 @@ export function renderHero(starCount) {
             <a href="#troubleshooting">Troubleshooting</a>
           </div>
           <div class="manual-command">
-            <span>$</span>
-            <code>psyche</code>
+            <span>source CLI:</span>
+            <code>node /path/to/psyche-build/psyche</code>
           </div>
         </aside>
       </div>

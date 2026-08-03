@@ -124,7 +124,7 @@ Resolve the unchanged reviewed commit and create the signed annotated tag:
 test -z "$(git status --porcelain)"
 git fetch origin main --tags
 release_sha="$(git rev-parse origin/main)"
-git switch --detach "$release_sha"
+git checkout --detach "$release_sha"
 test "$(git rev-parse HEAD)" = "$release_sha"
 test -z "$(git status --porcelain)"
 pnpm install --frozen-lockfile

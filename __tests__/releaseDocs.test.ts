@@ -172,7 +172,7 @@ describe('v0.0.1 release documentation contract', () => {
       'test -z "$(git status --porcelain)"',
       'git fetch origin main --tags',
       'release_sha="$(git rev-parse origin/main)"',
-      'git switch --detach "$release_sha"',
+      'git checkout --detach "$release_sha"',
       'test "$(git rev-parse HEAD)" = "$release_sha"',
       'pnpm install --frozen-lockfile',
       'pnpm release:check -- v0.0.1',
@@ -185,6 +185,7 @@ describe('v0.0.1 release documentation contract', () => {
       cursor = index;
     }
     expect(runbook.match(/test -z "\$\(git status --porcelain\)"/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(runbook).not.toContain('git switch --detach');
   });
 
   it('marks the TestFlight client command as workflow-internal and dispatches recovery', async () => {
@@ -225,6 +226,9 @@ describe('v0.0.1 release documentation contract', () => {
     expect(hero).toContain(caskCommand);
     expect(main).toContain(caskCommand);
     expect(hero).toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
+    expect(hero).toContain('source CLI:');
+    expect(hero).toContain('node /path/to/psyche-build/psyche');
+    expect(hero).not.toMatch(/<span>\$<\/span>\s*<code>psyche<\/code>/);
     expect(index).not.toMatch(/npmjs\.com\/package\/psyche-build/i);
   });
 
