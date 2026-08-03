@@ -111,12 +111,7 @@ final class PsycheAppUITests: XCTestCase {
         app.terminate()
         XCUIDevice.shared.orientation = .landscapeLeft
         app.launch()
-        let window = app.windows.firstMatch
-        let landscapeExpectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
-            object: window
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [landscapeExpectation], timeout: 5), .completed)
+        rotateToLandscape(app)
 
         let projectSidebar = element("project-sidebar", in: app)
         let paneList = element("pane-list", in: app)
@@ -147,12 +142,7 @@ final class PsycheAppUITests: XCTestCase {
         app.terminate()
         XCUIDevice.shared.orientation = .landscapeLeft
         app.launch()
-        let window = app.windows.firstMatch
-        let landscapeExpectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
-            object: window
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [landscapeExpectation], timeout: 5), .completed)
+        rotateToLandscape(app)
 
         let infraProject = element("project-infra", in: app)
         XCTAssertTrue(infraProject.waitForExistence(timeout: 5))
@@ -199,6 +189,42 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(window.waitForExistence(timeout: 5))
         if window.frame.width >= 700 {
             throw XCTSkip("Compact siderail coverage requires an iPhone simulator.")
+        }
+    }
+
+    /// Waits for the device to actually be in landscape.
+    ///
+    /// Setting `XCUIDevice.orientation` requests a rotation, it does not
+    /// guarantee one, and both regular-width tests failed repeatedly against
+    /// code that was fine because the original 5s wait was too short under
+    /// load. This waits longer and says what went wrong when it still fails.
+    ///
+    /// Deliberately does *not* retry the orientation request. That was tried:
+    /// forcing the first wait to time out showed the device then stayed
+    /// portrait through every subsequent attempt, because re-issuing
+    /// orientation changes in quick succession wedges the simulator — the same
+    /// wedge that originally needed a reboot to clear. One patient wait
+    /// recovers from a slow rotation; nothing inside the test recovers from a
+    /// wedged device, so it is better to fail saying so.
+    private func rotateToLandscape(
+        _ app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let window = app.windows.firstMatch
+        let landscape = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
+            object: window
+        )
+        guard XCTWaiter.wait(for: [landscape], timeout: 30) == .completed else {
+            XCTFail(
+                "Device never entered landscape within 30s; last frame \(window.frame). "
+                    + "This is a simulator-state failure rather than a product failure — "
+                    + "reboot the simulator (xcrun simctl shutdown/boot) and re-run.",
+                file: file,
+                line: line
+            )
+            return
         }
     }
 

@@ -1,6 +1,6 @@
 # Multiagent Orchestration Rewrite Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement this plan task-by-task and keep progress tracked with checkbox (`- [ ]`) syntax.
 
 **Goal:** Unify comux task fan-out, worktree/pane execution, optional capability routing, daemon control, MCP tools, and public documentation behind one typed multiagent orchestration contract.
 
