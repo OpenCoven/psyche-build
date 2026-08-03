@@ -212,6 +212,18 @@ final class PsycheAppUITests: XCTestCase {
         line: UInt = #line
     ) {
         let window = app.windows.firstMatch
+        // Callers reach here straight after a cold relaunch, where the window
+        // may not exist yet and reports a zero frame. Zero is not landscape, so
+        // without this the wait below would spend its full 30s and then blame
+        // the rotation for what was really a window that never appeared.
+        guard window.waitForExistence(timeout: 15) else {
+            XCTFail(
+                "No window appeared within 15s of launch, so rotation was never attempted.",
+                file: file,
+                line: line
+            )
+            return
+        }
         let landscape = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
             object: window
