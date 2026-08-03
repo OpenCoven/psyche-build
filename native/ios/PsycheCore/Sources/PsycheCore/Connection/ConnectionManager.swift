@@ -14,6 +14,7 @@ public actor ConnectionManager {
     private var messageTask: Task<Void, Never>?
     private var activeMessageSession: UUID?
     private var hasActiveTransport = false
+    private var isConnectInFlight = false
     private var requestedInitialSnapshots = false
     private var isMessageProcessorReady = false
     private var messageProcessorReadyWaiters: [CheckedContinuation<Void, Never>] = []
@@ -38,7 +39,21 @@ public actor ConnectionManager {
     }
 
     public func connect(to endpoint: HostEndpoint) async {
-        guard state != .connecting && state != .disconnecting else { return }
+        // Guard on execution, not on state. connect() keeps awaiting past the
+        // .authenticating transition (incomingMessages, hello, snapshots) and
+        // the actor yields at every await, so a second call can interleave,
+        // tear down the first one's transport, and leave the original sending
+        // hello onto the replacement.
+        //
+        // A state check cannot express this: .authenticating outlives the
+        // method — it persists until welcome arrives — so rejecting it would
+        // also block a deliberate later reconnect from a connection that hung
+        // mid-handshake, which is exactly when retrying matters.
+        guard !isConnectInFlight else { return }
+        guard state != .disconnecting else { return }
+        isConnectInFlight = true
+        defer { isConnectInFlight = false }
+
         await tearDownActiveConnection()
         transition(to: .connecting)
 
@@ -84,14 +99,21 @@ public actor ConnectionManager {
         transition(to: .disconnected)
     }
 
-    public func pair(code: String, clientID: String, clientName: String) async {
+    /// Defaults to the identity already announced in `hello`. Passing a
+    /// different one is possible but binds the token to an identity the server
+    /// never saw handshake, which is painful to debug.
+    public func pair(
+        code: String,
+        clientID: String? = nil,
+        clientName: String? = nil
+    ) async {
         guard hasActiveTransport else { return }
 
         do {
             try await transport.send(.pair(PairRequestPayload(
                 code: code,
-                clientID: clientID,
-                clientName: clientName
+                clientID: clientID ?? self.clientID,
+                clientName: clientName ?? self.clientName
             )))
         } catch {
             await tearDownActiveConnection()

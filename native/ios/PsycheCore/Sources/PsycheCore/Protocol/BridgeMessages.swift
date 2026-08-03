@@ -5,6 +5,14 @@ public enum PaneStatus: String, Codable, Sendable, CaseIterable {
     case idle
     case waiting
     case unknown
+
+    /// Synthesized Codable throws on an unrecognized raw value, so a status
+    /// added on the host would fail the whole message decode on an older
+    /// client. `.unknown` exists precisely to absorb that, so decode into it.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PaneStatus(rawValue: raw) ?? .unknown
+    }
 }
 
 public enum ConnectionState: Codable, Sendable, Equatable {
