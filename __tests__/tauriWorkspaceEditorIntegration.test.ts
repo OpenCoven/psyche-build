@@ -75,6 +75,40 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toContain("from '@codemirror/legacy-modes/mode/toml'");
   });
 
+  it('overrides the default token colors with a dark workspace highlight style', () => {
+    expect(tauriPackage.dependencies['@lezer/highlight']).toBe('1.2.3');
+    expect(editorEntry).toMatch(
+      /import \{[^}]*HighlightStyle[^}]*syntaxHighlighting[^}]*\} from '@codemirror\/language'/
+    );
+    expect(editorEntry).toContain("import { tags } from '@lezer/highlight'");
+    expect(editorEntry).toContain('const workspaceHighlightStyle = HighlightStyle.define([');
+    expect(editorEntry).toContain("{ tag: tags.keyword, color: '#cbb8ff' }");
+    expect(editorEntry).toContain(
+      "{ tag: [tags.name, tags.variableName, tags.propertyName], color: '#f5f2fb' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: tags.function(tags.variableName), color: '#8bd5ff' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: [tags.typeName, tags.className], color: '#d6b4ff' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: [tags.string, tags.character, tags.attributeValue], color: '#8fe3b0' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: [tags.number, tags.bool, tags.null], color: '#f5c978' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: [tags.comment, tags.lineComment, tags.blockComment], color: '#8f899f' }"
+    );
+    expect(editorEntry).toContain(
+      "{ tag: [tags.operator, tags.punctuation, tags.bracket], color: '#c8c2d8' }"
+    );
+    expect(editorEntry).toMatch(
+      /basicSetup,\s*syntaxHighlighting\(workspaceHighlightStyle\),/
+    );
+  });
+
   it('maps every approved language with a plain-text fallback', () => {
     for (const languageId of [
       'javascript',

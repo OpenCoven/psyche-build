@@ -1,7 +1,8 @@
 import { basicSetup } from 'codemirror';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
-import { StreamLanguage } from '@codemirror/language';
+import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
@@ -57,6 +58,17 @@ function extensionForLanguage(id) {
   }
 }
 
+const workspaceHighlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: '#cbb8ff' },
+  { tag: [tags.name, tags.variableName, tags.propertyName], color: '#f5f2fb' },
+  { tag: tags.function(tags.variableName), color: '#8bd5ff' },
+  { tag: [tags.typeName, tags.className], color: '#d6b4ff' },
+  { tag: [tags.string, tags.character, tags.attributeValue], color: '#8fe3b0' },
+  { tag: [tags.number, tags.bool, tags.null], color: '#f5c978' },
+  { tag: [tags.comment, tags.lineComment, tags.blockComment], color: '#8f899f' },
+  { tag: [tags.operator, tags.punctuation, tags.bracket], color: '#c8c2d8' },
+], { themeType: 'dark' });
+
 const workspaceEditorTheme = EditorView.theme(
   {
     '&': {
@@ -107,6 +119,7 @@ export function createFileEditor({ parent, onChange, onSelectionChange }) {
       doc: '',
       extensions: [
         basicSetup,
+        syntaxHighlighting(workspaceHighlightStyle),
         workspaceEditorTheme,
         languageCompartment.of([]),
         editableCompartment.of(EditorView.editable.of(true)),
