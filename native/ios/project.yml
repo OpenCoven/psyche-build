@@ -1,6 +1,6 @@
 name: Psyche
 options:
-  bundleIdPrefix: build.psyche
+  bundleIdPrefix: ai.opencoven
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -11,6 +11,8 @@ settings:
     SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
     GENERATE_INFOPLIST_FILE: YES
     MARKETING_VERSION: 0.0.1
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_STYLE: Automatic
 targets:
   PsycheCore:
     type: framework
@@ -19,7 +21,7 @@ targets:
       - path: PsycheCore/Sources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.core
+        PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.core
         DEFINES_MODULE: YES
   PsycheCoreTests:
     type: bundle.unit-test
@@ -30,21 +32,29 @@ targets:
       - target: PsycheCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.core.tests
+        PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.coretests
   PsycheApp:
     type: application
     platform: iOS
     sources:
       - path: PsycheApp/Sources
+    info:
+      path: PsycheApp/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Psyche Build
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSLocalNetworkUsageDescription: Psyche uses your local network to discover and connect to your paired coding host.
+        NSBonjourServices:
+          - _psyche._tcp
+        PsycheReleaseCommit: $(PSYCHE_RELEASE_SHA)
     dependencies:
       - target: PsycheCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.ios
-        INFOPLIST_KEY_CFBundleDisplayName: Psyche
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Psyche uses your local network to discover and connect to your paired coding host.
-        INFOPLIST_KEY_NSBonjourServices:
-          - _psyche._tcp
+        PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios
+        PRODUCT_NAME: Psyche Build
+        GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
   PsycheAppUITests:
     type: bundle.ui-testing
@@ -55,7 +65,7 @@ targets:
       - target: PsycheApp
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.ios.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.uitests
         TEST_TARGET_NAME: PsycheApp
 schemes:
   PsycheCore:
