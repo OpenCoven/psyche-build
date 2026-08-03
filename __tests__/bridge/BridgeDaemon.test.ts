@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BridgeDaemon } from "../../src/services/bridge/BridgeDaemon";
+import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow } from "../../src/services/bridge/PairingFlow";
 import { WebSocket } from "ws";
 import {
@@ -40,6 +41,14 @@ const noopRituals = {
   launchRitual: async () => {},
 };
 
+class NoopPaneStreamHub extends PaneStreamHub {
+  override start(): void {}
+  override stop(): void {}
+  override sendInput(_paneId: string, _data: Buffer): void {}
+}
+
+const noopHubFactory = (sessionName: string) => new NoopPaneStreamHub(sessionName);
+
 describe("BridgeDaemon", () => {
   it("requires authentication before listPanes/listProjects", async () => {
     const daemon = new BridgeDaemon({
@@ -47,6 +56,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [{
         id: "%1", displayName: "psyche", kind: "control",
         projectId: "p1", projectName: "psyche",
@@ -98,6 +108,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [{
         id: "%1", displayName: "psyche", kind: "control",
         projectId: "p1", projectName: "psyche",
@@ -158,6 +169,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [],
       projectProvider: () => [],
       ritualProvider: (projectId) => {
@@ -225,6 +237,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => panes,
       projectProvider: () => projects,
       ritualProvider: () => [],
@@ -295,6 +308,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => {
         throw new Error("pane provider failed");
       },
@@ -342,6 +356,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore: new FakeTokenStore() as any,
     });
@@ -555,6 +570,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -611,6 +627,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -657,6 +674,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -697,6 +715,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
