@@ -13,6 +13,8 @@ const relativePaths = {
   cargoToml: 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
   cargoLock: 'native/macos/psyche-build-tauri/src-tauri/Cargo.lock',
   tauriConfig: 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+  iosProjectYml: 'native/ios/project.yml',
+  iosXcodeProject: 'native/ios/Psyche.xcodeproj/project.pbxproj',
 };
 
 const labels = {
@@ -21,7 +23,14 @@ const labels = {
   cargoToml: relativePaths.cargoToml,
   cargoLock: relativePaths.cargoLock,
   tauriConfig: relativePaths.tauriConfig,
+  iosProjectYml: relativePaths.iosProjectYml,
+  iosXcodeProject: relativePaths.iosXcodeProject,
 };
+
+const yamlMarketingVersion =
+  /^[ \t]*MARKETING_VERSION[ \t]*:[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#\r\n]+))[ \t]*(?:#.*)?$/gm;
+const xcodeMarketingVersion =
+  /^[ \t]*MARKETING_VERSION[ \t]*=[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;\s\r\n]+))[ \t]*;[ \t]*(?:\/\*.*\*\/[ \t]*)?$/gm;
 
 export function normalizeReleaseTag(value) {
   const candidate = value.startsWith('v') ? value.slice(1) : value;
@@ -68,6 +77,20 @@ function readCargoLockVersion(contents, filePath) {
   return match[1];
 }
 
+function readMarketingVersion(contents, filePath, pattern) {
+  const versions = [...contents.matchAll(pattern)].map((match) => match[1] ?? match[2] ?? match[3]);
+  if (versions.length === 0) {
+    throw new Error(`${filePath} does not contain MARKETING_VERSION`);
+  }
+  const uniqueVersions = [...new Set(versions)];
+  if (uniqueVersions.length > 1) {
+    throw new Error(
+      `${filePath} contains inconsistent MARKETING_VERSION values: ${uniqueVersions.join(', ')}`,
+    );
+  }
+  return uniqueVersions[0];
+}
+
 export function readReleaseVersions(root = process.cwd()) {
   const paths = Object.fromEntries(
     Object.entries(relativePaths).map(([key, relativePath]) => [key, path.join(root, relativePath)]),
@@ -78,6 +101,16 @@ export function readReleaseVersions(root = process.cwd()) {
     cargoToml: readCargoPackageVersion(readFileSync(paths.cargoToml, 'utf8'), paths.cargoToml),
     cargoLock: readCargoLockVersion(readFileSync(paths.cargoLock, 'utf8'), paths.cargoLock),
     tauriConfig: readJsonVersion(paths.tauriConfig),
+    iosProjectYml: readMarketingVersion(
+      readFileSync(paths.iosProjectYml, 'utf8'),
+      paths.iosProjectYml,
+      yamlMarketingVersion,
+    ),
+    iosXcodeProject: readMarketingVersion(
+      readFileSync(paths.iosXcodeProject, 'utf8'),
+      paths.iosXcodeProject,
+      xcodeMarketingVersion,
+    ),
   };
 }
 
@@ -124,6 +157,22 @@ function replaceCargoLockVersion(contents, version, filePath) {
   return contents.replace(packageVersion, `$1${version}$2`);
 }
 
+function replaceMarketingVersions(contents, version, filePath, pattern, replacementPattern) {
+  readMarketingVersion(contents, filePath, pattern);
+  return contents.replace(
+    replacementPattern,
+    (_match, prefix, doubleQuoted, singleQuoted, bare, suffix) => {
+      const replacement =
+        doubleQuoted !== undefined
+          ? `"${version}"`
+          : singleQuoted !== undefined
+            ? `'${version}'`
+            : version;
+      return `${prefix}${replacement}${suffix}`;
+    },
+  );
+}
+
 export async function setReleaseVersion(root, value) {
   const version = normalizeReleaseTag(value);
   const paths = Object.fromEntries(
@@ -144,6 +193,26 @@ export async function setReleaseVersion(root, value) {
     writeFile(
       paths.cargoLock,
       replaceCargoLockVersion(contents.cargoLock, version, paths.cargoLock),
+    ),
+    writeFile(
+      paths.iosProjectYml,
+      replaceMarketingVersions(
+        contents.iosProjectYml,
+        version,
+        paths.iosProjectYml,
+        yamlMarketingVersion,
+        /(^[ \t]*MARKETING_VERSION[ \t]*:[ \t]*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#\r\n]+))([ \t]*(?:#.*)?$)/gm,
+      ),
+    ),
+    writeFile(
+      paths.iosXcodeProject,
+      replaceMarketingVersions(
+        contents.iosXcodeProject,
+        version,
+        paths.iosXcodeProject,
+        xcodeMarketingVersion,
+        /(^[ \t]*MARKETING_VERSION[ \t]*=[ \t]*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;\s\r\n]+))([ \t]*;[ \t]*(?:\/\*.*\*\/[ \t]*)?$)/gm,
+      ),
     ),
   ]);
   return version;

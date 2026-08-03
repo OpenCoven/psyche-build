@@ -10,6 +10,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
     GENERATE_INFOPLIST_FILE: YES
+    MARKETING_VERSION: 0.0.1
 targets:
   PsycheCore:
     type: framework

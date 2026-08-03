@@ -4,6 +4,8 @@ export interface ReleaseVersions {
   cargoToml: string;
   cargoLock: string;
   tauriConfig: string;
+  iosProjectYml: string;
+  iosXcodeProject: string;
 }
 
 export function normalizeReleaseTag(value: string): string;

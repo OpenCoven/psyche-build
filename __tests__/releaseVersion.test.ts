@@ -23,7 +23,10 @@ async function writeFixture(): Promise<string> {
 
   const nativeRoot = path.join(root, 'native/macos/psyche-build-tauri');
   const tauriRoot = path.join(nativeRoot, 'src-tauri');
+  const iosRoot = path.join(root, 'native/ios');
+  const xcodeProjectRoot = path.join(iosRoot, 'Psyche.xcodeproj');
   await mkdir(tauriRoot, { recursive: true });
+  await mkdir(xcodeProjectRoot, { recursive: true });
 
   await Promise.all([
     writeFile(
@@ -45,6 +48,14 @@ async function writeFixture(): Promise<string> {
     writeFile(
       path.join(tauriRoot, 'Cargo.lock'),
       'version = 4\n\n[[package]]\nname = "other"\nversion = "9.9.9"\n\n[[package]]\nname = "psyche-build-tauri"\nversion = "0.0.7"\ndependencies = []\n',
+    ),
+    writeFile(
+      path.join(iosRoot, 'project.yml'),
+      'name: Psyche\nsettings:\n  base:\n    MARKETING_VERSION: 0.0.5\n    CURRENT_PROJECT_VERSION: 1\n    SWIFT_VERSION: "6.0"\ntargets:\n  PsycheApp:\n    settings:\n      base:\n        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.fixture\n',
+    ),
+    writeFile(
+      path.join(xcodeProjectRoot, 'project.pbxproj'),
+      '// !$*UTF8*$!\n{\n\tobjects = {\n\t\tDEBUG /* Debug */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;\n\t\t\t};\n\t\t};\n\t\tRELEASE /* Release */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";\n\t\t\t};\n\t\t};\n\t};\n}\n',
     ),
   ]);
 
@@ -76,27 +87,30 @@ describe('release version contract', () => {
   it('reports every manifest that disagrees with the requested release', async () => {
     const root = await writeFixture();
 
-    expect(() => assertReleaseVersion(root, 'v0.1.0')).toThrow(
-      /package\.json \(0\.0\.11\)[\s\S]*native\/macos\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)/,
+    expect(() => assertReleaseVersion(root, 'v0.0.1')).toThrow(
+      /package\.json \(0\.0\.11\)[\s\S]*native\/macos\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)/,
     );
   });
 
   it('updates every release manifest without changing unrelated values', async () => {
     const root = await writeFixture();
 
-    await setReleaseVersion(root, '0.1.0');
-    await expect(setReleaseVersion(root, '0.1.0')).resolves.toBe('0.1.0');
+    await setReleaseVersion(root, '0.0.1');
+    await expect(setReleaseVersion(root, '0.0.1')).resolves.toBe('0.0.1');
 
     expect(readReleaseVersions(root)).toEqual({
-      packageJson: '0.1.0',
-      nativePackageJson: '0.1.0',
-      cargoToml: '0.1.0',
-      cargoLock: '0.1.0',
-      tauriConfig: '0.1.0',
+      packageJson: '0.0.1',
+      nativePackageJson: '0.0.1',
+      cargoToml: '0.0.1',
+      cargoLock: '0.0.1',
+      tauriConfig: '0.0.1',
+      iosProjectYml: '0.0.1',
+      iosXcodeProject: '0.0.1',
     });
-    expect(() => assertReleaseVersion(root, 'v0.1.0')).not.toThrow();
+    expect(() => assertReleaseVersion(root, 'v0.0.1')).not.toThrow();
 
-    const [rootPackage, tauriConfig, cargoToml, cargoLock] = await Promise.all([
+    const [rootPackage, tauriConfig, cargoToml, cargoLock, iosProjectYml, iosXcodeProject] =
+      await Promise.all([
       readFile(path.join(root, 'package.json'), 'utf8'),
       readFile(
         path.join(root, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'),
@@ -104,11 +118,45 @@ describe('release version contract', () => {
       ),
       readFile(path.join(root, 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml'), 'utf8'),
       readFile(path.join(root, 'native/macos/psyche-build-tauri/src-tauri/Cargo.lock'), 'utf8'),
+      readFile(path.join(root, 'native/ios/project.yml'), 'utf8'),
+      readFile(path.join(root, 'native/ios/Psyche.xcodeproj/project.pbxproj'), 'utf8'),
     ]);
     expect(JSON.parse(rootPackage)).toMatchObject({ name: 'psyche-build', private: false });
     expect(tauriConfig).toContain('"targets": ["dmg", "app"]');
     expect(cargoToml).toContain('edition = "2021"');
     expect(cargoLock).toContain('name = "other"\nversion = "9.9.9"');
+    expect(iosProjectYml).toContain(
+      '    MARKETING_VERSION: 0.0.1\n    CURRENT_PROJECT_VERSION: 1\n    SWIFT_VERSION: "6.0"',
+    );
+    expect(iosProjectYml).toContain('PRODUCT_BUNDLE_IDENTIFIER: build.psyche.fixture');
+    expect(iosXcodeProject).toContain(
+      '\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.1;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;',
+    );
+    expect(iosXcodeProject).toContain(
+      '\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.1;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";',
+    );
+  });
+
+  it('rejects generated Xcode projects without consistent marketing versions', async () => {
+    const root = await writeFixture();
+    const xcodeProjectPath = path.join(root, 'native/ios/Psyche.xcodeproj/project.pbxproj');
+    const contents = await readFile(xcodeProjectPath, 'utf8');
+
+    await writeFile(
+      xcodeProjectPath,
+      contents.replace('MARKETING_VERSION = 0.0.3;', 'MARKETING_VERSION = 0.0.4;'),
+    );
+    expect(() => readReleaseVersions(root)).toThrow(
+      /native\/ios\/Psyche\.xcodeproj\/project\.pbxproj[\s\S]*inconsistent MARKETING_VERSION/,
+    );
+
+    await writeFile(
+      xcodeProjectPath,
+      contents.replaceAll(/^[ \t]*MARKETING_VERSION = [^;]+;\n/gm, ''),
+    );
+    expect(() => readReleaseVersions(root)).toThrow(
+      /native\/ios\/Psyche\.xcodeproj\/project\.pbxproj[\s\S]*does not contain MARKETING_VERSION/,
+    );
   });
 
   it('accepts the argument separator forwarded by pnpm scripts', async () => {
