@@ -2,7 +2,16 @@ import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, '.worktrees/**', '.psyche/**'],
+    // The smoke test needs tmux and a production build, so it is not part of
+    // the portable unit suite. This exclusion applies even to an explicitly
+    // named file, so `pnpm smoke` cannot escape it by passing a path — it runs
+    // under vitest.smoke.config.ts instead, which does not exclude it.
+    exclude: [
+      ...configDefaults.exclude,
+      '.worktrees/**',
+      '.psyche/**',
+      '**/psyche.smoke.test.ts',
+    ],
     // Several suites shell out to real git (creating worktrees, branches, and
     // repos on disk) rather than mocking it. Vitest's 5s/10s defaults are
     // wall-clock budgets, so under full-suite parallelism those tests flake on

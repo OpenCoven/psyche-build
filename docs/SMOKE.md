@@ -2,6 +2,31 @@
 
 Use this loop to verify the current public CLI/core path.
 
+## Automated cockpit startup check
+
+```bash
+pnpm smoke
+```
+
+Builds, then starts the built `dist/index.js` in a throwaway git repo, under a
+throwaway `HOME`, on a tmux server of its own — so it cannot read or write your
+settings, tmux config, or runtime state. It declines the first-run tmux
+onboarding offer, waits for the project-local `.psyche/psyche.config.json`,
+checks the cockpit identified the disposable project and started with no panes,
+then quits and confirms the tmux session is gone. Everything is torn down on
+success and on failure; a startup failure prints the captured cockpit pane.
+
+Requires `tmux` and `git`. It fails rather than skips when tmux is missing,
+since it is the only assertion the command makes.
+
+This complements `pnpm smoke:pack` rather than replacing it. `smoke:pack`
+verifies what the published tarball would contain; `pnpm smoke` verifies the
+built cockpit actually starts. A package can pack correctly and still fail to
+launch.
+
+The manual checks below still cover the richer pane, ritual, merge, and
+optional Coven flows that the automated check deliberately leaves alone.
+
 ## Package checks
 
 From the psyche checkout:
