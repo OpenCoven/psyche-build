@@ -29,6 +29,7 @@ describe('pull request CI workflow contract', () => {
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
     const workflow = workflowSource();
+    const checkoutCount = workflow.match(/uses: actions\/checkout@/g)?.length ?? 0;
 
     expect(workflow).toContain('node-version: 24');
     expect(workflow).toContain('version: 10.14.0');
@@ -37,6 +38,8 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');
     expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
     expect(workflow).toContain('dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8');
+    expect(checkoutCount).toBeGreaterThan(0);
+    expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
 
     const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
       ([, action]) => action,

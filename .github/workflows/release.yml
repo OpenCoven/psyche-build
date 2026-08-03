@@ -37,6 +37,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require a public release source
         env:
@@ -127,7 +128,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-          cache: pnpm
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
         with:
@@ -223,6 +224,7 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.release_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set release metadata
         env:
@@ -256,7 +258,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-          cache: pnpm
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
         with:
@@ -415,6 +417,7 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.release_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set and validate release metadata
         env:
@@ -444,7 +447,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-          cache: pnpm
+          package-manager-cache: false
 
       - name: Install locked dependencies and verify release version
         run: |
@@ -718,6 +721,7 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.release_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set release metadata
         env:
