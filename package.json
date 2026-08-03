@@ -1,6 +1,6 @@
 {
   "name": "psyche-build",
-  "version": "0.0.11",
+  "version": "0.1.0",
   "description": "Multiagent coding harness: parallel agent lanes in isolated tmux panes and git worktrees.",
   "type": "module",
   "author": "Valentina Alexander",
@@ -42,6 +42,7 @@
     "docs/COVEN-DEMO-LOOP.md",
     "docs/COVEN-SESSIONS.md",
     "docs/PRODUCT-SPEC.md",
+    "docs/RELEASE.md",
     "docs/SMOKE.md",
     "CONTRIBUTING.md",
     "LICENSE"
@@ -58,6 +59,8 @@
     "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
+    "release:version": "node scripts/release-version.mjs --set",
+    "release:check": "node scripts/release-version.mjs --check",
     "test": "vitest --run",
     "prepublishOnly": "pnpm run build",
     "smoke:pack": "npm pack --dry-run"
