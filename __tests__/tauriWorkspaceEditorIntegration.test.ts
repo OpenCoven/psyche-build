@@ -17,6 +17,28 @@ const tauriPackage = JSON.parse(
 ) as { dependencies: Record<string, string> };
 const requireFromTauri = createRequire(join(tauriRoot, 'package.json'));
 
+function extractFunctionSource(source: string, name: string) {
+  const start = source.indexOf(`async function ${name}(`);
+  if (start === -1) throw new Error(`missing async function ${name}`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated async function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 describe('native CodeMirror workspace editor surface', () => {
   it('provides the approved accessible file editor shell', () => {
     for (const id of [
@@ -358,5 +380,141 @@ describe('native CodeMirror workspace editor surface', () => {
       expect(mainJs).toContain(status);
     }
     expect(mainJs).toMatch(/fileReadOnlyMessageEl\.hidden = editable/);
+  });
+
+  it('provides one accessible native decision dialog for dirty and conflict flows', () => {
+    expect(indexHtml.match(/<dialog\b/g)).toHaveLength(1);
+    expect(indexHtml).toMatch(/<dialog[^>]*id="dirty-file-dialog"[^>]*>/);
+    for (const id of [
+      'dirty-file-title',
+      'dirty-file-message',
+      'dirty-file-save',
+      'dirty-file-discard',
+      'dirty-file-cancel',
+      'dirty-file-reload',
+      'dirty-file-keep-editing',
+    ]) {
+      expect(indexHtml).toContain(`id="${id}"`);
+    }
+    expect(mainJs).toMatch(/function showFileDecision\s*\(\{ mode, file \}\)/);
+    expect(mainJs).toContain('dirtyFileDialogEl.showModal()');
+    expect(mainJs).toMatch(/event\.key === "Escape"[\s\S]*event\.preventDefault\(\)/);
+    expect(mainJs).toMatch(/event\.target === dirtyFileDialogEl/);
+    expect(stylesCss).toMatch(/\.file-decision-dialog::backdrop\s*\{/);
+  });
+
+  it('guards dirty files with save, discard, and cancel semantics', async () => {
+    const source = extractFunctionSource(mainJs, 'guardDirtyFile');
+    const decisions = ['cancel', 'discard', 'save'];
+    const saved: string[] = [];
+    const discarded: string[] = [];
+    let focusCount = 0;
+    const guardDirtyFile = compileFunction<
+      (file: { name: string; dirty: boolean }) => Promise<boolean>
+    >(source, {
+      showFileDecision: async () => decisions.shift(),
+      saveFile: async (file: { name: string }) => {
+        saved.push(file.name);
+        return true;
+      },
+      discardFile: (file: { name: string; dirty: boolean }) => {
+        discarded.push(file.name);
+        file.dirty = false;
+      },
+      restoreFileEditorFocus: () => { focusCount += 1; },
+    });
+    const clean = { name: 'clean', dirty: false };
+    const cancel = { name: 'cancel', dirty: true };
+    const discard = { name: 'discard', dirty: true };
+    const save = { name: 'save', dirty: true };
+
+    await expect(guardDirtyFile(clean)).resolves.toBe(true);
+    await expect(guardDirtyFile(cancel)).resolves.toBe(false);
+    await expect(guardDirtyFile(discard)).resolves.toBe(true);
+    await expect(guardDirtyFile(save)).resolves.toBe(true);
+    expect(discarded).toEqual(['discard']);
+    expect(saved).toEqual(['save']);
+    expect(focusCount).toBe(1);
+  });
+
+  it('guards multiple dirty files in deterministic order and stops on failure', async () => {
+    const source = extractFunctionSource(mainJs, 'guardDirtyFiles');
+    const visited: string[] = [];
+    const guardDirtyFiles = compileFunction<
+      (files: Array<{ name: string }>) => Promise<boolean>
+    >(source, {
+      guardDirtyFile: async (file: { name: string }) => {
+        visited.push(file.name);
+        return file.name !== 'second';
+      },
+    });
+
+    await expect(guardDirtyFiles([
+      { name: 'first' }, { name: 'second' }, { name: 'third' },
+    ])).resolves.toBe(false);
+    expect(visited).toEqual(['first', 'second']);
+  });
+
+  it('reloads disk text into a clean file while preserving its selection', async () => {
+    const source = extractFunctionSource(mainJs, 'reloadFile');
+    const selections: unknown[] = [];
+    const file = {
+      id: 'f1', projectId: 'p1', path: '/repo/a.ts', text: 'editor',
+      originalText: 'old', dirty: true, saving: false, error: 'old error',
+      saveError: 'conflict', saveState: 'error', conflict: true,
+      truncated: false, binary: false, size: 6,
+      selection: { anchor: 50, head: 50 },
+    };
+    const reloadFile = compileFunction<(target: typeof file) => Promise<boolean>>(source, {
+      findProject: () => ({ root: '/repo' }),
+      invoke: async () => ({ text: 'disk', truncated: false, binary: false, size: 4 }),
+      window: { PsycheCodeEditor: { createFileBuffer: (text: string) => ({
+        text, originalText: text, dirty: false,
+      }) } },
+      state: { activeFileId: 'f1' },
+      renderFileView: (options: unknown) => { selections.push(options); },
+      refreshTabs: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+
+    await expect(reloadFile(file)).resolves.toBe(true);
+    expect(file).toMatchObject({
+      text: 'disk', originalText: 'disk', dirty: false, saving: false,
+      error: null, saveError: null, saveState: 'clean', conflict: false,
+      selection: { anchor: 50, head: 50 },
+    });
+    expect(selections).toEqual([{ reload: true }]);
+  });
+
+  it('guards navigation, project removal, and native window close before mutation', () => {
+    for (const name of ['activateFileTab', 'closeFileTab', 'removeProject', 'showTerminalView']) {
+      expect(mainJs).toMatch(new RegExp(`async function ${name}\\(`));
+    }
+    const activateFileTabSource = extractFunctionSource(mainJs, 'activateFileTab');
+    expect(activateFileTabSource).toMatch(/await guardDirtyFile\(/);
+    expect(activateFileTabSource).toMatch(/if \(!canActivate\) return false;[\s\S]*activateFileTabNow\(id\)/);
+    expect(mainJs).toMatch(/function activateFileTabNow\(id\)[\s\S]*state\.activeFileId = id/);
+    expect(extractFunctionSource(mainJs, 'closeFileTab')).toMatch(
+      /await guardDirtyFile\(file\)[\s\S]*if \(!canClose\) return false;[\s\S]*state\.openFiles =/
+    );
+    expect(extractFunctionSource(mainJs, 'removeProject')).toMatch(
+      /await guardDirtyFiles\([\s\S]*if \(!canRemove\) return false;[\s\S]*state\.projects =/
+    );
+    expect(extractFunctionSource(mainJs, 'showTerminalView')).toMatch(
+      /await guardDirtyFile\([\s\S]*if \(!canShowTerminal\) return false;[\s\S]*state\.activeFileId = null/
+    );
+    expect(mainJs).toContain('window.__TAURI__.window.getCurrentWindow()');
+    expect(mainJs).toContain('onCloseRequested');
+    expect(mainJs).toMatch(/event\.preventDefault\(\)[\s\S]*await guardDirtyFiles\(state\.openFiles\.slice\(\)\)[\s\S]*currentWindow\.destroy\(\)/);
+    expect(mainJs).toMatch(/closeRequestInFlight/);
+    expect(mainJs).toMatch(/destroyingWindow/);
+    expect(mainJs).not.toMatch(/currentWindow\.close\(\)/);
+  });
+
+  it('offers reload or keep editing after a save conflict without continuing navigation', () => {
+    expect(mainJs).toMatch(/async function reloadFile\(file\)/);
+    expect(mainJs).toMatch(/invoke\("fs_read_text", \{ root: project\.root, path: file\.path \}\)/);
+    expect(mainJs).toMatch(/file\.saveError\.includes\("changed on disk"\)[\s\S]*showFileDecision\(\{ mode: "conflict", file: file \}\)/);
+    expect(mainJs).toMatch(/conflictChoice === "reload"[\s\S]*await reloadFile\(file\)[\s\S]*return false/);
   });
 });

@@ -43,6 +43,9 @@
   var listen = window.__TAURI__.event.listen;
   var openUrl = (window.__TAURI__.opener && window.__TAURI__.opener.openUrl) || null;
   var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
+  var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
+    ? window.__TAURI__.window.getCurrentWindow()
+    : null;
 
   // ============================================================
   // 2. State
@@ -93,11 +96,12 @@
     if (!p) return [];
     return state.threads.filter(function (t) { return t.projectId === p.id; });
   }
-  function setActiveProject(id) {
-    if (state.activeProjectId === id) return;
+  async function setActiveProject(id) {
+    if (state.activeProjectId === id) return true;
+    if (!(await showTerminalView())) return false;
     state.activeProjectId = id;
     var project = findProject(id);
-    if (!project) return;
+    if (!project) return false;
     restoreProjectLayout(project);
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
@@ -108,7 +112,7 @@
         ? project.lastActiveThreadId
         : (threads[0] ? threads[0].id : null);
     if (nextId) {
-      focusThread(nextId);
+      await focusThread(nextId);
     } else {
       state.activeThreadId = null;
       Array.prototype.forEach.call(terminalHost.children, function (el) {
@@ -122,6 +126,7 @@
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
+    return true;
   }
   var projectCounter = 0;
   function makeProjectId() {
@@ -757,9 +762,10 @@
     thread.host = container;
   }
 
-  function focusThread(id) {
+  async function focusThread(id) {
     var thread = findThread(id);
-    if (!thread) return;
+    if (!thread) return false;
+    if (!(await showTerminalView())) return false;
     markActiveSurface("terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
@@ -773,9 +779,6 @@
     Array.prototype.forEach.call(terminalHost.children, function (el) {
       el.classList.toggle("active", el.dataset.threadId === id);
     });
-    // Focusing a session hands the main area back to its terminal, so a file
-    // tab can never leave you staring at another project's source.
-    showTerminalView();
     refreshSidebar();
     requestAnimationFrame(function () {
       fitActiveTerm();
@@ -783,6 +786,7 @@
     });
 
     setProjectStatus(project, statusLevel(thread.status));
+    return true;
   }
 
   function statusLevel(s) {
@@ -791,7 +795,7 @@
     return "warn";
   }
 
-  function closeThread(id) {
+  function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread) return;
     invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
@@ -811,7 +815,7 @@
       });
       var next = siblings[siblings.length - 1] || state.threads[state.threads.length - 1] || null;
       state.activeThreadId = null;
-      if (next) {
+      if (next && (!options || options.focus !== false)) {
         focusThread(next.id);
       } else {
         Array.prototype.forEach.call(terminalHost.children, function (el) {
@@ -995,12 +999,12 @@
           "</span>" +
           '<button class="session-close" title="Close session" aria-label="Close session">×</button>';
 
-        row.addEventListener("click", function (e) {
+        row.addEventListener("click", async function (e) {
           if (e.target && e.target.classList.contains("session-close")) return;
           // Switching project first keeps layout/browser state consistent, then
           // focus the specific thread the user clicked.
-          if (project.id !== state.activeProjectId) setActiveProject(project.id);
-          focusThread(thread.id);
+          if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+          await focusThread(thread.id);
         });
         row.querySelector(".session-close").addEventListener("click", function (e) {
           e.stopPropagation();
@@ -1074,18 +1078,34 @@
     terminalHost.appendChild(empty);
   }
 
-  function closeProject(id) {
+  async function removeProject(id) {
     var project = findProject(id);
-    if (!project) return;
+    if (!project) return false;
+    var projectOpenFiles = state.openFiles.filter(function (file) {
+      return file.projectId === id;
+    });
+    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    fileNavigationInFlight = true;
+    var canRemove;
+    try {
+      canRemove = await guardDirtyFiles(projectOpenFiles);
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canRemove) return false;
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    threadIds.forEach(function (tid) { closeThread(tid); });
+    threadIds.forEach(function (tid) { closeThread(tid, { focus: false }); });
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
-    if (dropped.some(function (f) { return f.id === state.activeFileId; })) showTerminalView();
+    if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
+      state.activeFileId = null;
+      if (fileViewEl) fileViewEl.hidden = true;
+      if (terminalHost) terminalHost.hidden = false;
+    }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     if (state.activeProjectId === id) {
@@ -1094,7 +1114,7 @@
       // matches — clear first.
       state.activeProjectId = null;
       if (next) {
-        setActiveProject(next.id);
+        await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
         Array.prototype.forEach.call(terminalHost.children, function (el) {
@@ -1106,6 +1126,7 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    return true;
   }
 
   function escapeHtml(s) {
@@ -1135,8 +1156,18 @@
   var fileReadOnlyMessageEl = document.getElementById("file-read-only-message");
   var fileCursorEl = document.getElementById("file-cursor");
   var fileEditorHostEl = document.getElementById("file-editor-host");
+  var dirtyFileDialogEl = document.getElementById("dirty-file-dialog");
+  var dirtyFileTitleEl = document.getElementById("dirty-file-title");
+  var dirtyFileMessageEl = document.getElementById("dirty-file-message");
+  var dirtyFileSaveEl = document.getElementById("dirty-file-save");
+  var dirtyFileDiscardEl = document.getElementById("dirty-file-discard");
+  var dirtyFileCancelEl = document.getElementById("dirty-file-cancel");
+  var dirtyFileReloadEl = document.getElementById("dirty-file-reload");
+  var dirtyFileKeepEditingEl = document.getElementById("dirty-file-keep-editing");
   var fileCounter = 0;
   var loadedEditorFileId = null;
+  var fileDecisionInFlight = null;
+  var fileNavigationInFlight = false;
 
   var fileEditor = window.PsycheCodeEditor.createFileEditor({
     parent: fileEditorHostEl,
@@ -1158,6 +1189,70 @@
     },
   });
 
+  function restoreFileEditorFocus() {
+    requestAnimationFrame(function () {
+      if (state.activeFileId && fileViewEl && !fileViewEl.hidden) fileEditor.focus();
+    });
+  }
+
+  function showFileDecision({ mode, file }) {
+    if (fileDecisionInFlight) return fileDecisionInFlight;
+    var conflictMode = mode === "conflict";
+    var fallback = conflictMode ? "keep-editing" : "cancel";
+    var fileLabel = (file && (file.rel || file.name || file.path)) || "this file";
+    dirtyFileTitleEl.textContent = conflictMode ? "File changed on disk" : "Save changes?";
+    dirtyFileMessageEl.textContent = conflictMode
+      ? fileLabel + " changed outside Psyche. Reload the disk version or keep your unsaved edits."
+      : "Save your changes to " + fileLabel + " before continuing?";
+    Array.prototype.forEach.call(
+      dirtyFileDialogEl.querySelectorAll("[data-decision-mode]"),
+      function (actions) { actions.hidden = actions.dataset.decisionMode !== mode; }
+    );
+
+    fileDecisionInFlight = new Promise(function (resolve) {
+      var settled = false;
+      var bindings = [];
+      function bind(target, type, handler) {
+        target.addEventListener(type, handler);
+        bindings.push([target, type, handler]);
+      }
+      function settle(choice) {
+        if (settled) return;
+        settled = true;
+        bindings.forEach(function (binding) {
+          binding[0].removeEventListener(binding[1], binding[2]);
+        });
+        if (dirtyFileDialogEl.open) dirtyFileDialogEl.close();
+        fileDecisionInFlight = null;
+        resolve(choice);
+      }
+      function choose(choice) { return function () { settle(choice); }; }
+      bind(dirtyFileSaveEl, "click", choose("save"));
+      bind(dirtyFileDiscardEl, "click", choose("discard"));
+      bind(dirtyFileCancelEl, "click", choose("cancel"));
+      bind(dirtyFileReloadEl, "click", choose("reload"));
+      bind(dirtyFileKeepEditingEl, "click", choose("keep-editing"));
+      bind(dirtyFileDialogEl, "keydown", function (event) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          settle(fallback);
+        }
+      });
+      bind(dirtyFileDialogEl, "cancel", function (event) {
+        event.preventDefault();
+        settle(fallback);
+      });
+      bind(dirtyFileDialogEl, "pointerdown", function (event) {
+        if (event.target === dirtyFileDialogEl) settle(fallback);
+      });
+      dirtyFileDialogEl.showModal();
+      requestAnimationFrame(function () {
+        (conflictMode ? dirtyFileReloadEl : dirtyFileSaveEl).focus();
+      });
+    });
+    return fileDecisionInFlight;
+  }
+
   function findOpenFile(id) {
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
@@ -1168,7 +1263,16 @@
     var existing = state.openFiles.filter(function (f) {
       return f.path === path && f.projectId === project.id;
     })[0];
-    if (existing) { activateFileTab(existing.id); return; }
+    if (existing) return activateFileTab(existing.id);
+    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    fileNavigationInFlight = true;
+    var canOpen;
+    try {
+      canOpen = await guardDirtyFile(findOpenFile(state.activeFileId));
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canOpen) return false;
 
     fileCounter += 1;
     var rel = relativeToRoot(project.root, path);
@@ -1194,7 +1298,7 @@
       loading: true,
     };
     state.openFiles.push(file);
-    activateFileTab(file.id);
+    activateFileTabNow(file.id);
     try {
       var res = await invoke("fs_read_text", { root: project.root, path: path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(res.text || ""));
@@ -1206,44 +1310,128 @@
     }
     file.loading = false;
     if (state.activeFileId === file.id) renderFileView({ reload: true });
+    return true;
   }
 
-  function activateFileTab(id) {
+  function activateFileTabNow(id) {
     var file = findOpenFile(id);
-    if (!file) return;
+    if (!file) return false;
     state.activeFileId = id;
     markActiveSurface("terminal");
     if (fileViewEl) fileViewEl.hidden = false;
     if (terminalHost) terminalHost.hidden = true;
     refreshTabs();
     renderFileView();
+    return true;
+  }
+
+  async function activateFileTab(id) {
+    var file = findOpenFile(id);
+    if (!file) return false;
+    if (state.activeFileId === id) {
+      fileEditor.focus();
+      return true;
+    }
+    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    fileNavigationInFlight = true;
+    var canActivate;
+    try {
+      canActivate = await guardDirtyFile(findOpenFile(state.activeFileId));
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canActivate) return false;
+    return activateFileTabNow(id);
   }
 
   // Hands the main area back to the terminal. Called whenever a session is
   // focused, so clicking a sidebar row always lands you on its terminal.
-  function showTerminalView() {
+  async function showTerminalView() {
+    if (!state.activeFileId) return true;
+    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    fileNavigationInFlight = true;
+    var canShowTerminal;
+    try {
+      canShowTerminal = await guardDirtyFile(findOpenFile(state.activeFileId));
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canShowTerminal) return false;
     state.activeFileId = null;
     if (fileViewEl) fileViewEl.hidden = true;
     if (terminalHost) terminalHost.hidden = false;
     refreshTabs();
     requestAnimationFrame(function () { fitActiveTerm(); });
+    return true;
   }
 
-  function closeFileTab(id) {
+  async function closeFileTab(id) {
     var file = findOpenFile(id);
-    if (!file) return;
+    if (!file) return false;
+    if (fileNavigationInFlight || fileDecisionInFlight) return false;
+    fileNavigationInFlight = true;
+    var canClose;
+    try {
+      canClose = await guardDirtyFile(file);
+    } finally {
+      fileNavigationInFlight = false;
+    }
+    if (!canClose) return false;
     var siblings = projectFiles(file.projectId);
     var idx = siblings.indexOf(file);
     state.openFiles = state.openFiles.filter(function (f) { return f.id !== id; });
-    if (state.activeFileId !== id) { refreshTabs(); return; }
+    if (state.activeFileId !== id) { refreshTabs(); return true; }
     var remaining = projectFiles(file.projectId);
     var next = remaining[Math.min(idx, remaining.length - 1)];
-    if (next) activateFileTab(next.id);
-    else showTerminalView();
+    if (next) activateFileTabNow(next.id);
+    else {
+      state.activeFileId = null;
+      if (fileViewEl) fileViewEl.hidden = true;
+      if (terminalHost) terminalHost.hidden = false;
+      refreshTabs();
+      requestAnimationFrame(function () { fitActiveTerm(); });
+    }
+    return true;
   }
 
   function isEditableFile(file) {
     return !!file && !file.loading && !file.error && !file.binary && !file.truncated;
+  }
+
+  function discardFile(file) {
+    if (!file) return;
+    Object.assign(file, window.PsycheCodeEditor.createFileBuffer(file.originalText || ""), {
+      saving: false,
+      error: null,
+      saveError: null,
+      saveState: "clean",
+      conflict: false,
+    });
+    if (state.activeFileId === file.id) renderFileView({ reload: true });
+    refreshTabs();
+  }
+
+  async function guardDirtyFile(file) {
+    if (!file || !file.dirty) return true;
+    var choice = await showFileDecision({ mode: "dirty", file: file });
+    if (choice === "cancel") {
+      restoreFileEditorFocus();
+      return false;
+    }
+    if (choice === "discard") {
+      discardFile(file);
+      return true;
+    }
+    var saved = await saveFile(file);
+    if (!saved) restoreFileEditorFocus();
+    return saved;
+  }
+
+  async function guardDirtyFiles(files) {
+    for (var index = 0; index < files.length; index += 1) {
+      if (!(await guardDirtyFile(files[index]))) return false;
+    }
+    return true;
   }
 
   function languageLabel(languageId) {
@@ -1321,6 +1509,40 @@
     }
   }
 
+  async function reloadFile(file) {
+    var project = file && findProject(file.projectId);
+    if (!file || !project) {
+      if (file) file.saveError = "Project is no longer open.";
+      restoreFileEditorFocus();
+      return false;
+    }
+    try {
+      var loaded = await invoke("fs_read_text", { root: project.root, path: file.path });
+      Object.assign(file, window.PsycheCodeEditor.createFileBuffer(loaded.text || ""), {
+        saving: false,
+        loading: false,
+        error: null,
+        saveError: null,
+        saveState: "clean",
+        conflict: false,
+        truncated: !!loaded.truncated,
+        binary: !!loaded.binary,
+        size: loaded.size,
+      });
+      if (state.activeFileId === file.id) renderFileView({ reload: true });
+      refreshTabs();
+      restoreFileEditorFocus();
+      return true;
+    } catch (error) {
+      file.saving = false;
+      file.saveError = String(error);
+      file.saveState = "error";
+      if (state.activeFileId === file.id) renderFileChrome(file);
+      restoreFileEditorFocus();
+      return false;
+    }
+  }
+
   function handleFileSaveConflict(file) {
     // Task 5 owns the Reload / Keep Editing prompt. Preserve the conflict on
     // the model so that guard can present it without discarding this buffer.
@@ -1384,6 +1606,11 @@
       if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
         renderFileChrome(file);
       }
+      if (file.conflict) {
+        var conflictChoice = await showFileDecision({ mode: "conflict", file: file });
+        if (conflictChoice === "reload") await reloadFile(file);
+        else restoreFileEditorFocus();
+      } else restoreFileEditorFocus();
       return false;
     }
   }
@@ -1391,6 +1618,33 @@
   if (fileSaveEl) {
     fileSaveEl.addEventListener("click", function () {
       saveFile(findOpenFile(state.activeFileId));
+    });
+  }
+
+  var closeRequestInFlight = false;
+  var destroyingWindow = false;
+  if (currentWindow && typeof currentWindow.onCloseRequested === "function") {
+    currentWindow.onCloseRequested(async function (event) {
+      if (destroyingWindow) return;
+      event.preventDefault();
+      if (closeRequestInFlight || fileDecisionInFlight || fileNavigationInFlight) return;
+      closeRequestInFlight = true;
+      fileNavigationInFlight = true;
+      try {
+        if (!(await guardDirtyFiles(state.openFiles.slice()))) return;
+        destroyingWindow = true;
+        saveWorkspaceNow();
+        await currentWindow.destroy();
+      } catch (error) {
+        destroyingWindow = false;
+        setStatus("close failed: " + String(error), "error");
+        restoreFileEditorFocus();
+      } finally {
+        fileNavigationInFlight = false;
+        closeRequestInFlight = false;
+      }
+    }).catch(function (error) {
+      setStatus("close guard unavailable: " + String(error), "warn");
     });
   }
 
@@ -1426,13 +1680,13 @@
         '<span class="label">' + escapeHtml(file.name) + "</span>" +
         (file.dirty ? '<span class="dot dirty-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>' : "") +
         '<button class="close" title="Close file (\u2318W)">\u00d7</button>';
-      tab.addEventListener("click", function (e) {
+      tab.addEventListener("click", async function (e) {
         if (e.target.classList.contains("close")) return;
-        activateFileTab(file.id);
+        await activateFileTab(file.id);
       });
-      tab.querySelector(".close").addEventListener("click", function (e) {
+      tab.querySelector(".close").addEventListener("click", async function (e) {
         e.stopPropagation();
-        closeFileTab(file.id);
+        await closeFileTab(file.id);
       });
       tabStripEl.appendChild(tab);
     });
@@ -2155,7 +2409,7 @@
     if (activeSurface === "browser") openBlankBrowserTab(); else spawnDefaultThread();
   }
 
-  document.addEventListener("keydown", function (e) {
+  document.addEventListener("keydown", async function (e) {
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
@@ -2171,9 +2425,10 @@
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active file tab; with none open it closes the project.
     if (e.key === "w") {
-      if (state.activeFileId) closeFileTab(state.activeFileId);
-      else if (state.activeProjectId) closeProject(state.activeProjectId);
-      e.preventDefault(); return;
+      e.preventDefault();
+      if (state.activeFileId) await closeFileTab(state.activeFileId);
+      else if (state.activeProjectId) await removeProject(state.activeProjectId);
+      return;
     }
     if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
     if (e.key === "\\") { toggleBrowser(); e.preventDefault(); return; }
@@ -2183,17 +2438,17 @@
     if (e.code === "KeyB" && e.shiftKey) { cycleBrowserSide(1); e.preventDefault(); return; }
     // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
     // no files open they fall back to projects, which the sidebar also drives.
-    if (e.key === "[") { switchTab(-1); e.preventDefault(); return; }
-    if (e.key === "]") { switchTab(+1); e.preventDefault(); return; }
+    if (e.key === "[") { e.preventDefault(); await switchTab(-1); return; }
+    if (e.key === "]") { e.preventDefault(); await switchTab(+1); return; }
     var n = parseInt(e.key, 10);
     if (Number.isInteger(n) && n >= 1 && n <= 9) {
       var files = projectFiles();
       if (files.length) {
-        if (files[n - 1]) { activateFileTab(files[n - 1].id); e.preventDefault(); }
+        if (files[n - 1]) { e.preventDefault(); await activateFileTab(files[n - 1].id); }
         return;
       }
       var p = state.projects[n - 1];
-      if (p) { setActiveProject(p.id); e.preventDefault(); }
+      if (p) { e.preventDefault(); await setActiveProject(p.id); }
     }
   }, true);
   // ---- Side rails ----
@@ -2307,13 +2562,13 @@
         '<span class="twisty">' + (entry.is_dir ? "▶" : "") + "</span>" +
         '<span class="file-name">' + escapeHtml(entry.name) + "</span>";
       row.title = entry.path;
-      row.addEventListener("click", function () {
+      row.addEventListener("click", async function () {
         if (entry.is_dir) {
           if (expandedDirs[entry.path]) delete expandedDirs[entry.path];
           else expandedDirs[entry.path] = true;
           renderFilesPanel();
         } else {
-          openFileTab(entry.path, activeProject());
+          await openFileTab(entry.path, activeProject());
         }
       });
       container.appendChild(row);
@@ -2505,30 +2760,31 @@
     if (gitRemoteWebUrl && openUrl) openUrl(gitRemoteWebUrl).catch(function () {});
   });
 
-  function switchTab(delta) {
+  async function switchTab(delta) {
     var files = projectFiles();
     if (files.length) {
       var fi = files.findIndex(function (f) { return f.id === state.activeFileId; });
       if (fi === -1) fi = 0;
-      activateFileTab(files[(fi + delta + files.length) % files.length].id);
+      await activateFileTab(files[(fi + delta + files.length) % files.length].id);
       return;
     }
     if (state.projects.length === 0) return;
     var idx = state.projects.findIndex(function (p) { return p.id === state.activeProjectId; });
     if (idx === -1) idx = 0;
     var next = (idx + delta + state.projects.length) % state.projects.length;
-    setActiveProject(state.projects[next].id);
+    await setActiveProject(state.projects[next].id);
   }
 
   // ============================================================
   // 12. Boot
   // ============================================================
 
-  function addProject(rootPath) {
+  async function addProject(rootPath) {
     if (!rootPath) return null;
     var existing = state.projects.find(function (p) { return p.root === rootPath; });
-    if (existing) { setActiveProject(existing.id); return existing; }
+    if (existing) return (await setActiveProject(existing.id)) ? existing : null;
     if (state.projects.length >= settings.maxProjects) { setStatus("project limit reached (" + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ")", "warn"); return null; }
+    if (!(await showTerminalView())) return null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browser: { tabs: [], activeTabId: null } };
@@ -2557,7 +2813,7 @@
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      var project = addProject(selected);
+      var project = await addProject(selected);
       if (project) {
         ensureProjectPsyche(project);
         setProjectStatus(project, "ok");
@@ -2663,7 +2919,7 @@
   }
 
   invoke("app_environment")
-    .then(function (env) {
+    .then(async function (env) {
       state.env = env || {};
       var saved = readSavedWorkspace();
       var bootRoot = state.env.repo_root || state.env.home || "/";
@@ -2676,7 +2932,7 @@
         if (project) restoreProjectLayout(project);
         isRestoringWorkspace = false;
       }
-      if (!project) project = addProject(bootRoot);
+      if (!project) project = await addProject(bootRoot);
       if (project) {
         ensureProjectPsyche(project);
         var activeTab = currentBrowserTab(project);

@@ -1085,6 +1085,60 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   background: var(--accent-line) !important;
 }
 .file-editor-host .cm-cursor { border-left-color: var(--accent); }
+.file-decision-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-solid);
+  color: var(--text);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.65);
+}
+.file-decision-dialog::backdrop {
+  background: rgba(5, 4, 9, 0.62);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+.file-decision-card { padding: 18px; }
+.file-decision-card h2 {
+  margin: 0 0 7px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.file-decision-card p {
+  min-height: 34px;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.file-decision-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.file-decision-actions[hidden] { display: none; }
+.file-decision-actions button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+}
+.file-decision-actions button:hover { background: var(--surface-3); color: var(--text); }
+.file-decision-actions button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.file-decision-actions button.primary {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.file-decision-actions button.danger { color: #ffb4b4; }
 .file-read-only-message {
   position: absolute;
   top: 9px;

@@ -262,6 +262,26 @@
         </button>
       </nav>
     </div>
+    <dialog
+      class="file-decision-dialog"
+      id="dirty-file-dialog"
+      aria-labelledby="dirty-file-title"
+      aria-describedby="dirty-file-message"
+    >
+      <div class="file-decision-card">
+        <h2 id="dirty-file-title">Save changes?</h2>
+        <p id="dirty-file-message"></p>
+        <div class="file-decision-actions" data-decision-mode="dirty">
+          <button id="dirty-file-cancel" type="button">Cancel</button>
+          <button id="dirty-file-discard" class="danger" type="button">Discard</button>
+          <button id="dirty-file-save" class="primary" type="button">Save</button>
+        </div>
+        <div class="file-decision-actions" data-decision-mode="conflict" hidden>
+          <button id="dirty-file-keep-editing" type="button">Keep Editing</button>
+          <button id="dirty-file-reload" class="primary" type="button">Reload</button>
+        </div>
+      </div>
+    </dialog>
     <script src="./editor.bundle.js" defer></script>
     <script src="./main.js" defer></script>
   </body>
