@@ -4,7 +4,7 @@
 
 **Goal:** Make the Projects and Panes rails collapse together so an iPhone terminal opens at full width and can restore navigation from one accessible toolbar control.
 
-**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local visibility and preferred-compact-column state in `CockpitView`. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one detail-toolbar button without changing project, pane, or connection state.
+**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local visibility and preferred-compact-column state in `CockpitView`. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one toolbar control — carried by every column that can be on screen in compact width, so it collapses as well as reveals — without changing project, pane, or connection state.
 
 **Tech Stack:** Swift 6, SwiftUI, XCTest/XCUITest, XcodeGen, `xcodebuild`
 

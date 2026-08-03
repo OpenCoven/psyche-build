@@ -14,6 +14,38 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertEqual(toggle.label, "Show siderails")
     }
 
+    /// The reveal direction was covered; this covers the return trip.
+    ///
+    /// The neighbouring test reads as though it collapses again, but it walks
+    /// forward through the columns and stops at the pane list — so a toggle that
+    /// could only ever reveal still passed. Tapping it from each siderail is what
+    /// actually pins the control down as two-way.
+    func testSiderailToggleReturnsToDetailFromEitherNavigationLevel() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+
+        showProjectSidebar(in: app)
+        let sidebarToggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(sidebarToggle.label, "Hide siderails")
+        sidebarToggle.tap()
+        XCTAssertTrue(element("terminal-output", in: app).waitForExistence(timeout: 5))
+        XCTAssertFalse(element("project-sidebar", in: app).exists)
+
+        // One level deeper: the pane list must offer the same way back.
+        showProjectSidebar(in: app)
+        let panesButton = app.buttons["Panes"]
+        XCTAssertTrue(panesButton.waitForExistence(timeout: 5))
+        panesButton.tap()
+        XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
+
+        let paneListToggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(paneListToggle.waitForExistence(timeout: 5))
+        paneListToggle.tap()
+        XCTAssertTrue(element("terminal-output", in: app).waitForExistence(timeout: 5))
+        XCTAssertFalse(element("pane-list", in: app).exists)
+    }
+
     func testSiderailToggleRevealsBothNavigationLevelsAndCollapsesAgain() throws {
         let app = launchApp()
         try requireCompactWidth(in: app)

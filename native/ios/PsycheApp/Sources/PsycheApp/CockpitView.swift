@@ -34,11 +34,7 @@ struct CockpitView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(action: toggleSiderails) {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .accessibilityLabel(siderailToggleAccessibilityLabel)
-                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                    siderailToggleButton
                 }
             }
         }
@@ -110,11 +106,7 @@ struct CockpitView: View {
         .toolbar {
             if horizontalSizeClass == .compact {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(action: toggleSiderails) {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .accessibilityLabel(siderailToggleAccessibilityLabel)
-                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                    siderailToggleButton
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Panes") {
@@ -147,14 +139,23 @@ struct CockpitView: View {
         .toolbar {
             if horizontalSizeClass == .compact {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(action: toggleSiderails) {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .accessibilityLabel(siderailToggleAccessibilityLabel)
-                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                    siderailToggleButton
                 }
             }
         }
+    }
+
+    /// Shared by every column that can be on screen in compact width.
+    ///
+    /// The detail column alone used to carry it, which made the control
+    /// one-way: it could reveal the siderails but never collapse them again,
+    /// because once a siderail was showing the button was no longer on screen.
+    private var siderailToggleButton: some View {
+        Button(action: toggleSiderails) {
+            Image(systemName: "sidebar.left")
+        }
+        .accessibilityLabel(siderailToggleAccessibilityLabel)
+        .accessibilityIdentifier("cockpit-siderail-toggle")
     }
 
     private var siderailToggleAccessibilityLabel: String {
