@@ -16,6 +16,7 @@
 		875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */; };
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
 		B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208B0729C5558A164DD1556 /* CockpitView.swift */; };
+		C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */; };
 		C47E0519F01CE5BF77E873F8 /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */; };
 		E78D840B1348810820259800 /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -74,6 +75,7 @@
 /* Begin PBXFileReference section */
 		0208B0729C5558A164DD1556 /* CockpitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CockpitView.swift; sourceTree = "<group>"; };
 		0899D0A654BB447D7D88380A /* BridgeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessages.swift; sourceTree = "<group>"; };
+		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
 		171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStore.swift; sourceTree = "<group>"; };
 		1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransport.swift; sourceTree = "<group>"; };
 		56D912A6A487EC289774C800 /* PsycheApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheApp.swift; sourceTree = "<group>"; };
@@ -209,6 +211,7 @@
 			children = (
 				7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */,
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
+				158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */,
 			);
 			path = PsycheCoreTests;
 			sourceTree = "<group>";
@@ -361,6 +364,7 @@
 			files = (
 				7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */,
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
+				C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

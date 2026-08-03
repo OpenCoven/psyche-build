@@ -171,6 +171,59 @@ export type ServerMessage =
   | { type: "error"; payload: BridgeError };
 
 // ---------------------------------------------------------------------------
+// Runtime type lists
+//
+// The unions above are erased at runtime, so the contract test cannot iterate
+// them directly. These arrays make the set enumerable, and the assertions below
+// make them impossible to forget: adding a union member without adding it here
+// (or vice versa) is a compile error, not a silently under-covered test.
+// ---------------------------------------------------------------------------
+
+export const CLIENT_MESSAGE_TYPES = [
+  "hello",
+  "listPanes",
+  "sendInput",
+  "focusPane",
+  "ping",
+  "listProjects",
+  "subscribePane",
+  "unsubscribePane",
+  "listRituals",
+  "launchRitual",
+  "pair",
+] as const;
+
+export const SERVER_MESSAGE_TYPES = [
+  "welcome",
+  "paneList",
+  "paneListChanged",
+  "projectList",
+  "paneOutput",
+  "ritualList",
+  "attention",
+  "pairChallenge",
+  "pairAccepted",
+  "pairRejected",
+  "pong",
+  "error",
+] as const;
+
+/** Compile error if the array and the union ever disagree, in either direction. */
+type MutuallyExhaustive<A extends string, B extends string> =
+  [Exclude<A, B> | Exclude<B, A>] extends [never] ? true : never;
+
+const _clientTypesMatchUnion: MutuallyExhaustive<
+  ClientMessage["type"],
+  typeof CLIENT_MESSAGE_TYPES[number]
+> = true;
+const _serverTypesMatchUnion: MutuallyExhaustive<
+  ServerMessage["type"],
+  typeof SERVER_MESSAGE_TYPES[number]
+> = true;
+void _clientTypesMatchUnion;
+void _serverTypesMatchUnion;
+
+// ---------------------------------------------------------------------------
 // stableStringify — mirrors Swift's .sortedKeys output formatting.
 //
 // JSON.stringify with a replacer that sorts object keys lexicographically.
