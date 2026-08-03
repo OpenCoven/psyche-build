@@ -40,6 +40,12 @@ const noopRituals = {
   launchRitual: async () => {},
 };
 
+const noopHubFactory = () => ({
+  start() {},
+  stop() {},
+  sendInput() {},
+}) as any;
+
 describe("BridgeDaemon", () => {
   it("requires authentication before listPanes/listProjects", async () => {
     const daemon = new BridgeDaemon({
@@ -47,6 +53,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [{
         id: "%1", displayName: "psyche", kind: "control",
         projectId: "p1", projectName: "psyche",
@@ -98,6 +105,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [{
         id: "%1", displayName: "psyche", kind: "control",
         projectId: "p1", projectName: "psyche",
@@ -158,6 +166,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => [],
       projectProvider: () => [],
       ritualProvider: (projectId) => {
@@ -225,6 +234,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => panes,
       projectProvider: () => projects,
       ritualProvider: () => [],
@@ -295,6 +305,7 @@ describe("BridgeDaemon", () => {
       serverName: "test",
       projectName: "psyche",
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       paneProvider: () => {
         throw new Error("pane provider failed");
       },
@@ -342,6 +353,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore: new FakeTokenStore() as any,
     });
@@ -555,6 +567,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -611,6 +624,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -657,6 +671,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
@@ -697,6 +712,7 @@ describe("BridgeDaemon", () => {
       paneProvider: () => [],
       projectProvider: () => [],
       sessionName: "test-session",
+      hubFactory: noopHubFactory,
       ...noopRituals,
       tokenStore,
       pairingFlow,
