@@ -5,9 +5,11 @@ const languageByExtension = new Map([
   ['jsx', 'javascript'],
   ['json', 'json'],
   ['html', 'html'],
+  ['htm', 'html'],
   ['xml', 'xml'],
   ['css', 'css'],
   ['md', 'markdown'],
+  ['mdx', 'markdown'],
   ['markdown', 'markdown'],
   ['py', 'python'],
   ['rs', 'rust'],
@@ -78,8 +80,8 @@ export function createLruCache(limit) {
       }
     },
     deleteWhere(predicate) {
-      for (const [key, value] of entries) {
-        if (predicate(value, key)) {
+      for (const key of entries.keys()) {
+        if (predicate(key)) {
           entries.delete(key);
         }
       }

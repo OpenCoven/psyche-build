@@ -19,9 +19,11 @@ describe('Tauri workspace editor model', () => {
     expect(model.languageForPath('component.js')).toBe('javascript');
     expect(model.languageForPath('config.json')).toBe('json');
     expect(model.languageForPath('page.html')).toBe('html');
+    expect(model.languageForPath('page.htm')).toBe('html');
     expect(model.languageForPath('page.xml')).toBe('xml');
     expect(model.languageForPath('styles.css')).toBe('css');
     expect(model.languageForPath('README.md')).toBe('markdown');
+    expect(model.languageForPath('guide.mdx')).toBe('markdown');
     expect(model.languageForPath('script.py')).toBe('python');
     expect(model.languageForPath('main.rs')).toBe('rust');
     expect(model.languageForPath('Dockerfile')).toBe('shell');
@@ -36,10 +38,12 @@ describe('Tauri workspace editor model', () => {
   test('tracks file edits and resets its saved baseline', () => {
     const created = model.createFileBuffer('one');
     const updated = model.updateFileBuffer(created, 'two');
+    const restored = model.updateFileBuffer(updated, 'one');
     const saved = model.markFileSaved(updated, 'two');
 
     expect(created).toEqual({ text: 'one', originalText: 'one', dirty: false });
     expect(updated).toEqual({ text: 'two', originalText: 'one', dirty: true });
+    expect(restored).toEqual({ text: 'one', originalText: 'one', dirty: false });
     expect(saved).toEqual({ text: 'two', originalText: 'two', dirty: false });
   });
 
@@ -63,7 +67,7 @@ describe('Tauri workspace editor model', () => {
     expect(cache.get('first')).toBe(1);
     expect(cache.get('third')).toBe(3);
 
-    cache.deleteWhere((_value: number, key: string) => key === 'first');
+    cache.deleteWhere((key: string) => key.startsWith('first'));
     expect(cache.get('first')).toBeUndefined();
     expect(cache.get('third')).toBe(3);
 
