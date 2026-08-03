@@ -331,7 +331,10 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(/return saveOutcome\.canContinue/);
     expect(
       mainJs.match(/window\.PsycheCodeEditor\.shouldRenderFileSaveChrome\(/g)
-    ).toHaveLength(3);
+    ).toHaveLength(4);
+    expect(mainJs).toMatch(
+      /file\.saving = true;[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*try \{/
+    );
     expect(mainJs).toMatch(
       /if \(!project\) \{[\s\S]*file\.saveError = "Project is no longer open\.";[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*return false;/
     );

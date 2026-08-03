@@ -1340,7 +1340,9 @@
 
     file.saving = true;
     file.saveError = null;
-    renderFileChrome(file);
+    if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
+      renderFileChrome(file);
+    }
     try {
       var saved = await invoke("fs_write_text", {
         root: project.root,
