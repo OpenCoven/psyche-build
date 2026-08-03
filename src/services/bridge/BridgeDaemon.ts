@@ -14,6 +14,8 @@ import { PaneStreamHub } from "./PaneStreamHub.js";
 import { TokenStore, DeviceRecord } from "./TokenStore.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { BridgeBonjour } from "./BridgeBonjour.js";
+import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
+import { LogService } from "../LogService.js";
 
 export interface BridgeDaemonOptions {
   serverId?: string;
@@ -71,6 +73,14 @@ export class BridgeDaemon {
       onClose: (s) => {
         for (const teardown of s.subscriptionTeardowns.values()) teardown();
         for (const subs of this.paneSubscribers.values()) subs.delete(s);
+      },
+      // Transport errors are expected on a LAN listener (peers vanish, wifi
+      // drops). They must be observed so they do not crash psyche, but they
+      // are not actionable, so they go to the log rather than stdout — this
+      // daemon runs inside the Ink TUI, where console output corrupts the
+      // rendered frame.
+      onServerError: (err) => {
+        LogService.getInstance().warn(`bridge transport error: ${err.message}`, 'bridge');
       },
     });
     const { port } = await this.listener.start();
@@ -183,8 +193,14 @@ export class BridgeDaemon {
         return;
       }
       case "pair": {
+        const wasOpen = this.pairing.isOpen();
         if (!this.pairing.consume(m.payload.code)) {
-          const reason = this.pairing.isOpen() ? "invalid_code" : "no_window_open";
+          // The window closing on a wrong code means the attempt budget ran
+          // out, which is a different thing for the user to see than "you
+          // mistyped" — they have to run `:pair` again on the Mac.
+          const reason = this.pairing.isOpen()
+            ? "invalid_code"
+            : wasOpen ? "too_many_attempts" : "no_window_open";
           s.send({ type: "pairRejected", payload: { reason } });
           return;
         }
@@ -212,6 +228,13 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "not_authenticated", message: "pair first" } });
           return;
         }
+        // Subscribing allocates a replay buffer keyed by pane id, so an
+        // unchecked id both grows the hub without bound and seeds a value
+        // that later reaches tmux as command text.
+        if (!isTmuxPaneId(m.payload.paneId)) {
+          s.send({ type: "error", payload: { code: "invalid_pane", message: "paneId must be a tmux pane id such as %3" } });
+          return;
+        }
         this.subscribePane(s, m.payload.paneId, m.payload.sinceSeq ?? null);
         return;
       }
@@ -221,6 +244,16 @@ export class BridgeDaemon {
       }
       case "sendInput": {
         if (s.state !== "authenticated") return;
+        // Pane ids reach tmux control mode as command text, so a malformed one
+        // is a protocol error to report, never something to forward.
+        if (!isTmuxPaneId(m.payload.paneId)) {
+          s.send({ type: "error", payload: { code: "invalid_pane", message: "paneId must be a tmux pane id such as %3" } });
+          return;
+        }
+        if (typeof m.payload.data !== "string") {
+          s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
+          return;
+        }
         const bytes = Buffer.from(m.payload.data, "base64");
         this.hub!.sendInput(m.payload.paneId, bytes);
         return;

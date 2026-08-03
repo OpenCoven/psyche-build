@@ -179,6 +179,7 @@ See [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md) and the [OpenCov
 
 - [Documentation index](./docs/README.md)
 - [Breaking changes: comux → Psyche Build](./docs/BREAKING-CHANGES.md)
+- [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md)
 - [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md)
 - [Product spec](./docs/PRODUCT-SPEC.md)
 - [Smoke test](./docs/SMOKE.md)

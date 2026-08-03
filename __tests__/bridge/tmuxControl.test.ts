@@ -1,5 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { tmuxDimensionArg, unescapeTmuxOutput } from '../../src/services/bridge/tmuxControl.js';
+import { TmuxControl, tmuxDimensionArg, unescapeTmuxOutput } from '../../src/services/bridge/tmuxControl.js';
+
+describe('TmuxControl pane targets (LAN bridge)', () => {
+  function recordingControl() {
+    const tmux = new TmuxControl('psyche-test');
+    const commands: string[] = [];
+    tmux.command = (line: string) => {
+      commands.push(line);
+    };
+    return { tmux, commands };
+  }
+
+  it('builds quoted commands for a real pane id', () => {
+    const { tmux, commands } = recordingControl();
+    tmux.killPane('%7');
+    tmux.resizePane('%7', 100, 30);
+    tmux.sendKeysHex('%7', Buffer.from([0x61, 0x0d]));
+    expect(commands).toEqual([
+      "kill-pane -t '%7'",
+      "resize-pane -t '%7' -x 100 -y 30",
+      "send-keys -t '%7' -H 61 0d",
+    ]);
+  });
+
+  // Regression: this daemon listens on 0.0.0.0 and advertises itself over
+  // Bonjour, and `paneId` comes straight from a paired client's `sendInput`.
+  // A newline used to end the control-mode command and start a new one, so a
+  // paired device could run `run-shell` — arbitrary code as the user.
+  it('refuses pane ids that would inject a second tmux command', () => {
+    const { tmux, commands } = recordingControl();
+    const injected = "%7'\nrun-shell 'touch /tmp/psyche-pwned'";
+
+    expect(() => tmux.sendKeysHex(injected, Buffer.from('x'))).toThrow(/invalid pane id/);
+    expect(() => tmux.killPane(injected)).toThrow(/invalid pane id/);
+    expect(() => tmux.resizePane(injected, 80, 24)).toThrow(/invalid pane id/);
+    expect(commands).toEqual([]);
+  });
+
+  it('rejects a multi-line command assembled by any other route', () => {
+    const tmux = new TmuxControl('psyche-test');
+    expect(() => tmux.command("kill-pane -t '%7'\nrun-shell 'id'")).toThrow(/single line/);
+  });
+});
 
 describe('unescapeTmuxOutput', () => {
   it('passes plain ASCII through', () => {
