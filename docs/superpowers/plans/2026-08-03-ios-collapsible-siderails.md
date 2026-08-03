@@ -4,7 +4,7 @@
 
 **Goal:** Make the Projects and Panes rails collapse together so an iPhone terminal opens at full width and can restore navigation from one accessible toolbar control.
 
-**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local `NavigationSplitViewVisibility` state in `CockpitView`. Initialize compact-width devices to `.detailOnly`, initialize regular-width devices to `.all`, and toggle both rails through one detail-toolbar button without changing project, pane, or connection state.
+**Architecture:** Keep the existing three-column `NavigationSplitView` and bind it to local visibility and preferred-compact-column state in `CockpitView`. Initialize compact-width devices to the detail column, initialize regular-width devices to `.all`, and expose navigation through one detail-toolbar button without changing project, pane, or connection state.
 
 **Tech Stack:** Swift 6, SwiftUI, XCTest/XCUITest, XcodeGen, `xcodebuild`
 
@@ -54,8 +54,6 @@ final class PsycheAppUITests: XCTestCase {
         app.staticTexts["native-ios-cloud-terminal"].tap()
         let toggle = app.buttons["cockpit-siderail-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
-        XCTAssertEqual(toggle.label, "Hide siderails")
-        toggle.tap()
         XCTAssertEqual(toggle.label, "Show siderails")
         XCTAssertTrue(element("terminal-output", in: app).exists)
     }
@@ -120,7 +118,7 @@ xcodebuild \
 ```
 
 Expected: FAIL because `cockpit-siderail-toggle` and `project-sidebar` do not
-exist and the current split view does not explicitly start in `.detailOnly`.
+exist and the current split view does not explicitly prefer the detail column.
 
 - [ ] **Step 3: Bind the native split view to local visibility state**
 
@@ -132,13 +130,17 @@ struct CockpitView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: DemoStore
     @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .detail
     @State private var didApplyInitialColumnVisibility = false
 ```
 
 Change the split-view declaration and detail column to:
 
 ```swift
-NavigationSplitView(columnVisibility: $columnVisibility) {
+NavigationSplitView(
+    columnVisibility: $columnVisibility,
+    preferredCompactColumn: $preferredCompactColumn
+) {
     projectSidebar
         .navigationTitle("Psyche")
 } content: {
@@ -153,7 +155,7 @@ NavigationSplitView(columnVisibility: $columnVisibility) {
                     Image(systemName: "sidebar.left")
                 }
                 .accessibilityLabel(
-                    columnVisibility == .detailOnly ? "Show siderails" : "Hide siderails"
+                    preferredCompactColumn == .detail ? "Show siderails" : "Hide siderails"
                 )
                 .accessibilityIdentifier("cockpit-siderail-toggle")
             }
@@ -175,12 +177,18 @@ Add the toggle method inside `CockpitView`:
 
 ```swift
 private func toggleSiderails() {
-    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+    if horizontalSizeClass == .compact {
+        preferredCompactColumn = preferredCompactColumn == .detail ? .sidebar : .detail
+    } else {
+        columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+    }
 }
 ```
 
-This keeps compact devices terminal-first while preserving the current
-three-column default on regular-width iPads.
+This keeps compact devices terminal-first and gives SwiftUI an explicit compact
+navigation destination while preserving the current three-column default on
+regular-width iPads. SwiftUI updates `preferredCompactColumn` to `.detail` when
+the user selects a pane, so the button label returns to "Show siderails".
 
 - [ ] **Step 4: Add stable identifiers to both navigation rails**
 
@@ -221,8 +229,8 @@ xcodebuild \
 ```
 
 Expected: PASS. The initial terminal is visible, the project and pane rails are
-reachable through the toggle and native compact navigation, the terminal can
-return to `.detailOnly`, and pairing remains reachable.
+reachable through the toggle and native compact navigation, selecting a pane
+returns to the detail column, and pairing remains reachable.
 
 - [ ] **Step 6: Run the complete iOS app test scheme**
 
