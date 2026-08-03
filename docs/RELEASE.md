@@ -11,8 +11,9 @@ release assets from a private GitHub repository. The release workflow checks
 `github.event.repository.private` and exits before using signing credentials
 when this requirement is not met.
 
-Configure these repository secrets using the existing OpenCoven Apple release
-credentials:
+Create a `release` GitHub Environment with required-reviewer protection and
+prevent self-review. Configure these environment secrets using the existing
+OpenCoven Apple release credentials; do not store them as repository secrets:
 
 | Secret | Purpose |
 |---|---|
@@ -28,9 +29,16 @@ The first six values are mandatory and the workflow fails closed when any is
 missing. `HOMEBREW_TAP_TOKEN` only makes the Cask update immediate; the tap's
 scheduled workflow is the no-secrets fallback.
 
+Protect `v*` tags with an active repository ruleset that restricts tag creation
+to release managers and blocks tag updates and deletion. The workflow also
+requires the signed tag commit to be on `origin/main`, carries that verified SHA
+between jobs, and pauses every secret-bearing or publishing job at the
+protected `release` Environment.
+
 The pnpm workspace declaration must also be present on the release commit so a
 fresh `pnpm install --frozen-lockfile` installs the native CodeMirror and Tauri
-dependencies.
+dependencies. Rust is pinned by `rust-toolchain.toml`; update that pin and both
+workflow inputs together in a separately verified maintenance change.
 
 ## Prepare a release
 
@@ -102,8 +110,10 @@ workflow from `main` against the existing tag:
 gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.1.0
 ```
 
-The retry may replace assets on an existing draft. It refuses to overwrite a
-published release.
+The retry may replace assets on an existing draft. If the release was already
+published, it succeeds only when the three remote assets exactly match the
+freshly verified build and their checksums pass. Homebrew notification runs as
+a separate job, so a dispatch failure can be retried without republishing.
 
 ## Verify the public release
 

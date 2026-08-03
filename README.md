@@ -34,7 +34,7 @@ release appears on GitHub, build from source using the contributing guide; the
 After installing the CLI from source, verify the local setup with:
 
 ```sh
-psyche doctor --json
+node ./psyche doctor --json
 ```
 
 ## Quick Start

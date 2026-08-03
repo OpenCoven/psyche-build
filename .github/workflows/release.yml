@@ -25,6 +25,10 @@ jobs:
   verify:
     name: Verify release source
     runs-on: macos-15
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_version: ${{ steps.release.outputs.version }}
+      release_sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -43,6 +47,7 @@ jobs:
           fi
 
       - name: Resolve and verify release tag
+        id: release
         env:
           RAW_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         shell: bash
@@ -59,8 +64,16 @@ jobs:
             echo "::error::Checked out source does not match $RELEASE_TAG"
             exit 1
           fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Release tag must point to a commit on origin/main"
+            exit 1
+          fi
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Require a verified signed tag
         env:
@@ -91,8 +104,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
         with:
+          toolchain: 1.95.0
           components: rustfmt
 
       - name: Install locked dependencies
@@ -121,6 +135,7 @@ jobs:
   build-macos:
     name: Build ${{ matrix.arch }} DMG
     needs: verify
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -135,12 +150,13 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.release_sha }}
           fetch-depth: 0
 
       - name: Set release metadata
         env:
-          RAW_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RAW_RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          EXPECTED_RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
           MATRIX_ARCH: ${{ matrix.arch }}
           MATRIX_TARGET: ${{ matrix.target }}
         shell: bash
@@ -152,7 +168,8 @@ jobs:
             exit 1
           fi
           TAG_COMMIT="$(git rev-list -n 1 "$RELEASE_TAG")"
-          if [ "$TAG_COMMIT" != "$(git rev-parse HEAD)" ]; then
+          if [ "$TAG_COMMIT" != "$EXPECTED_RELEASE_SHA" ] || \
+             [ "$(git rev-parse HEAD)" != "$EXPECTED_RELEASE_SHA" ]; then
             echo "::error::Checked out source does not match $RELEASE_TAG"
             exit 1
           fi
@@ -168,7 +185,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.95.0 action @ 2026-03-27
+        with:
+          toolchain: 1.95.0
 
       - name: Install locked dependencies and Rust target
         run: |
@@ -292,25 +311,34 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build-macos
+    needs: [verify, build-macos]
+    environment: release
     runs-on: macos-15
+    outputs:
+      release_tag: ${{ needs.verify.outputs.release_tag }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.release_sha }}
           fetch-depth: 0
 
       - name: Set release metadata
         env:
-          RAW_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RAW_RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          EXPECTED_RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
         shell: bash
         run: |
           set -euo pipefail
           RELEASE_TAG="$RAW_RELEASE_TAG"
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must use stable vMAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          if [ "$(git rev-list -n 1 "$RELEASE_TAG")" != "$EXPECTED_RELEASE_SHA" ] || \
+             [ "$(git rev-parse HEAD)" != "$EXPECTED_RELEASE_SHA" ]; then
+            echo "::error::Checked out source does not match $RELEASE_TAG"
             exit 1
           fi
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
@@ -351,8 +379,27 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
             if [ "$IS_DRAFT" != "true" ]; then
-              echo "::error::Release $RELEASE_TAG is already published"
-              exit 1
+              mkdir -p published-assets
+              gh release download "$RELEASE_TAG" --dir published-assets
+              PUBLISHED_COUNT="$(find published-assets -maxdepth 1 -type f | wc -l | tr -d ' ')"
+              if [ "$PUBLISHED_COUNT" != "3" ]; then
+                echo "::error::Published release must contain exactly three assets; found $PUBLISHED_COUNT"
+                exit 1
+              fi
+              for asset in \
+                Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
+                Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
+                SHA256SUMS
+              do
+                test -f "published-assets/$asset"
+                cmp "artifacts/$asset" "published-assets/$asset"
+              done
+              (
+                cd published-assets
+                shasum -a 256 -c SHA256SUMS
+              )
+              echo "Published release assets match the verified build output"
+              exit 0
             fi
           else
             gh release create "$RELEASE_TAG" \
@@ -367,8 +414,15 @@ jobs:
             artifacts/SHA256SUMS
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
+  notify-homebrew:
+    name: Notify OpenCoven Homebrew tap
+    needs: publish
+    environment: release
+    runs-on: ubuntu-24.04
+    steps:
       - name: Notify OpenCoven Homebrew tap
         env:
+          RELEASE_TAG: ${{ needs.publish.outputs.release_tag }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
         run: |

@@ -51,10 +51,23 @@ under the same secret names used by Coven Cave:
 dispatches a cask update. Without it, a scheduled tap workflow provides a
 no-secrets fallback.
 
+Apple and Homebrew credentials live only in an approval-protected `release`
+Environment. An active `v*` tag ruleset restricts release-tag creation and
+blocks updates and deletion. The workflow accepts only signed tags whose
+commit is already on `origin/main`, then passes that verified commit SHA to
+every build and publication job. Rust is fixed by the repository
+`rust-toolchain.toml` and explicit workflow inputs so a retry cannot silently
+change compilers.
+
 Publishing is tag-authoritative. The tag must already exist on `origin`, point
 at the commit being built, and match every configured version. Missing secrets,
 missing artifacts, failed notarization, or checksum disagreement stops the
 release.
+
+Publication and Homebrew notification are independently retryable. A rerun may
+reuse an existing public release only after downloading all three assets,
+matching them byte-for-byte to the verified build output, and validating
+`SHA256SUMS`.
 
 ## Homebrew distribution
 
