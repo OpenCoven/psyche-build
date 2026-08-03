@@ -160,6 +160,39 @@ gh api --method POST \
   -f name='v*' -f type=tag
 ```
 
+Protect `main` with the two exact GitHub Actions check names already emitted by
+the release commit. Require a fresh non-self approval after the last push,
+enforce the policy for administrators, and leave no force-push or deletion
+path:
+
+```sh
+jq -n '{
+  required_status_checks: {
+    strict: true,
+    checks: [
+      {context: "TypeScript and Rust"},
+      {context: "iOS"}
+    ]
+  },
+  enforce_admins: true,
+  required_pull_request_reviews: {
+    dismissal_restrictions: {},
+    dismiss_stale_reviews: true,
+    require_code_owner_reviews: false,
+    required_approving_review_count: 1,
+    require_last_push_approval: true
+  },
+  restrictions: null,
+  required_linear_history: true,
+  allow_force_pushes: false,
+  allow_deletions: false,
+  block_creations: false,
+  required_conversation_resolution: true,
+  lock_branch: false,
+  allow_fork_syncing: false
+}' | gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -
+```
+
 Protect `main` and `v*` tags now that repository rulesets are available. A
 ruleset bypass applies to every rule in that ruleset, so use two separate active
 tag rulesets: one lets the `Maintainers` team create a release tag, and the

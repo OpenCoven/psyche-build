@@ -168,6 +168,23 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).not.toContain('protected-branch deployment policy');
   });
 
+  it('protects main with the exact CI checks and no administrative rewrite path', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toContain(
+      'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
+    );
+    expect(runbook).toContain('{context: "TypeScript and Rust"}');
+    expect(runbook).toContain('{context: "iOS"}');
+    expect(runbook).toContain('enforce_admins: true');
+    expect(runbook).toContain('required_approving_review_count: 1');
+    expect(runbook).toContain('require_last_push_approval: true');
+    expect(runbook).toContain('required_linear_history: true');
+    expect(runbook).toContain('allow_force_pushes: false');
+    expect(runbook).toContain('allow_deletions: false');
+    expect(runbook).toContain('required_conversation_resolution: true');
+  });
+
   it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
