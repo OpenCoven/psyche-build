@@ -34,9 +34,11 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
 
   const execute: LaneBackend = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
     if (lane.mode === 'coven-session') {
+      // Routed to createCovenSessionBackend by composeLaneBackends. Reaching
+      // here means a caller wired this backend directly for every mode.
       throw new OrchestrationError(
         'unsupported_lane_mode',
-        'Coven-managed lanes require the Coven backend',
+        'Coven-managed lanes belong to the Coven backend, not the pane backend',
       );
     }
     if (lane.mode === 'shared-worktree' && !lane.existingWorktree) {
