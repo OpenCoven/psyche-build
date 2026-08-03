@@ -1288,6 +1288,12 @@ where
     };
 
     let save_result = (|| -> Result<(), String> {
+        temp_file
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("write temporary save for '{}': {}", path, e))?;
+        temp_file
+            .flush()
+            .map_err(|e| format!("flush temporary save for '{}': {}", path, e))?;
         let chmod_result = unsafe {
             libc::fchmod(
                 temp_file.as_raw_fd(),
@@ -1301,12 +1307,6 @@ where
                 std::io::Error::last_os_error()
             ));
         }
-        temp_file
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("write temporary save for '{}': {}", path, e))?;
-        temp_file
-            .flush()
-            .map_err(|e| format!("flush temporary save for '{}': {}", path, e))?;
         temp_file
             .sync_all()
             .map_err(|e| format!("sync temporary save for '{}': {}", path, e))?;
@@ -1838,9 +1838,15 @@ mod workspace_panel_tests {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4750)).unwrap();
         }
         let permissions_before = std::fs::metadata(&target).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(permissions_before.mode() & 0o7777, 0o4750);
+        }
 
         let saved = fs_write_text(
             path_text(&tree.root).to_string(),
@@ -1858,10 +1864,9 @@ mod workspace_panel_tests {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            assert_eq!(
-                std::fs::metadata(&target).unwrap().permissions().mode(),
-                permissions_before.mode()
-            );
+            let permissions_after = std::fs::metadata(&target).unwrap().permissions();
+            assert_eq!(permissions_after.mode(), permissions_before.mode());
+            assert_eq!(permissions_after.mode() & 0o7777, 0o4750);
         }
         assert!(save_temp_paths(&target).is_empty());
     }
@@ -1991,6 +1996,7 @@ mod workspace_panel_tests {
         assert_eq!(std::fs::read(&outside_target).unwrap(), b"outside\n");
         assert_eq!(std::fs::read(&moved_target).unwrap(), b"before\n");
         assert!(save_temp_paths(&moved_target).is_empty());
+        assert!(save_temp_paths(&outside_target).is_empty());
     }
 
     #[test]
