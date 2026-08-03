@@ -62,6 +62,7 @@
     "release:version": "node scripts/release-version.mjs --set",
     "release:check": "node scripts/release-version.mjs --check",
     "test": "vitest --run",
+    "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
     "prepublishOnly": "pnpm run build",
     "smoke:pack": "npm pack --dry-run"
   },
