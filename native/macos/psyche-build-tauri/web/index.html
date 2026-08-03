@@ -88,11 +88,39 @@
           <div class="tab-strip" id="tab-strip"></div>
           <div class="terminal-host" id="terminal-host"></div>
           <div class="file-view" id="file-view" hidden>
-            <div class="file-view-bar">
-              <span class="file-view-path" id="file-view-path"></span>
+            <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
+              <span class="file-language" id="file-language">Plain Text</span>
+              <span class="file-view-title" id="file-view-title">No file selected</span>
+              <span class="file-dirty" id="file-dirty" title="Unsaved changes" aria-label="Unsaved changes" hidden></span>
               <span class="file-view-meta" id="file-view-meta"></span>
+              <button
+                id="file-save"
+                class="file-save"
+                type="button"
+                title="Save file (⌘S)"
+                aria-label="Save file"
+                disabled
+              >
+                Save <kbd>⌘S</kbd>
+              </button>
             </div>
-            <pre class="file-view-body" id="file-view-body"></pre>
+            <div class="file-view-path" id="file-view-path" aria-label="Project-relative file path">No file selected</div>
+            <div class="file-editor-stage">
+              <div class="file-editor-host" id="file-editor-host" aria-label="File editor"></div>
+              <div
+                class="file-read-only-message"
+                id="file-read-only-message"
+                role="status"
+                aria-live="polite"
+                hidden
+              >
+                Read-only — this file cannot be edited.
+              </div>
+            </div>
+            <div class="file-status-bar">
+              <span id="file-status" role="status" aria-live="polite">Ready</span>
+              <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
+            </div>
           </div>
           <div class="command-bar" id="command-bar">
             <span class="command-prompt">›</span>
@@ -233,6 +261,7 @@
         </button>
       </nav>
     </div>
+    <script src="./editor.bundle.js" defer></script>
     <script src="./main.js" defer></script>
   </body>
 </html>
