@@ -15,7 +15,7 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -25,6 +25,7 @@ jobs:
   verify:
     name: Verify release source
     runs-on: macos-15
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     outputs:
@@ -136,7 +137,7 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Require pinned Xcode and install pinned XcodeGen
+      - name: Require pinned Xcode
         shell: bash
         run: |
           set -euo pipefail
@@ -144,19 +145,7 @@ jobs:
           grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
           grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
 
-          XCODEGEN_VERSION="2.45.4"
-          XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
-          XCODEGEN_ZIP="$RUNNER_TEMP/xcodegen.zip"
-          curl --fail-with-body --silent --show-error --location \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
-            --output "$XCODEGEN_ZIP"
-          echo "$XCODEGEN_SHA256  $XCODEGEN_ZIP" | shasum -a 256 -c -
-          unzip -q "$XCODEGEN_ZIP" -d "$RUNNER_TEMP/xcodegen"
-          XCODEGEN_BINARY="$(find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -print -quit)"
-          test -n "$XCODEGEN_BINARY"
-          mkdir -p "$RUNNER_TEMP/bin"
-          install -m 0755 "$XCODEGEN_BINARY" "$RUNNER_TEMP/bin/xcodegen"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-xcodegen
 
       - name: Require matching release versions
         run: pnpm release:check -- "$RELEASE_TAG"
@@ -228,6 +217,7 @@ jobs:
             target: x86_64-apple-darwin
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -311,8 +301,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CERTIFICATE_PATH="$RUNNER_TEMP/apple-certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          umask 077
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           decode_base64() {
             if base64 --decode </dev/null >/dev/null 2>&1; then
@@ -322,6 +313,7 @@ jobs:
             fi
           }
           printf '%s' "$APPLE_CERTIFICATE" | decode_base64 > "$CERTIFICATE_PATH"
+          chmod 0600 "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -392,10 +384,27 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Remove ephemeral macOS signing material
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          CLEANUP_FAILED=0
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          if [ -e "$KEYCHAIN_PATH" ] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$CERTIFICATE_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          exit "$CLEANUP_FAILED"
+
   upload-ios:
     name: Upload iOS build to TestFlight
     needs: verify
     runs-on: macos-15
+    timeout-minutes: 60
     environment: release
     permissions:
       contents: read
@@ -469,7 +478,7 @@ jobs:
           done
 
           umask 077
-          APP_STORE_CONNECT_PRIVATE_KEY_PATH="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          APP_STORE_CONNECT_PRIVATE_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8"
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
           chmod 0600 "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
           echo "APP_STORE_CONNECT_PRIVATE_KEY_PATH=$APP_STORE_CONNECT_PRIVATE_KEY_PATH" >> "$GITHUB_ENV"
@@ -483,6 +492,7 @@ jobs:
           set -euo pipefail
           CERTIFICATE_PATH="$RUNNER_TEMP/apple-distribution.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/psyche-ios-signing.keychain-db"
+          umask 077
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           decode_base64() {
             if base64 --decode </dev/null >/dev/null 2>&1; then
@@ -492,6 +502,7 @@ jobs:
             fi
           }
           printf '%s' "$APPLE_DISTRIBUTION_CERTIFICATE" | decode_base64 > "$CERTIFICATE_PATH"
+          chmod 0600 "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -508,9 +519,8 @@ jobs:
             "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH"
           security default-keychain -d user -s "$KEYCHAIN_PATH"
-          echo "IOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-      - name: Require pinned Xcode and install pinned XcodeGen
+      - name: Require pinned Xcode
         shell: bash
         run: |
           set -euo pipefail
@@ -518,19 +528,7 @@ jobs:
           grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
           grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
 
-          XCODEGEN_VERSION="2.45.4"
-          XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
-          XCODEGEN_ZIP="$RUNNER_TEMP/xcodegen.zip"
-          curl --fail-with-body --silent --show-error --location \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
-            --output "$XCODEGEN_ZIP"
-          echo "$XCODEGEN_SHA256  $XCODEGEN_ZIP" | shasum -a 256 -c -
-          unzip -q "$XCODEGEN_ZIP" -d "$RUNNER_TEMP/xcodegen"
-          XCODEGEN_BINARY="$(find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -print -quit)"
-          test -n "$XCODEGEN_BINARY"
-          mkdir -p "$RUNNER_TEMP/bin"
-          install -m 0755 "$XCODEGEN_BINARY" "$RUNNER_TEMP/bin/xcodegen"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-xcodegen
 
       - name: Generate and verify the iOS project
         run: pnpm ios:project:check
@@ -650,6 +648,7 @@ jobs:
             --type ios \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --p8-file-path "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
             --output-format json \
             > "$RUNNER_TEMP/altool-validation.json"
           jq -e . "$RUNNER_TEMP/altool-validation.json" >/dev/null
@@ -658,6 +657,7 @@ jobs:
             --type ios \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
             --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --p8-file-path "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
             --output-format json \
             > "$RUNNER_TEMP/altool-upload.json"
           jq -e . "$RUNNER_TEMP/altool-upload.json" >/dev/null
@@ -687,17 +687,28 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -n "${IOS_KEYCHAIN_PATH:-}" ] && [ -f "$IOS_KEYCHAIN_PATH" ]; then
-            security delete-keychain "$IOS_KEYCHAIN_PATH"
+          set -uo pipefail
+          CLEANUP_FAILED=0
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-ios-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-distribution.p12"
+          PRIVATE_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8"
+          if [ -e "$KEYCHAIN_PATH" ] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            CLEANUP_FAILED=1
           fi
-          rm -f "${APP_STORE_CONNECT_PRIVATE_KEY_PATH:-}" "$RUNNER_TEMP/apple-distribution.p12"
+          if ! rm -f "$CERTIFICATE_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$PRIVATE_KEY_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          exit "$CLEANUP_FAILED"
 
   publish:
     name: Publish GitHub Release
     needs: [verify, build-macos, upload-ios]
     environment: release
     runs-on: macos-15
+    timeout-minutes: 20
     outputs:
       release_tag: ${{ needs.verify.outputs.release_tag }}
     permissions:
@@ -865,6 +876,8 @@ jobs:
     needs: publish
     environment: release
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Notify OpenCoven Homebrew tap
         env:

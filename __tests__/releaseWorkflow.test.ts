@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
@@ -23,11 +23,20 @@ function workflowStepScript(workflow: string, name: string): string {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = workflow.match(
     new RegExp(
-      `- name: ${escapedName}[\\s\\S]*?\\n        run: \\|\\n([\\s\\S]*?)(?=\\n\\n      - name:)`,
+      `- name: ${escapedName}[\\s\\S]*?\\n        run: \\|\\n([\\s\\S]*?)(?=\\n\\n      - name:|\\n\\n  [a-z])`,
     ),
   );
   if (!match) throw new Error(`Unable to find workflow script for ${name}`);
   return match[1].replace(/^ {10}/gm, '');
+}
+
+function workflowJobSource(workflow: string, jobName: string): string {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error(`Unable to find workflow job ${jobName}`);
+  const remaining = workflow.slice(start + marker.length);
+  const nextJob = remaining.search(/^  [a-z][a-z0-9-]*:\s*$/m);
+  return nextJob < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + nextJob);
 }
 
 describe('macOS release workflow contract', () => {
@@ -48,6 +57,10 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('ref: ${{ needs.verify.outputs.release_sha }}');
     expect(workflow).toContain('github.event.repository.private');
     expect(workflow).toContain('A public Homebrew release cannot be published from a private repository');
+    const concurrency = workflow.match(/^\s*group: (release-.+)$/m)?.[1];
+    expect(concurrency).toBe('release-${{ github.event.inputs.tag || github.ref_name }}');
+    const normalizeReleaseKey = (inputTag: string, refName: string) => inputTag || refName;
+    expect(normalizeReleaseKey('', 'v0.0.1')).toBe(normalizeReleaseKey('v0.0.1', 'main'));
     expect(workflow).toContain('LOCAL_TAG_OBJECT_SHA="$(git rev-parse "$RELEASE_TAG^{tag}")"');
     expect(workflow).toContain('[ "$TAG_OBJECT_SHA" != "$LOCAL_TAG_OBJECT_SHA" ]');
     expect(workflow).toContain(
@@ -79,6 +92,65 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('spctl --assess --type execute');
     expect(workflow).toContain('xcrun stapler validate');
     expect(workflow).not.toMatch(/continue-on-error:\s*true/);
+    expect(workflowJobSource(workflow, 'build-macos')).toContain('if: always()');
+    expect(workflowJobSource(workflow, 'build-macos')).toContain(
+      'Remove ephemeral macOS signing material',
+    );
+  });
+
+  it('creates both certificate files with mode 600 on first creation', () => {
+    const workflow = workflowSource();
+    const cases = [
+      {
+        step: 'Import Developer ID certificate',
+        certificate: 'APPLE_CERTIFICATE',
+        password: 'APPLE_CERTIFICATE_PASSWORD',
+        path: 'apple-developer-id.p12',
+      },
+      {
+        step: 'Import Apple Distribution certificate into an ephemeral keychain',
+        certificate: 'APPLE_DISTRIBUTION_CERTIFICATE',
+        password: 'APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD',
+        path: 'apple-distribution.p12',
+      },
+    ];
+
+    for (const testCase of cases) {
+      const root = mkdtempSync(path.join(tmpdir(), 'psyche-certificate-mode-'));
+      try {
+        const fakeBin = path.join(root, 'bin');
+        const fakeChmod = path.join(fakeBin, 'chmod');
+        const fakeSecurity = path.join(fakeBin, 'security');
+        mkdirSync(fakeBin);
+        writeFileSync(
+          fakeChmod,
+          `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+        );
+        writeFileSync(fakeSecurity, '#!/bin/bash\nexit 0\n');
+        chmodSync(fakeChmod, 0o755);
+        chmodSync(fakeSecurity, 0o755);
+
+        const result = spawnSync(
+          'bash',
+          ['-c', workflowStepScript(workflow, testCase.step)],
+          {
+            env: {
+              ...process.env,
+              PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+              RUNNER_TEMP: root,
+              GITHUB_ENV: path.join(root, 'github-env'),
+              [testCase.certificate]: Buffer.from('certificate').toString('base64'),
+              [testCase.password]: 'password',
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+        expect((statSync(path.join(root, testCase.path)).mode & 0o777).toString(8)).toBe('600');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 
   it('publishes only the complete architecture set plus checksums', () => {
@@ -105,10 +177,9 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer');
     expect(workflow).toContain("grep -Fx 'Xcode 26.2'");
     expect(workflow).toContain("grep -Fx 'Build version 17C52'");
-    expect(workflow).toContain('XCODEGEN_VERSION="2.45.4"');
-    expect(workflow).toContain(
-      'XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"',
-    );
+    expect(workflow.match(/uses: \.\/\.github\/actions\/setup-xcodegen/g)).toHaveLength(2);
+    expect(workflow).not.toContain('XCODEGEN_VERSION=');
+    expect(workflow).not.toContain('XCODEGEN_SHA256=');
     expect(workflow).toContain('pnpm ios:project:check');
     expect(workflow).toContain(`-destination '${destination}'`);
     expect(workflow).toContain('-scheme PsycheCore');
@@ -131,7 +202,8 @@ describe('macOS release workflow contract', () => {
     ]) {
       expect(workflow).toContain(`secrets.${secret}`);
     }
-    expect(workflow).toContain('AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8');
+    expect(workflow).toContain('APP_STORE_CONNECT_PRIVATE_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8"');
+    expect(workflow).not.toContain('AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8');
     expect(workflow).toContain('chmod 0600 "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"');
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
     expect(workflow).toContain('-destination \'generic/platform=iOS\'');
@@ -154,6 +226,7 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('xcrun altool --upload-app');
     expect(workflow).toContain('--output-format json');
     expect(workflow).toContain('API_PRIVATE_KEYS_DIR');
+    expect(workflow).toContain('--p8-file-path "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"');
   });
 
   it('creates the App Store Connect key with mode 600 before the defensive chmod', () => {
@@ -190,7 +263,7 @@ describe('macOS release workflow contract', () => {
         stdio: 'pipe',
       });
 
-      const keyPath = path.join(root, 'AuthKey_KEY123.p8');
+      const keyPath = path.join(root, 'app-store-connect-key.p8');
       expect((statSync(keyPath).mode & 0o777).toString(8)).toBe('600');
       expect(readFileSync(keyPath, 'utf8')).toBe('private-key-content');
     } finally {
@@ -210,6 +283,95 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain("steps.preflight.outputs.upload == 'true'");
     expect(workflow).toContain("steps.preflight.outputs.upload != 'true'");
     expect(workflow).not.toMatch(/continue-on-error:\s*true/);
+  });
+
+  it('executes preflight routing as 0 reuse, 2 upload, and every other status fatal', () => {
+    const workflow = workflowSource();
+    const script = workflowStepScript(workflow, 'Reuse an exact existing TestFlight build when possible');
+
+    for (const [status, expectedExit, expectedOutput] of [
+      [0, 0, 'upload=false\n'],
+      [2, 0, 'upload=true\n'],
+      [7, 7, ''],
+    ] as const) {
+      const root = mkdtempSync(path.join(tmpdir(), 'psyche-preflight-routing-'));
+      try {
+        const fakeBin = path.join(root, 'bin');
+        const fakePnpm = path.join(fakeBin, 'pnpm');
+        const githubOutput = path.join(root, 'github-output');
+        mkdirSync(fakeBin);
+        writeFileSync(fakePnpm, `#!/bin/bash\nexit ${status}\n`);
+        chmodSync(fakePnpm, 0o755);
+        writeFileSync(githubOutput, '');
+        const result = spawnSync('bash', ['-c', script], {
+          env: {
+            ...process.env,
+            PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+            GITHUB_OUTPUT: githubOutput,
+            RELEASE_VERSION: '0.0.1',
+            TESTFLIGHT_NOTES_PATH: path.join(root, 'notes.txt'),
+            EXPECTED_RELEASE_SHA: '0'.repeat(40),
+          },
+          encoding: 'utf8',
+        });
+        expect(result.status).toBe(expectedExit);
+        expect(readFileSync(githubOutput, 'utf8')).toBe(expectedOutput);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('cleans signing material unconditionally and independently in both release jobs', () => {
+    const workflow = workflowSource();
+    const macosJob = workflowJobSource(workflow, 'build-macos');
+    const iosJob = workflowJobSource(workflow, 'upload-ios');
+
+    for (const job of [macosJob, iosJob]) {
+      expect(job).toContain('if: always()');
+      expect(job).toContain('CLEANUP_FAILED=0');
+      expect(job).toContain('security delete-keychain');
+    }
+    expect(macosJob).toContain('$RUNNER_TEMP/apple-developer-id.p12');
+    expect(macosJob).toContain('$RUNNER_TEMP/psyche-macos-signing.keychain-db');
+    expect(iosJob).toContain('$RUNNER_TEMP/apple-distribution.p12');
+    expect(iosJob).toContain('$RUNNER_TEMP/psyche-ios-signing.keychain-db');
+    expect(iosJob).toContain('$RUNNER_TEMP/app-store-connect-key.p8');
+
+    const script = workflowStepScript(workflow, 'Remove ephemeral iOS signing material');
+    const root = mkdtempSync(path.join(tmpdir(), 'psyche-cleanup-routing-'));
+    try {
+      const fakeBin = path.join(root, 'bin');
+      const calls = path.join(root, 'calls');
+      mkdirSync(fakeBin);
+      writeFileSync(
+        path.join(fakeBin, 'security'),
+        '#!/bin/bash\nprintf "security %s\\n" "$*" >> "$CLEANUP_CALLS"\nexit 1\n',
+      );
+      writeFileSync(
+        path.join(fakeBin, 'rm'),
+        '#!/bin/bash\nprintf "rm %s\\n" "$*" >> "$CLEANUP_CALLS"\nexit 0\n',
+      );
+      chmodSync(path.join(fakeBin, 'security'), 0o755);
+      chmodSync(path.join(fakeBin, 'rm'), 0o755);
+      writeFileSync(path.join(root, 'psyche-ios-signing.keychain-db'), 'keychain');
+
+      const result = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          RUNNER_TEMP: root,
+          CLEANUP_CALLS: calls,
+        },
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(readFileSync(calls, 'utf8')).toContain('security delete-keychain');
+      expect(readFileSync(calls, 'utf8')).toContain('apple-distribution.p12');
+      expect(readFileSync(calls, 'utf8')).toContain('app-store-connect-key.p8');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('publishes curated notes only after macOS and TestFlight succeed and verifies retries byte-for-byte', () => {
@@ -248,8 +410,27 @@ describe('macOS release workflow contract', () => {
 
     expect(actionUses.length).toBeGreaterThan(0);
     for (const action of actionUses) {
-      expect(action, `${action} must be commit-pinned`).toMatch(/@[0-9a-f]{40}$/);
+      if (action.startsWith('./')) {
+        expect(action).toBe('./.github/actions/setup-xcodegen');
+      } else {
+        expect(action, `${action} must be commit-pinned`).toMatch(/@[0-9a-f]{40}$/);
+      }
     }
+  });
+
+  it('bounds every release job and gives the PAT-only notification no token permissions', () => {
+    const workflow = workflowSource();
+    const expectedTimeouts = new Map([
+      ['verify', 60],
+      ['build-macos', 60],
+      ['upload-ios', 60],
+      ['publish', 20],
+      ['notify-homebrew', 5],
+    ]);
+    for (const [jobName, timeout] of expectedTimeouts) {
+      expect(workflowJobSource(workflow, jobName)).toContain(`timeout-minutes: ${timeout}`);
+    }
+    expect(workflowJobSource(workflow, 'notify-homebrew')).toContain('permissions: {}');
   });
 
   it('pins the Rust compiler consistently for local and release builds', () => {

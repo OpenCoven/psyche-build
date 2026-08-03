@@ -1,0 +1,25 @@
+name: Setup pinned XcodeGen
+description: Install the checksum-verified XcodeGen release used by CI and release workflows
+
+runs:
+  using: composite
+  steps:
+    - name: Install checksum-verified XcodeGen
+      shell: bash
+      run: |
+        set -euo pipefail
+        XCODEGEN_VERSION="2.45.4"
+        XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"
+        XCODEGEN_ZIP="$RUNNER_TEMP/xcodegen.zip"
+        XCODEGEN_UNPACKED="$RUNNER_TEMP/xcodegen"
+        XCODEGEN_BIN_DIR="$RUNNER_TEMP/bin"
+        curl --fail-with-body --silent --show-error --location \
+          "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+          --output "$XCODEGEN_ZIP"
+        echo "$XCODEGEN_SHA256  $XCODEGEN_ZIP" | shasum -a 256 -c -
+        unzip -q "$XCODEGEN_ZIP" -d "$XCODEGEN_UNPACKED"
+        XCODEGEN_BINARY="$(find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -print -quit)"
+        test -n "$XCODEGEN_BINARY"
+        mkdir -p "$XCODEGEN_BIN_DIR"
+        install -m 0755 "$XCODEGEN_BINARY" "$XCODEGEN_BIN_DIR/xcodegen"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"

@@ -24,6 +24,7 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('name: TypeScript and Rust');
     expect(workflow).toContain('name: iOS');
+    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
@@ -42,7 +43,11 @@ describe('pull request CI workflow contract', () => {
     );
     expect(actionUses.length).toBeGreaterThan(0);
     for (const action of actionUses) {
-      expect(action, `${action} must be commit-pinned`).toMatch(/@[0-9a-f]{40}$/);
+      if (action.startsWith('./')) {
+        expect(action).toBe('./.github/actions/setup-xcodegen');
+      } else {
+        expect(action, `${action} must be commit-pinned`).toMatch(/@[0-9a-f]{40}$/);
+      }
     }
   });
 
@@ -73,10 +78,9 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer');
     expect(workflow).toContain("grep -Fx 'Xcode 26.2'");
     expect(workflow).toContain("grep -Fx 'Build version 17C52'");
-    expect(workflow).toContain('XCODEGEN_VERSION="2.45.4"');
-    expect(workflow).toContain(
-      'XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"',
-    );
+    expect(workflow).toContain('uses: ./.github/actions/setup-xcodegen');
+    expect(workflow).not.toContain('XCODEGEN_VERSION=');
+    expect(workflow).not.toContain('XCODEGEN_SHA256=');
     expect(workflow).toContain('xcrun simctl list devices available');
     expect(workflow).toContain('iPhone 16 Pro');
     expect(workflow).toContain('com.apple.CoreSimulator.SimRuntime.iOS-26-2');
