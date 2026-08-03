@@ -111,6 +111,13 @@ commands, but the soul runtime decides whether a command is valid under the
 current project scope, task ownership, lease, expected state, autonomy profile,
 and approval policy.
 
+Clients do not self-assert actor kind. The host authenticates scoped operator,
+agent, or compatibility credentials and stamps actor identity and capability
+onto every command. Only an operator principal may delegate a pane to Psyche;
+an MCP agent cannot grant itself an automation lease or perform human
+takeover, even if a malformed credential record claims the corresponding
+capability.
+
 One long-lived host daemon process is the sole owner of the soul runtime,
 journal, policy engine, and mutable terminal control. MCP runs as a client of
 that daemon rather than constructing an in-process orchestrator. The TUI,
@@ -124,6 +131,16 @@ records an owner epoch. A second process may serve read-only cached data, but it
 must reject mutations. Takeover requires proving the previous owner is dead,
 acquiring the lock, incrementing the epoch, restoring the journal, and
 reconciling live resources before accepting commands.
+
+Lock acquisition prepares a complete provisional owner record in a unique
+candidate directory and atomically renames that directory into place. Lock
+takeover is also atomic: a contender renames a stale lock directory to a
+unique quarantine path before removal, so it can never delete a replacement
+owner's lock. Epoch advancement occurs only after exclusive acquisition.
+
+The project root is filesystem-canonicalized before deriving the lock,
+journal, endpoint, tmux session identity, or protocol identity. Symlink and
+platform path aliases cannot create competing owners for the same repository.
 
 Git, tmux, and Coven remain authoritative for their own resources. The journal
 records what the daemon observed and requested; it does not pretend cached
@@ -147,6 +164,10 @@ Add `src/soul/` as a transport-independent domain layer:
 
 The domain layer does not import WebSocket, MCP framing, React, Ink, Swift, or
 Cloudflare code.
+
+Execution backends receive effect capabilities from host-owned resource
+adapters. They do not retain default imports that can mutate tmux, worktrees,
+or Coven outside the host boundary.
 
 ## Provisioning and Task Models
 
@@ -221,13 +242,16 @@ strings. Initial commands are:
 - `task.pause`
 - `task.resume`
 - `task.cancel`
-- `lane.create`
-- `lane.sendPrompt`
-- `lane.interrupt`
-- `lane.takeover`
-- `lane.focus`
-- `lane.resize`
-- `lane.close`
+- `orchestration.execute`
+- `pane.spawn`
+- `pane.delegate`
+- `pane.prompt`
+- `pane.interrupt`
+- `pane.takeover`
+- `pane.input`
+- `pane.focus`
+- `pane.resize`
+- `pane.kill`
 - `approval.resolve`
 - `runtime.reconcile`
 
@@ -246,11 +270,15 @@ The daemon records `command.requested`, then either `command.rejected` or
 unknown outcome. Unknown outcomes must reconcile or be resolved by the
 operator; they are not retried automatically.
 
-Raw terminal bytes remain available only as a low-level attached-terminal
-operation. The Psyche agent normally uses `lane.sendPrompt` or
-`lane.interrupt`, whose semantics and retry behavior are testable.
+Startup converts every restored nonterminal mutation to a durable `unknown`
+outcome before accepting new commands. This covers a crash after a side effect
+but before its terminal journal event.
 
-`lane.sendPrompt` uses a prompt envelope containing:
+Raw terminal bytes remain available only as a low-level attached-terminal
+operation. The Psyche agent normally uses `pane.prompt` or
+`pane.interrupt`, whose semantics and retry behavior are testable.
+
+`pane.prompt` uses a prompt envelope containing:
 
 - stable prompt id and idempotency key;
 - exact UTF-8 bytes and content hash;
@@ -267,6 +295,10 @@ prompt. Generic terminals and harnesses without receipts report `dispatched`
 or `unknown`; after a crash or ambiguous disconnect, Psyche must request
 operator resolution and must not replay the prompt, Enter, or control bytes.
 
+Tmux control commands use correlated `%begin`/`%end`/`%error` transactions.
+Disconnect before the complete text-and-submit transaction is acknowledged
+produces `unknown`, including disconnect between text and Enter.
+
 ## Controller Leases and Human Preemption
 
 Each mutable lane has at most one automation lease:
@@ -274,6 +306,8 @@ Each mutable lane has at most one automation lease:
 - leases name the actor, task, pane, revision, acquisition time, and expiry;
 - commands must present the current lease revision;
 - leases renew only while the owning task is live;
+- delegation is an explicit, journaled human command binding one Psyche actor,
+  task, pane, TTL, and lease revision;
 - disconnect does not grant another controller permission to replay ambiguous
   input;
 - a runtime-observed human takeover or human input through the protocol revokes
@@ -288,11 +322,16 @@ Tmux does not expose arbitrary keystrokes entered by a separately attached
 local client. Therefore the runtime cannot promise to detect every out-of-band
 human keystroke immediately. The supported fencing guarantee is:
 
-1. interactive clients invoke `lane.takeover` before enabling input;
+1. interactive clients invoke `pane.takeover` before enabling input;
 2. any human input received through the protocol implicitly performs takeover;
 3. accepted takeover revokes the automation lease and drains the serialized
    automation input queue;
 4. automation remains suspended until the operator explicitly delegates again.
+
+Takeover is a pane-queue barrier. It cancels not-yet-started automation
+commands, waits for any in-flight terminal transaction to settle, installs the
+human lease, and only then accepts human input. Every automation command
+revalidates the lease and barrier revision immediately before dispatch.
 
 The TUI and desktop clients must use this path before interactive input.
 Out-of-band direct tmux attachment is reported as an unsafe bypass in delegated
@@ -361,6 +400,9 @@ its covered sequence is durable. Startup truncates only an incomplete final
 line; corruption earlier in the journal stops mutation and preserves the
 files for recovery.
 
+All journal appends share one global serialization queue even when different
+panes execute concurrently.
+
 ## Event-Driven Attention
 
 Move attention detection behind a reusable headless interface. The pipeline
@@ -422,6 +464,15 @@ than silently downgrade. The v0 and v2 adapters can be retired only after the
 TUI, desktop, mobile, and MCP callers pass the same protocol fixtures and no
 direct mutating imports remain.
 
+Each project exposes a collision-free local endpoint: a project-derived Unix
+socket in a user-private runtime directory on Unix platforms and a
+project-derived named pipe on Windows. The welcome response includes canonical
+project identity and owner epoch; clients must reject a mismatch. A global
+fixed port is not the canonical mutation endpoint.
+
+Compatibility adapters preserve `unknown` as a distinct result. They must not
+collapse it into rejection or retry it after reconnect.
+
 MCP remains useful as the agent-facing adapter, but gains task status, event
 read, prompt send, interrupt, approval, and cancellation tools. It does not
 become the source of truth.
@@ -447,6 +498,9 @@ accepted or running state become `unknown` until live state proves the result.
 - Full terminal transcripts are not journaled by default.
 - Events and logs redact secrets and infrastructure URLs.
 - Project-root and worktree containment apply to every command.
+- Every payload path is canonicalized and checked against the project or a
+  registered worktree, and every pane/session identity must belong to the
+  project before side effects.
 - Bounded retention and compaction prevent the journal from growing forever.
 - Future cloud relay transports encrypted protocol frames and cannot authorize
   commands rejected by the host.
@@ -477,6 +531,10 @@ implementation plans. Program A must land before Program B begins.
 Define the canonical protocol, project lock, owner epoch, sequencing domains,
 provisioning-versus-work identity mapping, command outcomes, prompt envelopes,
 and compatibility fixtures.
+
+The host acquires ownership before creating or changing the tmux session.
+Bootstrap is journaled under that owner; clients never perform pre-owner tmux
+mutation.
 
 #### Checkpoint A1: Command journal and safe terminal control
 
