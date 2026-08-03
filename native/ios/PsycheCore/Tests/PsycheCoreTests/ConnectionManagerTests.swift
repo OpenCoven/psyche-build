@@ -13,6 +13,7 @@ final class ConnectionManagerTests: XCTestCase {
         let endpoint = HostEndpoint(host: "psyche.local", port: 4242)
 
         await manager.connect(to: endpoint)
+        await manager.waitForMessageProcessorReadiness()
 
         let sent = await fake.sentMessages
         XCTAssertEqual(sent.count, 3)
@@ -43,7 +44,7 @@ final class ConnectionManagerTests: XCTestCase {
             agent: nil,
             status: .idle
         )]))
-        await settle()
+        await manager.waitForEventDrain(after: 3)
 
         let connectedState = await manager.state
         let projectIDs = await manager.projects.map(\.id)
@@ -66,12 +67,6 @@ final class ConnectionManagerTests: XCTestCase {
 
         guard case .failed = await manager.state else {
             return XCTFail("Expected failed state")
-        }
-    }
-
-    private func settle() async {
-        for _ in 0..<10 {
-            await Task.yield()
         }
     }
 }

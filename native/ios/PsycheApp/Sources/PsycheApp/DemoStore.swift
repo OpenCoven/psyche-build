@@ -16,6 +16,12 @@ final class DemoStore: ObservableObject {
     @Published var selectedProjectID: String?
     @Published var selectedPaneID: String?
     @Published var isPairSheetPresented = false
+    @Published private(set) var pairedHost: PairedHost?
+
+    struct PairedHost: Equatable {
+        let host: String
+        let pairingCode: String
+    }
 
     let projects = [
         Project(id: "psyche", displayName: "psyche-build", attentionCount: 1),
@@ -95,5 +101,9 @@ final class DemoStore: ObservableObject {
     func panes(for projectID: String?) -> [DemoPane] {
         guard let projectID else { return panes }
         return panes.filter { $0.snapshot.projectID == projectID }
+    }
+
+    func recordPairing(host: String, pairingCode: String) {
+        pairedHost = PairedHost(host: host, pairingCode: pairingCode)
     }
 }
