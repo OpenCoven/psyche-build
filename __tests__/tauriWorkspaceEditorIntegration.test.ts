@@ -317,8 +317,8 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toMatch(/export function createDiffViewerState\s*\(/);
     expect(editorEntry).toContain('EditorView.editable.of(false)');
     expect(editorEntry).toContain('EditorState.readOnly.of(true)');
-    expect(editorEntry).toContain(
-      "EditorView.contentAttributes.of({ 'aria-label': 'Unified diff viewer' })"
+    expect(editorEntry).toMatch(
+      /EditorView\.contentAttributes\.of\(\{[\s\S]*'aria-label': 'Unified diff viewer',[\s\S]*'aria-readonly': 'true',[\s\S]*tabindex: '0'/
     );
     expect(editorEntry).toContain('ViewPlugin.fromClass');
     expect(editorEntry).toContain('view.visibleRanges');
@@ -341,6 +341,11 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(diffState.facet(stateModule.EditorState.readOnly)).toBe(true);
     expect(diffState.facet(viewModule.EditorView.editable)).toBe(false);
+    expect(diffState.facet(viewModule.EditorView.contentAttributes)).toContainEqual({
+      'aria-label': 'Unified diff viewer',
+      'aria-readonly': 'true',
+      tabindex: '0',
+    });
     expect(editorModule.diffClass('@@ -1 +1 @@')).toBe('cm-diff-hunk');
     expect(editorModule.diffClass('+++ b/file')).toBe('cm-diff-meta');
     expect(editorModule.diffClass('--- a/file')).toBe('cm-diff-meta');
@@ -368,6 +373,63 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(extractFunctionSource(mainJs, 'refreshDiffs')).toMatch(
       /invalidateProjectDiffs\(project\.id\)[\s\S]*renderDiffsPanel\(\)/
     );
+    expect(extractFunctionSource(mainJs, 'renderDiffsPanel')).toMatch(
+      /if \(!panelIsVisible\("diffs"\)\) return;/
+    );
+    expect(extractFunctionSource(mainJs, 'performFileSave')).toMatch(
+      /invalidateProjectDiffs\(project\.id\);[\s\S]*if \(panelIsVisible\("diffs"\)\) renderDiffsPanel\(\);/
+    );
+  });
+
+  it('suspends pending diffs on collapse and refreshes the active panel on reopen', () => {
+    expect(extractFunctionSource(mainJs, 'applyLayout')).toMatch(
+      /handlePanelLayoutTransition\(previousLayout, layout\)/
+    );
+    const transitions: string[] = [];
+    const handlePanelLayoutTransition = compileFunction<
+      (previous: string, next: string) => void
+    >(extractFunctionSource(mainJs, 'handlePanelLayoutTransition'), {
+      currentPanel: () => 'diffs',
+      suspendDiffRequests: () => { transitions.push('suspend'); },
+      renderPanel: (panel: string) => { transitions.push(`render:${panel}`); },
+    });
+
+    handlePanelLayoutTransition('split', 'terminal');
+    handlePanelLayoutTransition('terminal', 'split');
+
+    expect(transitions).toEqual(['suspend', 'render:diffs']);
+  });
+
+  it('does not render hidden panels and clears stale diff summaries on status errors', async () => {
+    const panelIsVisible = compileFunction<(panel: string) => boolean>(
+      extractFunctionSource(mainJs, 'panelIsVisible'),
+      { currentLayout: () => 'terminal', currentPanel: () => 'diffs' },
+    );
+    expect(panelIsVisible('diffs')).toBe(false);
+
+    const summary = { textContent: '3 changed' };
+    const messages: string[] = [];
+    const renderDiffsPanel = compileFunction<() => Promise<void>>(
+      extractFunctionSource(mainJs, 'renderDiffsPanel'),
+      {
+        diffFilesEl: {},
+        panelIsVisible: () => true,
+        activeProject: () => ({ id: 'p1', root: '/repo' }),
+        diffPanelRequestGate: { next: () => 1, isCurrent: () => true },
+        diffRequestGate: { next: () => 1 },
+        resetDiffDetail: (message: string) => { messages.push(message); },
+        diffsSummaryEl: summary,
+        invoke: async () => { throw new Error('status unavailable'); },
+        panelMessage: () => undefined,
+        clearDiffSelection: () => undefined,
+        currentPanel: () => 'diffs',
+        currentLayout: () => 'split',
+      },
+    );
+
+    await renderDiffsPanel();
+    expect(messages).toEqual(['Loading changes…']);
+    expect(summary.textContent).toBe('error');
   });
 
   it('serves cached diffs without invoking and ignores stale results and errors', async () => {
@@ -382,6 +444,7 @@ describe('native CodeMirror workspace editor surface', () => {
       activeProject: () => project,
       currentPanel: () => 'diffs',
       currentLayout: () => 'split',
+      panelIsVisible: () => true,
       stagedDiffFor: () => false,
       diffCacheKey: () => 'p1\0src/a.ts\0unstaged',
       diffRequestGate: { next: () => 1 },
@@ -511,7 +574,7 @@ describe('native CodeMirror workspace editor surface', () => {
       /catch \(error\) \{[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*return false;/
     );
     expect(mainJs).toContain('invalidateProjectDiffs(project.id)');
-    expect(mainJs).toMatch(/currentPanel\(\) === "diffs"[\s\S]*renderDiffsPanel\(\)/);
+    expect(mainJs).toMatch(/panelIsVisible\("diffs"\)[\s\S]*renderDiffsPanel\(\)/);
     expect(mainJs).toMatch(/currentPanel\(\) === "git"[\s\S]*renderGitPanel\(\)/);
     expect(mainJs).toMatch(/fileSaveEl\.addEventListener\("click", function \(\) \{[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/);
     expect(extractFunctionSource(mainJs, 'handleExplicitFileSave')).toMatch(

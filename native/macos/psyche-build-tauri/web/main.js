@@ -344,16 +344,20 @@
   function restoreProjectLayout(project) {
     var layout = ensureProjectLayout(project);
     if (!layout) return;
+    var previousLayout = currentLayout();
     setDetailSplitFrac(layout.splitFrac || 0.6);
     // Set the panel before the layout so syncBrowserBounds sees the right one.
     setPanel(layout.panel || project.panel || "browser", { render: false });
     applyLayout(layout.mode || "terminal", { side: layout.side || "right", persist: false });
     // Panels read from the project root, so re-render for the project we just
     // switched to rather than showing the previous one's tree/diff/log.
-    if (currentLayout() === "split") renderPanel(currentPanel());
+    if (previousLayout === "split" && currentLayout() === "split") {
+      renderPanel(currentPanel());
+    }
   }
 
   function applyLayout(layout, opts) {
+    var previousLayout = currentLayout();
     var side = (opts && opts.side) || currentSide();
     // Back-compat: older slash commands still pass "splitV" — treat as split-right.
     if (layout === "splitV") { layout = "split"; side = "right"; }
@@ -373,10 +377,21 @@
       var isHorizontalDivider = side === "bottom" || side === "top";
       splitterEl.setAttribute("aria-orientation", isHorizontalDivider ? "horizontal" : "vertical");
     }
+    handlePanelLayoutTransition(previousLayout, layout);
     requestAnimationFrame(function () {
       fitActiveTerm();
       syncBrowserBounds();
     });
+  }
+
+  function handlePanelLayoutTransition(previousLayout, nextLayout) {
+    var panel = currentPanel();
+    if (previousLayout === "split" && nextLayout !== "split" && panel === "diffs") {
+      suspendDiffRequests();
+    }
+    if (previousLayout !== "split" && nextLayout === "split") {
+      renderPanel(panel);
+    }
   }
 
   function toggleBrowser() {
@@ -449,9 +464,10 @@
           applyLayout("terminal");
           return;
         }
+        var panelWasVisible = currentLayout() === "split";
         setPanel(name, { render: false });
         applyLayout("split");
-        renderPanel(name);
+        if (panelWasVisible) renderPanel(name);
       });
     }
   );
@@ -1631,7 +1647,7 @@
         renderFileChrome(file);
       }
       refreshTabs();
-      if (currentPanel() === "diffs") renderDiffsPanel();
+      if (panelIsVisible("diffs")) renderDiffsPanel();
       if (currentPanel() === "git") renderGitPanel();
       setTimeout(function () {
         if (!file.dirty && file.saveState === "saved") {
@@ -2567,6 +2583,15 @@
     diffRequestGate.next();
   }
 
+  function suspendDiffRequests() {
+    diffPanelRequestGate.next();
+    diffRequestGate.next();
+  }
+
+  function panelIsVisible(panel) {
+    return currentLayout() === "split" && currentPanel() === panel;
+  }
+
   // The tree highlights whichever file currently owns the main area.
   function activeFilePath() {
     var f = findOpenFile(state.activeFileId);
@@ -2713,19 +2738,24 @@
     return diffRequestGate.isCurrent(generation) &&
       selectedDiffKey === key &&
       !!project && project.id === projectId &&
-      currentPanel() === "diffs" && currentLayout() === "split";
+      panelIsVisible("diffs");
   }
 
   async function renderDiffsPanel() {
     if (!diffFilesEl) return;
-    var project = activeProject();
+    if (!panelIsVisible("diffs")) return;
     var panelGeneration = diffPanelRequestGate.next();
+    diffRequestGate.next();
+    var project = activeProject();
     if (!project) {
       panelMessage(diffFilesEl, "No project open — ⌘O to add one.");
       clearDiffSelection("");
       if (diffsSummaryEl) diffsSummaryEl.textContent = "";
       return;
     }
+    resetDiffDetail("Loading changes…");
+    panelMessage(diffFilesEl, "Loading changes…");
+    if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
     var projectId = project.id;
     var status;
     try {
@@ -2733,18 +2763,19 @@
     } catch (err) {
       if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
           !activeProject() || activeProject().id !== projectId ||
-          currentPanel() !== "diffs") return;
+          !panelIsVisible("diffs")) return;
       panelMessage(diffFilesEl, String(err), "panel-error");
       clearDiffSelection("");
+      if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
       return;
     }
     if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
         !activeProject() || activeProject().id !== projectId ||
-        currentPanel() !== "diffs") return;
+        !panelIsVisible("diffs")) return;
     if (!status.is_repo) {
       panelMessage(diffFilesEl, "Not a git repository.");
       clearDiffSelection("");
-      if (diffsSummaryEl) diffsSummaryEl.textContent = "";
+      if (diffsSummaryEl) diffsSummaryEl.textContent = "not a repository";
       return;
     }
     if (diffsSummaryEl) {
@@ -2782,8 +2813,7 @@
 
   async function showDiff(project, entry) {
     if (!project || !entry || !diffEditorHostEl) return;
-    if (!activeProject() || activeProject().id !== project.id ||
-        currentPanel() !== "diffs" || currentLayout() !== "split") return;
+    if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
     var key = diffCacheKey(project.id, entry.path, staged);
     var generation = diffRequestGate.next();

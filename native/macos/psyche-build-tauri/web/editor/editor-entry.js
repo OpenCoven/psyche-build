@@ -300,7 +300,11 @@ export function createDiffViewerState({ text = '', cspNonce = '' } = {}) {
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
       EditorView.cspNonce.of(cspNonce),
-      EditorView.contentAttributes.of({ 'aria-label': 'Unified diff viewer' }),
+      EditorView.contentAttributes.of({
+        'aria-label': 'Unified diff viewer',
+        'aria-readonly': 'true',
+        tabindex: '0',
+      }),
     ],
   });
 }
