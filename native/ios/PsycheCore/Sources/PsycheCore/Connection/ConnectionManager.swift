@@ -10,12 +10,16 @@ public actor ConnectionManager {
     private let transport: any PsycheTransport
     private let clientID: String
     private let clientName: String
-    private let token: String?
+    private var token: String?
     private var messageTask: Task<Void, Never>?
+    private var activeMessageSession: UUID?
+    private var hasActiveTransport = false
+    private var requestedInitialSnapshots = false
     private var isMessageProcessorReady = false
     private var messageProcessorReadyWaiters: [CheckedContinuation<Void, Never>] = []
     private var processedMessageCount = 0
     private var eventDrainWaiters: [UUID: (count: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
+    private var stateWaiters: [UUID: (state: ConnectionState, continuation: CheckedContinuation<Void, Never>)] = [:]
 
     public init(
         transport: any PsycheTransport,
@@ -34,20 +38,31 @@ public actor ConnectionManager {
     }
 
     public func connect(to endpoint: HostEndpoint) async {
-        guard state == .disconnected || isFailed else { return }
+        guard state != .connecting && state != .disconnecting else { return }
+        await tearDownActiveConnection()
         transition(to: .connecting)
 
         do {
             try await transport.connect(to: endpoint)
+            hasActiveTransport = true
+            requestedInitialSnapshots = false
             transition(to: .authenticating)
             let messages = await transport.incomingMessages()
             isMessageProcessorReady = false
+            let session = UUID()
+            activeMessageSession = session
             messageTask = Task { [weak self] in
                 await self?.markMessageProcessorReady()
                 for await message in messages {
                     guard !Task.isCancelled else { return }
-                    await self?.handle(message)
+                    guard let result = await self?.handle(message, for: session) else { return }
+                    if case let .failed(reason) = result {
+                        await self?.messageProcessingEnded(for: session, reason: reason)
+                        return
+                    }
                 }
+                guard !Task.isCancelled else { return }
+                await self?.messageProcessingEnded(for: session, reason: "Connection closed unexpectedly")
             }
             await waitForMessageProcessorReadiness()
             try await transport.send(.hello(HelloPayload(
@@ -55,9 +70,9 @@ public actor ConnectionManager {
                 clientName: clientName,
                 token: token
             )))
-            try await transport.send(.listProjects(EmptyPayload()))
-            try await transport.send(.listPanes(EmptyPayload()))
+            try await requestInitialSnapshotsIfAuthorized()
         } catch {
+            await tearDownActiveConnection()
             transition(to: .failed(error.localizedDescription))
         }
     }
@@ -65,10 +80,23 @@ public actor ConnectionManager {
     public func disconnect() async {
         guard state != .disconnected else { return }
         transition(to: .disconnecting)
-        messageTask?.cancel()
-        messageTask = nil
-        await transport.disconnect()
+        await tearDownActiveConnection()
         transition(to: .disconnected)
+    }
+
+    public func pair(code: String, clientID: String, clientName: String) async {
+        guard hasActiveTransport else { return }
+
+        do {
+            try await transport.send(.pair(PairRequestPayload(
+                code: code,
+                clientID: clientID,
+                clientName: clientName
+            )))
+        } catch {
+            await tearDownActiveConnection()
+            transition(to: .failed(error.localizedDescription))
+        }
     }
 
     func waitForMessageProcessorReadiness() async {
@@ -86,9 +114,12 @@ public actor ConnectionManager {
         }
     }
 
-    private var isFailed: Bool {
-        if case .failed = state { return true }
-        return false
+    func waitForState(_ expectedState: ConnectionState) async {
+        guard state != expectedState else { return }
+        let waiterID = UUID()
+        await withCheckedContinuation { continuation in
+            stateWaiters[waiterID] = (expectedState, continuation)
+        }
     }
 
     private func markMessageProcessorReady() {
@@ -97,7 +128,9 @@ public actor ConnectionManager {
         messageProcessorReadyWaiters.removeAll()
     }
 
-    private func handle(_ message: ServerMessage) {
+    private func handle(_ message: ServerMessage, for session: UUID) async -> MessageHandlingResult {
+        guard activeMessageSession == session else { return .ignored }
+
         switch message {
         case .welcome:
             transition(to: .connected)
@@ -108,7 +141,14 @@ public actor ConnectionManager {
         case .paneOutput(let output):
             latestOutputByPane[output.paneID] = output
         case .error(let error):
-            transition(to: .failed(error.message))
+            return .failed(error.message)
+        case .pairAccepted(let payload):
+            token = payload.token
+            do {
+                try await requestInitialSnapshotsIfAuthorized()
+            } catch {
+                return .failed(error.localizedDescription)
+            }
         default:
             break
         }
@@ -118,10 +158,56 @@ public actor ConnectionManager {
             eventDrainWaiters.removeValue(forKey: waiterID)
             waiter.continuation.resume()
         }
+        return .processed
+    }
+
+    private func requestInitialSnapshotsIfAuthorized() async throws {
+        guard token?.isEmpty == false, !requestedInitialSnapshots else { return }
+        try await transport.send(.listProjects(EmptyPayload()))
+        try await transport.send(.listPanes(EmptyPayload()))
+        requestedInitialSnapshots = true
+    }
+
+    private func tearDownActiveConnection() async {
+        activeMessageSession = nil
+        let task = messageTask
+        messageTask = nil
+        task?.cancel()
+        if let task {
+            await task.value
+        }
+        if hasActiveTransport {
+            await transport.disconnect()
+            hasActiveTransport = false
+        }
+    }
+
+    private func messageProcessingEnded(for session: UUID, reason: String) async {
+        guard activeMessageSession == session else { return }
+
+        activeMessageSession = nil
+        messageTask = nil
+        transition(to: .disconnecting)
+        if hasActiveTransport {
+            await transport.disconnect()
+            hasActiveTransport = false
+        }
+        transition(to: .failed(reason))
     }
 
     private func transition(to newState: ConnectionState) {
         state = newState
         stateHistory.append(newState)
+        let completedWaiters = stateWaiters.filter { newState == $0.value.state }
+        completedWaiters.forEach { waiterID, waiter in
+            stateWaiters.removeValue(forKey: waiterID)
+            waiter.continuation.resume()
+        }
+    }
+
+    private enum MessageHandlingResult {
+        case ignored
+        case processed
+        case failed(String)
     }
 }

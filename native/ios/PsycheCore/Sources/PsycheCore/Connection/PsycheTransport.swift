@@ -15,16 +15,14 @@ public actor FakeTransport: PsycheTransport {
     public private(set) var connectionAttempts: [HostEndpoint] = []
     public private(set) var sentMessages: [ClientMessage] = []
     public private(set) var isConnected = false
+    public private(set) var disconnectCount = 0
+    public private(set) var incomingMessageStreamCount = 0
 
-    private let stream: AsyncStream<ServerMessage>
-    private let continuation: AsyncStream<ServerMessage>.Continuation
+    private var continuations: [AsyncStream<ServerMessage>.Continuation] = []
     private var scriptedMessages: [ServerMessage]
     private let shouldFailConnection: Bool
 
     public init(scriptedMessages: [ServerMessage] = [], shouldFailConnection: Bool = false) {
-        var capturedContinuation: AsyncStream<ServerMessage>.Continuation?
-        stream = AsyncStream { capturedContinuation = $0 }
-        continuation = capturedContinuation!
         self.scriptedMessages = scriptedMessages
         self.shouldFailConnection = shouldFailConnection
     }
@@ -33,12 +31,12 @@ public actor FakeTransport: PsycheTransport {
         connectionAttempts.append(endpoint)
         guard !shouldFailConnection else { throw FakeTransportError.connectionFailed }
         isConnected = true
-        scriptedMessages.forEach { continuation.yield($0) }
-        scriptedMessages.removeAll()
     }
 
     public func disconnect() async {
         isConnected = false
+        disconnectCount += 1
+        continuations.last?.finish()
     }
 
     public func send(_ message: ClientMessage) async throws {
@@ -47,10 +45,26 @@ public actor FakeTransport: PsycheTransport {
     }
 
     public func incomingMessages() async -> AsyncStream<ServerMessage> {
-        stream
+        var capturedContinuation: AsyncStream<ServerMessage>.Continuation?
+        let stream = AsyncStream<ServerMessage> { capturedContinuation = $0 }
+        let continuation = capturedContinuation!
+        continuations.append(continuation)
+        incomingMessageStreamCount += 1
+        scriptedMessages.forEach { continuation.yield($0) }
+        scriptedMessages.removeAll()
+        return stream
     }
 
     public func emit(_ message: ServerMessage) {
-        continuation.yield(message)
+        continuations.last?.yield(message)
+    }
+
+    public func emit(_ message: ServerMessage, onConnection index: Int) {
+        guard continuations.indices.contains(index) else { return }
+        continuations[index].yield(message)
+    }
+
+    public func finishIncomingMessages() {
+        continuations.last?.finish()
     }
 }
