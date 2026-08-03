@@ -1,9 +1,13 @@
 # Psyche Desktop Cockpit
 
-> **Status: implemented.** Written 2026-08-02, landed 2026-08-03 as a record of a
-> decision already carried out — the Comux strip-out is done, the Tauri app is
-> renamed to `dev.opencoven.psyche`, and the cockpit exists. Read this for why
-> the desktop workspace is shaped the way it is, not as pending work.
+> **Status: implemented, extended.** Written 2026-08-02, landed 2026-08-03 as a
+> record of a decision already carried out — the Comux strip-out is done, the
+> Tauri app is `native/macos/psyche-build-tauri` (`dev.opencoven.psyche`), and
+> the cockpit exists. Since then the workspace has grown a read-only inspection
+> rail (Browser, Files, Diffs, Git) and an editable code editor with a
+> virtualized diff viewer. Read this for why the desktop workspace is shaped the
+> way it is; see the follow-on specs listed under "Delivered Increments" for the
+> panel and editor work that has since landed on top of it.
 
 ## Goal
 
@@ -13,7 +17,9 @@ already present in the Psyche Build repository, while replacing Comux-specific
 identity, state, and orchestration with Psyche.
 
 Coven Cave remains a separate familiar and control-room application. CastCodes
-and editor parity are not part of this milestone.
+is not reused. Editor and diff surfaces were out of scope for this founding
+milestone but have since been added as separate increments (see "Delivered
+Increments").
 
 ## First Release
 
@@ -31,8 +37,12 @@ the rendered cockpit; lanes in other projects remain active.
 
 ## Architecture
 
-The implementation extends the existing Comux-derived desktop package inside
-`psyche-build`; it does not create a separate application or adopt CastCodes.
+The implementation lives in `native/macos/psyche-build-tauri`, the
+Comux-derived desktop package renamed to `dev.opencoven.psyche`; it does not
+create a fresh application or adopt CastCodes. The original `comux-tauri`
+directory remains only as a stripped legacy stub. The shell is a no-bundler
+Tauri 2 app whose static `web/` frontend (`main.js`, xterm terminals) talks to
+a Rust backend over IPC commands.
 
 The native desktop shell continues to host terminal surfaces. Its backend
 reads Psyche project configuration and tmux state, then exposes project and
@@ -88,14 +98,36 @@ the underlying error and leave the current state visible for recovery.
 
 ## Non-Goals
 
-This milestone excludes:
+This founding milestone excluded, and the desktop shell still does not:
 
-- Code-editor parity.
-- A full diff or review workspace.
-- CastCodes integration or reuse.
-- Coven Cave integration.
-- A new independent desktop package.
-- Changing Psyche's agent, Git, or tmux authority model.
+- Reuse or integrate CastCodes.
+- Integrate with Coven Cave.
+- Introduce a new independent desktop package.
+- Change Psyche's agent, Git, or tmux authority model.
+
+Editor and diff surfaces, originally listed here as non-goals, were delivered
+as later increments (see "Delivered Increments"). Those increments remain
+read-mostly: the inspection panels and diff viewer perform no staging,
+committing, merging, branch deletion, or worktree cleanup, and the editor adds
+only contained file edits — never file creation or deletion, language servers,
+autocomplete, formatting, or side-by-side diffs. Lifecycle mutations still flow
+through Psyche's existing confirmation-gated flows.
+
+## Delivered Increments
+
+The following specs describe work layered on top of this cockpit foundation and
+already landed on `main`:
+
+- `2026-08-03-macos-workspace-panels-design.md` — a read-only right rail with
+  Browser, Files, Diffs, and Git panels, scoped to the selected project root
+  with a canonicalizing containment boundary.
+- `2026-08-03-macos-code-editor-diff-viewer-design.md` — a locally bundled
+  CodeMirror 6 editor with explicit atomic saves and optimistic conflict
+  detection, plus a virtualized, read-only unified diff viewer.
+
+These increments preserve the cockpit's invariants: Psyche stays authoritative
+for orchestration and lifecycle, the desktop shell never owns lane processes,
+and no panel silently creates or removes runtime resources.
 
 ## Acceptance Criteria
 
