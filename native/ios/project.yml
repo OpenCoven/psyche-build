@@ -1,0 +1,76 @@
+name: Psyche
+options:
+  bundleIdPrefix: build.psyche
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  PsycheCore:
+    type: framework
+    platform: iOS
+    sources:
+      - path: PsycheCore/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.core
+        DEFINES_MODULE: YES
+  PsycheCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PsycheCore/Tests
+    dependencies:
+      - target: PsycheCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.core.tests
+  PsycheApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: PsycheApp/Sources
+    dependencies:
+      - target: PsycheCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.ios
+        INFOPLIST_KEY_CFBundleDisplayName: Psyche
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Psyche uses your local network to discover and connect to your paired coding host.
+        INFOPLIST_KEY_NSBonjourServices:
+          - _psyche._tcp
+        TARGETED_DEVICE_FAMILY: "1,2"
+  PsycheAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PsycheApp/Tests
+    dependencies:
+      - target: PsycheApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.ios.uitests
+        TEST_TARGET_NAME: PsycheApp
+schemes:
+  PsycheCore:
+    build:
+      targets:
+        PsycheCore: all
+        PsycheCoreTests: [test]
+    test:
+      targets:
+        - PsycheCoreTests
+  PsycheApp:
+    build:
+      targets:
+        PsycheApp: all
+        PsycheAppUITests: [test]
+    test:
+      targets:
+        - PsycheCoreTests
+        - PsycheAppUITests
