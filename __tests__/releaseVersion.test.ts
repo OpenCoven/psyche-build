@@ -174,6 +174,34 @@ describe('release version contract', () => {
     );
   });
 
+  it('does not write any release file when a later manifest is invalid', async () => {
+    const root = await writeFixture();
+    const releaseFiles = [
+      'package.json',
+      'native/macos/psyche-build-tauri/package.json',
+      'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
+      'native/macos/psyche-build-tauri/src-tauri/Cargo.lock',
+      'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+      'native/ios/project.yml',
+      'native/ios/Psyche.xcodeproj/project.pbxproj',
+    ].map((relativePath) => path.join(root, relativePath));
+    const xcodeProjectPath = releaseFiles.at(-1)!;
+    const xcodeProject = await readFile(xcodeProjectPath, 'utf8');
+    await writeFile(
+      xcodeProjectPath,
+      xcodeProject.replace('MARKETING_VERSION = 0.0.3;', 'MARKETING_VERSION = 0.0.4;'),
+    );
+    const before = await Promise.all(releaseFiles.map((filePath) => readFile(filePath, 'utf8')));
+
+    await expect(setReleaseVersion(root, '0.0.1')).rejects.toThrow(
+      /inconsistent MARKETING_VERSION/,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const after = await Promise.all(releaseFiles.map((filePath) => readFile(filePath, 'utf8')));
+    expect(after).toEqual(before);
+  });
+
   it('accepts the argument separator forwarded by pnpm scripts', async () => {
     const root = await writeFixture();
 

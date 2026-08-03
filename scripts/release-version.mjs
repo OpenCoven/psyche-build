@@ -320,38 +320,29 @@ export async function setReleaseVersion(root, value) {
   const contents = Object.fromEntries(
     Object.entries(paths).map(([key, filePath]) => [key, readFileSync(filePath, 'utf8')]),
   );
-
-  await Promise.all([
-    writeFile(paths.packageJson, replaceJsonVersion(contents.packageJson, version)),
-    writeFile(paths.nativePackageJson, replaceJsonVersion(contents.nativePackageJson, version)),
-    writeFile(paths.tauriConfig, replaceJsonVersion(contents.tauriConfig, version)),
-    writeFile(
-      paths.cargoToml,
-      replaceCargoPackageVersion(contents.cargoToml, version, paths.cargoToml),
-    ),
-    writeFile(
-      paths.cargoLock,
-      replaceCargoLockVersion(contents.cargoLock, version, paths.cargoLock),
-    ),
-    writeFile(
+  const nextContents = {
+    packageJson: replaceJsonVersion(contents.packageJson, version),
+    nativePackageJson: replaceJsonVersion(contents.nativePackageJson, version),
+    cargoToml: replaceCargoPackageVersion(contents.cargoToml, version, paths.cargoToml),
+    cargoLock: replaceCargoLockVersion(contents.cargoLock, version, paths.cargoLock),
+    tauriConfig: replaceJsonVersion(contents.tauriConfig, version),
+    iosProjectYml: replaceMarketingVersions(
+      contents.iosProjectYml,
+      version,
       paths.iosProjectYml,
-      replaceMarketingVersions(
-        contents.iosProjectYml,
-        version,
-        paths.iosProjectYml,
-        findYamlMarketingVersionAssignments,
-      ),
+      findYamlMarketingVersionAssignments,
     ),
-    writeFile(
+    iosXcodeProject: replaceMarketingVersions(
+      contents.iosXcodeProject,
+      version,
       paths.iosXcodeProject,
-      replaceMarketingVersions(
-        contents.iosXcodeProject,
-        version,
-        paths.iosXcodeProject,
-        findXcodeMarketingVersionAssignments,
-      ),
+      findXcodeMarketingVersionAssignments,
     ),
-  ]);
+  };
+
+  await Promise.all(
+    Object.entries(paths).map(([key, filePath]) => writeFile(filePath, nextContents[key])),
+  );
   return version;
 }
 
