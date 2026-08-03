@@ -98,4 +98,20 @@ describe('Tauri workspace editor model', () => {
     cache.clear();
     expect(cache.get('third')).toBeUndefined();
   });
+
+  test('invalidates only diff entries belonging to the selected project', () => {
+    const cache = model.createLruCache(6);
+    const projectA = 'project-a\0';
+    cache.set(`${projectA}src/a.ts\0unstaged`, 'a-unstaged');
+    cache.set(`${projectA}src/a.ts\0staged`, 'a-staged');
+    cache.set('project-ab\0src/a.ts\0unstaged', 'prefix-neighbour');
+    cache.set('project-b\0src/b.ts\0unstaged', 'other-project');
+
+    cache.deleteWhere((key: string) => key.startsWith(projectA));
+
+    expect(cache.get(`${projectA}src/a.ts\0unstaged`)).toBeUndefined();
+    expect(cache.get(`${projectA}src/a.ts\0staged`)).toBeUndefined();
+    expect(cache.get('project-ab\0src/a.ts\0unstaged')).toBe('prefix-neighbour');
+    expect(cache.get('project-b\0src/b.ts\0unstaged')).toBe('other-project');
+  });
 });

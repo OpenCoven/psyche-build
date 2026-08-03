@@ -307,6 +307,143 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toContain('head: main.head');
   });
 
+  it('provides one accessible virtualized read-only unified diff surface', async () => {
+    expect(indexHtml).toContain('id="diff-editor-host"');
+    expect(indexHtml).toContain('id="diff-metadata"');
+    expect(indexHtml).toContain('id="diff-truncation"');
+    expect(indexHtml).not.toContain('<pre class="diff-body" id="diff-body">');
+
+    expect(editorEntry).toMatch(/export function createDiffViewer\s*\(/);
+    expect(editorEntry).toMatch(/export function createDiffViewerState\s*\(/);
+    expect(editorEntry).toContain('EditorView.editable.of(false)');
+    expect(editorEntry).toContain('EditorState.readOnly.of(true)');
+    expect(editorEntry).toContain(
+      "EditorView.contentAttributes.of({ 'aria-label': 'Unified diff viewer' })"
+    );
+    expect(editorEntry).toContain('ViewPlugin.fromClass');
+    expect(editorEntry).toContain('view.visibleRanges');
+    expect(editorEntry).toContain('update.viewportChanged');
+    expect(extractFunctionSource(editorEntry, 'createDiffViewerState')).not.toContain('basicSetup');
+
+    const editorModule = await import(
+      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
+    );
+    const diffState = editorModule.createDiffViewerState({
+      text: '@@ -1 +1 @@\n-old\n+new',
+      cspNonce: 'test-nonce',
+    });
+    const stateModule = await import(
+      pathToFileURL(requireFromTauri.resolve('@codemirror/state')).href
+    );
+    const viewModule = await import(
+      pathToFileURL(requireFromTauri.resolve('@codemirror/view')).href
+    );
+
+    expect(diffState.facet(stateModule.EditorState.readOnly)).toBe(true);
+    expect(diffState.facet(viewModule.EditorView.editable)).toBe(false);
+    expect(editorModule.diffClass('@@ -1 +1 @@')).toBe('cm-diff-hunk');
+    expect(editorModule.diffClass('+++ b/file')).toBe('cm-diff-meta');
+    expect(editorModule.diffClass('--- a/file')).toBe('cm-diff-meta');
+    expect(editorModule.diffClass('+added')).toBe('cm-diff-add');
+    expect(editorModule.diffClass('-deleted')).toBe('cm-diff-delete');
+  });
+
+  it('coordinates structured diff responses with exact cache and request identity', () => {
+    expect(mainJs).toContain('window.PsycheCodeEditor.createLruCache(6)');
+    expect(mainJs).toContain('window.PsycheCodeEditor.createRequestGate()');
+    expect(mainJs).toMatch(/function diffCacheKey\(projectId, path, staged\)/);
+    expect(mainJs).toContain('projectId + "\\0" + path + "\\0" + (staged ? "staged" : "unstaged")');
+    expect(mainJs).toContain('key.startsWith(projectId + "\\0")');
+    expect(mainJs).toMatch(/diffCache\.get\(key\)[\s\S]*invoke\("git_diff"/);
+    expect(mainJs).toContain('diffRequestGate.isCurrent(generation)');
+    expect(mainJs).toContain('selectedDiffKey === key');
+    expect(mainJs).toContain('result.truncated');
+    expect(mainJs).toContain('result.lines');
+    expect(mainJs).toContain('result.bytes');
+    expect(mainJs).not.toContain('diffBodyEl');
+    expect(mainJs).not.toContain('colourDiff(');
+    expect(extractFunctionSource(mainJs, 'invalidateProjectDiffs')).toContain(
+      'diffCache.deleteWhere(function (key) { return key.startsWith(projectId + "\\0"); })'
+    );
+    expect(extractFunctionSource(mainJs, 'refreshDiffs')).toMatch(
+      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderDiffsPanel\(\)/
+    );
+  });
+
+  it('serves cached diffs without invoking and ignores stale results and errors', async () => {
+    const source = extractFunctionSource(mainJs, 'showDiff');
+    const project = { id: 'p1', root: '/repo' };
+    const entry = { path: 'src/a.ts', staged: false, unstaged: true };
+    const result = { text: '+cached', bytes: 7, lines: 1, truncated: false };
+    const renderCalls: unknown[] = [];
+    let invokeCalls = 0;
+    const common = {
+      diffEditorHostEl: {},
+      activeProject: () => project,
+      currentPanel: () => 'diffs',
+      currentLayout: () => 'split',
+      stagedDiffFor: () => false,
+      diffCacheKey: () => 'p1\0src/a.ts\0unstaged',
+      diffRequestGate: { next: () => 1 },
+      selectedDiffPath: null,
+      selectedDiffKey: null,
+      diffFilesEl: {
+        parentNode: { classList: { add: () => undefined } },
+        children: [],
+      },
+    };
+    const cachedShowDiff = compileFunction<
+      (owner: typeof project, target: typeof entry) => Promise<void>
+    >(source, {
+      ...common,
+      diffCache: { get: () => result, set: () => undefined },
+      currentDiffRequestMatches: () => true,
+      renderDiffResult: (value: unknown) => { renderCalls.push(value); },
+      resetDiffDetail: () => undefined,
+      invoke: async () => { invokeCalls += 1; return result; },
+    });
+
+    await cachedShowDiff(project, entry);
+    expect(invokeCalls).toBe(0);
+    expect(renderCalls).toEqual([result]);
+
+    const stale = deferred<typeof result>();
+    const staleRenders: unknown[] = [];
+    let cacheWrites = 0;
+    const staleShowDiff = compileFunction<
+      (owner: typeof project, target: typeof entry) => Promise<void>
+    >(source, {
+      ...common,
+      diffCache: {
+        get: () => undefined,
+        set: () => { cacheWrites += 1; },
+      },
+      currentDiffRequestMatches: () => false,
+      renderDiffResult: (value: unknown) => { staleRenders.push(value); },
+      resetDiffDetail: () => undefined,
+      invoke: () => stale.promise,
+    });
+    const staleRequest = staleShowDiff(project, entry);
+    stale.resolve(result);
+    await staleRequest;
+    expect(cacheWrites).toBe(0);
+    expect(staleRenders).toEqual([]);
+
+    let resets = 0;
+    const staleErrorShowDiff = compileFunction<
+      (owner: typeof project, target: typeof entry) => Promise<void>
+    >(source, {
+      ...common,
+      diffCache: { get: () => undefined, set: () => undefined },
+      currentDiffRequestMatches: () => false,
+      renderDiffResult: () => undefined,
+      resetDiffDetail: () => { resets += 1; },
+      invoke: async () => { throw new Error('old request'); },
+    });
+    await staleErrorShowDiff(project, entry);
+    expect(resets).toBe(1);
+  });
+
   it('gives CodeMirror one bounded scroll surface using the workspace palette', () => {
     expect(stylesCss).toMatch(
       /\.file-view\s*\{[\s\S]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto;/

@@ -2541,7 +2541,9 @@
   var fileTreeEl = document.getElementById("file-tree");
   var filesCrumbEl = document.getElementById("files-crumb");
   var diffFilesEl = document.getElementById("diff-files");
-  var diffBodyEl = document.getElementById("diff-body");
+  var diffEditorHostEl = document.getElementById("diff-editor-host");
+  var diffMetadataEl = document.getElementById("diff-metadata");
+  var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
   var gitViewEl = document.getElementById("git-view");
   var gitBranchEl = document.getElementById("git-branch");
@@ -2549,12 +2551,20 @@
 
   // Directory paths the user has expanded, so a refresh keeps the tree open.
   var expandedDirs = Object.create(null);
-  var selectedDiffPath = null;
+  var selectedDiffKey = null;
   var gitRemoteWebUrl = null;
+  var diffCache = window.PsycheCodeEditor.createLruCache(6);
+  var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var diffViewer = window.PsycheCodeEditor.createDiffViewer({ parent: diffEditorHostEl });
 
-  function invalidateProjectDiffs(_projectId) {
-    // Task 7 adds the bounded LRU diff cache. There is no cached diff state to
-    // clear yet; keeping this seam makes successful saves refresh-safe now.
+  function diffCacheKey(projectId, path, staged) {
+    return projectId + "\0" + path + "\0" + (staged ? "staged" : "unstaged");
+  }
+
+  function invalidateProjectDiffs(projectId) {
+    diffCache.deleteWhere(function (key) { return key.startsWith(projectId + "\0"); });
+    diffRequestGate.next();
   }
 
   // The tree highlights whichever file currently owns the main area.
@@ -2651,37 +2661,89 @@
 
   // ---- Diffs ----
 
-  function colourDiff(text) {
-    return text
-      .split("\n")
-      .map(function (line) {
-        var cls = "";
-        if (line.indexOf("@@") === 0) cls = "d-hunk";
-        else if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 ||
-                 line.indexOf("diff ") === 0 || line.indexOf("index ") === 0) cls = "d-meta";
-        else if (line.charAt(0) === "+") cls = "d-add";
-        else if (line.charAt(0) === "-") cls = "d-del";
-        return cls
-          ? '<span class="' + cls + '">' + escapeHtml(line) + "</span>"
-          : escapeHtml(line);
-      })
-      .join("\n");
+  function stagedDiffFor(entry) {
+    return !!entry.staged && !entry.unstaged;
+  }
+
+  function formatDiffBytes(bytes) {
+    var value = Number(bytes) || 0;
+    if (value < 1024) return value + " B";
+    if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KiB";
+    return (value / (1024 * 1024)).toFixed(1) + " MiB";
+  }
+
+  function resetDiffDetail(message) {
+    diffViewer.clear();
+    if (diffMetadataEl) diffMetadataEl.textContent = message || "";
+    if (diffTruncationEl) {
+      diffTruncationEl.hidden = true;
+      diffTruncationEl.textContent = "";
+    }
+  }
+
+  function clearDiffSelection(message) {
+    selectedDiffKey = null;
+    diffRequestGate.next();
+    resetDiffDetail(message);
+    if (diffFilesEl && diffFilesEl.parentNode) {
+      diffFilesEl.parentNode.classList.remove("has-detail");
+    }
+  }
+
+  function renderDiffResult(result) {
+    var text = result && typeof result.text === "string" ? result.text : "";
+    var lines = Number(result && result.lines) || 0;
+    var bytes = Number(result && result.bytes) || 0;
+    diffViewer.setDiff({ text: text });
+    if (diffMetadataEl) {
+      diffMetadataEl.textContent = text.trim()
+        ? lines + " lines · " + formatDiffBytes(bytes)
+        : "No textual diff · " + lines + " lines · " + formatDiffBytes(bytes);
+    }
+    if (diffTruncationEl) {
+      diffTruncationEl.hidden = !(result && result.truncated);
+      diffTruncationEl.textContent = result && result.truncated
+        ? "Capped preview — full diff is " + lines + " lines / " + formatDiffBytes(bytes)
+        : "";
+    }
+  }
+
+  function currentDiffRequestMatches(projectId, key, generation) {
+    var project = activeProject();
+    return diffRequestGate.isCurrent(generation) &&
+      selectedDiffKey === key &&
+      !!project && project.id === projectId &&
+      currentPanel() === "diffs" && currentLayout() === "split";
   }
 
   async function renderDiffsPanel() {
     if (!diffFilesEl) return;
     var project = activeProject();
-    if (!project) { panelMessage(diffFilesEl, "No project open — ⌘O to add one."); return; }
+    var panelGeneration = diffPanelRequestGate.next();
+    if (!project) {
+      panelMessage(diffFilesEl, "No project open — ⌘O to add one.");
+      clearDiffSelection("");
+      if (diffsSummaryEl) diffsSummaryEl.textContent = "";
+      return;
+    }
+    var projectId = project.id;
     var status;
     try {
       status = await invoke("git_status", { root: project.root });
     } catch (err) {
+      if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
+          !activeProject() || activeProject().id !== projectId ||
+          currentPanel() !== "diffs") return;
       panelMessage(diffFilesEl, String(err), "panel-error");
+      clearDiffSelection("");
       return;
     }
+    if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
+        !activeProject() || activeProject().id !== projectId ||
+        currentPanel() !== "diffs") return;
     if (!status.is_repo) {
       panelMessage(diffFilesEl, "Not a git repository.");
-      if (diffBodyEl) diffBodyEl.textContent = "";
+      clearDiffSelection("");
       if (diffsSummaryEl) diffsSummaryEl.textContent = "";
       return;
     }
@@ -2692,8 +2754,7 @@
     }
     if (status.files.length === 0) {
       panelMessage(diffFilesEl, "No uncommitted changes.");
-      if (diffBodyEl) diffBodyEl.innerHTML = "";
-      diffFilesEl.parentNode.classList.remove("has-detail");
+      clearDiffSelection("");
       return;
     }
 
@@ -2702,41 +2763,64 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      row.className = "diff-row " + kind + (selectedDiffPath === f.path ? " selected" : "");
+      var key = diffCacheKey(project.id, f.path, stagedDiffFor(f));
+      row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
         '<span class="diff-code">' + escapeHtml(f.code) + "</span>" +
         '<span class="diff-path">' + escapeHtml(shortenRelPath(f.path)) + "</span>";
-      row.addEventListener("click", function () { showDiff(project.root, f); });
+      row.addEventListener("click", function () { showDiff(project, f); });
       diffFilesEl.appendChild(row);
     });
 
     // Auto-open the first file so the panel is never a blank list.
-    var target = status.files.find(function (f) { return f.path === selectedDiffPath; }) || status.files[0];
-    showDiff(project.root, target);
+    var target = status.files.find(function (f) {
+      return diffCacheKey(project.id, f.path, stagedDiffFor(f)) === selectedDiffKey;
+    }) || status.files[0];
+    showDiff(project, target);
   }
 
-  async function showDiff(root, entry) {
-    if (!entry || !diffBodyEl) return;
-    selectedDiffPath = entry.path;
+  async function showDiff(project, entry) {
+    if (!project || !entry || !diffEditorHostEl) return;
+    if (!activeProject() || activeProject().id !== project.id ||
+        currentPanel() !== "diffs" || currentLayout() !== "split") return;
+    var staged = stagedDiffFor(entry);
+    var key = diffCacheKey(project.id, entry.path, staged);
+    var generation = diffRequestGate.next();
+    selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
     Array.prototype.forEach.call(diffFilesEl.children, function (el) {
       el.classList.toggle("selected", el.title === entry.path);
     });
-    diffBodyEl.textContent = "loading…";
+    var cached = diffCache.get(key);
+    if (cached !== undefined) {
+      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      renderDiffResult(cached);
+      return;
+    }
+    resetDiffDetail("Loading diff…");
     try {
-      var text = await invoke("git_diff", {
-        root: root,
+      var result = await invoke("git_diff", {
+        root: project.root,
         path: entry.path,
-        staged: !!entry.staged && !entry.unstaged,
+        staged: staged,
       });
-      diffBodyEl.innerHTML = text.trim() ? colourDiff(text) : "No textual diff.";
+      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      diffCache.set(key, result);
+      renderDiffResult(result);
     } catch (err) {
-      diffBodyEl.textContent = String(err);
+      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      resetDiffDetail("Unable to load diff: " + String(err));
     }
   }
 
-  onRailClick("diffs-refresh", function () { renderDiffsPanel(); });
+  function refreshDiffs() {
+    var project = activeProject();
+    if (project) invalidateProjectDiffs(project.id);
+    renderDiffsPanel();
+  }
+
+  onRailClick("diffs-refresh", refreshDiffs);
 
   // ---- Git / GitHub ----
 

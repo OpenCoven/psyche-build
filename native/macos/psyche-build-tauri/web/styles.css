@@ -1176,20 +1176,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 #file-cursor { flex: none; }
 
-.diff-body {
-  margin: 0;
-  padding: 8px 10px;
-  overflow: auto;
-  min-height: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-soft);
-  white-space: pre;
-  tab-size: 2;
-  scrollbar-width: thin;
-}
-
 /* -------- Diffs panel -------- */
 
 .diff-files { overflow: auto; min-height: 0; padding: 4px 0; scrollbar-width: thin; }
@@ -1225,10 +1211,63 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.diff-body .d-add { color: var(--ok); }
-.diff-body .d-del { color: var(--error); }
-.diff-body .d-hunk { color: var(--accent); }
-.diff-body .d-meta { color: var(--muted); }
+.diff-detail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  background: var(--surface-solid);
+}
+.panel-split:not(.has-detail) .diff-detail { display: none; }
+.diff-detail-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.35;
+}
+#diff-metadata {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#diff-truncation {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+  font-weight: 600;
+}
+#diff-truncation[hidden] { display: none; }
+.diff-editor-host {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.diff-editor-host .cm-editor { height: 100%; }
+.diff-editor-host .cm-scroller {
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  scrollbar-width: thin;
+}
+.diff-editor-host .cm-content {
+  font-family: var(--font-mono);
+  white-space: pre;
+  tab-size: 2;
+}
 
 /* -------- Git panel -------- */
 

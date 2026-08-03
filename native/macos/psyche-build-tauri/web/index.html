@@ -193,7 +193,13 @@
           </header>
           <div class="panel-body panel-split">
             <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
-            <pre class="diff-body" id="diff-body"></pre>
+            <div class="diff-detail" id="diff-detail">
+              <div class="diff-detail-status">
+                <span id="diff-metadata" role="status" aria-live="polite"></span>
+                <span id="diff-truncation" role="alert" hidden></span>
+              </div>
+              <div class="diff-editor-host" id="diff-editor-host"></div>
+            </div>
           </div>
         </div>
 
