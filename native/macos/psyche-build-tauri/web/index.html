@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>psyche</title>
+    <style id="codemirror-nonce-source"></style>
     <link rel="stylesheet" href="./xterm.css" />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./xterm.js"></script>
@@ -102,11 +103,39 @@
           <div class="tab-strip" id="tab-strip"></div>
           <div class="terminal-host" id="terminal-host"></div>
           <div class="file-view" id="file-view" hidden>
-            <div class="file-view-bar">
-              <span class="file-view-path" id="file-view-path"></span>
+            <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
+              <span class="file-language" id="file-language">Plain Text</span>
+              <span class="file-view-title" id="file-view-title">No file selected</span>
+              <span class="file-dirty" id="file-dirty" title="Unsaved changes" aria-label="Unsaved changes" hidden></span>
               <span class="file-view-meta" id="file-view-meta"></span>
+              <button
+                id="file-save"
+                class="file-save"
+                type="button"
+                title="Save file (⌘S)"
+                aria-label="Save file"
+                disabled
+              >
+                Save <kbd>⌘S</kbd>
+              </button>
             </div>
-            <pre class="file-view-body" id="file-view-body"></pre>
+            <div class="file-view-path" id="file-view-path" aria-label="Project-relative file path">No file selected</div>
+            <div class="file-editor-stage">
+              <div class="file-editor-host" id="file-editor-host" aria-label="File editor"></div>
+              <div
+                class="file-read-only-message"
+                id="file-read-only-message"
+                role="status"
+                aria-live="polite"
+                hidden
+              >
+                Read-only — this file cannot be edited.
+              </div>
+            </div>
+            <div class="file-status-bar">
+              <span id="file-status" role="status" aria-live="polite">Ready</span>
+              <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
+            </div>
           </div>
           <div class="command-bar" id="command-bar">
             <span class="command-prompt">›</span>
@@ -178,7 +207,13 @@
           </header>
           <div class="panel-body panel-split">
             <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
-            <pre class="diff-body" id="diff-body"></pre>
+            <div class="diff-detail" id="diff-detail">
+              <div class="diff-detail-status">
+                <span id="diff-metadata" role="status" aria-live="polite"></span>
+                <span id="diff-truncation" role="alert" hidden></span>
+              </div>
+              <div class="diff-editor-host" id="diff-editor-host"></div>
+            </div>
           </div>
         </div>
 
@@ -247,6 +282,27 @@
         </button>
       </nav>
     </div>
+    <dialog
+      class="file-decision-dialog"
+      id="dirty-file-dialog"
+      aria-labelledby="dirty-file-title"
+      aria-describedby="dirty-file-message"
+    >
+      <div class="file-decision-card">
+        <h2 id="dirty-file-title">Save changes?</h2>
+        <p id="dirty-file-message"></p>
+        <div class="file-decision-actions" data-decision-mode="dirty">
+          <button id="dirty-file-cancel" type="button">Cancel</button>
+          <button id="dirty-file-discard" class="danger" type="button">Discard</button>
+          <button id="dirty-file-save" class="primary" type="button">Save</button>
+        </div>
+        <div class="file-decision-actions" data-decision-mode="conflict" hidden>
+          <button id="dirty-file-keep-editing" type="button">Keep Editing</button>
+          <button id="dirty-file-reload" class="primary" type="button">Reload</button>
+        </div>
+      </div>
+    </dialog>
+    <script src="./editor.bundle.js" defer></script>
     <script src="./main.js" defer></script>
   </body>
 </html>

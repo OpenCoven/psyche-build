@@ -1,6 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
@@ -894,13 +901,15 @@ fn locate_psyche_repo() -> Option<String> {
 // ----------------------------------------------------------------------------
 // Workspace side panels: file tree, diffs, and git/GitHub state.
 //
-// These back the right-rail panels. Everything is read-only — nothing here
-// mutates the working tree, so a panel can never clobber an agent's work.
+// These back the right-rail panels. File saves are the only working-tree
+// mutation and use containment plus optimistic conflict checks.
 // ----------------------------------------------------------------------------
 
 /// Cap on file preview size. Big files are truncated rather than refused so the
 /// panel still shows a useful head.
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static WORKSPACE_SAVE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn canonical_project_root(root: &str) -> Result<PathBuf, String> {
     let canonical = Path::new(root)
@@ -1013,8 +1022,10 @@ fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
     let read = file.read(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(read);
 
-    // A NUL byte in the head is the usual "this is binary" heuristic.
-    let binary = buf.iter().take(8000).any(|b| *b == 0);
+    // A NUL byte in the bounded preview is the usual "this is binary"
+    // heuristic. Invalid UTF-8 is also non-editable so a save can never perform
+    // a lossy rewrite.
+    let binary = buf.contains(&0) || std::str::from_utf8(&buf).is_err();
     let text = if binary {
         String::new()
     } else {
@@ -1027,6 +1038,363 @@ fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
         binary,
         size,
     })
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SavedFileText {
+    pub path: String,
+    pub text: String,
+    pub size: u64,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileState {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+#[cfg(unix)]
+fn file_state(file: &std::fs::File) -> Result<FileState, String> {
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    Ok(FileState {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(unix)]
+fn same_identity(left: FileState, right: FileState) -> bool {
+    left.dev == right.dev && left.ino == right.ino
+}
+
+#[cfg(unix)]
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("path contains a NUL byte: {}", path.display()))
+}
+
+#[cfg(unix)]
+fn c_name(name: &std::ffi::OsStr) -> Result<CString, String> {
+    CString::new(name.as_bytes()).map_err(|_| "file name contains a NUL byte".to_string())
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    let path_c = c_path(path)?;
+    let fd = unsafe {
+        libc::open(
+            path_c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open {} '{}': {}",
+            label,
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn open_target_no_follow(
+    parent: &std::fs::File,
+    name: &CString,
+) -> Result<std::fs::File, std::io::Error> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn read_stable_file(file: &mut std::fs::File, path: &str) -> Result<(Vec<u8>, FileState), String> {
+    let before = file_state(file)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("read '{}': {}", path, e))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("read '{}': {}", path, e))?;
+    let after = file_state(file)?;
+    if before != after {
+        return Err(format!("file changed on disk: {}", path));
+    }
+    Ok((bytes, after))
+}
+
+#[cfg(unix)]
+fn validate_parent_identity(
+    root_input: &str,
+    canonical_root: &Path,
+    root_state: FileState,
+    parent_path: &Path,
+    parent_state: FileState,
+) -> Result<(), String> {
+    let current_root = canonical_project_root(root_input)?;
+    if current_root != canonical_root {
+        return Err("project root changed while saving".to_string());
+    }
+    let current_root_file = open_directory_no_follow(&current_root, "project root")?;
+    if !same_identity(file_state(&current_root_file)?, root_state) {
+        return Err("project root changed while saving".to_string());
+    }
+
+    let current_parent = parent_path.canonicalize().map_err(|e| {
+        format!(
+            "parent changed while saving '{}': {}",
+            parent_path.display(),
+            e
+        )
+    })?;
+    if !current_parent.starts_with(&current_root) {
+        return Err(format!(
+            "path is outside project root: {}",
+            parent_path.display()
+        ));
+    }
+    if current_parent != parent_path {
+        return Err(format!(
+            "parent changed while saving: {}",
+            parent_path.display()
+        ));
+    }
+    let current_parent_file = open_directory_no_follow(parent_path, "file parent")?;
+    if !same_identity(file_state(&current_parent_file)?, parent_state) {
+        return Err(format!(
+            "parent changed while saving: {}",
+            parent_path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlink_temp_at(parent: &std::fs::File, temp_name: &CString) -> Result<(), String> {
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), temp_name.as_ptr(), 0) };
+    if result < 0 {
+        return Err(format!(
+            "remove temporary save file: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fs_write_text_with_before_commit<F>(
+    root: String,
+    path: String,
+    text: String,
+    expected_text: String,
+    before_commit: F,
+) -> Result<SavedFileText, String>
+where
+    F: FnOnce(),
+{
+    let _save_guard = WORKSPACE_SAVE_MUTEX.lock();
+    let canonical_root = canonical_project_root(&root)?;
+    let target_path = resolve_project_path(&root, &path)?;
+    let parent_path = target_path
+        .parent()
+        .ok_or_else(|| format!("file has no parent directory: {}", target_path.display()))?;
+    let target_name = c_name(
+        target_path
+            .file_name()
+            .ok_or_else(|| format!("file has no name: {}", target_path.display()))?,
+    )?;
+
+    let root_file = open_directory_no_follow(&canonical_root, "project root")?;
+    let root_state = file_state(&root_file)?;
+    let parent_file = open_directory_no_follow(parent_path, "file parent")?;
+    let parent_state = file_state(&parent_file)?;
+    validate_parent_identity(
+        &root,
+        &canonical_root,
+        root_state,
+        parent_path,
+        parent_state,
+    )?;
+    let mut initial_target = open_target_no_follow(&parent_file, &target_name)
+        .map_err(|e| format!("open target '{}': {}", path, e))?;
+    let initial_state_before = file_state(&initial_target)?;
+    if !initial_target
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .is_file()
+    {
+        return Err(format!("not a regular file: {}", path));
+    }
+    let (initial_bytes, initial_state) = read_stable_file(&mut initial_target, &path)?;
+    if initial_state != initial_state_before {
+        return Err(format!("file changed on disk: {}", path));
+    }
+    let current_text = std::str::from_utf8(&initial_bytes)
+        .map_err(|_| format!("file is not valid UTF-8: {}", path))?;
+    if current_text != expected_text {
+        return Err(format!("file changed on disk: {}", path));
+    }
+
+    let (temp_name, mut temp_file) = loop {
+        let counter = SAVE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut bytes = target_name.as_bytes().to_vec();
+        bytes.extend_from_slice(
+            format!(".psyche-save-{}-{}", std::process::id(), counter).as_bytes(),
+        );
+        let temp_name = CString::new(bytes).expect("validated target name cannot contain NUL");
+        let fd = unsafe {
+            libc::openat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                (initial_state.mode & 0o7777) as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            break (temp_name, unsafe { std::fs::File::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!(
+                "create temporary save file for '{}': {}",
+                path, error
+            ));
+        }
+    };
+
+    let save_result = (|| -> Result<(), String> {
+        temp_file
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("write temporary save for '{}': {}", path, e))?;
+        temp_file
+            .flush()
+            .map_err(|e| format!("flush temporary save for '{}': {}", path, e))?;
+        let chmod_result = unsafe {
+            libc::fchmod(
+                temp_file.as_raw_fd(),
+                (initial_state.mode & 0o7777) as libc::mode_t,
+            )
+        };
+        if chmod_result < 0 {
+            return Err(format!(
+                "copy permissions for '{}': {}",
+                path,
+                std::io::Error::last_os_error()
+            ));
+        }
+        temp_file
+            .sync_all()
+            .map_err(|e| format!("sync temporary save for '{}': {}", path, e))?;
+
+        before_commit();
+
+        validate_parent_identity(
+            &root,
+            &canonical_root,
+            root_state,
+            parent_path,
+            parent_state,
+        )?;
+        let mut final_target = open_target_no_follow(&parent_file, &target_name)
+            .map_err(|e| format!("file changed on disk: {} ({})", path, e))?;
+        if !final_target
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .is_file()
+        {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        let final_state_before = file_state(&final_target)?;
+        if final_state_before != initial_state {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        let (final_bytes, final_state_after) = read_stable_file(&mut final_target, &path)?;
+        if final_state_after != final_state_before || final_bytes != expected_text.as_bytes() {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        drop(final_target);
+        drop(temp_file);
+
+        // POSIX rename has an unavoidable final-syscall window against an
+        // arbitrary non-cooperating writer. This is optimistic protection for
+        // trusted local editor and coding-agent saves; descriptor-relative
+        // rename keeps that window contained to the validated parent.
+        let rename_result = unsafe {
+            libc::renameat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                parent_file.as_raw_fd(),
+                target_name.as_ptr(),
+            )
+        };
+        if rename_result < 0 {
+            return Err(format!(
+                "replace '{}': {}",
+                path,
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    })();
+
+    if let Err(save_error) = save_result {
+        let cleanup_result = unlink_temp_at(&parent_file, &temp_name);
+        drop(initial_target);
+        return match cleanup_result {
+            Ok(()) => Err(save_error),
+            Err(cleanup_error) => Err(format!("{}; {}", save_error, cleanup_error)),
+        };
+    }
+
+    drop(initial_target);
+    Ok(SavedFileText {
+        path: target_path.to_string_lossy().to_string(),
+        size: text.len() as u64,
+        text,
+    })
+}
+
+#[tauri::command]
+fn fs_write_text(
+    root: String,
+    path: String,
+    text: String,
+    expected_text: String,
+) -> Result<SavedFileText, String> {
+    #[cfg(unix)]
+    {
+        return fs_write_text_with_before_commit(root, path, text, expected_text, || {});
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, path, text, expected_text);
+        Err("workspace file saves require POSIX descriptor-relative operations".to_string())
+    }
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
@@ -1192,8 +1560,46 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     })
 }
 
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitDiffResult {
+    pub text: String,
+    pub bytes: u64,
+    pub lines: u64,
+    pub truncated: bool,
+}
+
+fn bounded_diff(text: String) -> GitDiffResult {
+    let bytes = text.len();
+    let lines = text.lines().count() as u64;
+    if bytes <= MAX_DIFF_BYTES {
+        return GitDiffResult {
+            text,
+            bytes: bytes as u64,
+            lines,
+            truncated: false,
+        };
+    }
+
+    let mut end = MAX_DIFF_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    GitDiffResult {
+        text: text[..end].to_string(),
+        bytes: bytes as u64,
+        lines,
+        truncated: true,
+    }
+}
+
 #[tauri::command]
-fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<String, String> {
+fn git_diff(
+    root: String,
+    path: Option<String>,
+    staged: Option<bool>,
+) -> Result<GitDiffResult, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
         "--no-pager".into(),
@@ -1215,7 +1621,7 @@ fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = run_git(&root, &refs)?;
     if !out.trim().is_empty() {
-        return Ok(out);
+        return Ok(bounded_diff(out));
     }
     // An untracked file has no diff; show it as an all-additions block instead
     // of an empty pane.
@@ -1224,16 +1630,16 @@ fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<
         if full.is_file() {
             if let Ok(text) = std::fs::read_to_string(&full) {
                 let mut s = format!("--- /dev/null\n+++ b/{}\n", p);
-                for line in text.lines().take(2000) {
+                for line in text.lines() {
                     s.push('+');
                     s.push_str(line);
                     s.push('\n');
                 }
-                return Ok(s);
+                return Ok(bounded_diff(s));
             }
         }
     }
-    Ok(out)
+    Ok(bounded_diff(out))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1297,6 +1703,7 @@ pub fn run() {
             agent_skills,
             fs_list_dir,
             fs_read_text,
+            fs_write_text,
             git_status,
             git_diff,
             git_log,
@@ -1372,6 +1779,25 @@ mod workspace_panel_tests {
         );
     }
 
+    fn save_temp_paths(target: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.psyche-save-",
+            target
+                .file_name()
+                .expect("save target must have a file name")
+                .to_string_lossy()
+        );
+        std::fs::read_dir(target.parent().expect("save target must have a parent"))
+            .expect("save target parent must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
     #[test]
     fn resolves_existing_paths_inside_the_project() {
         let tree = TempTree::new("inside");
@@ -1396,6 +1822,24 @@ mod workspace_panel_tests {
 
         assert!(resolve_project_path(path_text(&project), "../project-copy/secret.txt").is_err());
         assert!(resolve_project_path(path_text(&project), path_text(&sibling_file)).is_err());
+
+        let relative_error = fs_write_text(
+            path_text(&project).to_string(),
+            "../project-copy/secret.txt".to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        let absolute_error = fs_write_text(
+            path_text(&project).to_string(),
+            path_text(&sibling_file).to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(relative_error.contains("outside project root"));
+        assert!(absolute_error.contains("outside project root"));
+        assert_eq!(std::fs::read(&sibling_file).unwrap(), b"secret\n");
     }
 
     #[cfg(unix)]
@@ -1412,6 +1856,230 @@ mod workspace_panel_tests {
         symlink(&outside, &link).unwrap();
 
         assert!(resolve_project_path(path_text(&project), path_text(&link)).is_err());
+        let error = fs_write_text(
+            path_text(&project).to_string(),
+            path_text(&link).to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("outside project root"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret\n");
+    }
+
+    #[test]
+    fn saves_contained_text_atomically_and_preserves_permissions() {
+        let tree = TempTree::new("save");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4750)).unwrap();
+        }
+        let permissions_before = std::fs::metadata(&target).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(permissions_before.mode() & 0o7777, 0o4750);
+        }
+
+        let saved = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "after\n".to_string(),
+            "before\n".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(saved.path, target.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(saved.text, "after\n");
+        assert_eq!(saved.size, 6);
+        assert_eq!(std::fs::read(&target).unwrap(), b"after\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let permissions_after = std::fs::metadata(&target).unwrap().permissions();
+            assert_eq!(permissions_after.mode(), permissions_before.mode());
+            assert_eq!(permissions_after.mode() & 0o7777, 0o4750);
+        }
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[test]
+    fn rejects_stale_saves_without_mutation_or_temp_files() {
+        let tree = TempTree::new("stale-save");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "current\n").unwrap();
+
+        let error = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "replacement\n".to_string(),
+            "stale\n".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"current\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_content_changes_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-content");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::write(&target, "external\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"external\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_target_deletion_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-delete");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::remove_file(&target).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert!(!target.exists());
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_target_replacement_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-replace");
+        let target = tree.root.join("notes.txt");
+        let moved_target = tree.root.join("notes-original.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::rename(&target, &moved_target).unwrap();
+                std::fs::write(&target, "replacement\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement\n");
+        assert_eq!(std::fs::read(&moved_target).unwrap(), b"before\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_parent_replacement_with_an_outside_symlink_before_commit() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("save-race-parent");
+        let project = tree.root.join("project");
+        let parent = project.join("src");
+        let moved_parent = project.join("src-original");
+        let target = parent.join("notes.txt");
+        let moved_target = moved_parent.join("notes.txt");
+        let outside = tree.root.join("outside");
+        let outside_target = outside.join("notes.txt");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(&target, "before\n").unwrap();
+        std::fs::write(&outside_target, "outside\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&project).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::rename(&parent, &moved_parent).unwrap();
+                symlink(&outside, &parent).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("outside project root") || error.contains("parent changed"));
+        assert_eq!(std::fs::read(&outside_target).unwrap(), b"outside\n");
+        assert_eq!(std::fs::read(&moved_target).unwrap(), b"before\n");
+        assert!(save_temp_paths(&moved_target).is_empty());
+        assert!(save_temp_paths(&outside_target).is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_is_binary_and_cannot_be_saved_as_text() {
+        let tree = TempTree::new("invalid-utf8");
+        let target = tree.root.join("invalid.txt");
+        let original = [0xff, 0xfe, b'x'];
+        std::fs::write(&target, original).unwrap();
+
+        let preview = fs_read_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+        )
+        .unwrap();
+        assert!(preview.binary);
+        assert!(preview.text.is_empty());
+
+        let error = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "replacement\n".to_string(),
+            String::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("file is not valid UTF-8"));
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[test]
+    fn nul_anywhere_in_the_bounded_preview_is_binary() {
+        let tree = TempTree::new("late-nul");
+        let target = tree.root.join("binary.txt");
+        let mut original = vec![b'a'; 9000];
+        original[8500] = 0;
+        std::fs::write(&target, original).unwrap();
+
+        let preview = fs_read_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+        )
+        .unwrap();
+
+        assert!(preview.binary);
+        assert!(preview.text.is_empty());
     }
 
     #[test]
@@ -1450,7 +2118,120 @@ mod workspace_panel_tests {
             Some(false),
         )
         .unwrap();
-        assert!(diff.contains("+inside changed"));
-        assert!(!diff.contains("outside changed"));
+        assert!(diff.text.contains("+inside changed"));
+        assert!(!diff.text.contains("outside changed"));
+        assert!(!diff.truncated);
+        assert_eq!(diff.bytes, diff.text.len() as u64);
+        assert_eq!(diff.lines, diff.text.lines().count() as u64);
+    }
+
+    #[test]
+    fn bounded_diffs_stop_before_a_split_utf8_character() {
+        let mut full = "a".repeat(MAX_DIFF_BYTES - 1);
+        full.push('💖');
+
+        let diff = bounded_diff(full);
+
+        assert!(diff.truncated);
+        assert_eq!(diff.text.len(), MAX_DIFF_BYTES - 1);
+        assert_eq!(diff.bytes, (MAX_DIFF_BYTES + 3) as u64);
+        assert_eq!(diff.lines, 1);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn caps_large_tracked_git_diffs_with_full_result_metadata() {
+        let tree = TempTree::new("large-tracked-diff");
+        let target = tree.root.join("large.txt");
+        std::fs::write(&target, "baseline\n").unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&tree.root, &["add", "large.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(&target, "changed payload\n".repeat(180_000)).unwrap();
+
+        let full = run_git(
+            path_text(&tree.root),
+            &[
+                "--no-pager",
+                "diff",
+                "--no-color",
+                "--relative",
+                "--",
+                "large.txt",
+            ],
+        )
+        .unwrap();
+        assert!(full.len() > MAX_DIFF_BYTES);
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("large.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+
+        assert!(diff.truncated);
+        assert!(diff.text.len() <= MAX_DIFF_BYTES);
+        assert_eq!(diff.bytes, full.len() as u64);
+        assert_eq!(diff.lines, full.lines().count() as u64);
+        assert!(diff.bytes > diff.text.len() as u64);
+        assert!(diff.lines > diff.text.lines().count() as u64);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn caps_large_untracked_diffs_with_the_same_byte_contract() {
+        let tree = TempTree::new("large-untracked-diff");
+        run_test_git(&tree.root, &["init", "-q"]);
+        let target = tree.root.join("untracked.txt");
+        let contents = "untracked payload\n".repeat(150_000);
+        std::fs::write(&target, &contents).unwrap();
+        let full = format!(
+            "--- /dev/null\n+++ b/untracked.txt\n{}",
+            contents
+                .lines()
+                .map(|line| format!("+{line}\n"))
+                .collect::<String>()
+        );
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("untracked.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+
+        assert!(full.len() > MAX_DIFF_BYTES);
+        assert!(diff.truncated);
+        assert!(diff.text.len() <= MAX_DIFF_BYTES);
+        assert_eq!(diff.bytes, full.len() as u64);
+        assert_eq!(diff.lines, full.lines().count() as u64);
+        assert!(diff.lines > diff.text.lines().count() as u64);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn returns_complete_structured_diff_for_a_small_untracked_file() {
+        let tree = TempTree::new("small-untracked-diff");
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("notes.txt"), "one\ntwo\n").unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("notes.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+        let expected = "--- /dev/null\n+++ b/notes.txt\n+one\n+two\n";
+
+        assert_eq!(diff.text, expected);
+        assert_eq!(diff.bytes, expected.len() as u64);
+        assert_eq!(diff.lines, expected.lines().count() as u64);
+        assert!(!diff.truncated);
     }
 }
