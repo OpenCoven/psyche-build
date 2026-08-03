@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
 import {
   composeLaneBackends,
   createCovenSessionBackend,
 } from '../../src/orchestration/covenSessionBackend.js';
 import { Orchestrator } from '../../src/orchestration/orchestrator.js';
 
-const ROOT = process.cwd();
+// launchProjectCovenSession canonicalizes projectRoot/cwd through
+// resolveScopedCwd, so the expectation has to be canonical too. A raw
+// process.cwd() passes wherever the checkout is not symlinked and fails
+// wherever it is — matching how the other orchestration tests resolve paths.
+const ROOT = fs.realpathSync.native(process.cwd());
 
 function lane(overrides: Record<string, unknown> = {}) {
   return {
