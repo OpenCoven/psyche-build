@@ -63,7 +63,7 @@
     /** Files opened from the Files panel. These are the *only* things the main
      *  tab strip shows; projects are switched from the sessions sidebar.
      *  { id, path, rel, name, projectId, text, originalText, dirty, saving,
-     *    languageId, cursor, truncated, binary, size, error, saveError } */
+     *    languageId, cursor, selection, truncated, binary, size, error, saveError } */
     openFiles: [],
     /** Non-null while a file tab owns the main area instead of the terminal. */
     activeFileId: null,
@@ -1149,10 +1149,11 @@
       renderFileChrome(file);
       refreshTabs();
     },
-    onSelectionChange: function (cursor) {
+    onSelectionChange: function (position) {
       var file = findOpenFile(state.activeFileId);
       if (!file || file.id !== loadedEditorFileId) return;
-      file.cursor = cursor;
+      file.selection = { anchor: position.anchor, head: position.head };
+      file.cursor = { line: position.line, column: position.column };
       renderFileCursor(file);
     },
   });
@@ -1183,6 +1184,7 @@
       saving: false,
       languageId: window.PsycheCodeEditor.languageForPath(rel),
       cursor: { line: 1, column: 1 },
+      selection: { anchor: 0, head: 0 },
       truncated: false,
       binary: false,
       size: 0,
@@ -1314,6 +1316,7 @@
         text: file.text,
         languageId: file.languageId,
         readOnly: !isEditableFile(file),
+        selection: file.selection,
       });
     }
   }

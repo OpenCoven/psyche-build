@@ -185,6 +185,62 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(commandsModule.undoDepth(stateB)).toBe(0);
   });
 
+  it('restores each document selection independently and clamps stale offsets', async () => {
+    const editorModule = await import(
+      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
+    );
+    const stateA = editorModule.createFileEditorState({
+      text: 'alpha',
+      languageId: 'plain',
+      selection: { anchor: 1, head: 4 },
+      cspNonce: 'test-nonce',
+    });
+    const editedA = stateA.update({
+      changes: { from: stateA.doc.length, insert: ' edited' },
+      selection: { anchor: 2, head: 9 },
+    }).state;
+    const savedSelectionA = {
+      anchor: editedA.selection.main.anchor,
+      head: editedA.selection.main.head,
+    };
+
+    const stateB = editorModule.createFileEditorState({
+      text: 'bravo',
+      languageId: 'plain',
+      selection: { anchor: 5, head: 5 },
+      cspNonce: 'test-nonce',
+    });
+    const restoredA = editorModule.createFileEditorState({
+      text: editedA.doc.toString(),
+      languageId: 'plain',
+      selection: savedSelectionA,
+      cspNonce: 'test-nonce',
+    });
+    const clamped = editorModule.createFileEditorState({
+      text: 'tiny',
+      languageId: 'plain',
+      selection: { anchor: -10, head: 100 },
+      cspNonce: 'test-nonce',
+    });
+    const defaulted = editorModule.createFileEditorState({
+      text: 'plain',
+      languageId: 'plain',
+      cspNonce: 'test-nonce',
+    });
+    const invalid = editorModule.createFileEditorState({
+      text: 'plain',
+      languageId: 'plain',
+      selection: { anchor: Number.NaN, head: Number.POSITIVE_INFINITY },
+      cspNonce: 'test-nonce',
+    });
+
+    expect(stateB.selection.main).toMatchObject({ anchor: 5, head: 5 });
+    expect(restoredA.selection.main).toMatchObject(savedSelectionA);
+    expect(clamped.selection.main).toMatchObject({ anchor: 0, head: 4 });
+    expect(defaulted.selection.main).toMatchObject({ anchor: 0, head: 0 });
+    expect(invalid.selection.main).toMatchObject({ anchor: 0, head: 0 });
+  });
+
   it('exports the model and guarded editor bridge API', () => {
     for (const modelApi of [
       'createFileBuffer',
@@ -214,7 +270,9 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toMatch(
       /view\.setState\(\s*createFileEditorState\(\{[\s\S]*text,[\s\S]*languageId,[\s\S]*readOnly,/
     );
-    expect(editorEntry).toContain('handleSelectionChange({ line: 1, column: 1 })');
+    expect(editorEntry).toContain('selectionPayload(view.state)');
+    expect(editorEntry).toContain('anchor: main.anchor');
+    expect(editorEntry).toContain('head: main.head');
   });
 
   it('gives CodeMirror one bounded scroll surface using the workspace palette', () => {
@@ -237,6 +295,7 @@ describe('native CodeMirror workspace editor surface', () => {
       'saving',
       'languageId',
       'cursor',
+      'selection',
     ]) {
       expect(mainJs).toMatch(new RegExp(`\\b${field}:`));
     }
@@ -249,7 +308,7 @@ describe('native CodeMirror workspace editor surface', () => {
       /onChange:\s*function \(text\) \{[\s\S]*findOpenFile\(state\.activeFileId\)[\s\S]*updateFileBuffer\(file, text\)/
     );
     expect(mainJs).toMatch(
-      /onSelectionChange:\s*function \(cursor\) \{[\s\S]*findOpenFile\(state\.activeFileId\)[\s\S]*file\.cursor = cursor/
+      /onSelectionChange:\s*function \(position\) \{[\s\S]*file\.selection = \{ anchor: position\.anchor, head: position\.head \}[\s\S]*file\.cursor = \{ line: position\.line, column: position\.column \}/
     );
     expect(mainJs).not.toContain('fileViewBodyEl');
     expect(mainJs).toMatch(
@@ -258,6 +317,7 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(
       /readOnly:\s*!isEditableFile\(file\)/
     );
+    expect(mainJs).toMatch(/selection:\s*file\.selection/);
   });
 
   it('saves the active dirty file explicitly and refreshes project Git data', () => {

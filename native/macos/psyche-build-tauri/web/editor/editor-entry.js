@@ -104,11 +104,36 @@ const workspaceEditorTheme = EditorView.theme(
   { dark: true }
 );
 
+function normalizeSelection(selection, documentLength) {
+  function normalizeOffset(value) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(documentLength, Math.trunc(value)));
+  }
+
+  return {
+    anchor: normalizeOffset(selection?.anchor),
+    head: normalizeOffset(selection?.head),
+  };
+}
+
+function selectionPayload(state) {
+  const main = state.selection.main;
+  const head = main.head;
+  const line = state.doc.lineAt(head);
+  return {
+    anchor: main.anchor,
+    head: main.head,
+    line: line.number,
+    column: head - line.from + 1,
+  };
+}
+
 export function createFileEditorState({
   text = '',
   languageId = 'plain',
   readOnly = false,
   cspNonce = '',
+  selection,
   onChange,
   onSelectionChange,
 }) {
@@ -118,6 +143,7 @@ export function createFileEditorState({
 
   return EditorState.create({
     doc: text,
+    selection: normalizeSelection(selection, text.length),
     extensions: [
       basicSetup,
       syntaxHighlighting(workspaceHighlightStyle),
@@ -133,12 +159,7 @@ export function createFileEditorState({
         }
 
         if (update.selectionSet || update.docChanged) {
-          const head = update.state.selection.main.head;
-          const line = update.state.doc.lineAt(head);
-          handleSelectionChange({
-            line: line.number,
-            column: head - line.from + 1,
-          });
+          handleSelectionChange(selectionPayload(update.state));
         }
       }),
     ],
@@ -160,18 +181,19 @@ export function createFileEditor({ parent, onChange, onSelectionChange }) {
     }),
   });
 
-  function setDocument({ text = '', languageId = 'plain', readOnly = false }) {
+  function setDocument({ text = '', languageId = 'plain', readOnly = false, selection }) {
     view.setState(
       createFileEditorState({
         text,
         languageId,
         readOnly,
         cspNonce,
+        selection,
         onChange: handleChange,
         onSelectionChange: handleSelectionChange,
       })
     );
-    handleSelectionChange({ line: 1, column: 1 });
+    handleSelectionChange(selectionPayload(view.state));
   }
 
   function getText() {
