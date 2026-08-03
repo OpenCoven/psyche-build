@@ -25,16 +25,18 @@ describe('pinned XcodeGen setup action', () => {
     );
   });
 
-  it('checks the archive before installing only the verified binary onto PATH', () => {
+  it('checks the archive before installing the binary and setting presets onto PATH', () => {
     const action = actionSource();
     const checksumIndex = action.indexOf('shasum -a 256 -c -');
-    const installIndex = action.indexOf('install -m 0755');
+    const installIndex = action.indexOf('bash "$XCODEGEN_INSTALLER" "$XCODEGEN_INSTALL_DIR"');
 
     expect(action).toContain('set -euo pipefail');
     expect(checksumIndex).toBeGreaterThan(0);
     expect(installIndex).toBeGreaterThan(checksumIndex);
-    expect(action).toContain('find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -print -quit');
-    expect(action).toContain('echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"');
+    expect(action).toContain('find "$XCODEGEN_UNPACKED" -type f -name install.sh -print -quit');
+    expect(action).toContain('test -x "$XCODEGEN_INSTALL_DIR/bin/xcodegen"');
+    expect(action).toContain('test -d "$XCODEGEN_INSTALL_DIR/share/xcodegen/SettingPresets"');
+    expect(action).toContain('echo "$XCODEGEN_INSTALL_DIR/bin" >> "$GITHUB_PATH"');
     expect(action).not.toContain('sudo');
   });
 });
