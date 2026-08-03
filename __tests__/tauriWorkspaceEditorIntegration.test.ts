@@ -41,6 +41,12 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
 describe('native CodeMirror workspace editor surface', () => {
   it('provides the approved accessible file editor shell', () => {
     for (const id of [
@@ -319,6 +325,7 @@ describe('native CodeMirror workspace editor surface', () => {
       'originalText',
       'dirty',
       'saving',
+      'savePromise',
       'languageId',
       'cursor',
       'selection',
@@ -347,12 +354,13 @@ describe('native CodeMirror workspace editor surface', () => {
   });
 
   it('saves the active dirty file explicitly and refreshes project Git data', () => {
-    expect(mainJs).toMatch(/async function saveFile\(file\)/);
+    expect(mainJs).toMatch(/function saveFile\(file\)/);
+    expect(mainJs).toMatch(/async function performFileSave\(file\)/);
     expect(mainJs).toMatch(
       /invoke\("fs_write_text",\s*\{\s*root:\s*project\.root,\s*path:\s*file\.path,\s*text:\s*file\.text,\s*expectedText:\s*file\.originalText,?\s*\}\)/
     );
     expect(mainJs).toContain('window.PsycheCodeEditor.reconcileFileSave(');
-    expect(mainJs).toMatch(/return saveOutcome\.canContinue/);
+    expect(mainJs).toMatch(/backendSucceeded: true,[\s\S]*canContinue: saveOutcome\.canContinue/);
     expect(
       mainJs.match(/window\.PsycheCodeEditor\.shouldRenderFileSaveChrome\(/g)
     ).toHaveLength(4);
@@ -415,9 +423,10 @@ describe('native CodeMirror workspace editor surface', () => {
       (file: { name: string; dirty: boolean }) => Promise<boolean>
     >(source, {
       showFileDecision: async () => decisions.shift(),
-      saveFile: async (file: { name: string }) => {
+      saveFile: async (file: { name: string; dirty: boolean }) => {
         saved.push(file.name);
-        return true;
+        file.dirty = false;
+        return { backendSucceeded: true, canContinue: true };
       },
       discardFile: (file: { name: string; dirty: boolean }) => {
         discarded.push(file.name);
@@ -470,9 +479,9 @@ describe('native CodeMirror workspace editor surface', () => {
         visited.push(file.id);
         if (file.id === active.id) {
           file.dirty = false;
-          return true;
+          return { backendSucceeded: true, canContinue: true };
         }
-        return false;
+        return { backendSucceeded: false, canContinue: false };
       },
       discardFile: () => undefined,
       revealFileForDecision: (file: typeof active) => {
@@ -577,6 +586,255 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(
       /String\(e\.key\)\.toLowerCase\(\) === "s"[\s\S]*await handleExplicitFileSave\(e\)/
     );
+  });
+
+  it('does not close a clean-looking file tab until its pending write settles', async () => {
+    const write = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: write.promise };
+    const state = { activeFileId: file.id, activeProjectId: 'p1', openFiles: [file] };
+    let dirtyDecisions = 0;
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => { dirtyDecisions += 1; return 'discard'; },
+      saveFile: async () => ({ backendSucceeded: true, canContinue: true }),
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+    const closeFileTab = compileFunction<
+      (id: string) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'closeFileTab'), {
+      findOpenFile: () => file,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: null,
+      guardDirtyFile,
+      projectFiles: () => state.openFiles,
+      state,
+      refreshTabs: () => undefined,
+      activateFileTabNow: () => undefined,
+      fileViewEl: { hidden: false },
+      terminalHost: { hidden: true },
+      requestAnimationFrame: () => undefined,
+      fitActiveTerm: () => undefined,
+    });
+
+    const closing = closeFileTab(file.id);
+    await Promise.resolve();
+    expect(state.openFiles).toEqual([file]);
+    expect(dirtyDecisions).toBe(0);
+    write.resolve({ backendSucceeded: true, canContinue: true });
+    await expect(closing).resolves.toBe(true);
+    expect(state.openFiles).toEqual([]);
+  });
+
+  it('does not remove a project until every pending file write settles', async () => {
+    const write = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: write.promise };
+    const project = { id: 'p1' };
+    const state = {
+      activeFileId: null,
+      activeProjectId: project.id,
+      activeThreadId: null,
+      openFiles: [file],
+      projects: [project],
+      threads: [],
+    };
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => 'cancel',
+      saveFile: async () => ({ backendSucceeded: true, canContinue: true }),
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+    const guardDirtyFiles = compileFunction<
+      (files: Array<typeof file>) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFiles'), { guardDirtyFile });
+    const removeProject = compileFunction<
+      (id: string) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'removeProject'), {
+      findProject: () => project,
+      state,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: null,
+      guardDirtyFiles,
+      closeThread: () => undefined,
+      fileViewEl: { hidden: true },
+      terminalHost: { hidden: false, children: [] },
+      setActiveProject: async () => true,
+      setStatus: () => undefined,
+      refreshTabs: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+    });
+
+    const removing = removeProject(project.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(state.projects).toEqual([project]);
+    write.resolve({ backendSucceeded: true, canContinue: true });
+    await expect(removing).resolves.toBe(true);
+    expect(state.projects).toEqual([]);
+  });
+
+  it('does not destroy the window until pending writes settle', async () => {
+    const write = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const file = { id: 'f1', dirty: false, savePromise: write.promise };
+    let destroyCalls = 0;
+    let prevented = 0;
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => 'cancel',
+      saveFile: async () => ({ backendSucceeded: true, canContinue: true }),
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+    const guardDirtyFiles = compileFunction<
+      (files: Array<typeof file>) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFiles'), { guardDirtyFile });
+    const handleWindowCloseRequested = compileFunction<
+      (event: { preventDefault(): void }) => Promise<void>
+    >(extractFunctionSource(mainJs, 'handleWindowCloseRequested'), {
+      destroyingWindow: false,
+      closeRequestInFlight: false,
+      fileDecisionInFlight: null,
+      fileNavigationInFlight: false,
+      guardDirtyFiles,
+      state: { openFiles: [file] },
+      saveWorkspaceNow: () => undefined,
+      currentWindow: { destroy: async () => { destroyCalls += 1; } },
+      setStatus: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+
+    const closing = handleWindowCloseRequested({ preventDefault: () => { prevented += 1; } });
+    await Promise.resolve();
+    expect(prevented).toBe(1);
+    expect(destroyCalls).toBe(0);
+    write.resolve({ backendSucceeded: true, canContinue: true });
+    await closing;
+    expect(destroyCalls).toBe(1);
+  });
+
+  it('rebases an edit back to the old baseline after pending save and prompts again', async () => {
+    const write = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const decisions: string[] = [];
+    const file = { id: 'f1', dirty: false, savePromise: write.promise };
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async ({ mode }: { mode: string }) => {
+        decisions.push(mode);
+        return 'cancel';
+      },
+      saveFile: async () => ({ backendSucceeded: true, canContinue: false }),
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+
+    const guarding = guardDirtyFile(file);
+    await Promise.resolve();
+    expect(decisions).toEqual([]);
+    file.dirty = true;
+    write.resolve({ backendSucceeded: true, canContinue: false });
+    await expect(guarding).resolves.toBe(false);
+    expect(decisions).toEqual(['dirty']);
+  });
+
+  it('waits for an existing save operation selected from the dirty decision', async () => {
+    const write = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const file = { id: 'f1', dirty: true, saving: false, savePromise: null as Promise<unknown> | null };
+    let performCalls = 0;
+    const saveFile = compileFunction<
+      (target: typeof file) => Promise<{ backendSucceeded: boolean; canContinue: boolean }>
+    >(extractFunctionSource(mainJs, 'saveFile'), {
+      performFileSave: () => { performCalls += 1; return Promise.resolve({ backendSucceeded: true, canContinue: true }); },
+    });
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => {
+        file.saving = true;
+        file.savePromise = write.promise;
+        return 'save';
+      },
+      saveFile,
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+
+    var settled = false;
+    const guarding = guardDirtyFile(file).then(function (result) { settled = true; return result; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(performCalls).toBe(0);
+    file.dirty = false;
+    write.resolve({ backendSucceeded: true, canContinue: true });
+    await expect(guarding).resolves.toBe(true);
+  });
+
+  it('shares one save promise and cannot clear a newer tracked operation', async () => {
+    const firstWrite = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const newerWrite = deferred<{ backendSucceeded: boolean; canContinue: boolean }>();
+    const file = {
+      id: 'f1', dirty: true, saving: false,
+      savePromise: null as Promise<unknown> | null,
+    };
+    const saveFile = compileFunction<
+      (target: typeof file) => Promise<{ backendSucceeded: boolean; canContinue: boolean }>
+    >(extractFunctionSource(mainJs, 'saveFile'), {
+      isEditableFile: () => true,
+      performFileSave: () => firstWrite.promise,
+    });
+
+    const first = saveFile(file);
+    expect(saveFile(file)).toBe(first);
+    file.savePromise = newerWrite.promise;
+    firstWrite.resolve({ backendSucceeded: true, canContinue: true });
+    await first;
+    expect(file.savePromise).toBe(newerWrite.promise);
+  });
+
+  it('awaits pending conflict mode before considering a dirty decision', async () => {
+    const backend = deferred<void>();
+    const conflictDecision = deferred<void>();
+    const modes: string[] = [];
+    const file = { id: 'f1', dirty: false, savePromise: null as Promise<unknown> | null };
+    file.savePromise = (async function () {
+      await backend.promise;
+      modes.push('conflict');
+      await conflictDecision.promise;
+      return { backendSucceeded: false, canContinue: false };
+    })();
+    const guardDirtyFile = compileFunction<
+      (target: typeof file) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => { modes.push('dirty'); return 'cancel'; },
+      saveFile: async () => ({ backendSucceeded: true, canContinue: true }),
+      discardFile: () => undefined,
+      revealFileForDecision: () => undefined,
+      restoreFileEditorFocus: () => undefined,
+    });
+
+    let settled = false;
+    const guarding = guardDirtyFile(file).then(function (result) { settled = true; return result; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(modes).toEqual([]);
+    backend.resolve();
+    await Promise.resolve();
+    expect(modes).toEqual(['conflict']);
+    conflictDecision.resolve();
+    await expect(guarding).resolves.toBe(false);
+    expect(modes).toEqual(['conflict']);
   });
 
   it('reloads disk text into a clean file while preserving its selection', async () => {

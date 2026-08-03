@@ -1286,6 +1286,7 @@
       originalText: "",
       dirty: false,
       saving: false,
+      savePromise: null,
       languageId: window.PsycheCodeEditor.languageForPath(rel),
       cursor: { line: 1, column: 1 },
       selection: { anchor: 0, head: 0 },
@@ -1430,7 +1431,6 @@
   function discardFile(file) {
     if (!file) return;
     Object.assign(file, window.PsycheCodeEditor.createFileBuffer(file.originalText || ""), {
-      saving: false,
       error: null,
       saveError: null,
       saveState: "clean",
@@ -1441,7 +1441,17 @@
   }
 
   async function guardDirtyFile(file) {
-    if (!file || !file.dirty) return true;
+    if (!file) return true;
+    if (file.savePromise) {
+      var pendingOutcome = await file.savePromise;
+      if (!pendingOutcome.backendSucceeded) {
+        revealFileForDecision(file);
+        restoreFileEditorFocus();
+        return false;
+      }
+      if (!file.dirty) return true;
+    }
+    if (!file.dirty) return true;
     var choice = await showFileDecision({ mode: "dirty", file: file });
     if (choice === "cancel") {
       restoreFileEditorFocus();
@@ -1451,12 +1461,14 @@
       discardFile(file);
       return true;
     }
-    var saved = await saveFile(file);
-    if (!saved) {
+    var outcome = await saveFile(file);
+    if (!outcome.backendSucceeded) {
       revealFileForDecision(file);
       restoreFileEditorFocus();
+      return false;
     }
-    return saved;
+    if (file.dirty) return guardDirtyFile(file);
+    return outcome.canContinue;
   }
 
   async function guardDirtyFiles(files) {
@@ -1551,7 +1563,6 @@
     try {
       var loaded = await invoke("fs_read_text", { root: project.root, path: file.path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(loaded.text || ""), {
-        saving: false,
         loading: false,
         error: null,
         saveError: null,
@@ -1566,7 +1577,6 @@
       restoreFileEditorFocus();
       return true;
     } catch (error) {
-      file.saving = false;
       file.saveError = String(error);
       file.saveState = "error";
       if (state.activeFileId === file.id) renderFileChrome(file);
@@ -1581,8 +1591,7 @@
     file.conflict = true;
   }
 
-  async function saveFile(file) {
-    if (!file || !file.dirty || file.saving || !isEditableFile(file)) return false;
+  async function performFileSave(file) {
     var project = findProject(file.projectId);
     if (!project) {
       file.saveError = "Project is no longer open.";
@@ -1590,7 +1599,7 @@
       if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
         renderFileChrome(file);
       }
-      return false;
+      return { backendSucceeded: false, canContinue: false };
     }
 
     file.saving = true;
@@ -1630,7 +1639,10 @@
           if (state.activeFileId === file.id) renderFileChrome(file);
         }
       }, 1500);
-      return saveOutcome.canContinue;
+      return {
+        backendSucceeded: true,
+        canContinue: saveOutcome.canContinue,
+      };
     } catch (error) {
       file.saving = false;
       file.saveError = String(error);
@@ -1645,8 +1657,21 @@
         if (conflictChoice === "reload") await reloadFile(file);
         else restoreFileEditorFocus();
       } else restoreFileEditorFocus();
-      return false;
+      return { backendSucceeded: false, canContinue: false };
     }
+  }
+
+  function saveFile(file) {
+    if (file && file.savePromise) return file.savePromise;
+    if (!file || !file.dirty || file.saving || !isEditableFile(file)) {
+      return Promise.resolve({ backendSucceeded: false, canContinue: false });
+    }
+    var operation = performFileSave(file);
+    var trackedOperation = operation.finally(function () {
+      if (file.savePromise === trackedOperation) file.savePromise = null;
+    });
+    file.savePromise = trackedOperation;
+    return trackedOperation;
   }
 
   if (fileSaveEl) {
@@ -1663,27 +1688,28 @@
 
   var closeRequestInFlight = false;
   var destroyingWindow = false;
+  async function handleWindowCloseRequested(event) {
+    if (destroyingWindow) return;
+    event.preventDefault();
+    if (closeRequestInFlight || fileDecisionInFlight || fileNavigationInFlight) return;
+    closeRequestInFlight = true;
+    fileNavigationInFlight = true;
+    try {
+      if (!(await guardDirtyFiles(state.openFiles.slice()))) return;
+      destroyingWindow = true;
+      saveWorkspaceNow();
+      await currentWindow.destroy();
+    } catch (error) {
+      destroyingWindow = false;
+      setStatus("close failed: " + String(error), "error");
+      restoreFileEditorFocus();
+    } finally {
+      fileNavigationInFlight = false;
+      closeRequestInFlight = false;
+    }
+  }
   if (currentWindow && typeof currentWindow.onCloseRequested === "function") {
-    currentWindow.onCloseRequested(async function (event) {
-      if (destroyingWindow) return;
-      event.preventDefault();
-      if (closeRequestInFlight || fileDecisionInFlight || fileNavigationInFlight) return;
-      closeRequestInFlight = true;
-      fileNavigationInFlight = true;
-      try {
-        if (!(await guardDirtyFiles(state.openFiles.slice()))) return;
-        destroyingWindow = true;
-        saveWorkspaceNow();
-        await currentWindow.destroy();
-      } catch (error) {
-        destroyingWindow = false;
-        setStatus("close failed: " + String(error), "error");
-        restoreFileEditorFocus();
-      } finally {
-        fileNavigationInFlight = false;
-        closeRequestInFlight = false;
-      }
-    }).catch(function (error) {
+    currentWindow.onCloseRequested(handleWindowCloseRequested).catch(function (error) {
       setStatus("close guard unavailable: " + String(error), "warn");
     });
   }
