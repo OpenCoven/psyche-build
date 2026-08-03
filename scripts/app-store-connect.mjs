@@ -87,18 +87,6 @@ export function createAppStoreConnectToken({
   }
 }
 
-function responseErrorDetail(body, fallback) {
-  if (!body || typeof body !== 'object') return fallback;
-  if (!Array.isArray(body.errors)) return JSON.stringify(body);
-  const details = body.errors
-    .map((error) => {
-      if (!error || typeof error !== 'object') return String(error);
-      return [error.code, error.title, error.detail].filter(Boolean).join(': ');
-    })
-    .filter(Boolean);
-  return details.length > 0 ? details.join('; ') : fallback;
-}
-
 function defaultSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -126,6 +114,7 @@ export function createAppStoreConnectClient({
       authorization: `Bearer ${token}`,
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
+    const requestLabel = `${redact(method, secrets)} ${redact(url.pathname, secrets)}`;
 
     let response;
     try {
@@ -134,30 +123,32 @@ export function createAppStoreConnectClient({
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-    } catch (error) {
-      throw new Error(
-        `App Store Connect ${method} request failed: ${redact(asMessage(error), secrets)}`,
-      );
+    } catch {
+      throw new Error(`App Store Connect ${requestLabel} request failed`);
     }
 
-    const text = await response.text();
+    const status = Number.isInteger(response.status) ? response.status : 'unknown';
+    let text;
+    try {
+      text = await response.text();
+    } catch {
+      throw new Error(
+        `App Store Connect ${requestLabel} response body could not be read (status ${status})`,
+      );
+    }
     let parsed;
     if (text.length > 0) {
       try {
         parsed = JSON.parse(text);
       } catch {
         if (response.ok) {
-          throw new Error(`App Store Connect ${method} response was not valid JSON`);
+          throw new Error(`App Store Connect ${requestLabel} response was not valid JSON`);
         }
       }
     }
 
     if (!response.ok) {
-      const fallback = text || response.statusText || 'request rejected';
-      const detail = responseErrorDetail(parsed, fallback);
-      throw new Error(
-        `App Store Connect ${method} request failed (${response.status}): ${redact(detail, secrets)}`,
-      );
+      throw new Error(`App Store Connect ${requestLabel} failed with status ${status}`);
     }
     return parsed;
   }
@@ -196,6 +187,27 @@ function assertResource(resource, type) {
   }
 }
 
+function requiredIncluded(response, expectedTypes) {
+  if (
+    !response ||
+    typeof response !== 'object' ||
+    !Array.isArray(response.included) ||
+    response.included.length !== expectedTypes.length
+  ) {
+    throw new Error('App Store Connect included response identity mismatch');
+  }
+
+  return expectedTypes.map((type) => {
+    const matches = response.included.filter((resource) => resource?.type === type);
+    if (matches.length !== 1) {
+      throw new Error('App Store Connect included response identity mismatch');
+    }
+    const [resource] = matches;
+    assertResource(resource, type);
+    return resource;
+  });
+}
+
 export async function findExactBuild(client, { bundleId, version, buildNumber }) {
   const appResponse = await client.request('/v1/apps', {
     query: {
@@ -216,6 +228,7 @@ export async function findExactBuild(client, { bundleId, version, buildNumber })
       'filter[version]': version,
       'filter[platform]': 'IOS',
       'fields[preReleaseVersions]': 'version,platform,app',
+      'fields[apps]': 'bundleId',
       include: 'app',
       limit: 2,
     },
@@ -232,12 +245,21 @@ export async function findExactBuild(client, { bundleId, version, buildNumber })
   ) {
     throw new Error('App Store Connect prerelease version response identity mismatch');
   }
+  const [versionIncludedApp] = requiredIncluded(versionResponse, ['apps']);
+  if (
+    versionIncludedApp.id !== app.id ||
+    versionIncludedApp.attributes?.bundleId !== bundleId
+  ) {
+    throw new Error('App Store Connect included app response identity mismatch');
+  }
 
   const buildResponse = await client.request('/v1/builds', {
     query: {
       'filter[preReleaseVersion]': prereleaseVersion.id,
       'filter[version]': buildNumber,
       'fields[builds]': 'version,processingState,app,preReleaseVersion',
+      'fields[apps]': 'bundleId',
+      'fields[preReleaseVersions]': 'version,platform,app',
       include: 'app,preReleaseVersion',
       limit: 2,
     },
@@ -250,6 +272,20 @@ export async function findExactBuild(client, { bundleId, version, buildNumber })
     relationshipId(build, 'preReleaseVersion', 'preReleaseVersions') !== prereleaseVersion.id
   ) {
     throw new Error('App Store Connect build response identity mismatch');
+  }
+  const [buildIncludedApp, buildIncludedVersion] = requiredIncluded(buildResponse, [
+    'apps',
+    'preReleaseVersions',
+  ]);
+  if (
+    buildIncludedApp.id !== app.id ||
+    buildIncludedApp.attributes?.bundleId !== bundleId ||
+    buildIncludedVersion.id !== prereleaseVersion.id ||
+    buildIncludedVersion.attributes?.version !== version ||
+    buildIncludedVersion.attributes?.platform !== 'IOS' ||
+    relationshipId(buildIncludedVersion, 'app', 'apps') !== app.id
+  ) {
+    throw new Error('App Store Connect included build response identity mismatch');
   }
   return build;
 }
@@ -280,13 +316,31 @@ export async function waitForBuild(
   }
 
   const startedAt = client.now();
+  const deadline = startedAt + timeoutMs;
+  let firstLookup = true;
   while (true) {
     let resource;
+    let lookupError;
+    if (!firstLookup && client.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
+    }
+    firstLookup = false;
     try {
       resource = await findExactBuild(client, { bundleId, version, buildNumber });
     } catch (error) {
-      if (!(error instanceof ExactLookupError) || error.count !== 0 || error.resource === 'app') {
-        throw error;
+      lookupError = error;
+    }
+
+    if (client.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
+    }
+    if (lookupError) {
+      if (
+        !(lookupError instanceof ExactLookupError) ||
+        lookupError.count !== 0 ||
+        lookupError.resource === 'app'
+      ) {
+        throw lookupError;
       }
     }
 
@@ -301,11 +355,11 @@ export async function waitForBuild(
       }
     }
 
-    const elapsed = client.now() - startedAt;
-    if (elapsed >= timeoutMs) {
+    const remaining = deadline - client.now();
+    if (remaining <= 0) {
       throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
     }
-    await client.sleep(Math.min(pollIntervalMs, timeoutMs - elapsed));
+    await client.sleep(Math.min(pollIntervalMs, remaining));
   }
 }
 

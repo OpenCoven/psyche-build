@@ -84,7 +84,11 @@ function buildResource(
 function identityFetch(options: {
   apps?: readonly JsonApiResource[];
   versions?: readonly JsonApiResource[];
+  versionIncluded?: readonly JsonApiResource[];
+  omitVersionIncluded?: boolean;
   builds?: readonly JsonApiResource[] | (() => readonly JsonApiResource[]);
+  buildIncluded?: readonly JsonApiResource[];
+  omitBuildIncluded?: boolean;
   localization?: readonly JsonApiResource[];
   calls?: FetchCall[];
 } = {}): typeof fetch {
@@ -96,11 +100,23 @@ function identityFetch(options: {
       return jsonResponse({ data: options.apps ?? [appResource()] });
     }
     if (url.pathname === '/v1/preReleaseVersions') {
-      return jsonResponse({ data: options.versions ?? [versionResource()] });
+      return jsonResponse({
+        data: options.versions ?? [versionResource()],
+        ...(options.omitVersionIncluded
+          ? {}
+          : { included: options.versionIncluded ?? [appResource()] }),
+      });
     }
     if (url.pathname === '/v1/builds') {
       const builds = typeof options.builds === 'function' ? options.builds() : options.builds;
-      return jsonResponse({ data: builds ?? [buildResource()] });
+      return jsonResponse({
+        data: builds ?? [buildResource()],
+        ...(options.omitBuildIncluded
+          ? {}
+          : {
+              included: options.buildIncluded ?? [appResource(), versionResource()],
+            }),
+      });
     }
     if (url.pathname === '/v1/builds/build-1/betaBuildLocalizations') {
       return jsonResponse({ data: options.localization ?? [] });
@@ -213,9 +229,14 @@ describe('exact release identity lookup', () => {
     expect(calls[1].url.searchParams.get('filter[version]')).toBe(VERSION);
     expect(calls[1].url.searchParams.get('filter[platform]')).toBe('IOS');
     expect(calls[1].url.searchParams.get('include')).toBe('app');
+    expect(calls[1].url.searchParams.get('fields[apps]')).toBe('bundleId');
     expect(calls[2].url.searchParams.get('filter[preReleaseVersion]')).toBe('version-1');
     expect(calls[2].url.searchParams.get('filter[version]')).toBe(BUILD_NUMBER);
     expect(calls[2].url.searchParams.get('include')).toBe('app,preReleaseVersion');
+    expect(calls[2].url.searchParams.get('fields[apps]')).toBe('bundleId');
+    expect(calls[2].url.searchParams.get('fields[preReleaseVersions]')).toBe(
+      'version,platform,app',
+    );
     expect(calls.every(({ init }) => new Headers(init.headers).get('authorization') === `Bearer ${TOKEN}`)).toBe(true);
   });
 
@@ -294,6 +315,109 @@ describe('exact release identity lookup', () => {
       }),
     ).rejects.toThrow(expected);
   });
+
+  it.each([
+    ['a missing included app collection', { omitVersionIncluded: true }],
+    ['zero included apps', { versionIncluded: [] }],
+    [
+      'duplicate included apps',
+      { versionIncluded: [appResource(), appResource()] },
+    ],
+    ['an included app type mismatch', { versionIncluded: [versionResource()] }],
+    [
+      'an included app relationship ID mismatch',
+      { versionIncluded: [appResource({ id: 'app-other' })] },
+    ],
+    [
+      'an included app bundle mismatch',
+      {
+        versionIncluded: [
+          appResource({ attributes: { bundleId: 'not.psyche', name: 'Other' } }),
+        ],
+      },
+    ],
+  ] as const)('rejects prerelease lookup with %s', async (_label, options) => {
+    await expect(
+      findExactBuild(clientWith(identityFetch(options)), {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+      }),
+    ).rejects.toThrow(/included.*identity mismatch/i);
+  });
+
+  it.each([
+    ['a missing included collection', { omitBuildIncluded: true }],
+    ['zero included resources', { buildIncluded: [] }],
+    [
+      'a duplicate included app',
+      { buildIncluded: [appResource(), appResource(), versionResource()] },
+    ],
+    [
+      'an included resource type mismatch',
+      { buildIncluded: [appResource(), buildResource()] },
+    ],
+    [
+      'an included app relationship ID mismatch',
+      {
+        buildIncluded: [appResource({ id: 'app-other' }), versionResource()],
+      },
+    ],
+    [
+      'an included app bundle mismatch',
+      {
+        buildIncluded: [
+          appResource({ attributes: { bundleId: 'not.psyche' } }),
+          versionResource(),
+        ],
+      },
+    ],
+    [
+      'an included prerelease relationship ID mismatch',
+      {
+        buildIncluded: [appResource(), versionResource({ id: 'version-other' })],
+      },
+    ],
+    [
+      'an included prerelease version mismatch',
+      {
+        buildIncluded: [
+          appResource(),
+          versionResource({ attributes: { version: '0.0.2', platform: 'IOS' } }),
+        ],
+      },
+    ],
+    [
+      'an included prerelease platform mismatch',
+      {
+        buildIncluded: [
+          appResource(),
+          versionResource({ attributes: { version: VERSION, platform: 'MAC_OS' } }),
+        ],
+      },
+    ],
+    [
+      'an included prerelease app relationship mismatch',
+      {
+        buildIncluded: [
+          appResource(),
+          versionResource({
+            relationships: {
+              app: { data: { type: 'apps', id: 'app-other' } },
+            },
+          }),
+        ],
+      },
+    ],
+  ] as const)('rejects build lookup with %s', async (_label, options) => {
+    await expect(
+      findExactBuild(clientWith(identityFetch(options)), {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+      }),
+    ).rejects.toThrow(/included.*identity mismatch/i);
+  });
 });
 
 describe('build processing polling', () => {
@@ -365,6 +489,93 @@ describe('build processing polling', () => {
     ).rejects.toThrow(/timed out.*2700000/i);
     expect(now).toBe(45 * 60_000);
     expect(sleeps.reduce((total, value) => total + value, 0)).toBe(45 * 60_000);
+  });
+
+  it('does not start another lookup at the exact deadline', async () => {
+    let now = 0;
+    let buildRequest = 0;
+    const calls: FetchCall[] = [];
+    const client = clientWith(
+      identityFetch({
+        calls,
+        builds: () => [buildResource(buildRequest++ === 0 ? 'PROCESSING' : 'VALID')],
+      }),
+      {
+        now: () => now,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        },
+      },
+    );
+
+    await expect(
+      waitForBuild(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+        timeoutMs: 30_000,
+      }),
+    ).rejects.toThrow(/timed out/i);
+    expect(now).toBe(30_000);
+    expect(buildRequest).toBe(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('rejects a VALID lookup result that completes after the deadline', async () => {
+    let now = 0;
+    const baseFetch = identityFetch();
+    const advancingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await baseFetch(input, init);
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (url.pathname === '/v1/builds') now = 1_001;
+      return response;
+    }) as typeof fetch;
+    const client = clientWith(advancingFetch, {
+      now: () => now,
+      sleep: async () => {},
+    });
+
+    await expect(
+      waitForBuild(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toThrow(/timed out/i);
+    expect(now).toBe(1_001);
+  });
+
+  it('caps a one-interval timeout and performs only the initial lookup', async () => {
+    let now = 0;
+    let buildRequest = 0;
+    const sleeps: number[] = [];
+    const client = clientWith(
+      identityFetch({
+        builds: () => {
+          buildRequest += 1;
+          return [buildResource('PROCESSING')];
+        },
+      }),
+      {
+        now: () => now,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+          now += milliseconds;
+        },
+      },
+    );
+
+    await expect(
+      waitForBuild(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toThrow(/timed out/i);
+    expect(sleeps).toEqual([1_000]);
+    expect(buildRequest).toBe(1);
   });
 });
 
@@ -475,9 +686,14 @@ describe('TestFlight notes and beta build localization', () => {
       calls.push({ url, init });
       if (url.pathname === '/v1/apps') return jsonResponse({ data: [appResource()] });
       if (url.pathname === '/v1/preReleaseVersions') {
-        return jsonResponse({ data: [versionResource()] });
+        return jsonResponse({ data: [versionResource()], included: [appResource()] });
       }
-      if (url.pathname === '/v1/builds') return jsonResponse({ data: [buildResource()] });
+      if (url.pathname === '/v1/builds') {
+        return jsonResponse({
+          data: [buildResource()],
+          included: [appResource(), versionResource()],
+        });
+      }
       if (url.pathname === '/v1/builds/build-1/betaBuildLocalizations') {
         return jsonResponse({ data: [] });
       }
@@ -615,20 +831,12 @@ describe('fail-closed reuse mode', () => {
 });
 
 describe('secret redaction and CLI contract', () => {
-  it('redacts the bearer token and private key from API and transport errors', async () => {
+  it('does not surface untrusted non-2xx response body text', async () => {
     const privateKey = 'PRIVATE_KEY_SENTINEL';
     const errorFetch = (async () =>
-      jsonResponse(
-        {
-          errors: [
-            {
-              code: 'FORBIDDEN',
-              detail: `Authorization: Bearer ${TOKEN}; key=${privateKey}`,
-            },
-          ],
-        },
-        403,
-      )) as typeof fetch;
+      new Response(`REMOTE_DETAIL Authorization: Bearer ${TOKEN}; key=${privateKey}`, {
+        status: 403,
+      })) as typeof fetch;
     const client = createAppStoreConnectClient({
       fetch: errorFetch,
       token: TOKEN,
@@ -642,13 +850,17 @@ describe('secret redaction and CLI contract', () => {
         buildNumber: BUILD_NUMBER,
       }),
     );
+    expect(apiError.message).toMatch(/GET.*\/v1\/apps.*403/i);
     expect(apiError.message).not.toContain(TOKEN);
     expect(apiError.message).not.toContain(privateKey);
-    expect(apiError.message).toContain('[REDACTED]');
+    expect(apiError.message).not.toContain('REMOTE_DETAIL');
+  });
 
+  it('does not surface untrusted fetch rejection messages', async () => {
+    const privateKey = 'PRIVATE_KEY_SENTINEL';
     const transportClient = createAppStoreConnectClient({
       fetch: (async () => {
-        throw new Error(`Bearer ${TOKEN} ${privateKey}`);
+        throw new Error(`REMOTE_TRANSPORT Bearer ${TOKEN} ${privateKey}`);
       }) as typeof fetch,
       token: TOKEN,
       redactValues: [privateKey],
@@ -660,8 +872,39 @@ describe('secret redaction and CLI contract', () => {
         buildNumber: BUILD_NUMBER,
       }),
     );
+    expect(transportError.message).toMatch(/GET.*\/v1\/apps.*request failed/i);
     expect(transportError.message).not.toContain(TOKEN);
     expect(transportError.message).not.toContain(privateKey);
+    expect(transportError.message).not.toContain('REMOTE_TRANSPORT');
+  });
+
+  it('does not surface response body-read failures', async () => {
+    const privateKey = 'PRIVATE_KEY_SENTINEL';
+    const client = createAppStoreConnectClient({
+      fetch: (async () => {
+        const response = new Response('', { status: 502 });
+        Object.defineProperty(response, 'text', {
+          value: async () => {
+            throw new Error(`REMOTE_BODY_READ Bearer ${TOKEN} ${privateKey}`);
+          },
+        });
+        return response;
+      }) as typeof fetch,
+      token: TOKEN,
+      redactValues: [privateKey],
+    });
+
+    const error = await capturedError(() =>
+      findExactBuild(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+      }),
+    );
+    expect(error.message).toMatch(/GET.*\/v1\/apps.*response body/i);
+    expect(error.message).not.toContain(TOKEN);
+    expect(error.message).not.toContain(privateKey);
+    expect(error.message).not.toContain('REMOTE_BODY_READ');
   });
 
   it('never copies secret-shaped response attributes into polling diagnostics', async () => {
