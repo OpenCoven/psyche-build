@@ -20,6 +20,8 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('target: aarch64-apple-darwin');
     expect(workflow).toContain('target: x86_64-apple-darwin');
     expect(workflow).toContain('pnpm release:check -- "$RELEASE_TAG"');
+    expect(workflow).toContain('verification.verified');
+    expect(workflow).toContain('Release tag must be an annotated tag with a verified signature');
     expect(workflow).toContain('github.event.repository.private');
     expect(workflow).toContain('A public Homebrew release cannot be published from a private repository');
   });
