@@ -1,6 +1,8 @@
 import {
+  chmodSync,
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -152,20 +154,34 @@ describe('iOS production release configuration', () => {
         { cwd: fixtureRoot }
       );
 
-      const fixtureProjectYml = resolve(fixtureRoot, 'native/ios/project.yml');
+      const fixtureBin = resolve(fixtureRoot, 'bin');
+      const fixtureXcodeGen = resolve(fixtureBin, 'xcodegen');
+      mkdirSync(fixtureBin);
+      writeFileSync(fixtureXcodeGen, "#!/bin/sh\nprintf '%s\\n' 'fixture xcodegen no-op'\n");
+      chmodSync(fixtureXcodeGen, 0o755);
+
+      const fixtureInfoPlist = resolve(
+        fixtureRoot,
+        'native/ios/PsycheApp/Resources/Info.plist'
+      );
       writeFileSync(
-        fixtureProjectYml,
-        readFileSync(fixtureProjectYml, 'utf8').replace(
-          'PsycheReleaseCommit: $(PSYCHE_RELEASE_SHA)',
-          'PsycheReleaseCommit: drifted'
+        fixtureInfoPlist,
+        readFileSync(fixtureInfoPlist, 'utf8').replace(
+          '<string>$(PSYCHE_RELEASE_SHA)</string>',
+          '<string>drifted</string>'
         )
       );
 
       const result = spawnSync('pnpm', ['ios:project:check'], {
         cwd: fixtureRoot,
         encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${fixtureBin}:${process.env.PATH ?? ''}`,
+        },
       });
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+      expect(`${result.stdout}\n${result.stderr}`).toContain('fixture xcodegen no-op');
       expect(`${result.stdout}\n${result.stderr}`).toContain('PsycheReleaseCommit');
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
