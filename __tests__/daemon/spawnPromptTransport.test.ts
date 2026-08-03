@@ -294,6 +294,41 @@ describe('shared-worktree attach', () => {
     expect(branches).toContain(first.branch);
   });
 
+
+  // The request's branchName is caller-supplied. spawnBridgePane is reachable
+  // without the planner, so a wrong value would be persisted verbatim and every
+  // later report and merge decision would inherit it.
+  it('records the branch actually checked out, not the one the request claims', async () => {
+    const seed = harness();
+    const first = await spawnBridgePane(
+      root, 'psyche-test',
+      { requestId: 'first', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      seed.deps,
+    );
+
+    const attached = await spawnBridgePane(
+      root, 'psyche-test',
+      {
+        requestId: 'second', cwd: root, agent: 'claude', prompt: 'Review',
+        existingWorktree: {
+          slug: path.basename(first.worktreePath),
+          worktreePath: first.worktreePath,
+          branchName: 'psyche/totally-wrong-branch',
+        },
+      },
+      harness().deps,
+    );
+
+    expect(attached.branch).toBe(first.branch);
+    expect(attached.branch).not.toBe('psyche/totally-wrong-branch');
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    const record = config.panes.find((p: any) => p.paneId === attached.id);
+    expect(record.branchName).toBe(first.branch);
+  });
+
   it('rejects a worktree outside the project root', async () => {
     const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-outside-')));
     try {
@@ -324,5 +359,39 @@ describe('shared-worktree attach', () => {
       },
       h.deps,
     )).rejects.toMatchObject({ code: 'invalid_worktree_path' });
+  });
+});
+
+describe('concurrent shared-worktree attach', () => {
+  // Regression: the sibling slug was allocated from config BEFORE entering the
+  // serialized config mutation, so two concurrent attaches to the same worktree
+  // both computed fix-auth-a2. Same check-then-act shape as the worktree claim
+  // and the config write, reintroduced in the attach path.
+  it('gives concurrent attaches distinct sibling slugs', async () => {
+    const seed = harness();
+    const first = await spawnBridgePane(
+      root, 'psyche-test',
+      { requestId: 'first', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      seed.deps,
+    );
+    const existingWorktree = {
+      slug: path.basename(first.worktreePath),
+      worktreePath: first.worktreePath,
+      branchName: first.branch,
+    };
+
+    await Promise.all(['a', 'b', 'c'].map((id) =>
+      spawnBridgePane(
+        root, 'psyche-test',
+        { requestId: id, cwd: root, agent: 'claude', prompt: 'Review', existingWorktree },
+        harness().deps,
+      )));
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    const slugs = config.panes.map((p: any) => p.slug);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    expect(slugs).toHaveLength(4);
   });
 });

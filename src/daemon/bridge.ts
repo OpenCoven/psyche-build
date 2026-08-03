@@ -842,6 +842,21 @@ function nextBridgePaneId(): string {
  * and live inside the project, which is what stops an arbitrary path arriving
  * over the wire from being used.
  */
+/**
+ * Sibling slugs handed out but not yet written to config.
+ *
+ * The create path does not need this: createGitWorktree makes the directory
+ * inside the claim mutex, so the next uniqueSlug scan sees it. Attaching
+ * creates nothing on disk, so without an explicit reservation two concurrent
+ * attaches to the same worktree both read the same config and both pick
+ * fix-auth-a2.
+ */
+const reservedSiblingSlugs = new Set<string>();
+
+export function releaseSiblingSlug(slug: string): void {
+  reservedSiblingSlugs.delete(slug);
+}
+
 async function resolveSharedWorktree(
   projectRoot: string,
   existing: { slug: string; worktreePath: string; branchName: string },
@@ -867,14 +882,41 @@ async function resolveSharedWorktree(
     );
   }
 
-  const config = await readBridgeConfig(projectRoot);
-  const panes = Array.isArray(config.panes) ? config.panes : [];
-  const slug = generateSiblingSlugForTargetPane(
-    { slug: existing.slug, worktreePath: resolved },
-    panes.map((pane) => ({ slug: String(pane.slug ?? '') })),
-  );
+  // Read the branch from the worktree rather than trusting the request. A
+  // caller reaching spawnBridgePane directly could otherwise persist a
+  // branchName that has nothing to do with what is checked out, and every
+  // later report and merge decision would inherit that lie.
+  const branch = readWorktreeBranch(resolved) ?? existing.branchName;
 
-  return { slug, branch: existing.branchName, worktreePath: resolved };
+  // Allocate under the same mutex the create path uses, and consult the
+  // in-flight reservations as well as config, so concurrent attaches to one
+  // worktree cannot land on the same sibling slug.
+  return claimWorktree(async () => {
+    const config = await readBridgeConfig(projectRoot);
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const taken = [
+      ...panes.map((pane) => ({ slug: String(pane.slug ?? '') })),
+      ...[...reservedSiblingSlugs].map((slug) => ({ slug })),
+    ];
+    const slug = generateSiblingSlugForTargetPane(
+      { slug: existing.slug, worktreePath: resolved },
+      taken,
+    );
+    reservedSiblingSlugs.add(slug);
+    return { slug, branch, worktreePath: resolved };
+  });
+}
+
+/** Branch actually checked out in a worktree, or null if detached/unreadable. */
+function readWorktreeBranch(worktreePath: string): string | null {
+  try {
+    const name = execFileSync('git', ['-C', worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    return name && name !== 'HEAD' ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Canonical paths of every worktree git knows about for this project. */
@@ -941,7 +983,9 @@ export async function spawnBridgePane(
   } catch (error) {
     // Only ever roll back a worktree THIS call created. A shared worktree is
     // in use by other panes; deleting it here would destroy their work.
-    if (!attaching) {
+    if (attaching) {
+      releaseSiblingSlug(slug);
+    } else {
       removeGitWorktree(scoped.projectRoot, worktreePath, branch);
     }
     throw error;
@@ -976,6 +1020,8 @@ export async function spawnBridgePane(
     config.lastUpdated = now;
     return config.settings;
   });
+  // Persisted, so the slug is now discoverable from config itself.
+  if (attaching) releaseSiblingSlug(slug);
 
   if (agent) {
     const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, settings?.permissionMode);
