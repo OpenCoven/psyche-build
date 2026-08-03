@@ -26,6 +26,14 @@ class ExactLookupError extends Error {
   }
 }
 
+export function reuseExitCode(error) {
+  return error instanceof ExactLookupError &&
+    error.count === 0 &&
+    (error.resource === 'version' || error.resource === 'build')
+    ? 2
+    : 1;
+}
+
 class OperationDeadlineError extends Error {
   constructor() {
     super('App Store Connect operation deadline reached');
@@ -813,6 +821,6 @@ async function main() {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   main().catch((error) => {
     console.error(asMessage(error));
-    process.exitCode = 1;
+    process.exitCode = process.argv.includes('--reuse-existing') ? reuseExitCode(error) : 1;
   });
 }

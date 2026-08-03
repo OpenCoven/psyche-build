@@ -42,7 +42,7 @@ describe('macOS release workflow contract', () => {
     ]) {
       expect(workflow).toContain(`secrets.${secret}`);
     }
-    expect(workflow.match(/^\s*environment: release\s*$/gm)).toHaveLength(3);
+    expect(workflow.match(/^\s*environment: release\s*$/gm)).toHaveLength(4);
     expect(workflow).toContain('Missing required release environment secret $secret_name');
     expect(workflow).not.toContain('Missing required repository secret');
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
@@ -61,11 +61,105 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('SHA256SUMS');
     expect(workflow).toContain('gh release create "$RELEASE_TAG"');
     expect(workflow).toContain('gh release download "$RELEASE_TAG"');
-    expect(workflow).toContain('Published release assets match the verified build output');
+    expect(workflow).toContain('Published release assets and notes match the verified build output');
     expect(workflow).toContain('notify-homebrew:');
     expect(workflow).toContain('needs: publish');
     expect(workflow).toContain('event_type: "psyche-build-release"');
     expect(workflow).toContain('secrets.HOMEBREW_TAP_TOKEN');
+    expect(workflow).toContain('Missing required release environment secret HOMEBREW_TAP_TOKEN');
+  });
+
+  it('verifies every product against the pinned Apple toolchain', () => {
+    const workflow = workflowSource();
+    const destination = 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro';
+
+    expect(workflow).toContain('DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer');
+    expect(workflow).toContain("grep -Fx 'Xcode 26.2'");
+    expect(workflow).toContain("grep -Fx 'Build version 17C52'");
+    expect(workflow).toContain('XCODEGEN_VERSION="2.45.4"');
+    expect(workflow).toContain(
+      'XCODEGEN_SHA256="090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef"',
+    );
+    expect(workflow).toContain('pnpm ios:project:check');
+    expect(workflow).toContain(`-destination '${destination}'`);
+    expect(workflow).toContain('-scheme PsycheCore');
+    expect(workflow).toContain('-scheme PsycheApp');
+  });
+
+  it('archives, verifies, exports, and uploads the exact iOS release source', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).toContain('upload-ios:');
+    expect(workflow).toMatch(/upload-ios:\s*\n(?:.|\n)*?needs: verify\s*\n(?:.|\n)*?runs-on: macos-15\s*\n(?:.|\n)*?environment: release/);
+    expect(workflow).toContain('ref: ${{ needs.verify.outputs.release_sha }}');
+    for (const secret of [
+      'APPLE_DISTRIBUTION_CERTIFICATE',
+      'APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD',
+      'APP_STORE_CONNECT_KEY_ID',
+      'APP_STORE_CONNECT_ISSUER_ID',
+      'APP_STORE_CONNECT_PRIVATE_KEY',
+      'APPLE_TEAM_ID',
+    ]) {
+      expect(workflow).toContain(`secrets.${secret}`);
+    }
+    expect(workflow).toContain('AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8');
+    expect(workflow).toContain('chmod 0600 "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"');
+    expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
+    expect(workflow).toContain('-destination \'generic/platform=iOS\'');
+    expect(workflow).toContain('CURRENT_PROJECT_VERSION=1');
+    expect(workflow).toContain('MARKETING_VERSION="$RELEASE_VERSION"');
+    expect(workflow).toContain('PSYCHE_RELEASE_SHA="$EXPECTED_RELEASE_SHA"');
+    expect(workflow).toContain('-authenticationKeyPath "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"');
+    expect(workflow).toContain('Products/Applications/Psyche Build.app/Info.plist');
+    for (const expected of [
+      'ai.opencoven.psyche-ios',
+      'Psyche Build',
+      'CFBundleShortVersionString',
+      'CFBundleVersion',
+      'PsycheReleaseCommit',
+    ]) {
+      expect(workflow).toContain(expected);
+    }
+    expect(workflow).toContain('-exportOptionsPlist native/ios/ExportOptions.plist');
+    expect(workflow).toContain('xcrun altool --validate-app');
+    expect(workflow).toContain('xcrun altool --upload-app');
+    expect(workflow).toContain('--output-format json');
+    expect(workflow).toContain('API_PRIVATE_KEYS_DIR');
+  });
+
+  it('reuses only an exact existing TestFlight build and uploads only on a distinct absence result', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).toContain('node scripts/release-notes.mjs --testflight');
+    expect(workflow).toContain('pnpm release:testflight --');
+    expect(workflow).toContain('--reuse-existing');
+    expect(workflow).toContain('--timeout-seconds 2700');
+    expect(workflow).toContain('set +e');
+    expect(workflow).toContain('[ "$REUSE_STATUS" = "2" ]');
+    expect(workflow).toContain("steps.preflight.outputs.upload == 'true'");
+    expect(workflow).toContain("steps.preflight.outputs.upload != 'true'");
+    expect(workflow).not.toMatch(/continue-on-error:\s*true/);
+  });
+
+  it('publishes curated notes only after macOS and TestFlight succeed and verifies retries byte-for-byte', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).toContain('needs: [verify, build-macos, upload-ios]');
+    expect(workflow).toContain('node scripts/release-notes.mjs --github');
+    expect(workflow).toContain('--notes-file "$RELEASE_NOTES_PATH"');
+    expect(workflow).not.toContain('--generate-notes');
+    expect(workflow).toContain('process.stdout.write(release.body)');
+    expect(workflow).toContain('cmp "$RELEASE_NOTES_PATH" "$PUBLISHED_NOTES_PATH"');
+    expect(workflow).toContain('Published release assets and notes match the verified build output');
+  });
+
+  it('does not expose release secrets or fall back to repository secrets', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).not.toContain('Missing required repository secret');
+    expect(workflow).not.toMatch(/continue-on-error:\s*true/);
+    expect(workflow).not.toMatch(/echo[^\n]*"\$(APP_STORE_CONNECT_PRIVATE_KEY|APPLE_DISTRIBUTION_CERTIFICATE)"/);
+    expect(workflow).not.toMatch(/\bcat\s+[^\n]*(APP_STORE_CONNECT_PRIVATE_KEY|AuthKey_)/);
   });
 
   it('pins every third-party action to an immutable commit', () => {

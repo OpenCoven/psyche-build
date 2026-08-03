@@ -73,6 +73,8 @@ export function waitForBuild(
 
 export function normalizeTestFlightNotes(notes: string, releaseSha: string): string;
 
+export function reuseExitCode(error: unknown): 1 | 2;
+
 export function upsertBetaBuildLocalization(
   client: AppStoreConnectClient,
   options: {

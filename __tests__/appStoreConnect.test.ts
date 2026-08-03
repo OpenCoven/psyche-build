@@ -14,6 +14,7 @@ import {
   createAppStoreConnectToken,
   findExactBuild,
   normalizeTestFlightNotes,
+  reuseExitCode,
   upsertBetaBuildLocalization,
   waitAndLocalize,
   waitForBuild,
@@ -1075,6 +1076,43 @@ describe('TestFlight notes and beta build localization', () => {
 });
 
 describe('fail-closed reuse mode', () => {
+  it('returns a distinct upload-safe exit code only when the exact version or build is absent', async () => {
+    for (const options of [{ versions: [] }, { builds: [] }]) {
+      const error = await capturedError(() =>
+        waitAndLocalize(clientWith(identityFetch(options)), {
+          bundleId: BUNDLE_ID,
+          version: VERSION,
+          buildNumber: BUILD_NUMBER,
+          locale: 'en-US',
+          notes: 'Retry notes.',
+          releaseSha: RELEASE_SHA,
+          reuseExisting: true,
+        }),
+      );
+      expect(reuseExitCode(error)).toBe(2);
+    }
+
+    for (const options of [
+      { apps: [] },
+      { versions: [versionResource(), versionResource({ id: 'version-2' })] },
+      { builds: [buildResource(), buildResource('VALID', { id: 'build-2' })] },
+    ]) {
+      const error = await capturedError(() =>
+        waitAndLocalize(clientWith(identityFetch(options)), {
+          bundleId: BUNDLE_ID,
+          version: VERSION,
+          buildNumber: BUILD_NUMBER,
+          locale: 'en-US',
+          notes: 'Retry notes.',
+          releaseSha: RELEASE_SHA,
+          reuseExisting: true,
+        }),
+      );
+      expect(reuseExitCode(error)).toBe(1);
+    }
+    expect(reuseExitCode(new Error('transport failure'))).toBe(1);
+  });
+
   it('reuses an exact VALID build only when existing provenance matches, without mutation', async () => {
     const calls: FetchCall[] = [];
     const whatsNew = `Existing test notes.\n\nSource commit: ${RELEASE_SHA}`;
