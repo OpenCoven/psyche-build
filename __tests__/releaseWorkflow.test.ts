@@ -43,6 +43,8 @@ describe('macOS release workflow contract', () => {
       expect(workflow).toContain(`secrets.${secret}`);
     }
     expect(workflow.match(/^\s*environment: release\s*$/gm)).toHaveLength(3);
+    expect(workflow).toContain('Missing required release environment secret $secret_name');
+    expect(workflow).not.toContain('Missing required repository secret');
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
     expect(workflow).toContain('codesign --verify --deep --strict');
     expect(workflow).toContain('spctl --assess --type execute');
