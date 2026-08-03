@@ -60,6 +60,12 @@
     threads: [],
     activeProjectId: null,
     activeThreadId: null,
+    /** Files opened from the Files panel. These are the *only* things the main
+     *  tab strip shows; projects are switched from the sessions sidebar.
+     *  { id, path, rel, name, projectId, text, truncated, binary, size, error } */
+    openFiles: [],
+    /** Non-null while a file tab owns the main area instead of the terminal. */
+    activeFileId: null,
     /** Discovered slash commands the active agent harness will recognise.
      *  Refreshed on boot and on project switch via `agent_skills`. */
     agentSkills: [],
@@ -250,10 +256,14 @@
   //    `--split-frac` is always the fraction of the *terminal* pane in split.
   // ============================================================
 
-  var browserToggleBtn = document.getElementById("browser-toggle");
+  // Every [data-browser-toggle] control (titlebar chrome button + right rail)
+  // reflects and drives the same split/terminal state.
+  var browserToggleBtns = Array.prototype.slice.call(
+    document.querySelectorAll("[data-browser-toggle]")
+  );
   var browserCollapseBtn = document.getElementById("browser-collapse");
-  var browserCycleSideBtn = document.getElementById("browser-cycle-side");
   var BROWSER_SIDES = ["right", "bottom", "left", "top"];
+  var PANELS = ["browser", "files", "diffs", "git"];
   var detailStyleRule = null;
 
   function currentLayout() { return detail.dataset.layout || "terminal"; }
@@ -295,13 +305,19 @@
     layout.mode = currentLayout();
     layout.side = currentSide();
     layout.splitFrac = currentSplitFrac();
+    layout.panel = currentPanel();
     saveWorkspaceSoon();
   }
   function restoreProjectLayout(project) {
     var layout = ensureProjectLayout(project);
     if (!layout) return;
     setDetailSplitFrac(layout.splitFrac || 0.6);
+    // Set the panel before the layout so syncBrowserBounds sees the right one.
+    setPanel(layout.panel || project.panel || "browser", { render: false });
     applyLayout(layout.mode || "terminal", { side: layout.side || "right", persist: false });
+    // Panels read from the project root, so re-render for the project we just
+    // switched to rather than showing the previous one's tree/diff/log.
+    if (currentLayout() === "split") renderPanel(currentPanel());
   }
 
   function applyLayout(layout, opts) {
@@ -313,9 +329,10 @@
     if (layout === "browser") markActiveSurface("browser");
     else if (layout === "terminal") markActiveSurface("terminal");
     if (!opts || opts.persist !== false) rememberProjectLayout();
-    if (browserToggleBtn) {
-      browserToggleBtn.setAttribute("aria-pressed", layout === "split" ? "true" : "false");
-    }
+    browserToggleBtns.forEach(function (btn) {
+      btn.setAttribute("aria-pressed", layout === "split" ? "true" : "false");
+    });
+    syncPanelButtons();
     // For role="separator", orientation describes the line: vertical for
     // a left/right divider, horizontal for a top/bottom divider.
     var splitterEl = document.getElementById("splitter");
@@ -340,24 +357,71 @@
     applyLayout("split", { side: next });
   }
 
-  if (browserToggleBtn) {
-    browserToggleBtn.addEventListener("click", toggleBrowser);
+  browserToggleBtns.forEach(function (btn) {
+    btn.addEventListener("click", toggleBrowser);
     // Right-click cycles side without changing visibility on/off.
-    browserToggleBtn.addEventListener("contextmenu", function (e) {
+    btn.addEventListener("contextmenu", function (e) {
       e.preventDefault();
       cycleBrowserSide(e.shiftKey ? -1 : 1);
     });
-  }
+  });
   if (browserCollapseBtn) {
     browserCollapseBtn.addEventListener("click", function () {
       applyLayout("terminal");
     });
   }
-  if (browserCycleSideBtn) {
-    browserCycleSideBtn.addEventListener("click", function (e) {
-      cycleBrowserSide(e.shiftKey ? -1 : 1);
-    });
+  // ---- Right-rail panel switching ----
+  // The rail is a radio group over the right pane's four panels. Clicking the
+  // panel that is already showing collapses the pane, so one button both opens
+  // and closes — the usual activity-bar behaviour.
+  function currentPanel() {
+    var p = detail.dataset.panel;
+    return PANELS.indexOf(p) === -1 ? "browser" : p;
   }
+  function syncPanelButtons() {
+    var open = currentLayout() === "split";
+    var panel = currentPanel();
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-panel-btn]"),
+      function (btn) {
+        btn.setAttribute(
+          "aria-pressed",
+          open && btn.dataset.panelBtn === panel ? "true" : "false"
+        );
+      }
+    );
+  }
+  function setPanel(name, opts) {
+    if (PANELS.indexOf(name) === -1) name = "browser";
+    detail.dataset.panel = name;
+    var project = activeProject();
+    if (project) project.panel = name;
+    if (!opts || opts.render !== false) renderPanel(name);
+    // The browser is a native child webview layered over the DOM — it has to be
+    // hidden whenever a different panel owns the pane, or it paints on top.
+    syncBrowserBounds();
+    syncPanelButtons();
+  }
+  function renderPanel(name) {
+    if (name === "files") renderFilesPanel();
+    else if (name === "diffs") renderDiffsPanel();
+    else if (name === "git") renderGitPanel();
+  }
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-panel-btn]"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        var name = btn.dataset.panelBtn;
+        if (currentLayout() === "split" && currentPanel() === name) {
+          applyLayout("terminal");
+          return;
+        }
+        setPanel(name, { render: false });
+        applyLayout("split");
+        renderPanel(name);
+      });
+    }
+  );
 
   // ============================================================
   // 5. PTY event plumbing
@@ -676,8 +740,10 @@
     Array.prototype.forEach.call(terminalHost.children, function (el) {
       el.classList.toggle("active", el.dataset.threadId === id);
     });
+    // Focusing a session hands the main area back to its terminal, so a file
+    // tab can never leave you staring at another project's source.
+    showTerminalView();
     refreshSidebar();
-    refreshTabs();
     requestAnimationFrame(function () {
       fitActiveTerm();
       if (thread.term) thread.term.focus();
@@ -817,7 +883,137 @@
   //    continue to update the surviving project tab strip.
   // ============================================================
 
-  function refreshSidebar() { refreshTabs(); renderTerminalEmptyState(); }
+  function refreshSidebar() { refreshTabs(); renderSessionList(); renderTerminalEmptyState(); }
+
+  // ============================================================
+  // 7b. Sessions sidebar
+  // ============================================================
+
+  // One row per thread, grouped under its project. Threads are the "sessions"
+  // — state.threads is the source of truth, so this renders from the same data
+  // the tab strip and terminal host use rather than tracking its own copy.
+
+  var sessionListEl = document.getElementById("session-list");
+  var sessionSearchEl = document.getElementById("session-search");
+  var sessionFilter = "";
+
+  // ~/Documents/GitHub/OpenCoven/coven-cave → ~/…/OpenCoven/coven-cave
+  function shortenRoot(root) {
+    if (!root) return "";
+    var home = (state.env && state.env.home) || "";
+    var path = home && root.indexOf(home) === 0 ? "~" + root.slice(home.length) : root;
+    var parts = path.split("/").filter(Boolean);
+    if (path.length <= 32 || parts.length <= 3) return path;
+    var head = path.charAt(0) === "~" ? "~/" : "/";
+    return head + "…/" + parts.slice(-2).join("/");
+  }
+
+  function sessionStatusClass(thread) {
+    if (thread.spawning || thread.status === "starting") return "starting";
+    if (thread.status === "running") return "running";
+    if (thread.status === "exited") return "exited";
+    return "";
+  }
+
+  function renderSessionList() {
+    if (!sessionListEl) return;
+    if (editingContext && editingContext.surface === "sidebar") return;
+    sessionListEl.innerHTML = "";
+
+    var needle = sessionFilter.trim().toLowerCase();
+    var matched = 0;
+
+    state.projects.forEach(function (project) {
+      var threads = state.threads.filter(function (t) { return t.projectId === project.id; });
+      if (needle) {
+        var projectHit = project.name.toLowerCase().indexOf(needle) !== -1;
+        threads = threads.filter(function (t) {
+          return projectHit || String(t.name).toLowerCase().indexOf(needle) !== -1;
+        });
+      }
+      if (threads.length === 0) return;
+      matched += threads.length;
+
+      var group = document.createElement("div");
+      group.className = "session-group";
+
+      var head = document.createElement("div");
+      head.className = "session-group-head";
+      head.textContent = project.name;
+      head.title = project.root || project.name;
+      group.appendChild(head);
+
+      threads.forEach(function (thread) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "session-row " + sessionStatusClass(thread) +
+          (state.activeThreadId === thread.id ? " active" : "");
+        row.dataset.threadId = thread.id;
+        row.setAttribute("role", "treeitem");
+        row.setAttribute("aria-selected", state.activeThreadId === thread.id ? "true" : "false");
+        row.title = thread.name + " — " + (project.root || "");
+        row.innerHTML =
+          '<span class="session-dot"></span>' +
+          '<span class="session-text">' +
+            '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
+            '<span class="session-sub">' + escapeHtml(shortenRoot(project.root)) + "</span>" +
+          "</span>" +
+          '<button class="session-close" title="Close session" aria-label="Close session">×</button>';
+
+        row.addEventListener("click", function (e) {
+          if (e.target && e.target.classList.contains("session-close")) return;
+          // Switching project first keeps layout/browser state consistent, then
+          // focus the specific thread the user clicked.
+          if (project.id !== state.activeProjectId) setActiveProject(project.id);
+          focusThread(thread.id);
+        });
+        row.querySelector(".session-close").addEventListener("click", function (e) {
+          e.stopPropagation();
+          closeThread(thread.id);
+        });
+        var titleEl = row.querySelector(".session-title");
+        titleEl.addEventListener("dblclick", function (e) {
+          e.stopPropagation();
+          editLabelInline(titleEl, "sidebar", {
+            initial: thread.name,
+            onCommit: function (v) { renameThread(thread.id, v); },
+            done: function () { renderSessionList(); },
+          });
+        });
+        group.appendChild(row);
+      });
+
+      sessionListEl.appendChild(group);
+    });
+
+    if (matched === 0) {
+      var empty = document.createElement("div");
+      empty.className = "session-empty";
+      empty.textContent = needle
+        ? "No sessions match “" + sessionFilter.trim() + "”"
+        : state.projects.length
+          ? "No sessions yet — ⌘T opens one."
+          : "No project open — ⌘O to add one.";
+      sessionListEl.appendChild(empty);
+    }
+  }
+
+  if (sessionSearchEl) {
+    sessionSearchEl.addEventListener("input", function () {
+      sessionFilter = sessionSearchEl.value || "";
+      renderSessionList();
+    });
+    // Escape clears the filter rather than bubbling to the terminal.
+    sessionSearchEl.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        sessionSearchEl.value = "";
+        sessionFilter = "";
+        renderSessionList();
+        sessionSearchEl.blur();
+        e.stopPropagation();
+      }
+    });
+  }
 
   function renderTerminalEmptyState() {
     var existing = terminalHost.querySelector(".terminal-empty");
@@ -837,6 +1033,10 @@
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
     threadIds.forEach(function (tid) { closeThread(tid); });
+    // Its file tabs go with it — they are scoped to the project.
+    var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
+    state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
+    if (dropped.some(function (f) { return f.id === state.activeFileId; })) showTerminalView();
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
     if (state.activeProjectId === id) {
@@ -873,67 +1073,162 @@
   // and clicking the tab restores the project's last-active thread. Threads
   // themselves are managed inside the embedded psyche/tmux UI — they aren't
   // surfaced as separate tabs at the shell level.
+  // ---- File tabs (main area) ----
+
+  var fileViewEl = document.getElementById("file-view");
+  var fileViewPathEl = document.getElementById("file-view-path");
+  var fileViewMetaEl = document.getElementById("file-view-meta");
+  var fileViewBodyEl = document.getElementById("file-view-body");
+  var fileCounter = 0;
+
+  function findOpenFile(id) {
+    return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
+  }
+
+  async function openFileTab(path, project) {
+    project = project || activeProject();
+    if (!project) return;
+    var existing = state.openFiles.filter(function (f) {
+      return f.path === path && f.projectId === project.id;
+    })[0];
+    if (existing) { activateFileTab(existing.id); return; }
+
+    fileCounter += 1;
+    var rel = relativeToRoot(project.root, path);
+    var file = {
+      id: "f" + fileCounter,
+      path: path,
+      rel: rel,
+      name: rel.split("/").pop() || rel,
+      projectId: project.id,
+      text: "",
+      truncated: false,
+      binary: false,
+      size: 0,
+      error: null,
+      loading: true,
+    };
+    state.openFiles.push(file);
+    activateFileTab(file.id);
+    try {
+      var res = await invoke("fs_read_text", { root: project.root, path: path });
+      file.text = res.text;
+      file.truncated = res.truncated;
+      file.binary = res.binary;
+      file.size = res.size;
+    } catch (err) {
+      file.error = String(err);
+    }
+    file.loading = false;
+    if (state.activeFileId === file.id) renderFileView();
+  }
+
+  function activateFileTab(id) {
+    var file = findOpenFile(id);
+    if (!file) return;
+    state.activeFileId = id;
+    markActiveSurface("terminal");
+    if (fileViewEl) fileViewEl.hidden = false;
+    if (terminalHost) terminalHost.hidden = true;
+    refreshTabs();
+    renderFileView();
+  }
+
+  // Hands the main area back to the terminal. Called whenever a session is
+  // focused, so clicking a sidebar row always lands you on its terminal.
+  function showTerminalView() {
+    state.activeFileId = null;
+    if (fileViewEl) fileViewEl.hidden = true;
+    if (terminalHost) terminalHost.hidden = false;
+    refreshTabs();
+    requestAnimationFrame(function () { fitActiveTerm(); });
+  }
+
+  function closeFileTab(id) {
+    var file = findOpenFile(id);
+    if (!file) return;
+    var siblings = projectFiles(file.projectId);
+    var idx = siblings.indexOf(file);
+    state.openFiles = state.openFiles.filter(function (f) { return f.id !== id; });
+    if (state.activeFileId !== id) { refreshTabs(); return; }
+    var remaining = projectFiles(file.projectId);
+    var next = remaining[Math.min(idx, remaining.length - 1)];
+    if (next) activateFileTab(next.id);
+    else showTerminalView();
+  }
+
+  function renderFileView() {
+    var file = findOpenFile(state.activeFileId);
+    if (!file || !fileViewBodyEl) return;
+    fileViewPathEl.textContent = file.rel;
+    if (file.loading) {
+      fileViewMetaEl.textContent = "";
+      fileViewBodyEl.textContent = "loading…";
+      return;
+    }
+    if (file.error) {
+      fileViewMetaEl.textContent = "error";
+      fileViewBodyEl.textContent = file.error;
+      return;
+    }
+    if (file.binary) {
+      fileViewMetaEl.textContent = file.size + " bytes";
+      fileViewBodyEl.textContent = "Binary file — no preview.";
+      return;
+    }
+    var lines = file.text.split("\n");
+    fileViewMetaEl.textContent =
+      lines.length + " lines · " + file.size + " bytes" + (file.truncated ? " · truncated" : "");
+    // Line numbers are spans rather than a gutter column so selecting text
+    // still copies the source cleanly-ish and there is no second scroll box.
+    fileViewBodyEl.innerHTML = lines
+      .map(function (line, i) {
+        return '<span class="ln">' + (i + 1) + "</span>" + escapeHtml(line);
+      })
+      .join("\n") + (file.truncated ? '\n<span class="ln"></span>… truncated' : "");
+  }
+
+  // Tabs are opened files only — projects live in the sessions sidebar.
+  // An empty strip means "terminal", which is the default view.
+  function projectFiles(projectId) {
+    var pid = projectId || state.activeProjectId;
+    return state.openFiles.filter(function (f) { return f.projectId === pid; });
+  }
+
   function refreshTabs() {
     if (editingContext && editingContext.surface === "tabs") return;
     tabStripEl.innerHTML = "";
+    var files = projectFiles();
 
-    if (state.projects.length === 0) {
+    if (files.length === 0) {
       var empty = document.createElement("div");
       empty.className = "tab-empty";
-      empty.textContent = "Drop/open a project — click + to begin";
+      empty.textContent = activeProject()
+        ? "No files open — pick one from the Files panel"
+        : "Drop/open a project to begin";
       tabStripEl.appendChild(empty);
+      return;
     }
 
-    state.projects.forEach(function (project, idx) {
-      var threads = state.threads.filter(function (t) { return t.projectId === project.id; });
-      var anyRunning = threads.some(function (t) { return t.status === "running"; });
-      var allExited  = threads.length > 0 && threads.every(function (t) { return t.status === "exited"; });
-      var statusClass = anyRunning ? " running" : allExited ? " exited" : "";
-      var spawning = threads.some(function (t) { return t.spawning; });
-      var isActive = state.activeProjectId === project.id;
-
+    files.forEach(function (file, idx) {
+      var isActive = state.activeFileId === file.id;
       var tab = document.createElement("div");
-      tab.className = "tab" + statusClass + (spawning ? " spawning" : "") + (isActive ? " active" : "");
+      tab.className = "tab" + (isActive ? " active" : "");
+      tab.dataset.fileId = file.id;
+      tab.title = file.rel + (idx < 9 ? "  (\u2318" + (idx + 1) + ")" : "");
       tab.innerHTML =
-        '<span class="dot"></span>' +
-        '<span class="label" title="' + escapeHtml(project.root) + '">' +
-          escapeHtml(project.name) +
-        "</span>" +
-        '<button class="close" title="Close project (⌘W)">×</button>';
-
-      // Single click → activate this project's psyche (restores last-active thread).
+        '<span class="label">' + escapeHtml(file.name) + "</span>" +
+        '<button class="close" title="Close file (\u2318W)">\u00d7</button>';
       tab.addEventListener("click", function (e) {
         if (e.target.classList.contains("close")) return;
-        setActiveProject(project.id);
+        activateFileTab(file.id);
       });
-      // Close × → tear down all of the project's threads + remove the tab.
       tab.querySelector(".close").addEventListener("click", function (e) {
         e.stopPropagation();
-        closeProject(project.id);
+        closeFileTab(file.id);
       });
-      // Double-click name → rename project inline.
-      var tabLabel = tab.querySelector(".label");
-      if (tabLabel) {
-        tabLabel.addEventListener("dblclick", function (e) {
-          e.stopPropagation();
-          editLabelInline(tabLabel, "tabs", {
-            initial: project.name,
-            onCommit: function (v) { renameProject(project.id, v); },
-            done: function () { refreshTabs(); },
-          });
-        });
-      }
-      if (idx < 9) tab.title = "⌘" + (idx + 1) + " — double-click to rename";
-      else tab.title = "double-click to rename";
       tabStripEl.appendChild(tab);
     });
-
-    var addBtn = document.createElement("button");
-    addBtn.className = "tab-add";
-    addBtn.textContent = "+";
-    addBtn.title = "Open new project + launch psyche (⌘O)";
-    addBtn.addEventListener("click", function () { openProjectPicker(); });
-    tabStripEl.appendChild(addBtn);
   }
 
   // ============================================================
@@ -1475,7 +1770,7 @@
     if (preview) preview.classList.toggle("loading", !!(tab && tab.loading));
     updateBrowserControls();
   }
-  function visibleBrowserBounds() { var rect = preview.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; if (detail.dataset.layout === "terminal") return null; return { x: rect.left, y: rect.top, w: rect.width, h: rect.height }; }
+  function visibleBrowserBounds() { var rect = preview.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; if (detail.dataset.layout === "terminal") return null; if (currentPanel() !== "browser") return null; return { x: rect.left, y: rect.top, w: rect.width, h: rect.height }; }
   function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
   function syncBrowserBounds() {
     var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
@@ -1653,9 +1948,10 @@
     }
     // ⌘O opens a new project (folder picker → addProject → psyche).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
-    // ⌘W closes the active project tab (and its threads).
+    // ⌘W closes the active file tab; with none open it closes the project.
     if (e.key === "w") {
-      if (state.activeProjectId) closeProject(state.activeProjectId);
+      if (state.activeFileId) closeFileTab(state.activeFileId);
+      else if (state.activeProjectId) closeProject(state.activeProjectId);
       e.preventDefault(); return;
     }
     if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
@@ -1664,17 +1960,333 @@
     // (which produces ∫ on macOS) still resolves to KeyB.
     if (e.code === "KeyB" && e.altKey)   { toggleBrowser(); e.preventDefault(); return; }
     if (e.code === "KeyB" && e.shiftKey) { cycleBrowserSide(1); e.preventDefault(); return; }
-    // ⌘[ / ⌘] now cycle between project tabs.
+    // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
+    // no files open they fall back to projects, which the sidebar also drives.
     if (e.key === "[") { switchTab(-1); e.preventDefault(); return; }
     if (e.key === "]") { switchTab(+1); e.preventDefault(); return; }
-    // ⌘1-9 activates the Nth project tab.
     var n = parseInt(e.key, 10);
     if (Number.isInteger(n) && n >= 1 && n <= 9) {
+      var files = projectFiles();
+      if (files.length) {
+        if (files[n - 1]) { activateFileTab(files[n - 1].id); e.preventDefault(); }
+        return;
+      }
       var p = state.projects[n - 1];
       if (p) { setActiveProject(p.id); e.preventDefault(); }
     }
   }, true);
+  // ---- Side rails ----
+  // Each rail button is a click affordance for a shortcut that already exists;
+  // they call the same functions the ⌘-handlers above do, so there is no second
+  // code path to keep in sync. #rail-browser-toggle is wired via
+  // [data-browser-toggle] alongside the titlebar button.
+  function onRailClick(id, handler) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener("click", handler);
+  }
+  onRailClick("rail-new-tab", function () { createContextualTab(); });
+  onRailClick("rail-open-project", function () { openProjectPicker(); });
+  onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
+
+  // ============================================================
+  // 11b. Right-pane panels: files, diffs, git
+  // ============================================================
+  //
+  // All three read from the active project's root via the Rust commands
+  // fs_list_dir / fs_read_text / git_status / git_diff / git_log. Everything is
+  // read-only — a panel can never modify an agent's working tree.
+
+  var fileTreeEl = document.getElementById("file-tree");
+  var filesCrumbEl = document.getElementById("files-crumb");
+  var diffFilesEl = document.getElementById("diff-files");
+  var diffBodyEl = document.getElementById("diff-body");
+  var diffsSummaryEl = document.getElementById("diffs-summary");
+  var gitViewEl = document.getElementById("git-view");
+  var gitBranchEl = document.getElementById("git-branch");
+  var gitOpenRemoteBtn = document.getElementById("git-open-remote");
+
+  // Directory paths the user has expanded, so a refresh keeps the tree open.
+  var expandedDirs = Object.create(null);
+  var selectedDiffPath = null;
+  var gitRemoteWebUrl = null;
+
+  // The tree highlights whichever file currently owns the main area.
+  function activeFilePath() {
+    var f = findOpenFile(state.activeFileId);
+    return f ? f.path : null;
+  }
+
+  function panelMessage(el, text, cls) {
+    el.innerHTML = "";
+    var d = document.createElement("div");
+    d.className = cls || "panel-empty";
+    d.textContent = text;
+    el.appendChild(d);
+  }
+
+  // Drop leading path segments until it fits, keeping the basename — the part
+  // that identifies the file. CSS ellipsis would eat the basename instead.
+  function shortenRelPath(p, max) {
+    max = max || 40;
+    if (p.length <= max) return p;
+    var parts = String(p).split("/");
+    var out = parts[parts.length - 1];
+    for (var i = parts.length - 2; i >= 0; i--) {
+      var next = parts[i] + "/" + out;
+      if (next.length + 2 > max) break;
+      out = next;
+    }
+    return "…/" + out;
+  }
+
+  function relativeToRoot(root, full) {
+    if (root && full.indexOf(root) === 0) {
+      var rel = full.slice(root.length);
+      return rel.charAt(0) === "/" ? rel.slice(1) : rel;
+    }
+    return full;
+  }
+
+  // ---- Files ----
+
+  async function renderFilesPanel() {
+    if (!fileTreeEl) return;
+    var project = activeProject();
+    if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
+    if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(project.root);
+    fileTreeEl.innerHTML = "";
+    await appendDirInto(fileTreeEl, project.root, project.root, 0);
+    if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
+  }
+
+  async function appendDirInto(container, root, dirPath, depth) {
+    var entries;
+    try {
+      entries = await invoke("fs_list_dir", { root: root, path: dirPath });
+    } catch (err) {
+      var e = document.createElement("div");
+      e.className = "panel-error";
+      e.textContent = String(err);
+      container.appendChild(e);
+      return;
+    }
+    entries.forEach(function (entry) {
+      var row = document.createElement("button");
+      row.type = "button";
+      var isOpen = !!expandedDirs[entry.path];
+      row.className = "file-row" + (entry.is_dir ? " is-dir" : "") +
+        (isOpen ? " open" : "") + (activeFilePath() === entry.path ? " selected" : "");
+      row.style.paddingLeft = 10 + depth * 12 + "px";
+      row.innerHTML =
+        '<span class="twisty">' + (entry.is_dir ? "▶" : "") + "</span>" +
+        '<span class="file-name">' + escapeHtml(entry.name) + "</span>";
+      row.title = entry.path;
+      row.addEventListener("click", function () {
+        if (entry.is_dir) {
+          if (expandedDirs[entry.path]) delete expandedDirs[entry.path];
+          else expandedDirs[entry.path] = true;
+          renderFilesPanel();
+        } else {
+          openFileTab(entry.path, activeProject());
+        }
+      });
+      container.appendChild(row);
+      if (entry.is_dir && isOpen) {
+        // Children render inline under the row, indented one level.
+        var slot = document.createElement("div");
+        container.appendChild(slot);
+        appendDirInto(slot, root, entry.path, depth + 1);
+      }
+    });
+  }
+
+  onRailClick("files-refresh", function () { renderFilesPanel(); });
+
+  // ---- Diffs ----
+
+  function colourDiff(text) {
+    return text
+      .split("\n")
+      .map(function (line) {
+        var cls = "";
+        if (line.indexOf("@@") === 0) cls = "d-hunk";
+        else if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 ||
+                 line.indexOf("diff ") === 0 || line.indexOf("index ") === 0) cls = "d-meta";
+        else if (line.charAt(0) === "+") cls = "d-add";
+        else if (line.charAt(0) === "-") cls = "d-del";
+        return cls
+          ? '<span class="' + cls + '">' + escapeHtml(line) + "</span>"
+          : escapeHtml(line);
+      })
+      .join("\n");
+  }
+
+  async function renderDiffsPanel() {
+    if (!diffFilesEl) return;
+    var project = activeProject();
+    if (!project) { panelMessage(diffFilesEl, "No project open — ⌘O to add one."); return; }
+    var status;
+    try {
+      status = await invoke("git_status", { root: project.root });
+    } catch (err) {
+      panelMessage(diffFilesEl, String(err), "panel-error");
+      return;
+    }
+    if (!status.is_repo) {
+      panelMessage(diffFilesEl, "Not a git repository.");
+      if (diffBodyEl) diffBodyEl.textContent = "";
+      if (diffsSummaryEl) diffsSummaryEl.textContent = "";
+      return;
+    }
+    if (diffsSummaryEl) {
+      diffsSummaryEl.textContent = status.files.length
+        ? status.files.length + " changed"
+        : "clean";
+    }
+    if (status.files.length === 0) {
+      panelMessage(diffFilesEl, "No uncommitted changes.");
+      if (diffBodyEl) diffBodyEl.innerHTML = "";
+      diffFilesEl.parentNode.classList.remove("has-detail");
+      return;
+    }
+
+    diffFilesEl.innerHTML = "";
+    status.files.forEach(function (f) {
+      var row = document.createElement("button");
+      row.type = "button";
+      var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
+      row.className = "diff-row " + kind + (selectedDiffPath === f.path ? " selected" : "");
+      row.title = f.path;
+      row.innerHTML =
+        '<span class="diff-code">' + escapeHtml(f.code) + "</span>" +
+        '<span class="diff-path">' + escapeHtml(shortenRelPath(f.path)) + "</span>";
+      row.addEventListener("click", function () { showDiff(project.root, f); });
+      diffFilesEl.appendChild(row);
+    });
+
+    // Auto-open the first file so the panel is never a blank list.
+    var target = status.files.find(function (f) { return f.path === selectedDiffPath; }) || status.files[0];
+    showDiff(project.root, target);
+  }
+
+  async function showDiff(root, entry) {
+    if (!entry || !diffBodyEl) return;
+    selectedDiffPath = entry.path;
+    diffFilesEl.parentNode.classList.add("has-detail");
+    Array.prototype.forEach.call(diffFilesEl.children, function (el) {
+      el.classList.toggle("selected", el.title === entry.path);
+    });
+    diffBodyEl.textContent = "loading…";
+    try {
+      var text = await invoke("git_diff", {
+        root: root,
+        path: entry.path,
+        staged: !!entry.staged && !entry.unstaged,
+      });
+      diffBodyEl.innerHTML = text.trim() ? colourDiff(text) : "No textual diff.";
+    } catch (err) {
+      diffBodyEl.textContent = String(err);
+    }
+  }
+
+  onRailClick("diffs-refresh", function () { renderDiffsPanel(); });
+
+  // ---- Git / GitHub ----
+
+  async function renderGitPanel() {
+    if (!gitViewEl) return;
+    var project = activeProject();
+    if (!project) { panelMessage(gitViewEl, "No project open — ⌘O to add one."); return; }
+    gitViewEl.innerHTML = "";
+    if (gitBranchEl) gitBranchEl.textContent = "";
+    gitRemoteWebUrl = null;
+    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = true;
+
+    var status, commits;
+    try {
+      status = await invoke("git_status", { root: project.root });
+      commits = status.is_repo ? await invoke("git_log", { root: project.root, limit: 30 }) : [];
+    } catch (err) {
+      panelMessage(gitViewEl, String(err), "panel-error");
+      return;
+    }
+    if (!status.is_repo) { panelMessage(gitViewEl, "Not a git repository."); return; }
+
+    gitRemoteWebUrl = status.web_url || null;
+    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = !gitRemoteWebUrl;
+    if (gitBranchEl) gitBranchEl.textContent = status.branch || "(detached)";
+
+    var head = document.createElement("div");
+    head.className = "git-branch-line";
+    var track = "";
+    if (status.upstream) {
+      track = escapeHtml(status.upstream);
+      if (status.ahead) track += ' <span class="ahead">↑' + status.ahead + "</span>";
+      if (status.behind) track += ' <span class="behind">↓' + status.behind + "</span>";
+    } else {
+      track = "no upstream";
+    }
+    head.innerHTML =
+      '<span class="git-branch-name">' + escapeHtml(status.branch || "(detached)") + "</span>" +
+      '<span class="git-track">' + track + "</span>";
+    gitViewEl.appendChild(head);
+
+    var changed = document.createElement("div");
+    changed.className = "git-section-head";
+    changed.textContent = "Working tree — " +
+      (status.files.length ? status.files.length + " changed" : "clean");
+    gitViewEl.appendChild(changed);
+    status.files.slice(0, 40).forEach(function (f) {
+      var row = document.createElement("div");
+      row.className = "diff-row " + (f.untracked ? "untracked" : f.staged ? "staged" : "unstaged");
+      row.title = f.path;
+      row.innerHTML =
+        '<span class="diff-code">' + escapeHtml(f.code) + "</span>" +
+        '<span class="diff-path">' + escapeHtml(shortenRelPath(f.path)) + "</span>";
+      gitViewEl.appendChild(row);
+    });
+
+    var commitsHead = document.createElement("div");
+    commitsHead.className = "git-section-head";
+    commitsHead.textContent = "Recent commits";
+    gitViewEl.appendChild(commitsHead);
+    if (commits.length === 0) {
+      var none = document.createElement("div");
+      none.className = "panel-empty";
+      none.textContent = "No commits yet.";
+      gitViewEl.appendChild(none);
+    }
+    commits.forEach(function (c) {
+      var row = document.createElement("div");
+      row.className = "git-commit";
+      row.title = c.subject + "\n" + c.author + " — " + c.relative;
+      row.innerHTML =
+        '<span class="sha">' + escapeHtml(c.short) + "</span>" +
+        '<span class="subject">' + escapeHtml(c.subject) + "</span>" +
+        '<span class="when">' + escapeHtml(c.relative) + "</span>";
+      // Clicking a commit opens it on the remote host when there is one.
+      if (gitRemoteWebUrl) {
+        row.addEventListener("click", function () {
+          if (openUrl) openUrl(gitRemoteWebUrl + "/commit/" + c.hash).catch(function () {});
+        });
+      }
+      gitViewEl.appendChild(row);
+    });
+  }
+
+  onRailClick("git-refresh", function () { renderGitPanel(); });
+  onRailClick("git-open-remote", function () {
+    if (gitRemoteWebUrl && openUrl) openUrl(gitRemoteWebUrl).catch(function () {});
+  });
+
   function switchTab(delta) {
+    var files = projectFiles();
+    if (files.length) {
+      var fi = files.findIndex(function (f) { return f.id === state.activeFileId; });
+      if (fi === -1) fi = 0;
+      activateFileTab(files[(fi + delta + files.length) % files.length].id);
+      return;
+    }
     if (state.projects.length === 0) return;
     var idx = state.projects.findIndex(function (p) { return p.id === state.activeProjectId; });
     if (idx === -1) idx = 0;

@@ -12,6 +12,33 @@
   </head>
   <body>
     <div class="app" id="app">
+      <aside class="rail sidebar" id="sidebar" data-tauri-drag-region aria-label="Sessions">
+        <div class="sidebar-head">
+          <input
+            id="session-search"
+            class="session-search"
+            type="search"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="Search sessions…"
+            aria-label="Search sessions"
+          />
+          <button id="rail-new-tab" class="rail-btn" title="New session (⌘T)" aria-label="New session">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
+                    stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="rail-open-project" class="rail-btn" title="Open project (⌘O)" aria-label="Open project">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path d="M2.25 4.4c0-.9.7-1.6 1.6-1.6h2.3l1.3 1.5h4.6c.9 0 1.6.7 1.6 1.6v5.7c0 .9-.7 1.6-1.6 1.6H3.85c-.9 0-1.6-.7-1.6-1.6z"
+                    fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="session-list" id="session-list" role="tree" aria-label="Sessions grouped by project"></div>
+      </aside>
+
       <header class="titlebar" data-tauri-drag-region>
         <div class="titlebar-left" data-tauri-drag-region>
           <span class="brand" data-tauri-drag-region>psyche</span>
@@ -22,6 +49,7 @@
           <button
             id="browser-toggle"
             class="chrome-btn"
+            data-browser-toggle
             title="Show browser preview (⌘⌥B). Right-click to cycle side."
             aria-pressed="false"
           >
@@ -39,10 +67,17 @@
         </div>
       </header>
 
-      <main class="detail" id="detail" data-layout="terminal" data-browser-side="right">
+      <main class="detail" id="detail" data-layout="terminal" data-browser-side="right" data-panel="browser">
         <section class="terminal-area">
           <div class="tab-strip" id="tab-strip"></div>
           <div class="terminal-host" id="terminal-host"></div>
+          <div class="file-view" id="file-view" hidden>
+            <div class="file-view-bar">
+              <span class="file-view-path" id="file-view-path"></span>
+              <span class="file-view-meta" id="file-view-meta"></span>
+            </div>
+            <pre class="file-view-body" id="file-view-body"></pre>
+          </div>
           <div class="command-bar" id="command-bar">
             <span class="command-prompt">›</span>
             <input
@@ -67,12 +102,10 @@
           title="Resize terminal and browser panes"
         ></div>
         <section class="browser-pane">
+        <div class="panel panel-browser">
           <header class="pane-header browser-bar">
-            <button id="browser-collapse" class="icon-btn ghost-btn" title="Hide browser (⌘⌥B)" aria-label="Hide browser">
+            <button id="browser-collapse" class="icon-btn ghost-btn" title="Hide panel (⌘⌥B)" aria-label="Hide panel">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-            <button id="browser-cycle-side" class="icon-btn side-trigger" title="Move browser pane (⌘⇧B)" aria-label="Move browser pane">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.35"/><path d="M6.4 3v10" fill="none" stroke="currentColor" stroke-width="1.35"/><path class="side-trigger-fill" d="M2.5 4.8c0-1 .8-1.8 1.8-1.8h2.1v10H4.3c-1 0-1.8-.8-1.8-1.8z" fill="currentColor" opacity=".18"/></svg>
             </button>
             <button id="back" class="icon-btn nav-btn" title="Back" aria-label="Back">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.75 4.25 6 8l3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -90,8 +123,99 @@
           <div id="preview" class="preview-placeholder">
             <div class="preview-empty">No browser tab yet — type a URL above or press +</div>
           </div>
+        </div>
+
+        <div class="panel panel-files">
+          <header class="pane-header panel-bar">
+            <span class="panel-title">Files</span>
+            <span class="panel-crumb" id="files-crumb"></span>
+            <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </header>
+          <div class="panel-body">
+            <div class="file-tree" id="file-tree" role="tree" aria-label="Project files"></div>
+          </div>
+        </div>
+
+        <div class="panel panel-diffs">
+          <header class="pane-header panel-bar">
+            <span class="panel-title">Diffs</span>
+            <span class="panel-crumb" id="diffs-summary"></span>
+            <button id="diffs-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh diffs">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </header>
+          <div class="panel-body panel-split">
+            <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
+            <pre class="diff-body" id="diff-body"></pre>
+          </div>
+        </div>
+
+        <div class="panel panel-git">
+          <header class="pane-header panel-bar">
+            <span class="panel-title">Git</span>
+            <span class="panel-crumb" id="git-branch"></span>
+            <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button id="git-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh git state">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </header>
+          <div class="panel-body">
+            <div class="git-view" id="git-view"></div>
+          </div>
+        </div>
         </section>
       </main>
+
+      <nav class="rail rail-right" id="rail-right" data-tauri-drag-region
+           role="toolbar" aria-orientation="vertical" aria-label="Panels">
+        <button class="rail-btn" data-panel-btn="browser" aria-pressed="false"
+                title="Browser (⌘⌥B)" aria-label="Browser panel">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.35"/>
+            <path d="M2.4 8h11.2M8 2.4c1.5 1.7 2.3 3.6 2.3 5.6S9.5 12 8 13.6C6.5 12 5.7 10 5.7 8s.8-3.9 2.3-5.6z"
+                  fill="none" stroke="currentColor" stroke-width="1.35"/>
+          </svg>
+        </button>
+        <button class="rail-btn" data-panel-btn="files" aria-pressed="false"
+                title="Files" aria-label="File tree panel">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path d="M3.5 2.5v9.25a1.25 1.25 0 0 0 1.25 1.25H7"
+                  fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+            <path d="M3.5 7.5H7" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+            <rect x="8" y="2" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="8" y="6" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="8" y="11" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+        </button>
+        <button class="rail-btn" data-panel-btn="diffs" aria-pressed="false"
+                title="Diffs" aria-label="Diff viewer panel">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M9.5 11.5h4.2" fill="none" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor"
+                  stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
+            <path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor"
+                  stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
+          </svg>
+        </button>
+        <button class="rail-btn" data-panel-btn="git" aria-pressed="false"
+                title="Git / GitHub" aria-label="Git panel">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+            <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+            <circle cx="11.2" cy="6.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+            <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+            <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
+                  stroke-width="1.35" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </nav>
     </div>
     <script src="./main.js" defer></script>
   </body>

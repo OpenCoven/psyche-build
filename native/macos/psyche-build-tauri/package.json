@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.0.7",
   "scripts": {
-    "build": "cargo tauri build",
-    "dev": "cargo tauri dev"
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
   }
 }

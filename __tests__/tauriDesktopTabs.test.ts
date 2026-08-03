@@ -47,7 +47,13 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(/for\s+p\s+in\s+std::env::split_paths\(&existing\)[\s\S]*?parts\.push\(p\);[\s\S]*?for\s+extra\s+in\s+extras/);
     expect(tauriLib).toMatch(/std::env::join_paths\(&parts\)/);
     expect(tauriLib).toMatch(/\.unwrap_or_else\(\|_\|\s+existing\.clone\(\)\)/);
-    expect(tauriLib).not.toMatch(/std::env::join_paths\(&parts\)[\s\S]*?\.unwrap_or_default\(\)/);
+    const augmentedPathFunction = tauriLib.match(
+      /fn\s+compute_augmented_path\(\)\s*->\s*String\s*\{[\s\S]*?\n\}\n\nfn\s+push_path_if_dir/
+    )?.[0];
+    expect(augmentedPathFunction).toBeTruthy();
+    expect(augmentedPathFunction).not.toMatch(
+      /std::env::join_paths\(&parts\)[\s\S]*?\.unwrap_or_default\(\)/
+    );
     expect(tauriLib).toMatch(/for\s+dir\s+in\s+std::env::split_paths\(augmented_path\(\)\)/);
     expect(tauriLib).toMatch(/fn\s+newest_nvm_node_bin\(/);
     expect(tauriLib).not.toMatch(/\.nvm\/versions\/node\/v\d+\.\d+\.\d+\/bin/);

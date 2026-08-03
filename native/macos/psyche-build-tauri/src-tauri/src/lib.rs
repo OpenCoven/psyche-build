@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
@@ -891,6 +891,389 @@ fn locate_psyche_repo() -> Option<String> {
     None
 }
 
+// ----------------------------------------------------------------------------
+// Workspace side panels: file tree, diffs, and git/GitHub state.
+//
+// These back the right-rail panels. Everything is read-only — nothing here
+// mutates the working tree, so a panel can never clobber an agent's work.
+// ----------------------------------------------------------------------------
+
+/// Cap on file preview size. Big files are truncated rather than refused so the
+/// panel still shows a useful head.
+const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+
+fn canonical_project_root(root: &str) -> Result<PathBuf, String> {
+    let canonical = Path::new(root)
+        .canonicalize()
+        .map_err(|e| format!("project root '{}': {}", root, e))?;
+    if !canonical.is_dir() {
+        return Err(format!("project root is not a directory: {}", root));
+    }
+    Ok(canonical)
+}
+
+fn resolve_project_path(root: &str, requested: &str) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(root)?;
+    let requested_path = Path::new(requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        canonical_root.join(requested_path)
+    };
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("path '{}': {}", requested, e))?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(format!("path is outside project root: {}", requested));
+    }
+    Ok(canonical_candidate)
+}
+
+fn validate_git_relative_path(path: &str) -> Result<(), String> {
+    let candidate = Path::new(path);
+    if path.is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!("git path must stay inside project root: {}", path));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+fn fs_list_dir(root: String, path: String) -> Result<Vec<DirEntryInfo>, String> {
+    let dir = resolve_project_path(&root, &path)?;
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {}", path));
+    }
+    let mut out: Vec<DirEntryInfo> = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        // .git is noise in a file tree and enormous; the git panel covers it.
+        if name == ".git" {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        out.push(DirEntryInfo {
+            name,
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir: meta.is_dir(),
+            size: if meta.is_dir() { 0 } else { meta.len() },
+        });
+    }
+    // Directories first, then case-insensitive by name.
+    out.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(out)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FileText {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
+    pub binary: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
+    let p = resolve_project_path(&root, &path)?;
+    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+    if meta.is_dir() {
+        return Err(format!("is a directory: {}", path));
+    }
+    let size = meta.len();
+    let mut file = std::fs::File::open(&p).map_err(|e| e.to_string())?;
+    let take = size.min(MAX_PREVIEW_BYTES);
+    let mut buf = vec![0u8; take as usize];
+    let read = file.read(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(read);
+
+    // A NUL byte in the head is the usual "this is binary" heuristic.
+    let binary = buf.iter().take(8000).any(|b| *b == 0);
+    let text = if binary {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&buf).to_string()
+    };
+    Ok(FileText {
+        path: p.to_string_lossy().to_string(),
+        text,
+        truncated: size > take,
+        binary,
+        size,
+    })
+}
+
+fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("git {:?} failed", args)
+        } else {
+            err
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// git@github.com:owner/repo.git and https://github.com/owner/repo.git both
+/// normalise to a browsable https URL.
+fn remote_to_web_url(remote: &str) -> Option<String> {
+    let r = remote.trim().trim_end_matches(".git");
+    if let Some(rest) = r.strip_prefix("git@") {
+        let mut parts = rest.splitn(2, ':');
+        let host = parts.next()?;
+        let path = parts.next()?;
+        return Some(format!("https://{}/{}", host, path));
+    }
+    if r.starts_with("https://") || r.starts_with("http://") {
+        return Some(r.to_string());
+    }
+    if let Some(rest) = r.strip_prefix("ssh://git@") {
+        return Some(format!("https://{}", rest));
+    }
+    None
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitFileEntry {
+    pub path: String,
+    /// Two-character porcelain code, e.g. " M", "A ", "??".
+    pub code: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitStatus {
+    pub is_repo: bool,
+    pub branch: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub files: Vec<GitFileEntry>,
+    pub remote_url: Option<String>,
+    pub web_url: Option<String>,
+}
+
+#[tauri::command]
+fn git_status(root: String) -> Result<GitStatus, String> {
+    let root = canonical_project_root(&root)?.to_string_lossy().to_string();
+    let inside = run_git(&root, &["rev-parse", "--is-inside-work-tree"]).unwrap_or_default();
+    if inside.trim() != "true" {
+        return Ok(GitStatus {
+            is_repo: false,
+            branch: None,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+            remote_url: None,
+            web_url: None,
+        });
+    }
+
+    let prefix = run_git(&root, &["rev-parse", "--show-prefix"])?
+        .trim()
+        .to_string();
+    let raw = run_git(
+        &root,
+        &[
+            "status",
+            "--porcelain",
+            "-b",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
+    )?;
+    let mut branch = None;
+    let mut upstream = None;
+    let (mut ahead, mut behind) = (0u32, 0u32);
+    let mut files = Vec::new();
+
+    for line in raw.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            // "main...origin/main [ahead 1, behind 2]" | "No commits yet on main"
+            let (refs, track) = match head.find(" [") {
+                Some(i) => (&head[..i], &head[i..]),
+                None => (head, ""),
+            };
+            let mut it = refs.splitn(2, "...");
+            branch = it
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            upstream = it.next().map(|s| s.trim().to_string());
+            for (key, slot) in [("ahead ", &mut ahead), ("behind ", &mut behind)] {
+                if let Some(i) = track.find(key) {
+                    let tail = &track[i + key.len()..];
+                    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    *slot = digits.parse().unwrap_or(0);
+                }
+            }
+            continue;
+        }
+        if line.len() < 4 {
+            continue;
+        }
+        let code = line[..2].to_string();
+        // Renames read "R  old -> new"; the new path is what the user cares about.
+        let rest = &line[3..];
+        let repo_path = match rest.split(" -> ").last() {
+            Some(p) => p.to_string(),
+            None => rest.to_string(),
+        };
+        let path = if prefix.is_empty() {
+            repo_path
+        } else {
+            let Some(relative) = repo_path.strip_prefix(&prefix) else {
+                continue;
+            };
+            relative.to_string()
+        };
+        let index = code.chars().next().unwrap_or(' ');
+        let worktree = code.chars().nth(1).unwrap_or(' ');
+        files.push(GitFileEntry {
+            path,
+            untracked: code == "??",
+            staged: index != ' ' && index != '?',
+            unstaged: worktree != ' ' && worktree != '?',
+            code,
+        });
+    }
+
+    let remote_url = run_git(&root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let web_url = remote_url.as_deref().and_then(remote_to_web_url);
+
+    Ok(GitStatus {
+        is_repo: true,
+        branch,
+        upstream,
+        ahead,
+        behind,
+        files,
+        remote_url,
+        web_url,
+    })
+}
+
+#[tauri::command]
+fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<String, String> {
+    let root = canonical_project_root(&root)?.to_string_lossy().to_string();
+    let mut args: Vec<String> = vec![
+        "--no-pager".into(),
+        "diff".into(),
+        "--no-color".into(),
+        "--relative".into(),
+    ];
+    if staged.unwrap_or(false) {
+        args.push("--cached".into());
+    }
+    if let Some(p) = path.as_ref() {
+        validate_git_relative_path(p)?;
+        args.push("--".into());
+        args.push(p.clone());
+    } else {
+        args.push("--".into());
+        args.push(".".into());
+    }
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_git(&root, &refs)?;
+    if !out.trim().is_empty() {
+        return Ok(out);
+    }
+    // An untracked file has no diff; show it as an all-additions block instead
+    // of an empty pane.
+    if let Some(p) = path {
+        let full = resolve_project_path(&root, &p)?;
+        if full.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&full) {
+                let mut s = format!("--- /dev/null\n+++ b/{}\n", p);
+                for line in text.lines().take(2000) {
+                    s.push('+');
+                    s.push_str(line);
+                    s.push('\n');
+                }
+                return Ok(s);
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitCommit {
+    pub hash: String,
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    pub relative: String,
+}
+
+#[tauri::command]
+fn git_log(root: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
+    let root = canonical_project_root(&root)?.to_string_lossy().to_string();
+    let n = limit.unwrap_or(30).clamp(1, 200).to_string();
+    let raw = run_git(
+        &root,
+        &[
+            "--no-pager",
+            "log",
+            "-n",
+            &n,
+            "--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ar",
+        ],
+    )?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\x1f');
+            Some(GitCommit {
+                hash: f.next()?.to_string(),
+                short: f.next()?.to_string(),
+                subject: f.next()?.to_string(),
+                author: f.next()?.to_string(),
+                relative: f.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
@@ -912,6 +1295,11 @@ pub fn run() {
             browser_eval,
             app_environment,
             agent_skills,
+            fs_list_dir,
+            fs_read_text,
+            git_status,
+            git_diff,
+            git_log,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -932,4 +1320,137 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod workspace_panel_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new(label: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock must be after the Unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "psyche-workspace-panels-{}-{}-{}",
+                label,
+                std::process::id(),
+                nonce
+            ));
+            std::fs::create_dir_all(&root).expect("temporary tree must be created");
+            Self { root }
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn path_text(path: &Path) -> &str {
+        path.to_str().expect("test paths must be UTF-8")
+    }
+
+    fn run_test_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git must run in tests");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn resolves_existing_paths_inside_the_project() {
+        let tree = TempTree::new("inside");
+        let nested = tree.root.join("src").join("main.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "fn main() {}\n").unwrap();
+
+        let resolved = resolve_project_path(path_text(&tree.root), path_text(&nested)).unwrap();
+
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn rejects_parent_traversal_and_sibling_prefixes() {
+        let tree = TempTree::new("outside");
+        let project = tree.root.join("project");
+        let sibling = tree.root.join("project-copy");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let sibling_file = sibling.join("secret.txt");
+        std::fs::write(&sibling_file, "secret\n").unwrap();
+
+        assert!(resolve_project_path(path_text(&project), "../project-copy/secret.txt").is_err());
+        assert!(resolve_project_path(path_text(&project), path_text(&sibling_file)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_that_escape_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("symlink");
+        let project = tree.root.join("project");
+        let outside = tree.root.join("outside.txt");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&outside, "secret\n").unwrap();
+        let link = project.join("linked-secret.txt");
+        symlink(&outside, &link).unwrap();
+
+        assert!(resolve_project_path(path_text(&project), path_text(&link)).is_err());
+    }
+
+    #[test]
+    fn git_file_paths_must_be_relative_and_cannot_traverse() {
+        assert!(validate_git_relative_path("src/main.rs").is_ok());
+        assert!(validate_git_relative_path("../secret.txt").is_err());
+        assert!(validate_git_relative_path("src/../../secret.txt").is_err());
+        assert!(validate_git_relative_path("/tmp/secret.txt").is_err());
+    }
+
+    #[test]
+    fn git_status_and_diff_stay_inside_a_nested_project_root() {
+        let tree = TempTree::new("git-scope");
+        let project = tree.root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(tree.root.join("outside.txt"), "outside baseline\n").unwrap();
+        std::fs::write(project.join("inside.txt"), "inside baseline\n").unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&tree.root, &["add", "."]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(tree.root.join("outside.txt"), "outside changed\n").unwrap();
+        std::fs::write(project.join("inside.txt"), "inside changed\n").unwrap();
+
+        let status = git_status(path_text(&project).to_string()).unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "inside.txt");
+
+        let diff = git_diff(
+            path_text(&project).to_string(),
+            Some("inside.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+        assert!(diff.contains("+inside changed"));
+        assert!(!diff.contains("outside changed"));
+    }
 }
