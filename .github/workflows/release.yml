@@ -84,16 +84,36 @@ jobs:
         run: |
           set -euo pipefail
           REF_ENDPOINT="repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
-          TAG_OBJECT_TYPE="$(gh api "$REF_ENDPOINT" --jq '.object.type')"
+          REF_JSON_PATH="$RUNNER_TEMP/release-tag-ref.json"
+          gh api "$REF_ENDPOINT" > "$REF_JSON_PATH"
+          TAG_OBJECT_TYPE="$(jq -r '.object.type' "$REF_JSON_PATH")"
           if [ "$TAG_OBJECT_TYPE" != "tag" ]; then
             echo "::error::Release tag must be an annotated tag with a verified signature"
             exit 1
           fi
-          TAG_OBJECT_SHA="$(gh api "$REF_ENDPOINT" --jq '.object.sha')"
-          SIGNATURE_VERIFIED="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" \
-              --jq '.verification.verified'
-          )"
+          TAG_OBJECT_SHA="$(jq -r '.object.sha' "$REF_JSON_PATH")"
+          LOCAL_TAG_OBJECT_SHA="$(git rev-parse "$RELEASE_TAG^{tag}")"
+          if [ "$TAG_OBJECT_SHA" != "$LOCAL_TAG_OBJECT_SHA" ]; then
+            echo "::error::Remote release tag object does not match the verified local tag"
+            exit 1
+          fi
+
+          TAG_OBJECT_JSON_PATH="$RUNNER_TEMP/release-tag-object.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > "$TAG_OBJECT_JSON_PATH"
+          TAG_TARGET_TYPE="$(jq -r '.object.type' "$TAG_OBJECT_JSON_PATH")"
+          TAG_TARGET_SHA="$(jq -r '.object.sha' "$TAG_OBJECT_JSON_PATH")"
+          TAG_COMMIT="$(git rev-list -n 1 "$RELEASE_TAG")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "$TAG_TARGET_TYPE" != "commit" ]; then
+            echo "::error::Release tag object must target a commit"
+            exit 1
+          fi
+          if [ "$TAG_TARGET_SHA" != "$TAG_COMMIT" ] || \
+             [ "$TAG_TARGET_SHA" != "$HEAD_COMMIT" ]; then
+            echo "::error::Remote release tag target does not match the verified release commit"
+            exit 1
+          fi
+          SIGNATURE_VERIFIED="$(jq -r '.verification.verified' "$TAG_OBJECT_JSON_PATH")"
           if [ "$SIGNATURE_VERIFIED" != "true" ]; then
             echo "::error::Release tag must be an annotated tag with a verified signature"
             exit 1
@@ -448,6 +468,7 @@ jobs:
             fi
           done
 
+          umask 077
           APP_STORE_CONNECT_PRIVATE_KEY_PATH="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
           chmod 0600 "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
@@ -797,6 +818,46 @@ jobs:
             artifacts/Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
             artifacts/Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
             artifacts/SHA256SUMS
+
+          IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Release must remain draft until its exact asset set is verified"
+            exit 1
+          fi
+          EXPECTED_DRAFT_ASSETS="$RUNNER_TEMP/expected-draft-assets.txt"
+          ACTUAL_DRAFT_ASSETS="$RUNNER_TEMP/actual-draft-assets.txt"
+          printf '%s\n' \
+            "Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg" \
+            "Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg" \
+            SHA256SUMS \
+            | LC_ALL=C sort > "$EXPECTED_DRAFT_ASSETS"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "$ACTUAL_DRAFT_ASSETS"
+          if ! cmp "$EXPECTED_DRAFT_ASSETS" "$ACTUAL_DRAFT_ASSETS"; then
+            echo "::error::Draft release must contain exactly the two DMGs and SHA256SUMS"
+            exit 1
+          fi
+
+          DRAFT_ASSET_DIR="$RUNNER_TEMP/draft-assets"
+          mkdir -p "$DRAFT_ASSET_DIR"
+          gh release download "$RELEASE_TAG" --dir "$DRAFT_ASSET_DIR"
+          DRAFT_ASSET_COUNT="$(find "$DRAFT_ASSET_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [ "$DRAFT_ASSET_COUNT" != "3" ]; then
+            echo "::error::Draft release must contain exactly three assets; found $DRAFT_ASSET_COUNT"
+            exit 1
+          fi
+          for asset in \
+            Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
+            Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
+            SHA256SUMS
+          do
+            cmp "artifacts/$asset" "$DRAFT_ASSET_DIR/$asset"
+          done
+          (
+            cd "$DRAFT_ASSET_DIR"
+            shasum -a 256 -c SHA256SUMS
+          )
+          echo "Draft release assets match the verified build output"
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
   notify-homebrew:

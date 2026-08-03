@@ -1,4 +1,14 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -7,6 +17,17 @@ const rustToolchainPath = path.resolve('rust-toolchain.toml');
 
 function workflowSource(): string {
   return readFileSync(workflowPath, 'utf8');
+}
+
+function workflowStepScript(workflow: string, name: string): string {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = workflow.match(
+    new RegExp(
+      `- name: ${escapedName}[\\s\\S]*?\\n        run: \\|\\n([\\s\\S]*?)(?=\\n\\n      - name:)`,
+    ),
+  );
+  if (!match) throw new Error(`Unable to find workflow script for ${name}`);
+  return match[1].replace(/^ {10}/gm, '');
 }
 
 describe('macOS release workflow contract', () => {
@@ -27,6 +48,14 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('ref: ${{ needs.verify.outputs.release_sha }}');
     expect(workflow).toContain('github.event.repository.private');
     expect(workflow).toContain('A public Homebrew release cannot be published from a private repository');
+    expect(workflow).toContain('LOCAL_TAG_OBJECT_SHA="$(git rev-parse "$RELEASE_TAG^{tag}")"');
+    expect(workflow).toContain('[ "$TAG_OBJECT_SHA" != "$LOCAL_TAG_OBJECT_SHA" ]');
+    expect(workflow).toContain(
+      'TAG_TARGET_TYPE="$(jq -r \'.object.type\' "$TAG_OBJECT_JSON_PATH")"',
+    );
+    expect(workflow).toContain('[ "$TAG_TARGET_TYPE" != "commit" ]');
+    expect(workflow).toContain('[ "$TAG_TARGET_SHA" != "$TAG_COMMIT" ]');
+    expect(workflow).toContain('[ "$TAG_TARGET_SHA" != "$HEAD_COMMIT" ]');
   });
 
   it('requires Apple signing and notarization before an artifact is accepted', () => {
@@ -127,6 +156,48 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('API_PRIVATE_KEYS_DIR');
   });
 
+  it('creates the App Store Connect key with mode 600 before the defensive chmod', () => {
+    const workflow = workflowSource();
+    const script = workflowStepScript(workflow, 'Require iOS distribution credentials');
+    const root = mkdtempSync(path.join(tmpdir(), 'psyche-key-mode-'));
+
+    try {
+      expect(script).toContain('umask 077');
+      const fakeBin = path.join(root, 'bin');
+      const fakeChmod = path.join(fakeBin, 'chmod');
+      const githubEnv = path.join(root, 'github-env');
+      mkdirSync(fakeBin);
+      writeFileSync(
+        fakeChmod,
+        `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+      );
+      chmodSync(fakeChmod, 0o755);
+      writeFileSync(githubEnv, '');
+
+      execFileSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          RUNNER_TEMP: root,
+          GITHUB_ENV: githubEnv,
+          APPLE_DISTRIBUTION_CERTIFICATE: 'certificate',
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: 'password',
+          APP_STORE_CONNECT_KEY_ID: 'KEY123',
+          APP_STORE_CONNECT_ISSUER_ID: 'issuer',
+          APP_STORE_CONNECT_PRIVATE_KEY: 'private-key-content',
+          APPLE_TEAM_ID: 'team',
+        },
+        stdio: 'pipe',
+      });
+
+      const keyPath = path.join(root, 'AuthKey_KEY123.p8');
+      expect((statSync(keyPath).mode & 0o777).toString(8)).toBe('600');
+      expect(readFileSync(keyPath, 'utf8')).toBe('private-key-content');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('reuses only an exact existing TestFlight build and uploads only on a distinct absence result', () => {
     const workflow = workflowSource();
 
@@ -151,6 +222,13 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('process.stdout.write(release.body)');
     expect(workflow).toContain('cmp "$RELEASE_NOTES_PATH" "$PUBLISHED_NOTES_PATH"');
     expect(workflow).toContain('Published release assets and notes match the verified build output');
+    expect(workflow).toContain('gh release view "$RELEASE_TAG" --json assets --jq \'.assets[].name\'');
+    expect(workflow).toContain('cmp "$EXPECTED_DRAFT_ASSETS" "$ACTUAL_DRAFT_ASSETS"');
+    expect(workflow).toContain('gh release download "$RELEASE_TAG" --dir "$DRAFT_ASSET_DIR"');
+    expect(workflow).toContain('Draft release assets match the verified build output');
+    expect(workflow.indexOf('Draft release assets match the verified build output')).toBeLessThan(
+      workflow.indexOf('gh release edit "$RELEASE_TAG" --draft=false --latest'),
+    );
   });
 
   it('does not expose release secrets or fall back to repository secrets', () => {
