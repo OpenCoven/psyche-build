@@ -16,6 +16,10 @@ import {
 const temporaryRoots: string[] = [];
 const execFileAsync = promisify(execFile);
 const releaseScript = path.resolve('scripts/release-version.mjs');
+const yamlMarketingVersionDecoy =
+  '    RELEASE_NOTES: |-\n      Example only:\n      MARKETING_VERSION: 9.9.8\n';
+const xcodeMarketingVersionDecoy =
+  '\t\t\t\t/* Example only:\n\t\t\t\tMARKETING_VERSION = 9.9.7;\n\t\t\t\t*/\n';
 
 async function writeFixture(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'psyche-release-version-'));
@@ -51,11 +55,11 @@ async function writeFixture(): Promise<string> {
     ),
     writeFile(
       path.join(iosRoot, 'project.yml'),
-      'name: Psyche\nsettings:\n  base:\n    MARKETING_VERSION: 0.0.5\n    CURRENT_PROJECT_VERSION: 1\n    SWIFT_VERSION: "6.0"\ntargets:\n  PsycheApp:\n    settings:\n      base:\n        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.fixture\n',
+      `name: Psyche\nsettings:\n  base:\n    MARKETING_VERSION: 0.0.5\n    CURRENT_PROJECT_VERSION: 1\n    SWIFT_VERSION: "6.0"\n${yamlMarketingVersionDecoy}targets:\n  PsycheApp:\n    settings:\n      base:\n        PRODUCT_BUNDLE_IDENTIFIER: build.psyche.fixture\n`,
     ),
     writeFile(
       path.join(xcodeProjectRoot, 'project.pbxproj'),
-      '// !$*UTF8*$!\n{\n\tobjects = {\n\t\tDEBUG /* Debug */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;\n\t\t\t};\n\t\t};\n\t\tRELEASE /* Release */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";\n\t\t\t};\n\t\t};\n\t};\n}\n',
+      `// !$*UTF8*$!\n{\n\tobjects = {\n\t\tDEBUG /* Debug */ = {\n\t\t\tbuildSettings = {\n${xcodeMarketingVersionDecoy}\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;\n\t\t\t};\n\t\t};\n\t\tRELEASE /* Release */ = {\n\t\t\tbuildSettings = {\n\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.3;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";\n\t\t\t};\n\t\t};\n\t};\n}\n`,
     ),
   ]);
 
@@ -90,6 +94,15 @@ describe('release version contract', () => {
     expect(() => assertReleaseVersion(root, 'v0.0.1')).toThrow(
       /package\.json \(0\.0\.11\)[\s\S]*native\/macos\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)/,
     );
+  });
+
+  it('ignores marketing-version examples in YAML blocks and Xcode comments', async () => {
+    const root = await writeFixture();
+
+    expect(readReleaseVersions(root)).toMatchObject({
+      iosProjectYml: '0.0.5',
+      iosXcodeProject: '0.0.3',
+    });
   });
 
   it('updates every release manifest without changing unrelated values', async () => {
@@ -129,12 +142,14 @@ describe('release version contract', () => {
       '    MARKETING_VERSION: 0.0.1\n    CURRENT_PROJECT_VERSION: 1\n    SWIFT_VERSION: "6.0"',
     );
     expect(iosProjectYml).toContain('PRODUCT_BUNDLE_IDENTIFIER: build.psyche.fixture');
+    expect(iosProjectYml).toContain(yamlMarketingVersionDecoy);
     expect(iosXcodeProject).toContain(
       '\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.1;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = build.psyche.fixture;',
     );
     expect(iosXcodeProject).toContain(
       '\t\t\t\tCURRENT_PROJECT_VERSION = 1;\n\t\t\t\tMARKETING_VERSION = 0.0.1;\n\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-O";',
     );
+    expect(iosXcodeProject).toContain(xcodeMarketingVersionDecoy);
   });
 
   it('rejects generated Xcode projects without consistent marketing versions', async () => {

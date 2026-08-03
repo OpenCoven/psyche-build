@@ -27,11 +27,6 @@ const labels = {
   iosXcodeProject: relativePaths.iosXcodeProject,
 };
 
-const yamlMarketingVersion =
-  /^[ \t]*MARKETING_VERSION[ \t]*:[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#\r\n]+))[ \t]*(?:#.*)?$/gm;
-const xcodeMarketingVersion =
-  /^[ \t]*MARKETING_VERSION[ \t]*=[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;\s\r\n]+))[ \t]*;[ \t]*(?:\/\*.*\*\/[ \t]*)?$/gm;
-
 export function normalizeReleaseTag(value) {
   const candidate = value.startsWith('v') ? value.slice(1) : value;
   if (/^\d+\.\d+\.\d+-/.test(candidate)) {
@@ -77,8 +72,156 @@ function readCargoLockVersion(contents, filePath) {
   return match[1];
 }
 
-function readMarketingVersion(contents, filePath, pattern) {
-  const versions = [...contents.matchAll(pattern)].map((match) => match[1] ?? match[2] ?? match[3]);
+function assignmentFromMatch(match, lineOffset) {
+  const token = match[2];
+  const quoted = (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith("'") && token.endsWith("'"));
+  return {
+    value: quoted ? token.slice(1, -1) : token,
+    start: lineOffset + match[1].length,
+    end: lineOffset + match[1].length + token.length,
+  };
+}
+
+function findYamlMarketingVersionAssignments(contents) {
+  const assignments = [];
+  let blockScalarIndent = null;
+  let lineOffset = 0;
+
+  for (const lineWithEnding of contents.match(/.*(?:\r\n|\n|$)/g) ?? []) {
+    if (lineWithEnding.length === 0) continue;
+    const line = lineWithEnding.replace(/\r?\n$/, '');
+    const indentation = line.match(/^[ \t]*/)[0].length;
+    const blank = /^[ \t]*$/.test(line);
+
+    if (blockScalarIndent !== null) {
+      if (blank || indentation > blockScalarIndent) {
+        lineOffset += lineWithEnding.length;
+        continue;
+      }
+      blockScalarIndent = null;
+    }
+
+    const blockScalar = line.match(
+      /^([ \t]*)(?:-[ \t]+)?[^#\r\n][^:\r\n]*:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#.*)?$/,
+    );
+    if (blockScalar) {
+      blockScalarIndent = blockScalar[1].length;
+      lineOffset += lineWithEnding.length;
+      continue;
+    }
+
+    const assignment = line.match(
+      /^([ \t]*MARKETING_VERSION[ \t]*:[ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^\s#\r\n]+)([ \t]*(?:#.*)?)$/,
+    );
+    if (assignment) assignments.push(assignmentFromMatch(assignment, lineOffset));
+    lineOffset += lineWithEnding.length;
+  }
+
+  return assignments;
+}
+
+function maskPbxComments(contents) {
+  const masked = [...contents];
+  let state = 'normal';
+  let escaped = false;
+
+  for (let index = 0; index < contents.length; index += 1) {
+    const character = contents[index];
+    const next = contents[index + 1];
+
+    if (state === 'block') {
+      if (character === '*' && next === '/') {
+        masked[index] = ' ';
+        masked[index + 1] = ' ';
+        index += 1;
+        state = 'normal';
+      } else if (character !== '\n' && character !== '\r') {
+        masked[index] = ' ';
+      }
+      continue;
+    }
+    if (state === 'line') {
+      if (character === '\n' || character === '\r') state = 'normal';
+      else masked[index] = ' ';
+      continue;
+    }
+    if (state === 'string') {
+      if (!escaped && character === '"') state = 'normal';
+      escaped = !escaped && character === '\\';
+      continue;
+    }
+    if (character === '"') {
+      state = 'string';
+      escaped = false;
+    } else if (character === '/' && next === '*') {
+      masked[index] = ' ';
+      masked[index + 1] = ' ';
+      index += 1;
+      state = 'block';
+    } else if (character === '/' && next === '/') {
+      masked[index] = ' ';
+      masked[index + 1] = ' ';
+      index += 1;
+      state = 'line';
+    }
+  }
+
+  return masked.join('');
+}
+
+function findXcodeMarketingVersionAssignments(contents) {
+  const assignments = [];
+  const masked = maskPbxComments(contents);
+  let buildSettingsDepth = null;
+  let braceDepth = 0;
+  let lineOffset = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (const lineWithEnding of masked.match(/.*(?:\r\n|\n|$)/g) ?? []) {
+    if (lineWithEnding.length === 0) continue;
+    const line = lineWithEnding.replace(/\r?\n$/, '');
+
+    if (buildSettingsDepth !== null && !inString) {
+      const assignment = line.match(
+        /^([ \t]*MARKETING_VERSION[ \t]*=[ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^;\s\r\n]+)([ \t]*;[ \t]*)$/,
+      );
+      if (assignment) assignments.push(assignmentFromMatch(assignment, lineOffset));
+    }
+
+    const buildSettings = line.match(/^[ \t]*buildSettings[ \t]*=[ \t]*\{/);
+    const openingIndex = buildSettings
+      ? buildSettings.index + buildSettings[0].lastIndexOf('{')
+      : -1;
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      if (inString) {
+        if (!escaped && character === '"') inString = false;
+        escaped = !escaped && character === '\\';
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        escaped = false;
+      } else if (character === '{') {
+        braceDepth += 1;
+        if (index === openingIndex) buildSettingsDepth = braceDepth;
+      } else if (character === '}') {
+        braceDepth -= 1;
+        if (buildSettingsDepth !== null && braceDepth < buildSettingsDepth) {
+          buildSettingsDepth = null;
+        }
+      }
+    }
+    lineOffset += lineWithEnding.length;
+  }
+
+  return assignments;
+}
+
+function readMarketingVersion(assignments, filePath) {
+  const versions = assignments.map(({ value }) => value);
   if (versions.length === 0) {
     throw new Error(`${filePath} does not contain MARKETING_VERSION`);
   }
@@ -102,14 +245,12 @@ export function readReleaseVersions(root = process.cwd()) {
     cargoLock: readCargoLockVersion(readFileSync(paths.cargoLock, 'utf8'), paths.cargoLock),
     tauriConfig: readJsonVersion(paths.tauriConfig),
     iosProjectYml: readMarketingVersion(
-      readFileSync(paths.iosProjectYml, 'utf8'),
+      findYamlMarketingVersionAssignments(readFileSync(paths.iosProjectYml, 'utf8')),
       paths.iosProjectYml,
-      yamlMarketingVersion,
     ),
     iosXcodeProject: readMarketingVersion(
-      readFileSync(paths.iosXcodeProject, 'utf8'),
+      findXcodeMarketingVersionAssignments(readFileSync(paths.iosXcodeProject, 'utf8')),
       paths.iosXcodeProject,
-      xcodeMarketingVersion,
     ),
   };
 }
@@ -157,20 +298,18 @@ function replaceCargoLockVersion(contents, version, filePath) {
   return contents.replace(packageVersion, `$1${version}$2`);
 }
 
-function replaceMarketingVersions(contents, version, filePath, pattern, replacementPattern) {
-  readMarketingVersion(contents, filePath, pattern);
-  return contents.replace(
-    replacementPattern,
-    (_match, prefix, doubleQuoted, singleQuoted, bare, suffix) => {
-      const replacement =
-        doubleQuoted !== undefined
-          ? `"${version}"`
-          : singleQuoted !== undefined
-            ? `'${version}'`
-            : version;
-      return `${prefix}${replacement}${suffix}`;
-    },
-  );
+function replaceMarketingVersions(contents, version, filePath, findAssignments) {
+  const assignments = findAssignments(contents);
+  readMarketingVersion(assignments, filePath);
+  return assignments.reduceRight((updated, { start, end }) => {
+    const token = contents.slice(start, end);
+    const replacement = token.startsWith('"')
+      ? `"${version}"`
+      : token.startsWith("'")
+        ? `'${version}'`
+        : version;
+    return `${updated.slice(0, start)}${replacement}${updated.slice(end)}`;
+  }, contents);
 }
 
 export async function setReleaseVersion(root, value) {
@@ -200,8 +339,7 @@ export async function setReleaseVersion(root, value) {
         contents.iosProjectYml,
         version,
         paths.iosProjectYml,
-        yamlMarketingVersion,
-        /(^[ \t]*MARKETING_VERSION[ \t]*:[ \t]*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#\r\n]+))([ \t]*(?:#.*)?$)/gm,
+        findYamlMarketingVersionAssignments,
       ),
     ),
     writeFile(
@@ -210,8 +348,7 @@ export async function setReleaseVersion(root, value) {
         contents.iosXcodeProject,
         version,
         paths.iosXcodeProject,
-        xcodeMarketingVersion,
-        /(^[ \t]*MARKETING_VERSION[ \t]*=[ \t]*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;\s\r\n]+))([ \t]*;[ \t]*(?:\/\*.*\*\/[ \t]*)?$)/gm,
+        findXcodeMarketingVersionAssignments,
       ),
     ),
   ]);
