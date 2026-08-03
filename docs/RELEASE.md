@@ -99,8 +99,13 @@ Generate and inspect the curated notes sourced from the single `0.0.1`
 ```sh
 node scripts/release-notes.mjs --github 0.0.1 > /tmp/psyche-v0.0.1-notes.md
 node scripts/release-notes.mjs --testflight 0.0.1 > /tmp/psyche-v0.0.1-testflight.txt
-test "$(wc -c < /tmp/psyche-v0.0.1-testflight.txt | tr -d ' ')" -le 4000
 ```
+
+The generated TestFlight text is input, not the final localization. The client
+uses `normalizeTestFlightNotes`: it removes existing `Source commit:` lines,
+trims the curated text, and appends exactly one
+`Source commit: <40-hex release SHA>` line. It enforces the 4,000 Unicode code
+points limit on that final localization after provenance is appended.
 
 ## Final audit, visibility, and signed tag
 
@@ -119,6 +124,16 @@ Resolve the unchanged reviewed commit and create the signed annotated tag:
 git fetch origin main --tags
 release_sha="$(git rev-parse origin/main)"
 pnpm release:check -- v0.0.1
+node --input-type=module - "$release_sha" /tmp/psyche-v0.0.1-testflight.txt <<'NODE'
+import { readFile } from 'node:fs/promises';
+import { normalizeTestFlightNotes } from './scripts/app-store-connect.mjs';
+
+const normalized = normalizeTestFlightNotes(
+  await readFile(process.argv[3], 'utf8'),
+  process.argv[2],
+);
+console.log(`Final TestFlight localization: ${[...normalized].length} Unicode code points`);
+NODE
 git tag -s v0.0.1 "$release_sha" -m "Psyche Build v0.0.1"
 git verify-tag v0.0.1
 test "$(git rev-list -n 1 v0.0.1)" = "$release_sha"
@@ -143,12 +158,24 @@ the failure is transient and manually dispatch the existing immutable tag from
 gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1
 ```
 
-The retry rebuilds the exact tag. Before upload, it checks App Store Connect for
-the exact bundle/version/build and release-SHA provenance. A matching VALID
-build is reused without uploading a duplicate; otherwise the workflow validates
-and uploads the freshly exported IPA. A published GitHub Release is reused only
-when its three artifacts and curated notes byte-match the verified output; a
-draft may have its assets replaced before it is reverified and published.
+The retry rebuilds the exact tag. Its App Store Connect preflight is
+fail-closed:
+
+- Only exit status `2`, caused by an absent exact iOS prerelease version or an
+  absent exact build, permits the workflow to validate and upload the freshly
+  exported IPA.
+- An existing `0.0.1 (1)` is reused without upload only when its identity is
+  exact, its processing state is `VALID`, and it has exactly one `en-US`
+  beta-build localization containing exactly one line
+  `Source commit: <40-hex release SHA>` that matches the immutable tag commit.
+- Every other result is fatal: any non-VALID build (including `PROCESSING`,
+  `FAILED`, or `INVALID`), a duplicate or malformed identity result, zero or
+  multiple localizations for an existing build, or a provenance mismatch. These
+  states must never fall through to upload or build 2.
+
+A published GitHub Release is reused only when its three artifacts and curated
+notes byte-match the verified output; a draft may have its assets replaced
+before it is reverified and published.
 
 App Store Connect processing has a hard 45-minute bound:
 

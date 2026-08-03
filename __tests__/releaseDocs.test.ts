@@ -9,6 +9,25 @@ const releaseDocs = [
   'native/ios/README.md',
 ] as const;
 
+const generatedOrDependencyDirectories = new Set([
+  '.build',
+  '.git',
+  '.psyche',
+  '.worktrees',
+  '__fixtures__',
+  'client',
+  'coverage',
+  'dist',
+  'fixtures',
+  'node_modules',
+  'target',
+]);
+
+const historicalDocDirectories = new Set([
+  path.join('docs', 'superpowers', 'plans'),
+  path.join('docs', 'superpowers', 'specs'),
+]);
+
 async function readReleaseDocs(): Promise<Record<(typeof releaseDocs)[number], string>> {
   return Object.fromEntries(
     await Promise.all(
@@ -17,26 +36,50 @@ async function readReleaseDocs(): Promise<Record<(typeof releaseDocs)[number], s
   ) as Record<(typeof releaseDocs)[number], string>;
 }
 
-async function listActiveDocFiles(directory = 'docs'): Promise<string[]> {
+function isActiveDocumentationFile(filePath: string): boolean {
+  if (path.extname(filePath) === '.md') return true;
+  return filePath.startsWith(`docs${path.sep}`) && ['.js', '.svg'].includes(path.extname(filePath));
+}
+
+// Active documentation means every Markdown file in the repository plus the
+// JS/SVG sources that render the docs site. Historical plans/specs, generated
+// output and dependencies are skipped by directory; non-document test/fixture
+// sources (including this contract test) are excluded by the file-type policy.
+async function listActiveDocFiles(directory = '.'): Promise<string[]> {
   const files: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const filePath = path.join(directory, entry.name);
+    const filePath = directory === '.' ? entry.name : path.join(directory, entry.name);
     if (entry.isDirectory()) {
       if (
-        filePath === path.join('docs', 'superpowers', 'plans') ||
-        filePath === path.join('docs', 'superpowers', 'specs') ||
-        entry.name === 'node_modules' ||
-        entry.name === 'dist' ||
-        entry.name === 'client'
+        historicalDocDirectories.has(filePath) ||
+        generatedOrDependencyDirectories.has(entry.name)
       ) {
         continue;
       }
       files.push(...(await listActiveDocFiles(filePath)));
-    } else {
+    } else if (entry.isFile() && isActiveDocumentationFile(filePath)) {
       files.push(filePath);
     }
   }
-  return files;
+  return files.sort();
+}
+
+function releaseEnvironmentSecretNames(runbook: string): string[] {
+  const lines = runbook.split(/\r?\n/);
+  const headers = lines.reduce<number[]>(
+    (indexes, line, index) => (line === '| Secret | Purpose |' ? [...indexes, index] : indexes),
+    [],
+  );
+  expect(headers).toHaveLength(1);
+
+  const rows: string[] = [];
+  for (const line of lines.slice(headers[0] + 2)) {
+    if (!line.startsWith('|')) break;
+    const match = line.match(/^\| `([A-Z0-9_]+)` \|/);
+    expect(match, `Malformed release-environment secret row: ${line}`).not.toBeNull();
+    rows.push(match![1]);
+  }
+  return rows.sort();
 }
 
 describe('v0.0.1 release documentation contract', () => {
@@ -81,7 +124,7 @@ describe('v0.0.1 release documentation contract', () => {
       'HOMEBREW_TAP_TOKEN',
     ];
 
-    for (const secret of requiredSecrets) expect(runbook).toContain(`\`${secret}\``);
+    expect(releaseEnvironmentSecretNames(runbook)).toEqual(requiredSecrets.sort());
     expect(runbook).toMatch(/protected GitHub `release` environment/i);
     expect(runbook).toMatch(/no\s+repository-secret fallback/i);
     expect(runbook).toMatch(/secret audit[\s\S]*public[\s\S]*tag/i);
@@ -102,6 +145,41 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('gh workflow run Release');
   });
 
+  it('allows upload only for an absent exact version or build and fails every unsafe reuse state', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(
+      /Only exit status `2`[\s\S]{0,240}absent exact iOS prerelease version[\s\S]{0,120}absent exact build/i,
+    );
+    expect(runbook).toMatch(
+      /existing `0\.0\.1 \(1\)`[\s\S]{0,300}`VALID`[\s\S]{0,300}exactly one `en-US`/i,
+    );
+    expect(runbook).toMatch(/exactly one line\s+`Source commit: <40-hex release SHA>`/i);
+    for (const fatalState of [
+      /non-VALID/,
+      /FAILED/,
+      /INVALID/,
+      /duplicate or malformed identity/,
+      /zero or\s+multiple localizations/,
+      /provenance mismatch/,
+    ]) {
+      expect(runbook).toMatch(fatalState);
+    }
+    expect(runbook).toMatch(/must never fall through to upload or build 2/i);
+  });
+
+  it('documents normalization and the final TestFlight localization limit', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toContain('normalizeTestFlightNotes');
+    expect(runbook).toMatch(
+      /appends exactly one\s+`Source commit: <40-hex release SHA>` line/i,
+    );
+    expect(runbook).toMatch(/4,000 Unicode code\s+points/i);
+    expect(runbook).toMatch(/final localization/i);
+    expect(runbook).not.toContain('wc -c');
+  });
+
   it('documents source-generated iOS provenance and conditional TestFlight availability', async () => {
     const iosReadme = await readFile('native/ios/README.md', 'utf8');
 
@@ -113,8 +191,24 @@ describe('v0.0.1 release documentation contract', () => {
   });
 
   it('contains no stale release identity or unsupported install claim in active docs', async () => {
-    const activeFiles = ['README.md', 'native/ios/README.md', ...(await listActiveDocFiles())];
+    const activeFiles = await listActiveDocFiles();
     const staleClaims: string[] = [];
+
+    expect(activeFiles).toEqual(
+      expect.arrayContaining([
+        'CHANGELOG.md',
+        'CONTRIBUTING.md',
+        'README.md',
+        path.join('__tests__', 'README.md'),
+        path.join('native', 'ios', 'README.md'),
+        path.join('protocol-fixtures', 'README.md'),
+        path.join('docs', 'src', 'hero.js'),
+        path.join('docs', 'public', 'og.svg'),
+      ]),
+    );
+    expect(
+      activeFiles.some((filePath) => filePath.startsWith(path.join('docs', 'superpowers'))),
+    ).toBe(false);
 
     for (const filePath of activeFiles) {
       const contents = await readFile(filePath, 'utf8');
