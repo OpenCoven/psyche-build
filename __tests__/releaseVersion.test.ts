@@ -1,5 +1,6 @@
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -56,6 +57,14 @@ afterEach(async () => {
 });
 
 describe('release version contract', () => {
+  it('ships the release runbook referenced by the packaged README', () => {
+    const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
+      files?: string[];
+    };
+
+    expect(packageJson.files).toContain('docs/RELEASE.md');
+  });
+
   it('normalizes stable release tags and rejects unsupported forms', () => {
     expect(normalizeReleaseTag('v0.1.0')).toBe('0.1.0');
     expect(normalizeReleaseTag('0.1.0')).toBe('0.1.0');
