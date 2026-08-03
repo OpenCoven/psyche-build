@@ -99,7 +99,11 @@ An exhausted window and an already-expired one both end closed, so that
 inference tells a user who merely idled that someone is guessing at their code.
 `consume()` remains as a boolean view of `attempt()`.
 
-### 3a. Decoded payloads must be validated, not just typed
+Any future short-secret challenge needs the same treatment. A long random token
+— the 256-bit daemon token — does not need an attempt cap, but still gets the
+constant-time compare, because it is free.
+
+### 4. Decoded payloads must be validated, not just typed
 
 `Buffer.from(str, 'base64')` never throws: it skips characters outside the
 alphabet and tolerates wrong padding. `Buffer.from('!!!!', 'base64')` is an
@@ -113,11 +117,7 @@ never learns its frame was malformed. Use `decodeBase64Payload` from
 `src/utils/base64.ts`, which validates canonical RFC 4648 base64 first and
 returns `null` rather than a mangled buffer.
 
-Any future short-secret challenge needs the same treatment. A long random token
-— the 256-bit daemon token — does not need an attempt cap, but still gets the
-constant-time compare, because it is free.
-
-### 4. A single frame must never be able to stop the server
+### 5. A single frame must never be able to stop the server
 
 Three distinct crash routes, all of which were reachable:
 
@@ -133,7 +133,7 @@ Three distinct crash routes, all of which were reachable:
   produce an error frame, not an exception. `panes.attach` with no `id` used to
   be a one-frame denial of service.
 
-### 5. Resources a client controls are bounded
+### 6. Resources a client controls are bounded
 
 - `maxPayload` is 1 MiB on both servers (`ws` defaults to 100 MB, which an
   unauthenticated peer can send repeatedly to exhaust the heap).
@@ -144,7 +144,7 @@ Three distinct crash routes, all of which were reachable:
 - A connection registers **one** `output` listener on the shared `TmuxControl`
   emitter and fans out internally, rather than one per attached stream.
 
-### 6. Destructive git operations are not remotely reachable
+### 7. Destructive git operations are not remotely reachable
 
 `killBridgePane` deliberately leaves the worktree and branch on disk and
 returns them, so a remote client cannot destroy uncommitted work as a side
