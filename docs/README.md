@@ -24,7 +24,6 @@ npm run preview
 - Polished public docs layout for psyche
 - psyche install, workflow, configuration, hook, and troubleshooting pages
 - Agent catalog and keyboard shortcut reference
-- Cloudflare Workers deployment config
 
 ## Structure
 
