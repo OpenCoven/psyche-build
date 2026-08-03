@@ -52,6 +52,14 @@ describe('macOS release workflow contract', () => {
     expect(workflow).not.toMatch(/^\s+cache:\s*pnpm\s*$/gm);
   });
 
+  it('documents the exact download-artifact release behind its immutable pin', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).toContain(
+      'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1',
+    );
+  });
+
   it('builds the exact stable tag on native Apple Silicon and Intel runners', () => {
     const workflow = workflowSource();
 

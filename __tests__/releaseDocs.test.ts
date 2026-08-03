@@ -151,6 +151,23 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toMatch(/secret audit[\s\S]*public[\s\S]*tag/i);
   });
 
+  it('creates the release environment only after publication and permits immutable-tag recovery', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const publicIndex = runbook.indexOf('-f visibility=public');
+    const environmentIndex = runbook.indexOf('environments/release --input');
+    const secretIndex = runbook.indexOf(
+      'gh secret set --env release --repo OpenCoven/psyche-build',
+    );
+
+    expect(publicIndex).toBeGreaterThan(-1);
+    expect(environmentIndex).toBeGreaterThan(publicIndex);
+    expect(secretIndex).toBeGreaterThan(environmentIndex);
+    expect(runbook).toContain('custom_branch_policies: true');
+    expect(runbook).toContain('-f name=main -f type=branch');
+    expect(runbook).toContain("-f name='v*' -f type=tag");
+    expect(runbook).not.toContain('protected-branch deployment policy');
+  });
+
   it('documents the executable release and recovery contracts', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
