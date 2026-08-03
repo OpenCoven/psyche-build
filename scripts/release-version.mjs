@@ -13,6 +13,8 @@ const relativePaths = {
   cargoToml: 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
   cargoLock: 'native/macos/psyche-build-tauri/src-tauri/Cargo.lock',
   tauriConfig: 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+  iosProjectYml: 'native/ios/project.yml',
+  iosXcodeProject: 'native/ios/Psyche.xcodeproj/project.pbxproj',
 };
 
 const labels = {
@@ -21,6 +23,8 @@ const labels = {
   cargoToml: relativePaths.cargoToml,
   cargoLock: relativePaths.cargoLock,
   tauriConfig: relativePaths.tauriConfig,
+  iosProjectYml: relativePaths.iosProjectYml,
+  iosXcodeProject: relativePaths.iosXcodeProject,
 };
 
 export function normalizeReleaseTag(value) {
@@ -68,6 +72,168 @@ function readCargoLockVersion(contents, filePath) {
   return match[1];
 }
 
+function assignmentFromMatch(match, lineOffset) {
+  const token = match[2];
+  const quoted = (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith("'") && token.endsWith("'"));
+  return {
+    value: quoted ? token.slice(1, -1) : token,
+    start: lineOffset + match[1].length,
+    end: lineOffset + match[1].length + token.length,
+  };
+}
+
+function findYamlMarketingVersionAssignments(contents) {
+  const assignments = [];
+  let blockScalarIndent = null;
+  let lineOffset = 0;
+
+  for (const lineWithEnding of contents.match(/.*(?:\r\n|\n|$)/g) ?? []) {
+    if (lineWithEnding.length === 0) continue;
+    const line = lineWithEnding.replace(/\r?\n$/, '');
+    const indentation = line.match(/^[ \t]*/)[0].length;
+    const blank = /^[ \t]*$/.test(line);
+
+    if (blockScalarIndent !== null) {
+      if (blank || indentation > blockScalarIndent) {
+        lineOffset += lineWithEnding.length;
+        continue;
+      }
+      blockScalarIndent = null;
+    }
+
+    const blockScalar = line.match(
+      /^([ \t]*)(?:-[ \t]+)?[^#\r\n][^:\r\n]*:[ \t]*[|>](?:[1-9][+-]?|[+-][1-9]?)?[ \t]*(?:#.*)?$/,
+    );
+    if (blockScalar) {
+      blockScalarIndent = blockScalar[1].length;
+      lineOffset += lineWithEnding.length;
+      continue;
+    }
+
+    const assignment = line.match(
+      /^([ \t]*MARKETING_VERSION[ \t]*:[ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^\s#\r\n]+)([ \t]*(?:#.*)?)$/,
+    );
+    if (assignment) assignments.push(assignmentFromMatch(assignment, lineOffset));
+    lineOffset += lineWithEnding.length;
+  }
+
+  return assignments;
+}
+
+function maskPbxComments(contents) {
+  const masked = [...contents];
+  let state = 'normal';
+  let escaped = false;
+
+  for (let index = 0; index < contents.length; index += 1) {
+    const character = contents[index];
+    const next = contents[index + 1];
+
+    if (state === 'block') {
+      if (character === '*' && next === '/') {
+        masked[index] = ' ';
+        masked[index + 1] = ' ';
+        index += 1;
+        state = 'normal';
+      } else if (character !== '\n' && character !== '\r') {
+        masked[index] = ' ';
+      }
+      continue;
+    }
+    if (state === 'line') {
+      if (character === '\n' || character === '\r') state = 'normal';
+      else masked[index] = ' ';
+      continue;
+    }
+    if (state === 'string') {
+      if (!escaped && character === '"') state = 'normal';
+      escaped = !escaped && character === '\\';
+      continue;
+    }
+    if (character === '"') {
+      state = 'string';
+      escaped = false;
+    } else if (character === '/' && next === '*') {
+      masked[index] = ' ';
+      masked[index + 1] = ' ';
+      index += 1;
+      state = 'block';
+    } else if (character === '/' && next === '/') {
+      masked[index] = ' ';
+      masked[index + 1] = ' ';
+      index += 1;
+      state = 'line';
+    }
+  }
+
+  return masked.join('');
+}
+
+function findXcodeMarketingVersionAssignments(contents) {
+  const assignments = [];
+  const masked = maskPbxComments(contents);
+  let buildSettingsDepth = null;
+  let braceDepth = 0;
+  let lineOffset = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (const lineWithEnding of masked.match(/.*(?:\r\n|\n|$)/g) ?? []) {
+    if (lineWithEnding.length === 0) continue;
+    const line = lineWithEnding.replace(/\r?\n$/, '');
+
+    if (buildSettingsDepth !== null && !inString) {
+      const assignment = line.match(
+        /^([ \t]*MARKETING_VERSION[ \t]*=[ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^;\s\r\n]+)([ \t]*;[ \t]*)$/,
+      );
+      if (assignment) assignments.push(assignmentFromMatch(assignment, lineOffset));
+    }
+
+    const buildSettings = line.match(/^[ \t]*buildSettings[ \t]*=[ \t]*\{/);
+    const openingIndex = buildSettings
+      ? buildSettings.index + buildSettings[0].lastIndexOf('{')
+      : -1;
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      if (inString) {
+        if (!escaped && character === '"') inString = false;
+        escaped = !escaped && character === '\\';
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        escaped = false;
+      } else if (character === '{') {
+        braceDepth += 1;
+        if (index === openingIndex) buildSettingsDepth = braceDepth;
+      } else if (character === '}') {
+        braceDepth -= 1;
+        if (buildSettingsDepth !== null && braceDepth < buildSettingsDepth) {
+          buildSettingsDepth = null;
+        }
+      }
+    }
+    lineOffset += lineWithEnding.length;
+  }
+
+  return assignments;
+}
+
+function readMarketingVersion(assignments, filePath) {
+  const versions = assignments.map(({ value }) => value);
+  if (versions.length === 0) {
+    throw new Error(`${filePath} does not contain MARKETING_VERSION`);
+  }
+  const uniqueVersions = [...new Set(versions)];
+  if (uniqueVersions.length > 1) {
+    throw new Error(
+      `${filePath} contains inconsistent MARKETING_VERSION values: ${uniqueVersions.join(', ')}`,
+    );
+  }
+  return uniqueVersions[0];
+}
+
 export function readReleaseVersions(root = process.cwd()) {
   const paths = Object.fromEntries(
     Object.entries(relativePaths).map(([key, relativePath]) => [key, path.join(root, relativePath)]),
@@ -78,6 +244,14 @@ export function readReleaseVersions(root = process.cwd()) {
     cargoToml: readCargoPackageVersion(readFileSync(paths.cargoToml, 'utf8'), paths.cargoToml),
     cargoLock: readCargoLockVersion(readFileSync(paths.cargoLock, 'utf8'), paths.cargoLock),
     tauriConfig: readJsonVersion(paths.tauriConfig),
+    iosProjectYml: readMarketingVersion(
+      findYamlMarketingVersionAssignments(readFileSync(paths.iosProjectYml, 'utf8')),
+      paths.iosProjectYml,
+    ),
+    iosXcodeProject: readMarketingVersion(
+      findXcodeMarketingVersionAssignments(readFileSync(paths.iosXcodeProject, 'utf8')),
+      paths.iosXcodeProject,
+    ),
   };
 }
 
@@ -124,6 +298,20 @@ function replaceCargoLockVersion(contents, version, filePath) {
   return contents.replace(packageVersion, `$1${version}$2`);
 }
 
+function replaceMarketingVersions(contents, version, filePath, findAssignments) {
+  const assignments = findAssignments(contents);
+  readMarketingVersion(assignments, filePath);
+  return assignments.reduceRight((updated, { start, end }) => {
+    const token = contents.slice(start, end);
+    const replacement = token.startsWith('"')
+      ? `"${version}"`
+      : token.startsWith("'")
+        ? `'${version}'`
+        : version;
+    return `${updated.slice(0, start)}${replacement}${updated.slice(end)}`;
+  }, contents);
+}
+
 export async function setReleaseVersion(root, value) {
   const version = normalizeReleaseTag(value);
   const paths = Object.fromEntries(
@@ -132,20 +320,29 @@ export async function setReleaseVersion(root, value) {
   const contents = Object.fromEntries(
     Object.entries(paths).map(([key, filePath]) => [key, readFileSync(filePath, 'utf8')]),
   );
+  const nextContents = {
+    packageJson: replaceJsonVersion(contents.packageJson, version),
+    nativePackageJson: replaceJsonVersion(contents.nativePackageJson, version),
+    cargoToml: replaceCargoPackageVersion(contents.cargoToml, version, paths.cargoToml),
+    cargoLock: replaceCargoLockVersion(contents.cargoLock, version, paths.cargoLock),
+    tauriConfig: replaceJsonVersion(contents.tauriConfig, version),
+    iosProjectYml: replaceMarketingVersions(
+      contents.iosProjectYml,
+      version,
+      paths.iosProjectYml,
+      findYamlMarketingVersionAssignments,
+    ),
+    iosXcodeProject: replaceMarketingVersions(
+      contents.iosXcodeProject,
+      version,
+      paths.iosXcodeProject,
+      findXcodeMarketingVersionAssignments,
+    ),
+  };
 
-  await Promise.all([
-    writeFile(paths.packageJson, replaceJsonVersion(contents.packageJson, version)),
-    writeFile(paths.nativePackageJson, replaceJsonVersion(contents.nativePackageJson, version)),
-    writeFile(paths.tauriConfig, replaceJsonVersion(contents.tauriConfig, version)),
-    writeFile(
-      paths.cargoToml,
-      replaceCargoPackageVersion(contents.cargoToml, version, paths.cargoToml),
-    ),
-    writeFile(
-      paths.cargoLock,
-      replaceCargoLockVersion(contents.cargoLock, version, paths.cargoLock),
-    ),
-  ]);
+  await Promise.all(
+    Object.entries(paths).map(([key, filePath]) => writeFile(filePath, nextContents[key])),
+  );
   return version;
 }
 

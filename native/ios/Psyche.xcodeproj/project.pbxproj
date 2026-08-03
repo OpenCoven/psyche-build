@@ -321,7 +321,17 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					74A409596775FB76C108C60D = {
+						ProvisioningStyle = Automatic;
 						TestTargetID = 8ADE4C2F5910D2DE934CC66D;
+					};
+					7BB8397E93E6CC7E68808C4A = {
+						ProvisioningStyle = Automatic;
+					};
+					8ADE4C2F5910D2DE934CC66D = {
+						ProvisioningStyle = Automatic;
+					};
+					ECF6C642C37AA9953E6714DD = {
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -412,16 +422,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				INFOPLIST_KEY_CFBundleDisplayName = Psyche;
-				INFOPLIST_KEY_NSBonjourServices = (
-					_psyche._tcp,
-				);
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Psyche uses your local network to discover and connect to your paired coding host.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PsycheApp/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios";
+				PRODUCT_NAME = "Psyche Build";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -460,7 +468,9 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -480,6 +490,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.0.1;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -502,7 +513,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.core.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.coretests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -513,16 +524,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				INFOPLIST_KEY_CFBundleDisplayName = Psyche;
-				INFOPLIST_KEY_NSBonjourServices = (
-					_psyche._tcp,
-				);
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Psyche uses your local network to discover and connect to your paired coding host.";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PsycheApp/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios";
+				PRODUCT_NAME = "Psyche Build";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -537,7 +546,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.uitests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = PsycheApp;
@@ -577,7 +586,9 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -591,6 +602,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.0.1;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -612,7 +624,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.core.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.coretests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -632,7 +644,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.core;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.core";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -654,7 +666,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.core;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.core";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -671,7 +683,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = build.psyche.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.uitests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = PsycheApp;

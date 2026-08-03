@@ -15,7 +15,7 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -25,6 +25,9 @@ jobs:
   verify:
     name: Verify release source
     runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     outputs:
       release_tag: ${{ steps.release.outputs.tag }}
       release_version: ${{ steps.release.outputs.version }}
@@ -82,22 +85,44 @@ jobs:
         run: |
           set -euo pipefail
           REF_ENDPOINT="repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
-          TAG_OBJECT_TYPE="$(gh api "$REF_ENDPOINT" --jq '.object.type')"
+          REF_JSON_PATH="$RUNNER_TEMP/release-tag-ref.json"
+          gh api "$REF_ENDPOINT" > "$REF_JSON_PATH"
+          TAG_OBJECT_TYPE="$(jq -r '.object.type' "$REF_JSON_PATH")"
           if [ "$TAG_OBJECT_TYPE" != "tag" ]; then
             echo "::error::Release tag must be an annotated tag with a verified signature"
             exit 1
           fi
-          TAG_OBJECT_SHA="$(gh api "$REF_ENDPOINT" --jq '.object.sha')"
-          SIGNATURE_VERIFIED="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" \
-              --jq '.verification.verified'
-          )"
+          TAG_OBJECT_SHA="$(jq -r '.object.sha' "$REF_JSON_PATH")"
+          LOCAL_TAG_OBJECT_SHA="$(git rev-parse "$RELEASE_TAG^{tag}")"
+          if [ "$TAG_OBJECT_SHA" != "$LOCAL_TAG_OBJECT_SHA" ]; then
+            echo "::error::Remote release tag object does not match the verified local tag"
+            exit 1
+          fi
+
+          TAG_OBJECT_JSON_PATH="$RUNNER_TEMP/release-tag-object.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > "$TAG_OBJECT_JSON_PATH"
+          TAG_TARGET_TYPE="$(jq -r '.object.type' "$TAG_OBJECT_JSON_PATH")"
+          TAG_TARGET_SHA="$(jq -r '.object.sha' "$TAG_OBJECT_JSON_PATH")"
+          TAG_COMMIT="$(git rev-list -n 1 "$RELEASE_TAG")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "$TAG_TARGET_TYPE" != "commit" ]; then
+            echo "::error::Release tag object must target a commit"
+            exit 1
+          fi
+          if [ "$TAG_TARGET_SHA" != "$TAG_COMMIT" ] || \
+             [ "$TAG_TARGET_SHA" != "$HEAD_COMMIT" ]; then
+            echo "::error::Remote release tag target does not match the verified release commit"
+            exit 1
+          fi
+          SIGNATURE_VERIFIED="$(jq -r '.verification.verified' "$TAG_OBJECT_JSON_PATH")"
           if [ "$SIGNATURE_VERIFIED" != "true" ]; then
             echo "::error::Release tag must be an annotated tag with a verified signature"
             exit 1
           fi
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 10.14.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -111,6 +136,16 @@ jobs:
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Require pinned Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
 
       - name: Require matching release versions
         run: pnpm release:check -- "$RELEASE_TAG"
@@ -132,6 +167,41 @@ jobs:
           cargo check --manifest-path "$MANIFEST" --locked
           pnpm --dir native/macos/psyche-build-tauri build:web
 
+      - name: Require iOS 26.2 iPhone 16 Pro simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/available-simulators.json"
+          if ! jq -e '
+            .devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"]
+            | any(.name == "iPhone 16 Pro" and .isAvailable == true)
+          ' "$RUNNER_TEMP/available-simulators.json" >/dev/null; then
+            echo "::error::iOS 26.2 iPhone 16 Pro simulator is unavailable"
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+      - name: Verify generated iOS project, Core, app, and UI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm ios:project:check
+          xcodebuild test \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheCore \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-core-derived-data"
+          xcodebuild build \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-build-derived-data"
+          xcodebuild test \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 16 Pro' \
+            -derivedDataPath "$RUNNER_TEMP/psyche-app-test-derived-data"
+
   build-macos:
     name: Build ${{ matrix.arch }} DMG
     needs: verify
@@ -147,6 +217,7 @@ jobs:
             target: x86_64-apple-darwin
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -179,6 +250,8 @@ jobs:
           echo "RUST_TARGET=$MATRIX_TARGET" >> "$GITHUB_ENV"
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 10.14.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -228,8 +301,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CERTIFICATE_PATH="$RUNNER_TEMP/apple-certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          umask 077
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           decode_base64() {
             if base64 --decode </dev/null >/dev/null 2>&1; then
@@ -239,6 +313,7 @@ jobs:
             fi
           }
           printf '%s' "$APPLE_CERTIFICATE" | decode_base64 > "$CERTIFICATE_PATH"
+          chmod 0600 "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -309,11 +384,331 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Remove ephemeral macOS signing material
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          CLEANUP_FAILED=0
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-macos-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-developer-id.p12"
+          if [ -e "$KEYCHAIN_PATH" ] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$CERTIFICATE_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          exit "$CLEANUP_FAILED"
+
+  upload-ios:
+    name: Upload iOS build to TestFlight
+    needs: verify
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.verify.outputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Set and validate release metadata
+        env:
+          RAW_RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          EXPECTED_RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="$RAW_RELEASE_TAG"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use stable vMAJOR.MINOR.PATCH form"
+            exit 1
+          fi
+          if [ "$(git rev-list -n 1 "$RELEASE_TAG")" != "$EXPECTED_RELEASE_SHA" ] || \
+             [ "$(git rev-parse HEAD)" != "$EXPECTED_RELEASE_SHA" ]; then
+            echo "::error::Checked out source does not match $RELEASE_TAG"
+            exit 1
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "EXPECTED_RELEASE_SHA=$EXPECTED_RELEASE_SHA" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 10.14.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies and verify release version
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm release:check -- "$RELEASE_TAG"
+
+      - name: Require iOS distribution credentials
+        env:
+          APPLE_DISTRIBUTION_CERTIFICATE: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for secret_name in \
+            APPLE_DISTRIBUTION_CERTIFICATE \
+            APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            APP_STORE_CONNECT_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_PRIVATE_KEY \
+            APPLE_TEAM_ID
+          do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::Missing required release environment secret $secret_name"
+              exit 1
+            fi
+          done
+
+          umask 077
+          APP_STORE_CONNECT_PRIVATE_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8"
+          printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
+          chmod 0600 "$APP_STORE_CONNECT_PRIVATE_KEY_PATH"
+          echo "APP_STORE_CONNECT_PRIVATE_KEY_PATH=$APP_STORE_CONNECT_PRIVATE_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Import Apple Distribution certificate into an ephemeral keychain
+        env:
+          APPLE_DISTRIBUTION_CERTIFICATE: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-distribution.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-ios-signing.keychain-db"
+          umask 077
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          decode_base64() {
+            if base64 --decode </dev/null >/dev/null 2>&1; then
+              base64 --decode
+            else
+              base64 -D
+            fi
+          }
+          printf '%s' "$APPLE_DISTRIBUTION_CERTIFICATE" | decode_base64 > "$CERTIFICATE_PATH"
+          chmod 0600 "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Require pinned Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Xcode 26.2' "$RUNNER_TEMP/xcode-version.txt"
+          grep -Fx 'Build version 17C52' "$RUNNER_TEMP/xcode-version.txt"
+
+      - uses: ./.github/actions/setup-xcodegen
+
+      - name: Generate and verify the iOS project
+        run: pnpm ios:project:check
+
+      - name: Archive the signed iOS app
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project native/ios/Psyche.xcodeproj \
+            -scheme PsycheApp \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/PsycheBuild.xcarchive" \
+            -configuration Release \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION=1 \
+            MARKETING_VERSION="$RELEASE_VERSION" \
+            PSYCHE_RELEASE_SHA="$EXPECTED_RELEASE_SHA" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Verify archived app identity and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          INFO_PLIST="$RUNNER_TEMP/PsycheBuild.xcarchive/Products/Applications/Psyche Build.app/Info.plist"
+          test -f "$INFO_PLIST"
+          require_plist_value() {
+            local key="$1"
+            local expected="$2"
+            local actual
+            actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$INFO_PLIST")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::Archive $key does not match the verified release"
+              exit 1
+            fi
+          }
+          require_plist_value CFBundleIdentifier ai.opencoven.psyche-ios
+          require_plist_value CFBundleDisplayName 'Psyche Build'
+          require_plist_value CFBundleShortVersionString "$RELEASE_VERSION"
+          require_plist_value CFBundleVersion 1
+          require_plist_value PsycheReleaseCommit "$EXPECTED_RELEASE_SHA"
+
+      - name: Export the IPA and generate TestFlight notes
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORT_PATH="$RUNNER_TEMP/ios-export"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/PsycheBuild.xcarchive" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist native/ios/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+          IPA_COUNT="$(find "$EXPORT_PATH" -maxdepth 1 -type f -name '*.ipa' | wc -l | tr -d ' ')"
+          if [ "$IPA_COUNT" != "1" ]; then
+            echo "::error::Expected exactly one exported IPA; found $IPA_COUNT"
+            exit 1
+          fi
+          IPA_PATH="$(find "$EXPORT_PATH" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          TESTFLIGHT_NOTES_PATH="$RUNNER_TEMP/testflight-notes.txt"
+          node scripts/release-notes.mjs --testflight "$RELEASE_VERSION" > "$TESTFLIGHT_NOTES_PATH"
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+          echo "TESTFLIGHT_NOTES_PATH=$TESTFLIGHT_NOTES_PATH" >> "$GITHUB_ENV"
+
+      - name: Reuse an exact existing TestFlight build when possible
+        id: preflight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          pnpm release:testflight -- \
+            --bundle-id ai.opencoven.psyche-ios \
+            --version "$RELEASE_VERSION" \
+            --build-number 1 \
+            --locale en-US \
+            --notes-file "$TESTFLIGHT_NOTES_PATH" \
+            --release-sha "$EXPECTED_RELEASE_SHA" \
+            --timeout-seconds 2700 \
+            --reuse-existing
+          REUSE_STATUS=$?
+          set -e
+          if [ "$REUSE_STATUS" = "0" ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          elif [ "$REUSE_STATUS" = "2" ]; then
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          else
+            exit "$REUSE_STATUS"
+          fi
+
+      - name: Validate and upload the IPA
+        if: steps.preflight.outputs.upload == 'true'
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          API_PRIVATE_KEYS_DIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --type ios \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --p8-file-path "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
+            --output-format json \
+            > "$RUNNER_TEMP/altool-validation.json"
+          jq -e . "$RUNNER_TEMP/altool-validation.json" >/dev/null
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --type ios \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --p8-file-path "$APP_STORE_CONNECT_PRIVATE_KEY_PATH" \
+            --output-format json \
+            > "$RUNNER_TEMP/altool-upload.json"
+          jq -e . "$RUNNER_TEMP/altool-upload.json" >/dev/null
+
+      - name: Verify uploaded build and localize TestFlight notes
+        if: steps.preflight.outputs.upload == 'true'
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm release:testflight -- \
+            --bundle-id ai.opencoven.psyche-ios \
+            --version "$RELEASE_VERSION" \
+            --build-number 1 \
+            --locale en-US \
+            --notes-file "$TESTFLIGHT_NOTES_PATH" \
+            --release-sha "$EXPECTED_RELEASE_SHA" \
+            --timeout-seconds 2700
+
+      - name: Confirm exact existing build reuse
+        if: steps.preflight.outputs.upload != 'true'
+        run: echo "Exact TestFlight build and release provenance already verified"
+
+      - name: Remove ephemeral iOS signing material
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          CLEANUP_FAILED=0
+          KEYCHAIN_PATH="$RUNNER_TEMP/psyche-ios-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/apple-distribution.p12"
+          PRIVATE_KEY_PATH="$RUNNER_TEMP/app-store-connect-key.p8"
+          if [ -e "$KEYCHAIN_PATH" ] && ! security delete-keychain "$KEYCHAIN_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$CERTIFICATE_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          if ! rm -f "$PRIVATE_KEY_PATH"; then
+            CLEANUP_FAILED=1
+          fi
+          exit "$CLEANUP_FAILED"
+
   publish:
     name: Publish GitHub Release
-    needs: [verify, build-macos]
+    needs: [verify, build-macos, upload-ios]
     environment: release
     runs-on: macos-15
+    timeout-minutes: 20
     outputs:
       release_tag: ${{ needs.verify.outputs.release_tag }}
     permissions:
@@ -370,6 +765,15 @@ jobs:
             shasum -a 256 -c SHA256SUMS
           )
 
+      - name: Generate curated GitHub release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_NOTES_PATH="$RUNNER_TEMP/github-release-notes.md"
+          node scripts/release-notes.mjs --github "$RELEASE_VERSION" > "$RELEASE_NOTES_PATH"
+          test -s "$RELEASE_NOTES_PATH"
+          echo "RELEASE_NOTES_PATH=$RELEASE_NOTES_PATH" >> "$GITHUB_ENV"
+
       - name: Publish complete stable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -398,20 +802,73 @@ jobs:
                 cd published-assets
                 shasum -a 256 -c SHA256SUMS
               )
-              echo "Published release assets match the verified build output"
+              PUBLISHED_NOTES_PATH="$RUNNER_TEMP/published-release-notes.md"
+              PUBLISHED_RELEASE_JSON="$RUNNER_TEMP/published-release.json"
+              gh release view "$RELEASE_TAG" --json body > "$PUBLISHED_RELEASE_JSON"
+              node --input-type=module -e '
+                import { readFileSync } from "node:fs";
+                const release = JSON.parse(readFileSync(process.argv[1], "utf8"));
+                if (typeof release.body !== "string") process.exit(1);
+                process.stdout.write(release.body);
+              ' "$PUBLISHED_RELEASE_JSON" > "$PUBLISHED_NOTES_PATH"
+              cmp "$RELEASE_NOTES_PATH" "$PUBLISHED_NOTES_PATH"
+              echo "Published release assets and notes match the verified build output"
               exit 0
             fi
+            gh release edit "$RELEASE_TAG" \
+              --title "Psyche Build $RELEASE_TAG" \
+              --notes-file "$RELEASE_NOTES_PATH"
           else
             gh release create "$RELEASE_TAG" \
               --verify-tag \
               --draft \
               --title "Psyche Build $RELEASE_TAG" \
-              --generate-notes
+              --notes-file "$RELEASE_NOTES_PATH"
           fi
           gh release upload "$RELEASE_TAG" --clobber \
             artifacts/Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
             artifacts/Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
             artifacts/SHA256SUMS
+
+          IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Release must remain draft until its exact asset set is verified"
+            exit 1
+          fi
+          EXPECTED_DRAFT_ASSETS="$RUNNER_TEMP/expected-draft-assets.txt"
+          ACTUAL_DRAFT_ASSETS="$RUNNER_TEMP/actual-draft-assets.txt"
+          printf '%s\n' \
+            "Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg" \
+            "Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg" \
+            SHA256SUMS \
+            | LC_ALL=C sort > "$EXPECTED_DRAFT_ASSETS"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | LC_ALL=C sort > "$ACTUAL_DRAFT_ASSETS"
+          if ! cmp "$EXPECTED_DRAFT_ASSETS" "$ACTUAL_DRAFT_ASSETS"; then
+            echo "::error::Draft release must contain exactly the two DMGs and SHA256SUMS"
+            exit 1
+          fi
+
+          DRAFT_ASSET_DIR="$RUNNER_TEMP/draft-assets"
+          mkdir -p "$DRAFT_ASSET_DIR"
+          gh release download "$RELEASE_TAG" --dir "$DRAFT_ASSET_DIR"
+          DRAFT_ASSET_COUNT="$(find "$DRAFT_ASSET_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [ "$DRAFT_ASSET_COUNT" != "3" ]; then
+            echo "::error::Draft release must contain exactly three assets; found $DRAFT_ASSET_COUNT"
+            exit 1
+          fi
+          for asset in \
+            Psyche-Build-v${RELEASE_VERSION}-aarch64.dmg \
+            Psyche-Build-v${RELEASE_VERSION}-x86_64.dmg \
+            SHA256SUMS
+          do
+            cmp "artifacts/$asset" "$DRAFT_ASSET_DIR/$asset"
+          done
+          (
+            cd "$DRAFT_ASSET_DIR"
+            shasum -a 256 -c SHA256SUMS
+          )
+          echo "Draft release assets match the verified build output"
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
   notify-homebrew:
@@ -419,6 +876,8 @@ jobs:
     needs: publish
     environment: release
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Notify OpenCoven Homebrew tap
         env:
@@ -428,8 +887,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not configured; scheduled tap update will be the fallback"
-            exit 0
+            echo "::error::Missing required release environment secret HOMEBREW_TAP_TOKEN"
+            exit 1
           fi
           curl --fail-with-body --silent --show-error \
             --request POST \

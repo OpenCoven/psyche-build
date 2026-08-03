@@ -670,7 +670,6 @@ describe('daemon bridge Coven API client', () => {
 
     expect(healthRequests).toBe(2);
   });
-
   it('uses the versioned localhost API after checking /api/v1/health', async () => {
     const requests: Array<{ method: string; url: string; body: string }> = [];
     const server = http.createServer((req, res) => {

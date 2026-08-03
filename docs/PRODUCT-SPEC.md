@@ -9,7 +9,7 @@
 
 Parallel coding agents are useful only when the work stays visible, scoped, and recoverable.
 
-Psyche Build gives developers one cockpit for launching agent lanes, watching terminals, keeping branches isolated, and bringing work back through explicit review. It focuses the proven terminal-cockpit primitives — tmux panes, git worktrees, agent launchers, rituals, file browsing, and merge flows — with clean Psyche Build branding and a public package that can stand alone.
+Psyche Build gives developers one cockpit for launching agent lanes, watching terminals, keeping branches isolated, and bringing work back through explicit review. It focuses the proven terminal-cockpit primitives — tmux panes, git worktrees, agent launchers, rituals, file browsing, and merge flows — with clean Psyche Build branding and a source package that can also be validated as a package archive.
 
 > Branch, develop, inspect, and merge — all in parallel.
 
@@ -95,7 +95,7 @@ Psyche Build should keep the core user promise sharp:
 
 Psyche Build-specific additions:
 
-- public `psyche-build` npm package and `psyche` command;
+- source `psyche-build` package and `psyche` command, validated through the package archive;
 - cleaned public docs and branding;
 - local bridge/daemon direction;
 - Coven session list/open/launch integration;
@@ -105,7 +105,7 @@ Psyche Build-specific additions:
 
 ### Included now / near-term
 
-- Public npm package `psyche`.
+- Source/package-archive Node CLI `psyche`; npm publication is not part of `0.0.1`.
 - TypeScript + Ink tmux cockpit.
 - Project-scoped tmux session.
 - Pane/worktree creation.
