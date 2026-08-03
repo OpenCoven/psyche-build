@@ -2,10 +2,17 @@ import SwiftUI
 import PsycheCore
 
 struct CockpitView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: DemoStore
+    @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .detail
+    @State private var didApplyInitialColumnVisibility = false
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(
+            columnVisibility: $columnVisibility,
+            preferredCompactColumn: $preferredCompactColumn
+        ) {
             projectSidebar
                 .navigationTitle("Psyche")
         } content: {
@@ -14,6 +21,15 @@ struct CockpitView: View {
         } detail: {
             TerminalDetail(pane: store.selectedPane)
                 .navigationTitle(store.selectedPane.snapshot.displayName)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: toggleSiderails) {
+                            Image(systemName: "sidebar.left")
+                        }
+                        .accessibilityLabel(siderailToggleAccessibilityLabel)
+                        .accessibilityIdentifier("cockpit-siderail-toggle")
+                    }
+                }
         }
         .tint(PsycheTheme.mint)
         .background(PsycheTheme.background)
@@ -21,10 +37,15 @@ struct CockpitView: View {
         .sheet(isPresented: $store.isPairSheetPresented) {
             PairHostSheet()
         }
+        .onAppear {
+            guard !didApplyInitialColumnVisibility else { return }
+            columnVisibility = horizontalSizeClass == .regular ? .all : .detailOnly
+            didApplyInitialColumnVisibility = true
+        }
     }
 
     private var projectSidebar: some View {
-        List(selection: $store.selectedProjectID) {
+        List(selection: projectSelection) {
             Section("Projects") {
                 ForEach(store.projects) { project in
                     HStack(spacing: 10) {
@@ -62,10 +83,20 @@ struct CockpitView: View {
             }
         }
         .listStyle(.sidebar)
+        .accessibilityIdentifier("project-sidebar")
+        .toolbar {
+            if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Panes") {
+                        preferredCompactColumn = .content
+                    }
+                }
+            }
+        }
     }
 
     private var paneList: some View {
-        List(selection: $store.selectedPaneID) {
+        List(selection: paneSelection) {
             ForEach(store.panes(for: store.selectedProjectID)) { pane in
                 PaneRow(pane: pane)
                     .tag(pane.id)
@@ -75,6 +106,56 @@ struct CockpitView: View {
             if store.panes(for: store.selectedProjectID).isEmpty {
                 ContentUnavailableView("No panes", systemImage: "rectangle.stack")
             }
+        }
+        .accessibilityIdentifier("pane-list")
+    }
+
+    private var siderailToggleAccessibilityLabel: String {
+        if horizontalSizeClass == .compact {
+            return preferredCompactColumn == .detail ? "Show siderails" : "Hide siderails"
+        }
+        return columnVisibility == .detailOnly ? "Show siderails" : "Hide siderails"
+    }
+
+    private var paneSelection: Binding<String?> {
+        Binding(
+            get: {
+                horizontalSizeClass == .compact && preferredCompactColumn != .detail
+                    ? nil
+                    : store.selectedPaneID
+            },
+            set: { selection in
+                guard selection != nil || preferredCompactColumn == .detail else { return }
+                store.selectedPaneID = selection
+                if horizontalSizeClass == .compact, selection != nil {
+                    preferredCompactColumn = .detail
+                }
+            }
+        )
+    }
+
+    private var projectSelection: Binding<String?> {
+        Binding(
+            get: {
+                horizontalSizeClass == .compact && preferredCompactColumn == .sidebar
+                    ? nil
+                    : store.selectedProjectID
+            },
+            set: { selection in
+                guard selection != nil || preferredCompactColumn != .sidebar else { return }
+                store.selectedProjectID = selection
+                if horizontalSizeClass == .compact, selection != nil {
+                    preferredCompactColumn = .content
+                }
+            }
+        )
+    }
+
+    private func toggleSiderails() {
+        if horizontalSizeClass == .compact {
+            preferredCompactColumn = preferredCompactColumn == .detail ? .sidebar : .detail
+        } else {
+            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
     }
 }

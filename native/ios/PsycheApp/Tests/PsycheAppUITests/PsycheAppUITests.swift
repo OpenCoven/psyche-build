@@ -1,22 +1,37 @@
 import XCTest
 
 final class PsycheAppUITests: XCTestCase {
-    func testLaunchesMainCockpit() {
-        let app = XCUIApplication()
-        app.launch()
+    func testLaunchesMainCockpitWithCollapsedSiderails() {
+        let app = launchApp()
 
         XCTAssertTrue(app.otherElements["main-cockpit"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["native-ios-cloud-terminal"].exists)
+        XCTAssertTrue(element("terminal-output", in: app).waitForExistence(timeout: 5))
+        XCTAssertFalse(element("project-sidebar", in: app).exists)
+
+        let toggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Show siderails")
+    }
+
+    func testSiderailToggleRevealsBothNavigationLevelsAndCollapsesAgain() {
+        let app = launchApp()
+
+        showProjectSidebar(in: app)
+        XCTAssertTrue(app.buttons["Panes"].waitForExistence(timeout: 5))
+        app.buttons["Panes"].tap()
+        XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
+
+        app.staticTexts["native-ios-cloud-terminal"].tap()
+        let toggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Show siderails")
+        XCTAssertTrue(element("terminal-output", in: app).exists)
     }
 
     func testPairsHostWithValidSixDigitCode() {
-        let app = XCUIApplication()
-        app.launch()
+        let app = launchApp()
 
-        XCTAssertTrue(app.buttons["Panes"].waitForExistence(timeout: 5))
-        app.buttons["Panes"].tap()
-        XCTAssertTrue(app.buttons["Psyche"].waitForExistence(timeout: 5))
-        app.buttons["Psyche"].tap()
+        showProjectSidebar(in: app)
         XCTAssertTrue(app.buttons["Pair a host"].waitForExistence(timeout: 5))
         app.buttons["Pair a host"].tap()
 
@@ -35,5 +50,22 @@ final class PsycheAppUITests: XCTestCase {
         app.buttons["Pair"].tap()
 
         XCTAssertTrue(app.staticTexts["Paired with psyche.local"].waitForExistence(timeout: 5))
+    }
+
+    private func launchApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launch()
+        return app
+    }
+
+    private func showProjectSidebar(in app: XCUIApplication) {
+        let toggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertTrue(element("project-sidebar", in: app).waitForExistence(timeout: 5))
+    }
+
+    private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
     }
 }
