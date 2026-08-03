@@ -19,17 +19,23 @@
 > but it is a clean break — nothing is migrated, and hook scripts stop firing
 > **silently**. See [Breaking changes](./docs/BREAKING-CHANGES.md).
 
-## Install
+## Distribution
 
-Install the signed and notarized macOS application through the OpenCoven tap:
+When the `v0.0.1` GitHub Release and tap Cask are available, the only public
+macOS installation path is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
 ```
 
-The Cask becomes available with the first public `v0.1.0` release. Until that
-release appears on GitHub, build from source using the contributing guide; the
-`psyche-build` npm package is not yet published.
+The iOS build is internal TestFlight only. Authorized OpenCoven testers can
+install `Psyche Build` `0.0.1 (1)` if it is available to their account in
+TestFlight; this is not a public App Store or external TestFlight release.
+
+Source development is separate; follow [CONTRIBUTING.md](./CONTRIBUTING.md) to
+run the checkout. The Node CLI ships in the source tree and package archive,
+but it is not an npm release for `0.0.1`. Windows, Linux, Android, external
+TestFlight, and public App Store distribution are unavailable in `0.0.1`.
 
 After installing the CLI from source, verify the local setup with:
 

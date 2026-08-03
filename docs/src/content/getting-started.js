@@ -3,10 +3,12 @@ export const meta = { title: 'Getting Started' };
 export function render() {
   return `
     <h1>Getting Started</h1>
-    <p>Get psyche running in under a minute. All you need is tmux and Node.js; install a supported AI coding agent when you want prompt-launched agent panes.</p>
+    <p>Install a supported AI coding agent when you want prompt-launched agent panes.</p>
 
-    <h2>Install psyche</h2>
-    <pre><code data-lang="bash">npm install -g psyche-build</code></pre>
+    <h2>Install Psyche Build</h2>
+    <p>When the public release and Cask are available, the supported public macOS install is:</p>
+    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build</code></pre>
+    <p>For source development, use the repository checkout and contributing guide. The Node CLI is not an npm release in 0.0.1.</p>
 
     <h2>Set Up OpenRouter (Recommended)</h2>
     <p>Before your first run, we recommend setting up an <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> API key. psyche uses it to generate smart branch names from your prompts and AI-powered commit messages when merging. Without it, branch names fall back to <code>psyche-{timestamp}</code> and commit messages will be generic.</p>

@@ -5,6 +5,11 @@ name `Psyche Build` and bundle identifier `ai.opencoven.psyche-ios`.
 `PsycheCore` models bridge protocol v2 behind Swift transport interfaces; no
 live host is required.
 
+The `v0.0.1` release identity is `Psyche Build` `0.0.1 (1)`. Distribution is
+internal TestFlight only for authorized OpenCoven testers. It is not an
+external TestFlight or public App Store release, and installation is possible
+only if that exact build is available to the tester's account.
+
 `project.yml` is the authoritative Xcode project and app metadata source.
 XcodeGen writes the committed `PsycheApp/Resources/Info.plist`, including the
 `$(PSYCHE_RELEASE_SHA)` placeholder, and the committed `Psyche.xcodeproj`.
@@ -40,4 +45,4 @@ xcodebuild -project native/ios/Psyche.xcodeproj -scheme PsycheApp -destination '
 `ExportOptions.plist` is intentionally restricted to internal TestFlight
 testing and automatic signing. No Apple development team ID is checked in;
 provide signing-team configuration only in the authorized release environment.
-This repository does not claim that a TestFlight build is already live.
+This repository does not claim live TestFlight availability.

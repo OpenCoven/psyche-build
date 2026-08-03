@@ -6,7 +6,8 @@ export function render() {
     <p class="lead">Use this loop to show how psyche and Coven fit together: one project, any harness, visible work.</p>
 
     <h2>Prerequisites</h2>
-    <pre><code data-lang="bash">npm install -g psyche-build
+    <p>When the public release and Cask are available, install Psyche Build for macOS through Homebrew. For source development, use the repository checkout; the Node CLI is not an npm release in 0.0.1.</p>
+    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
 npx @opencoven/cli doctor
 coven doctor
 coven daemon start

@@ -1,60 +1,83 @@
-# Psyche Build Release Runbook
+# Psyche Build v0.0.1 Release Runbook
 
-This runbook publishes the macOS application. A local `.app` or `.dmg` proves
-packaging only; public artifacts must be signed, notarized, verified by
-Gatekeeper, and produced by `.github/workflows/release.yml`.
+This runbook publishes one coordinated release from
+`.github/workflows/release.yml`:
 
-## One-time setup
+- macOS app `Psyche Build`, as signed and notarized Apple Silicon and Intel
+  DMGs;
+- iOS app `Psyche Build`, bundle ID `ai.opencoven.psyche-ios`, marketing
+  version/build `0.0.1 (1)`, for internal TestFlight only;
+- a curated GitHub Release and a native Homebrew Cask update.
 
-The repository must be public before publication. Homebrew cannot download
-release assets from a private GitHub repository. The release workflow checks
-`github.event.repository.private` and exits before using signing credentials
-when this requirement is not met.
+The Node CLI ships in the source tree and npm package archive, but `0.0.1` is
+not an npm release. Windows, Linux, Android, external TestFlight, and public App
+Store distribution are unavailable in `0.0.1`.
 
-Create a `release` GitHub Environment with required-reviewer protection and
-prevent self-review. Configure these environment secrets using the existing
-OpenCoven Apple release credentials; do not store them as repository secrets:
+## Apple and GitHub setup
+
+In Apple Developer and App Store Connect, confirm one OpenCoven team and Team
+ID owns both the Developer ID and iOS distribution identities. Then create:
+
+- an explicit App ID named `Psyche Build` for `ai.opencoven.psyche-ios`, with
+  only capabilities used by the project;
+- an App Store Connect iOS record named `Psyche Build`, primary language
+  English (U.S.), bundle ID `ai.opencoven.psyche-ios`, SKU `psyche-ios`, and
+  access limited to the intended internal team;
+- an internal group named `OpenCoven Internal`, with only authorized OpenCoven
+  testers and automatic distribution for eligible builds;
+- a least-privilege team App Store Connect API key that can upload builds, read
+  processing state, and manage internal TestFlight metadata.
+
+Record the truthful export-compliance answer before release. If project
+metadata must change as a result, land and verify that change before tagging.
+
+Create a protected GitHub `release` environment with a non-self required
+reviewer, `prevent_self_review=true`, and protected-branch deployment policy.
+Every credential below is required and belongs only in that environment:
 
 | Secret | Purpose |
 |---|---|
-| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
-| `APPLE_CERTIFICATE_PASSWORD` | Password used to export the `.p12` |
+| `APPLE_CERTIFICATE` | Base64 Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Developer ID `.p12` password |
 | `APPLE_SIGNING_IDENTITY` | Developer ID identity name or SHA-1 fingerprint |
-| `APPLE_ID` | Apple Developer account used by `notarytool` |
+| `APPLE_ID` | Apple account used by `notarytool` |
 | `APPLE_PASSWORD` | App-specific password for `APPLE_ID` |
-| `APPLE_TEAM_ID` | Apple Developer Team ID |
-| `HOMEBREW_TAP_TOKEN` | Optional token allowed to dispatch `OpenCoven/homebrew-tap` |
+| `APPLE_DISTRIBUTION_CERTIFICATE` | Base64 Apple Distribution `.p12` |
+| `APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD` | Distribution `.p12` password |
+| `APP_STORE_CONNECT_KEY_ID` | Team API key ID |
+| `APP_STORE_CONNECT_ISSUER_ID` | Team API issuer ID |
+| `APP_STORE_CONNECT_PRIVATE_KEY` | Complete downloaded `.p8` contents |
+| `APPLE_TEAM_ID` | Confirmed team ID shared by both release identities |
+| `HOMEBREW_TAP_TOKEN` | Least-privilege token that dispatches `OpenCoven/homebrew-tap` |
 
-The first six values are mandatory and the workflow fails closed when any is
-missing. `HOMEBREW_TAP_TOKEN` only makes the Cask update immediate; the tap's
-scheduled workflow is the no-secrets fallback.
+Use interactive `gh secret set --env release --repo OpenCoven/psyche-build`
+input. Verify names with `gh secret list --env release`, and require
+`gh secret list --repo OpenCoven/psyche-build` to be empty. There is no
+repository-secret fallback, scheduled no-secret fallback, or optional secret
+for this release.
 
-Protect `v*` tags with an active repository ruleset that restricts tag creation
-to release managers and blocks tag updates and deletion. The workflow also
-requires the signed tag commit to be on `origin/main`, carries that verified SHA
-between jobs, and pauses every secret-bearing or publishing job at the
-protected `release` Environment.
+Protect `main` and `v*` tags before tagging. The active tag ruleset must
+restrict creation to approved release managers and block tag update/deletion.
+The workflow separately requires a verified signed annotated tag whose commit
+is on `origin/main`, and every secret-bearing or publishing job waits at the
+protected `release` environment.
 
-The pnpm workspace declaration must also be present on the release commit so a
-fresh `pnpm install --frozen-lockfile` installs the native CodeMirror and Tauri
-dependencies. Rust is pinned by `rust-toolchain.toml`; update that pin and both
-workflow inputs together in a separately verified maintenance change.
-
-## Prepare a release
+## Prepare the release commit
 
 Use a clean branch based on `origin/main`:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm release:version -- 0.1.0
-pnpm release:check -- v0.1.0
+pnpm release:version -- 0.0.1
+pnpm release:check -- v0.0.1
 ```
 
 `package.json` is the authoritative version. The version command synchronizes
-the native package, Cargo manifest and lockfile, and Tauri config. Commit all
-five version changes together.
+the native package, Cargo manifest and lockfile, Tauri config, source
+`native/ios/project.yml`, and generated Xcode project. XcodeGen owns the
+committed Xcode project and `Info.plist`; never hand-edit generated metadata.
 
-Run the complete release gate:
+Run the full release gate:
 
 ```sh
 pnpm test
@@ -67,94 +90,127 @@ cargo fmt --manifest-path "$MANIFEST" --check
 cargo test --manifest-path "$MANIFEST" --locked
 cargo check --manifest-path "$MANIFEST" --locked
 pnpm --dir native/macos/psyche-build-tauri build:web
+pnpm ios:project:check
 ```
 
-For a local packaging smoke test:
+Generate and inspect the curated notes sourced from the single `0.0.1`
+`CHANGELOG.md` entry. Do not use generated GitHub notes:
 
 ```sh
-pnpm --dir native/macos/psyche-build-tauri exec tauri build --bundles app,dmg
+node scripts/release-notes.mjs --github 0.0.1 > /tmp/psyche-v0.0.1-notes.md
+node scripts/release-notes.mjs --testflight 0.0.1 > /tmp/psyche-v0.0.1-testflight.txt
+test "$(wc -c < /tmp/psyche-v0.0.1-testflight.txt | tr -d ' ')" -le 4000
 ```
 
-Do not upload that local artifact. Unless the local machine has explicitly
-configured Developer ID and notary credentials, it is not the CI-verified
-release artifact.
+## Final audit, visibility, and signed tag
 
-## Publish
+Keep the repository private through the final release-commit and secret audit.
+Scan the full history and the exact `git archive` publication tree with
+redacted Gitleaks output, review every finding, confirm there are no GitHub
+release artifacts/caches/repository secrets, and re-check the protected
+`release` environment. Only after that final secret audit, make the repository
+public, enable secret scanning and push protection, and verify `main` protection
+and the active `v*` tag ruleset. The repository must be public before the tag;
+the workflow fails before accessing credentials when it is private.
 
-After the release preparation PR is merged and the merged commit passes the
-same gate, create a signed tag:
+Resolve the unchanged reviewed commit and create the signed annotated tag:
 
 ```sh
-git switch main
-git pull --ff-only origin main
-pnpm release:check -- v0.1.0
-git tag -s v0.1.0 -m "Psyche Build v0.1.0"
-git push origin v0.1.0
+git fetch origin main --tags
+release_sha="$(git rev-parse origin/main)"
+pnpm release:check -- v0.0.1
+git tag -s v0.0.1 "$release_sha" -m "Psyche Build v0.0.1"
+git verify-tag v0.0.1
+test "$(git rev-list -n 1 v0.0.1)" = "$release_sha"
+git push origin v0.0.1
 ```
 
-The workflow builds on native Apple Silicon and Intel runners and publishes
-only this complete set:
+Have the configured non-self reviewer approve the pending `release`
+deployment once. Do not bypass the environment or start a duplicate run.
 
-- `Psyche-Build-v0.1.0-aarch64.dmg`
-- `Psyche-Build-v0.1.0-x86_64.dmg`
+## Workflow behavior and recovery
+
+The tag run verifies the exact tag/source SHA, all version surfaces, tests,
+generated iOS files, the iOS archive identity/provenance, both macOS artifacts,
+and curated notes. It publishes only after the macOS and internal TestFlight
+jobs succeed.
+
+For an infrastructure, runner, archive, export, or upload interruption, prove
+the failure is transient and manually dispatch the existing immutable tag from
+`main`:
+
+```sh
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1
+```
+
+The retry rebuilds the exact tag. Before upload, it checks App Store Connect for
+the exact bundle/version/build and release-SHA provenance. A matching VALID
+build is reused without uploading a duplicate; otherwise the workflow validates
+and uploads the freshly exported IPA. A published GitHub Release is reused only
+when its three artifacts and curated notes byte-match the verified output; a
+draft may have its assets replaced before it is reverified and published.
+
+App Store Connect processing has a hard 45-minute bound:
+
+```sh
+pnpm release:testflight -- \
+  --bundle-id ai.opencoven.psyche-ios \
+  --version 0.0.1 \
+  --build-number 1 \
+  --locale en-US \
+  --notes-file /tmp/psyche-v0.0.1-testflight.txt \
+  --release-sha "$release_sha" \
+  --timeout-seconds 2700
+```
+
+Do not extend that bound. If processing times out, let the run fail, confirm
+App Store Connect state, and retry the existing tag. Stop on a FAILED/INVALID
+build or identity/provenance mismatch. Do not claim TestFlight availability
+until `Psyche Build 0.0.1 (1)` is `Ready to Test` for `OpenCoven Internal` and
+an authorized tester can see it.
+
+## Verify the GitHub release
+
+The complete public asset set is exactly:
+
+- `Psyche-Build-v0.0.1-aarch64.dmg`
+- `Psyche-Build-v0.0.1-x86_64.dmg`
 - `SHA256SUMS`
 
-The GitHub Release remains a draft until both architecture jobs pass
-`codesign`, Gatekeeper, and stapler validation and all three files have been
-uploaded.
-
-If a draft release needs a retry after an infrastructure failure, dispatch the
-workflow from `main` against the existing tag:
-
-```sh
-gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.1.0
-```
-
-The retry may replace assets on an existing draft. If the release was already
-published, it succeeds only when the three remote assets exactly match the
-freshly verified build and their checksums pass. Homebrew notification runs as
-a separate job, so a dispatch failure can be retried without republishing.
-
-## Verify the public release
+Verify all three files and both checksums:
 
 ```sh
 release_dir="$(mktemp -d)"
-gh release download v0.1.0 \
-  --repo OpenCoven/psyche-build \
-  --dir "$release_dir"
+gh release download v0.0.1 --repo OpenCoven/psyche-build --dir "$release_dir"
 (
   cd "$release_dir"
+  test "$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
   shasum -a 256 -c SHA256SUMS
 )
-gh release view v0.1.0 \
-  --repo OpenCoven/psyche-build \
-  --json tagName,isDraft,isPrerelease,url
+gh release view v0.0.1 --repo OpenCoven/psyche-build \
+  --json tagName,isDraft,isPrerelease,isLatest,body,url
 ```
 
-Require `isDraft: false`, `isPrerelease: false`, both checksum validations,
-and HTTP 200 responses for both DMGs before updating Homebrew.
+Require a public/latest/stable release whose body exactly matches the curated
+changelog entry. Require both DMG URLs to return HTTP 200 before Homebrew work.
 
-## Homebrew
+## Homebrew publication and recovery
 
-The application is a Cask, not a Formula:
+The application is a Cask, not a Formula. The release workflow dispatches
+`OpenCoven/homebrew-tap` only after publication. If notification fails, do not
+rebuild or republish the app; manually run the tap's existing updater:
+
+```sh
+gh workflow run "Update Psyche Build cask" \
+  --repo OpenCoven/homebrew-tap \
+  --ref main \
+  -f tag=v0.0.1
+```
+
+Verify the updater PR's two URLs and hashes against the published assets, then
+require tap CI and review before merge. Once the `v0.0.1` release and Cask are
+actually available, public macOS installation is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
-brew upgrade --cask opencoven/tap/psyche-build
-brew uninstall --cask opencoven/tap/psyche-build
 ```
-
-The tap updater consumes `SHA256SUMS` and refuses to render or update the Cask
-unless both architecture-specific DMGs are downloadable.
-
-## npm status
-
-The Node CLI is a separate release surface. Do not advertise it as published
-until this command returns the intended version:
-
-```sh
-npm view psyche-build version
-```
-
-A Homebrew Formula remains out of scope until the CLI ships as a standalone
-binary without a separate Node installation.

@@ -10,7 +10,7 @@ export function renderHero(starCount) {
       <div class="hero-scanlines absolute inset-0 pointer-events-none z-0"></div>
       <div class="hero-grid relative z-1">
         <div class="hero-copy">
-          <div class="hero-kicker" style="animation: fade-up 0.7s cubic-bezier(0.16,1,0.3,1) both">Operator field manual / v0.0.10</div>
+          <div class="hero-kicker" style="animation: fade-up 0.7s cubic-bezier(0.16,1,0.3,1) both">Operator field manual / v0.0.1</div>
           <div class="relative inline-block mb-8">
             <img src="/psyche.svg" alt="psyche" class="hero-logo h-36 w-auto relative z-1 drop-shadow-[0_0_80px_rgba(139,92,246,0.35)] max-sm:h-24" style="animation: hero-logo-in 0.8s 0.04s cubic-bezier(0.16,1,0.3,1) both" />
           </div>
@@ -24,7 +24,7 @@ export function renderHero(starCount) {
               <span class="hero-star-badge bg-accent-glow-mid text-accent px-1.5 py-px rounded-lg text-[11.5px] font-semibold tabular-nums" ${starCount ? '' : 'style="display:none"'}>${starCount ? formatStars(starCount) : ''}</span>
             </a>
             <button id="hero-copy-btn" title="Copy to clipboard" class="hero-install-btn group inline-flex items-center gap-2.5 bg-bg-code border border-border rounded-[10px] px-5 h-10 cursor-pointer hover:border-border-hover hover:-translate-y-0.5 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-all">
-              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">npm i -g psyche-build</code>
+              <code class="font-[var(--font-mono)] text-sm font-medium text-accent tracking-[-0.02em] !bg-transparent !border-0 !p-0">brew install --cask opencoven/tap/psyche-build</code>
               <svg class="hero-copy-icon text-text-dimmer group-hover:text-accent transition-colors" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               <svg class="hero-check-icon hidden text-text-secondary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
             </button>

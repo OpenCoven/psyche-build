@@ -13,12 +13,16 @@ https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md
 
 ## Prerequisites
 
-Install psyche and Coven, then verify both from the same shell:
+When the public release and Cask are available, install Psyche Build for macOS,
+then verify Psyche Build and Coven from the same shell:
 
 ```bash
-npm install -g psyche-build
+brew install --cask opencoven/tap/psyche-build
 npx @opencoven/cli doctor
 ```
+
+For source development, run Psyche Build from the repository checkout as
+described in `CONTRIBUTING.md`. Its Node CLI is not an npm release in `0.0.1`.
 
 Coven is optional. psyche still works as a standalone tmux/worktree cockpit when Coven is not installed or the daemon is stopped.
 
