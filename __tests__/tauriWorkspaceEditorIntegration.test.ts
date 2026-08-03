@@ -1,15 +1,20 @@
+import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
-const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
+const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
+const webRoot = join(tauriRoot, 'web');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const editorEntry = readFileSync(join(webRoot, 'editor/editor-entry.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
+const tauriConfig = readFileSync(join(tauriRoot, 'src-tauri/tauri.conf.json'), 'utf8');
 const tauriPackage = JSON.parse(
-  readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/package.json'), 'utf8')
+  readFileSync(join(tauriRoot, 'package.json'), 'utf8')
 ) as { dependencies: Record<string, string> };
+const requireFromTauri = createRequire(join(tauriRoot, 'package.json'));
 
 describe('native CodeMirror workspace editor surface', () => {
   it('provides the approved accessible file editor shell', () => {
@@ -34,6 +39,17 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
   });
 
+  it('provides Tauri a dynamic style nonce source without weakening CSP', () => {
+    expect(indexHtml).toContain('<style id="codemirror-nonce-source"></style>');
+    expect(indexHtml).not.toMatch(/id="codemirror-nonce-source"[^>]+nonce=/);
+    expect(editorEntry).toContain(
+      "document.getElementById('codemirror-nonce-source').nonce"
+    );
+    expect(editorEntry).toContain('EditorView.cspNonce.of(cspNonce)');
+    expect(tauriConfig).not.toContain("'unsafe-inline'");
+    expect(tauriConfig).not.toMatch(/'nonce-[^']+'/);
+  });
+
   it('uses only pinned local CodeMirror language packages', () => {
     for (const dependency of [
       '@codemirror/lang-css',
@@ -47,6 +63,7 @@ describe('native CodeMirror workspace editor surface', () => {
       '@codemirror/lang-yaml',
       '@codemirror/language',
       '@codemirror/legacy-modes',
+      '@codemirror/commands',
       '@codemirror/state',
       '@codemirror/view',
       'codemirror',
@@ -135,6 +152,38 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toMatch(/default:\s*return \[\];/);
   });
 
+  it('starts every loaded document with isolated undo history', async () => {
+    expect(tauriPackage.dependencies['@codemirror/commands']).toBe('6.10.4');
+
+    const editorModule = await import(
+      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
+    );
+    const commandsModule = await import(
+      pathToFileURL(requireFromTauri.resolve('@codemirror/commands')).href
+    );
+    const stateA = editorModule.createFileEditorState({
+      text: 'alpha',
+      languageId: 'plain',
+      readOnly: false,
+      cspNonce: 'test-nonce',
+    });
+    const editedA = stateA.update({
+      changes: { from: stateA.doc.length, insert: ' edited' },
+    }).state;
+
+    expect(commandsModule.undoDepth(editedA)).toBe(1);
+
+    const stateB = editorModule.createFileEditorState({
+      text: 'bravo',
+      languageId: 'plain',
+      readOnly: false,
+      cspNonce: 'test-nonce',
+    });
+
+    expect(stateB.doc.toString()).toBe('bravo');
+    expect(commandsModule.undoDepth(stateB)).toBe(0);
+  });
+
   it('exports the model and guarded editor bridge API', () => {
     for (const modelApi of [
       'createFileBuffer',
@@ -148,21 +197,23 @@ describe('native CodeMirror workspace editor surface', () => {
     }
 
     expect(editorEntry).toMatch(/export function createFileEditor\s*\(/);
+    expect(editorEntry).toMatch(/export function createFileEditorState\s*\(/);
     expect(editorEntry).toContain('basicSetup');
-    expect(editorEntry).toMatch(/new Compartment\(\)/);
     expect(editorEntry).toContain('EditorView.editable.of(!readOnly)');
     expect(editorEntry).toContain('EditorState.readOnly.of(readOnly)');
+    expect(editorEntry).toContain(
+      "EditorView.contentAttributes.of({ 'aria-label': 'File editor' })"
+    );
     expect(editorEntry).toContain('EditorView.updateListener.of');
-    expect(editorEntry).toMatch(/update\.docChanged\s*&&\s*!settingDocument/);
+    expect(editorEntry).toMatch(/if \(update\.docChanged\) \{/);
     expect(editorEntry).toMatch(/update\.selectionSet\s*\|\|\s*update\.docChanged/);
     expect(editorEntry).toContain('line: line.number');
     expect(editorEntry).toContain('column: head - line.from + 1');
     expect(editorEntry).toMatch(/return \{\s*setDocument,\s*getText,\s*focus,\s*destroy,?\s*\}/);
-    expect(editorEntry).toMatch(/changes:\s*\{\s*from:\s*0,\s*to:\s*view\.state\.doc\.length,\s*insert:\s*text/);
-    expect(editorEntry).toMatch(/selection:\s*\{\s*anchor:\s*0\s*\}/);
     expect(editorEntry).toMatch(
-      /settingDocument = true;[\s\S]*try \{[\s\S]*view\.dispatch\([\s\S]*finally \{\s*settingDocument = false;/
+      /view\.setState\(\s*createFileEditorState\(\{[\s\S]*text,[\s\S]*languageId,[\s\S]*readOnly,/
     );
+    expect(editorEntry).toContain('handleSelectionChange({ line: 1, column: 1 })');
   });
 
   it('gives CodeMirror one bounded scroll surface using the workspace palette', () => {

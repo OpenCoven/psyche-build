@@ -1,5 +1,5 @@
 import { basicSetup } from 'codemirror';
-import { Compartment, EditorState } from '@codemirror/state';
+import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
@@ -104,59 +104,74 @@ const workspaceEditorTheme = EditorView.theme(
   { dark: true }
 );
 
+export function createFileEditorState({
+  text = '',
+  languageId = 'plain',
+  readOnly = false,
+  cspNonce = '',
+  onChange,
+  onSelectionChange,
+}) {
+  const handleChange = typeof onChange === 'function' ? onChange : () => {};
+  const handleSelectionChange =
+    typeof onSelectionChange === 'function' ? onSelectionChange : () => {};
+
+  return EditorState.create({
+    doc: text,
+    extensions: [
+      basicSetup,
+      syntaxHighlighting(workspaceHighlightStyle),
+      workspaceEditorTheme,
+      extensionForLanguage(languageId),
+      EditorView.editable.of(!readOnly),
+      EditorState.readOnly.of(readOnly),
+      EditorView.cspNonce.of(cspNonce),
+      EditorView.contentAttributes.of({ 'aria-label': 'File editor' }),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          handleChange(update.state.doc.toString());
+        }
+
+        if (update.selectionSet || update.docChanged) {
+          const head = update.state.selection.main.head;
+          const line = update.state.doc.lineAt(head);
+          handleSelectionChange({
+            line: line.number,
+            column: head - line.from + 1,
+          });
+        }
+      }),
+    ],
+  });
+}
+
 export function createFileEditor({ parent, onChange, onSelectionChange }) {
   const handleChange = typeof onChange === 'function' ? onChange : () => {};
   const handleSelectionChange =
     typeof onSelectionChange === 'function' ? onSelectionChange : () => {};
-  const languageCompartment = new Compartment();
-  const editableCompartment = new Compartment();
-  const readOnlyCompartment = new Compartment();
-  let settingDocument = false;
+  const cspNonce = document.getElementById('codemirror-nonce-source').nonce;
 
   const view = new EditorView({
     parent,
-    state: EditorState.create({
-      doc: '',
-      extensions: [
-        basicSetup,
-        syntaxHighlighting(workspaceHighlightStyle),
-        workspaceEditorTheme,
-        languageCompartment.of([]),
-        editableCompartment.of(EditorView.editable.of(true)),
-        readOnlyCompartment.of(EditorState.readOnly.of(false)),
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged && !settingDocument) {
-            handleChange(update.state.doc.toString());
-          }
-
-          if (update.selectionSet || update.docChanged) {
-            const head = update.state.selection.main.head;
-            const line = update.state.doc.lineAt(head);
-            handleSelectionChange({
-              line: line.number,
-              column: head - line.from + 1,
-            });
-          }
-        }),
-      ],
+    state: createFileEditorState({
+      cspNonce,
+      onChange: handleChange,
+      onSelectionChange: handleSelectionChange,
     }),
   });
 
   function setDocument({ text = '', languageId = 'plain', readOnly = false }) {
-    settingDocument = true;
-    try {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text },
-        selection: { anchor: 0 },
-        effects: [
-          languageCompartment.reconfigure(extensionForLanguage(languageId)),
-          editableCompartment.reconfigure(EditorView.editable.of(!readOnly)),
-          readOnlyCompartment.reconfigure(EditorState.readOnly.of(readOnly)),
-        ],
-      });
-    } finally {
-      settingDocument = false;
-    }
+    view.setState(
+      createFileEditorState({
+        text,
+        languageId,
+        readOnly,
+        cspNonce,
+        onChange: handleChange,
+        onSelectionChange: handleSelectionChange,
+      })
+    );
+    handleSelectionChange({ line: 1, column: 1 });
   }
 
   function getText() {
