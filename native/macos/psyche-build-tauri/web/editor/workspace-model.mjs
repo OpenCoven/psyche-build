@@ -43,6 +43,18 @@ export function markFileSaved(buffer, text) {
   return { ...buffer, text, originalText: text, dirty: false };
 }
 
+export function reconcileFileSave(buffer, savedText, currentText) {
+  const rebased = updateFileBuffer(
+    markFileSaved(buffer, savedText),
+    currentText,
+  );
+  return { buffer: rebased, canContinue: !rebased.dirty };
+}
+
+export function shouldRenderFileSaveChrome(activeFileId, savedFileId) {
+  return activeFileId === savedFileId;
+}
+
 export function createRequestGate() {
   let current = 0;
 

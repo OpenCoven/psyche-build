@@ -1332,11 +1332,12 @@
     var project = findProject(file.projectId);
     if (!project) {
       file.saveError = "Project is no longer open.";
-      renderFileChrome(file);
+      if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
+        renderFileChrome(file);
+      }
       return false;
     }
 
-    var textToSave = file.text;
     file.saving = true;
     file.saveError = null;
     renderFileChrome(file);
@@ -1348,20 +1349,21 @@
         expectedText: file.originalText,
       });
       var textAfterSave = file.text;
-      Object.assign(file, window.PsycheCodeEditor.markFileSaved(file, saved.text), {
+      var saveOutcome = window.PsycheCodeEditor.reconcileFileSave(
+        file, saved.text, textAfterSave
+      );
+      Object.assign(file, saveOutcome.buffer, {
         size: saved.size,
         saving: false,
         error: null,
         saveError: null,
-        saveState: "saved",
+        saveState: saveOutcome.canContinue ? "saved" : "modified",
         conflict: false,
       });
-      if (textAfterSave !== textToSave) {
-        Object.assign(file, window.PsycheCodeEditor.updateFileBuffer(file, textAfterSave));
-        file.saveState = "modified";
-      }
       invalidateProjectDiffs(project.id);
-      renderFileChrome(file);
+      if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
+        renderFileChrome(file);
+      }
       refreshTabs();
       if (currentPanel() === "diffs") renderDiffsPanel();
       if (currentPanel() === "git") renderGitPanel();
@@ -1371,13 +1373,15 @@
           if (state.activeFileId === file.id) renderFileChrome(file);
         }
       }, 1500);
-      return true;
+      return saveOutcome.canContinue;
     } catch (error) {
       file.saving = false;
       file.saveError = String(error);
       file.saveState = "error";
       if (file.saveError.includes("changed on disk")) handleFileSaveConflict(file);
-      renderFileChrome(file);
+      if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
+        renderFileChrome(file);
+      }
       return false;
     }
   }

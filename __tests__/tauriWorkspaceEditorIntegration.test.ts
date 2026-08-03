@@ -248,6 +248,8 @@ describe('native CodeMirror workspace editor surface', () => {
       'createRequestGate',
       'languageForPath',
       'markFileSaved',
+      'reconcileFileSave',
+      'shouldRenderFileSaveChrome',
       'updateFileBuffer',
     ]) {
       expect(editorEntry).toMatch(new RegExp(`\\b${modelApi},`));
@@ -325,7 +327,17 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(
       /invoke\("fs_write_text",\s*\{\s*root:\s*project\.root,\s*path:\s*file\.path,\s*text:\s*file\.text,\s*expectedText:\s*file\.originalText,?\s*\}\)/
     );
-    expect(mainJs).toMatch(/Object\.assign\(file, window\.PsycheCodeEditor\.markFileSaved\(file, saved\.text\)/);
+    expect(mainJs).toContain('window.PsycheCodeEditor.reconcileFileSave(');
+    expect(mainJs).toMatch(/return saveOutcome\.canContinue/);
+    expect(
+      mainJs.match(/window\.PsycheCodeEditor\.shouldRenderFileSaveChrome\(/g)
+    ).toHaveLength(3);
+    expect(mainJs).toMatch(
+      /if \(!project\) \{[\s\S]*file\.saveError = "Project is no longer open\.";[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*return false;/
+    );
+    expect(mainJs).toMatch(
+      /catch \(error\) \{[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*return false;/
+    );
     expect(mainJs).toContain('invalidateProjectDiffs(project.id)');
     expect(mainJs).toMatch(/currentPanel\(\) === "diffs"[\s\S]*renderDiffsPanel\(\)/);
     expect(mainJs).toMatch(/currentPanel\(\) === "git"[\s\S]*renderGitPanel\(\)/);

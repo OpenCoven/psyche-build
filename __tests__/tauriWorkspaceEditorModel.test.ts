@@ -47,6 +47,30 @@ describe('Tauri workspace editor model', () => {
     expect(saved).toEqual({ text: 'two', originalText: 'two', dirty: false });
   });
 
+  test('keeps edits made during a save dirty and blocks guarded continuation', () => {
+    const pending = model.updateFileBuffer(model.createFileBuffer('old'), 'saving');
+    const rebased = model.reconcileFileSave(pending, 'saving', 'newer edit');
+    const clean = model.reconcileFileSave(pending, 'saving', 'saving');
+
+    expect(rebased).toEqual({
+      buffer: { text: 'newer edit', originalText: 'saving', dirty: true },
+      canContinue: false,
+    });
+    expect(clean).toEqual({
+      buffer: { text: 'saving', originalText: 'saving', dirty: false },
+      canContinue: true,
+    });
+  });
+
+  test('suppresses save chrome after another file becomes active', () => {
+    let activeFileId = 'file-a';
+    expect(model.shouldRenderFileSaveChrome(activeFileId, 'file-a')).toBe(true);
+
+    activeFileId = 'file-b';
+    expect(model.shouldRenderFileSaveChrome(activeFileId, 'file-a')).toBe(false);
+    expect(model.shouldRenderFileSaveChrome(activeFileId, 'file-b')).toBe(true);
+  });
+
   test('suppresses stale request generations', () => {
     const gate = model.createRequestGate();
     const first = gate.next();

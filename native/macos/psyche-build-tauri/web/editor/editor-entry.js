@@ -21,6 +21,8 @@ export {
   createRequestGate,
   languageForPath,
   markFileSaved,
+  reconcileFileSave,
+  shouldRenderFileSaveChrome,
   updateFileBuffer,
 } from './workspace-model.mjs';
 
