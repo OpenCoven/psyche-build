@@ -3,8 +3,9 @@ import { configDefaults, defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     // The smoke test needs tmux and a production build, so it is not part of
-    // the portable unit suite. `pnpm smoke` runs it by path, which overrides
-    // this exclusion.
+    // the portable unit suite. This exclusion applies even to an explicitly
+    // named file, so `pnpm smoke` cannot escape it by passing a path — it runs
+    // under vitest.smoke.config.ts instead, which does not exclude it.
     exclude: [
       ...configDefaults.exclude,
       '.worktrees/**',
