@@ -1,7 +1,7 @@
 {
   "name": "psyche-build-tauri",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.1",
   "scripts": {
     "build:web": "esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js",
     "build": "pnpm build:web && tauri build",

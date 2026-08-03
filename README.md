@@ -19,29 +19,38 @@
 > but it is a clean break — nothing is migrated, and hook scripts stop firing
 > **silently**. See [Breaking changes](./docs/BREAKING-CHANGES.md).
 
-## Install
+## Distribution
 
-Install the signed and notarized macOS application through the OpenCoven tap:
+When the `v0.0.1` GitHub Release and tap Cask are available, the only public
+macOS installation path is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
 ```
 
-The Cask becomes available with the first public `v0.1.0` release. Until that
-release appears on GitHub, build from source using the contributing guide; the
-`psyche-build` npm package is not yet published.
+The iOS build is internal TestFlight only. Authorized OpenCoven testers can
+install `Psyche Build` `0.0.1 (1)` if it is available to their account in
+TestFlight; this is not a public App Store or external TestFlight release.
 
-After installing the CLI from source, verify the local setup with:
+Source development is separate; follow [CONTRIBUTING.md](./CONTRIBUTING.md) to
+run the checkout. The Node CLI ships in the source tree and package archive,
+but it is not an npm release for `0.0.1`. Windows, Linux, Android, external
+TestFlight, and public App Store distribution are unavailable in `0.0.1`.
+
+The Cask installs only `Psyche Build.app`; it does not install the Node CLI.
+From a source checkout, invoke that CLI explicitly and verify the local setup
+with:
 
 ```sh
-node ./psyche doctor --json
+node /path/to/psyche-build/psyche doctor --json
 ```
 
 ## Quick Start
 
 ```sh
 cd /path/to/your/project
-psyche
+node /path/to/psyche-build/psyche
 ```
 
 Press `n` to create a new pane, type a prompt, pick one or more agents (or none for a plain terminal), and Psyche Build handles the rest — tmux pane, git worktree, branch, and agent launch.
@@ -55,8 +64,8 @@ For the full Psyche Build + Coven walkthrough, see [Coven demo loop](./docs/COVE
 New to tmux? Run:
 
 ```sh
-psyche doctor
-psyche doctor --fix
+node /path/to/psyche-build/psyche doctor
+node /path/to/psyche-build/psyche doctor --fix
 ```
 
 `psyche doctor` checks tmux, git, clipboard/navigation support, psyche session styling, and the psyche-managed tmux config block. `--fix` applies safe repairs, backs up an existing `~/.tmux.conf`, and only edits the block between `# >>> psyche` and `# <<< psyche`.

@@ -6,7 +6,11 @@ export function render() {
     <p class="lead">Use this loop to show how psyche and Coven fit together: one project, any harness, visible work.</p>
 
     <h2>Prerequisites</h2>
-    <pre><code data-lang="bash">npm install -g psyche-build
+    <p>After the v0.0.1 release and Cask are available, install and open the public Psyche Build GUI for macOS. The Cask installs only <code>Psyche Build.app</code>.</p>
+    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"</code></pre>
+    <p>For the source CLI demo, use the repository checkout and invoke it explicitly. The Node CLI is not an npm release in 0.0.1.</p>
+    <pre><code data-lang="bash">node /path/to/psyche-build/psyche
 npx @opencoven/cli doctor
 coven doctor
 coven daemon start
@@ -15,7 +19,7 @@ coven daemon status</code></pre>
 
     <h2>Demo Path</h2>
     <ol>
-      <li>Run <code>psyche</code> from the repository you want to work in.</li>
+      <li>Run <code>node /path/to/psyche-build/psyche</code> from the repository you want to work in.</li>
       <li>Press <kbd>n</kbd> for a normal psyche agent pane, or press <kbd>d</kbd> to launch the desktop-use Coven pane.</li>
       <li>For a CLI-started Coven session, run <code>coven run codex "fix the failing tests" --title "Fix tests"</code> or <code>coven run claude "review this branch" --title "Review branch"</code> in a terminal pane.</li>
       <li>Watch matching Coven sessions in the side panel for the active project.</li>

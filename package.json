@@ -1,6 +1,6 @@
 {
   "name": "psyche-build",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Multiagent coding harness: parallel agent lanes in isolated tmux panes and git worktrees.",
   "type": "module",
   "author": "Valentina Alexander",
@@ -36,6 +36,7 @@
   "files": [
     "dist/**/*",
     "psyche",
+    "CHANGELOG.md",
     "README.md",
     "docs/README.md",
     "docs/BREAKING-CHANGES.md",
@@ -59,8 +60,11 @@
     "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
+    "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",
+    "ios:project:check": "pnpm ios:project:generate && git diff --exit-code -- native/ios/Psyche.xcodeproj native/ios/PsycheApp/Resources/Info.plist",
     "release:version": "node scripts/release-version.mjs --set",
     "release:check": "node scripts/release-version.mjs --check",
+    "release:testflight": "node scripts/app-store-connect.mjs wait-and-localize",
     "test": "vitest --run",
     "smoke": "pnpm run build && vitest --run -c vitest.smoke.config.ts",
     "prepublishOnly": "pnpm run build",

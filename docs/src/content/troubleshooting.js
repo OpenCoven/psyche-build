@@ -6,27 +6,31 @@ export function render() {
     <p class="lead">Start here when psyche does not launch, an agent is missing, panes look stale, merges stop, or a docs preview is not building.</p>
 
     <h2>Quick Diagnostics</h2>
-    <pre><code data-lang="bash">psyche doctor
+    <p>For source CLI diagnostics, run the executable from its checkout:</p>
+    <pre><code data-lang="bash">node /path/to/psyche-build/psyche doctor
 node --version
 pnpm --version
 tmux -V
 git status --short
-psyche --version</code></pre>
+node /path/to/psyche-build/psyche --version</code></pre>
     <p>When developing psyche itself, use the maintainer doctor command:</p>
     <pre><code data-lang="bash">pnpm run dev:doctor</code></pre>
 
-    <h2>Install Command Fails</h2>
+    <h2>Homebrew Install Fails</h2>
     <table>
       <thead>
         <tr><th>Symptom</th><th>Check</th><th>Fix</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>psyche: command not found</code></td><td>Global npm bin is not on <code>PATH</code></td><td>Run <code>npm config get prefix</code> and add the resulting bin directory to your shell profile</td></tr>
-        <tr><td>Package name not found</td><td>Registry or package metadata issue</td><td>Confirm the package name is <code>psyche</code> and retry after refreshing npm auth/cache</td></tr>
-        <tr><td>Permission denied during global install</td><td>npm prefix ownership</td><td>Use a Node version manager or fix npm global directory ownership</td></tr>
+        <tr><td>The GUI does not launch</td><td>The Cask is not installed or the release is not yet available</td><td>Confirm the public GitHub release and tap Cask exist, then reinstall and open the app</td></tr>
+        <tr><td>Cask name not found</td><td>The tap is stale or the release is not yet available</td><td>Run <code>brew update</code> and confirm <code>opencoven/tap/psyche-build</code> exists</td></tr>
+        <tr><td>Checksum mismatch</td><td>The Cask and release assets disagree</td><td>Stop and report the release integrity failure; do not bypass Homebrew verification</td></tr>
       </tbody>
     </table>
-    <pre><code data-lang="bash">npm install -g psyche-build</code></pre>
+    <p>After the v0.0.1 release and Cask are available:</p>
+    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"</code></pre>
+    <p>The Cask installs only <code>Psyche Build.app</code>. It does not provide a <code>psyche</code> command. The Node CLI is not an npm release in 0.0.1; source-development recovery uses <code>node /path/to/psyche-build/psyche</code> from the repository checkout.</p>
 
     <h2>psyche Will Not Start</h2>
     <ul>
