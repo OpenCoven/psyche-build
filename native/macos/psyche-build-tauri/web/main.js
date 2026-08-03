@@ -62,7 +62,8 @@
     activeThreadId: null,
     /** Files opened from the Files panel. These are the *only* things the main
      *  tab strip shows; projects are switched from the sessions sidebar.
-     *  { id, path, rel, name, projectId, text, truncated, binary, size, error } */
+     *  { id, path, rel, name, projectId, text, originalText, dirty, saving,
+     *    languageId, cursor, truncated, binary, size, error, saveError } */
     openFiles: [],
     /** Non-null while a file tab owns the main area instead of the terminal. */
     activeFileId: null,
@@ -1126,8 +1127,35 @@
   var fileViewEl = document.getElementById("file-view");
   var fileViewPathEl = document.getElementById("file-view-path");
   var fileViewMetaEl = document.getElementById("file-view-meta");
-  var fileViewBodyEl = document.getElementById("file-view-body");
+  var fileViewTitleEl = document.getElementById("file-view-title");
+  var fileDirtyEl = document.getElementById("file-dirty");
+  var fileSaveEl = document.getElementById("file-save");
+  var fileLanguageEl = document.getElementById("file-language");
+  var fileStatusEl = document.getElementById("file-status");
+  var fileReadOnlyMessageEl = document.getElementById("file-read-only-message");
+  var fileCursorEl = document.getElementById("file-cursor");
+  var fileEditorHostEl = document.getElementById("file-editor-host");
   var fileCounter = 0;
+  var loadedEditorFileId = null;
+
+  var fileEditor = window.PsycheCodeEditor.createFileEditor({
+    parent: fileEditorHostEl,
+    onChange: function (text) {
+      var file = findOpenFile(state.activeFileId);
+      if (!file || file.id !== loadedEditorFileId || !isEditableFile(file)) return;
+      Object.assign(file, window.PsycheCodeEditor.updateFileBuffer(file, text));
+      file.saveError = null;
+      file.saveState = file.dirty ? "modified" : "clean";
+      renderFileChrome(file);
+      refreshTabs();
+    },
+    onSelectionChange: function (cursor) {
+      var file = findOpenFile(state.activeFileId);
+      if (!file || file.id !== loadedEditorFileId) return;
+      file.cursor = cursor;
+      renderFileCursor(file);
+    },
+  });
 
   function findOpenFile(id) {
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
@@ -1150,17 +1178,24 @@
       name: rel.split("/").pop() || rel,
       projectId: project.id,
       text: "",
+      originalText: "",
+      dirty: false,
+      saving: false,
+      languageId: window.PsycheCodeEditor.languageForPath(rel),
+      cursor: { line: 1, column: 1 },
       truncated: false,
       binary: false,
       size: 0,
       error: null,
+      saveError: null,
+      saveState: "clean",
       loading: true,
     };
     state.openFiles.push(file);
     activateFileTab(file.id);
     try {
       var res = await invoke("fs_read_text", { root: project.root, path: path });
-      file.text = res.text;
+      Object.assign(file, window.PsycheCodeEditor.createFileBuffer(res.text || ""));
       file.truncated = res.truncated;
       file.binary = res.binary;
       file.size = res.size;
@@ -1168,7 +1203,7 @@
       file.error = String(err);
     }
     file.loading = false;
-    if (state.activeFileId === file.id) renderFileView();
+    if (state.activeFileId === file.id) renderFileView({ reload: true });
   }
 
   function activateFileTab(id) {
@@ -1205,35 +1240,149 @@
     else showTerminalView();
   }
 
-  function renderFileView() {
-    var file = findOpenFile(state.activeFileId);
-    if (!file || !fileViewBodyEl) return;
+  function isEditableFile(file) {
+    return !!file && !file.loading && !file.error && !file.binary && !file.truncated;
+  }
+
+  function languageLabel(languageId) {
+    var labels = {
+      javascript: "JavaScript", typescript: "TypeScript", json: "JSON",
+      html: "HTML", xml: "XML", css: "CSS", markdown: "Markdown",
+      python: "Python", rust: "Rust", shell: "Shell", yaml: "YAML",
+      toml: "TOML", plain: "Plain Text",
+    };
+    return labels[languageId] || languageId || "Plain Text";
+  }
+
+  function renderFileCursor(file) {
+    if (!fileCursorEl || !file) return;
+    var cursor = file.cursor || { line: 1, column: 1 };
+    fileCursorEl.textContent = "Ln " + cursor.line + ", Col " + cursor.column;
+  }
+
+  function readOnlyReason(file) {
+    if (file.loading) return "Loading…";
+    if (file.error) return "Read-only — " + file.error;
+    if (file.binary) return "Read-only — binary or invalid UTF-8 file.";
+    if (file.truncated) return "Read-only — file exceeds the 512 KiB preview limit.";
+    return "";
+  }
+
+  function renderFileChrome(file) {
+    if (!file) return;
+    var editable = isEditableFile(file);
+    var lineCount = file.text ? file.text.split("\n").length : 1;
+    var lineEnding = file.text.indexOf("\r\n") === -1 ? "LF" : "CRLF";
+    var stateLabel = file.loading ? "Loading…" :
+      file.error ? "Load failed: " + file.error :
+      file.saving ? "Saving…" :
+      file.saveError ? "Save failed: " + file.saveError :
+      file.dirty ? "Modified" :
+      file.saveState === "saved" ? "Saved" :
+      editable ? "Clean" : "Read-only";
+
     fileViewPathEl.textContent = file.rel;
-    if (file.loading) {
-      fileViewMetaEl.textContent = "";
-      fileViewBodyEl.textContent = "loading…";
-      return;
+    if (fileViewTitleEl) fileViewTitleEl.textContent = file.name;
+    if (fileLanguageEl) fileLanguageEl.textContent = languageLabel(file.languageId);
+    if (fileViewMetaEl) {
+      fileViewMetaEl.textContent = lineCount + " lines · " + file.size + " bytes" +
+        (file.truncated ? " · truncated" : "");
     }
-    if (file.error) {
-      fileViewMetaEl.textContent = "error";
-      fileViewBodyEl.textContent = file.error;
-      return;
+    if (fileDirtyEl) fileDirtyEl.hidden = !file.dirty;
+    if (fileSaveEl) {
+      fileSaveEl.disabled = !isEditableFile(file) || !file.dirty || file.saving;
+      fileSaveEl.innerHTML = file.saving ? "Saving…" : "Save <kbd>⌘S</kbd>";
     }
-    if (file.binary) {
-      fileViewMetaEl.textContent = file.size + " bytes";
-      fileViewBodyEl.textContent = "Binary file — no preview.";
-      return;
+    if (fileStatusEl) {
+      fileStatusEl.textContent = stateLabel + (editable ? " · UTF-8 · " + lineEnding : "");
     }
-    var lines = file.text.split("\n");
-    fileViewMetaEl.textContent =
-      lines.length + " lines · " + file.size + " bytes" + (file.truncated ? " · truncated" : "");
-    // Line numbers are spans rather than a gutter column so selecting text
-    // still copies the source cleanly-ish and there is no second scroll box.
-    fileViewBodyEl.innerHTML = lines
-      .map(function (line, i) {
-        return '<span class="ln">' + (i + 1) + "</span>" + escapeHtml(line);
-      })
-      .join("\n") + (file.truncated ? '\n<span class="ln"></span>… truncated' : "");
+    if (fileReadOnlyMessageEl) {
+      fileReadOnlyMessageEl.hidden = editable;
+      fileReadOnlyMessageEl.textContent = readOnlyReason(file);
+    }
+    renderFileCursor(file);
+  }
+
+  function renderFileView(options) {
+    options = options || {};
+    var file = findOpenFile(state.activeFileId);
+    if (!file) return;
+    renderFileChrome(file);
+    if (loadedEditorFileId !== file.id || options.reload) {
+      loadedEditorFileId = file.id;
+      fileEditor.setDocument({
+        text: file.text,
+        languageId: file.languageId,
+        readOnly: !isEditableFile(file),
+      });
+    }
+  }
+
+  function handleFileSaveConflict(file) {
+    // Task 5 owns the Reload / Keep Editing prompt. Preserve the conflict on
+    // the model so that guard can present it without discarding this buffer.
+    file.conflict = true;
+  }
+
+  async function saveFile(file) {
+    if (!file || !file.dirty || file.saving || !isEditableFile(file)) return false;
+    var project = findProject(file.projectId);
+    if (!project) {
+      file.saveError = "Project is no longer open.";
+      renderFileChrome(file);
+      return false;
+    }
+
+    var textToSave = file.text;
+    file.saving = true;
+    file.saveError = null;
+    renderFileChrome(file);
+    try {
+      var saved = await invoke("fs_write_text", {
+        root: project.root,
+        path: file.path,
+        text: file.text,
+        expectedText: file.originalText,
+      });
+      var textAfterSave = file.text;
+      Object.assign(file, window.PsycheCodeEditor.markFileSaved(file, saved.text), {
+        size: saved.size,
+        saving: false,
+        error: null,
+        saveError: null,
+        saveState: "saved",
+        conflict: false,
+      });
+      if (textAfterSave !== textToSave) {
+        Object.assign(file, window.PsycheCodeEditor.updateFileBuffer(file, textAfterSave));
+        file.saveState = "modified";
+      }
+      invalidateProjectDiffs(project.id);
+      renderFileChrome(file);
+      refreshTabs();
+      if (currentPanel() === "diffs") renderDiffsPanel();
+      if (currentPanel() === "git") renderGitPanel();
+      setTimeout(function () {
+        if (!file.dirty && file.saveState === "saved") {
+          file.saveState = "clean";
+          if (state.activeFileId === file.id) renderFileChrome(file);
+        }
+      }, 1500);
+      return true;
+    } catch (error) {
+      file.saving = false;
+      file.saveError = String(error);
+      file.saveState = "error";
+      if (file.saveError.includes("changed on disk")) handleFileSaveConflict(file);
+      renderFileChrome(file);
+      return false;
+    }
+  }
+
+  if (fileSaveEl) {
+    fileSaveEl.addEventListener("click", function () {
+      saveFile(findOpenFile(state.activeFileId));
+    });
   }
 
   // Tabs are opened files only — projects live in the sessions sidebar.
@@ -1266,6 +1415,7 @@
       tab.title = file.rel + (idx < 9 ? "  (\u2318" + (idx + 1) + ")" : "");
       tab.innerHTML =
         '<span class="label">' + escapeHtml(file.name) + "</span>" +
+        (file.dirty ? '<span class="dot dirty-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>' : "") +
         '<button class="close" title="Close file (\u2318W)">\u00d7</button>';
       tab.addEventListener("click", function (e) {
         if (e.target.classList.contains("close")) return;
@@ -1999,6 +2149,10 @@
   document.addEventListener("keydown", function (e) {
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
+    if (String(e.key).toLowerCase() === "s") {
+      saveFile(findOpenFile(state.activeFileId));
+      e.preventDefault(); return;
+    }
     // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
     if (String(e.key).toLowerCase() === "t") {
       createContextualTab();
@@ -2067,6 +2221,11 @@
   var expandedDirs = Object.create(null);
   var selectedDiffPath = null;
   var gitRemoteWebUrl = null;
+
+  function invalidateProjectDiffs(_projectId) {
+    // Task 7 adds the bounded LRU diff cache. There is no cached diff state to
+    // clear yet; keeping this seam makes successful saves refresh-safe now.
+  }
 
   // The tree highlights whichever file currently owns the main area.
   function activeFilePath() {

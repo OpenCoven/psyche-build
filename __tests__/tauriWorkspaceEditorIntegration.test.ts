@@ -9,6 +9,7 @@ const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
 const webRoot = join(tauriRoot, 'web');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const editorEntry = readFileSync(join(webRoot, 'editor/editor-entry.js'), 'utf8');
+const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 const tauriConfig = readFileSync(join(tauriRoot, 'src-tauri/tauri.conf.json'), 'utf8');
 const tauriPackage = JSON.parse(
@@ -227,5 +228,60 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(stylesCss).toMatch(/\.file-editor-host \.cm-gutters\s*\{[\s\S]*var\(--surface/);
     expect(stylesCss).toMatch(/\.file-editor-host \.cm-selectionBackground[\s\S]*var\(--accent/);
     expect(stylesCss).toContain('.file-view[hidden]');
+  });
+
+  it('stores editable file state and wires one editor to the active file only', () => {
+    for (const field of [
+      'originalText',
+      'dirty',
+      'saving',
+      'languageId',
+      'cursor',
+    ]) {
+      expect(mainJs).toMatch(new RegExp(`\\b${field}:`));
+    }
+
+    expect(mainJs).toMatch(
+      /var fileEditor = window\.PsycheCodeEditor\.createFileEditor\(\{/
+    );
+    expect(mainJs.match(/createFileEditor\(\{/g)).toHaveLength(1);
+    expect(mainJs).toMatch(
+      /onChange:\s*function \(text\) \{[\s\S]*findOpenFile\(state\.activeFileId\)[\s\S]*updateFileBuffer\(file, text\)/
+    );
+    expect(mainJs).toMatch(
+      /onSelectionChange:\s*function \(cursor\) \{[\s\S]*findOpenFile\(state\.activeFileId\)[\s\S]*file\.cursor = cursor/
+    );
+    expect(mainJs).not.toContain('fileViewBodyEl');
+    expect(mainJs).toMatch(
+      /if \(loadedEditorFileId !== file\.id \|\| options\.reload\) \{[\s\S]*fileEditor\.setDocument\(\{/
+    );
+    expect(mainJs).toMatch(
+      /readOnly:\s*!isEditableFile\(file\)/
+    );
+  });
+
+  it('saves the active dirty file explicitly and refreshes project Git data', () => {
+    expect(mainJs).toMatch(/async function saveFile\(file\)/);
+    expect(mainJs).toMatch(
+      /invoke\("fs_write_text",\s*\{\s*root:\s*project\.root,\s*path:\s*file\.path,\s*text:\s*file\.text,\s*expectedText:\s*file\.originalText,?\s*\}\)/
+    );
+    expect(mainJs).toMatch(/Object\.assign\(file, window\.PsycheCodeEditor\.markFileSaved\(file, saved\.text\)/);
+    expect(mainJs).toContain('invalidateProjectDiffs(project.id)');
+    expect(mainJs).toMatch(/currentPanel\(\) === "diffs"[\s\S]*renderDiffsPanel\(\)/);
+    expect(mainJs).toMatch(/currentPanel\(\) === "git"[\s\S]*renderGitPanel\(\)/);
+    expect(mainJs).toMatch(/fileSaveEl\.addEventListener\("click", function \(\) \{[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/);
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\) === "s"[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)[\s\S]*e\.preventDefault\(\)/
+    );
+  });
+
+  it('renders dirty, saving, saved, error, and read-only file chrome', () => {
+    expect(mainJs).toMatch(/class="[^"]*\bdirty-dot\b[^"]*"/);
+    expect(mainJs).toMatch(/fileDirtyEl\.hidden = !file\.dirty/);
+    expect(mainJs).toMatch(/fileSaveEl\.disabled = !isEditableFile\(file\) \|\| !file\.dirty \|\| file\.saving/);
+    for (const status of ['Modified', 'Saving…', 'Saved', 'Save failed:']) {
+      expect(mainJs).toContain(status);
+    }
+    expect(mainJs).toMatch(/fileReadOnlyMessageEl\.hidden = editable/);
   });
 });
