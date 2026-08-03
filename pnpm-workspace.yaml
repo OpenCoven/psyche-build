@@ -1,0 +1,7 @@
+# Explicit paths, not globs. Globs such as "native/**" would also match the
+# copies of these same packages inside .worktrees/ and .psyche/worktrees/,
+# which pnpm would then try to link as workspace members.
+packages:
+  - frontend
+  - docs
+  - native/macos/psyche-build-tauri
