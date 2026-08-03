@@ -188,6 +188,11 @@ struct CockpitView: View {
 
     private func toggleSiderails() {
         if horizontalSizeClass == .compact {
+            // .detailOnly keeps the sidebar column unavailable, so pointing
+            // preferredCompactColumn at it does nothing until this is lifted.
+            // Without this the toggle is inert in compact width, which also
+            // strands the pair-a-host button that lives in the sidebar.
+            if columnVisibility == .detailOnly { columnVisibility = .automatic }
             preferredCompactColumn = preferredCompactColumn == .detail ? .sidebar : .detail
         } else {
             if columnVisibility == .detailOnly {
