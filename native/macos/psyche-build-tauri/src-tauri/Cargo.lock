@@ -2993,6 +2993,7 @@ name = "psyche-build-tauri"
 version = "0.0.7"
 dependencies = [
  "env_logger",
+ "libc",
  "log",
  "once_cell",
  "parking_lot",

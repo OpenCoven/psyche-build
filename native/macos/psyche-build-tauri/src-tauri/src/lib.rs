@@ -1,5 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -903,6 +909,7 @@ fn locate_psyche_repo() -> Option<String> {
 /// panel still shows a useful head.
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static WORKSPACE_SAVE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn canonical_project_root(root: &str) -> Result<PathBuf, String> {
     let canonical = Path::new(root)
@@ -1015,9 +1022,10 @@ fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
     let read = file.read(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(read);
 
-    // A NUL byte in the head is the usual "this is binary" heuristic. Invalid
-    // UTF-8 is also non-editable so a save can never perform a lossy rewrite.
-    let binary = buf.iter().take(8000).any(|b| *b == 0) || std::str::from_utf8(&buf).is_err();
+    // A NUL byte in the bounded preview is the usual "this is binary"
+    // heuristic. Invalid UTF-8 is also non-editable so a save can never perform
+    // a lossy rewrite.
+    let binary = buf.contains(&0) || std::str::from_utf8(&buf).is_err();
     let text = if binary {
         String::new()
     } else {
@@ -1039,63 +1047,336 @@ pub struct SavedFileText {
     pub size: u64,
 }
 
-fn atomic_replace_file(
-    target: &Path,
-    bytes: &[u8],
-    permissions: std::fs::Permissions,
-) -> Result<(), String> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("file has no parent directory: {}", target.display()))?;
-    let basename = target
-        .file_name()
-        .ok_or_else(|| format!("file has no name: {}", target.display()))?;
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileState {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
 
-    let (temp_path, mut temp_file) = loop {
+#[cfg(unix)]
+fn file_state(file: &std::fs::File) -> Result<FileState, String> {
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    Ok(FileState {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(unix)]
+fn same_identity(left: FileState, right: FileState) -> bool {
+    left.dev == right.dev && left.ino == right.ino
+}
+
+#[cfg(unix)]
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("path contains a NUL byte: {}", path.display()))
+}
+
+#[cfg(unix)]
+fn c_name(name: &std::ffi::OsStr) -> Result<CString, String> {
+    CString::new(name.as_bytes()).map_err(|_| "file name contains a NUL byte".to_string())
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    let path_c = c_path(path)?;
+    let fd = unsafe {
+        libc::open(
+            path_c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open {} '{}': {}",
+            label,
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn open_target_no_follow(
+    parent: &std::fs::File,
+    name: &CString,
+) -> Result<std::fs::File, std::io::Error> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn read_stable_file(file: &mut std::fs::File, path: &str) -> Result<(Vec<u8>, FileState), String> {
+    let before = file_state(file)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("read '{}': {}", path, e))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("read '{}': {}", path, e))?;
+    let after = file_state(file)?;
+    if before != after {
+        return Err(format!("file changed on disk: {}", path));
+    }
+    Ok((bytes, after))
+}
+
+#[cfg(unix)]
+fn validate_parent_identity(
+    root_input: &str,
+    canonical_root: &Path,
+    root_state: FileState,
+    parent_path: &Path,
+    parent_state: FileState,
+) -> Result<(), String> {
+    let current_root = canonical_project_root(root_input)?;
+    if current_root != canonical_root {
+        return Err("project root changed while saving".to_string());
+    }
+    let current_root_file = open_directory_no_follow(&current_root, "project root")?;
+    if !same_identity(file_state(&current_root_file)?, root_state) {
+        return Err("project root changed while saving".to_string());
+    }
+
+    let current_parent = parent_path.canonicalize().map_err(|e| {
+        format!(
+            "parent changed while saving '{}': {}",
+            parent_path.display(),
+            e
+        )
+    })?;
+    if !current_parent.starts_with(&current_root) {
+        return Err(format!(
+            "path is outside project root: {}",
+            parent_path.display()
+        ));
+    }
+    if current_parent != parent_path {
+        return Err(format!(
+            "parent changed while saving: {}",
+            parent_path.display()
+        ));
+    }
+    let current_parent_file = open_directory_no_follow(parent_path, "file parent")?;
+    if !same_identity(file_state(&current_parent_file)?, parent_state) {
+        return Err(format!(
+            "parent changed while saving: {}",
+            parent_path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlink_temp_at(parent: &std::fs::File, temp_name: &CString) -> Result<(), String> {
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), temp_name.as_ptr(), 0) };
+    if result < 0 {
+        return Err(format!(
+            "remove temporary save file: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fs_write_text_with_before_commit<F>(
+    root: String,
+    path: String,
+    text: String,
+    expected_text: String,
+    before_commit: F,
+) -> Result<SavedFileText, String>
+where
+    F: FnOnce(),
+{
+    let _save_guard = WORKSPACE_SAVE_MUTEX.lock();
+    let canonical_root = canonical_project_root(&root)?;
+    let target_path = resolve_project_path(&root, &path)?;
+    let parent_path = target_path
+        .parent()
+        .ok_or_else(|| format!("file has no parent directory: {}", target_path.display()))?;
+    let target_name = c_name(
+        target_path
+            .file_name()
+            .ok_or_else(|| format!("file has no name: {}", target_path.display()))?,
+    )?;
+
+    let root_file = open_directory_no_follow(&canonical_root, "project root")?;
+    let root_state = file_state(&root_file)?;
+    let parent_file = open_directory_no_follow(parent_path, "file parent")?;
+    let parent_state = file_state(&parent_file)?;
+    validate_parent_identity(
+        &root,
+        &canonical_root,
+        root_state,
+        parent_path,
+        parent_state,
+    )?;
+    let mut initial_target = open_target_no_follow(&parent_file, &target_name)
+        .map_err(|e| format!("open target '{}': {}", path, e))?;
+    let initial_state_before = file_state(&initial_target)?;
+    if !initial_target
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .is_file()
+    {
+        return Err(format!("not a regular file: {}", path));
+    }
+    let (initial_bytes, initial_state) = read_stable_file(&mut initial_target, &path)?;
+    if initial_state != initial_state_before {
+        return Err(format!("file changed on disk: {}", path));
+    }
+    let current_text = std::str::from_utf8(&initial_bytes)
+        .map_err(|_| format!("file is not valid UTF-8: {}", path))?;
+    if current_text != expected_text {
+        return Err(format!("file changed on disk: {}", path));
+    }
+
+    let (temp_name, mut temp_file) = loop {
         let counter = SAVE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut temp_name = basename.to_os_string();
-        temp_name.push(format!(".psyche-save-{}-{}", std::process::id(), counter));
-        let temp_path = parent.join(temp_name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
-            Ok(file) => break (temp_path, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(format!(
-                    "create temporary save file for '{}': {}",
-                    target.display(),
-                    error
-                ));
-            }
+        let mut bytes = target_name.as_bytes().to_vec();
+        bytes.extend_from_slice(
+            format!(".psyche-save-{}-{}", std::process::id(), counter).as_bytes(),
+        );
+        let temp_name = CString::new(bytes).expect("validated target name cannot contain NUL");
+        let fd = unsafe {
+            libc::openat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                (initial_state.mode & 0o7777) as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            break (temp_name, unsafe { std::fs::File::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!(
+                "create temporary save file for '{}': {}",
+                path, error
+            ));
         }
     };
 
     let save_result = (|| -> Result<(), String> {
+        let chmod_result = unsafe {
+            libc::fchmod(
+                temp_file.as_raw_fd(),
+                (initial_state.mode & 0o7777) as libc::mode_t,
+            )
+        };
+        if chmod_result < 0 {
+            return Err(format!(
+                "copy permissions for '{}': {}",
+                path,
+                std::io::Error::last_os_error()
+            ));
+        }
         temp_file
-            .set_permissions(permissions)
-            .map_err(|e| format!("copy permissions for '{}': {}", target.display(), e))?;
-        temp_file
-            .write_all(bytes)
-            .map_err(|e| format!("write temporary save for '{}': {}", target.display(), e))?;
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("write temporary save for '{}': {}", path, e))?;
         temp_file
             .flush()
-            .map_err(|e| format!("flush temporary save for '{}': {}", target.display(), e))?;
+            .map_err(|e| format!("flush temporary save for '{}': {}", path, e))?;
         temp_file
             .sync_all()
-            .map_err(|e| format!("sync temporary save for '{}': {}", target.display(), e))?;
+            .map_err(|e| format!("sync temporary save for '{}': {}", path, e))?;
+
+        before_commit();
+
+        validate_parent_identity(
+            &root,
+            &canonical_root,
+            root_state,
+            parent_path,
+            parent_state,
+        )?;
+        let mut final_target = open_target_no_follow(&parent_file, &target_name)
+            .map_err(|e| format!("file changed on disk: {} ({})", path, e))?;
+        if !final_target
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .is_file()
+        {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        let final_state_before = file_state(&final_target)?;
+        if final_state_before != initial_state {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        let (final_bytes, final_state_after) = read_stable_file(&mut final_target, &path)?;
+        if final_state_after != final_state_before || final_bytes != expected_text.as_bytes() {
+            return Err(format!("file changed on disk: {}", path));
+        }
+        drop(final_target);
         drop(temp_file);
-        std::fs::rename(&temp_path, target)
-            .map_err(|e| format!("replace '{}': {}", target.display(), e))?;
+
+        // POSIX rename has an unavoidable final-syscall window against an
+        // arbitrary non-cooperating writer. This is optimistic protection for
+        // trusted local editor and coding-agent saves; descriptor-relative
+        // rename keeps that window contained to the validated parent.
+        let rename_result = unsafe {
+            libc::renameat(
+                parent_file.as_raw_fd(),
+                temp_name.as_ptr(),
+                parent_file.as_raw_fd(),
+                target_name.as_ptr(),
+            )
+        };
+        if rename_result < 0 {
+            return Err(format!(
+                "replace '{}': {}",
+                path,
+                std::io::Error::last_os_error()
+            ));
+        }
         Ok(())
     })();
 
-    if save_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+    if let Err(save_error) = save_result {
+        let cleanup_result = unlink_temp_at(&parent_file, &temp_name);
+        drop(initial_target);
+        return match cleanup_result {
+            Ok(()) => Err(save_error),
+            Err(cleanup_error) => Err(format!("{}; {}", save_error, cleanup_error)),
+        };
     }
-    save_result
+
+    drop(initial_target);
+    Ok(SavedFileText {
+        path: target_path.to_string_lossy().to_string(),
+        size: text.len() as u64,
+        text,
+    })
 }
 
 #[tauri::command]
@@ -1105,25 +1386,15 @@ fn fs_write_text(
     text: String,
     expected_text: String,
 ) -> Result<SavedFileText, String> {
-    let target = resolve_project_path(&root, &path)?;
-    if !target.is_file() {
-        return Err(format!("not a regular file: {}", path));
+    #[cfg(unix)]
+    {
+        return fs_write_text_with_before_commit(root, path, text, expected_text, || {});
     }
-
-    let metadata = std::fs::metadata(&target).map_err(|e| e.to_string())?;
-    let current_bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
-    let current_text = std::str::from_utf8(&current_bytes)
-        .map_err(|_| format!("file is not valid UTF-8: {}", path))?;
-    if current_text != expected_text {
-        return Err(format!("file changed on disk: {}", path));
+    #[cfg(not(unix))]
+    {
+        let _ = (root, path, text, expected_text);
+        Err("workspace file saves require POSIX descriptor-relative operations".to_string())
     }
-
-    atomic_replace_file(&target, text.as_bytes(), metadata.permissions())?;
-    Ok(SavedFileText {
-        path: target.to_string_lossy().to_string(),
-        size: text.len() as u64,
-        text,
-    })
 }
 
 fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
@@ -1614,6 +1885,114 @@ mod workspace_panel_tests {
         assert!(save_temp_paths(&target).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_content_changes_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-content");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::write(&target, "external\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"external\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_target_deletion_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-delete");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::remove_file(&target).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert!(!target.exists());
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_target_replacement_before_the_atomic_commit() {
+        let tree = TempTree::new("save-race-replace");
+        let target = tree.root.join("notes.txt");
+        let moved_target = tree.root.join("notes-original.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::rename(&target, &moved_target).unwrap();
+                std::fs::write(&target, "replacement\n").unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement\n");
+        assert_eq!(std::fs::read(&moved_target).unwrap(), b"before\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_parent_replacement_with_an_outside_symlink_before_commit() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("save-race-parent");
+        let project = tree.root.join("project");
+        let parent = project.join("src");
+        let moved_parent = project.join("src-original");
+        let target = parent.join("notes.txt");
+        let moved_target = moved_parent.join("notes.txt");
+        let outside = tree.root.join("outside");
+        let outside_target = outside.join("notes.txt");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(&target, "before\n").unwrap();
+        std::fs::write(&outside_target, "outside\n").unwrap();
+
+        let error = fs_write_text_with_before_commit(
+            path_text(&project).to_string(),
+            path_text(&target).to_string(),
+            "editor\n".to_string(),
+            "before\n".to_string(),
+            || {
+                std::fs::rename(&parent, &moved_parent).unwrap();
+                symlink(&outside, &parent).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("outside project root") || error.contains("parent changed"));
+        assert_eq!(std::fs::read(&outside_target).unwrap(), b"outside\n");
+        assert_eq!(std::fs::read(&moved_target).unwrap(), b"before\n");
+        assert!(save_temp_paths(&moved_target).is_empty());
+    }
+
     #[test]
     fn invalid_utf8_is_binary_and_cannot_be_saved_as_text() {
         let tree = TempTree::new("invalid-utf8");
@@ -1639,6 +2018,24 @@ mod workspace_panel_tests {
         assert!(error.contains("file is not valid UTF-8"));
         assert_eq!(std::fs::read(&target).unwrap(), original);
         assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[test]
+    fn nul_anywhere_in_the_bounded_preview_is_binary() {
+        let tree = TempTree::new("late-nul");
+        let target = tree.root.join("binary.txt");
+        let mut original = vec![b'a'; 9000];
+        original[8500] = 0;
+        std::fs::write(&target, original).unwrap();
+
+        let preview = fs_read_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+        )
+        .unwrap();
+
+        assert!(preview.binary);
+        assert!(preview.text.is_empty());
     }
 
     #[test]
