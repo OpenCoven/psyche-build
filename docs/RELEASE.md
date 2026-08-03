@@ -59,8 +59,9 @@ Do not stage these values in files or create repository-level fallback secrets.
 There is no repository-secret fallback, scheduled no-secret fallback, or
 optional secret for this release.
 
-Protect `main` and `v*` tags before tagging. The active tag ruleset must
-restrict creation to approved release managers and block tag update/deletion.
+Protect `main` and `v*` tags before tagging. Two separate active tag rulesets
+must restrict creation to approved release managers and block tag
+update/deletion without giving those managers an immutability bypass.
 The workflow separately requires a verified signed annotated tag whose commit
 is on `origin/main`, and every secret-bearing or publishing job waits at the
 protected `release` environment.
@@ -159,11 +160,34 @@ gh api --method POST \
   -f name='v*' -f type=tag
 ```
 
-Protect `main` and `v*` tags now that repository rulesets are available. The
-active tag rules must allow only approved release managers to create matching
-tags and must block tag update/deletion. Verify `main` protection, the tag
-rules, the reviewer team, `prevent_self_review=true`, and both custom deployment
-policies before adding credentials.
+Protect `main` and `v*` tags now that repository rulesets are available. A
+ruleset bypass applies to every rule in that ruleset, so use two separate active
+tag rulesets: one lets the `Maintainers` team create a release tag, and the
+other has no bypass actors and makes matching tags immutable.
+
+```sh
+jq -n --argjson team_id "$maintainers_team_id" '{
+  name: "Release tag creation",
+  target: "tag",
+  enforcement: "active",
+  bypass_actors: [{actor_id: $team_id, actor_type: "Team", bypass_mode: "always"}],
+  conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+  rules: [{type: "creation"}]
+}' | gh api --method POST repos/OpenCoven/psyche-build/rulesets --input -
+
+jq -n '{
+  name: "Immutable release tags",
+  target: "tag",
+  enforcement: "active",
+  bypass_actors: [],
+  conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+  rules: [{type: "update"}, {type: "deletion"}]
+}' | gh api --method POST repos/OpenCoven/psyche-build/rulesets --input -
+```
+
+Verify `main` protection, both active tag rulesets and their exact bypass
+actors, the reviewer team, `prevent_self_review=true`, and both custom
+deployment policies before adding credentials.
 
 Use interactive `gh secret set --env release --repo OpenCoven/psyche-build`
 input for every value in the table above. Verify the exact names with

@@ -168,6 +168,25 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).not.toContain('protected-branch deployment policy');
   });
 
+  it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(/two separate active tag rulesets/i);
+    expect(runbook).toContain('name: "Release tag creation"');
+    expect(runbook).toContain('name: "Immutable release tags"');
+    expect(runbook).toContain(
+      'bypass_actors: [{actor_id: $team_id, actor_type: "Team", bypass_mode: "always"}]',
+    );
+    expect(runbook).toContain('rules: [{type: "creation"}]');
+    expect(runbook).toContain('bypass_actors: []');
+    expect(runbook).toContain('rules: [{type: "update"}, {type: "deletion"}]');
+    expect(
+      runbook.match(
+        /gh api --method POST repos\/OpenCoven\/psyche-build\/rulesets --input -/g,
+      ),
+    ).toHaveLength(2);
+  });
+
   it('documents the executable release and recovery contracts', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 
