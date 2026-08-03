@@ -7,9 +7,11 @@ live host is required.
 
 `project.yml` is the authoritative Xcode project and app metadata source.
 XcodeGen writes the committed `PsycheApp/Resources/Info.plist`, including the
-release commit from `PSYCHE_RELEASE_SHA`, and the committed `Psyche.xcodeproj`.
-Both must be generated deterministically with XcodeGen 2.45.4. The pinned
-distribution SHA-256 is
+`$(PSYCHE_RELEASE_SHA)` placeholder, and the committed `Psyche.xcodeproj`.
+Xcode substitutes the build setting when it processes the plist. Ordinary
+builds may record empty provenance; a production archive must pass and validate
+the exact commit SHA. Both generated outputs must remain deterministic under
+XcodeGen 2.45.4. The pinned distribution SHA-256 is
 `090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef`.
 
 From the repository root, regenerate or verify the project with:

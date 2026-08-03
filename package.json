@@ -61,7 +61,7 @@
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
     "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",
-    "ios:project:check": "pnpm ios:project:generate && git diff --exit-code -- native/ios/Psyche.xcodeproj",
+    "ios:project:check": "pnpm ios:project:generate && git diff --exit-code -- native/ios/Psyche.xcodeproj native/ios/PsycheApp/Resources/Info.plist",
     "release:version": "node scripts/release-version.mjs --set",
     "release:check": "node scripts/release-version.mjs --check",
     "test": "vitest --run",
