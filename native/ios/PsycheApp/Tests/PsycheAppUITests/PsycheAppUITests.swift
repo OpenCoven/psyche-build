@@ -12,6 +12,22 @@ final class PsycheAppUITests: XCTestCase {
         let toggle = app.buttons["cockpit-siderail-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         XCTAssertEqual(toggle.label, "Show siderails")
+
+        let window = app.windows.firstMatch
+        let cockpit = app.otherElements["main-cockpit"]
+        let terminal = element("terminal-output", in: app)
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        XCTAssertTrue(cockpit.waitForExistence(timeout: 5))
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+
+        let windowFrame = window.frame
+        let cockpitFrame = cockpit.frame
+        let terminalFrame = terminal.frame
+        let frames = "window \(windowFrame), cockpit \(cockpitFrame), terminal \(terminalFrame)"
+        XCTAssertLessThanOrEqual(abs(cockpitFrame.minY - windowFrame.minY), 1, frames)
+        XCTAssertLessThanOrEqual(abs(cockpitFrame.maxY - windowFrame.maxY), 1, frames)
+        let remainingContentHeight = cockpitFrame.maxY - terminalFrame.minY
+        XCTAssertGreaterThan(terminalFrame.height, remainingContentHeight * 0.5, frames)
     }
 
     /// The reveal direction was covered; this covers the return trip.

@@ -38,6 +38,7 @@ struct CockpitView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(PsycheTheme.mint)
         .background(PsycheTheme.background)
         .accessibilityIdentifier("main-cockpit")
@@ -272,12 +273,14 @@ struct TerminalDetail: View {
                 }
                 .padding(18)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(PsycheTheme.terminal)
             .accessibilityIdentifier("terminal-output")
             Divider().overlay(PsycheTheme.border)
             CodingKeyRow()
         }
         .background(PsycheTheme.background)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var terminalHeader: some View {
