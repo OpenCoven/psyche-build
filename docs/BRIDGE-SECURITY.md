@@ -92,6 +92,27 @@ codes, with close reason `exhausted`; the client sees `pairRejected` with reason
 token comparisons use `timingSafeEqual` behind a length guard (it throws on
 length mismatch).
 
+`PairingFlow.attempt` returns the outcome — `accepted`, `invalid_code`,
+`too_many_attempts`, `expired`, `no_window_open` — and the daemon forwards it
+verbatim. **Do not reconstruct the reason from `isOpen()` before and after.**
+An exhausted window and an already-expired one both end closed, so that
+inference tells a user who merely idled that someone is guessing at their code.
+`consume()` remains as a boolean view of `attempt()`.
+
+### 3a. Decoded payloads must be validated, not just typed
+
+`Buffer.from(str, 'base64')` never throws: it skips characters outside the
+alphabet and tolerates wrong padding. `Buffer.from('!!!!', 'base64')` is an
+empty buffer and `Buffer.from('zz z', 'base64')` is two arbitrary bytes — both
+silently, which makes a `try`/`catch` around the decode dead code.
+
+These payloads carry *keystrokes*. Silently mangling a byte sequence and typing
+the remains into a terminal is worse than refusing it: a truncated multi-byte
+sequence can leave stray control characters in the user's shell, and the client
+never learns its frame was malformed. Use `decodeBase64Payload` from
+`src/utils/base64.ts`, which validates canonical RFC 4648 base64 first and
+returns `null` rather than a mangled buffer.
+
 Any future short-secret challenge needs the same treatment. A long random token
 — the 256-bit daemon token — does not need an attempt cap, but still gets the
 constant-time compare, because it is free.
@@ -157,6 +178,7 @@ The rules above are pinned by:
 | Test | Covers |
 |---|---|
 | `__tests__/utils/tmuxTarget.test.ts` | the shared pane-id and quoting guard |
+| `__tests__/utils/base64.test.ts` | strict base64 validation of wire payloads |
 | `__tests__/daemon/tmuxControl.test.ts`, `__tests__/bridge/tmuxControl.test.ts` | no tmux command is built from an injecting pane id |
 | `__tests__/bridge/PairingFlow.test.ts` | the pairing attempt budget |
 | `__tests__/bridge/bridgeDaemonHardening.test.ts` | pairing, input validation, socket errors, frame cap — over a real TLS WebSocket |

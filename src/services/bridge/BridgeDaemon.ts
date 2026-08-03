@@ -15,6 +15,7 @@ import { TokenStore, DeviceRecord } from "./TokenStore.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
+import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 
 export interface BridgeDaemonOptions {
@@ -193,15 +194,13 @@ export class BridgeDaemon {
         return;
       }
       case "pair": {
-        const wasOpen = this.pairing.isOpen();
-        if (!this.pairing.consume(m.payload.code)) {
-          // The window closing on a wrong code means the attempt budget ran
-          // out, which is a different thing for the user to see than "you
-          // mistyped" — they have to run `:pair` again on the Mac.
-          const reason = this.pairing.isOpen()
-            ? "invalid_code"
-            : wasOpen ? "too_many_attempts" : "no_window_open";
-          s.send({ type: "pairRejected", payload: { reason } });
+        // The flow reports the outcome directly. Inferring it from isOpen()
+        // before and after cannot separate "budget exhausted" from "already
+        // expired" — both end closed — and would tell a user who merely idled
+        // that someone is guessing at their code.
+        const outcome = this.pairing.attempt(m.payload.code);
+        if (outcome !== "accepted") {
+          s.send({ type: "pairRejected", payload: { reason: outcome } });
           return;
         }
         const rec = await this.tokens.issue(m.payload.clientId, m.payload.clientName);
@@ -250,11 +249,14 @@ export class BridgeDaemon {
           s.send({ type: "error", payload: { code: "invalid_pane", message: "paneId must be a tmux pane id such as %3" } });
           return;
         }
-        if (typeof m.payload.data !== "string") {
+        // Buffer.from(..., 'base64') never throws — it drops characters
+        // outside the alphabet — so malformed input would otherwise be typed
+        // into the user's terminal as silently mangled bytes.
+        const bytes = decodeBase64Payload(m.payload.data);
+        if (!bytes) {
           s.send({ type: "error", payload: { code: "invalid_input", message: "data must be a base64 string" } });
           return;
         }
-        const bytes = Buffer.from(m.payload.data, "base64");
         this.hub!.sendInput(m.payload.paneId, bytes);
         return;
       }

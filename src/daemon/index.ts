@@ -17,6 +17,7 @@ import {
 } from '../utils/covenDesktopUse.js';
 import { TmuxControl, tmuxSessionNameForRoot, tmuxSessionExists } from './tmuxControl.js';
 import { isTmuxPaneId } from '../utils/tmuxTarget.js';
+import { decodeBase64Payload } from '../utils/base64.js';
 import {
   bridgeErrorCode,
   bridgeErrorMessage,
@@ -539,11 +540,12 @@ export class Connection {
           this.send({ type: 'error', requestId: msg.requestId, code: 'no_stream', message: 'unknown streamId' });
           return;
         }
-        // `data` is base64 to preserve arbitrary bytes
-        let bytes: Buffer;
-        try {
-          bytes = Buffer.from(msg.data, 'base64');
-        } catch {
+        // `data` is base64 to preserve arbitrary bytes. This used to be a
+        // try/catch, which never fired: Buffer.from(..., 'base64') skips
+        // characters outside the alphabet instead of throwing, so a malformed
+        // payload was silently mangled and typed into the user's terminal.
+        const bytes = decodeBase64Payload(msg.data);
+        if (!bytes) {
           this.send({ type: 'error', requestId: msg.requestId, code: 'bad_base64', message: 'input must be base64' });
           return;
         }

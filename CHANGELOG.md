@@ -16,7 +16,14 @@
 - LAN pairing now closes the window after five wrong codes and reports
   `too_many_attempts`. A six-digit code with unlimited guesses was brute-forceable
   inside its own five-minute window, and pairing grants a durable device token.
-- Pairing codes and daemon tokens are compared in constant time.
+- Pairing codes and daemon tokens are compared in constant time, and
+  `PairingFlow` now reports why an attempt failed instead of leaving the caller
+  to infer it — an expired window is reported as expired, not as a spent
+  attempt budget.
+- Keystroke payloads are validated as canonical base64 before decoding.
+  `Buffer.from(str, 'base64')` never throws — it silently drops characters
+  outside the alphabet — so the previous `try`/`catch` was dead code and
+  malformed input reached the terminal as mangled bytes.
 - Both servers cap client frames at 1 MiB, the daemon disconnects connections
   that never authenticate, and a connection may hold at most 64 attached streams.
 

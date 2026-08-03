@@ -132,6 +132,44 @@ describe("PairingFlow", () => {
     flow.close("manual");
   });
 
+  // Regression: the daemon used to infer the rejection reason by comparing
+  // isOpen() before and after consume(). Both "budget exhausted" and "already
+  // expired" leave the window closed, so an expired window was reported as
+  // too_many_attempts — telling a user who merely idled that someone was
+  // guessing at their code.
+  it("reports expiry as expiry, not as a spent attempt budget", () => {
+    const flow = new PairingFlow();
+    const w = flow.open();
+    // Age the window out without firing its timer.
+    (w as unknown as { expiresAt: Date }).expiresAt = new Date(Date.now() - 1000);
+
+    expect(flow.attempt(w.code)).toBe("expired");
+    expect(flow.isOpen()).toBe(false);
+  });
+
+  it("distinguishes every pairing outcome", () => {
+    const flow = new PairingFlow();
+    expect(flow.attempt("000000")).toBe("no_window_open");
+
+    const w = flow.open();
+    const wrong = wrongCode(w.code);
+    for (let i = 0; i < PAIR_MAX_ATTEMPTS - 1; i++) {
+      expect(flow.attempt(wrong)).toBe("invalid_code");
+    }
+    expect(flow.attempt(wrong)).toBe("too_many_attempts");
+    expect(flow.attempt(w.code)).toBe("no_window_open");
+
+    const second = flow.open();
+    expect(flow.attempt(second.code)).toBe("accepted");
+  });
+
+  it("keeps consume() as a boolean view of attempt()", () => {
+    const flow = new PairingFlow();
+    const w = flow.open();
+    expect(flow.consume(wrongCode(w.code))).toBe(false);
+    expect(flow.consume(w.code)).toBe(true);
+  });
+
   it("clears the stale expiry timer when opening after an expired window", () => {
     vi.useFakeTimers();
     try {

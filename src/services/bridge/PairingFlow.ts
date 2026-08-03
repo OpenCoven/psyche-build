@@ -22,6 +22,21 @@ export const PAIR_MAX_ATTEMPTS = 5;
 
 export type PairCloseReason = "expired" | "consumed" | "manual" | "exhausted";
 
+/**
+ * Why a pairing attempt did or did not succeed.
+ *
+ * Reported by `attempt` rather than inferred by the caller. Comparing
+ * `isOpen()` before and after `consume()` cannot tell "the budget ran out"
+ * from "the window had already expired" — both leave it closed — and guessing
+ * tells a user who simply idled that someone is guessing at their code.
+ */
+export type PairAttemptOutcome =
+  | "accepted"
+  | "invalid_code"
+  | "too_many_attempts"
+  | "expired"
+  | "no_window_open";
+
 export interface PairWindow {
   code: string;
   expiresAt: Date;
@@ -64,23 +79,32 @@ export class PairingFlow extends EventEmitter {
   }
 
   /**
-   * Returns true iff `code` matches the open window. Consumes the window on
-   * success; closes it as "exhausted" once PAIR_MAX_ATTEMPTS codes have been
-   * rejected.
+   * Try `code` against the open window and say what happened.
+   *
+   * Consumes the window on success; closes it as "exhausted" once
+   * PAIR_MAX_ATTEMPTS codes have been rejected.
    */
-  consume(code: string): boolean {
-    if (!this.current) return false;
+  attempt(code: unknown): PairAttemptOutcome {
+    if (!this.current) return "no_window_open";
     if (this.current.expiresAt <= new Date()) {
       this.close("expired");
-      return false;
+      return "expired";
     }
     if (!codesMatch(this.current.code, code)) {
       this.attempts += 1;
-      if (this.attempts >= PAIR_MAX_ATTEMPTS) this.close("exhausted");
-      return false;
+      if (this.attempts >= PAIR_MAX_ATTEMPTS) {
+        this.close("exhausted");
+        return "too_many_attempts";
+      }
+      return "invalid_code";
     }
     this.close("consumed");
-    return true;
+    return "accepted";
+  }
+
+  /** Returns true iff `code` matched the open window. See `attempt`. */
+  consume(code: string): boolean {
+    return this.attempt(code) === "accepted";
   }
 
   /** Wrong codes still tolerated on the open window; 0 when no window is open. */

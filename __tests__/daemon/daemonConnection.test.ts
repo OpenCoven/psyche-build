@@ -280,6 +280,35 @@ describe('daemon connection resilience', () => {
     expect(ws.sent.some((m) => m.code === 'internal_error')).toBe(true);
   });
 
+  it('rejects malformed base64 input rather than sending mangled keys', async () => {
+    // Regression: this was a try/catch, which never fired — Buffer.from with
+    // 'base64' skips characters outside the alphabet instead of throwing.
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const { ws, tmux } = buildConnection(root);
+
+    await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
+    const streamId = ws.sent.find((m) => m.type === 'panes.attach.result').streamId;
+    tmux.calls.length = 0;
+
+    await request(ws, { type: 'panes.input', requestId: 'r2', streamId, data: '!!!!' });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'error', code: 'bad_base64' });
+
+    await request(ws, { type: 'panes.input', requestId: 'r3', streamId, data: 'zz z' });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'error', code: 'bad_base64' });
+
+    expect(tmux.calls).toEqual([]);
+
+    // Well-formed input still goes through.
+    await request(ws, {
+      type: 'panes.input',
+      requestId: 'r4',
+      streamId,
+      data: Buffer.from('ls\r').toString('base64'),
+    });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', ok: true });
+    expect(tmux.calls).toEqual([{ op: 'input', paneId: '%3' }]);
+  });
+
   it('rejects invalid JSON without closing an authenticated connection', async () => {
     const root = await projectWithPanes([]);
     const { ws } = buildConnection(root);

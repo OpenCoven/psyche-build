@@ -187,6 +187,24 @@ describe("bridge daemon pane input validation", () => {
     expect(hub.inputs).toEqual([]);
   });
 
+  it("rejects malformed base64 rather than typing mangled bytes into the pane", async () => {
+    // Buffer.from(..., 'base64') drops characters outside the alphabet instead
+    // of throwing, so this used to reach the terminal as silent garbage.
+    const { daemon, hub, pairing } = startDaemon();
+    const { port } = await daemon.start();
+    const client = await connect(port);
+    await authenticate(client, pairing);
+
+    for (const data of ["!!!!", "zz z", "bHM", "ab==cd"]) {
+      client.send({ type: "sendInput", payload: { paneId: "%1", data } });
+    }
+    await client.until(
+      () => client.messages.filter((m) => m.payload?.code === "invalid_input").length === 4,
+      "four invalid_input errors",
+    );
+    expect(hub.inputs).toEqual([]);
+  });
+
   it("still forwards well-formed input", async () => {
     const { daemon, hub, pairing } = startDaemon();
     const { port } = await daemon.start();
