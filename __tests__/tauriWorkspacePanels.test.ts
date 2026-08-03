@@ -36,8 +36,15 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).toMatch(/fn\s+validate_git_relative_path\(/);
   });
 
-  it('registers only read-only workspace commands', () => {
-    for (const command of ['fs_list_dir', 'fs_read_text', 'git_status', 'git_diff', 'git_log']) {
+  it('registers workspace reads and conflict-safe file saves without Git mutations', () => {
+    for (const command of [
+      'fs_list_dir',
+      'fs_read_text',
+      'fs_write_text',
+      'git_status',
+      'git_diff',
+      'git_log',
+    ]) {
       expect(tauriLib).toMatch(new RegExp(`\\n\\s*${command},`));
     }
     expect(tauriLib).not.toMatch(
@@ -52,8 +59,11 @@ describe('Tauri workspace panels', () => {
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
-    expect(tauriPackage.scripts.build).toBe('tauri build');
-    expect(tauriPackage.scripts.dev).toBe('tauri dev');
+    expect(tauriPackage.scripts['build:web']).toBe(
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js'
+    );
+    expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
+    expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
     expect(tauriPackage.devDependencies['@tauri-apps/cli']).toMatch(/^2\./);
   });
 });

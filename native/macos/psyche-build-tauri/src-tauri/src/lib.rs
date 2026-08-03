@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
@@ -894,13 +895,14 @@ fn locate_psyche_repo() -> Option<String> {
 // ----------------------------------------------------------------------------
 // Workspace side panels: file tree, diffs, and git/GitHub state.
 //
-// These back the right-rail panels. Everything is read-only — nothing here
-// mutates the working tree, so a panel can never clobber an agent's work.
+// These back the right-rail panels. File saves are the only working-tree
+// mutation and use containment plus optimistic conflict checks.
 // ----------------------------------------------------------------------------
 
 /// Cap on file preview size. Big files are truncated rather than refused so the
 /// panel still shows a useful head.
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn canonical_project_root(root: &str) -> Result<PathBuf, String> {
     let canonical = Path::new(root)
@@ -1013,8 +1015,9 @@ fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
     let read = file.read(&mut buf).map_err(|e| e.to_string())?;
     buf.truncate(read);
 
-    // A NUL byte in the head is the usual "this is binary" heuristic.
-    let binary = buf.iter().take(8000).any(|b| *b == 0);
+    // A NUL byte in the head is the usual "this is binary" heuristic. Invalid
+    // UTF-8 is also non-editable so a save can never perform a lossy rewrite.
+    let binary = buf.iter().take(8000).any(|b| *b == 0) || std::str::from_utf8(&buf).is_err();
     let text = if binary {
         String::new()
     } else {
@@ -1026,6 +1029,100 @@ fn fs_read_text(root: String, path: String) -> Result<FileText, String> {
         truncated: size > take,
         binary,
         size,
+    })
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SavedFileText {
+    pub path: String,
+    pub text: String,
+    pub size: u64,
+}
+
+fn atomic_replace_file(
+    target: &Path,
+    bytes: &[u8],
+    permissions: std::fs::Permissions,
+) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("file has no parent directory: {}", target.display()))?;
+    let basename = target
+        .file_name()
+        .ok_or_else(|| format!("file has no name: {}", target.display()))?;
+
+    let (temp_path, mut temp_file) = loop {
+        let counter = SAVE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = basename.to_os_string();
+        temp_name.push(format!(".psyche-save-{}-{}", std::process::id(), counter));
+        let temp_path = parent.join(temp_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => break (temp_path, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "create temporary save file for '{}': {}",
+                    target.display(),
+                    error
+                ));
+            }
+        }
+    };
+
+    let save_result = (|| -> Result<(), String> {
+        temp_file
+            .set_permissions(permissions)
+            .map_err(|e| format!("copy permissions for '{}': {}", target.display(), e))?;
+        temp_file
+            .write_all(bytes)
+            .map_err(|e| format!("write temporary save for '{}': {}", target.display(), e))?;
+        temp_file
+            .flush()
+            .map_err(|e| format!("flush temporary save for '{}': {}", target.display(), e))?;
+        temp_file
+            .sync_all()
+            .map_err(|e| format!("sync temporary save for '{}': {}", target.display(), e))?;
+        drop(temp_file);
+        std::fs::rename(&temp_path, target)
+            .map_err(|e| format!("replace '{}': {}", target.display(), e))?;
+        Ok(())
+    })();
+
+    if save_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    save_result
+}
+
+#[tauri::command]
+fn fs_write_text(
+    root: String,
+    path: String,
+    text: String,
+    expected_text: String,
+) -> Result<SavedFileText, String> {
+    let target = resolve_project_path(&root, &path)?;
+    if !target.is_file() {
+        return Err(format!("not a regular file: {}", path));
+    }
+
+    let metadata = std::fs::metadata(&target).map_err(|e| e.to_string())?;
+    let current_bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
+    let current_text = std::str::from_utf8(&current_bytes)
+        .map_err(|_| format!("file is not valid UTF-8: {}", path))?;
+    if current_text != expected_text {
+        return Err(format!("file changed on disk: {}", path));
+    }
+
+    atomic_replace_file(&target, text.as_bytes(), metadata.permissions())?;
+    Ok(SavedFileText {
+        path: target.to_string_lossy().to_string(),
+        size: text.len() as u64,
+        text,
     })
 }
 
@@ -1297,6 +1394,7 @@ pub fn run() {
             agent_skills,
             fs_list_dir,
             fs_read_text,
+            fs_write_text,
             git_status,
             git_diff,
             git_log,
@@ -1372,6 +1470,25 @@ mod workspace_panel_tests {
         );
     }
 
+    fn save_temp_paths(target: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.psyche-save-",
+            target
+                .file_name()
+                .expect("save target must have a file name")
+                .to_string_lossy()
+        );
+        std::fs::read_dir(target.parent().expect("save target must have a parent"))
+            .expect("save target parent must be readable")
+            .map(|entry| entry.expect("directory entry must be readable").path())
+            .filter(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
     #[test]
     fn resolves_existing_paths_inside_the_project() {
         let tree = TempTree::new("inside");
@@ -1396,6 +1513,24 @@ mod workspace_panel_tests {
 
         assert!(resolve_project_path(path_text(&project), "../project-copy/secret.txt").is_err());
         assert!(resolve_project_path(path_text(&project), path_text(&sibling_file)).is_err());
+
+        let relative_error = fs_write_text(
+            path_text(&project).to_string(),
+            "../project-copy/secret.txt".to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        let absolute_error = fs_write_text(
+            path_text(&project).to_string(),
+            path_text(&sibling_file).to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(relative_error.contains("outside project root"));
+        assert!(absolute_error.contains("outside project root"));
+        assert_eq!(std::fs::read(&sibling_file).unwrap(), b"secret\n");
     }
 
     #[cfg(unix)]
@@ -1412,6 +1547,98 @@ mod workspace_panel_tests {
         symlink(&outside, &link).unwrap();
 
         assert!(resolve_project_path(path_text(&project), path_text(&link)).is_err());
+        let error = fs_write_text(
+            path_text(&project).to_string(),
+            path_text(&link).to_string(),
+            "clobbered\n".to_string(),
+            "secret\n".to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("outside project root"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"secret\n");
+    }
+
+    #[test]
+    fn saves_contained_text_atomically_and_preserves_permissions() {
+        let tree = TempTree::new("save");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let permissions_before = std::fs::metadata(&target).unwrap().permissions();
+
+        let saved = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "after\n".to_string(),
+            "before\n".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(saved.path, target.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(saved.text, "after\n");
+        assert_eq!(saved.size, 6);
+        assert_eq!(std::fs::read(&target).unwrap(), b"after\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode(),
+                permissions_before.mode()
+            );
+        }
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[test]
+    fn rejects_stale_saves_without_mutation_or_temp_files() {
+        let tree = TempTree::new("stale-save");
+        let target = tree.root.join("notes.txt");
+        std::fs::write(&target, "current\n").unwrap();
+
+        let error = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "replacement\n".to_string(),
+            "stale\n".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed on disk"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"current\n");
+        assert!(save_temp_paths(&target).is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_is_binary_and_cannot_be_saved_as_text() {
+        let tree = TempTree::new("invalid-utf8");
+        let target = tree.root.join("invalid.txt");
+        let original = [0xff, 0xfe, b'x'];
+        std::fs::write(&target, original).unwrap();
+
+        let preview = fs_read_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+        )
+        .unwrap();
+        assert!(preview.binary);
+        assert!(preview.text.is_empty());
+
+        let error = fs_write_text(
+            path_text(&tree.root).to_string(),
+            path_text(&target).to_string(),
+            "replacement\n".to_string(),
+            String::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("file is not valid UTF-8"));
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert!(save_temp_paths(&target).is_empty());
     }
 
     #[test]
