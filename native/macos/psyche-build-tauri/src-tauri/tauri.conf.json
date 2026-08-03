@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "psyche",
+  "productName": "Psyche Build",
   "version": "0.0.7",
-  "identifier": "dev.buns.psyche.tauri",
+  "identifier": "dev.opencoven.psyche",
   "build": {
     "beforeDevCommand": "python3 -m http.server 1420 --bind 127.0.0.1 --directory web",
     "devUrl": "http://127.0.0.1:1420",
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "psyche",
+        "title": "Psyche Build",
         "width": 1280,
         "height": 800,
         "minWidth": 980,

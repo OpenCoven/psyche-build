@@ -38,6 +38,10 @@ import { tmuxSessionNameForRoot } from '../services/bridge/tmuxControl.js';
 import { Orchestrator } from '../orchestration/orchestrator.js';
 import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
 import {
+  composeLaneBackends,
+  createCovenSessionBackend,
+} from '../orchestration/covenSessionBackend.js';
+import {
   ORCHESTRATION_LANE_MODES,
   type OrchestrationTaskRequest,
   type OrchestrationTaskResult,
@@ -122,10 +126,20 @@ export const defaultMcpDeps: McpDeps = {
   killPane: (projectRoot, paneId) => killBridgePane(projectRoot, paneId),
   sessionNameForRoot: tmuxSessionNameForRoot,
   executeTask: async (request, sessionName) => {
-    const backend = createBridgePaneBackend({ sessionName });
-    const orchestrator = new Orchestrator({ executeLane: backend.execute });
+    // One task can mix local panes and Coven sessions; each backend stays
+    // unaware of the other and the router owns which mode goes where.
+    const panes = createBridgePaneBackend({ sessionName });
+    const coven = createCovenSessionBackend();
+    const orchestrator = new Orchestrator({
+      executeLane: composeLaneBackends({
+        'isolated-worktree': panes.execute,
+        'shared-worktree': panes.execute,
+        terminal: panes.execute,
+        'coven-session': coven.execute,
+      }),
+    });
     const result = await orchestrator.execute(request);
-    return { result, spawned: backend.spawned() };
+    return { result, spawned: panes.spawned() };
   },
 };
 

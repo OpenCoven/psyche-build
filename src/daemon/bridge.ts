@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
@@ -52,6 +54,12 @@ export interface BridgeSpawnRequest {
   /** Existing branch or ref from which to create the generated pane branch. */
   startPointBranch?: string;
   branch?: string;
+  /**
+   * Attach to a worktree that already exists instead of creating one, so
+   * several agents share a branch and files. The worktree is NOT created, and
+   * critically is never rolled back on failure — other panes are using it.
+   */
+  existingWorktree?: { slug: string; worktreePath: string; branchName: string };
 }
 
 export interface BridgeSpawnPromptKeysRequest {
@@ -825,6 +833,113 @@ function nextBridgePaneId(): string {
   return `psyche-${Date.now()}-${paneIdCounter}`;
 }
 
+/**
+ * Validate an existing worktree and allocate a sibling slug for a new pane in
+ * it, so attached agents read as siblings (fix-auth-a2, fix-auth-a3) rather
+ * than colliding on the original slug.
+ *
+ * Nothing is created here. The worktree must already be registered with git
+ * and live inside the project, which is what stops an arbitrary path arriving
+ * over the wire from being used.
+ */
+/**
+ * Sibling slugs handed out but not yet written to config.
+ *
+ * The create path does not need this: createGitWorktree makes the directory
+ * inside the claim mutex, so the next uniqueSlug scan sees it. Attaching
+ * creates nothing on disk, so without an explicit reservation two concurrent
+ * attaches to the same worktree both read the same config and both pick
+ * fix-auth-a2.
+ */
+const reservedSiblingSlugs = new Set<string>();
+
+export function releaseSiblingSlug(slug: string): void {
+  reservedSiblingSlugs.delete(slug);
+}
+
+async function resolveSharedWorktree(
+  projectRoot: string,
+  existing: { slug: string; worktreePath: string; branchName: string },
+): Promise<{ slug: string; branch: string; worktreePath: string }> {
+  let resolved: string;
+  try {
+    resolved = await realpath(existing.worktreePath);
+  } catch {
+    throw bridgeError('invalid_worktree_path', 'existing worktree path does not exist');
+  }
+
+  if (!isPathInsideOrEqual(projectRoot, resolved)) {
+    throw bridgeError(
+      'invalid_worktree_path',
+      'existing worktree is outside the psyche project root',
+    );
+  }
+
+  if (!listGitWorktreePaths(projectRoot).has(resolved)) {
+    throw bridgeError(
+      'invalid_worktree_path',
+      'path is not a registered git worktree of this project',
+    );
+  }
+
+  // Read the branch from the worktree rather than trusting the request. A
+  // caller reaching spawnBridgePane directly could otherwise persist a
+  // branchName that has nothing to do with what is checked out, and every
+  // later report and merge decision would inherit that lie.
+  const branch = readWorktreeBranch(resolved) ?? existing.branchName;
+
+  // Allocate under the same mutex the create path uses, and consult the
+  // in-flight reservations as well as config, so concurrent attaches to one
+  // worktree cannot land on the same sibling slug.
+  return claimWorktree(async () => {
+    const config = await readBridgeConfig(projectRoot);
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const taken = [
+      ...panes.map((pane) => ({ slug: String(pane.slug ?? '') })),
+      ...[...reservedSiblingSlugs].map((slug) => ({ slug })),
+    ];
+    const slug = generateSiblingSlugForTargetPane(
+      { slug: existing.slug, worktreePath: resolved },
+      taken,
+    );
+    reservedSiblingSlugs.add(slug);
+    return { slug, branch, worktreePath: resolved };
+  });
+}
+
+/** Branch actually checked out in a worktree, or null if detached/unreadable. */
+function readWorktreeBranch(worktreePath: string): string | null {
+  try {
+    const name = execFileSync('git', ['-C', worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    return name && name !== 'HEAD' ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Canonical paths of every worktree git knows about for this project. */
+function listGitWorktreePaths(projectRoot: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    const raw = execFileSync('git', ['-C', projectRoot, 'worktree', 'list', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    for (const line of raw.split('\n')) {
+      if (!line.startsWith('worktree ')) continue;
+      try {
+        out.add(realpathSync(line.slice('worktree '.length).trim()));
+      } catch {
+        // Pruned or inaccessible — not a valid attach target anyway.
+      }
+    }
+  } catch {
+    // Not a git repo, or git unavailable; the containment check still applies.
+  }
+  return out;
+}
+
 export async function spawnBridgePane(
   projectRoot: string,
   sessionName: string,
@@ -840,7 +955,10 @@ export async function spawnBridgePane(
   }
 
   const agent = normalizeAgent(request.agent);
-  const { slug, branch, worktreePath } = await claimWorktree(async () => {
+  const attaching = request.existingWorktree !== undefined;
+  const { slug, branch, worktreePath } = attaching
+    ? await resolveSharedWorktree(scoped.projectRoot, request.existingWorktree!)
+    : await claimWorktree(async () => {
     const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
     const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
     const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
@@ -863,7 +981,13 @@ export async function spawnBridgePane(
   try {
     return await finishSpawn();
   } catch (error) {
-    removeGitWorktree(scoped.projectRoot, worktreePath, branch);
+    // Only ever roll back a worktree THIS call created. A shared worktree is
+    // in use by other panes; deleting it here would destroy their work.
+    if (attaching) {
+      releaseSiblingSlug(slug);
+    } else {
+      removeGitWorktree(scoped.projectRoot, worktreePath, branch);
+    }
     throw error;
   }
 
@@ -896,6 +1020,8 @@ export async function spawnBridgePane(
     config.lastUpdated = now;
     return config.settings;
   });
+  // Persisted, so the slug is now discoverable from config itself.
+  if (attaching) releaseSiblingSlug(slug);
 
   if (agent) {
     const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, settings?.permissionMode);

@@ -67,17 +67,24 @@ describe('createBridgePaneBackend', () => {
     expect(request.branch).toBeUndefined();
   });
 
-  // spawnBridgePane always creates a fresh worktree. Silently making a second
-  // one when the caller asked to share an existing one would be worse than
-  // refusing.
-  it('refuses shared-worktree lanes rather than creating a second worktree', async () => {
+  it('forwards the existing worktree for shared-worktree lanes', async () => {
+    const spawnPane = vi.fn(async () => spawnResult('attached'));
+    const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
+    const existingWorktree = { slug: 'fix-auth', worktreePath: '/w/fix-auth', branchName: 'psyche/fix-auth' };
+
+    await backend.execute(lane({ mode: 'shared-worktree', existingWorktree }));
+
+    expect((spawnPane.mock.calls[0] as any[])[2].existingWorktree).toEqual(existingWorktree);
+  });
+
+  // The planner normally enforces this; the backend re-checks so a hand-built
+  // lane cannot reach spawnBridgePane and silently receive a NEW worktree.
+  it('refuses a shared-worktree lane that names no worktree', async () => {
     const spawnPane = vi.fn();
     const backend = createBridgePaneBackend({ sessionName: 's', spawnPane });
 
-    await expect(backend.execute(lane({
-      mode: 'shared-worktree',
-      existingWorktree: { slug: 's', worktreePath: '/w', branchName: 'b' },
-    }))).rejects.toMatchObject({ code: 'unsupported_lane_mode' });
+    await expect(backend.execute(lane({ mode: 'shared-worktree' })))
+      .rejects.toMatchObject({ code: 'invalid_orchestration_request' });
     expect(spawnPane).not.toHaveBeenCalled();
   });
 

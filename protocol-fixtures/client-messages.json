@@ -1,0 +1,91 @@
+{
+  "focusPane": {
+    "payload": {
+      "paneId": "%3"
+    },
+    "type": "focusPane"
+  },
+  "hello": {
+    "payload": {
+      "clientId": "ios-device-1",
+      "clientName": "Psyche for iPhone",
+      "protocolVersion": 2,
+      "token": "tok_abc123"
+    },
+    "type": "hello"
+  },
+  "hello_noToken": {
+    "payload": {
+      "clientId": "ios-device-1",
+      "clientName": "Psyche for iPhone",
+      "protocolVersion": 2,
+      "token": null
+    },
+    "type": "hello"
+  },
+  "launchRitual": {
+    "payload": {
+      "params": {
+        "prompt": "Fix the failing tests"
+      },
+      "projectId": "proj-1",
+      "ritualId": "start-coding"
+    },
+    "type": "launchRitual"
+  },
+  "listPanes": {
+    "payload": {},
+    "type": "listPanes"
+  },
+  "listProjects": {
+    "payload": {},
+    "type": "listProjects"
+  },
+  "listRituals": {
+    "payload": {
+      "projectId": "proj-1"
+    },
+    "type": "listRituals"
+  },
+  "pair": {
+    "payload": {
+      "clientId": "ios-device-1",
+      "clientName": "Psyche for iPhone",
+      "code": "123456"
+    },
+    "type": "pair"
+  },
+  "ping": {
+    "payload": {
+      "token": "tok_abc123"
+    },
+    "type": "ping"
+  },
+  "sendInput": {
+    "payload": {
+      "data": "bHMgLWxhCg==",
+      "paneId": "%3"
+    },
+    "type": "sendInput"
+  },
+  "subscribePane": {
+    "payload": {
+      "paneId": "%3",
+      "sinceSeq": 42
+    },
+    "type": "subscribePane"
+  },
+  "subscribePane_noSeq": {
+    "payload": {
+      "paneId": "%3",
+      "sinceSeq": null
+    },
+    "type": "subscribePane"
+  },
+  "unsubscribePane": {
+    "payload": {
+      "paneId": "%3"
+    },
+    "type": "unsubscribePane"
+  }
+}

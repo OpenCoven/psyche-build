@@ -1,0 +1,150 @@
+{
+  "attention": {
+    "payload": {
+      "paneId": "%3",
+      "reason": "waiting",
+      "summary": "Agent is awaiting input",
+      "timestamp": "2026-08-03T02:17:18Z"
+    },
+    "type": "attention"
+  },
+  "attention_noSummary": {
+    "payload": {
+      "paneId": "%3",
+      "reason": "idle",
+      "summary": null,
+      "timestamp": "2026-08-03T02:17:18Z"
+    },
+    "type": "attention"
+  },
+  "error": {
+    "payload": {
+      "code": "pane_not_found",
+      "message": "pane is not registered in this psyche project"
+    },
+    "type": "error"
+  },
+  "pairAccepted": {
+    "payload": {
+      "token": "tok_abc123"
+    },
+    "type": "pairAccepted"
+  },
+  "pairChallenge": {
+    "payload": {
+      "codeLength": 6,
+      "expiresAt": "2026-08-03T02:22:18Z"
+    },
+    "type": "pairChallenge"
+  },
+  "pairRejected": {
+    "payload": {
+      "reason": "code expired"
+    },
+    "type": "pairRejected"
+  },
+  "paneList": {
+    "payload": [
+      {
+        "agent": "coven-code",
+        "displayName": "fix-auth",
+        "id": "%3",
+        "kind": "worktree",
+        "projectId": "proj-1",
+        "projectName": "psyche-build",
+        "status": "working",
+        "worktreePath": "/repo/.psyche/worktrees/fix-auth"
+      }
+    ],
+    "type": "paneList"
+  },
+  "paneListChanged": {
+    "payload": [
+      {
+        "agent": "coven-code",
+        "displayName": "fix-auth",
+        "id": "%3",
+        "kind": "worktree",
+        "projectId": "proj-1",
+        "projectName": "psyche-build",
+        "status": "working",
+        "worktreePath": "/repo/.psyche/worktrees/fix-auth"
+      },
+      {
+        "agent": null,
+        "displayName": "shell",
+        "id": "%4",
+        "kind": "shell",
+        "projectId": null,
+        "projectName": null,
+        "status": "idle",
+        "worktreePath": null
+      }
+    ],
+    "type": "paneListChanged"
+  },
+  "paneOutput": {
+    "payload": {
+      "data": "aGVsbG8gd29ybGQK",
+      "paneId": "%3",
+      "seq": 1024
+    },
+    "type": "paneOutput"
+  },
+  "pong": {
+    "payload": {
+      "token": "tok_abc123"
+    },
+    "type": "pong"
+  },
+  "projectList": {
+    "payload": [
+      {
+        "attentionCount": 2,
+        "displayName": "psyche-build",
+        "id": "proj-1"
+      }
+    ],
+    "type": "projectList"
+  },
+  "ritualList": {
+    "payload": {
+      "projectId": "proj-1",
+      "rituals": [
+        {
+          "description": "Open one agent pane for focused implementation work.",
+          "displayName": "Start Coding",
+          "id": "start-coding",
+          "projectId": null,
+          "scope": "builtIn"
+        }
+      ]
+    },
+    "type": "ritualList"
+  },
+  "ritualList_empty": {
+    "payload": {
+      "projectId": null,
+      "rituals": []
+    },
+    "type": "ritualList"
+  },
+  "welcome": {
+    "payload": {
+      "projectName": "psyche-build",
+      "protocolVersion": 2,
+      "serverId": "srv-1",
+      "serverName": "psyche-build"
+    },
+    "type": "welcome"
+  },
+  "welcome_noProject": {
+    "payload": {
+      "projectName": null,
+      "protocolVersion": 2,
+      "serverId": "srv-1",
+      "serverName": "psyche-build"
+    },
+    "type": "welcome"
+  }
+}

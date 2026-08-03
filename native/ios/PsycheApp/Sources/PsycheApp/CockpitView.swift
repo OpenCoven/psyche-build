@@ -2,18 +2,41 @@ import SwiftUI
 import PsycheCore
 
 struct CockpitView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: DemoStore
+    @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .detail
+    @State private var didApplyInitialColumnVisibility = false
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(
+            columnVisibility: $columnVisibility,
+            preferredCompactColumn: $preferredCompactColumn
+        ) {
             projectSidebar
                 .navigationTitle("Psyche")
         } content: {
             paneList
                 .navigationTitle("Panes")
         } detail: {
-            TerminalDetail(pane: store.selectedPane)
-                .navigationTitle(store.selectedPane.snapshot.displayName)
+            Group {
+                if let pane = selectedProjectPane {
+                    TerminalDetail(pane: pane)
+                        .navigationTitle(pane.snapshot.displayName)
+                } else {
+                    ContentUnavailableView(
+                        "No pane selected",
+                        systemImage: "rectangle.stack",
+                        description: Text("Choose a project with an active pane.")
+                    )
+                    .accessibilityIdentifier("no-pane-detail")
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    siderailToggleButton
+                }
+            }
         }
         .tint(PsycheTheme.mint)
         .background(PsycheTheme.background)
@@ -21,12 +44,25 @@ struct CockpitView: View {
         .sheet(isPresented: $store.isPairSheetPresented) {
             PairHostSheet()
         }
+        .onAppear {
+            guard !didApplyInitialColumnVisibility else { return }
+            columnVisibility = horizontalSizeClass == .regular ? .all : .detailOnly
+            didApplyInitialColumnVisibility = true
+        }
+    }
+
+    private var selectedProjectPane: DemoStore.DemoPane? {
+        guard store.selectedProjectID != nil else { return nil }
+        return store.panes(for: store.selectedProjectID)
+            .first(where: { $0.id == store.selectedPaneID })
     }
 
     private var projectSidebar: some View {
-        List(selection: $store.selectedProjectID) {
+        List(selection: projectSelection) {
             Section("Projects") {
                 ForEach(store.projects) { project in
+                    let isSelected = store.selectedProjectID == project.id
+
                     HStack(spacing: 10) {
                         Image(systemName: "folder.fill")
                             .foregroundStyle(PsycheTheme.mint)
@@ -42,6 +78,10 @@ struct CockpitView: View {
                         }
                     }
                     .tag(project.id)
+                    .listRowBackground(isSelected ? PsycheTheme.mint.opacity(0.12) : Color.clear)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("project-\(project.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
 
@@ -62,18 +102,127 @@ struct CockpitView: View {
             }
         }
         .listStyle(.sidebar)
+        .accessibilityIdentifier("project-sidebar")
+        .toolbar {
+            if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .topBarLeading) {
+                    siderailToggleButton
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Panes") {
+                        preferredCompactColumn = .content
+                    }
+                }
+            }
+        }
     }
 
     private var paneList: some View {
-        List(selection: $store.selectedPaneID) {
+        List(selection: paneSelection) {
             ForEach(store.panes(for: store.selectedProjectID)) { pane in
+                let isSelected = store.selectedPaneID == pane.id
+
                 PaneRow(pane: pane)
                     .tag(pane.id)
+                    .listRowBackground(isSelected ? PsycheTheme.mint.opacity(0.12) : Color.clear)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pane-\(pane.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
         .overlay {
             if store.panes(for: store.selectedProjectID).isEmpty {
                 ContentUnavailableView("No panes", systemImage: "rectangle.stack")
+            }
+        }
+        .accessibilityIdentifier("pane-list")
+        .toolbar {
+            if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .topBarLeading) {
+                    siderailToggleButton
+                }
+            }
+        }
+    }
+
+    /// Shared by every column that can be on screen in compact width.
+    ///
+    /// The detail column alone used to carry it, which made the control
+    /// one-way: it could reveal the siderails but never collapse them again,
+    /// because once a siderail was showing the button was no longer on screen.
+    private var siderailToggleButton: some View {
+        Button(action: toggleSiderails) {
+            Image(systemName: "sidebar.left")
+        }
+        .accessibilityLabel(siderailToggleAccessibilityLabel)
+        .accessibilityIdentifier("cockpit-siderail-toggle")
+    }
+
+    private var siderailToggleAccessibilityLabel: String {
+        if horizontalSizeClass == .compact {
+            return preferredCompactColumn == .detail ? "Show siderails" : "Hide siderails"
+        }
+        return columnVisibility == .detailOnly ? "Show siderails" : "Hide siderails"
+    }
+
+    private var paneSelection: Binding<String?> {
+        Binding(
+            get: {
+                horizontalSizeClass == .compact && preferredCompactColumn != .detail
+                    ? nil
+                    : store.selectedPaneID
+            },
+            set: { selection in
+                guard selection != nil || preferredCompactColumn == .detail else { return }
+                store.selectedPaneID = selection
+                if horizontalSizeClass == .compact, selection != nil {
+                    preferredCompactColumn = .detail
+                }
+            }
+        )
+    }
+
+    private var projectSelection: Binding<String?> {
+        Binding(
+            get: {
+                horizontalSizeClass == .compact && preferredCompactColumn == .sidebar
+                    ? nil
+                    : store.selectedProjectID
+            },
+            set: { selection in
+                guard selection != nil || preferredCompactColumn != .sidebar else { return }
+                store.selectedProjectID = selection
+                if let selection {
+                    let panes = store.panes(for: selection)
+                    if !panes.contains(where: { $0.id == store.selectedPaneID }) {
+                        store.selectedPaneID = panes.first?.id
+                    }
+                }
+                if horizontalSizeClass == .compact, selection != nil {
+                    preferredCompactColumn = .content
+                }
+            }
+        )
+    }
+
+    private func toggleSiderails() {
+        if horizontalSizeClass == .compact {
+            // .detailOnly keeps the sidebar column unavailable, so pointing
+            // preferredCompactColumn at it does nothing until this is lifted.
+            // Without this the toggle is inert in compact width, which also
+            // strands the pair-a-host button that lives in the sidebar.
+            if columnVisibility == .detailOnly { columnVisibility = .automatic }
+            preferredCompactColumn = preferredCompactColumn == .detail ? .sidebar : .detail
+        } else {
+            if columnVisibility == .detailOnly {
+                columnVisibility = .automatic
+                Task { @MainActor in
+                    await Task.yield()
+                    guard columnVisibility != .detailOnly else { return }
+                    columnVisibility = .all
+                }
+            } else {
+                columnVisibility = .detailOnly
             }
         }
     }

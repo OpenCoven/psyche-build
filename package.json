@@ -57,6 +57,7 @@
     "dev:doctor": "pnpm run generate:hooks-docs && tsc && node ./psyche doctor",
     "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
     "typecheck:tests": "tsc -p tsconfig.test.json",
+    "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
     "test": "vitest --run",
     "prepublishOnly": "pnpm run build",
     "smoke:pack": "npm pack --dry-run"

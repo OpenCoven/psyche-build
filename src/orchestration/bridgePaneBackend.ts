@@ -34,19 +34,19 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
 
   const execute: LaneBackend = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
     if (lane.mode === 'coven-session') {
+      // Routed to createCovenSessionBackend by composeLaneBackends. Reaching
+      // here means a caller wired this backend directly for every mode.
       throw new OrchestrationError(
         'unsupported_lane_mode',
-        'Coven-managed lanes require the Coven backend',
+        'Coven-managed lanes belong to the Coven backend, not the pane backend',
       );
     }
-    if (lane.mode === 'shared-worktree') {
-      // spawnBridgePane always creates a fresh worktree. Attaching to an
-      // existing one needs the sibling-slug handling that currently only the
-      // TUI has, so this fails loudly rather than silently creating a second
-      // worktree the caller did not ask for.
+    if (lane.mode === 'shared-worktree' && !lane.existingWorktree) {
+      // The planner normally enforces this; belt-and-braces so a hand-built
+      // lane cannot reach spawnBridgePane and silently get a NEW worktree.
       throw new OrchestrationError(
-        'unsupported_lane_mode',
-        'Shared-worktree lanes are not available on the daemon path yet; use the psyche TUI',
+        'invalid_orchestration_request',
+        `Lane "${lane.id}" is shared-worktree but names no existing worktree`,
       );
     }
 
@@ -57,6 +57,7 @@ export function createBridgePaneBackend(options: BridgePaneBackendOptions): Brid
       prompt: lane.prompt,
       ...(lane.startPointBranch ? { startPointBranch: lane.startPointBranch } : {}),
       ...(lane.title ? { title: lane.title } : {}),
+      ...(lane.existingWorktree ? { existingWorktree: lane.existingWorktree } : {}),
     });
 
     spawned.set(lane.id, result);
