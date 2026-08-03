@@ -101,7 +101,7 @@ public actor ConnectionManager {
 
     /// Defaults to the identity already announced in `hello`. Passing a
     /// different one is possible but binds the token to an identity the server
-    /// never saw handshake, which is painful to debug.
+    /// never saw during the handshake, which is painful to debug.
     public func pair(
         code: String,
         clientID: String? = nil,

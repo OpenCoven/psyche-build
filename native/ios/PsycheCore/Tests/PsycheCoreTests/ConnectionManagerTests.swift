@@ -2,6 +2,28 @@ import XCTest
 @testable import PsycheCore
 
 final class ConnectionManagerTests: XCTestCase {
+
+    /// Fails cleanly instead of trapping when a message list is shorter than a
+    /// test expects. XCTAssertEqual on `.count` does not halt execution, so the
+    /// following subscript would still crash the whole test process and take
+    /// every other case in the file with it.
+    private func requireCount<T>(
+        _ messages: [T],
+        _ minimum: Int,
+        _ context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> Bool {
+        guard messages.count >= minimum else {
+            XCTFail(
+                "\(context): expected at least \(minimum) message(s), got \(messages.count)",
+                file: file,
+                line: line
+            )
+            return false
+        }
+        return true
+    }
     func testConnectSendsInitialRequestsAndCollectsSnapshots() async {
         let fake = FakeTransport()
         let manager = ConnectionManager(
@@ -19,6 +41,7 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(sent.count, 3)
         let attempts = await fake.connectionAttempts
         XCTAssertEqual(attempts, [endpoint])
+        guard requireCount(sent, 3, "connect handshake") else { return }
         guard case let .hello(hello) = sent[0] else {
             return XCTFail("First request should be hello")
         }
@@ -79,6 +102,7 @@ final class ConnectionManagerTests: XCTestCase {
 
         let helloOnly = await fake.sentMessages
         XCTAssertEqual(helloOnly.count, 1)
+        guard requireCount(helloOnly, 1, "tokenless connect") else { return }
         guard case let .hello(hello) = helloOnly[0] else {
             return XCTFail("Tokenless connection should begin with hello")
         }
@@ -88,6 +112,7 @@ final class ConnectionManagerTests: XCTestCase {
 
         let pairingRequest = await fake.sentMessages
         XCTAssertEqual(pairingRequest.count, 2)
+        guard requireCount(pairingRequest, 2, "pair request") else { return }
         guard case let .pair(payload) = pairingRequest[1] else {
             return XCTFail("Expected typed pair request")
         }
@@ -222,6 +247,7 @@ final class ConnectionManagerTests: XCTestCase {
         await manager.pair(code: "123456")
 
         let sent = await fake.sentMessages
+        guard requireCount(sent, 2, "pair defaults") else { return }
         guard case let .pair(payload) = sent[1] else {
             return XCTFail("Expected typed pair request")
         }
