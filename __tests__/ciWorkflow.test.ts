@@ -55,6 +55,9 @@ describe('pull request CI workflow contract', () => {
     const workflow = workflowSource();
 
     expect(workflow).toContain('runs-on: macos-15');
+    expect(workflow).toContain('- name: Install tmux');
+    expect(workflow).toContain('brew install tmux');
+    expect(workflow.indexOf('brew install tmux')).toBeLessThan(workflow.indexOf('pnpm test'));
     expect(workflow).toContain('pnpm install --frozen-lockfile');
     for (const command of [
       'pnpm test',
