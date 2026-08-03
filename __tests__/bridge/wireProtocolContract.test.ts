@@ -8,6 +8,8 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from '../../src/services/bridge/wireProtocol.js';
+import { CLIENT_FIXTURES, SERVER_FIXTURES } from '../../protocol-fixtures/fixtures.js';
+import { serialize } from '../../scripts/generate-protocol-fixtures.js';
 
 /**
  * Host half of the wire-protocol contract.
@@ -141,4 +143,21 @@ describe('wire protocol contract', () => {
       expect((serverFixtures.welcome.payload as { protocolVersion: number }).protocolVersion).toBe(2);
     });
   });
+
+  describe('generated JSON tracks the typed source', () => {
+    // fixtures.ts is compile-checked against the unions; the JSON is what Swift
+    // reads. If they diverge, the Swift suite is testing something the host no
+    // longer describes — so the checked-in JSON must be exactly what the source
+    // emits.
+    it('client-messages.json is up to date', () => {
+      const onDisk = fs.readFileSync(path.join(FIXTURE_DIR, 'client-messages.json'), 'utf8');
+      expect(onDisk).toBe(serialize(CLIENT_FIXTURES));
+    });
+
+    it('server-messages.json is up to date', () => {
+      const onDisk = fs.readFileSync(path.join(FIXTURE_DIR, 'server-messages.json'), 'utf8');
+      expect(onDisk).toBe(serialize(SERVER_FIXTURES));
+    });
+  });
+
 });
