@@ -255,6 +255,11 @@ public struct PairRequestPayload: Codable, Sendable, Equatable {
 }
 
 public enum ClientMessage: Codable, Sendable, Equatable {
+
+    /// Wire `type` values this side declares. The contract test asserts a
+    /// fixture exists for each — see protocol-fixtures/.
+    public static var allTypeNames: [String] { MessageType.allCases.map(\.rawValue) }
+
     case hello(HelloPayload)
     case listPanes(EmptyPayload)
     case sendInput(SendInputPayload)
@@ -268,7 +273,7 @@ public enum ClientMessage: Codable, Sendable, Equatable {
     case pair(PairRequestPayload)
 
     private enum CodingKeys: String, CodingKey { case type, payload }
-    private enum MessageType: String, Codable {
+    private enum MessageType: String, Codable, CaseIterable {
         case hello, listPanes, sendInput, focusPane, ping, listProjects, subscribePane, unsubscribePane, listRituals, launchRitual, pair
     }
 
@@ -388,6 +393,11 @@ public struct PairRejectedPayload: Codable, Sendable, Equatable {
 }
 
 public enum ServerMessage: Codable, Sendable, Equatable {
+
+    /// Wire `type` values this side declares. The contract test asserts a
+    /// fixture exists for each — see protocol-fixtures/.
+    public static var allTypeNames: [String] { MessageType.allCases.map(\.rawValue) }
+
     case welcome(WelcomePayload)
     case paneList([PaneSnapshot])
     case paneListChanged([PaneSnapshot])
@@ -402,7 +412,7 @@ public enum ServerMessage: Codable, Sendable, Equatable {
     case error(ProtocolError)
 
     private enum CodingKeys: String, CodingKey { case type, payload }
-    private enum MessageType: String, Codable {
+    private enum MessageType: String, Codable, CaseIterable {
         case welcome, paneList, paneListChanged, projectList, paneOutput, ritualList, attention, pairChallenge, pairAccepted, pairRejected, pong, error
     }
 
