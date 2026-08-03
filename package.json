@@ -36,6 +36,7 @@
   "files": [
     "dist/**/*",
     "psyche",
+    "CHANGELOG.md",
     "README.md",
     "docs/README.md",
     "docs/BREAKING-CHANGES.md",
