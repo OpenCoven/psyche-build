@@ -156,6 +156,12 @@ struct CockpitView: View {
             set: { selection in
                 guard selection != nil || preferredCompactColumn != .sidebar else { return }
                 store.selectedProjectID = selection
+                if let selection {
+                    let panes = store.panes(for: selection)
+                    if !panes.contains(where: { $0.id == store.selectedPaneID }) {
+                        store.selectedPaneID = panes.first?.id
+                    }
+                }
                 if horizontalSizeClass == .compact, selection != nil {
                     preferredCompactColumn = .content
                 }
@@ -167,7 +173,16 @@ struct CockpitView: View {
         if horizontalSizeClass == .compact {
             preferredCompactColumn = preferredCompactColumn == .detail ? .sidebar : .detail
         } else {
-            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            if columnVisibility == .detailOnly {
+                columnVisibility = .automatic
+                Task { @MainActor in
+                    await Task.yield()
+                    guard columnVisibility != .detailOnly else { return }
+                    columnVisibility = .all
+                }
+            } else {
+                columnVisibility = .detailOnly
+            }
         }
     }
 }

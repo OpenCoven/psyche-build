@@ -40,11 +40,69 @@ final class PsycheAppUITests: XCTestCase {
         showProjectSidebar(in: app)
         XCTAssertTrue(project.waitForExistence(timeout: 5))
         XCTAssertTrue(project.isSelected)
-        project.tap()
+        let panesButton = app.buttons["Panes"]
+        XCTAssertTrue(panesButton.waitForExistence(timeout: 5))
+        panesButton.tap()
         XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
 
         XCTAssertTrue(bridgePane.waitForExistence(timeout: 5))
         XCTAssertTrue(bridgePane.isSelected)
+    }
+
+    func testSelectingProjectReconcilesPaneSelection() {
+        let app = launchApp()
+
+        showProjectSidebar(in: app)
+        let websiteProject = element("project-website", in: app)
+        XCTAssertTrue(websiteProject.waitForExistence(timeout: 5))
+        websiteProject.tap()
+
+        XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
+        let websitePane = element("pane-web-home", in: app)
+        XCTAssertTrue(websitePane.waitForExistence(timeout: 5))
+        XCTAssertTrue(websitePane.isSelected)
+        websitePane.tap()
+
+        XCTAssertTrue(element("terminal-output", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Waiting for review input…"].waitForExistence(timeout: 5))
+    }
+
+    func testRegularWidthSiderailsCollapseAndRestoreTogether() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launchApp()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        if window.frame.width < 700 {
+            throw XCTSkip("Regular-width siderail coverage requires an iPad simulator.")
+        }
+
+        app.terminate()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        let landscapeExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
+            object: window
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [landscapeExpectation], timeout: 5), .completed)
+
+        let projectSidebar = element("project-sidebar", in: app)
+        let paneList = element("pane-list", in: app)
+        XCTAssertTrue(projectSidebar.waitForExistence(timeout: 5))
+        XCTAssertTrue(paneList.waitForExistence(timeout: 5))
+
+        let toggle = app.buttons["cockpit-siderail-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Hide siderails")
+        toggle.tap()
+
+        XCTAssertTrue(projectSidebar.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(paneList.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Show siderails")
+        toggle.tap()
+
+        XCTAssertTrue(projectSidebar.waitForExistence(timeout: 5))
+        XCTAssertTrue(paneList.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.label, "Hide siderails")
     }
 
     func testPairsHostWithValidSixDigitCode() {
