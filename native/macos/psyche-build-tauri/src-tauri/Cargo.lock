@@ -523,25 +523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "psyche-build-tauri"
-version = "0.0.7"
-dependencies = [
- "env_logger",
- "log",
- "once_cell",
- "parking_lot",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tokio",
- "window-vibrancy",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3005,6 +2986,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "psyche-build-tauri"
+version = "0.0.7"
+dependencies = [
+ "env_logger",
+ "log",
+ "once_cell",
+ "parking_lot",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tokio",
+ "window-vibrancy",
 ]
 
 [[package]]
