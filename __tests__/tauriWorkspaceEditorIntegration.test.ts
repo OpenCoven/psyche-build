@@ -18,8 +18,10 @@ const tauriPackage = JSON.parse(
 const requireFromTauri = createRequire(join(tauriRoot, 'package.json'));
 
 function extractFunctionSource(source: string, name: string) {
-  const start = source.indexOf(`async function ${name}(`);
-  if (start === -1) throw new Error(`missing async function ${name}`);
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const syncStart = source.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing function ${name}`);
   const bodyStart = source.indexOf('{', start);
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
@@ -487,6 +489,65 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(visited).toEqual(['active', 'inactive']);
     expect(visibleState).toEqual({ activeFileId: inactive.id, fileViewVisible: true });
     expect(inactive.dirty).toBe(true);
+  });
+
+  it('reveals the actual failed-save editor from a stored browser-only layout', () => {
+    const project = {
+      id: 'p2',
+      lastActiveThreadId: 't2',
+      layout: { mode: 'browser', side: 'right' },
+    };
+    const file = { id: 'inactive', projectId: project.id, dirty: true };
+    const state = {
+      activeProjectId: 'p1',
+      activeThreadId: 't1',
+      activeFileId: 'active',
+      threads: [{ id: 't2', projectId: project.id }],
+    };
+    let visibleLayout = 'terminal';
+    let editorVisible = false;
+    const liveLayoutCalls: Array<{ layout: string; options: unknown }> = [];
+    const revealFileForDecision = compileFunction<
+      (target: typeof file) => boolean
+    >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
+      findOpenFile: () => file,
+      findProject: () => project,
+      state,
+      terminalHost: {
+        children: [{
+          dataset: { threadId: 't2' },
+          classList: { toggle: () => undefined },
+        }],
+      },
+      restoreProjectLayout: () => { visibleLayout = project.layout.mode; },
+      applyLayout: (layout: string, options: unknown) => {
+        visibleLayout = layout;
+        liveLayoutCalls.push({ layout, options });
+      },
+      currentSide: () => project.layout.side,
+      loadAgentSkills: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      activateFileTabNow: (id: string) => {
+        state.activeFileId = id;
+        editorVisible = visibleLayout !== 'browser';
+      },
+      refreshSidebar: () => undefined,
+    });
+
+    expect(revealFileForDecision(file)).toBe(true);
+    expect(state).toMatchObject({
+      activeProjectId: project.id,
+      activeThreadId: 't2',
+      activeFileId: file.id,
+    });
+    expect(editorVisible).toBe(true);
+    expect(visibleLayout).toBe('terminal');
+    expect(project.layout.mode).toBe('browser');
+    expect(liveLayoutCalls).toEqual([{
+      layout: 'terminal',
+      options: { side: 'right', persist: false },
+    }]);
   });
 
   it('gates explicit save while any guarded file decision is pending', async () => {

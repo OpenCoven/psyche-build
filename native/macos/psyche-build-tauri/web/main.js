@@ -1342,6 +1342,9 @@
         element.classList.toggle("active", element.dataset.threadId === nextThreadId);
       });
       restoreProjectLayout(project);
+      // A stored browser-only layout hides the terminal area that owns the
+      // editor. Change only the live surface; keep the project's saved layout.
+      applyLayout("terminal", { side: currentSide(), persist: false });
       loadAgentSkills();
       syncProjectBrowser();
       saveWorkspaceSoon();
