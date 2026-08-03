@@ -20,21 +20,43 @@ function versionEntries(changelog, version) {
 }
 
 function readTestFlight(entry) {
-  const heading = /^### TestFlight: What to Test\s*\n/m.exec(entry);
-  if (!heading || heading.index === undefined) {
-    throw new Error('Release notes must include a TestFlight: What to Test section');
+  const headings = [...entry.matchAll(/^### TestFlight: What to Test[ \t]*\r?$/gm)];
+  if (headings.length !== 1) {
+    throw new Error(
+      `Expected exactly one TestFlight: What to Test section; found ${headings.length}`,
+    );
   }
 
+  const [heading] = headings;
   const sectionStart = heading.index + heading[0].length;
-  const nextSection = entry.indexOf('\n### ', sectionStart);
+  const peerHeading = /^### [^\r\n]+[ \t]*\r?$/gm;
+  peerHeading.lastIndex = sectionStart;
+  const nextSection = peerHeading.exec(entry);
   const testFlight = entry
-    .slice(sectionStart, nextSection < 0 ? undefined : nextSection)
+    .slice(sectionStart, nextSection?.index)
     .replace(/^#{1,6}\s+/gm, '')
     .trim();
+  if (!testFlight) {
+    throw new Error('TestFlight: What to Test section cannot be empty');
+  }
   if (testFlight.length > MAX_TESTFLIGHT_LENGTH) {
     throw new Error(`TestFlight release notes exceed ${MAX_TESTFLIGHT_LENGTH} characters`);
   }
   return testFlight;
+}
+
+function assertValidReleaseDate(date, version) {
+  if (/^unreleased$/i.test(date)) {
+    throw new Error(`Release notes for ${version} cannot be dated Unreleased`);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`Release date for ${version} must use YYYY-MM-DD; received "${date}"`);
+  }
+
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+    throw new Error(`Release date for ${version} is not a valid calendar date: "${date}"`);
+  }
 }
 
 export function readReleaseNotes(root, version) {
@@ -45,9 +67,7 @@ export function readReleaseNotes(root, version) {
   }
 
   const [entry] = entries;
-  if (/^unreleased$/i.test(entry.date)) {
-    throw new Error(`Release notes for ${version} cannot be dated Unreleased`);
-  }
+  assertValidReleaseDate(entry.date, version);
 
   const nextHeading = changelog.indexOf('\n## ', entry.contentStart);
   const github = changelog.slice(entry.start, nextHeading < 0 ? undefined : nextHeading).trim();
@@ -61,7 +81,11 @@ function main() {
   }
 
   const notes = readReleaseNotes(process.cwd(), version);
-  console.log(mode === '--github' ? notes.github : notes.testFlight);
+  if (mode === '--github') {
+    console.log(notes.github);
+  } else {
+    process.stdout.write(notes.testFlight);
+  }
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
