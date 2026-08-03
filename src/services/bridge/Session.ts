@@ -21,7 +21,13 @@ export class Session {
 
   send(msg: ServerMessage): void {
     if (this.ctx.socket.readyState !== 1) return; // 1 = OPEN
-    this.ctx.socket.send(encodeServerMessage(msg));
+    try {
+      this.ctx.socket.send(encodeServerMessage(msg));
+    } catch {
+      // The socket can fail between the readyState check and the write. A
+      // send failure is never worth propagating — the 'close' handler tears
+      // the session down either way.
+    }
   }
 
   close(reason: string): void {

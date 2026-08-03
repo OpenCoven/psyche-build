@@ -2,6 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams, execSync } from 'node:child
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import {
+  assertSingleTmuxCommandLine,
+  assertTmuxPaneId,
+  quoteTmuxArgument,
+} from '../utils/tmuxTarget.js';
 
 /**
  * Thin wrapper around `tmux -C attach-session` (tmux control mode).
@@ -52,30 +57,38 @@ export class TmuxControl extends EventEmitter {
     this.proc.kill('SIGTERM');
   }
 
-  /** Send a raw tmux command over the control connection. */
+  /**
+   * Send a raw tmux command over the control connection.
+   *
+   * Control mode is line-oriented, so a command containing a newline is really
+   * two commands. Rejecting that here backstops the per-argument guards below.
+   */
   command(line: string): void {
+    assertSingleTmuxCommandLine(line);
     if (!this.proc) throw new Error('tmux control mode not started');
     this.proc.stdin.write(line + '\n');
   }
 
   sendKeysHex(paneId: string, data: Buffer): void {
+    const target = assertTmuxPaneId(paneId);
     if (data.length === 0) return;
     const hex = Array.from(data, (b) => b.toString(16).padStart(2, '0')).join(' ');
-    this.command(`send-keys -t ${quote(paneId)} -H ${hex}`);
+    this.command(`send-keys -t ${quote(target)} -H ${hex}`);
   }
 
   resizePane(paneId: string, cols: unknown, rows: unknown): void {
+    const target = assertTmuxPaneId(paneId);
     const x = tmuxDimensionArg(cols, 'cols');
     const y = tmuxDimensionArg(rows, 'rows');
-    this.command(`resize-pane -t ${quote(paneId)} -x ${x} -y ${y}`);
+    this.command(`resize-pane -t ${quote(target)} -x ${x} -y ${y}`);
   }
 
   selectPane(paneId: string): void {
-    this.command(`select-pane -t ${quote(paneId)}`);
+    this.command(`select-pane -t ${quote(assertTmuxPaneId(paneId))}`);
   }
 
   killPane(paneId: string): void {
-    this.command(`kill-pane -t ${quote(paneId)}`);
+    this.command(`kill-pane -t ${quote(assertTmuxPaneId(paneId))}`);
   }
 
   private onStdout(chunk: string): void {
@@ -152,7 +165,7 @@ export function unescapeTmuxOutput(s: string): Buffer {
 }
 
 function quote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
+  return quoteTmuxArgument(s);
 }
 
 const TMUX_DIMENSION_MAX = 65535;

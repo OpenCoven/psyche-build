@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The bridge and daemon no longer accept a tmux pane id that is not a real
+  pane id. Control mode is line-oriented, so a pane id containing a newline
+  used to end the intended command and start another one — reaching
+  `run-shell`, and so arbitrary commands as the user — from any paired device
+  or daemon client.
+- Pane operations on the loopback daemon now stay inside the project the daemon
+  is scoped to. `panes.attach`, `panes.focus`, and `panes.kill` previously took
+  a raw tmux pane id, letting a client authorized for one project read output
+  from and type into any tmux pane on the machine.
+- LAN pairing now closes the window after five wrong codes and reports
+  `too_many_attempts`. A six-digit code with unlimited guesses was brute-forceable
+  inside its own five-minute window, and pairing grants a durable device token.
+- Pairing codes and daemon tokens are compared in constant time, and
+  `PairingFlow` now reports why an attempt failed instead of leaving the caller
+  to infer it — an expired window is reported as expired, not as a spent
+  attempt budget.
+- Keystroke payloads are validated as canonical base64 before decoding.
+  `Buffer.from(str, 'base64')` never throws — it silently drops characters
+  outside the alphabet — so the previous `try`/`catch` was dead code and
+  malformed input reached the terminal as mangled bytes.
+- Both servers cap client frames at 1 MiB, the daemon disconnects connections
+  that never authenticate, and a connection may hold at most 64 attached streams.
+
+### Reliability
+
+- Neither server can be taken down by a single client frame any more: socket and
+  listener `error` events are handled, async dispatch failures answer with an
+  error frame instead of crashing the process, and malformed requests are
+  rejected rather than thrown. `panes.attach` with no pane id was a one-frame
+  denial of service.
+- A pane's output stream now costs one shared emitter listener per connection
+  rather than one per attached pane, which removes a listener leak and the
+  spurious "possible memory leak" warnings that came with it.
+- `.psyche/psyche.config.json` — the pane registry — is written atomically, and
+  a read that fails for any reason other than "the file does not exist" is now
+  an error. Previously an unreadable or corrupt config was silently replaced
+  with an empty one on the next write, erasing every pane, worktree path, and
+  branch name in the project.
+- Opening a Coven session and patching pane metadata now go through the same
+  mutation lock as pane spawning, so concurrent operations no longer drop each
+  other's panes.
+
+### Documentation
+
+- Added [Bridge and daemon security model](./docs/BRIDGE-SECURITY.md).
+
 ## [0.0.1] - 2026-08-03
 
 ### Orchestration

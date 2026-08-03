@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -376,33 +377,38 @@ export async function openProjectCovenSession(
   deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
 
   const now = new Date().toISOString();
-  const config = await readBridgeConfig(projectRoot);
-  const pane: RawConfigPane = {
-    id: `psyche-${Date.now()}`,
-    slug: uniqueCovenPaneSlug(config, session),
-    title,
-    displayName: title,
-    prompt: '',
-    paneId,
-    cwd: session.projectRoot,
-    projectRoot,
-    projectName: path.basename(projectRoot),
-    type: 'shell',
-    shellType: 'coven',
-    covenSession: {
-      id: session.id,
-      harness: session.harness,
-      status: session.status,
-      projectRoot: session.projectRoot,
-    },
-    lastUpdated: now,
-  };
-  config.projectName = config.projectName || path.basename(projectRoot);
-  config.projectRoot = projectRoot;
-  config.settings = config.settings || {};
-  config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-  config.lastUpdated = now;
-  await writeBridgeConfig(projectRoot, config);
+  // Read-modify-write of the whole config must go through the mutation lock.
+  // Doing it inline here — as this path used to — meant a coven pane opened
+  // while a lane was spawning read the same snapshot as the spawn and clobbered
+  // it, so one of the two panes vanished from the registry.
+  const pane = await mutateBridgeConfig(projectRoot, (config) => {
+    const record: RawConfigPane = {
+      id: nextBridgePaneId(),
+      slug: uniqueCovenPaneSlug(config, session),
+      title,
+      displayName: title,
+      prompt: '',
+      paneId,
+      cwd: session.projectRoot,
+      projectRoot,
+      projectName: path.basename(projectRoot),
+      type: 'shell',
+      shellType: 'coven',
+      covenSession: {
+        id: session.id,
+        harness: session.harness,
+        status: session.status,
+        projectRoot: session.projectRoot,
+      },
+      lastUpdated: now,
+    };
+    config.projectName = config.projectName || path.basename(projectRoot);
+    config.projectRoot = projectRoot;
+    config.settings = config.settings || {};
+    config.panes = [...(Array.isArray(config.panes) ? config.panes : []), record];
+    config.lastUpdated = now;
+    return record;
+  });
 
   return {
     id: paneId,
@@ -804,7 +810,7 @@ async function claimWorktree<T>(work: () => Promise<T>): Promise<T> {
  */
 let configMutation: Promise<unknown> = Promise.resolve();
 
-async function mutateBridgeConfig<T>(
+export async function mutateBridgeConfig<T>(
   projectRoot: string,
   mutate: (config: BridgeConfig) => T | Promise<T>,
 ): Promise<T> {
@@ -1232,13 +1238,29 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
   sendTmuxCommand,
 };
 
+/**
+ * Read the project config, or synthesize an empty one if there is none yet.
+ *
+ * The "or" matters: this used to swallow *every* failure and hand back a
+ * config with `panes: []`. Callers in the mutate path then wrote that back,
+ * so a single unreadable or half-written config — EACCES, a torn write, a
+ * stray editor save — silently erased every pane record, worktree pointer and
+ * branch name the project had. Only ENOENT is a legitimately empty project;
+ * anything else propagates so the caller fails loudly and the file on disk is
+ * left alone for the user to recover.
+ */
 async function readBridgeConfig(projectRoot: string): Promise<BridgeConfig> {
   const configPath = bridgeConfigPath(projectRoot);
+  let raw: string;
   try {
-    const raw = await readFile(configPath, 'utf8');
-    const parsed = JSON.parse(raw) as BridgeConfig;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
+    raw = await readFile(configPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw bridgeError(
+        'config_unreadable',
+        `could not read ${configPath}: ${bridgeErrorMessage(error)}`,
+      );
+    }
     return {
       projectName: path.basename(projectRoot),
       projectRoot,
@@ -1247,12 +1269,34 @@ async function readBridgeConfig(projectRoot: string): Promise<BridgeConfig> {
       lastUpdated: new Date().toISOString(),
     };
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw bridgeError(
+      'config_corrupt',
+      `${configPath} is not valid JSON and will not be overwritten: ${bridgeErrorMessage(error)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw bridgeError('config_corrupt', `${configPath} is not a JSON object`);
+  }
+  return parsed as BridgeConfig;
 }
 
+/**
+ * Write the project config atomically.
+ *
+ * A plain `writeFile` truncates first, so a crash — or a reader arriving
+ * mid-write — sees a half-written file. Since the config *is* the pane
+ * registry, that is data loss, not a transient glitch. Write-then-rename
+ * means a reader observes either the old file or the new one.
+ */
 async function writeBridgeConfig(projectRoot: string, config: BridgeConfig): Promise<void> {
   const configPath = bridgeConfigPath(projectRoot);
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, JSON.stringify(config, null, 2));
+  await atomicWriteJson(configPath, config);
 }
 
 function bridgeConfigPath(projectRoot: string): string {
