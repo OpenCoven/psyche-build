@@ -1325,6 +1325,32 @@
     return true;
   }
 
+  function revealFileForDecision(file) {
+    if (!file || !findOpenFile(file.id)) return false;
+    var project = findProject(file.projectId);
+    if (project) {
+      state.activeProjectId = project.id;
+      var threads = state.threads.filter(function (thread) {
+        return thread.projectId === project.id;
+      });
+      var nextThreadId = project.lastActiveThreadId &&
+        threads.some(function (thread) { return thread.id === project.lastActiveThreadId; })
+          ? project.lastActiveThreadId
+          : (threads[0] ? threads[0].id : null);
+      state.activeThreadId = nextThreadId;
+      Array.prototype.forEach.call(terminalHost.children, function (element) {
+        element.classList.toggle("active", element.dataset.threadId === nextThreadId);
+      });
+      restoreProjectLayout(project);
+      loadAgentSkills();
+      syncProjectBrowser();
+      saveWorkspaceSoon();
+    }
+    activateFileTabNow(file.id);
+    refreshSidebar();
+    return true;
+  }
+
   async function activateFileTab(id) {
     var file = findOpenFile(id);
     if (!file) return false;
@@ -1423,7 +1449,10 @@
       return true;
     }
     var saved = await saveFile(file);
-    if (!saved) restoreFileEditorFocus();
+    if (!saved) {
+      revealFileForDecision(file);
+      restoreFileEditorFocus();
+    }
     return saved;
   }
 
@@ -1554,6 +1583,7 @@
     var project = findProject(file.projectId);
     if (!project) {
       file.saveError = "Project is no longer open.";
+      revealFileForDecision(file);
       if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
         renderFileChrome(file);
       }
@@ -1602,6 +1632,7 @@
       file.saving = false;
       file.saveError = String(error);
       file.saveState = "error";
+      revealFileForDecision(file);
       if (file.saveError.includes("changed on disk")) handleFileSaveConflict(file);
       if (window.PsycheCodeEditor.shouldRenderFileSaveChrome(state.activeFileId, file.id)) {
         renderFileChrome(file);
@@ -1619,6 +1650,12 @@
     fileSaveEl.addEventListener("click", function () {
       saveFile(findOpenFile(state.activeFileId));
     });
+  }
+
+  async function handleExplicitFileSave(event) {
+    event.preventDefault();
+    if (fileDecisionInFlight || fileNavigationInFlight || closeRequestInFlight) return false;
+    return saveFile(findOpenFile(state.activeFileId));
   }
 
   var closeRequestInFlight = false;
@@ -2413,8 +2450,8 @@
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
-      saveFile(findOpenFile(state.activeFileId));
-      e.preventDefault(); return;
+      await handleExplicitFileSave(e);
+      return;
     }
     // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
     if (String(e.key).toLowerCase() === "t") {

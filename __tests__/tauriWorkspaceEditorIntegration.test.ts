@@ -367,8 +367,8 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(/currentPanel\(\) === "diffs"[\s\S]*renderDiffsPanel\(\)/);
     expect(mainJs).toMatch(/currentPanel\(\) === "git"[\s\S]*renderGitPanel\(\)/);
     expect(mainJs).toMatch(/fileSaveEl\.addEventListener\("click", function \(\) \{[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/);
-    expect(mainJs).toMatch(
-      /String\(e\.key\)\.toLowerCase\(\) === "s"[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)[\s\S]*e\.preventDefault\(\)/
+    expect(extractFunctionSource(mainJs, 'handleExplicitFileSave')).toMatch(
+      /event\.preventDefault\(\)[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/
     );
   });
 
@@ -455,6 +455,69 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(visited).toEqual(['first', 'second']);
   });
 
+  it('reveals an inactive dirty file when an ordered batch save fails', async () => {
+    const active = { id: 'active', name: 'active.ts', dirty: true };
+    const inactive = { id: 'inactive', name: 'inactive.ts', dirty: true };
+    const visibleState = { activeFileId: active.id, fileViewVisible: true };
+    const visited: string[] = [];
+    const guardDirtyFile = compileFunction<
+      (file: typeof active) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFile'), {
+      showFileDecision: async () => 'save',
+      saveFile: async (file: typeof active) => {
+        visited.push(file.id);
+        if (file.id === active.id) {
+          file.dirty = false;
+          return true;
+        }
+        return false;
+      },
+      discardFile: () => undefined,
+      revealFileForDecision: (file: typeof active) => {
+        visibleState.activeFileId = file.id;
+        visibleState.fileViewVisible = true;
+      },
+      restoreFileEditorFocus: () => undefined,
+    });
+    const guardDirtyFiles = compileFunction<
+      (files: Array<typeof active>) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'guardDirtyFiles'), { guardDirtyFile });
+
+    await expect(guardDirtyFiles([active, inactive])).resolves.toBe(false);
+    expect(visited).toEqual(['active', 'inactive']);
+    expect(visibleState).toEqual({ activeFileId: inactive.id, fileViewVisible: true });
+    expect(inactive.dirty).toBe(true);
+  });
+
+  it('gates explicit save while any guarded file decision is pending', async () => {
+    const source = extractFunctionSource(mainJs, 'handleExplicitFileSave');
+    for (const blockers of [
+      { fileDecisionInFlight: Promise.resolve('save'), fileNavigationInFlight: false, closeRequestInFlight: false },
+      { fileDecisionInFlight: null, fileNavigationInFlight: true, closeRequestInFlight: false },
+      { fileDecisionInFlight: null, fileNavigationInFlight: false, closeRequestInFlight: true },
+    ]) {
+      let prevented = 0;
+      let saveCalls = 0;
+      const handleExplicitFileSave = compileFunction<
+        (event: { preventDefault(): void }) => Promise<boolean>
+      >(source, {
+        ...blockers,
+        saveFile: async () => { saveCalls += 1; return true; },
+        findOpenFile: () => ({ id: 'active', dirty: true }),
+        state: { activeFileId: 'active' },
+      });
+
+      await expect(handleExplicitFileSave({
+        preventDefault: () => { prevented += 1; },
+      })).resolves.toBe(false);
+      expect(prevented).toBe(1);
+      expect(saveCalls).toBe(0);
+    }
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\) === "s"[\s\S]*await handleExplicitFileSave\(e\)/
+    );
+  });
+
   it('reloads disk text into a clean file while preserving its selection', async () => {
     const source = extractFunctionSource(mainJs, 'reloadFile');
     const selections: unknown[] = [];
@@ -516,5 +579,8 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(/invoke\("fs_read_text", \{ root: project\.root, path: file\.path \}\)/);
     expect(mainJs).toMatch(/file\.saveError\.includes\("changed on disk"\)[\s\S]*showFileDecision\(\{ mode: "conflict", file: file \}\)/);
     expect(mainJs).toMatch(/conflictChoice === "reload"[\s\S]*await reloadFile\(file\)[\s\S]*return false/);
+    expect(mainJs).toMatch(
+      /catch \(error\) \{[\s\S]*revealFileForDecision\(file\)[\s\S]*showFileDecision\(\{ mode: "conflict", file: file \}\)/
+    );
   });
 });
