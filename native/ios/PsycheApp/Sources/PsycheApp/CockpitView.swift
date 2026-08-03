@@ -109,6 +109,13 @@ struct CockpitView: View {
         .accessibilityIdentifier("project-sidebar")
         .toolbar {
             if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleSiderails) {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .accessibilityLabel(siderailToggleAccessibilityLabel)
+                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Panes") {
                         preferredCompactColumn = .content
@@ -137,6 +144,17 @@ struct CockpitView: View {
             }
         }
         .accessibilityIdentifier("pane-list")
+        .toolbar {
+            if horizontalSizeClass == .compact {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleSiderails) {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .accessibilityLabel(siderailToggleAccessibilityLabel)
+                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                }
+            }
+        }
     }
 
     private var siderailToggleAccessibilityLabel: String {
