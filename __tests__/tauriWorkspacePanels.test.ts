@@ -52,6 +52,14 @@ describe('Tauri workspace panels', () => {
     );
   });
 
+  it('returns structured workspace diffs capped at two MiB', () => {
+    expect(tauriLib).toMatch(/const\s+MAX_DIFF_BYTES:\s*usize\s*=\s*2\s*\*\s*1024\s*\*\s*1024/);
+    expect(tauriLib).toMatch(/pub\s+struct\s+GitDiffResult\s*\{[\s\S]*pub\s+text:\s*String,[\s\S]*pub\s+bytes:\s*u64,[\s\S]*pub\s+lines:\s*u64,[\s\S]*pub\s+truncated:\s*bool/);
+    expect(tauriLib).toMatch(/fn\s+bounded_diff\(text:\s*String\)\s*->\s*GitDiffResult/);
+    expect(tauriLib).toMatch(/fn\s+git_diff\([\s\S]{0,120}\)\s*->\s*Result<GitDiffResult,\s*String>/);
+    expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
+  });
+
   it('exposes the four right-rail panels', () => {
     for (const panel of ['browser', 'files', 'diffs', 'git']) {
       expect(indexHtml).toContain(`data-panel-btn="${panel}"`);

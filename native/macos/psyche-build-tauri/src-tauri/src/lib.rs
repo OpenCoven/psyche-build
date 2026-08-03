@@ -1560,8 +1560,46 @@ fn git_status(root: String) -> Result<GitStatus, String> {
     })
 }
 
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitDiffResult {
+    pub text: String,
+    pub bytes: u64,
+    pub lines: u64,
+    pub truncated: bool,
+}
+
+fn bounded_diff(text: String) -> GitDiffResult {
+    let bytes = text.len();
+    let lines = text.lines().count() as u64;
+    if bytes <= MAX_DIFF_BYTES {
+        return GitDiffResult {
+            text,
+            bytes: bytes as u64,
+            lines,
+            truncated: false,
+        };
+    }
+
+    let mut end = MAX_DIFF_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    GitDiffResult {
+        text: text[..end].to_string(),
+        bytes: bytes as u64,
+        lines,
+        truncated: true,
+    }
+}
+
 #[tauri::command]
-fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<String, String> {
+fn git_diff(
+    root: String,
+    path: Option<String>,
+    staged: Option<bool>,
+) -> Result<GitDiffResult, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
         "--no-pager".into(),
@@ -1583,7 +1621,7 @@ fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = run_git(&root, &refs)?;
     if !out.trim().is_empty() {
-        return Ok(out);
+        return Ok(bounded_diff(out));
     }
     // An untracked file has no diff; show it as an all-additions block instead
     // of an empty pane.
@@ -1592,16 +1630,16 @@ fn git_diff(root: String, path: Option<String>, staged: Option<bool>) -> Result<
         if full.is_file() {
             if let Ok(text) = std::fs::read_to_string(&full) {
                 let mut s = format!("--- /dev/null\n+++ b/{}\n", p);
-                for line in text.lines().take(2000) {
+                for line in text.lines() {
                     s.push('+');
                     s.push_str(line);
                     s.push('\n');
                 }
-                return Ok(s);
+                return Ok(bounded_diff(s));
             }
         }
     }
-    Ok(out)
+    Ok(bounded_diff(out))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2080,7 +2118,120 @@ mod workspace_panel_tests {
             Some(false),
         )
         .unwrap();
-        assert!(diff.contains("+inside changed"));
-        assert!(!diff.contains("outside changed"));
+        assert!(diff.text.contains("+inside changed"));
+        assert!(!diff.text.contains("outside changed"));
+        assert!(!diff.truncated);
+        assert_eq!(diff.bytes, diff.text.len() as u64);
+        assert_eq!(diff.lines, diff.text.lines().count() as u64);
+    }
+
+    #[test]
+    fn bounded_diffs_stop_before_a_split_utf8_character() {
+        let mut full = "a".repeat(MAX_DIFF_BYTES - 1);
+        full.push('💖');
+
+        let diff = bounded_diff(full);
+
+        assert!(diff.truncated);
+        assert_eq!(diff.text.len(), MAX_DIFF_BYTES - 1);
+        assert_eq!(diff.bytes, (MAX_DIFF_BYTES + 3) as u64);
+        assert_eq!(diff.lines, 1);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn caps_large_tracked_git_diffs_with_full_result_metadata() {
+        let tree = TempTree::new("large-tracked-diff");
+        let target = tree.root.join("large.txt");
+        std::fs::write(&target, "baseline\n").unwrap();
+        run_test_git(&tree.root, &["init", "-q"]);
+        run_test_git(&tree.root, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &tree.root,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&tree.root, &["add", "large.txt"]);
+        run_test_git(&tree.root, &["commit", "-qm", "baseline"]);
+        std::fs::write(&target, "changed payload\n".repeat(180_000)).unwrap();
+
+        let full = run_git(
+            path_text(&tree.root),
+            &[
+                "--no-pager",
+                "diff",
+                "--no-color",
+                "--relative",
+                "--",
+                "large.txt",
+            ],
+        )
+        .unwrap();
+        assert!(full.len() > MAX_DIFF_BYTES);
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("large.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+
+        assert!(diff.truncated);
+        assert!(diff.text.len() <= MAX_DIFF_BYTES);
+        assert_eq!(diff.bytes, full.len() as u64);
+        assert_eq!(diff.lines, full.lines().count() as u64);
+        assert!(diff.bytes > diff.text.len() as u64);
+        assert!(diff.lines > diff.text.lines().count() as u64);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn caps_large_untracked_diffs_with_the_same_byte_contract() {
+        let tree = TempTree::new("large-untracked-diff");
+        run_test_git(&tree.root, &["init", "-q"]);
+        let target = tree.root.join("untracked.txt");
+        let contents = "untracked payload\n".repeat(150_000);
+        std::fs::write(&target, &contents).unwrap();
+        let full = format!(
+            "--- /dev/null\n+++ b/untracked.txt\n{}",
+            contents
+                .lines()
+                .map(|line| format!("+{line}\n"))
+                .collect::<String>()
+        );
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("untracked.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+
+        assert!(full.len() > MAX_DIFF_BYTES);
+        assert!(diff.truncated);
+        assert!(diff.text.len() <= MAX_DIFF_BYTES);
+        assert_eq!(diff.bytes, full.len() as u64);
+        assert_eq!(diff.lines, full.lines().count() as u64);
+        assert!(diff.lines > diff.text.lines().count() as u64);
+        assert!(std::str::from_utf8(diff.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn returns_complete_structured_diff_for_a_small_untracked_file() {
+        let tree = TempTree::new("small-untracked-diff");
+        run_test_git(&tree.root, &["init", "-q"]);
+        std::fs::write(tree.root.join("notes.txt"), "one\ntwo\n").unwrap();
+
+        let diff = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("notes.txt".to_string()),
+            Some(false),
+        )
+        .unwrap();
+        let expected = "--- /dev/null\n+++ b/notes.txt\n+one\n+two\n";
+
+        assert_eq!(diff.text, expected);
+        assert_eq!(diff.bytes, expected.len() as u64);
+        assert_eq!(diff.lines, expected.lines().count() as u64);
+        assert!(!diff.truncated);
     }
 }
