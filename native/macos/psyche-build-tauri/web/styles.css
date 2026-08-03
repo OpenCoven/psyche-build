@@ -11,11 +11,18 @@
   --accent-glow: rgba(184, 157, 255, 0.55);
 
   /* Surfaces — translucent over the macOS HudWindow vibrancy material */
+  /* Master background-opacity multiplier. 1 reproduces the original design;
+     lower values let more of the macOS vibrancy material through. Every
+     translucent chrome surface below is expressed relative to it, so a single
+     setting moves the whole window together instead of 16 separate alphas.
+     Driven at runtime by settings.bgOpacity via --bg-opacity on :root. */
+  --bg-opacity: 1;
+
   --bg: rgba(10, 9, 16, 0.0);            /* see-through to vibrancy */
-  --surface-1: rgba(20, 18, 30, 0.74);
-  --surface-2: rgba(28, 25, 42, 0.62);
-  --surface-3: rgba(38, 33, 56, 0.50);
-  --surface-solid: #0d0c14;              /* terminal background */
+  --surface-1: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.74));
+  --surface-2: rgba(28, 25, 42, calc(var(--bg-opacity) * 0.62));
+  --surface-3: rgba(38, 33, 56, calc(var(--bg-opacity) * 0.50));
+  --surface-solid: rgba(13, 12, 20, calc(var(--bg-opacity) * 1));  /* terminal bg */
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
 
@@ -101,7 +108,7 @@ kbd {
   align-items: center;
   gap: 4px;
   padding: calc(var(--titlebar-h) + 8px) 0 10px;
-  background: rgba(13, 11, 22, 0.45);
+  background: rgba(13, 11, 22, calc(var(--bg-opacity) * 0.45));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   -webkit-app-region: drag;
@@ -314,7 +321,7 @@ kbd {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  background: rgba(13, 11, 22, 0.45);
+  background: rgba(13, 11, 22, calc(var(--bg-opacity) * 0.45));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-bottom: 1px solid var(--border);
@@ -616,7 +623,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .tab-strip {
   display: flex;
   align-items: stretch;
-  background: rgba(20, 18, 30, 0.78);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.78));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border);
@@ -717,7 +724,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 .terminal-host {
   position: relative;
-  background: var(--surface-solid);
+  /* Transparent on purpose: .terminal-area paints the tint. Painting here too
+     stacked two translucent layers and squared the opacity. */
+  background: transparent;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -735,7 +744,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   align-items: center;
   gap: 8px;
   padding: 0 14px;
-  background: rgba(20, 18, 30, 0.82);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.82));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--border);
@@ -772,7 +781,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   left: 14px;
   right: 14px;
   bottom: calc(var(--command-h) + 6px);
-  background: rgba(20, 18, 30, 0.92);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.92));
   backdrop-filter: blur(28px) saturate(1.2);
   -webkit-backdrop-filter: blur(28px) saturate(1.2);
   border: 1px solid var(--border-strong);
@@ -840,7 +849,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   grid-template-columns: 1fr;
   min-width: 0;
   min-height: 0;
-  background: rgba(20, 18, 30, 0.50);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.50));
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
@@ -865,7 +874,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   align-items: center;
   gap: 6px;
   padding: 0 6px 0 10px;
-  background: rgba(12, 11, 18, 0.86);
+  background: rgba(12, 11, 18, calc(var(--bg-opacity) * 0.86));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border);
@@ -951,7 +960,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   gap: 10px;
   padding: 7px 14px;
   border-bottom: 1px solid var(--border);
-  background: rgba(20, 18, 30, 0.5);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.5));
 }
 .file-view-path {
   flex: 1 1 auto;
@@ -1090,7 +1099,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   gap: 4px;
   align-items: center;
   padding: 0 8px;
-  background: rgba(12, 11, 18, 0.86);
+  background: rgba(12, 11, 18, calc(var(--bg-opacity) * 0.86));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border);
@@ -1147,7 +1156,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   align-items: center;
   height: var(--browser-bar-h);
   padding: 0 10px;
-  background: rgba(20, 18, 30, 0.80);
+  background: rgba(20, 18, 30, calc(var(--bg-opacity) * 0.80));
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   color: var(--muted);
@@ -1169,7 +1178,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   min-width: 0;
   overflow-x: auto;
   padding: 2px 6px 0;
-  background: rgba(12, 11, 18, 0.82);
+  background: rgba(12, 11, 18, calc(var(--bg-opacity) * 0.82));
   border-bottom: 1px solid rgba(255, 255, 255, 0.065);
   scrollbar-width: none;
 }
@@ -1299,7 +1308,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   min-height: 40px;
   padding-left: 80px;
   padding-right: 12px;
-  background: rgba(10, 9, 16, 0.54);
+  background: rgba(10, 9, 16, calc(var(--bg-opacity) * 0.54));
 }
 .titlebar-left,
 .titlebar-right { height: 100%; align-items: center; }
@@ -1360,12 +1369,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   to { opacity: 1; transform: scale(1); }
 }
 .command-bar {
-  background: rgba(13, 12, 19, 0.88);
+  background: rgba(13, 12, 19, calc(var(--bg-opacity) * 0.88));
   border-top-color: rgba(255,255,255,0.08);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
 }
 .browser-tab-strip {
-  background: rgba(18, 16, 25, 0.86);
+  background: rgba(18, 16, 25, calc(var(--bg-opacity) * 0.86));
 }
 .browser-tab {
   background: rgba(255,255,255,0.04);
@@ -1459,7 +1468,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .browser-pane {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  background: rgba(15, 14, 22, 0.56);
+  background: rgba(15, 14, 22, calc(var(--bg-opacity) * 0.56));
 }
 .panel-browser {
   grid-template-columns: minmax(0, 1fr);
@@ -1501,7 +1510,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   overflow-x: auto;
   overflow-y: hidden;
   padding: 2px 6px 0;
-  background: rgba(10, 9, 16, 0.88);
+  background: rgba(10, 9, 16, calc(var(--bg-opacity) * 0.88));
   border-left: 0;
   border-bottom: 1px solid rgba(255,255,255,0.075);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
@@ -1604,3 +1613,66 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   .browser-tab:not(.active) .browser-tab-title,
   .browser-tab:not(:hover) .browser-tab-close { display: none; }
 }
+
+/* -------- Background opacity control (sidebar footer) --------
+   Sits below the session list so it is always reachable, including when the
+   chrome is turned down far enough to be hard to see. */
+
+.sidebar-foot {
+  flex: none;
+  padding: 8px 10px 2px;
+  border-top: 1px solid var(--border);
+}
+.bg-opacity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bg-opacity-label {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.bg-opacity-value {
+  flex: none;
+  min-width: 34px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.bg-opacity-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  outline: none;
+}
+.bg-opacity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--accent);
+  border: none;
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.bg-opacity-slider:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* xterm.css hardcodes `.xterm .xterm-viewport { background-color: #000 }` so
+   the macOS scrollbar reads as fully opaque. Left alone that keeps the largest
+   surface in the window solid black no matter what --bg-opacity says, so the
+   setting would appear to do nothing over the terminal. The tint is painted by
+   .terminal-area instead; the viewport stays out of the way. Specificity here
+   (0,3,0) has to beat xterm's (0,2,0). */
+.terminal-host .xterm .xterm-viewport { background-color: transparent; }

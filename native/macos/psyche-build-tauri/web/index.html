@@ -37,6 +37,22 @@
           </button>
         </div>
         <div class="session-list" id="session-list" role="tree" aria-label="Sessions grouped by project"></div>
+        <div class="sidebar-foot">
+          <label class="bg-opacity-row" for="bg-opacity">
+            <span class="bg-opacity-label">Background</span>
+            <input
+              id="bg-opacity"
+              class="bg-opacity-slider"
+              type="range"
+              min="0.3"
+              max="1"
+              step="0.05"
+              value="1"
+              aria-label="Background opacity"
+            />
+            <span class="bg-opacity-value" id="bg-opacity-value">100%</span>
+          </label>
+        </div>
       </aside>
 
       <header class="titlebar" data-tauri-drag-region>

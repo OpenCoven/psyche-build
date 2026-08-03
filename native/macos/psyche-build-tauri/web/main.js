@@ -134,6 +134,11 @@
 
   var HARD_MAX_PROJECTS = 10;
   var HARD_MAX_BROWSER_TABS_PER_PROJECT = 10;
+  var DEFAULT_BG_OPACITY = 1;
+  // Floor is deliberately above 0: at 0 the chrome vanishes entirely and the
+  // window becomes unusable with no visible control to undo it.
+  var MIN_BG_OPACITY = 0.3;
+  var MAX_BG_OPACITY = 1;
   var SETTINGS_KEY = "psyche.tauri.settings.v1";
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
@@ -145,21 +150,43 @@
     if (!Number.isFinite(n)) return fallback;
     return Math.max(min, Math.min(max, n));
   }
+  function clampFloat(value, fallback, min, max) {
+    var n = parseFloat(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
   function loadSettings() {
-    var defaults = { maxProjects: 10, maxBrowserTabsPerProject: 10 };
+    var defaults = { maxProjects: 10, maxBrowserTabsPerProject: 10, bgOpacity: DEFAULT_BG_OPACITY };
     try {
       var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
       return {
         maxProjects: clampInt(saved.maxProjects, defaults.maxProjects, 1, HARD_MAX_PROJECTS),
         maxBrowserTabsPerProject: clampInt(saved.maxBrowserTabsPerProject, defaults.maxBrowserTabsPerProject, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT),
+        bgOpacity: clampFloat(saved.bgOpacity, defaults.bgOpacity, MIN_BG_OPACITY, MAX_BG_OPACITY),
       };
     } catch (_) { return defaults; }
   }
   function saveSettings() {
     settings.maxProjects = clampInt(settings.maxProjects, 10, 1, HARD_MAX_PROJECTS);
     settings.maxBrowserTabsPerProject = clampInt(settings.maxBrowserTabsPerProject, 10, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
+    settings.bgOpacity = clampFloat(settings.bgOpacity, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }
+
+  // ---- Background opacity ----
+  // One multiplier drives every translucent chrome surface (via the
+  // --bg-opacity custom property) *and* the xterm theme. The terminal canvas
+  // paints its own background, so CSS alone would leave the largest surface in
+  // the window stubbornly opaque.
+  function applyBgOpacity(value, opts) {
+    var v = clampFloat(value, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
+    settings.bgOpacity = v;
+    document.documentElement.style.setProperty("--bg-opacity", String(v));
+    if (bgOpacityInput && bgOpacityInput.value !== String(v)) bgOpacityInput.value = String(v);
+    if (bgOpacityValueEl) bgOpacityValueEl.textContent = Math.round(v * 100) + "%";
+    if (!opts || opts.persist !== false) saveSettings();
+  }
+
   function persistableProject(project) {
     return { id: project.id, name: project.name, root: project.root, layout: ensureProjectLayout(project), browser: ensureBrowserModel(project) };
   }
@@ -669,8 +696,13 @@
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.18,
+      // Fully transparent canvas: the terminal's tint comes from
+      // .terminal-area's CSS background, which already tracks --bg-opacity.
+      // Driving it through the xterm theme instead left .xterm-viewport
+      // painted an opaque black that ignored the setting.
+      allowTransparency: true,
       theme: {
-        background: "#000000",
+        background: "rgba(0, 0, 0, 0)",
         foreground: "#ece9f5",
         cursor: "#a78bfa",
         selectionBackground: "rgba(167,139,250,0.30)",
@@ -893,6 +925,8 @@
   // — state.threads is the source of truth, so this renders from the same data
   // the tab strip and terminal host use rather than tracking its own copy.
 
+  var bgOpacityInput = document.getElementById("bg-opacity");
+  var bgOpacityValueEl = document.getElementById("bg-opacity-value");
   var sessionListEl = document.getElementById("session-list");
   var sessionSearchEl = document.getElementById("session-search");
   var sessionFilter = "";
@@ -997,6 +1031,20 @@
       sessionListEl.appendChild(empty);
     }
   }
+
+  if (bgOpacityInput) {
+    // `input` fires continuously while dragging so the window responds live;
+    // the write to localStorage is deferred to `change` (drag end) so a single
+    // drag does not thrash it.
+    bgOpacityInput.addEventListener("input", function () {
+      applyBgOpacity(bgOpacityInput.value, { persist: false });
+    });
+    bgOpacityInput.addEventListener("change", function () {
+      applyBgOpacity(bgOpacityInput.value);
+    });
+  }
+  // Apply whatever was persisted before the first paint settles.
+  applyBgOpacity(settings.bgOpacity, { persist: false });
 
   if (sessionSearchEl) {
     sessionSearchEl.addEventListener("input", function () {
@@ -1294,24 +1342,34 @@
     },
     {
       cmd: "/settings",
-      desc: "Show or set caps: /settings projects 8, /settings browser-tabs 6",
+      desc: "Show or set: /settings projects 8, /settings browser-tabs 6, /settings bg-opacity 70",
       run: function (rest) {
         var parts = rest.split(/\s+/).filter(Boolean);
+        function summary() {
+          return "projects " + settings.maxProjects + "/" + HARD_MAX_PROJECTS +
+            ", browser-tabs " + settings.maxBrowserTabsPerProject + "/" + HARD_MAX_BROWSER_TABS_PER_PROJECT +
+            ", bg-opacity " + Math.round(settings.bgOpacity * 100) + "%";
+        }
         if (parts.length === 0) {
-          writeToActive("\r\n\x1b[36m[settings]\x1b[0m projects " + settings.maxProjects + "/" + HARD_MAX_PROJECTS + ", browser-tabs " + settings.maxBrowserTabsPerProject + "/" + HARD_MAX_BROWSER_TABS_PER_PROJECT + "\r\n");
+          writeToActive("\r\n\x1b[36m[settings]\x1b[0m " + summary() + "\r\n");
           return;
         }
         if (parts.length >= 2 && parts[0] === "projects") {
           settings.maxProjects = clampInt(parts[1], settings.maxProjects, 1, HARD_MAX_PROJECTS);
         } else if (parts.length >= 2 && parts[0] === "browser-tabs") {
           settings.maxBrowserTabsPerProject = clampInt(parts[1], settings.maxBrowserTabsPerProject, 1, HARD_MAX_BROWSER_TABS_PER_PROJECT);
+        } else if (parts.length >= 2 && parts[0] === "bg-opacity") {
+          // Accept both 0-1 and a 0-100 percentage, since both read naturally.
+          var raw = parseFloat(parts[1]);
+          if (Number.isFinite(raw) && raw > 1) raw = raw / 100;
+          applyBgOpacity(raw);
         } else {
-          writeToActive("\r\n\x1b[33m[/settings]\x1b[0m try /settings projects 8 or /settings browser-tabs 6\r\n");
+          writeToActive("\r\n\x1b[33m[/settings]\x1b[0m try /settings projects 8, /settings browser-tabs 6, or /settings bg-opacity 70\r\n");
           return;
         }
         saveSettings();
         saveWorkspaceSoon();
-        writeToActive("\r\n\x1b[36m[settings]\x1b[0m projects " + settings.maxProjects + ", browser-tabs " + settings.maxBrowserTabsPerProject + "\r\n");
+        writeToActive("\r\n\x1b[36m[settings]\x1b[0m " + summary() + "\r\n");
       },
     },
     {
