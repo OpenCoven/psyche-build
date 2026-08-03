@@ -19,17 +19,28 @@ struct CockpitView: View {
             paneList
                 .navigationTitle("Panes")
         } detail: {
-            TerminalDetail(pane: store.selectedPane)
-                .navigationTitle(store.selectedPane.snapshot.displayName)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button(action: toggleSiderails) {
-                            Image(systemName: "sidebar.left")
-                        }
-                        .accessibilityLabel(siderailToggleAccessibilityLabel)
-                        .accessibilityIdentifier("cockpit-siderail-toggle")
-                    }
+            Group {
+                if let pane = selectedProjectPane {
+                    TerminalDetail(pane: pane)
+                        .navigationTitle(pane.snapshot.displayName)
+                } else {
+                    ContentUnavailableView(
+                        "No pane selected",
+                        systemImage: "rectangle.stack",
+                        description: Text("Choose a project with an active pane.")
+                    )
+                    .accessibilityIdentifier("no-pane-detail")
                 }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleSiderails) {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .accessibilityLabel(siderailToggleAccessibilityLabel)
+                    .accessibilityIdentifier("cockpit-siderail-toggle")
+                }
+            }
         }
         .tint(PsycheTheme.mint)
         .background(PsycheTheme.background)
@@ -42,6 +53,12 @@ struct CockpitView: View {
             columnVisibility = horizontalSizeClass == .regular ? .all : .detailOnly
             didApplyInitialColumnVisibility = true
         }
+    }
+
+    private var selectedProjectPane: DemoStore.DemoPane? {
+        guard store.selectedProjectID != nil else { return nil }
+        return store.panes(for: store.selectedProjectID)
+            .first(where: { $0.id == store.selectedPaneID })
     }
 
     private var projectSidebar: some View {

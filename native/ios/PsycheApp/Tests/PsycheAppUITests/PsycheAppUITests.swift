@@ -1,8 +1,9 @@
 import XCTest
 
 final class PsycheAppUITests: XCTestCase {
-    func testLaunchesMainCockpitWithCollapsedSiderails() {
+    func testLaunchesMainCockpitWithCollapsedSiderails() throws {
         let app = launchApp()
+        try requireCompactWidth(in: app)
 
         XCTAssertTrue(app.otherElements["main-cockpit"].waitForExistence(timeout: 5))
         XCTAssertTrue(element("terminal-output", in: app).waitForExistence(timeout: 5))
@@ -13,8 +14,9 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertEqual(toggle.label, "Show siderails")
     }
 
-    func testSiderailToggleRevealsBothNavigationLevelsAndCollapsesAgain() {
+    func testSiderailToggleRevealsBothNavigationLevelsAndCollapsesAgain() throws {
         let app = launchApp()
+        try requireCompactWidth(in: app)
 
         showProjectSidebar(in: app)
         let project = element("project-psyche", in: app)
@@ -49,8 +51,9 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(bridgePane.isSelected)
     }
 
-    func testSelectingProjectReconcilesPaneSelection() {
+    func testSelectingProjectReconcilesPaneSelection() throws {
         let app = launchApp()
+        try requireCompactWidth(in: app)
 
         showProjectSidebar(in: app)
         let websiteProject = element("project-website", in: app)
@@ -68,17 +71,15 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     func testRegularWidthSiderailsCollapseAndRestoreTogether() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
         XCUIDevice.shared.orientation = .portrait
         let app = launchApp()
-        let window = app.windows.firstMatch
-        XCTAssertTrue(window.waitForExistence(timeout: 5))
-        if window.frame.width < 700 {
-            throw XCTSkip("Regular-width siderail coverage requires an iPad simulator.")
-        }
+        try requireRegularWidth(in: app)
 
         app.terminate()
         XCUIDevice.shared.orientation = .landscapeLeft
         app.launch()
+        let window = app.windows.firstMatch
         let landscapeExpectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
             object: window
@@ -105,8 +106,34 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertEqual(toggle.label, "Hide siderails")
     }
 
-    func testPairsHostWithValidSixDigitCode() {
+    func testEmptyProjectShowsNoPaneDetailAtRegularWidth() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .portrait
         let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        app.terminate()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        app.launch()
+        let window = app.windows.firstMatch
+        let landscapeExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
+            object: window
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [landscapeExpectation], timeout: 5), .completed)
+
+        let infraProject = element("project-infra", in: app)
+        XCTAssertTrue(infraProject.waitForExistence(timeout: 5))
+        infraProject.tap()
+
+        XCTAssertTrue(element("no-pane-detail", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["No pane selected"].exists)
+        XCTAssertFalse(element("terminal-output", in: app).exists)
+    }
+
+    func testPairsHostWithValidSixDigitCode() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
 
         showProjectSidebar(in: app)
         XCTAssertTrue(app.buttons["Pair a host"].waitForExistence(timeout: 5))
@@ -133,6 +160,22 @@ final class PsycheAppUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         return app
+    }
+
+    private func requireCompactWidth(in app: XCUIApplication) throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        if window.frame.width >= 700 {
+            throw XCTSkip("Compact siderail coverage requires an iPhone simulator.")
+        }
+    }
+
+    private func requireRegularWidth(in app: XCUIApplication) throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        if window.frame.width < 700 {
+            throw XCTSkip("Regular-width siderail coverage requires an iPad simulator.")
+        }
     }
 
     private func showProjectSidebar(in app: XCUIApplication) {
