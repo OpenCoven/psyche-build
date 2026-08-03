@@ -299,7 +299,6 @@ class Connection {
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_desktop_state_failed'), message: bridgeErrorMessage(e) });
         }
-
         return;
       }
       case 'coven.desktop.action': {
