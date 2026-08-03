@@ -177,4 +177,72 @@ final class ConnectionManagerTests: XCTestCase {
             status: .idle
         )
     }
+
+    // MARK: - Review follow-ups from #4
+
+    // The guard used to allow re-entry while .authenticating. Because connect()
+    // keeps awaiting past that transition, a second call tore down the first
+    // one's transport and the original resumed sending hello onto the
+    // replacement — two connections' worth of traffic on one transport.
+    func testConcurrentConnectDoesNotDuplicateHandshake() async {
+        let fake = FakeTransport()
+        let manager = ConnectionManager(
+            transport: fake,
+            clientID: "ios-device",
+            clientName: "Psyche Tests",
+            token: "token"
+        )
+        let endpoint = HostEndpoint(host: "psyche.local", port: 4242)
+
+        async let first: Void = manager.connect(to: endpoint)
+        async let second: Void = manager.connect(to: endpoint)
+        _ = await (first, second)
+        await manager.waitForMessageProcessorReadiness()
+
+        let sent = await fake.sentMessages
+        let helloCount = sent.filter { if case .hello = $0 { return true } else { return false } }.count
+        XCTAssertEqual(helloCount, 1, "A concurrent connect must not repeat the handshake")
+
+        let streams = await fake.incomingMessageStreamCount
+        XCTAssertEqual(streams, 1, "A concurrent connect must not open a second reader")
+    }
+
+    // pair() previously required an explicit identity, which let callers bind a
+    // token to a clientID the server never saw in hello.
+    func testPairDefaultsToTheIdentityAnnouncedInHello() async {
+        let fake = FakeTransport()
+        let manager = ConnectionManager(
+            transport: fake,
+            clientID: "ios-device",
+            clientName: "Psyche Tests"
+        )
+
+        await manager.connect(to: HostEndpoint(host: "psyche.local", port: 4242))
+        await manager.waitForMessageProcessorReadiness()
+        await manager.pair(code: "123456")
+
+        let sent = await fake.sentMessages
+        guard case let .pair(payload) = sent[1] else {
+            return XCTFail("Expected typed pair request")
+        }
+        XCTAssertEqual(payload.clientID, "ios-device")
+        XCTAssertEqual(payload.clientName, "Psyche Tests")
+    }
+
+    // Synthesized Codable throws on an unrecognized raw value, so one new
+    // status on the host would fail the entire message decode on an older
+    // client rather than degrading to .unknown.
+    func testPaneStatusDecodesUnrecognizedServerValueAsUnknown() throws {
+        let data = Data("\"quantum-entangled\"".utf8)
+        let decoded = try JSONDecoder().decode(PaneStatus.self, from: data)
+        XCTAssertEqual(decoded, .unknown)
+    }
+
+    func testPaneStatusStillDecodesKnownValues() throws {
+        for status in PaneStatus.allCases {
+            let data = Data("\"\(status.rawValue)\"".utf8)
+            XCTAssertEqual(try JSONDecoder().decode(PaneStatus.self, from: data), status)
+        }
+    }
+
 }

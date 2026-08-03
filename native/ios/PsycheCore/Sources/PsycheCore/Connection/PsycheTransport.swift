@@ -45,9 +45,7 @@ public actor FakeTransport: PsycheTransport {
     }
 
     public func incomingMessages() async -> AsyncStream<ServerMessage> {
-        var capturedContinuation: AsyncStream<ServerMessage>.Continuation?
-        let stream = AsyncStream<ServerMessage> { capturedContinuation = $0 }
-        let continuation = capturedContinuation!
+        let (stream, continuation) = AsyncStream<ServerMessage>.makeStream()
         continuations.append(continuation)
         incomingMessageStreamCount += 1
         scriptedMessages.forEach { continuation.yield($0) }
