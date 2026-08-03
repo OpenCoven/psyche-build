@@ -33,6 +33,8 @@ export interface AppStoreConnectClient {
       method?: string;
       query?: Record<string, string | number | undefined>;
       body?: unknown;
+      signal?: AbortSignal;
+      deadline?: number;
     },
   ) => Promise<unknown>;
   readonly now: () => number;
@@ -48,7 +50,7 @@ export function createAppStoreConnectToken(options: {
 
 export function createAppStoreConnectClient(options: {
   fetch?: typeof globalThis.fetch;
-  token: string;
+  getToken: () => string | Promise<string>;
   baseUrl?: string;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -58,6 +60,7 @@ export function createAppStoreConnectClient(options: {
 export function findExactBuild(
   client: AppStoreConnectClient,
   identity: ReleaseIdentity,
+  options?: { signal?: AbortSignal; deadline?: number },
 ): Promise<JsonApiResource>;
 
 export function waitForBuild(
@@ -77,6 +80,7 @@ export function upsertBetaBuildLocalization(
     locale?: string;
     whatsNew: string;
   },
+  requestOptions?: { signal?: AbortSignal; deadline?: number },
 ): Promise<BetaBuildLocalization>;
 
 export function waitAndLocalize(

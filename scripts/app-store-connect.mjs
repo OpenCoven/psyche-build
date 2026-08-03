@@ -2,6 +2,7 @@
 
 import { sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
 const API_ROOT = 'https://api.appstoreconnect.apple.com';
@@ -22,6 +23,13 @@ class ExactLookupError extends Error {
     this.name = 'ExactLookupError';
     this.resource = resource;
     this.count = count;
+  }
+}
+
+class OperationDeadlineError extends Error {
+  constructor() {
+    super('App Store Connect operation deadline reached');
+    this.name = 'OperationDeadlineError';
   }
 }
 
@@ -91,19 +99,64 @@ function defaultSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function monotonicNow() {
+  return performance.now();
+}
+
+function raceWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new OperationDeadlineError());
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new OperationDeadlineError());
+    };
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 export function createAppStoreConnectClient({
   fetch: fetchImpl = globalThis.fetch,
-  token,
+  getToken,
   baseUrl = API_ROOT,
-  now = Date.now,
+  now = monotonicNow,
   sleep = defaultSleep,
   redactValues = [],
 }) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
-  assertNonEmpty(token, 'App Store Connect bearer token');
-  const secrets = [token, ...redactValues];
+  if (typeof getToken !== 'function') throw new Error('App Store Connect token supplier is required');
+  const secrets = new Set(redactValues);
 
-  async function request(pathname, { method = 'GET', query, body } = {}) {
+  async function request(pathname, { method = 'GET', query, body, signal, deadline } = {}) {
+    const isAtDeadline = () =>
+      signal?.aborted || (Number.isFinite(deadline) && now() >= deadline);
+    if (isAtDeadline()) {
+      throw new Error('App Store Connect request aborted at operation deadline');
+    }
+    let token;
+    try {
+      token = await raceWithAbort(Promise.resolve().then(() => getToken()), signal);
+      assertNonEmpty(token, 'App Store Connect bearer token');
+      secrets.add(token);
+    } catch (error) {
+      if (error instanceof OperationDeadlineError || isAtDeadline()) {
+        throw new Error('App Store Connect request aborted at operation deadline');
+      }
+      throw new Error('Unable to create App Store Connect token');
+    }
+
     const url = new URL(pathname, baseUrl);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
@@ -114,26 +167,52 @@ export function createAppStoreConnectClient({
       authorization: `Bearer ${token}`,
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
-    const requestLabel = `${redact(method, secrets)} ${redact(url.pathname, secrets)}`;
+    const knownSecrets = [...secrets];
+    const requestLabel = `${redact(method, knownSecrets)} ${redact(url.pathname, knownSecrets)}`;
+    if (isAtDeadline()) {
+      throw new Error(`App Store Connect ${requestLabel} request aborted at operation deadline`);
+    }
 
     let response;
     try {
-      response = await fetchImpl(url, {
-        method,
-        headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-    } catch {
+      response = await raceWithAbort(
+        Promise.resolve().then(() =>
+          fetchImpl(url, {
+            method,
+            headers,
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            ...(signal ? { signal } : {}),
+          }),
+        ),
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof OperationDeadlineError || isAtDeadline()) {
+        throw new Error(`App Store Connect ${requestLabel} request aborted at operation deadline`);
+      }
       throw new Error(`App Store Connect ${requestLabel} request failed`);
     }
 
     const status = Number.isInteger(response.status) ? response.status : 'unknown';
+    if (isAtDeadline()) {
+      throw new Error(`App Store Connect ${requestLabel} request aborted at operation deadline`);
+    }
     let text;
     try {
-      text = await response.text();
-    } catch {
+      text = await raceWithAbort(Promise.resolve().then(() => response.text()), signal);
+    } catch (error) {
+      if (error instanceof OperationDeadlineError || isAtDeadline()) {
+        throw new Error(
+          `App Store Connect ${requestLabel} response body aborted at operation deadline`,
+        );
+      }
       throw new Error(
         `App Store Connect ${requestLabel} response body could not be read (status ${status})`,
+      );
+    }
+    if (isAtDeadline()) {
+      throw new Error(
+        `App Store Connect ${requestLabel} response body aborted at operation deadline`,
       );
     }
     let parsed;
@@ -208,13 +287,19 @@ function requiredIncluded(response, expectedTypes) {
   });
 }
 
-export async function findExactBuild(client, { bundleId, version, buildNumber }) {
+export async function findExactBuild(
+  client,
+  { bundleId, version, buildNumber },
+  { signal, deadline } = {},
+) {
   const appResponse = await client.request('/v1/apps', {
     query: {
       'filter[bundleId]': bundleId,
       'fields[apps]': 'bundleId,name',
       limit: 2,
     },
+    signal,
+    deadline,
   });
   const app = exactResource(resourceList(appResponse, 'apps'), 'app');
   assertResource(app, 'apps');
@@ -232,6 +317,8 @@ export async function findExactBuild(client, { bundleId, version, buildNumber })
       include: 'app',
       limit: 2,
     },
+    signal,
+    deadline,
   });
   const prereleaseVersion = exactResource(
     resourceList(versionResponse, 'prerelease versions'),
@@ -263,6 +350,8 @@ export async function findExactBuild(client, { bundleId, version, buildNumber })
       include: 'app,preReleaseVersion',
       limit: 2,
     },
+    signal,
+    deadline,
   });
   const build = exactResource(resourceList(buildResponse, 'builds'), 'build');
   assertResource(build, 'builds');
@@ -298,42 +387,65 @@ function publicBuild(resource) {
   };
 }
 
-export async function waitForBuild(
-  client,
-  {
-    bundleId,
-    version,
-    buildNumber,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
-  },
-) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error('timeoutMs must be a positive number');
+function assertTimeoutMs(timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > DEFAULT_TIMEOUT_MS) {
+    throw new Error(`timeoutMs must be greater than zero and at most ${DEFAULT_TIMEOUT_MS}`);
   }
-  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
-    throw new Error('pollIntervalMs must be a positive number');
-  }
+}
 
-  const startedAt = client.now();
-  const deadline = startedAt + timeoutMs;
+function startOperation(client, timeoutMs) {
+  assertTimeoutMs(timeoutMs);
+  const controller = new AbortController();
+  const deadline = client.now() + timeoutMs;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let finished = false;
+  return {
+    deadline,
+    signal: controller.signal,
+    finish() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+    },
+  };
+}
+
+function timedOut(client, operation) {
+  return operation.signal.aborted || client.now() >= operation.deadline;
+}
+
+function timeoutError(timeoutMs) {
+  return new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect operation`);
+}
+
+function throwIfTimedOut(client, operation, timeoutMs) {
+  if (!timedOut(client, operation)) return;
+  throw timeoutError(timeoutMs);
+}
+
+async function waitForBuildWithinOperation(
+  client,
+  { bundleId, version, buildNumber, pollIntervalMs },
+  operation,
+  timeoutMs,
+) {
   let firstLookup = true;
   while (true) {
     let resource;
     let lookupError;
-    if (!firstLookup && client.now() >= deadline) {
-      throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
-    }
+    if (!firstLookup) throwIfTimedOut(client, operation, timeoutMs);
     firstLookup = false;
     try {
-      resource = await findExactBuild(client, { bundleId, version, buildNumber });
+      resource = await findExactBuild(
+        client,
+        { bundleId, version, buildNumber },
+        { signal: operation.signal, deadline: operation.deadline },
+      );
     } catch (error) {
       lookupError = error;
     }
 
-    if (client.now() >= deadline) {
-      throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
-    }
+    throwIfTimedOut(client, operation, timeoutMs);
     if (lookupError) {
       if (
         !(lookupError instanceof ExactLookupError) ||
@@ -355,11 +467,43 @@ export async function waitForBuild(
       }
     }
 
-    const remaining = deadline - client.now();
-    if (remaining <= 0) {
-      throw new Error(`Timed out after ${timeoutMs} ms waiting for App Store Connect build`);
+    const remaining = operation.deadline - client.now();
+    if (remaining <= 0) throw timeoutError(timeoutMs);
+    try {
+      await raceWithAbort(client.sleep(Math.min(pollIntervalMs, remaining)), operation.signal);
+    } catch (error) {
+      if (error instanceof OperationDeadlineError || operation.signal.aborted) {
+        throw timeoutError(timeoutMs);
+      }
+      throw error;
     }
-    await client.sleep(Math.min(pollIntervalMs, remaining));
+  }
+}
+
+export async function waitForBuild(
+  client,
+  {
+    bundleId,
+    version,
+    buildNumber,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  },
+) {
+  assertTimeoutMs(timeoutMs);
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error('pollIntervalMs must be a positive number');
+  }
+  const operation = startOperation(client, timeoutMs);
+  try {
+    return await waitForBuildWithinOperation(
+      client,
+      { bundleId, version, buildNumber, pollIntervalMs },
+      operation,
+      timeoutMs,
+    );
+  } finally {
+    operation.finish();
   }
 }
 
@@ -379,47 +523,77 @@ export function normalizeTestFlightNotes(notes, releaseSha) {
     .join('\n')
     .trim();
   const normalized = body.length > 0 ? `${body}\n\n${sourceLine}` : sourceLine;
-  if (normalized.length > MAX_NOTES_LENGTH) {
+  if (countUnicodeCodePoints(normalized) > MAX_NOTES_LENGTH) {
     throw new Error(`TestFlight notes exceed 4,000 characters after adding provenance`);
   }
   return normalized;
 }
 
-function localizationFromResource(resource) {
+function countUnicodeCodePoints(value) {
+  return [...value].length;
+}
+
+function localizationFromResource(resource, buildId, { requireBuildRelationship = false } = {}) {
   assertResource(resource, 'betaBuildLocalizations');
-  const { locale, whatsNew } = resource.attributes ?? {};
-  if (typeof locale !== 'string' || typeof whatsNew !== 'string') {
+  if (!resource.attributes || typeof resource.attributes !== 'object') {
     throw new Error('App Store Connect beta localization response identity mismatch');
+  }
+  const { locale, whatsNew } = resource.attributes ?? {};
+  if (
+    typeof locale !== 'string' ||
+    (whatsNew !== undefined && typeof whatsNew !== 'string')
+  ) {
+    throw new Error('App Store Connect beta localization response identity mismatch');
+  }
+  const buildRelationship = resource.relationships?.build;
+  if (requireBuildRelationship || buildRelationship !== undefined) {
+    if (relationshipId(resource, 'build', 'builds') !== buildId) {
+      throw new Error('App Store Connect beta localization response identity mismatch');
+    }
   }
   return { id: resource.id, locale, whatsNew };
 }
 
-async function listBetaBuildLocalizations(client, buildId, locale) {
+async function listBetaBuildLocalizations(
+  client,
+  buildId,
+  locale,
+  { signal, deadline } = {},
+) {
   const response = await client.request(
     `/v1/builds/${encodeURIComponent(buildId)}/betaBuildLocalizations`,
     {
       query: {
-        'fields[betaBuildLocalizations]': 'locale,whatsNew',
+        'fields[betaBuildLocalizations]': 'locale,whatsNew,build',
         limit: 200,
       },
+      signal,
+      deadline,
     },
   );
   const resources = resourceList(response, 'beta build localizations');
-  const matches = resources.filter((resource) => resource.attributes?.locale === locale);
+  const validated = resources.map((resource) =>
+    localizationFromResource(resource, buildId, { requireBuildRelationship: true }),
+  );
+  const matches = validated.filter((resource) => resource.locale === locale);
   if (matches.length > 1) {
     throw new Error(`Expected at most one ${locale} beta build localization; found ${matches.length}`);
   }
-  return matches.map(localizationFromResource);
+  return matches;
 }
 
 export async function upsertBetaBuildLocalization(
   client,
   { buildId, locale = 'en-US', whatsNew },
+  { signal, deadline } = {},
 ) {
-  if (typeof whatsNew !== 'string' || whatsNew.length > MAX_NOTES_LENGTH) {
+  if (typeof whatsNew !== 'string' || countUnicodeCodePoints(whatsNew) > MAX_NOTES_LENGTH) {
     throw new Error('Beta build localization whatsNew must be at most 4,000 characters');
   }
-  const [existing] = await listBetaBuildLocalizations(client, buildId, locale);
+  const [existing] = await listBetaBuildLocalizations(client, buildId, locale, {
+    signal,
+    deadline,
+  });
   let response;
   if (existing) {
     response = await client.request(
@@ -433,6 +607,8 @@ export async function upsertBetaBuildLocalization(
             attributes: { whatsNew },
           },
         },
+        signal,
+        deadline,
       },
     );
   } else {
@@ -446,11 +622,13 @@ export async function upsertBetaBuildLocalization(
             build: { data: { type: 'builds', id: buildId } },
           },
         },
+        signal,
+        deadline,
       },
     });
   }
 
-  const localization = localizationFromResource(response?.data);
+  const localization = localizationFromResource(response?.data, buildId);
   if (localization.locale !== locale || localization.whatsNew !== whatsNew) {
     throw new Error('App Store Connect beta localization response identity mismatch');
   }
@@ -481,37 +659,66 @@ export async function waitAndLocalize(
   },
 ) {
   assertReleaseSha(releaseSha);
-  if (reuseExisting) {
-    const build = publicBuild(
-      await findExactBuild(client, { bundleId, version, buildNumber }),
-    );
-    if (build.processingState !== 'VALID') {
-      throw new Error('Reuse requires an existing VALID App Store Connect build');
+  const operation = startOperation(client, timeoutMs);
+  try {
+    if (reuseExisting) {
+      const build = publicBuild(
+        await findExactBuild(
+          client,
+          { bundleId, version, buildNumber },
+          { signal: operation.signal, deadline: operation.deadline },
+        ),
+      );
+      throwIfTimedOut(client, operation, timeoutMs);
+      if (build.processingState !== 'VALID') {
+        throw new Error('Reuse requires an existing VALID App Store Connect build');
+      }
+      const localizations = await listBetaBuildLocalizations(client, build.id, locale, {
+        signal: operation.signal,
+        deadline: operation.deadline,
+      });
+      throwIfTimedOut(client, operation, timeoutMs);
+      if (localizations.length !== 1) {
+        throw new Error(`Reuse requires exactly one existing ${locale} localization with provenance`);
+      }
+      const [localization] = localizations;
+      if (
+        typeof localization.whatsNew !== 'string' ||
+        !hasExactProvenance(localization.whatsNew, releaseSha)
+      ) {
+        throw new Error('Existing beta build localization provenance does not match release SHA');
+      }
+      return { build, localization, reused: true };
     }
-    const localizations = await listBetaBuildLocalizations(client, build.id, locale);
-    if (localizations.length !== 1) {
-      throw new Error(`Reuse requires exactly one existing ${locale} localization with provenance`);
-    }
-    const [localization] = localizations;
-    if (!hasExactProvenance(localization.whatsNew, releaseSha)) {
-      throw new Error('Existing beta build localization provenance does not match release SHA');
-    }
-    return { build, localization, reused: true };
-  }
 
-  const build = await waitForBuild(client, {
-    bundleId,
-    version,
-    buildNumber,
-    timeoutMs,
-  });
-  const whatsNew = normalizeTestFlightNotes(notes, releaseSha);
-  const localization = await upsertBetaBuildLocalization(client, {
-    buildId: build.id,
-    locale,
-    whatsNew,
-  });
-  return { build, localization, reused: false };
+    const build = await waitForBuildWithinOperation(
+      client,
+      {
+        bundleId,
+        version,
+        buildNumber,
+        pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+      },
+      operation,
+      timeoutMs,
+    );
+    throwIfTimedOut(client, operation, timeoutMs);
+    const whatsNew = normalizeTestFlightNotes(notes, releaseSha);
+    throwIfTimedOut(client, operation, timeoutMs);
+    const localization = await upsertBetaBuildLocalization(
+      client,
+      {
+        buildId: build.id,
+        locale,
+        whatsNew,
+      },
+      { signal: operation.signal, deadline: operation.deadline },
+    );
+    throwIfTimedOut(client, operation, timeoutMs);
+    return { build, localization, reused: false };
+  } finally {
+    operation.finish();
+  }
 }
 
 const USAGE = 'Usage: node scripts/app-store-connect.mjs wait-and-localize --bundle-id ID --version VERSION --build-number NUMBER --locale LOCALE --notes-file PATH --release-sha SHA --timeout-seconds SECONDS [--reuse-existing]';
@@ -549,7 +756,13 @@ function parseCli(argv) {
     if (typeof values[key] !== 'string' || values[key].length === 0) throw new Error(USAGE);
   }
   const timeoutSeconds = Number(values.timeoutSeconds);
-  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new Error(USAGE);
+  if (
+    !Number.isFinite(timeoutSeconds) ||
+    timeoutSeconds <= 0 ||
+    timeoutSeconds > DEFAULT_TIMEOUT_MS / 1_000
+  ) {
+    throw new Error(USAGE);
+  }
   return {
     ...values,
     timeoutMs: timeoutSeconds * 1_000,
@@ -578,9 +791,8 @@ async function main() {
   } catch {
     throw new Error('Unable to read App Store Connect private key or TestFlight notes file');
   }
-  const token = createAppStoreConnectToken({ keyId, issuerId, privateKey });
   const client = createAppStoreConnectClient({
-    token,
+    getToken: () => createAppStoreConnectToken({ keyId, issuerId, privateKey }),
     redactValues: [privateKey],
   });
   const result = await waitAndLocalize(client, {

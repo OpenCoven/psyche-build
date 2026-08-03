@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createAppStoreConnectClient,
@@ -81,6 +81,20 @@ function buildResource(
   };
 }
 
+function localizationResource(
+  locale = 'en-US',
+  whatsNew = 'Existing notes.',
+  overrides: Partial<JsonApiResource> = {},
+): JsonApiResource {
+  return {
+    type: 'betaBuildLocalizations',
+    id: `localization-${locale}`,
+    attributes: { locale, whatsNew },
+    relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
+    ...overrides,
+  };
+}
+
 function identityFetch(options: {
   apps?: readonly JsonApiResource[];
   versions?: readonly JsonApiResource[];
@@ -131,7 +145,7 @@ function clientWith(fetchImpl: typeof fetch, timing: {
 } = {}) {
   return createAppStoreConnectClient({
     fetch: fetchImpl,
-    token: TOKEN,
+    getToken: () => TOKEN,
     ...timing,
   });
 }
@@ -146,6 +160,7 @@ async function capturedError(action: () => unknown | Promise<unknown>): Promise<
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -200,6 +215,82 @@ describe('App Store Connect token', () => {
         signature,
       ),
     ).toBe(true);
+  });
+
+  it('refreshes a valid JWT per request across 19 minutes without exposing old or new tokens', async () => {
+    const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    const wallClockStart = 1_786_000_000_000;
+    let monotonicNow = 0;
+    let failLocalization = false;
+    const authorizationValues: string[] = [];
+    const baseFetch = identityFetch({
+      builds: () => [buildResource(monotonicNow < 20 * 60_000 ? 'PROCESSING' : 'VALID')],
+    });
+    const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const authorization = new Headers(init.headers).get('authorization') ?? '';
+      authorizationValues.push(authorization.replace(/^Bearer /, ''));
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (failLocalization && url.pathname.endsWith('/betaBuildLocalizations')) {
+        return new Response(
+          `REMOTE_DETAIL old=${authorizationValues[0]} new=${authorizationValues.at(-1)}`,
+          { status: 503 },
+        );
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const client = createAppStoreConnectClient({
+      fetch: fetchImpl,
+      getToken: async () =>
+        createAppStoreConnectToken({
+          keyId: 'KEY123',
+          issuerId: 'issuer-123',
+          privateKey: privateKeyPem,
+          now: () => wallClockStart + monotonicNow,
+        }),
+      now: () => monotonicNow,
+      sleep: async (milliseconds) => {
+        monotonicNow += milliseconds;
+      },
+      redactValues: [privateKeyPem],
+    });
+
+    await expect(
+      waitForBuild(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+        timeoutMs: 45 * 60_000,
+        pollIntervalMs: 10 * 60_000,
+      }),
+    ).resolves.toMatchObject({ processingState: 'VALID' });
+
+    const firstToken = authorizationValues[0];
+    const latestBuildToken = authorizationValues.at(-1) ?? '';
+    const firstClaims = JSON.parse(
+      Buffer.from(firstToken.split('.')[1], 'base64url').toString(),
+    ) as { iat: number; exp: number };
+    const latestClaims = JSON.parse(
+      Buffer.from(latestBuildToken.split('.')[1], 'base64url').toString(),
+    ) as { iat: number; exp: number };
+    expect(monotonicNow).toBe(20 * 60_000);
+    expect(latestClaims.iat).toBeGreaterThan(firstClaims.iat);
+    expect(latestClaims.exp).toBeGreaterThan((wallClockStart + monotonicNow) / 1_000);
+
+    failLocalization = true;
+    const error = await capturedError(() =>
+      upsertBetaBuildLocalization(client, {
+        buildId: 'build-1',
+        locale: 'en-US',
+        whatsNew: 'Notes',
+      }),
+    );
+    const newestToken = authorizationValues.at(-1) ?? '';
+    expect(newestToken).not.toBe(firstToken);
+    expect(error.message).toMatch(/GET.*betaBuildLocalizations.*503/i);
+    expect(error.message).not.toContain(firstToken);
+    expect(error.message).not.toContain(newestToken);
+    expect(error.message).not.toContain('REMOTE_DETAIL');
   });
 });
 
@@ -491,6 +582,127 @@ describe('build processing polling', () => {
     expect(sleeps.reduce((total, value) => total + value, 0)).toBe(45 * 60_000);
   });
 
+  it('aborts and rejects an unresolved fetch at the operation deadline even if transport ignores the signal', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let requestSignal: AbortSignal | undefined;
+    const privateKey = 'PRIVATE_KEY_SENTINEL';
+    const client = createAppStoreConnectClient({
+      fetch: ((_: string | URL | Request, init: RequestInit = {}) => {
+        requestSignal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      }) as typeof fetch,
+      getToken: () => TOKEN,
+      redactValues: [privateKey],
+      now: () => Date.now(),
+    });
+    const outcome = Promise.race([
+      capturedError(() =>
+        waitForBuild(client, {
+          bundleId: BUNDLE_ID,
+          version: VERSION,
+          buildNumber: BUILD_NUMBER,
+          timeoutMs: 1_000,
+        }),
+      ),
+      new Promise<'safety-timeout'>((resolve) => setTimeout(() => resolve('safety-timeout'), 1_001)),
+    ]);
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await outcome;
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toMatch(/timed out|deadline|aborted/i);
+    expect((result as Error).message).not.toContain(TOKEN);
+    expect((result as Error).message).not.toContain(privateKey);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('aborts an unresolved localization body read at the shared operation deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let requestSignal: AbortSignal | undefined;
+    const response = new Response('', { status: 200 });
+    Object.defineProperty(response, 'text', {
+      value: () => new Promise<string>(() => {}),
+    });
+    const baseFetch = identityFetch();
+    const client = createAppStoreConnectClient({
+      fetch: (async (input: string | URL | Request, init: RequestInit = {}) => {
+        const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+        if (url.pathname.endsWith('/betaBuildLocalizations')) {
+          requestSignal = init.signal ?? undefined;
+          return response;
+        }
+        return baseFetch(input, init);
+      }) as typeof fetch,
+      getToken: () => TOKEN,
+      now: () => Date.now(),
+    });
+    const outcome = Promise.race([
+      capturedError(() =>
+        waitAndLocalize(client, {
+          bundleId: BUNDLE_ID,
+          version: VERSION,
+          buildNumber: BUILD_NUMBER,
+          locale: 'en-US',
+          notes: 'Notes',
+          releaseSha: RELEASE_SHA,
+          timeoutMs: 1_000,
+        }),
+      ),
+      new Promise<'safety-timeout'>((resolve) => setTimeout(() => resolve('safety-timeout'), 1_001)),
+    ]);
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await outcome;
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toMatch(/timed out|deadline|aborted/i);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not start a localization mutation when the list body completes at the deadline', async () => {
+    let now = 0;
+    const calls: FetchCall[] = [];
+    const baseFetch = identityFetch({ calls });
+    const existing = localizationResource('en-US', 'Old notes');
+    const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (url.pathname.endsWith('/betaBuildLocalizations')) {
+        calls.push({ url, init });
+        const response = jsonResponse({ data: [existing] });
+        Object.defineProperty(response, 'text', {
+          value: async () => {
+            now = 1_000;
+            return JSON.stringify({ data: [existing] });
+          },
+        });
+        return response;
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const client = clientWith(fetchImpl, { now: () => now });
+
+    await expect(
+      waitAndLocalize(client, {
+        bundleId: BUNDLE_ID,
+        version: VERSION,
+        buildNumber: BUILD_NUMBER,
+        locale: 'en-US',
+        notes: 'Notes',
+        releaseSha: RELEASE_SHA,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toThrow(/timed out|deadline|aborted/i);
+    expect(calls.map(({ init }) => init.method ?? 'GET')).toEqual([
+      'GET',
+      'GET',
+      'GET',
+      'GET',
+    ]);
+  });
+
   it('does not start another lookup at the exact deadline', async () => {
     let now = 0;
     let buildRequest = 0;
@@ -599,6 +811,62 @@ describe('TestFlight notes and beta build localization', () => {
     expect(() => normalizeTestFlightNotes('notes', 'not-a-sha')).toThrow(/40-hex/i);
   });
 
+  it('counts astral Unicode characters as one code point at the 4,000-character boundary', () => {
+    const provenance = `Source commit: ${RELEASE_SHA}`;
+    const reservedCodePoints = [...`\n\n${provenance}`].length;
+    const exact = normalizeTestFlightNotes(
+      '🫠'.repeat(4_000 - reservedCodePoints),
+      RELEASE_SHA,
+    );
+
+    expect([...exact]).toHaveLength(4_000);
+    expect(() =>
+      normalizeTestFlightNotes('🫠'.repeat(4_001 - reservedCodePoints), RELEASE_SHA),
+    ).toThrow(/4,000/);
+  });
+
+  it('uses the same Unicode code-point limit for direct localization writes', async () => {
+    const calls: FetchCall[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      calls.push({ url, init });
+      if (url.pathname.endsWith('/betaBuildLocalizations') && init.method === 'GET') {
+        return jsonResponse({ data: [] });
+      }
+      if (url.pathname === '/v1/betaBuildLocalizations' && init.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          data: { attributes: { locale: string; whatsNew: string } };
+        };
+        return jsonResponse({
+          data: localizationResource(
+            body.data.attributes.locale,
+            body.data.attributes.whatsNew,
+            { id: 'localization-1' },
+          ),
+        }, 201);
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    }) as typeof fetch;
+    const client = clientWith(fetchImpl);
+
+    await expect(
+      upsertBetaBuildLocalization(client, {
+        buildId: 'build-1',
+        locale: 'en-US',
+        whatsNew: '🫠'.repeat(4_000),
+      }),
+    ).resolves.toMatchObject({ id: 'localization-1' });
+    const callCount = calls.length;
+    await expect(
+      upsertBetaBuildLocalization(client, {
+        buildId: 'build-1',
+        locale: 'en-US',
+        whatsNew: '🫠'.repeat(4_001),
+      }),
+    ).rejects.toThrow(/4,000/);
+    expect(calls).toHaveLength(callCount);
+  });
+
   it('creates an en-US beta build localization when none exists', async () => {
     const calls: FetchCall[] = [];
     const whatsNew = normalizeTestFlightNotes('Try the release.', RELEASE_SHA);
@@ -647,6 +915,7 @@ describe('TestFlight notes and beta build localization', () => {
       type: 'betaBuildLocalizations',
       id: 'localization-1',
       attributes: { locale: 'en-US', whatsNew: 'Old notes' },
+      relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
     } satisfies JsonApiResource;
     const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
       const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
@@ -677,6 +946,85 @@ describe('TestFlight notes and beta build localization', () => {
         attributes: { whatsNew },
       },
     });
+  });
+
+  it.each([
+    [
+      'a wrong resource type on a nonmatching row',
+      [
+        localizationResource('en-US', 'Old notes'),
+        localizationResource('fr-FR', 'French notes', { type: 'builds' }),
+      ],
+    ],
+    [
+      'a malformed nonmatching row',
+      [
+        localizationResource('en-US', 'Old notes'),
+        localizationResource('fr-FR', 'French notes', { id: undefined as unknown as string }),
+      ],
+    ],
+    [
+      'missing localization attributes',
+      [
+        localizationResource('en-US', 'Old notes'),
+        localizationResource('fr-FR', 'French notes', { attributes: undefined }),
+      ],
+    ],
+    [
+      'a non-string locale on any row',
+      [
+        localizationResource('en-US', 'Old notes'),
+        localizationResource('fr-FR', 'French notes', {
+          attributes: { locale: 123, whatsNew: 'French notes' },
+        }),
+      ],
+    ],
+    [
+      'a non-string whatsNew on any row',
+      [
+        localizationResource('en-US', 'Old notes'),
+        localizationResource('fr-FR', 'French notes', {
+          attributes: { locale: 'fr-FR', whatsNew: 123 },
+        }),
+      ],
+    ],
+    [
+      'a target localization linked to another build',
+      [
+        localizationResource('en-US', 'Old notes', {
+          relationships: { build: { data: { type: 'builds', id: 'build-other' } } },
+        }),
+      ],
+    ],
+    [
+      'a malformed build relationship',
+      [
+        localizationResource('en-US', 'Old notes', {
+          relationships: {
+            build: { data: { type: 'betaBuildLocalizations', id: 'build-1' } },
+          },
+        }),
+      ],
+    ],
+  ] as const)('rejects %s before POST or PATCH', async (_label, resources) => {
+    const calls: FetchCall[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      calls.push({ url, init });
+      if (url.pathname === '/v1/builds/build-1/betaBuildLocalizations') {
+        return jsonResponse({ data: resources });
+      }
+      throw new Error(`Unexpected mutation: ${init.method ?? 'GET'} ${url.pathname}`);
+    }) as typeof fetch;
+
+    await expect(
+      upsertBetaBuildLocalization(clientWith(fetchImpl), {
+        buildId: 'build-1',
+        locale: 'en-US',
+        whatsNew: 'New notes',
+      }),
+    ).rejects.toThrow(/identity mismatch|invalid/i);
+    expect(calls.map(({ init }) => init.method ?? 'GET')).toEqual(['GET']);
   });
 
   it('waits for a normal upload and writes notes with release provenance', async () => {
@@ -734,6 +1082,7 @@ describe('fail-closed reuse mode', () => {
       type: 'betaBuildLocalizations',
       id: 'localization-1',
       attributes: { locale: 'en-US', whatsNew },
+      relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
     } satisfies JsonApiResource;
     const client = clientWith(identityFetch({ calls, localization: [localization] }));
 
@@ -764,6 +1113,7 @@ describe('fail-closed reuse mode', () => {
           type: 'betaBuildLocalizations',
           id: 'localization-1',
           attributes: { locale: 'en-US', whatsNew: 'No source here.' },
+          relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
         },
       ],
     ],
@@ -777,6 +1127,7 @@ describe('fail-closed reuse mode', () => {
             locale: 'en-US',
             whatsNew: `Source commit: ${'f'.repeat(40)}`,
           },
+          relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
         },
       ],
     ],
@@ -790,6 +1141,7 @@ describe('fail-closed reuse mode', () => {
             locale: 'en-US',
             whatsNew: `Source commit: ${RELEASE_SHA}\nSource commit: ${RELEASE_SHA}`,
           },
+          relationships: { build: { data: { type: 'builds', id: 'build-1' } } },
         },
       ],
     ],
@@ -839,7 +1191,7 @@ describe('secret redaction and CLI contract', () => {
       })) as typeof fetch;
     const client = createAppStoreConnectClient({
       fetch: errorFetch,
-      token: TOKEN,
+      getToken: () => TOKEN,
       redactValues: [privateKey],
     });
 
@@ -862,7 +1214,7 @@ describe('secret redaction and CLI contract', () => {
       fetch: (async () => {
         throw new Error(`REMOTE_TRANSPORT Bearer ${TOKEN} ${privateKey}`);
       }) as typeof fetch,
-      token: TOKEN,
+      getToken: () => TOKEN,
       redactValues: [privateKey],
     });
     const transportError = await capturedError(() =>
@@ -890,7 +1242,7 @@ describe('secret redaction and CLI contract', () => {
         });
         return response;
       }) as typeof fetch,
-      token: TOKEN,
+      getToken: () => TOKEN,
       redactValues: [privateKey],
     });
 
@@ -917,7 +1269,7 @@ describe('secret redaction and CLI contract', () => {
           }),
         ],
       }),
-      token: TOKEN,
+      getToken: () => TOKEN,
       redactValues: [privateKey],
       now: () => 0,
       sleep: async () => {},
@@ -935,7 +1287,33 @@ describe('secret redaction and CLI contract', () => {
     expect(error.message).not.toContain(privateKey);
   });
 
-  it('reports CLI credential errors without echoing key material or a bearer token', async () => {
+  it.each(['0', '2701'])('rejects a %s-second CLI timeout before credentials or network', async (timeoutSeconds) => {
+    const result = await capturedError(() =>
+      execFileAsync(process.execPath, [
+        path.resolve('scripts/app-store-connect.mjs'),
+        'wait-and-localize',
+        '--bundle-id',
+        BUNDLE_ID,
+        '--version',
+        VERSION,
+        '--build-number',
+        BUILD_NUMBER,
+        '--locale',
+        'en-US',
+        '--notes-file',
+        '/does/not/matter',
+        '--release-sha',
+        RELEASE_SHA,
+        '--timeout-seconds',
+        timeoutSeconds,
+      ]),
+    );
+    const diagnostic = `${result.message}\n${String((result as Error & { stderr?: string }).stderr ?? '')}`;
+    expect(diagnostic).toContain('Usage:');
+    expect(diagnostic).not.toMatch(/fetch|network/i);
+  });
+
+  it('accepts the exact 2,700-second CLI maximum and reports credential errors safely', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'psyche-asc-'));
     temporaryRoots.push(root);
     const privateKey = 'PRIVATE_KEY_SENTINEL_DO_NOT_PRINT';
