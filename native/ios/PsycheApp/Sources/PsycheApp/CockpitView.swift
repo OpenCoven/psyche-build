@@ -48,6 +48,8 @@ struct CockpitView: View {
         List(selection: projectSelection) {
             Section("Projects") {
                 ForEach(store.projects) { project in
+                    let isSelected = store.selectedProjectID == project.id
+
                     HStack(spacing: 10) {
                         Image(systemName: "folder.fill")
                             .foregroundStyle(PsycheTheme.mint)
@@ -63,6 +65,10 @@ struct CockpitView: View {
                         }
                     }
                     .tag(project.id)
+                    .listRowBackground(isSelected ? PsycheTheme.mint.opacity(0.12) : Color.clear)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("project-\(project.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
 
@@ -98,8 +104,14 @@ struct CockpitView: View {
     private var paneList: some View {
         List(selection: paneSelection) {
             ForEach(store.panes(for: store.selectedProjectID)) { pane in
+                let isSelected = store.selectedPaneID == pane.id
+
                 PaneRow(pane: pane)
                     .tag(pane.id)
+                    .listRowBackground(isSelected ? PsycheTheme.mint.opacity(0.12) : Color.clear)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("pane-\(pane.id)")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
         .overlay {

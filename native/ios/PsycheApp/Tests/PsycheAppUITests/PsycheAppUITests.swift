@@ -17,15 +17,34 @@ final class PsycheAppUITests: XCTestCase {
         let app = launchApp()
 
         showProjectSidebar(in: app)
-        XCTAssertTrue(app.buttons["Panes"].waitForExistence(timeout: 5))
-        app.buttons["Panes"].tap()
+        let project = element("project-psyche", in: app)
+        XCTAssertTrue(project.waitForExistence(timeout: 5))
+        XCTAssertTrue(project.isSelected)
+        project.tap()
         XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
 
-        app.staticTexts["native-ios-cloud-terminal"].tap()
+        let initialPane = element("pane-ios-cockpit", in: app)
+        XCTAssertTrue(initialPane.waitForExistence(timeout: 5))
+        XCTAssertTrue(initialPane.isSelected)
+
+        let bridgePane = element("pane-bridge-protocol", in: app)
+        XCTAssertTrue(bridgePane.waitForExistence(timeout: 5))
+        bridgePane.tap()
+
         let toggle = app.buttons["cockpit-siderail-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         XCTAssertEqual(toggle.label, "Show siderails")
         XCTAssertTrue(element("terminal-output", in: app).exists)
+        XCTAssertTrue(app.staticTexts["$ pnpm test wireProtocol"].waitForExistence(timeout: 5))
+
+        showProjectSidebar(in: app)
+        XCTAssertTrue(project.waitForExistence(timeout: 5))
+        XCTAssertTrue(project.isSelected)
+        project.tap()
+        XCTAssertTrue(element("pane-list", in: app).waitForExistence(timeout: 5))
+
+        XCTAssertTrue(bridgePane.waitForExistence(timeout: 5))
+        XCTAssertTrue(bridgePane.isSelected)
     }
 
     func testPairsHostWithValidSixDigitCode() {
