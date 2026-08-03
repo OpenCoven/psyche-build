@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/psyche-build"><strong>npm</strong></a>
+  <a href="https://github.com/OpenCoven/psyche-build/releases"><strong>Releases</strong></a>
   ·
   <a href="https://github.com/OpenCoven/psyche-build/issues"><strong>Issues</strong></a>
 </p>
@@ -21,14 +21,20 @@
 
 ## Install
 
+Install the signed and notarized macOS application through the OpenCoven tap:
+
 ```sh
-npm install -g psyche-build
+brew install --cask opencoven/tap/psyche-build
 ```
 
-Or try it without a global install:
+The Cask becomes available with the first public `v0.1.0` release. Until that
+release appears on GitHub, build from source using the contributing guide; the
+`psyche-build` npm package is not yet published.
+
+After installing the CLI from source, verify the local setup with:
 
 ```sh
-npm exec psyche-build@latest -- doctor --json
+psyche doctor --json
 ```
 
 ## Quick Start
@@ -167,6 +173,7 @@ See [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md) and the [OpenCov
 - [Psyche Build + Coven demo loop](./docs/COVEN-DEMO-LOOP.md)
 - [Product spec](./docs/PRODUCT-SPEC.md)
 - [Smoke test](./docs/SMOKE.md)
+- [Release runbook](./docs/RELEASE.md)
 - [Contributing](./CONTRIBUTING.md)
 
 ## Contributing
