@@ -13,16 +13,24 @@ https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md
 
 ## Prerequisites
 
-When the public release and Cask are available, install Psyche Build for macOS,
-then verify Psyche Build and Coven from the same shell:
+After the `v0.0.1` release and Cask are available, install and open the public
+Psyche Build GUI for macOS:
 
 ```bash
 brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
+```
+
+The Cask does not install the Node CLI. For the source CLI demo, use a repository
+checkout as described in `CONTRIBUTING.md`, then verify it and Coven from the
+same shell:
+
+```bash
+node /path/to/psyche-build/psyche doctor --json
 npx @opencoven/cli doctor
 ```
 
-For source development, run Psyche Build from the repository checkout as
-described in `CONTRIBUTING.md`. Its Node CLI is not an npm release in `0.0.1`.
+The Node CLI is not an npm release in `0.0.1`.
 
 Coven is optional. psyche still works as a standalone tmux/worktree cockpit when Coven is not installed or the daemon is stopped.
 
@@ -40,7 +48,7 @@ From the repository you want to work in:
 
 ```bash
 cd /path/to/project
-psyche
+node /path/to/psyche-build/psyche
 ```
 
 Inside psyche:

@@ -27,19 +27,26 @@ npm run preview
 
 ## v0.0.1 distribution
 
-When the release is available, public macOS installation is provided only by
-the signed Homebrew Cask:
+After the `v0.0.1` release and Cask are available, public macOS installation is
+provided only by the signed Homebrew Cask:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
 ```
 
 The iOS build `Psyche Build` `0.0.1 (1)` is internal TestFlight only for
 authorized OpenCoven testers, conditional on its availability to their
-TestFlight account. Source development uses the repository checkout and
-contributing guide. The Node CLI is present in source/package output but is not
-an npm release. Windows, Linux, Android, external TestFlight, and public App
-Store distribution are unavailable in `0.0.1`.
+TestFlight account. The Cask installs only `Psyche Build.app`. Source CLI
+development uses the repository checkout and contributing guide:
+
+```sh
+node /path/to/psyche-build/psyche
+```
+
+The Node CLI is present in source/package output but is not an npm release.
+Windows, Linux, Android, external TestFlight, and public App Store distribution
+are unavailable in `0.0.1`.
 
 ## Structure
 

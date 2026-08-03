@@ -744,7 +744,8 @@ function parseCli(argv) {
     ['--timeout-seconds', 'timeoutSeconds'],
   ]);
 
-  for (let index = 1; index < argv.length; index += 1) {
+  const firstArgumentIndex = argv[1] === '--' ? 2 : 1;
+  for (let index = firstArgumentIndex; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--reuse-existing') {
       if (values.reuseExisting) throw new Error(USAGE);

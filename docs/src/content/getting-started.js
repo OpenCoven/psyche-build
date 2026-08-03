@@ -6,9 +6,12 @@ export function render() {
     <p>Install a supported AI coding agent when you want prompt-launched agent panes.</p>
 
     <h2>Install Psyche Build</h2>
-    <p>When the public release and Cask are available, the supported public macOS install is:</p>
-    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build</code></pre>
-    <p>For source development, use the repository checkout and contributing guide. The Node CLI is not an npm release in 0.0.1.</p>
+    <p>After the v0.0.1 release and Cask are available, install and open the supported public macOS GUI:</p>
+    <pre><code data-lang="bash">brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"</code></pre>
+    <p>The Cask installs only <code>Psyche Build.app</code>. For source CLI development, use the repository checkout and contributing guide, then invoke it explicitly:</p>
+    <pre><code data-lang="bash">node /path/to/psyche-build/psyche</code></pre>
+    <p>The Node CLI is not an npm release in 0.0.1.</p>
 
     <h2>Set Up OpenRouter (Recommended)</h2>
     <p>Before your first run, we recommend setting up an <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> API key. psyche uses it to generate smart branch names from your prompts and AI-powered commit messages when merging. Without it, branch names fall back to <code>psyche-{timestamp}</code> and commit messages will be generic.</p>
@@ -23,12 +26,12 @@ export function render() {
       </li>
       <li>
         <p><strong>Check setup:</strong></p>
-        <pre><code data-lang="bash">psyche doctor</code></pre>
+        <pre><code data-lang="bash">node /path/to/psyche-build/psyche doctor</code></pre>
         <p>Doctor confirms tmux and git, shows whether any supported agent CLIs are detected, and explains which Coven features are optional.</p>
       </li>
       <li>
         <p><strong>Launch psyche:</strong></p>
-        <pre><code data-lang="bash">psyche</code></pre>
+        <pre><code data-lang="bash">node /path/to/psyche-build/psyche</code></pre>
         <p>psyche will create or attach to a project-scoped tmux session named like <code>psyche-your-project-a1b2c3d4</code> and show the TUI.</p>
       </li>
       <li>
@@ -81,7 +84,7 @@ export function render() {
     </div>
 
     <h2>tmux Configuration</h2>
-    <p>If tmux is new on your machine, start with <code>psyche doctor</code>. Use <code>psyche doctor --fix</code> to install the psyche-managed tmux config block and apply safe live-session repairs. The command backs up an existing config and only edits the block between <code># &gt;&gt;&gt; psyche</code> and <code># &lt;&lt;&lt; psyche</code>.</p>
+    <p>If tmux is new on your machine, start with <code>node /path/to/psyche-build/psyche doctor</code>. Add <code>--fix</code> to install the psyche-managed tmux config block and apply safe live-session repairs. The command backs up an existing config and only edits the block between <code># &gt;&gt;&gt; psyche</code> and <code># &lt;&lt;&lt; psyche</code>.</p>
     <p>On first run, psyche will detect if you have no tmux config and offer to install a recommended preset (dark or light theme). This handles pane borders, navigation bindings, mouse support, and clipboard integration automatically.</p>
     <p>If you'd rather configure tmux manually, edit <code>~/.tmux.conf</code> (or <code>~/.config/tmux/tmux.conf</code>). Here's a solid starting point:</p>
     <pre><code data-lang="bash"># Extended keys for Ctrl-Shift-Arrow support

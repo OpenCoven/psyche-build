@@ -15,13 +15,24 @@ run. Read the hooks section below even if you skip the rest.
 
 ```sh
 npm uninstall -g comux
-brew install --cask opencoven/tap/psyche-build
-psyche
 ```
 
-Run the Homebrew command only when the public release and Cask are available.
-For source development before then, use the repository checkout and follow
-`CONTRIBUTING.md`; the Psyche Build Node CLI is not an npm release in `0.0.1`.
+After the `v0.0.1` release and Cask are available, install and open the public
+GUI:
+
+```sh
+brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
+```
+
+The Cask installs only `Psyche Build.app`. For source CLI development, use the
+repository checkout, follow `CONTRIBUTING.md`, and invoke it explicitly:
+
+```sh
+node /path/to/psyche-build/psyche
+```
+
+The Psyche Build Node CLI is not an npm release in `0.0.1`.
 
 ## What changes
 

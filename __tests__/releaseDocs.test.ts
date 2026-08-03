@@ -28,6 +28,8 @@ const historicalDocDirectories = new Set([
   path.join('docs', 'superpowers', 'specs'),
 ]);
 
+const generatedAgentsDoc = path.join('src', 'utils', 'generated-agents-doc.ts');
+
 async function readReleaseDocs(): Promise<Record<(typeof releaseDocs)[number], string>> {
   return Object.fromEntries(
     await Promise.all(
@@ -38,13 +40,15 @@ async function readReleaseDocs(): Promise<Record<(typeof releaseDocs)[number], s
 
 function isActiveDocumentationFile(filePath: string): boolean {
   if (path.extname(filePath) === '.md') return true;
-  return filePath.startsWith(`docs${path.sep}`) && ['.js', '.svg'].includes(path.extname(filePath));
+  if (filePath === generatedAgentsDoc) return true;
+  return filePath.startsWith(`docs${path.sep}`) && ['.html', '.js', '.svg'].includes(path.extname(filePath));
 }
 
 // Active documentation means every Markdown file in the repository plus the
-// JS/SVG sources that render the docs site. Historical plans/specs, generated
-// output and dependencies are skipped by directory; non-document test/fixture
-// sources (including this contract test) are excluded by the file-type policy.
+// JS/HTML/SVG sources that render the docs site and the tracked generated
+// AGENTS.md source published by the CLI. Historical plans/specs, build output
+// and dependencies are skipped by directory; non-document test/fixture sources
+// (including this contract test) are excluded by the file-type policy.
 async function listActiveDocFiles(directory = '.'): Promise<string[]> {
   const files: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -67,15 +71,19 @@ async function listActiveDocFiles(directory = '.'): Promise<string[]> {
 function releaseEnvironmentSecretNames(runbook: string): string[] {
   const lines = runbook.split(/\r?\n/);
   const headers = lines.reduce<number[]>(
-    (indexes, line, index) => (line === '| Secret | Purpose |' ? [...indexes, index] : indexes),
+    (indexes, line, index) =>
+      (/^\s*\|\s*Secret\s*\|\s*Purpose\s*\|\s*$/.test(line) ? [...indexes, index] : indexes),
     [],
   );
   expect(headers).toHaveLength(1);
+  expect(lines[headers[0] + 1]).toMatch(
+    /^\s*\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$/,
+  );
 
   const rows: string[] = [];
   for (const line of lines.slice(headers[0] + 2)) {
-    if (!line.startsWith('|')) break;
-    const match = line.match(/^\| `([A-Z0-9_]+)` \|/);
+    if (!/^\s*\|/.test(line)) break;
+    const match = line.match(/^\s*\|\s*`([A-Z0-9_]+)`\s*\|/);
     expect(match, `Malformed release-environment secret row: ${line}`).not.toBeNull();
     rows.push(match![1]);
   }
@@ -83,6 +91,12 @@ function releaseEnvironmentSecretNames(runbook: string): string[] {
 }
 
 describe('v0.0.1 release documentation contract', () => {
+  it('parses an aligned Markdown secret table without weakening exact-name checks', () => {
+    expect(
+      releaseEnvironmentSecretNames(`  | Secret | Purpose |\n | :--- | ---: |\n  |   \`ONE_SECRET\`   | first |\n | \`TWO_SECRET\` | second |`),
+    ).toEqual(['ONE_SECRET', 'TWO_SECRET']);
+  });
+
   it('documents the exact release identity and supported distribution surfaces', async () => {
     const docs = await readReleaseDocs();
     const combined = Object.values(docs).join('\n');
@@ -105,6 +119,13 @@ describe('v0.0.1 release documentation contract', () => {
         new RegExp(`${unsupported}[\\s\\S]{0,160}(?:unavailable|not (?:supported|included|part))`, 'i'),
       );
     }
+  });
+
+  it('pins the tracked generated agent documentation to the release version', async () => {
+    const generated = await readFile(generatedAgentsDoc, 'utf8');
+
+    expect(generated).toContain('*Version: 0.0.1*');
+    expect(generated).not.toContain('*Version: 0.1.0*');
   });
 
   it('documents every protected release-environment secret without a repository fallback', async () => {
@@ -143,6 +164,68 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toMatch(/archive[\s\S]*upload[\s\S]*(?:retry|recovery)/i);
     expect(runbook).toMatch(/Homebrew[\s\S]*(?:retry|recovery|manual)/i);
     expect(runbook).toContain('gh workflow run Release');
+  });
+
+  it('validates and tags the exact clean fetched origin/main commit', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const orderedCommands = [
+      'test -z "$(git status --porcelain)"',
+      'git fetch origin main --tags',
+      'release_sha="$(git rev-parse origin/main)"',
+      'git switch --detach "$release_sha"',
+      'test "$(git rev-parse HEAD)" = "$release_sha"',
+      'pnpm install --frozen-lockfile',
+      'pnpm release:check -- v0.0.1',
+      'git tag -s v0.0.1 "$release_sha"',
+    ];
+    let cursor = -1;
+    for (const command of orderedCommands) {
+      const index = runbook.indexOf(command, cursor + 1);
+      expect(index, `${command} must follow the previous immutable-tag step`).toBeGreaterThan(cursor);
+      cursor = index;
+    }
+    expect(runbook.match(/test -z "\$\(git status --porcelain\)"/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('marks the TestFlight client command as workflow-internal and dispatches recovery', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(/release:testflight[\s\S]{0,500}workflow-internal/i);
+    expect(runbook).toMatch(/credentials from the protected GitHub `release` environment/i);
+    expect(runbook).toMatch(/mutates[\s\S]{0,120}TestFlight[\s\S]{0,120}localization/i);
+    expect(runbook).toMatch(/recover[\s\S]{0,400}gh workflow run Release/i);
+    expect(runbook.match(/^pnpm release:testflight --/gm)).toHaveLength(1);
+  });
+
+  it('separates the released GUI Cask from the source-only Node CLI', async () => {
+    const publicGuides = [
+      'README.md',
+      'docs/BREAKING-CHANGES.md',
+      'docs/COVEN-DEMO-LOOP.md',
+      'docs/README.md',
+      'docs/src/content/getting-started.js',
+      'docs/src/content/coven-demo.js',
+      'docs/src/content/troubleshooting.js',
+    ];
+    for (const filePath of publicGuides) {
+      const contents = await readFile(filePath, 'utf8');
+      expect(contents, filePath).toContain('brew install --cask opencoven/tap/psyche-build');
+      expect(contents, filePath).toContain('open -a "Psyche Build"');
+      expect(contents, filePath).toContain('node /path/to/psyche-build/psyche');
+      expect(contents, filePath).toMatch(/(?:after|when)[^\n]{0,100}v0\.0\.1[^\n]{0,100}(?:release|Cask)|v0\.0\.1[^\n]{0,100}(?:release|Cask)[^\n]{0,100}(?:available|published)/i);
+    }
+  });
+
+  it('keeps the docs hero Cask command honest and removes the npm package link', async () => {
+    const hero = await readFile('docs/src/hero.js', 'utf8');
+    const main = await readFile('docs/src/main.js', 'utf8');
+    const index = await readFile('docs/src/index.html', 'utf8');
+    const caskCommand = 'brew install --cask opencoven/tap/psyche-build';
+
+    expect(hero).toContain(caskCommand);
+    expect(main).toContain(caskCommand);
+    expect(hero).toMatch(/available after[^\n]{0,80}v0\.0\.1 release/i);
+    expect(index).not.toMatch(/npmjs\.com\/package\/psyche-build/i);
   });
 
   it('allows upload only for an absent exact version or build and fails every unsafe reuse state', async () => {
@@ -202,7 +285,9 @@ describe('v0.0.1 release documentation contract', () => {
         path.join('__tests__', 'README.md'),
         path.join('native', 'ios', 'README.md'),
         path.join('protocol-fixtures', 'README.md'),
+        generatedAgentsDoc,
         path.join('docs', 'src', 'hero.js'),
+        path.join('docs', 'src', 'index.html'),
         path.join('docs', 'public', 'og.svg'),
       ]),
     );
@@ -212,7 +297,11 @@ describe('v0.0.1 release documentation contract', () => {
 
     for (const filePath of activeFiles) {
       const contents = await readFile(filePath, 'utf8');
-      if (/v0\.1\.0|build\.psyche|--generate-notes|npm (?:i|install).*psyche-build/i.test(contents)) {
+      if (
+        /v0\.1\.0|build\.psyche|--generate-notes|npm (?:i|install).*psyche-build|npmjs\.com\/package\/psyche-build|public\s+(?:`psyche-build`\s+)?npm package|public package that can stand alone|published (?:on|to) npm|available (?:on|from) npm/i.test(
+          contents,
+        )
+      ) {
         staleClaims.push(filePath);
       }
     }

@@ -121,9 +121,16 @@ the workflow fails before accessing credentials when it is private.
 Resolve the unchanged reviewed commit and create the signed annotated tag:
 
 ```sh
+test -z "$(git status --porcelain)"
 git fetch origin main --tags
 release_sha="$(git rev-parse origin/main)"
+git switch --detach "$release_sha"
+test "$(git rev-parse HEAD)" = "$release_sha"
+test -z "$(git status --porcelain)"
+pnpm install --frozen-lockfile
 pnpm release:check -- v0.0.1
+node scripts/release-notes.mjs --github 0.0.1 > /tmp/psyche-v0.0.1-notes.md
+node scripts/release-notes.mjs --testflight 0.0.1 > /tmp/psyche-v0.0.1-testflight.txt
 node --input-type=module - "$release_sha" /tmp/psyche-v0.0.1-testflight.txt <<'NODE'
 import { readFile } from 'node:fs/promises';
 import { normalizeTestFlightNotes } from './scripts/app-store-connect.mjs';
@@ -177,7 +184,13 @@ A published GitHub Release is reused only when its three artifacts and curated
 notes byte-match the verified output; a draft may have its assets replaced
 before it is reverified and published.
 
-App Store Connect processing has a hard 45-minute bound:
+App Store Connect processing has a hard 45-minute bound. The
+`pnpm release:testflight --` command is workflow-internal: it requires
+credentials from the protected GitHub `release` environment and mutates the
+`en-US` TestFlight localization. Do not run it locally. Operators recover by
+manually dispatching the immutable tag with `gh workflow run Release`, as shown
+above. The invocation is included here only to document the workflow's hard
+bound:
 
 ```sh
 pnpm release:testflight -- \
@@ -240,4 +253,5 @@ actually available, public macOS installation is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
 ```

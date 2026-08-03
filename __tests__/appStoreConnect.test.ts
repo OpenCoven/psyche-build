@@ -1399,6 +1399,67 @@ describe('secret redaction and CLI contract', () => {
     expect(diagnostic).not.toContain('SECRET_ISSUER_ID');
   });
 
+  it('accepts the pinned pnpm script delimiter and reaches credential validation without network', async () => {
+    const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
+      packageManager: string;
+    };
+    const expectedPnpmVersion = packageJson.packageManager.replace(/^pnpm@/, '');
+    const installedPnpm = await execFileAsync('pnpm', ['--version']);
+    expect(installedPnpm.stdout.trim()).toBe(expectedPnpmVersion);
+
+    const env = { ...process.env };
+    delete env.APP_STORE_CONNECT_KEY_ID;
+    delete env.APP_STORE_CONNECT_ISSUER_ID;
+    delete env.APP_STORE_CONNECT_PRIVATE_KEY_PATH;
+
+    const result = await capturedError(() =>
+      execFileAsync(
+        'pnpm',
+        [
+          'release:testflight',
+          '--',
+          '--bundle-id',
+          BUNDLE_ID,
+          '--version',
+          VERSION,
+          '--build-number',
+          BUILD_NUMBER,
+          '--locale',
+          'en-US',
+          '--notes-file',
+          'CHANGELOG.md',
+          '--release-sha',
+          RELEASE_SHA,
+          '--timeout-seconds',
+          '1',
+        ],
+        { env },
+      ),
+    );
+    const diagnostic = `${result.message}\n${String((result as Error & { stderr?: string }).stderr ?? '')}`;
+    expect(diagnostic).toContain(
+      'APP_STORE_CONNECT_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, and APP_STORE_CONNECT_PRIVATE_KEY_PATH are required',
+    );
+    expect(diagnostic).not.toContain('Usage:');
+    expect(diagnostic).not.toMatch(/fetch|network/i);
+  });
+
+  it('rejects more than one leading CLI delimiter before credentials or network', async () => {
+    const result = await capturedError(() =>
+      execFileAsync(process.execPath, [
+        path.resolve('scripts/app-store-connect.mjs'),
+        'wait-and-localize',
+        '--',
+        '--',
+        '--bundle-id',
+        BUNDLE_ID,
+      ]),
+    );
+    const diagnostic = `${result.message}\n${String((result as Error & { stderr?: string }).stderr ?? '')}`;
+    expect(diagnostic).toContain('Usage:');
+    expect(diagnostic).not.toMatch(/fetch|network/i);
+  });
+
   it('ships the exact operator script without adding a release dependency', async () => {
     const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
       scripts: Record<string, string>;

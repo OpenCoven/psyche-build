@@ -26,6 +26,7 @@ macOS installation path is:
 
 ```sh
 brew install --cask opencoven/tap/psyche-build
+open -a "Psyche Build"
 ```
 
 The iOS build is internal TestFlight only. Authorized OpenCoven testers can
@@ -37,17 +38,19 @@ run the checkout. The Node CLI ships in the source tree and package archive,
 but it is not an npm release for `0.0.1`. Windows, Linux, Android, external
 TestFlight, and public App Store distribution are unavailable in `0.0.1`.
 
-After installing the CLI from source, verify the local setup with:
+The Cask installs only `Psyche Build.app`; it does not install the Node CLI.
+From a source checkout, invoke that CLI explicitly and verify the local setup
+with:
 
 ```sh
-node ./psyche doctor --json
+node /path/to/psyche-build/psyche doctor --json
 ```
 
 ## Quick Start
 
 ```sh
 cd /path/to/your/project
-psyche
+node /path/to/psyche-build/psyche
 ```
 
 Press `n` to create a new pane, type a prompt, pick one or more agents (or none for a plain terminal), and Psyche Build handles the rest — tmux pane, git worktree, branch, and agent launch.
@@ -61,8 +64,8 @@ For the full Psyche Build + Coven walkthrough, see [Coven demo loop](./docs/COVE
 New to tmux? Run:
 
 ```sh
-psyche doctor
-psyche doctor --fix
+node /path/to/psyche-build/psyche doctor
+node /path/to/psyche-build/psyche doctor --fix
 ```
 
 `psyche doctor` checks tmux, git, clipboard/navigation support, psyche session styling, and the psyche-managed tmux config block. `--fix` applies safe repairs, backs up an existing `~/.tmux.conf`, and only edits the block between `# >>> psyche` and `# <<< psyche`.

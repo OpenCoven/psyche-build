@@ -275,9 +275,19 @@ describe('macOS release workflow contract', () => {
     const workflow = workflowSource();
 
     expect(workflow).toContain('node scripts/release-notes.mjs --testflight');
-    expect(workflow).toContain('pnpm release:testflight --');
-    expect(workflow).toContain('--reuse-existing');
-    expect(workflow).toContain('--timeout-seconds 2700');
+    expect(workflow.match(/pnpm release:testflight --/g)).toHaveLength(2);
+    for (const requiredArgument of [
+      '--bundle-id ai.opencoven.psyche-ios',
+      '--version "$RELEASE_VERSION"',
+      '--build-number 1',
+      '--locale en-US',
+      '--notes-file "$TESTFLIGHT_NOTES_PATH"',
+      '--release-sha "$EXPECTED_RELEASE_SHA"',
+      '--timeout-seconds 2700',
+    ]) {
+      expect(workflow.split(requiredArgument)).toHaveLength(3);
+    }
+    expect(workflow.match(/--reuse-existing/g)).toHaveLength(1);
     expect(workflow).toContain('set +e');
     expect(workflow).toContain('[ "$REUSE_STATUS" = "2" ]');
     expect(workflow).toContain("steps.preflight.outputs.upload == 'true'");
