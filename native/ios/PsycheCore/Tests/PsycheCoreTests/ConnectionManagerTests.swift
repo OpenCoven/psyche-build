@@ -127,6 +127,7 @@ final class ConnectionManagerTests: XCTestCase {
 
         let paired = await fake.sentMessages
         XCTAssertEqual(paired.count, 4)
+        guard requireCount(paired, 4, "post-pair snapshot requests") else { return }
         guard case .listProjects = paired[2], case .listPanes = paired[3] else {
             return XCTFail("Pair acceptance should request initial snapshots")
         }
