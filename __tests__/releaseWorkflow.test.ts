@@ -93,7 +93,7 @@ describe('macOS release workflow contract', () => {
       const steps = actionStepBlocks(workflowJobSource(workflow, jobName), 'pnpm/action-setup');
       expect(steps).toHaveLength(1);
       expect(steps[0]).toContain(
-        'pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453 # v4.3.0',
+        'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0',
       );
     }
   });

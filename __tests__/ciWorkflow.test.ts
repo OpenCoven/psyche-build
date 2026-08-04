@@ -64,7 +64,7 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('version: 10.14.0');
     expect(workflow).toContain('toolchain: 1.95.0');
     expect(workflow).toContain('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5');
-    expect(workflow).toContain('pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453');
+    expect(workflow).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');
     expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
     expect(workflow).toContain('dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8');
     expect(checkoutSteps).toHaveLength(2);
@@ -78,7 +78,7 @@ describe('pull request CI workflow contract', () => {
       expect(jobCheckoutSteps[0]).toMatch(/^\s+persist-credentials: false$/m);
       expect(jobPnpmSetupSteps).toHaveLength(1);
       expect(jobPnpmSetupSteps[0]).toContain(
-        'pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453 # v4.3.0',
+        'pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0',
       );
       expect(jobSetupNodeSteps).toHaveLength(1);
       expect(jobSetupNodeSteps[0]).toMatch(/^\s+cache: pnpm$/m);
