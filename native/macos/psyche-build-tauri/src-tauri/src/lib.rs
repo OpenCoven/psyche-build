@@ -19,6 +19,8 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
 };
 
+mod coven_sessions;
+
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
 fn safe_browser_label(label: Option<String>) -> String {
