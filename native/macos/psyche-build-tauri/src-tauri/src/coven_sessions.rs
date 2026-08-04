@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::Url;
 
@@ -11,11 +14,34 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
+const UNAVAILABLE_MESSAGE: &str = "Coven daemon is not running; run `coven daemon start`";
+const INCOMPATIBLE_MESSAGE: &str = "Coven daemon API update required";
+const ERROR_MESSAGE: &str = "Coven sessions could not be loaded";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CovenEndpoint {
     Unix(PathBuf),
     Http(SocketAddr),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HttpResponseError {
+    Malformed,
+    Status(u16),
+    TooLarge,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CovenAdapterError {
+    Unavailable,
+    Incompatible,
+    Failed,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CovenHealthResponse {
+    api_version: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -139,6 +165,424 @@ fn is_safe_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+#[allow(dead_code)]
+fn load_coven_sessions(
+    endpoint: &CovenEndpoint,
+    project_roots: &[PathBuf],
+) -> CovenSessionsResponse {
+    match try_load_coven_sessions(endpoint, project_roots) {
+        Ok(sessions) => CovenSessionsResponse {
+            status: "ready".to_string(),
+            sessions,
+            message: None,
+        },
+        Err(CovenAdapterError::Unavailable) => CovenSessionsResponse {
+            status: "unavailable".to_string(),
+            sessions: Vec::new(),
+            message: Some(UNAVAILABLE_MESSAGE.to_string()),
+        },
+        Err(CovenAdapterError::Incompatible) => CovenSessionsResponse {
+            status: "incompatible".to_string(),
+            sessions: Vec::new(),
+            message: Some(INCOMPATIBLE_MESSAGE.to_string()),
+        },
+        Err(CovenAdapterError::Failed) => CovenSessionsResponse {
+            status: "error".to_string(),
+            sessions: Vec::new(),
+            message: Some(ERROR_MESSAGE.to_string()),
+        },
+    }
+}
+
+fn try_load_coven_sessions(
+    endpoint: &CovenEndpoint,
+    project_roots: &[PathBuf],
+) -> Result<Vec<CovenSessionSummary>, CovenAdapterError> {
+    let health_body = request_endpoint(endpoint, "/api/v1/health")?;
+    let health: CovenHealthResponse =
+        serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
+    if health.api_version != STABLE_API_VERSION {
+        return Err(CovenAdapterError::Incompatible);
+    }
+
+    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions")?;
+    let sessions_value =
+        serde_json::from_slice(&sessions_body).map_err(|_| CovenAdapterError::Failed)?;
+    normalize_sessions(sessions_value, project_roots).map_err(|_| CovenAdapterError::Failed)
+}
+
+fn request_endpoint(endpoint: &CovenEndpoint, path: &str) -> Result<Vec<u8>, CovenAdapterError> {
+    if !matches!(path, "/api/v1/health" | "/api/v1/sessions") {
+        return Err(CovenAdapterError::Failed);
+    }
+
+    match endpoint {
+        #[cfg(unix)]
+        CovenEndpoint::Unix(socket) => {
+            let mut stream =
+                UnixStream::connect(socket).map_err(|error| categorize_io_error(&error, true))?;
+            stream
+                .set_read_timeout(Some(READ_TIMEOUT))
+                .map_err(|error| categorize_io_error(&error, false))?;
+            stream
+                .set_write_timeout(Some(READ_TIMEOUT))
+                .map_err(|error| categorize_io_error(&error, false))?;
+            exchange_http(&mut stream, path)
+        }
+        #[cfg(not(unix))]
+        CovenEndpoint::Unix(_) => Err(CovenAdapterError::Failed),
+        CovenEndpoint::Http(address) => {
+            if !address.ip().is_loopback() {
+                return Err(CovenAdapterError::Failed);
+            }
+            let mut stream = TcpStream::connect_timeout(address, CONNECT_TIMEOUT)
+                .map_err(|error| categorize_io_error(&error, false))?;
+            stream
+                .set_read_timeout(Some(READ_TIMEOUT))
+                .map_err(|error| categorize_io_error(&error, false))?;
+            stream
+                .set_write_timeout(Some(READ_TIMEOUT))
+                .map_err(|error| categorize_io_error(&error, false))?;
+            exchange_http(&mut stream, path)
+        }
+    }
+}
+
+trait LocalHttpStream: Read + Write {
+    fn shutdown_write(&self) -> io::Result<()>;
+}
+
+impl LocalHttpStream for TcpStream {
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+    }
+}
+
+#[cfg(unix)]
+impl LocalHttpStream for UnixStream {
+    fn shutdown_write(&self) -> io::Result<()> {
+        self.shutdown(Shutdown::Write)
+    }
+}
+
+fn exchange_http<S: LocalHttpStream>(
+    stream: &mut S,
+    path: &str,
+) -> Result<Vec<u8>, CovenAdapterError> {
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| categorize_io_error(&error, false))?;
+    stream
+        .flush()
+        .map_err(|error| categorize_io_error(&error, false))?;
+    stream
+        .shutdown_write()
+        .map_err(|error| categorize_io_error(&error, false))?;
+
+    let mut response = Vec::new();
+    stream
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut response)
+        .map_err(|error| categorize_io_error(&error, false))?;
+    if response.len() > MAX_RESPONSE_BYTES {
+        return Err(CovenAdapterError::Failed);
+    }
+    parse_http_response(&response).map_err(|_| CovenAdapterError::Failed)
+}
+
+fn categorize_io_error(error: &io::Error, missing_is_unavailable: bool) -> CovenAdapterError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) || (missing_is_unavailable && error.kind() == io::ErrorKind::NotFound)
+    {
+        CovenAdapterError::Unavailable
+    } else {
+        CovenAdapterError::Failed
+    }
+}
+
+fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, HttpResponseError> {
+    if response.len() > MAX_RESPONSE_BYTES {
+        return Err(HttpResponseError::TooLarge);
+    }
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(HttpResponseError::Malformed)?;
+    let header_bytes = &response[..header_end];
+    if !header_bytes.is_ascii() {
+        return Err(HttpResponseError::Malformed);
+    }
+    let header_block =
+        std::str::from_utf8(header_bytes).map_err(|_| HttpResponseError::Malformed)?;
+    let mut lines = header_block.split("\r\n");
+    let status_line = lines.next().ok_or(HttpResponseError::Malformed)?;
+    let mut status_parts = status_line.split_ascii_whitespace();
+    let version = status_parts.next().ok_or(HttpResponseError::Malformed)?;
+    let status_text = status_parts.next().ok_or(HttpResponseError::Malformed)?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || status_text.len() != 3
+        || !status_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(HttpResponseError::Malformed);
+    }
+    let status = status_text
+        .parse::<u16>()
+        .map_err(|_| HttpResponseError::Malformed)?;
+    if !(200..=299).contains(&status) {
+        return Err(HttpResponseError::Status(status));
+    }
+
+    let mut content_lengths = Vec::new();
+    let mut transfer_encodings = Vec::new();
+    for line in lines {
+        let (name, value) = parse_header_line(line)?;
+        if name.eq_ignore_ascii_case("content-length") {
+            for length in value.split(',') {
+                let length = length.trim();
+                if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(HttpResponseError::Malformed);
+                }
+                content_lengths.push(
+                    length
+                        .parse::<usize>()
+                        .map_err(|_| HttpResponseError::Malformed)?,
+                );
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            for encoding in value.split(',') {
+                let encoding = encoding.trim();
+                if encoding.is_empty() {
+                    return Err(HttpResponseError::Malformed);
+                }
+                transfer_encodings.push(encoding.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let content_length = match content_lengths.first().copied() {
+        Some(first) if content_lengths.iter().all(|length| *length == first) => Some(first),
+        Some(_) => return Err(HttpResponseError::Malformed),
+        None => None,
+    };
+    if content_length.is_some() && !transfer_encodings.is_empty() {
+        return Err(HttpResponseError::Malformed);
+    }
+
+    let body = &response[header_end + 4..];
+    if !transfer_encodings.is_empty() {
+        if transfer_encodings.as_slice() != ["chunked"] {
+            return Err(HttpResponseError::Malformed);
+        }
+        return decode_chunked_body(body);
+    }
+
+    if let Some(content_length) = content_length {
+        if content_length > MAX_RESPONSE_BYTES {
+            return Err(HttpResponseError::TooLarge);
+        }
+        if body.len() != content_length {
+            return Err(HttpResponseError::Malformed);
+        }
+    }
+
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(HttpResponseError::TooLarge);
+    }
+    Ok(body.to_vec())
+}
+
+fn parse_header_line(line: &str) -> Result<(&str, &str), HttpResponseError> {
+    if line.starts_with([' ', '\t']) {
+        return Err(HttpResponseError::Malformed);
+    }
+    let (name, value) = line.split_once(':').ok_or(HttpResponseError::Malformed)?;
+    if name.is_empty() || !name.bytes().all(is_http_token_byte) {
+        return Err(HttpResponseError::Malformed);
+    }
+    Ok((name, value.trim_matches([' ', '\t'])))
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, HttpResponseError> {
+    let mut position = 0;
+    let mut decoded = Vec::new();
+
+    loop {
+        let line_end = find_crlf(body, position).ok_or(HttpResponseError::Malformed)?;
+        let size_line = &body[position..line_end];
+        if !size_line.is_ascii() {
+            return Err(HttpResponseError::Malformed);
+        }
+        let size_line = std::str::from_utf8(size_line).map_err(|_| HttpResponseError::Malformed)?;
+        let chunk_size = parse_chunk_size(size_line)?;
+        position = line_end + 2;
+
+        if chunk_size == 0 {
+            loop {
+                let trailer_end = find_crlf(body, position).ok_or(HttpResponseError::Malformed)?;
+                let trailer = &body[position..trailer_end];
+                position = trailer_end + 2;
+                if trailer.is_empty() {
+                    return (position == body.len())
+                        .then_some(decoded)
+                        .ok_or(HttpResponseError::Malformed);
+                }
+                if !trailer.is_ascii() {
+                    return Err(HttpResponseError::Malformed);
+                }
+                let trailer =
+                    std::str::from_utf8(trailer).map_err(|_| HttpResponseError::Malformed)?;
+                parse_header_line(trailer)?;
+            }
+        }
+
+        let decoded_length = decoded
+            .len()
+            .checked_add(chunk_size)
+            .ok_or(HttpResponseError::TooLarge)?;
+        if decoded_length > MAX_RESPONSE_BYTES {
+            return Err(HttpResponseError::TooLarge);
+        }
+        let data_end = position
+            .checked_add(chunk_size)
+            .ok_or(HttpResponseError::Malformed)?;
+        let terminator_end = data_end
+            .checked_add(2)
+            .ok_or(HttpResponseError::Malformed)?;
+        if body.get(data_end..terminator_end) != Some(b"\r\n") {
+            return Err(HttpResponseError::Malformed);
+        }
+        let chunk = body
+            .get(position..data_end)
+            .ok_or(HttpResponseError::Malformed)?;
+        decoded.extend_from_slice(chunk);
+        position = terminator_end;
+    }
+}
+
+fn find_crlf(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes
+        .get(start..)?
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|offset| start + offset)
+}
+
+fn parse_chunk_size(line: &str) -> Result<usize, HttpResponseError> {
+    let (size, extensions) = line
+        .split_once(';')
+        .map_or((line, None), |(size, extensions)| (size, Some(extensions)));
+    let size = size.trim_end_matches([' ', '\t']);
+    if size.is_empty() || !size.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(HttpResponseError::Malformed);
+    }
+    if let Some(extensions) = extensions {
+        validate_chunk_extensions(extensions)?;
+    }
+    usize::from_str_radix(size, 16).map_err(|_| HttpResponseError::Malformed)
+}
+
+fn validate_chunk_extensions(extensions: &str) -> Result<(), HttpResponseError> {
+    for extension in split_chunk_extensions(extensions)? {
+        let extension = extension.trim_matches([' ', '\t']);
+        let (name, value) = extension
+            .split_once('=')
+            .map_or((extension, None), |(name, value)| (name, Some(value)));
+        let name = name.trim_end_matches([' ', '\t']);
+        if name.is_empty() || !name.bytes().all(is_http_token_byte) {
+            return Err(HttpResponseError::Malformed);
+        }
+        if let Some(value) = value {
+            let value = value.trim_matches([' ', '\t']);
+            let valid = !value.is_empty()
+                && (value.bytes().all(is_http_token_byte) || is_valid_quoted_string(value));
+            if !valid {
+                return Err(HttpResponseError::Malformed);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn split_chunk_extensions(extensions: &str) -> Result<Vec<&str>, HttpResponseError> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for (index, byte) in extensions.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        } else if byte == b';' {
+            parts.push(&extensions[start..index]);
+            start = index + 1;
+        }
+    }
+
+    if quoted || escaped {
+        return Err(HttpResponseError::Malformed);
+    }
+    parts.push(&extensions[start..]);
+    Ok(parts)
+}
+
+fn is_valid_quoted_string(value: &str) -> bool {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return false;
+    };
+    let mut escaped = false;
+    for byte in inner.bytes() {
+        if escaped {
+            if byte.is_ascii_control() && byte != b'\t' {
+                return false;
+            }
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' || (byte.is_ascii_control() && byte != b'\t') {
+            return false;
+        }
+    }
+    !escaped
+}
+
 fn normalize_sessions(
     value: Value,
     requested_roots: &[PathBuf],
@@ -255,20 +699,46 @@ fn optional_string(
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+    use std::sync::Arc;
+    use std::thread::{self, JoinHandle};
+    use std::time::Instant;
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
 
     use serde_json::json;
 
     use super::*;
 
     static TEMP_TREE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    const FAKE_SERVER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
+    const FAKE_SERVER_IO_TIMEOUT: Duration = Duration::from_secs(1);
+    const FAKE_SERVER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const FAKE_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+    const FAKE_SERVER_STALL_TIMEOUT: Duration = Duration::from_secs(4);
 
     struct TempTree {
         root: PathBuf,
+    }
+
+    struct FakeServer {
+        requests: Receiver<Vec<u8>>,
+        shutdown: Sender<()>,
+        thread: Option<JoinHandle<Result<(), String>>>,
+        expected_exchanges: usize,
+        completed_exchanges: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    struct TempSocket {
+        path: PathBuf,
     }
 
     impl TempTree {
@@ -293,6 +763,313 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    impl FakeServer {
+        fn recv_request(&self) -> Vec<u8> {
+            self.requests
+                .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
+                .expect("fake server did not receive a request before the deadline")
+        }
+
+        fn finish(mut self) {
+            let completed = self.completed_exchanges.load(Ordering::Acquire);
+            if completed != self.expected_exchanges {
+                self.stop_and_join(true);
+                panic!(
+                    "fake server consumed {completed} of {} scripted exchanges",
+                    self.expected_exchanges
+                );
+            }
+            self.stop_and_join(true);
+        }
+
+        fn cancel(mut self) {
+            self.stop_and_join(true);
+        }
+
+        fn stop_and_join(&mut self, report_failure: bool) {
+            let _ = self.shutdown.send(());
+            let Some(thread) = self.thread.take() else {
+                return;
+            };
+            let result = thread.join();
+            if !report_failure {
+                return;
+            }
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => panic!("fake server failed: {error}"),
+                Err(_) => panic!("fake server thread panicked"),
+            }
+        }
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            if self.thread.is_none() {
+                return;
+            }
+            let report_failure = !thread::panicking();
+            let completed = self.completed_exchanges.load(Ordering::Acquire);
+            self.stop_and_join(report_failure);
+            if report_failure && completed != self.expected_exchanges {
+                panic!(
+                    "fake server dropped after consuming {completed} of {} scripted exchanges",
+                    self.expected_exchanges
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl TempSocket {
+        fn new(name: &str) -> Self {
+            let suffix = TEMP_TREE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = PathBuf::from(format!(
+                "/tmp/pbcoven-{name}-{}-{suffix}.sock",
+                std::process::id()
+            ));
+            Self { path }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TempSocket {
+        fn drop(&mut self) {
+            match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("failed to clean up {}: {error}", self.path.display()),
+            }
+        }
+    }
+
+    fn http_json(body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn expected_request(path: &str) -> Vec<u8> {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn assert_server_requests(server: &FakeServer, paths: &[&str]) {
+        for path in paths {
+            assert_eq!(server.recv_request(), expected_request(path));
+        }
+    }
+
+    fn spawn_tcp_server(responses: Vec<Vec<u8>>) -> (CovenEndpoint, FakeServer) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let expected_exchanges = responses.len();
+        let completed_exchanges = Arc::new(AtomicUsize::new(0));
+        let thread_completed_exchanges = Arc::clone(&completed_exchanges);
+        let handle = thread::spawn(move || -> Result<(), String> {
+            for response in responses {
+                let Some(mut stream) = accept_tcp_connection(&listener, &shutdown_rx)? else {
+                    return Ok(());
+                };
+                configure_fake_tcp_stream(&stream)?;
+                let mut request = Vec::new();
+                stream
+                    .read_to_end(&mut request)
+                    .map_err(|error| format!("failed to read fake TCP request: {error}"))?;
+                request_tx
+                    .send(request)
+                    .map_err(|_| "fake TCP request receiver closed".to_string())?;
+                stream
+                    .write_all(&response)
+                    .map_err(|error| format!("failed to write fake TCP response: {error}"))?;
+                thread_completed_exchanges.fetch_add(1, Ordering::Release);
+                stream
+                    .shutdown(Shutdown::Write)
+                    .map_err(|error| format!("failed to close fake TCP response: {error}"))?;
+            }
+            Ok(())
+        });
+        (
+            CovenEndpoint::Http(address),
+            FakeServer {
+                requests: request_rx,
+                shutdown: shutdown_tx,
+                thread: Some(handle),
+                expected_exchanges,
+                completed_exchanges,
+            },
+        )
+    }
+
+    fn spawn_stalling_tcp_server() -> (CovenEndpoint, FakeServer) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let completed_exchanges = Arc::new(AtomicUsize::new(0));
+        let handle = thread::spawn(move || -> Result<(), String> {
+            let Some(mut stream) = accept_tcp_connection(&listener, &shutdown_rx)? else {
+                return Ok(());
+            };
+            configure_fake_tcp_stream(&stream)?;
+            let mut request = Vec::new();
+            stream
+                .read_to_end(&mut request)
+                .map_err(|error| format!("failed to read stalling TCP request: {error}"))?;
+            request_tx
+                .send(request)
+                .map_err(|_| "stalling TCP request receiver closed".to_string())?;
+            match shutdown_rx.recv_timeout(FAKE_SERVER_STALL_TIMEOUT) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => Ok(()),
+                Err(RecvTimeoutError::Timeout) => {
+                    Err("stalling TCP server cancellation deadline elapsed".to_string())
+                }
+            }
+        });
+        (
+            CovenEndpoint::Http(address),
+            FakeServer {
+                requests: request_rx,
+                shutdown: shutdown_tx,
+                thread: Some(handle),
+                expected_exchanges: 1,
+                completed_exchanges,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn spawn_unix_server(socket: &Path, responses: Vec<Vec<u8>>) -> FakeServer {
+        let listener = UnixListener::bind(socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (request_tx, request_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let expected_exchanges = responses.len();
+        let completed_exchanges = Arc::new(AtomicUsize::new(0));
+        let thread_completed_exchanges = Arc::clone(&completed_exchanges);
+        let handle = thread::spawn(move || -> Result<(), String> {
+            for response in responses {
+                let Some(mut stream) = accept_unix_connection(&listener, &shutdown_rx)? else {
+                    return Ok(());
+                };
+                configure_fake_unix_stream(&stream)?;
+                let mut request = Vec::new();
+                stream
+                    .read_to_end(&mut request)
+                    .map_err(|error| format!("failed to read fake Unix request: {error}"))?;
+                request_tx
+                    .send(request)
+                    .map_err(|_| "fake Unix request receiver closed".to_string())?;
+                stream
+                    .write_all(&response)
+                    .map_err(|error| format!("failed to write fake Unix response: {error}"))?;
+                thread_completed_exchanges.fetch_add(1, Ordering::Release);
+                stream
+                    .shutdown(Shutdown::Write)
+                    .map_err(|error| format!("failed to close fake Unix response: {error}"))?;
+            }
+            Ok(())
+        });
+        FakeServer {
+            requests: request_rx,
+            shutdown: shutdown_tx,
+            thread: Some(handle),
+            expected_exchanges,
+            completed_exchanges,
+        }
+    }
+
+    fn accept_tcp_connection(
+        listener: &TcpListener,
+        shutdown: &Receiver<()>,
+    ) -> Result<Option<TcpStream>, String> {
+        let deadline = Instant::now() + FAKE_SERVER_ACCEPT_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(Some(stream)),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(format!("fake TCP accept failed: {error}")),
+            }
+            if wait_for_fake_server_work(shutdown, deadline)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn configure_fake_tcp_stream(stream: &TcpStream) -> Result<(), String> {
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| format!("failed to make fake TCP stream blocking: {error}"))?;
+        stream
+            .set_read_timeout(Some(FAKE_SERVER_IO_TIMEOUT))
+            .map_err(|error| format!("failed to set fake TCP read timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(FAKE_SERVER_IO_TIMEOUT))
+            .map_err(|error| format!("failed to set fake TCP write timeout: {error}"))
+    }
+
+    #[cfg(unix)]
+    fn accept_unix_connection(
+        listener: &UnixListener,
+        shutdown: &Receiver<()>,
+    ) -> Result<Option<UnixStream>, String> {
+        let deadline = Instant::now() + FAKE_SERVER_ACCEPT_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(Some(stream)),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(format!("fake Unix accept failed: {error}")),
+            }
+            if wait_for_fake_server_work(shutdown, deadline)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn configure_fake_unix_stream(stream: &UnixStream) -> Result<(), String> {
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| format!("failed to make fake Unix stream blocking: {error}"))?;
+        stream
+            .set_read_timeout(Some(FAKE_SERVER_IO_TIMEOUT))
+            .map_err(|error| format!("failed to set fake Unix read timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(FAKE_SERVER_IO_TIMEOUT))
+            .map_err(|error| format!("failed to set fake Unix write timeout: {error}"))
+    }
+
+    fn wait_for_fake_server_work(
+        shutdown: &Receiver<()>,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err("fake server accept deadline elapsed".to_string());
+        }
+        let wait = FAKE_SERVER_POLL_INTERVAL.min(deadline.duration_since(now));
+        match shutdown.recv_timeout(wait) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => Ok(true),
+            Err(RecvTimeoutError::Timeout) => Ok(false),
+        }
+    }
+
+    fn assert_adapter_state(response: &CovenSessionsResponse, status: &str, message: Option<&str>) {
+        assert_eq!(response.status, status);
+        assert!(response.sessions.is_empty());
+        assert_eq!(response.message.as_deref(), message);
     }
 
     #[cfg(unix)]
@@ -650,5 +1427,487 @@ mod tests {
         let sessions = normalize_sessions(payload, &requested).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].project_root, project.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn parses_content_length_json_responses() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+
+        assert_eq!(parse_http_response(response).unwrap(), b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn parses_chunked_json_responses_with_extensions() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4 ; part = one\r\n{\"ok\r\n7\r\n\":true}\r\n0\r\nChecksum: ignored\r\n\r\n";
+
+        assert_eq!(parse_http_response(response).unwrap(), b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn parses_chunk_extensions_with_quoted_semicolons() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;note=\"a;b\"\r\ntest\r\n0\r\n\r\n";
+
+        assert_eq!(parse_http_response(response).unwrap(), b"test");
+    }
+
+    #[test]
+    fn parses_header_names_case_insensitively() {
+        let response = b"HTTP/1.1 204 No Content\r\ncOnTeNt-LeNgTh: 0\r\n\r\n";
+
+        assert_eq!(parse_http_response(response).unwrap(), b"");
+    }
+
+    #[test]
+    fn rejects_incomplete_and_extra_fixed_bodies() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n1234".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n12345".as_slice(),
+        ] {
+            assert_eq!(
+                parse_http_response(response),
+                Err(HttpResponseError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_chunk_sizes_terminators_and_trailers() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nnope\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx!\r\n0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nTrailer: open\r\n"
+                .as_slice(),
+        ] {
+            assert_eq!(
+                parse_http_response(response),
+                Err(HttpResponseError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_success_status_without_retaining_the_body() {
+        let response =
+            b"HTTP/1.1 503 Unavailable\r\nContent-Length: 21\r\n\r\nsensitive daemon data";
+
+        assert_eq!(
+            parse_http_response(response),
+            Err(HttpResponseError::Status(503))
+        );
+    }
+
+    #[test]
+    fn rejects_responses_without_a_complete_header_block() {
+        assert_eq!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"),
+            Err(HttpResponseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_lengths_and_transfer_encodings() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx"
+                .as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nx".as_slice(),
+        ] {
+            assert_eq!(
+                parse_http_response(response),
+                Err(HttpResponseError::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_raw_and_decoded_response_limits() {
+        let raw = vec![b'x'; MAX_RESPONSE_BYTES + 1];
+        assert_eq!(parse_http_response(&raw), Err(HttpResponseError::TooLarge));
+
+        let mut chunked = format!("{:x}\r\n", MAX_RESPONSE_BYTES + 1).into_bytes();
+        chunked.extend(vec![b'x'; MAX_RESPONSE_BYTES + 1]);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(
+            decode_chunked_body(&chunked),
+            Err(HttpResponseError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn accepts_connection_close_bodies_without_length_headers() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n[]";
+
+        assert_eq!(parse_http_response(response).unwrap(), b"[]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loads_sessions_over_unix_and_sends_exact_paths() {
+        let tree = TempTree::new("unix-transport");
+        let project = tree.directory("project");
+        let socket = TempSocket::new("round-trip");
+        let sessions = serde_json::to_vec(&json!({
+            "sessions": [{
+                "id": "unix-session",
+                "projectRoot": project,
+                "title": "  Native session  "
+            }]
+        }))
+        .unwrap();
+        let server = spawn_unix_server(
+            &socket.path,
+            vec![
+                http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+                http_json(&sessions),
+            ],
+        );
+
+        let response = load_coven_sessions(&CovenEndpoint::Unix(socket.path.clone()), &[project]);
+        let health_request = server.recv_request();
+        let sessions_request = server.recv_request();
+        server.finish();
+
+        assert_eq!(response.status, "ready");
+        assert_eq!(response.sessions.len(), 1);
+        assert_eq!(response.sessions[0].id, "unix-session");
+        assert_eq!(
+            response.sessions[0].title.as_deref(),
+            Some("Native session")
+        );
+        assert_eq!(response.message, None);
+        assert_eq!(health_request, expected_request("/api/v1/health"));
+        assert_eq!(sessions_request, expected_request("/api/v1/sessions"));
+    }
+
+    #[test]
+    fn loads_sessions_over_loopback_tcp_and_sends_exact_paths() {
+        let tree = TempTree::new("tcp-transport");
+        let project = tree.directory("project");
+        let other = tree.directory("other");
+        let sessions = serde_json::to_vec(&json!([
+            { "id": "tcp-session", "projectRoot": project, "status": " active " },
+            { "id": "out-of-scope", "projectRoot": other }
+        ]))
+        .unwrap();
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_json(&sessions),
+        ]);
+
+        let response = load_coven_sessions(&endpoint, &[project.clone()]);
+        let health_request = server.recv_request();
+        let sessions_request = server.recv_request();
+        server.finish();
+
+        assert_eq!(response.status, "ready");
+        assert_eq!(response.sessions.len(), 1);
+        assert_eq!(response.sessions[0].id, "tcp-session");
+        assert_eq!(response.sessions[0].project_root, project.to_string_lossy());
+        assert_eq!(response.sessions[0].status.as_deref(), Some("active"));
+        assert_eq!(response.message, None);
+        assert_eq!(health_request, expected_request("/api/v1/health"));
+        assert_eq!(sessions_request, expected_request("/api/v1/sessions"));
+    }
+
+    #[test]
+    fn accepted_fake_tcp_streams_use_bounded_blocking_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel();
+        let mut stream = accept_tcp_connection(&listener, &shutdown_rx)
+            .unwrap()
+            .unwrap();
+        configure_fake_tcp_stream(&stream).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let mut byte = [0];
+            done_tx.send(stream.read_exact(&mut byte)).unwrap();
+            byte
+        });
+
+        started_rx
+            .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
+            .unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        client.write_all(b"x").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(done_rx
+            .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
+            .unwrap()
+            .is_ok());
+        assert_eq!(reader.join().unwrap(), *b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepted_fake_unix_streams_use_bounded_blocking_io() {
+        let socket = TempSocket::new("blocking-io");
+        let listener = UnixListener::bind(&socket.path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = UnixStream::connect(&socket.path).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel();
+        let mut stream = accept_unix_connection(&listener, &shutdown_rx)
+            .unwrap()
+            .unwrap();
+        configure_fake_unix_stream(&stream).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let mut byte = [0];
+            done_tx.send(stream.read_exact(&mut byte)).unwrap();
+            byte
+        });
+
+        started_rx
+            .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
+            .unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        client.write_all(b"x").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(done_rx
+            .recv_timeout(FAKE_SERVER_REQUEST_TIMEOUT)
+            .unwrap()
+            .is_ok());
+        assert_eq!(reader.join().unwrap(), *b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_a_missing_unix_socket_to_unavailable() {
+        let socket = TempSocket::new("missing");
+        let response = load_coven_sessions(&CovenEndpoint::Unix(socket.path.clone()), &[]);
+
+        assert_adapter_state(
+            &response,
+            "unavailable",
+            Some("Coven daemon is not running; run `coven daemon start`"),
+        );
+    }
+
+    #[test]
+    fn maps_a_refused_tcp_connection_to_unavailable() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        drop(listener);
+
+        let response = load_coven_sessions(&endpoint, &[]);
+
+        assert_adapter_state(
+            &response,
+            "unavailable",
+            Some("Coven daemon is not running; run `coven daemon start`"),
+        );
+    }
+
+    #[test]
+    fn bounds_daemon_read_timeouts_and_maps_them_to_unavailable() {
+        let (endpoint, server) = spawn_stalling_tcp_server();
+
+        let started = Instant::now();
+        let response = load_coven_sessions(&endpoint, &[]);
+        let elapsed = started.elapsed();
+        let request = server.recv_request();
+        server.cancel();
+
+        assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
+        assert_eq!(request, expected_request("/api/v1/health"));
+        assert_adapter_state(
+            &response,
+            "unavailable",
+            Some("Coven daemon is not running; run `coven daemon start`"),
+        );
+    }
+
+    #[test]
+    fn rejects_non_loopback_tcp_endpoints_at_request_time() {
+        let response = load_coven_sessions(
+            &CovenEndpoint::Http("192.0.2.10:7777".parse().unwrap()),
+            &[],
+        );
+
+        assert_adapter_state(
+            &response,
+            "error",
+            Some("Coven sessions could not be loaded"),
+        );
+    }
+
+    #[test]
+    fn maps_an_incompatible_health_version_without_requesting_sessions() {
+        let (endpoint, server) =
+            spawn_tcp_server(vec![http_json(br#"{"apiVersion":"coven.daemon.v2"}"#)]);
+
+        let response = load_coven_sessions(&endpoint, &[]);
+        let health_request = server.recv_request();
+        server.finish();
+
+        assert_adapter_state(
+            &response,
+            "incompatible",
+            Some("Coven daemon API update required"),
+        );
+        assert_eq!(health_request, expected_request("/api/v1/health"));
+    }
+
+    #[test]
+    fn strict_fake_server_finish_rejects_an_unconsumed_script() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v2"}"#),
+            http_json(br#"{"sessions":[]}"#),
+        ]);
+        let started = Instant::now();
+
+        let response = load_coven_sessions(&endpoint, &[]);
+        let request = server.recv_request();
+        let finish = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finish()));
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(finish.is_err());
+        assert_adapter_state(
+            &response,
+            "incompatible",
+            Some("Coven daemon API update required"),
+        );
+        assert_eq!(request, expected_request("/api/v1/health"));
+    }
+
+    #[test]
+    fn explicit_fake_server_cancel_allows_an_intentionally_skipped_exchange() {
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v2"}"#),
+            http_json(br#"{"sessions":[]}"#),
+        ]);
+        let started = Instant::now();
+
+        let response = load_coven_sessions(&endpoint, &[]);
+        let request = server.recv_request();
+        server.cancel();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_adapter_state(
+            &response,
+            "incompatible",
+            Some("Coven daemon API update required"),
+        );
+        assert_eq!(request, expected_request("/api/v1/health"));
+    }
+
+    #[test]
+    fn maps_malformed_health_json_to_error() {
+        let (endpoint, server) = spawn_tcp_server(vec![http_json(b"{")]);
+
+        let response = load_coven_sessions(&endpoint, &[]);
+        assert_server_requests(&server, &["/api/v1/health"]);
+        server.finish();
+
+        assert_adapter_state(
+            &response,
+            "error",
+            Some("Coven sessions could not be loaded"),
+        );
+    }
+
+    #[test]
+    fn maps_malformed_sessions_json_and_envelopes_to_error() {
+        for sessions in [b"{".as_slice(), br#"{"sessions":{}}"#.as_slice()] {
+            let (endpoint, server) = spawn_tcp_server(vec![
+                http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+                http_json(sessions),
+            ]);
+
+            let response = load_coven_sessions(&endpoint, &[]);
+            assert_server_requests(&server, &["/api/v1/health", "/api/v1/sessions"]);
+            server.finish();
+
+            assert_adapter_state(
+                &response,
+                "error",
+                Some("Coven sessions could not be loaded"),
+            );
+        }
+    }
+
+    #[test]
+    fn maps_malformed_http_on_health_or_sessions_to_error() {
+        for (responses, expected_paths) in [
+            (vec![b"not http".to_vec()], vec!["/api/v1/health"]),
+            (
+                vec![
+                    http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n".to_vec(),
+                ],
+                vec!["/api/v1/health", "/api/v1/sessions"],
+            ),
+        ] {
+            let (endpoint, server) = spawn_tcp_server(responses);
+
+            let response = load_coven_sessions(&endpoint, &[]);
+            assert_server_requests(&server, &expected_paths);
+            server.finish();
+
+            assert_adapter_state(
+                &response,
+                "error",
+                Some("Coven sessions could not be loaded"),
+            );
+        }
+    }
+
+    #[test]
+    fn maps_non_success_health_or_sessions_responses_to_error() {
+        let denied = b"HTTP/1.1 503 Unavailable\r\nContent-Length: 6\r\n\r\nsecret".to_vec();
+        for (responses, expected_paths) in [
+            (vec![denied.clone()], vec!["/api/v1/health"]),
+            (
+                vec![
+                    http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+                    denied.clone(),
+                ],
+                vec!["/api/v1/health", "/api/v1/sessions"],
+            ),
+        ] {
+            let (endpoint, server) = spawn_tcp_server(responses);
+
+            let response = load_coven_sessions(&endpoint, &[]);
+            assert_server_requests(&server, &expected_paths);
+            server.finish();
+
+            assert_adapter_state(
+                &response,
+                "error",
+                Some("Coven sessions could not be loaded"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_successful_call_after_failure_has_no_stale_failure_state() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let failed_endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        drop(listener);
+        let failed = load_coven_sessions(&failed_endpoint, &[]);
+        assert_eq!(failed.status, "unavailable");
+
+        let (endpoint, server) = spawn_tcp_server(vec![
+            http_json(br#"{"apiVersion":"coven.daemon.v1"}"#),
+            http_json(br#"{"sessions":[]}"#),
+        ]);
+        let recovered = load_coven_sessions(&endpoint, &[]);
+        assert_server_requests(&server, &["/api/v1/health", "/api/v1/sessions"]);
+        server.finish();
+
+        assert_eq!(recovered.status, "ready");
+        assert!(recovered.sessions.is_empty());
+        assert_eq!(recovered.message, None);
     }
 }
