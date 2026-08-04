@@ -169,6 +169,7 @@ path:
 jq -n '{
   required_status_checks: {
     strict: true,
+    contexts: [],
     checks: [
       {context: "TypeScript and Rust"},
       {context: "iOS"}

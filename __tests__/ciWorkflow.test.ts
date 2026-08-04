@@ -12,6 +12,35 @@ function workflowSource(): string {
   }
 }
 
+function actionStepBlocks(workflow: string, action: string): string[] {
+  const lines = workflow.split('\n');
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const marker = `- uses: ${action}@`;
+    if (!line.trimStart().startsWith(marker)) continue;
+    const indentation = line.length - line.trimStart().length;
+    const block = [line];
+    for (index += 1; index < lines.length; index += 1) {
+      const nextLine = lines[index];
+      if (nextLine.trim() && nextLine.length - nextLine.trimStart().length <= indentation) break;
+      block.push(nextLine);
+    }
+    index -= 1;
+    blocks.push(block.join('\n'));
+  }
+  return blocks;
+}
+
+function workflowJobSource(workflow: string, jobName: string): string {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error(`Unable to find workflow job ${jobName}`);
+  const remaining = workflow.slice(start + marker.length);
+  const nextJob = remaining.search(/^  [a-z][a-z0-9-]*:\s*$/m);
+  return nextJob < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + nextJob);
+}
+
 describe('pull request CI workflow contract', () => {
   it('runs read-only checks for pull requests and pushes to main with stable job names', () => {
     const workflow = workflowSource();
@@ -29,17 +58,31 @@ describe('pull request CI workflow contract', () => {
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
     const workflow = workflowSource();
-    const checkoutCount = workflow.match(/uses: actions\/checkout@/g)?.length ?? 0;
+    const checkoutSteps = actionStepBlocks(workflow, 'actions/checkout');
 
     expect(workflow).toContain('node-version: 24');
     expect(workflow).toContain('version: 10.14.0');
     expect(workflow).toContain('toolchain: 1.95.0');
     expect(workflow).toContain('actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5');
-    expect(workflow).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');
+    expect(workflow).toContain('pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453');
     expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
     expect(workflow).toContain('dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8');
-    expect(checkoutCount).toBeGreaterThan(0);
-    expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
+    expect(checkoutSteps).toHaveLength(2);
+    for (const jobName of ['typescript-rust', 'ios']) {
+      const job = workflowJobSource(workflow, jobName);
+      const jobCheckoutSteps = actionStepBlocks(job, 'actions/checkout');
+      const jobPnpmSetupSteps = actionStepBlocks(job, 'pnpm/action-setup');
+      const jobSetupNodeSteps = actionStepBlocks(job, 'actions/setup-node');
+
+      expect(jobCheckoutSteps).toHaveLength(1);
+      expect(jobCheckoutSteps[0]).toMatch(/^\s+persist-credentials: false$/m);
+      expect(jobPnpmSetupSteps).toHaveLength(1);
+      expect(jobPnpmSetupSteps[0]).toContain(
+        'pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453 # v4.3.0',
+      );
+      expect(jobSetupNodeSteps).toHaveLength(1);
+      expect(jobSetupNodeSteps[0]).toMatch(/^\s+cache: pnpm$/m);
+    }
 
     const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)].map(
       ([, action]) => action,

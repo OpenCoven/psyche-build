@@ -39,17 +39,63 @@ function workflowJobSource(workflow: string, jobName: string): string {
   return nextJob < 0 ? workflow.slice(start) : workflow.slice(start, start + marker.length + nextJob);
 }
 
-describe('macOS release workflow contract', () => {
-  it('does not persist checkout credentials or restore mutable dependency caches', () => {
-    const workflow = workflowSource();
-    const checkoutCount = workflow.match(/uses: actions\/checkout@/g)?.length ?? 0;
-    const setupNodeCount = workflow.match(/uses: actions\/setup-node@/g)?.length ?? 0;
+function actionStepBlocks(workflow: string, action: string): string[] {
+  const lines = workflow.split('\n');
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const marker = `- uses: ${action}@`;
+    if (!line.trimStart().startsWith(marker)) continue;
+    const indentation = line.length - line.trimStart().length;
+    const block = [line];
+    for (index += 1; index < lines.length; index += 1) {
+      const nextLine = lines[index];
+      if (nextLine.trim() && nextLine.length - nextLine.trimStart().length <= indentation) break;
+      block.push(nextLine);
+    }
+    index -= 1;
+    blocks.push(block.join('\n'));
+  }
+  return blocks;
+}
 
-    expect(checkoutCount).toBeGreaterThan(0);
-    expect(workflow.match(/persist-credentials: false/g) ?? []).toHaveLength(checkoutCount);
-    expect(setupNodeCount).toBeGreaterThan(0);
-    expect(workflow.match(/package-manager-cache: false/g) ?? []).toHaveLength(setupNodeCount);
-    expect(workflow).not.toMatch(/^\s+cache:\s*pnpm\s*$/gm);
+describe('macOS release workflow contract', () => {
+  it('isolates every checkout and setup-node step instead of relying on global counts', () => {
+    const workflow = workflowSource();
+    for (const jobName of ['verify', 'build-macos', 'upload-ios', 'publish']) {
+      const job = workflowJobSource(workflow, jobName);
+      const checkoutSteps = actionStepBlocks(job, 'actions/checkout');
+
+      expect(checkoutSteps).toHaveLength(1);
+      expect(checkoutSteps[0]).toMatch(/^\s+persist-credentials: false$/m);
+
+      if (jobName !== 'publish') {
+        const setupNodeSteps = actionStepBlocks(job, 'actions/setup-node');
+        expect(setupNodeSteps).toHaveLength(1);
+        expect(setupNodeSteps[0]).toMatch(/^\s+package-manager-cache: false$/m);
+        expect(setupNodeSteps[0]).not.toMatch(/^\s+cache:\s*pnpm\s*$/m);
+      }
+    }
+  });
+
+  it('uses a setup-node release that implements package-manager-cache', () => {
+    const workflow = workflowSource();
+
+    expect(workflow).toContain(
+      'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0',
+    );
+  });
+
+  it('pins every release job to the documented pnpm action revision', () => {
+    const workflow = workflowSource();
+
+    for (const jobName of ['verify', 'build-macos', 'upload-ios']) {
+      const steps = actionStepBlocks(workflowJobSource(workflow, jobName), 'pnpm/action-setup');
+      expect(steps).toHaveLength(1);
+      expect(steps[0]).toContain(
+        'pnpm/action-setup@c336a2788d9774dccfdeb4823a5058ccc9f07453 # v4.3.0',
+      );
+    }
   });
 
   it('documents the exact download-artifact release behind its immutable pin', () => {
@@ -104,10 +150,14 @@ describe('macOS release workflow contract', () => {
     ]) {
       expect(workflow).toContain(`secrets.${secret}`);
     }
-    expect(workflow.match(/^\s*environment: release\s*$/gm)).toHaveLength(4);
+    expect(workflow.match(/^\s*environment: release\s*$/gm)).toHaveLength(5);
+    expect(workflowJobSource(workflow, 'verify')).toContain('environment: release');
+    expect(workflowJobSource(workflow, 'verify')).toContain('GH_TOKEN: ${{ github.token }}');
     expect(workflow).toContain('Missing required release environment secret $secret_name');
     expect(workflow).not.toContain('Missing required repository secret');
     expect(workflow).toContain('security import "$CERTIFICATE_PATH"');
+    expect(workflow).not.toMatch(/security import "\$CERTIFICATE_PATH"[\s\S]*?\n\s+-A\s*\n/);
+    expect(workflow.match(/-T \/usr\/bin\/codesign/g)).toHaveLength(2);
     expect(workflow).toContain('codesign --verify --deep --strict');
     expect(workflow).toContain('spctl --assess --type execute');
     expect(workflow).toContain('xcrun stapler validate');
@@ -144,7 +194,7 @@ describe('macOS release workflow contract', () => {
         mkdirSync(fakeBin);
         writeFileSync(
           fakeChmod,
-          `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+          `#!/bin/bash\nmode="$(if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$2"; else stat -c '%a' "$2"; fi)"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
         );
         writeFileSync(fakeSecurity, '#!/bin/bash\nexit 0\n');
         chmodSync(fakeChmod, 0o755);
@@ -262,7 +312,7 @@ describe('macOS release workflow contract', () => {
       mkdirSync(fakeBin);
       writeFileSync(
         fakeChmod,
-        `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+        `#!/bin/bash\nmode="$(if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$2"; else stat -c '%a' "$2"; fi)"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
       );
       chmodSync(fakeChmod, 0o755);
       writeFileSync(githubEnv, '');

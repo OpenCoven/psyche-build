@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -56,7 +56,8 @@ async function listActiveDocFiles(directory = '.'): Promise<string[]> {
     if (entry.isDirectory()) {
       if (
         historicalDocDirectories.has(filePath) ||
-        generatedOrDependencyDirectories.has(entry.name)
+        generatedOrDependencyDirectories.has(entry.name) ||
+        entry.name.startsWith('.vitest-')
       ) {
         continue;
       }
@@ -174,6 +175,7 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain(
       'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
     );
+    expect(runbook).toContain('contexts: []');
     expect(runbook).toContain('{context: "TypeScript and Rust"}');
     expect(runbook).toContain('{context: "iOS"}');
     expect(runbook).toContain('enforce_admins: true');
@@ -328,6 +330,19 @@ describe('v0.0.1 release documentation contract', () => {
     expect(iosReadme).toContain('0.0.1 (1)');
     expect(iosReadme).toMatch(/if[^\n]*available|when[^\n]*available/i);
     expect(iosReadme).not.toMatch(/(?:is|now|already) live|currently available/i);
+  });
+
+  it('ignores transient Vitest directories while scanning active documentation', async () => {
+    const fixtureDirectory = `.vitest-release-docs-${process.pid}-${Date.now()}`;
+    const fixtureReadme = path.join(fixtureDirectory, 'project', 'README.md');
+
+    try {
+      await mkdir(path.dirname(fixtureReadme), { recursive: true });
+      await writeFile(fixtureReadme, 'v0.1.0');
+      expect(await listActiveDocFiles()).not.toContain(fixtureReadme);
+    } finally {
+      await rm(fixtureDirectory, { recursive: true, force: true });
+    }
   });
 
   it('contains no stale release identity or unsupported install claim in active docs', async () => {
