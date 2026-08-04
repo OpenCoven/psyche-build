@@ -4,8 +4,15 @@ set -euo pipefail
 MODE="${1:-run}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAURI_DIR="$ROOT_DIR/native/macos/psyche-build-tauri"
+# Process name (CFBundleExecutable), used by pkill/pgrep. This is the cargo
+# binary name, which the product rename did not change.
 APP_NAME="psyche-build-tauri"
-APP_BUNDLE="$TAURI_DIR/src-tauri/target/debug/bundle/macos/psyche.app"
+# The .app is named after `productName` in tauri.conf.json ("Psyche Build"),
+# not after the binary. This used to be hardcoded — as `psyche.app` — and the
+# comux -> psyche rename left it pointing at a bundle that is never produced,
+# so every `run`/`--verify` built successfully and then died on `open`.
+# Resolve it from disk instead, so the next rename cannot break this again.
+APP_BUNDLE_DIR="$TAURI_DIR/src-tauri/target/debug/bundle/macos"
 TAURI_CLI_VERSION="2.11.1"
 LOCAL_TAURI_CLI="$ROOT_DIR/.codex/tools/tauri-cli/bin/cargo-tauri"
 
@@ -53,8 +60,17 @@ build_app_bundle() {
   )
 }
 
+resolve_app_bundle() {
+  local matches=("$APP_BUNDLE_DIR"/*.app)
+  if [[ ${#matches[@]} -ne 1 || ! -d "${matches[0]}" ]]; then
+    echo "expected exactly one .app bundle in $APP_BUNDLE_DIR, found: ${matches[*]}" >&2
+    return 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
 open_app_bundle() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open -n "$(resolve_app_bundle)"
 }
 
 run_dev() {
@@ -93,7 +109,7 @@ case "$MODE" in
     open_app_bundle
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
-    echo "verified $APP_BUNDLE is running as $APP_NAME"
+    echo "verified $(resolve_app_bundle) is running as $APP_NAME"
     ;;
   *)
     usage
