@@ -30,6 +30,25 @@ function plistHasValue(plist: string, key: string, serializedValue: string): boo
   ).test(plist);
 }
 
+function yamlStringArray(source: string, key: string): string[] {
+  const match = source.match(
+    new RegExp(`^\\s*${escapeRegExp(key)}:\\s*\\n((?:\\s+-\\s+[^\\n]+\\n?)*)`, 'm'),
+  );
+  if (!match) return [];
+  return match[1]
+    .split(/\r?\n/)
+    .map((line) => line.match(/^\s*-\s+(.+)$/)?.[1])
+    .filter((value): value is string => value !== undefined);
+}
+
+function plistStringArray(plist: string, key: string): string[] {
+  const match = plist.match(
+    new RegExp(`<key>${escapeRegExp(key)}</key>\\s*<array>([\\s\\S]*?)</array>`),
+  );
+  if (!match) return [];
+  return [...match[1].matchAll(/<string>([^<]+)<\/string>/g)].map(([, value]) => value);
+}
+
 describe('iOS production release configuration', () => {
   const projectYml = read('native/ios/project.yml');
   const generatedProject = read('native/ios/Psyche.xcodeproj/project.pbxproj');
@@ -70,21 +89,35 @@ describe('iOS production release configuration', () => {
   });
 
   test('declares a system launch screen and complete phone and tablet orientations', () => {
-    for (const key of [
-      'UILaunchScreen',
-      'UISupportedInterfaceOrientations',
-      'UISupportedInterfaceOrientations~ipad',
-    ]) {
-      expect(projectYml).toContain(`${key}:`);
-      expect(sourceInfoPlist).toContain(`<key>${key}</key>`);
-    }
+    const phoneOrientations = [
+      'UIInterfaceOrientationPortrait',
+      'UIInterfaceOrientationLandscapeLeft',
+      'UIInterfaceOrientationLandscapeRight',
+    ];
+    const tabletOrientations = [
+      'UIInterfaceOrientationPortrait',
+      'UIInterfaceOrientationPortraitUpsideDown',
+      'UIInterfaceOrientationLandscapeLeft',
+      'UIInterfaceOrientationLandscapeRight',
+    ];
 
+    expect(projectYml).toMatch(/^\s*UILaunchScreen:\s*\{\}\s*$/m);
     expect(sourceInfoPlist).toMatch(/<key>UILaunchScreen<\/key>\s*<dict\/>/);
-    expect(sourceInfoPlist).toMatch(
-      /<key>UISupportedInterfaceOrientations<\/key>\s*<array>[\s\S]*?<string>UIInterfaceOrientationPortrait<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeLeft<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeRight<\/string>[\s\S]*?<\/array>/,
+    expect(yamlStringArray(projectYml, 'UISupportedInterfaceOrientations')).toEqual(phoneOrientations);
+    expect(plistStringArray(sourceInfoPlist, 'UISupportedInterfaceOrientations')).toEqual(
+      phoneOrientations,
     );
-    expect(sourceInfoPlist).toMatch(
-      /<key>UISupportedInterfaceOrientations~ipad<\/key>\s*<array>[\s\S]*?<string>UIInterfaceOrientationPortrait<\/string>[\s\S]*?<string>UIInterfaceOrientationPortraitUpsideDown<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeLeft<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeRight<\/string>[\s\S]*?<\/array>/,
+    expect(plistStringArray(sourceInfoPlist, 'UISupportedInterfaceOrientations')).toEqual(
+      yamlStringArray(projectYml, 'UISupportedInterfaceOrientations'),
+    );
+    expect(yamlStringArray(projectYml, 'UISupportedInterfaceOrientations~ipad')).toEqual(
+      tabletOrientations,
+    );
+    expect(plistStringArray(sourceInfoPlist, 'UISupportedInterfaceOrientations~ipad')).toEqual(
+      tabletOrientations,
+    );
+    expect(plistStringArray(sourceInfoPlist, 'UISupportedInterfaceOrientations~ipad')).toEqual(
+      yamlStringArray(projectYml, 'UISupportedInterfaceOrientations~ipad'),
     );
   });
 
@@ -186,8 +219,8 @@ describe('iOS production release configuration', () => {
       writeFileSync(
         fixtureInfoPlist,
         readFileSync(fixtureInfoPlist, 'utf8').replace(
-          '<string>$(PSYCHE_RELEASE_SHA)</string>',
-          '<string>drifted</string>'
+          '<string>UIInterfaceOrientationLandscapeRight</string>',
+          '<string>UIInterfaceOrientationPortraitUpsideDown</string>'
         )
       );
 
@@ -201,7 +234,7 @@ describe('iOS production release configuration', () => {
       });
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
       expect(`${result.stdout}\n${result.stderr}`).toContain('fixture xcodegen no-op');
-      expect(`${result.stdout}\n${result.stderr}`).toContain('PsycheReleaseCommit');
+      expect(`${result.stdout}\n${result.stderr}`).toContain('UISupportedInterfaceOrientations');
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }

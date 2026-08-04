@@ -164,6 +164,8 @@ describe('v0.0.1 release documentation contract', () => {
     expect(environmentIndex).toBeGreaterThan(publicIndex);
     expect(secretIndex).toBeGreaterThan(environmentIndex);
     expect(runbook).toContain('custom_branch_policies: true');
+    expect(runbook).toContain('-f permission=push');
+    expect(runbook).toContain('can_admins_bypass: false');
     expect(runbook).toContain('-f name=main -f type=branch');
     expect(runbook).toContain("-f name='v*' -f type=tag");
     expect(runbook).not.toContain('protected-branch deployment policy');
@@ -176,8 +178,8 @@ describe('v0.0.1 release documentation contract', () => {
       'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
     );
     expect(runbook).toContain('contexts: []');
-    expect(runbook).toContain('{context: "TypeScript and Rust"}');
-    expect(runbook).toContain('{context: "iOS"}');
+    expect(runbook).toContain('{context: "TypeScript and Rust", app_id: 15368}');
+    expect(runbook).toContain('{context: "iOS", app_id: 15368}');
     expect(runbook).toContain('enforce_admins: true');
     expect(runbook).toContain('required_approving_review_count: 1');
     expect(runbook).toContain('require_last_push_approval: true');
@@ -185,6 +187,7 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('allow_force_pushes: false');
     expect(runbook).toContain('allow_deletions: false');
     expect(runbook).toContain('required_conversation_resolution: true');
+    expect(runbook).toMatch(/do not weaken, delete, or bypass an\s+existing\s+control/i);
   });
 
   it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {

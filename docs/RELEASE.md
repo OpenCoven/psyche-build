@@ -122,12 +122,23 @@ commit. Only after that private audit, make the repository public and enable
 secret scanning and push protection. The repository must be public before the
 tag; the workflow fails before accessing credentials when it is private.
 
+Before running these commands, confirm the external prerequisites: a GitHub plan
+that supports required environment reviewers and repository rulesets for this
+public repository; an organization owner (or a role with repository visibility,
+security-analysis, environment, branch-protection, and ruleset administration);
+maintainer-team access for the intended reviewer; a token with the corresponding
+repository and organization scopes; and no existing environment policy, branch
+protection, or ruleset whose requirements conflict with this policy. Resolve
+those prerequisites outside this runbook; do not weaken, delete, or bypass an
+existing control to make these commands succeed.
+
 Once a non-self member of the OpenCoven `Maintainers` team has accepted release
-review duty, attach that team with read access and create the protected
-`release` environment. The workflow has two valid entry points: a `v*` tag push
-and a manual recovery dispatch from `main`. Use selected branch/tag policies for
-those exact refs; a protected-branches-only policy rejects the tag-triggered
-jobs.
+review duty, attach that team with write access: the environment reviewer needs
+repository access and the tag-creation ruleset requires a member to push the
+signed tag. Then create the protected `release` environment. The workflow has
+two valid entry points: a `v*` tag push and a manual recovery dispatch from
+`main`. Use selected branch/tag policies for those exact refs; a
+protected-branches-only policy rejects the tag-triggered jobs.
 
 ```sh
 gh api --method PATCH repos/OpenCoven/psyche-build -f visibility=public
@@ -137,7 +148,7 @@ gh api --method PATCH repos/OpenCoven/psyche-build \
 
 gh api --method PUT \
   orgs/OpenCoven/teams/maintainers/repos/OpenCoven/psyche-build \
-  -f permission=pull
+  -f permission=push
 
 maintainers_team_id="$(gh api orgs/OpenCoven/teams/maintainers --jq .id)"
 environment_payload="$(mktemp)"
@@ -145,6 +156,7 @@ trap 'rm -f "$environment_payload"' EXIT
 jq -n --argjson team_id "$maintainers_team_id" '{
   wait_timer: 0,
   prevent_self_review: true,
+  can_admins_bypass: false,
   reviewers: [{type: "Team", id: $team_id}],
   deployment_branch_policy: {
     protected_branches: false,
@@ -160,10 +172,11 @@ gh api --method POST \
   -f name='v*' -f type=tag
 ```
 
-Protect `main` with the two exact GitHub Actions check names already emitted by
-the release commit. Require a fresh non-self approval after the last push,
-enforce the policy for administrators, and leave no force-push or deletion
-path:
+Protect `main` with the two exact GitHub Actions checks already emitted by the
+release commit. Pin their provider to the GitHub Actions app (`15368`) so an
+unrelated status context with the same name cannot satisfy the gate. Require a
+fresh non-self approval after the last push, enforce the policy for
+administrators, and leave no force-push or deletion path:
 
 ```sh
 jq -n '{
@@ -171,8 +184,8 @@ jq -n '{
     strict: true,
     contexts: [],
     checks: [
-      {context: "TypeScript and Rust"},
-      {context: "iOS"}
+      {context: "TypeScript and Rust", app_id: 15368},
+      {context: "iOS", app_id: 15368}
     ]
   },
   enforce_admins: true,
@@ -220,8 +233,9 @@ jq -n '{
 ```
 
 Verify `main` protection, both active tag rulesets and their exact bypass
-actors, the reviewer team, `prevent_self_review=true`, and both custom
-deployment policies before adding credentials.
+actors, the reviewer team, `prevent_self_review=true`,
+`can_admins_bypass=false`, and both custom deployment policies before adding
+credentials.
 
 Use interactive `gh secret set --env release --repo OpenCoven/psyche-build`
 input for every value in the table above. Verify the exact names with
