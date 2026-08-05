@@ -20,6 +20,7 @@ use tauri::{
 };
 
 mod coven_sessions;
+use coven_sessions::coven_sessions;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -1702,6 +1703,7 @@ pub fn run() {
             browser_reload,
             browser_eval,
             app_environment,
+            coven_sessions,
             agent_skills,
             fs_list_dir,
             fs_read_text,
