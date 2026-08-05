@@ -1,15 +1,6 @@
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
-const model = await import(
-  pathToFileURL(
-    join(
-      process.cwd(),
-      'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
-    ),
-  ).href,
-);
+import * as model from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
 
 describe('Tauri Coven session model', () => {
   test('accepts only safe Coven session identifiers', () => {
@@ -195,7 +186,7 @@ describe('Tauri Coven session model', () => {
       ],
     }, 100);
     expect(ready).toMatchObject({ phase: 'ready', message: 'updated', refreshedAt: 100 });
-    expect(ready.sessionsByProject.get('/alpha').map((session) => session.id)).toEqual(['live', 'done']);
+    expect(ready.sessionsByProject.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'done']);
 
     for (const status of ['unavailable', 'incompatible', 'error']) {
       const next = model.beginCovenRequest(ready);

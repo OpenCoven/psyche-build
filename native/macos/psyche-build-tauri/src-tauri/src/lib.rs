@@ -20,6 +20,7 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod workspace_contract;
 use coven_sessions::coven_sessions;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";

@@ -1,0 +1,86 @@
+{
+  "requestId": "workspace-1",
+  "type": "workspace.snapshot.result",
+  "workspace": {
+    "projects": [
+      {
+        "attentionCount": 1,
+        "id": "project-1",
+        "projectPanes": [
+          {
+            "agent": "",
+            "cwd": "/missing/worktree",
+            "id": "%9",
+            "kind": "terminal",
+            "needsAttention": false,
+            "recoverability": "missing-worktree",
+            "status": "exited",
+            "title": "orphaned pane"
+          }
+        ],
+        "root": "/repo",
+        "runningCount": 1,
+        "title": "psyche-build",
+        "worktrees": [
+          {
+            "attentionCount": 0,
+            "bare": false,
+            "branch": "main",
+            "detached": false,
+            "dirty": true,
+            "head": "0123456789abcdef0123456789abcdef01234567",
+            "isMain": true,
+            "lockReason": "",
+            "locked": false,
+            "missing": false,
+            "panes": [
+              {
+                "agent": "coven-code",
+                "cwd": "/repo",
+                "id": "%3",
+                "kind": "agent",
+                "needsAttention": false,
+                "recoverability": "healthy",
+                "status": "running",
+                "title": "implementation"
+              }
+            ],
+            "path": "/repo",
+            "prunable": false,
+            "pruneReason": "",
+            "runningCount": 1
+          },
+          {
+            "attentionCount": 1,
+            "bare": false,
+            "branch": "review",
+            "detached": false,
+            "dirty": false,
+            "head": "fedcba9876543210fedcba9876543210fedcba98",
+            "isMain": false,
+            "lockReason": "manual review",
+            "locked": true,
+            "missing": true,
+            "panes": [
+              {
+                "agent": "coven-code",
+                "cwd": "/worktrees/review",
+                "id": "coven:review",
+                "kind": "coven-session",
+                "needsAttention": true,
+                "recoverability": "healthy",
+                "status": "waiting",
+                "title": "review lane"
+              }
+            ],
+            "path": "/worktrees/review",
+            "prunable": true,
+            "pruneReason": "gitdir file points to non-existent location",
+            "runningCount": 0
+          }
+        ]
+      }
+    ],
+    "revision": 42
+  }
+}

@@ -2,6 +2,7 @@ import type {
   ClientMessage,
   ServerMessage,
 } from '../src/services/bridge/wireProtocol.js';
+import type { ServerResponse } from '../src/daemon/protocol.js';
 
 /**
  * Typed source of truth for the wire-protocol fixtures.
@@ -37,6 +38,14 @@ type CompleteMessage<M> = M extends { type: infer T; payload: infer P }
 
 export type ClientFixture = CompleteMessage<ClientMessage>;
 export type ServerFixture = CompleteMessage<ServerMessage>;
+type CompleteDaemonMessage<M> = M extends { type: infer T }
+  ? { [K in keyof M]-?: Complete<M[K]> } & { type: T }
+  : never;
+
+export type WorkspaceSnapshotFixture = CompleteDaemonMessage<Extract<
+  ServerResponse,
+  { type: 'workspace.snapshot.result' }
+>>;
 
 /**
  * Keys may carry a `_variant` suffix to cover a second shape of the same
@@ -170,3 +179,79 @@ export const SERVER_FIXTURES = {
     payload: { code: 'pane_not_found', message: 'pane is not registered in this psyche project' },
   },
 } satisfies Record<string, ServerFixture>;
+
+export const WORKSPACE_SNAPSHOT_FIXTURE = {
+  type: 'workspace.snapshot.result',
+  requestId: 'workspace-1',
+  workspace: {
+    revision: 42,
+    projects: [{
+      id: 'project-1',
+      root: '/repo',
+      title: 'psyche-build',
+      worktrees: [{
+        path: '/repo',
+        head: '0123456789abcdef0123456789abcdef01234567',
+        branch: 'main',
+        isMain: true,
+        detached: false,
+        bare: false,
+        locked: false,
+        lockReason: '',
+        prunable: false,
+        pruneReason: '',
+        dirty: true,
+        missing: false,
+        panes: [{
+          id: '%3',
+          cwd: '/repo',
+          title: 'implementation',
+          kind: 'agent',
+          agent: 'coven-code',
+          status: 'running',
+          needsAttention: false,
+          recoverability: 'healthy',
+        }],
+        runningCount: 1,
+        attentionCount: 0,
+      }, {
+        path: '/worktrees/review',
+        head: 'fedcba9876543210fedcba9876543210fedcba98',
+        branch: 'review',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: true,
+        lockReason: 'manual review',
+        prunable: true,
+        pruneReason: 'gitdir file points to non-existent location',
+        dirty: false,
+        missing: true,
+        panes: [{
+          id: 'coven:review',
+          cwd: '/worktrees/review',
+          title: 'review lane',
+          kind: 'coven-session',
+          agent: 'coven-code',
+          status: 'waiting',
+          needsAttention: true,
+          recoverability: 'healthy',
+        }],
+        runningCount: 0,
+        attentionCount: 1,
+      }],
+      projectPanes: [{
+        id: '%9',
+        cwd: '/missing/worktree',
+        title: 'orphaned pane',
+        kind: 'terminal',
+        agent: '',
+        status: 'exited',
+        needsAttention: false,
+        recoverability: 'missing-worktree',
+      }],
+      runningCount: 1,
+      attentionCount: 1,
+    }],
+  },
+} satisfies WorkspaceSnapshotFixture;

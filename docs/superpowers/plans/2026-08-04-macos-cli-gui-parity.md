@@ -24,7 +24,7 @@
 
 - [x] Add `workspace.snapshot` to the canonical control contract.
 - [x] Add ordered `workspace.changed` events with revision and sequence identifiers.
-- [ ] Generate or validate protocol fixtures for TypeScript, Rust/Tauri, and Swift consumers.
+- [x] Generate or validate protocol fixtures for TypeScript, Rust/Tauri, and Swift consumers.
 - [ ] Preserve legacy protocol adapters as read-only compatibility paths.
 
 ### Task 3: Render the macOS project/worktree/pane rail
