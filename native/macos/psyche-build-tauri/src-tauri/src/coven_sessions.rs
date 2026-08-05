@@ -1685,6 +1685,26 @@ mod tests {
     }
 
     #[test]
+    fn keeps_cwds_within_any_requested_project_or_worktree_root() {
+        let tree = TempTree::new("cwd-worktree-scope");
+        let project = tree.directory("project");
+        let worktree = tree.directory("linked-worktree");
+        let cwd = tree.directory("linked-worktree/app");
+        let requested = vec![project.clone(), worktree];
+        let payload = json!([
+            { "id": "worktree", "projectRoot": project, "cwd": cwd }
+        ]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].cwd.as_deref(),
+            Some(cwd.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
     fn drops_invalid_items_without_losing_valid_siblings() {
         let tree = TempTree::new("invalid-item");
         let project = tree.directory("project");

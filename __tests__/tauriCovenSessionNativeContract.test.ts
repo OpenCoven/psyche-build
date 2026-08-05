@@ -70,4 +70,20 @@ describe('Tauri Coven session native contract', () => {
     );
     expect(libSource).not.toMatch(/load_coven_sessions\s*\(/);
   });
+
+  test('shares one wall-clock deadline across health and session requests', async () => {
+    const source = await readFile(covenSessionsSourcePath, 'utf8');
+    const loadBody = functionBody(source, 'try_load_coven_sessions');
+    const requestBody = functionBody(source, 'request_endpoint');
+
+    expect(loadBody).toMatch(/let\s+deadline\s*=\s*Instant::now\(\)\s*\+\s*EXCHANGE_TIMEOUT/);
+    expect(loadBody).toMatch(
+      /request_endpoint\s*\(\s*endpoint\s*,\s*"\/api\/v1\/health"\s*,\s*deadline\s*\)/,
+    );
+    expect(loadBody).toMatch(
+      /request_endpoint\s*\(\s*endpoint\s*,\s*"\/api\/v1\/sessions"\s*,\s*deadline\s*\)/,
+    );
+    expect(requestBody).toMatch(/deadline\s*:\s*Instant/);
+    expect(requestBody).not.toMatch(/Instant::now\(\)\s*\+\s*EXCHANGE_TIMEOUT/);
+  });
 });

@@ -168,6 +168,43 @@ describe('Tauri Coven session model', () => {
     expect(covenSessions).toEqual(remoteOriginal);
   });
 
+  test('normalizes local and Coven sessions into their most-specific worktree rows', () => {
+    const project = {
+      name: 'Alpha',
+      root: '/repo',
+      worktrees: [
+        { path: '/repo', branch: 'main' },
+        { path: '/external/feature', branch: 'feature' },
+        { path: '/external/feature/nested', branch: 'nested' },
+      ],
+    };
+
+    const result = model.buildProjectRailModel(
+      project,
+      [{ id: 'local', name: 'Local', worktreePath: '/external/feature' }],
+      [{
+        id: 'remote',
+        projectRoot: '/repo',
+        cwd: '/external/feature/nested/app',
+        title: 'Remote',
+        status: 'waiting',
+      }],
+      '',
+    );
+
+    expect(result.worktrees[1].rows).toEqual([
+      expect.objectContaining({ source: 'psyche', id: 'local', worktreePath: '/external/feature' }),
+    ]);
+    expect(result.worktrees[2].rows).toEqual([
+      expect.objectContaining({
+        source: 'coven',
+        id: 'remote',
+        worktreePath: '/external/feature/nested',
+        needsAttention: true,
+      }),
+    ]);
+  });
+
   test('creates an idle discovery state and only shows first-request loading', () => {
     const initial = model.createCovenDiscoveryState();
 
@@ -216,6 +253,24 @@ describe('Tauri Coven session model', () => {
       expect(recovered.phase).toBe('ready');
       expect(recovered.sessionsByProject.get('/beta')?.[0].id).toBe('recovered');
     }
+  });
+
+  test('treats a healthy empty response as ready with no sessions', () => {
+    const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
+    const empty = model.applyCovenResponse(
+      requested.state,
+      requested.requestId,
+      { status: 'empty', sessions: [] },
+      103,
+    );
+
+    expect(empty).toEqual({
+      phase: 'ready',
+      sessionsByProject: new Map(),
+      message: null,
+      requestId: requested.requestId,
+      refreshedAt: 103,
+    });
   });
 
   test('turns malformed responses into errors and suppresses stale results by identity', () => {
