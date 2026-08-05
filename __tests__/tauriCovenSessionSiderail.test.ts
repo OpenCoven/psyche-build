@@ -592,6 +592,22 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.editLabelInline).not.toHaveBeenCalled();
   });
 
+  it('aggregates attention badges from normalized waiting rows', () => {
+    const renderer = createRenderer({
+      sessions: [{
+        id: 'waiting', projectRoot: '/alpha', title: 'Needs input', status: 'waiting',
+      }],
+    });
+
+    renderer.render();
+
+    const badges = renderer.sessionListEl.querySelectorAll('.session-attention-badge');
+    expect(textOf(badges)).toEqual(['1', '1']);
+    expect(badges[0].getAttribute('aria-label')).toBe('1 sessions need attention');
+    expect(badges[1].getAttribute('aria-label'))
+      .toBe('1 sessions need attention in this worktree');
+  });
+
   it('does not mark an exited attachment active', () => {
     const renderer = createRenderer({
       activeThreadId: 'attached',

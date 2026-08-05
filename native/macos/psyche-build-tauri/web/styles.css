@@ -184,7 +184,9 @@ kbd {
 }
 .session-group + .session-group { margin-top: 10px; }
 .session-group-head {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
   border: 0;
   background: transparent;
@@ -199,6 +201,20 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.session-attention-badge {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.session-group-head > .session-attention-badge { margin-left: auto; }
 
 .session-worktree-group {
   margin: 1px 0 3px;

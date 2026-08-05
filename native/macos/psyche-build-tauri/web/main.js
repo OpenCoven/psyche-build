@@ -1268,6 +1268,16 @@
       head.className = "session-group-head";
       head.textContent = project.name;
       head.title = project.root || project.name;
+      var projectAttention = visibleWorktrees.reduce(function (count, entry) {
+        return count + entry.rows.filter(function (row) { return row.needsAttention; }).length;
+      }, 0);
+      if (projectAttention > 0) {
+        var projectBadge = document.createElement("span");
+        projectBadge.className = "session-attention-badge";
+        projectBadge.textContent = String(projectAttention);
+        projectBadge.setAttribute("aria-label", projectAttention + " sessions need attention");
+        head.appendChild(projectBadge);
+      }
       head.addEventListener("click", function () { setActiveProject(project.id); });
       group.appendChild(head);
 
@@ -1293,6 +1303,18 @@
           '<span class="worktree-name">' + escapeHtml(worktreeName) + "</span>" +
           (worktree.dirty ? '<span class="worktree-state" title="Uncommitted changes">●</span>' : "") +
           (worktree.missing ? '<span class="worktree-warning" title="Worktree is missing">!</span>' : "");
+        var worktreeAttention = entry.rows.filter(function (row) {
+          return row.needsAttention;
+        }).length;
+        if (worktreeAttention > 0) {
+          var worktreeBadge = document.createElement("span");
+          worktreeBadge.className = "session-attention-badge";
+          worktreeBadge.textContent = String(worktreeAttention);
+          worktreeBadge.setAttribute(
+            "aria-label", worktreeAttention + " sessions need attention in this worktree"
+          );
+          worktreeHead.appendChild(worktreeBadge);
+        }
         worktreeHead.title = worktree.virtual ? "Sessions with no available worktree" : worktree.path;
         worktreeHead.disabled = Boolean(worktree.virtual);
         worktreeHead.addEventListener("click", async function () {
@@ -1311,6 +1333,21 @@
           worktree.collapsed = !worktree.collapsed;
           refreshSidebar();
           saveWorkspaceSoon();
+        });
+        worktreeHead.addEventListener("keydown", function (event) {
+          if (worktree.virtual || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+          var collapse = event.key === "ArrowLeft";
+          if (worktree.collapsed === collapse) return;
+          event.preventDefault();
+          worktree.collapsed = collapse;
+          refreshSidebar();
+          saveWorkspaceSoon();
+          requestAnimationFrame(function () {
+            var heads = sessionListEl.querySelectorAll(".session-worktree-head");
+            for (var i = 0; i < heads.length; i++) {
+              if (heads[i].title === worktree.path) { heads[i].focus(); break; }
+            }
+          });
         });
         worktreeGroup.appendChild(worktreeHead);
 
@@ -1536,6 +1573,26 @@
         sessionSearchEl.blur();
         e.stopPropagation();
       }
+    });
+  }
+  if (sessionListEl) {
+    sessionListEl.addEventListener("keydown", function (event) {
+      if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
+      var items = Array.prototype.filter.call(
+        sessionListEl.querySelectorAll(
+          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, .session-close"
+        ),
+        function (item) { return item.offsetParent !== null; }
+      );
+      if (!items.length) return;
+      var current = items.indexOf(document.activeElement);
+      var next = current;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = items.length - 1;
+      else if (event.key === "ArrowDown") next = Math.min(items.length - 1, current + 1);
+      else next = current <= 0 ? 0 : current - 1;
+      event.preventDefault();
+      items[next].focus();
     });
   }
 
