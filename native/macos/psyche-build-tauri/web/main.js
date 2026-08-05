@@ -75,110 +75,8 @@
     agentSkills: [],
   };
 
-  var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
-  var covenPollTimer = null;
-  var COVEN_POLL_MS = 5000;
-
-  async function refreshCovenSessions() {
-    var request = PsycheSessions.beginCovenRequest(covenDiscovery);
-    covenDiscovery = request.state;
-    var requestId = request.requestId;
-    renderSessionList();
-    var projectRootGroups = [];
-    state.projects.forEach(function (project) {
-      var candidates = [project.root].concat(
-        (state.env && state.env.native_workspace_v2 === false
-          ? []
-          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
-          return worktree.path;
-        })
-      );
-      var roots = [];
-      candidates.forEach(function (root) {
-        if (root && roots.indexOf(root) === -1) roots.push(root);
-      });
-      if (roots.length > 0) projectRootGroups.push(roots);
-    });
-    if (projectRootGroups.length === 0) {
-      covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
-      renderSessionList();
-      return;
-    }
-    var responses = await Promise.all(projectRootGroups.map(function (roots) {
-      return invoke("coven_sessions", { projectRoots: roots }).catch(function () {
-        return {
-          status: "error",
-          sessions: [],
-          message: "Coven sessions could not be loaded",
-        };
-      });
-    }));
-    var sessionsById = new Map();
-    responses.forEach(function (candidate) {
-      (Array.isArray(candidate.sessions) ? candidate.sessions : []).forEach(function (session) {
-        if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
-      });
-    });
-    var sessions = Array.from(sessionsById.values());
-    var hasSuccessfulFamily = responses.some(function (candidate) {
-      return candidate.status === "ready" || candidate.status === "empty";
-    });
-    var firstFailure = responses.find(function (candidate) {
-      return candidate.status !== "ready" && candidate.status !== "empty";
-    });
-    var response = sessions.length > 0
-      ? { status: "ready", sessions: sessions }
-      : hasSuccessfulFamily
-        ? { status: "empty", sessions: [] }
-        : (firstFailure || {
-        status: "error",
-        sessions: [],
-        message: "Coven sessions could not be loaded",
-      });
-    covenDiscovery = PsycheSessions.applyCovenResponse(
-      covenDiscovery, requestId, response
-    );
-    renderSessionList();
-  }
-
-  function invalidateCovenDiscovery() {
-    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
-    renderSessionList();
-  }
-
-  function requestCovenRefresh() {
-    if (isBootstrapping) return;
-    return Promise.resolve(refreshCovenSessions()).catch(function () {});
-  }
-
-  function stopCovenPolling() {
-    if (covenPollTimer !== null) {
-      clearInterval(covenPollTimer);
-      covenPollTimer = null;
-    }
-  }
-
-  function startCovenPolling() {
-    stopCovenPolling();
-    if (document.visibilityState === "hidden") return;
-    Promise.resolve(refreshCovenSessions()).catch(function () {});
-    covenPollTimer = setInterval(function () {
-      Promise.resolve(refreshCovenSessions()).catch(function () {});
-    }, COVEN_POLL_MS);
-  }
-
-  function completeCovenBoot() {
-    isBootstrapping = false;
-    startCovenPolling();
-  }
-
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") {
-      saveWorkspaceNow();
-      stopCovenPolling();
-    } else {
-      startCovenPolling();
-    }
+    if (document.visibilityState === "hidden") saveWorkspaceNow();
   }
 
   /**
@@ -307,7 +205,6 @@
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var isRestoringWorkspace = false;
-  var isBootstrapping = true;
   var saveWorkspaceTimer = 0;
 
   function clampInt(value, fallback, min, max) {
@@ -762,35 +659,6 @@
       spawnPty(thread, thread.worktreePath);
     });
     return thread;
-  }
-
-  async function openCovenSession(project, session) {
-    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
-      return null;
-    }
-    if (project.id === state.activeProjectId) {
-      if (!(await showTerminalView())) return null;
-    } else if (!(await setActiveProject(project.id))) {
-      return null;
-    }
-    var existing = state.threads.find(function (thread) {
-      return thread.projectId === project.id &&
-        thread.covenSessionId === session.id && thread.status !== "exited";
-    });
-    if (existing) {
-      await focusThread(existing.id);
-      return existing;
-    }
-    var title = typeof session.title === "string" ? session.title.trim() : "";
-    return createThread({
-      project: project,
-      name: title || session.id,
-      kind: "coven",
-      command: "coven",
-      args: ["attach", session.id],
-      projectRoot: session.cwd || session.projectRoot || project.root,
-      covenSessionId: session.id,
-    });
   }
 
   function spawnPty(thread, projectRoot) {
@@ -1677,7 +1545,6 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
-    invalidateCovenDiscovery();
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -1711,7 +1578,6 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
-    requestCovenRefresh();
     return true;
   }
 
@@ -3576,7 +3442,6 @@
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (!isBootstrapping) requestCovenRefresh();
     return project;
   }
 
@@ -3728,7 +3593,6 @@
       restoreProjectLayout(project);
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
-    completeCovenBoot();
   }
 
   invoke("app_environment")
