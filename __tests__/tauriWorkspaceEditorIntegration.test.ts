@@ -868,6 +868,8 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
+      invalidateCovenDiscovery: () => undefined,
+      requestCovenRefresh: () => undefined,
     });
 
     const removing = removeProject(project.id);
