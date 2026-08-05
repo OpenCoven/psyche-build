@@ -285,16 +285,6 @@ kbd {
   color: var(--muted);
 }
 
-.session-subsection-label {
-  padding: 5px 8px 2px 22px;
-  font-size: 9.5px;
-  font-weight: 600;
-  line-height: 1.3;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--muted);
-}
-
 .session-row {
   display: flex;
   align-items: center;
