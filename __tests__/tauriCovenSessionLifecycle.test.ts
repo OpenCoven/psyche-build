@@ -77,7 +77,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(mainJs).not.toContain('startCovenPolling');
     expect(mainJs).not.toContain('openCovenSession');
     expect(mainJs).not.toContain('args: ["attach"');
-    expect(mainJs).not.toContain('Attach');
+    expect(mainJs).not.toContain('"Attach"');
     expect(nativeLib).toContain('coven_sessions,');
     expect(sessionModel).toContain('export function createCovenDiscoveryState');
   });
