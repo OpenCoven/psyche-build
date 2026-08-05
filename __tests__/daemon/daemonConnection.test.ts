@@ -70,7 +70,10 @@ class RecordingTmux extends TmuxControl {
   override sendKeysHex(paneId: string): void { this.calls.push({ op: 'input', paneId }); }
 }
 
-function buildConnection(projectRoot: string, opts: { authed?: boolean; tmux?: TmuxControl } = {}) {
+function buildConnection(
+  projectRoot: string,
+  opts: { authed?: boolean; tmux?: TmuxControl; workspaceProvider?: ConnectionDeps['workspaceProvider'] } = {},
+) {
   const ws = new FakeSocket();
   const tmux = opts.tmux ?? new RecordingTmux('psyche-test');
   const deps: ConnectionDeps = {
@@ -80,6 +83,7 @@ function buildConnection(projectRoot: string, opts: { authed?: boolean; tmux?: T
     authedViaHeader: opts.authed ?? true,
     tmux,
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+    workspaceProvider: opts.workspaceProvider,
   };
   const conn = new Connection(ws as any, deps);
   conn.bind();
@@ -250,6 +254,67 @@ describe('daemon connection project scoping', () => {
 
     expect(ws.sent[0]).toMatchObject({ type: 'error', code: 'invalid_pane' });
     expect(tmux.calls).toEqual([]);
+  });
+});
+
+describe('daemon workspace projection', () => {
+  it('returns the shared project-worktree-pane snapshot', async () => {
+    const root = await projectWithPanes([]);
+    const workspace = {
+      revision: 12,
+      projects: [{
+        id: root,
+        root,
+        title: 'project',
+        worktrees: [],
+        projectPanes: [],
+        runningCount: 0,
+        attentionCount: 0,
+      }],
+    };
+    const workspaceProvider = vi.fn(async () => workspace);
+    const { ws } = buildConnection(root, { workspaceProvider });
+
+    await request(ws, { type: 'workspace.snapshot', requestId: 'workspace-1' });
+
+    expect(workspaceProvider).toHaveBeenCalledOnce();
+    expect(ws.sent).toEqual([{
+      type: 'workspace.snapshot.result',
+      requestId: 'workspace-1',
+      workspace,
+    }]);
+  });
+
+  it('emits an ordered workspace change after a successful pane mutation', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3', title: 'old' }]);
+    const workspace = {
+      revision: 13,
+      projects: [{
+        id: root,
+        root,
+        title: 'project',
+        worktrees: [],
+        projectPanes: [],
+        runningCount: 0,
+        attentionCount: 0,
+      }],
+    };
+    const { ws } = buildConnection(root, {
+      workspaceProvider: vi.fn(async () => workspace),
+    });
+
+    await request(ws, {
+      type: 'panes.meta',
+      requestId: 'rename-1',
+      id: 'psyche-1',
+      title: 'renamed',
+    });
+    await waitFor(() => ws.sent.length === 2, 'workspace change event');
+
+    expect(ws.sent).toEqual([
+      { type: 'ack', requestId: 'rename-1', ok: true },
+      { type: 'workspace.changed', revision: 13, sequence: 1, workspace },
+    ]);
   });
 });
 

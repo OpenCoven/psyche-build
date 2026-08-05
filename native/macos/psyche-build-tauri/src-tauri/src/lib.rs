@@ -1414,6 +1414,100 @@ fn run_git(root: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: String,
+    pub head: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
+    pub detached: bool,
+    pub bare: bool,
+    pub locked: bool,
+    pub lock_reason: Option<String>,
+    pub prunable: bool,
+    pub prune_reason: Option<String>,
+    pub dirty: bool,
+    pub missing: bool,
+}
+
+fn parse_git_worktrees(raw: &str) -> Vec<GitWorktree> {
+    raw.split("\n\n")
+        .filter_map(|block| {
+            let mut worktree = GitWorktree {
+                path: String::new(),
+                head: String::new(),
+                branch: None,
+                is_main: false,
+                detached: false,
+                bare: false,
+                locked: false,
+                lock_reason: None,
+                prunable: false,
+                prune_reason: None,
+                dirty: false,
+                missing: false,
+            };
+            for line in block.lines() {
+                let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+                match key {
+                    "worktree" => worktree.path = value.to_string(),
+                    "HEAD" => worktree.head = value.to_string(),
+                    "branch" => {
+                        worktree.branch = Some(
+                            value
+                                .strip_prefix("refs/heads/")
+                                .unwrap_or(value)
+                                .to_string(),
+                        )
+                    }
+                    "detached" => worktree.detached = true,
+                    "bare" => worktree.bare = true,
+                    "locked" => {
+                        worktree.locked = true;
+                        if !value.is_empty() {
+                            worktree.lock_reason = Some(value.to_string());
+                        }
+                    }
+                    "prunable" => {
+                        worktree.prunable = true;
+                        worktree.missing = true;
+                        if !value.is_empty() {
+                            worktree.prune_reason = Some(value.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (!worktree.path.is_empty()).then_some(worktree)
+        })
+        .enumerate()
+        .map(|(index, mut worktree)| {
+            worktree.is_main = index == 0;
+            worktree
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn git_worktrees(root: String) -> Result<Vec<GitWorktree>, String> {
+    let root = canonical_project_root(&root)?.to_string_lossy().to_string();
+    let raw = run_git(&root, &["worktree", "list", "--porcelain"])?;
+    let mut worktrees = parse_git_worktrees(&raw);
+    for worktree in &mut worktrees {
+        if worktree.prunable || worktree.bare {
+            continue;
+        }
+        match run_git(
+            &worktree.path,
+            &["status", "--porcelain=v1", "--untracked-files=normal"],
+        ) {
+            Ok(status) => worktree.dirty = !status.trim().is_empty(),
+            Err(_) => worktree.missing = true,
+        }
+    }
+    Ok(worktrees)
+}
+
 /// git@github.com:owner/repo.git and https://github.com/owner/repo.git both
 /// normalise to a browsable https URL.
 fn remote_to_web_url(remote: &str) -> Option<String> {
@@ -1705,6 +1799,7 @@ pub fn run() {
             fs_read_text,
             fs_write_text,
             git_status,
+            git_worktrees,
             git_diff,
             git_log,
         ])
@@ -2233,5 +2328,22 @@ mod workspace_panel_tests {
         assert_eq!(diff.bytes, expected.len() as u64);
         assert_eq!(diff.lines, expected.lines().count() as u64);
         assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn parses_linked_detached_locked_and_prunable_worktrees() {
+        let worktrees = parse_git_worktrees(
+            "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n\
+             worktree /external/review\nHEAD def\ndetached\nlocked in use\n\n\
+             worktree /missing\nHEAD 000\nprunable gitdir file points to non-existent location\n\n",
+        );
+
+        assert_eq!(worktrees.len(), 3);
+        assert!(worktrees[0].is_main);
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert!(worktrees[1].detached);
+        assert_eq!(worktrees[1].lock_reason.as_deref(), Some("in use"));
+        assert!(worktrees[2].prunable);
+        assert!(worktrees[2].missing);
     }
 }

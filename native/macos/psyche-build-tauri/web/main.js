@@ -91,6 +91,44 @@
   function activeProject() {
     return findProject(state.activeProjectId) || state.projects[0] || null;
   }
+  function mergeWorktreePresentationState(project, discovered) {
+    var existing = Array.isArray(project.worktrees) ? project.worktrees : [];
+    return (Array.isArray(discovered) ? discovered : []).map(function (worktree) {
+      var previous = existing.find(function (item) { return item.path === worktree.path; });
+      return Object.assign({}, worktree, { collapsed: previous ? !!previous.collapsed : false });
+    });
+  }
+  function selectedWorktree(project) {
+    project = project || activeProject();
+    if (!project) return null;
+    var worktrees = Array.isArray(project.worktrees) ? project.worktrees : [];
+    return worktrees.find(function (worktree) { return worktree.path === project.selectedWorktreePath; }) ||
+      worktrees.find(function (worktree) { return worktree.is_main; }) ||
+      worktrees[0] ||
+      { path: project.root, branch: null, is_main: true, dirty: false, missing: false };
+  }
+  function activeWorkspaceRoot(project) {
+    var worktree = selectedWorktree(project);
+    return worktree ? worktree.path : (project && project.root);
+  }
+  function refreshProjectWorktrees(project) {
+    if (!project) return Promise.resolve([]);
+    return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
+      project.worktrees = mergeWorktreePresentationState(project, worktrees);
+      var selected = selectedWorktree(project);
+      project.selectedWorktreePath = selected ? selected.path : project.root;
+      refreshSidebar();
+      saveWorkspaceSoon();
+      return project.worktrees;
+    }).catch(function () {
+      project.worktrees = mergeWorktreePresentationState(project, [{
+        path: project.root, branch: null, is_main: true, dirty: false, missing: false,
+      }]);
+      project.selectedWorktreePath = project.root;
+      refreshSidebar();
+      return project.worktrees;
+    });
+  }
   function activeProjectThreads() {
     var p = activeProject();
     if (!p) return [];
@@ -226,7 +264,7 @@
   }
 
   function persistableProject(project) {
-    return { id: project.id, name: project.name, root: project.root, layout: ensureProjectLayout(project), browser: ensureBrowserModel(project) };
+    return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browser: ensureBrowserModel(project) };
   }
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return;
@@ -249,6 +287,8 @@
       name: saved.name || String(saved.root).split("/").pop() || saved.root,
       root: saved.root,
       collapsed: false,
+      selectedWorktreePath: saved.selectedWorktreePath || saved.root,
+      worktrees: Array.isArray(saved.worktreePresentation) ? saved.worktreePresentation : [],
       layout: {
         mode: saved.layout && saved.layout.mode ? saved.layout.mode : "terminal",
         side: saved.layout && saved.layout.side ? saved.layout.side : "right",
@@ -562,6 +602,7 @@
     var thread = {
       id: id,
       projectId: project ? project.id : null,
+      worktreePath: opts.projectRoot || (project && activeWorkspaceRoot(project)),
       name: opts.name || "thread " + (state.threads.length + 1),
       kind: opts.kind || "shell",
       command: opts.command,
@@ -583,7 +624,7 @@
     // the wrong size and leave artifacts.
     requestAnimationFrame(function () {
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
-      spawnPty(thread, opts.projectRoot || (project && project.root));
+      spawnPty(thread, thread.worktreePath);
     });
     return thread;
   }
@@ -1013,26 +1054,74 @@
     var matched = 0;
 
     state.projects.forEach(function (project) {
-      var threads = state.threads.filter(function (t) { return t.projectId === project.id; });
-      if (needle) {
-        var projectHit = project.name.toLowerCase().indexOf(needle) !== -1;
-        threads = threads.filter(function (t) {
-          return projectHit || String(t.name).toLowerCase().indexOf(needle) !== -1;
+      var projectThreads = state.threads.filter(function (t) { return t.projectId === project.id; });
+      var projectHit = !needle || project.name.toLowerCase().indexOf(needle) !== -1;
+      var worktrees = Array.isArray(project.worktrees) && project.worktrees.length
+        ? project.worktrees
+        : [{ path: project.root, branch: null, is_main: true, dirty: false, missing: false }];
+      var visibleWorktrees = worktrees.filter(function (worktree) {
+        var worktreeHit = projectHit || String(worktree.branch || worktree.path).toLowerCase().indexOf(needle) !== -1;
+        var paneHit = projectThreads.some(function (thread) {
+          return thread.worktreePath === worktree.path && String(thread.name).toLowerCase().indexOf(needle) !== -1;
         });
-      }
-      if (threads.length === 0) return;
-      matched += threads.length;
+        return !needle || worktreeHit || paneHit;
+      });
+      if (visibleWorktrees.length === 0) return;
+      matched += visibleWorktrees.length;
 
       var group = document.createElement("div");
       group.className = "session-group";
 
-      var head = document.createElement("div");
+      var head = document.createElement("button");
+      head.type = "button";
       head.className = "session-group-head";
       head.textContent = project.name;
       head.title = project.root || project.name;
+      head.addEventListener("click", function () { setActiveProject(project.id); });
       group.appendChild(head);
 
-      threads.forEach(function (thread) {
+      visibleWorktrees.forEach(function (worktree) {
+        var worktreeGroup = document.createElement("div");
+        worktreeGroup.className = "session-worktree-group" +
+          (project.selectedWorktreePath === worktree.path ? " selected" : "") +
+          (worktree.missing ? " missing" : "");
+        var worktreeHead = document.createElement("button");
+        worktreeHead.type = "button";
+        worktreeHead.className = "session-worktree-head";
+        var worktreeName = worktree.branch || (worktree.is_main ? "main checkout" : shortenRoot(worktree.path));
+        worktreeHead.innerHTML =
+          '<span class="worktree-twisty">' + (worktree.collapsed ? "▶" : "▼") + "</span>" +
+          '<span class="worktree-name">' + escapeHtml(worktreeName) + "</span>" +
+          (worktree.dirty ? '<span class="worktree-state" title="Uncommitted changes">●</span>' : "") +
+          (worktree.missing ? '<span class="worktree-warning" title="Worktree is missing">!</span>' : "");
+        worktreeHead.title = worktree.path;
+        worktreeHead.addEventListener("click", async function () {
+          if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+          project.selectedWorktreePath = worktree.path;
+          worktree.collapsed = false;
+          renderPanel(currentPanel());
+          loadAgentSkills();
+          refreshSidebar();
+          saveWorkspaceSoon();
+        });
+        worktreeHead.addEventListener("dblclick", function (event) {
+          event.preventDefault();
+          worktree.collapsed = !worktree.collapsed;
+          refreshSidebar();
+          saveWorkspaceSoon();
+        });
+        worktreeGroup.appendChild(worktreeHead);
+
+        var threads = projectThreads.filter(function (thread) {
+          return thread.worktreePath === worktree.path;
+        });
+        if (needle && !projectHit) {
+          threads = threads.filter(function (thread) {
+            return String(thread.name).toLowerCase().indexOf(needle) !== -1 ||
+              String(worktree.branch || worktree.path).toLowerCase().indexOf(needle) !== -1;
+          });
+        }
+        if (!worktree.collapsed) threads.forEach(function (thread) {
         var row = document.createElement("button");
         row.type = "button";
         row.className = "session-row " + sessionStatusClass(thread) +
@@ -1040,12 +1129,12 @@
         row.dataset.threadId = thread.id;
         row.setAttribute("role", "treeitem");
         row.setAttribute("aria-selected", state.activeThreadId === thread.id ? "true" : "false");
-        row.title = thread.name + " — " + (project.root || "");
+        row.title = thread.name + " — " + worktree.path;
         row.innerHTML =
           '<span class="session-dot"></span>' +
           '<span class="session-text">' +
             '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
-            '<span class="session-sub">' + escapeHtml(shortenRoot(project.root)) + "</span>" +
+            '<span class="session-sub">' + escapeHtml(thread.kind + " · " + shortenRoot(worktree.path)) + "</span>" +
           "</span>" +
           '<button class="session-close" title="Close session" aria-label="Close session">×</button>';
 
@@ -1069,7 +1158,15 @@
             done: function () { renderSessionList(); },
           });
         });
-        group.appendChild(row);
+          worktreeGroup.appendChild(row);
+        });
+        if (!worktree.collapsed && threads.length === 0) {
+          var noPanes = document.createElement("div");
+          noPanes.className = "session-worktree-empty";
+          noPanes.textContent = worktree.missing ? "Unavailable" : "No panes — select and press ⌘T";
+          worktreeGroup.appendChild(noPanes);
+        }
+        group.appendChild(worktreeGroup);
       });
 
       sessionListEl.appendChild(group);
@@ -1081,7 +1178,7 @@
       empty.textContent = needle
         ? "No sessions match “" + sessionFilter.trim() + "”"
         : state.projects.length
-          ? "No sessions yet — ⌘T opens one."
+          ? "No matching projects, worktrees, or panes."
           : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
@@ -1318,6 +1415,7 @@
   async function openFileTab(path, project) {
     project = project || activeProject();
     if (!project) return;
+    var workspaceRoot = activeWorkspaceRoot(project);
     var existing = state.openFiles.filter(function (f) {
       return f.path === path && f.projectId === project.id;
     })[0];
@@ -1333,13 +1431,14 @@
     if (!canOpen) return false;
 
     fileCounter += 1;
-    var rel = relativeToRoot(project.root, path);
+    var rel = relativeToRoot(workspaceRoot, path);
     var file = {
       id: "f" + fileCounter,
       path: path,
       rel: rel,
       name: rel.split("/").pop() || rel,
       projectId: project.id,
+      workspaceRoot: workspaceRoot,
       text: "",
       originalText: "",
       dirty: false,
@@ -1359,7 +1458,7 @@
     state.openFiles.push(file);
     activateFileTabNow(file.id);
     try {
-      var res = await invoke("fs_read_text", { root: project.root, path: path });
+      var res = await invoke("fs_read_text", { root: workspaceRoot, path: path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(res.text || ""));
       file.truncated = res.truncated;
       file.binary = res.binary;
@@ -1619,7 +1718,7 @@
       return false;
     }
     try {
-      var loaded = await invoke("fs_read_text", { root: project.root, path: file.path });
+      var loaded = await invoke("fs_read_text", { root: file.workspaceRoot || project.root, path: file.path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(loaded.text || ""), {
         loading: false,
         error: null,
@@ -1667,7 +1766,7 @@
     }
     try {
       var saved = await invoke("fs_write_text", {
-        root: project.root,
+        root: file.workspaceRoot || project.root,
         path: file.path,
         text: file.text,
         expectedText: file.originalText,
@@ -2018,10 +2117,11 @@
    */
   function loadAgentSkills(verbose) {
     var project = activeProject();
+    var workspaceRoot = activeWorkspaceRoot(project);
     invoke("agent_skills", {
       harness: "claude",
-      projectRoot: project ? project.root : null,
-      project_root: project ? project.root : null,
+      projectRoot: workspaceRoot || null,
+      project_root: workspaceRoot || null,
     }).then(function (skills) {
       state.agentSkills = Array.isArray(skills) ? skills : [];
       if (verbose) {
@@ -2687,9 +2787,10 @@
     if (!fileTreeEl) return;
     var project = activeProject();
     if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
-    if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(project.root);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
     fileTreeEl.innerHTML = "";
-    await appendDirInto(fileTreeEl, project.root, project.root, 0);
+    await appendDirInto(fileTreeEl, workspaceRoot, workspaceRoot, 0);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
   }
 
@@ -2811,7 +2912,7 @@
     var projectId = project.id;
     var status;
     try {
-      status = await invoke("git_status", { root: project.root });
+      status = await invoke("git_status", { root: activeWorkspaceRoot(project) });
     } catch (err) {
       if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
           !activeProject() || activeProject().id !== projectId ||
@@ -2883,7 +2984,7 @@
     resetDiffDetail("Loading diff…");
     try {
       var result = await invoke("git_diff", {
-        root: project.root,
+        root: activeWorkspaceRoot(project),
         path: entry.path,
         staged: staged,
       });
@@ -2917,8 +3018,9 @@
 
     var status, commits;
     try {
-      status = await invoke("git_status", { root: project.root });
-      commits = status.is_repo ? await invoke("git_log", { root: project.root, limit: 30 }) : [];
+      var workspaceRoot = activeWorkspaceRoot(project);
+      status = await invoke("git_status", { root: workspaceRoot });
+      commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
@@ -3019,11 +3121,12 @@
     if (!(await showTerminalView())) return null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
-    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browser: { tabs: [], activeTabId: null } };
+    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browser: { tabs: [], activeTabId: null } };
     state.projects.push(project);
     state.activeProjectId = project.id;
     restoreProjectLayout(project);
     refreshSidebar();
+    await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
     return project;
@@ -3057,12 +3160,14 @@
 
   function ensureProjectPsyche(project) {
     if (!project) return null;
-    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.kind === "psyche" && t.status !== "exited"; });
+    var worktree = selectedWorktree(project);
+    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.worktreePath === worktree.path && t.kind === "psyche" && t.status !== "exited"; });
     if (existing) { focusThread(existing.id); return existing; }
     return spawnDefaultThreadIn(project);
   }
 
   function spawnDefaultThreadIn(project) {
+    var worktree = selectedWorktree(project);
     if (state.env && state.env.psyche_entry && state.env.node_path) {
       var shell = (state.env.default_shell) || "/bin/zsh";
       var quoted = function (s) {
@@ -3075,7 +3180,7 @@
         kind: "psyche",
         command: shell,
         args: ["-l", "-c", cmd],
-        projectRoot: project.root,
+        projectRoot: worktree.path,
         env: tauriPsycheEnv(),
       });
     } else {
@@ -3085,20 +3190,21 @@
         kind: "shell",
         command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
         args: ["-l"],
-        projectRoot: project.root,
+        projectRoot: worktree.path,
       });
     }
   }
 
   function spawnDefaultThread() {
     var project = activeProject();
+    var worktree = selectedWorktree(project);
     return createThread({
       project: project,
       name: "shell " + (state.threads.length + 1),
       kind: "shell",
       command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
       args: ["-l"],
-      projectRoot: project && project.root,
+      projectRoot: worktree && worktree.path,
     });
   }
 
@@ -3163,6 +3269,9 @@
         project = activeProject();
         if (project) restoreProjectLayout(project);
         isRestoringWorkspace = false;
+        await Promise.all(state.projects.map(function (savedProject) {
+          return refreshProjectWorktrees(savedProject);
+        }));
       }
       if (!project) project = await addProject(bootRoot);
       if (project) {

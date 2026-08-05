@@ -28,7 +28,7 @@ describe('Tauri workspace panels', () => {
       /invoke\("fs_list_dir",\s*\{\s*root:\s*root,\s*path:\s*dirPath\s*\}\)/
     );
     expect(mainJs).toMatch(
-      /invoke\("fs_read_text",\s*\{\s*root:\s*project\.root,\s*path:\s*path\s*\}\)/
+      /invoke\("fs_read_text",\s*\{\s*root:\s*workspaceRoot,\s*path:\s*path\s*\}\)/
     );
     expect(tauriLib).toMatch(/fn\s+fs_list_dir\(root:\s*String,\s*path:\s*String\)/);
     expect(tauriLib).toMatch(/fn\s+fs_read_text\(root:\s*String,\s*path:\s*String\)/);

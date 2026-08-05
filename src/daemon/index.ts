@@ -41,6 +41,8 @@ import {
   type AgenticCapabilityStrategy,
 } from '../orchestration/capabilityRouter.js';
 import type { CovenClient } from './bridge.js';
+import { readDaemonWorkspaceSnapshot } from './workspace.js';
+import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 
 export interface DaemonOptions {
   port: number;
@@ -163,6 +165,7 @@ export interface ConnectionDeps {
   authedViaHeader: boolean;
   tmux: TmuxControl;
   capabilityRouter: AgenticCapabilityRouter;
+  workspaceProvider?: () => Promise<WorkspaceSnapshot>;
 }
 
 /**
@@ -173,6 +176,7 @@ export interface ConnectionDeps {
  */
 export class Connection {
   private authed: boolean;
+  private workspaceSequence = 0;
   private activeStreams = new Map<StreamId, { paneId: string }>();
   private authTimer: NodeJS.Timeout | null = null;
   /**
@@ -275,6 +279,24 @@ export class Connection {
     }
   }
 
+  private async emitWorkspaceChanged(): Promise<void> {
+    try {
+      const workspace = await (
+        this.deps.workspaceProvider?.()
+        ?? readDaemonWorkspaceSnapshot(this.deps.projectRoot)
+      );
+      this.workspaceSequence += 1;
+      this.send({
+        type: 'workspace.changed',
+        revision: workspace.revision,
+        sequence: this.workspaceSequence,
+        workspace,
+      });
+    } catch {
+      // The mutation already succeeded. A failed refresh must not rewrite its result.
+    }
+  }
+
   private async onText(raw: string): Promise<void> {
     let msg: ClientRequest;
     try {
@@ -346,6 +368,27 @@ export class Connection {
         }
         return;
       }
+      case 'workspace.snapshot': {
+        try {
+          const workspace = await (
+            this.deps.workspaceProvider?.()
+            ?? readDaemonWorkspaceSnapshot(this.deps.projectRoot)
+          );
+          this.send({
+            type: 'workspace.snapshot.result',
+            requestId: msg.requestId,
+            workspace,
+          });
+        } catch (e) {
+          this.send({
+            type: 'error',
+            requestId: msg.requestId,
+            code: 'workspace_snapshot_failed',
+            message: bridgeErrorMessage(e),
+          });
+        }
+        return;
+      }
       case 'projects.open': {
         try {
           const project = await buildScopedProject(this.deps.projectRoot, msg.cwd, {
@@ -376,6 +419,7 @@ export class Connection {
         try {
           const session = await launchProjectCovenSession(this.deps.projectRoot, msg.launch, createCovenClient());
           this.send({ type: 'coven.sessions.launch.result', requestId: msg.requestId, session });
+          await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_launch_failed'), message: bridgeErrorMessage(e) });
         }
@@ -391,6 +435,7 @@ export class Connection {
             pane: result.pane,
             session: result.session,
           });
+          await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_open_failed'), message: bridgeErrorMessage(e) });
         }
@@ -582,6 +627,7 @@ export class Connection {
           }
           this.releaseOutputHandler();
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
+          await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'kill_failed'), message: bridgeErrorMessage(e) });
         }
@@ -591,6 +637,7 @@ export class Connection {
         try {
           await updatePaneMeta(this.deps.projectRoot, msg.id, { title: msg.title, agent: msg.agent });
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
+          await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({ type: 'error', requestId: msg.requestId, code: 'meta_failed', message: String(e) });
         }
@@ -607,6 +654,7 @@ export class Connection {
             worktreePath: result.worktreePath,
             branch: result.branch,
           });
+          await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({
             type: 'error',

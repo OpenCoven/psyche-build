@@ -557,7 +557,7 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(/function saveFile\(file\)/);
     expect(mainJs).toMatch(/async function performFileSave\(file\)/);
     expect(mainJs).toMatch(
-      /invoke\("fs_write_text",\s*\{\s*root:\s*project\.root,\s*path:\s*file\.path,\s*text:\s*file\.text,\s*expectedText:\s*file\.originalText,?\s*\}\)/
+      /invoke\("fs_write_text",\s*\{\s*root:\s*file\.workspaceRoot\s*\|\|\s*project\.root,\s*path:\s*file\.path,\s*text:\s*file\.text,\s*expectedText:\s*file\.originalText,?\s*\}\)/
     );
     expect(mainJs).toContain('window.PsycheCodeEditor.reconcileFileSave(');
     expect(mainJs).toMatch(/backendSucceeded: true,[\s\S]*canContinue: saveOutcome\.canContinue/);
@@ -1095,7 +1095,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
   it('offers reload or keep editing after a save conflict without continuing navigation', () => {
     expect(mainJs).toMatch(/async function reloadFile\(file\)/);
-    expect(mainJs).toMatch(/invoke\("fs_read_text", \{ root: project\.root, path: file\.path \}\)/);
+    expect(mainJs).toMatch(/invoke\("fs_read_text", \{ root: file\.workspaceRoot \|\| project\.root, path: file\.path \}\)/);
     expect(mainJs).toMatch(/file\.saveError\.includes\("changed on disk"\)[\s\S]*showFileDecision\(\{ mode: "conflict", file: file \}\)/);
     expect(mainJs).toMatch(/conflictChoice === "reload"[\s\S]*await reloadFile\(file\)[\s\S]*return false/);
     expect(mainJs).toMatch(

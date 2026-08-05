@@ -102,6 +102,7 @@ export interface PaneStatusResult {
 
 export type ClientRequest =
   | { type: 'hello'; token: string; clientName?: string }
+  | { type: 'workspace.snapshot'; requestId: string }
   | { type: 'projects.list'; requestId: string }
   | { type: 'projects.open'; requestId: string; cwd?: string; title?: string; autonomyProfile?: string }
   | { type: 'panes.list'; requestId: string }
@@ -124,6 +125,8 @@ export type ClientRequest =
 
 export type ServerResponse =
   | { type: 'welcome'; protocol: number; serverVersion: string }
+  | { type: 'workspace.snapshot.result'; requestId: string; workspace: WorkspaceSnapshot }
+  | { type: 'workspace.changed'; revision: number; sequence: number; workspace: WorkspaceSnapshot }
   | { type: 'error'; requestId?: string; code: string; message: string }
   | { type: 'ack'; requestId: string; ok: true }
   | { type: 'projects.list.result'; requestId: string; projects: ProjectSummary[] }
@@ -171,3 +174,4 @@ import type {
   AgenticCapabilityExecution,
   AgenticCapabilityRequest,
 } from '../orchestration/capabilityRouter.js';
+import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
