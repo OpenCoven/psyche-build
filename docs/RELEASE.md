@@ -31,9 +31,14 @@ ID owns both the Developer ID and iOS distribution identities. Then create:
 Record the truthful export-compliance answer before release. If project
 metadata must change as a result, land and verify that change before tagging.
 
-Create a protected GitHub `release` environment with a non-self required
-reviewer, `prevent_self_review=true`, and protected-branch deployment policy.
-Every credential below is required and belongs only in that environment:
+Identify a non-self release reviewer before publication and have them confirm
+that they can review this release. The repository's current GitHub plan exposes
+required environment reviewers and repository rulesets only after the
+repository is public, so create the protected GitHub `release` environment in
+the final-audit sequence below, not while the repository is private.
+
+Prepare every credential below for interactive entry after that environment
+exists. Each credential is required and belongs only in that environment:
 
 | Secret | Purpose |
 |---|---|
@@ -50,14 +55,13 @@ Every credential below is required and belongs only in that environment:
 | `APPLE_TEAM_ID` | Confirmed team ID shared by both release identities |
 | `HOMEBREW_TAP_TOKEN` | Least-privilege token that dispatches `OpenCoven/homebrew-tap` |
 
-Use interactive `gh secret set --env release --repo OpenCoven/psyche-build`
-input. Verify names with `gh secret list --env release`, and require
-`gh secret list --repo OpenCoven/psyche-build` to be empty. There is no
-repository-secret fallback, scheduled no-secret fallback, or optional secret
-for this release.
+Do not stage these values in files or create repository-level fallback secrets.
+There is no repository-secret fallback, scheduled no-secret fallback, or
+optional secret for this release.
 
-Protect `main` and `v*` tags before tagging. The active tag ruleset must
-restrict creation to approved release managers and block tag update/deletion.
+Protect `main` and `v*` tags before tagging. Two separate active tag rulesets
+must restrict creation to approved release managers and block tag
+update/deletion without giving those managers an immutability bypass.
 The workflow separately requires a verified signed annotated tag whose commit
 is on `origin/main`, and every secret-bearing or publishing job waits at the
 protected `release` environment.
@@ -109,14 +113,120 @@ points limit on that final localization after provenance is appended.
 
 ## Final audit, visibility, and signed tag
 
-Keep the repository private through the final release-commit and secret audit.
+Keep the repository private through the final release-commit, secret audit, and
+publication audit.
 Scan the full history and the exact `git archive` publication tree with
 redacted Gitleaks output, review every finding, confirm there are no GitHub
-release artifacts/caches/repository secrets, and re-check the protected
-`release` environment. Only after that final secret audit, make the repository
-public, enable secret scanning and push protection, and verify `main` protection
-and the active `v*` tag ruleset. The repository must be public before the tag;
-the workflow fails before accessing credentials when it is private.
+release artifacts/caches/repository secrets, and confirm the unchanged release
+commit. Only after that private audit, make the repository public and enable
+secret scanning and push protection. The repository must be public before the
+tag; the workflow fails before accessing credentials when it is private.
+
+Once a non-self member of the OpenCoven `Maintainers` team has accepted release
+review duty, attach that team with read access and create the protected
+`release` environment. The workflow has two valid entry points: a `v*` tag push
+and a manual recovery dispatch from `main`. Use selected branch/tag policies for
+those exact refs; a protected-branches-only policy rejects the tag-triggered
+jobs.
+
+```sh
+gh api --method PATCH repos/OpenCoven/psyche-build -f visibility=public
+gh api --method PATCH repos/OpenCoven/psyche-build \
+  -f 'security_and_analysis[secret_scanning][status]=enabled' \
+  -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
+
+gh api --method PUT \
+  orgs/OpenCoven/teams/maintainers/repos/OpenCoven/psyche-build \
+  -f permission=pull
+
+maintainers_team_id="$(gh api orgs/OpenCoven/teams/maintainers --jq .id)"
+environment_payload="$(mktemp)"
+trap 'rm -f "$environment_payload"' EXIT
+jq -n --argjson team_id "$maintainers_team_id" '{
+  wait_timer: 0,
+  prevent_self_review: true,
+  reviewers: [{type: "Team", id: $team_id}],
+  deployment_branch_policy: {
+    protected_branches: false,
+    custom_branch_policies: true
+  }
+}' > "$environment_payload"
+gh api --method PUT repos/OpenCoven/psyche-build/environments/release --input "$environment_payload"
+gh api --method POST \
+  repos/OpenCoven/psyche-build/environments/release/deployment-branch-policies \
+  -f name=main -f type=branch
+gh api --method POST \
+  repos/OpenCoven/psyche-build/environments/release/deployment-branch-policies \
+  -f name='v*' -f type=tag
+```
+
+Protect `main` with the two exact GitHub Actions check names already emitted by
+the release commit. Require a fresh non-self approval after the last push,
+enforce the policy for administrators, and leave no force-push or deletion
+path:
+
+```sh
+jq -n '{
+  required_status_checks: {
+    strict: true,
+    checks: [
+      {context: "TypeScript and Rust"},
+      {context: "iOS"}
+    ]
+  },
+  enforce_admins: true,
+  required_pull_request_reviews: {
+    dismissal_restrictions: {},
+    dismiss_stale_reviews: true,
+    require_code_owner_reviews: false,
+    required_approving_review_count: 1,
+    require_last_push_approval: true
+  },
+  restrictions: null,
+  required_linear_history: true,
+  allow_force_pushes: false,
+  allow_deletions: false,
+  block_creations: false,
+  required_conversation_resolution: true,
+  lock_branch: false,
+  allow_fork_syncing: false
+}' | gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -
+```
+
+Protect `main` and `v*` tags now that repository rulesets are available. A
+ruleset bypass applies to every rule in that ruleset, so use two separate active
+tag rulesets: one lets the `Maintainers` team create a release tag, and the
+other has no bypass actors and makes matching tags immutable.
+
+```sh
+jq -n --argjson team_id "$maintainers_team_id" '{
+  name: "Release tag creation",
+  target: "tag",
+  enforcement: "active",
+  bypass_actors: [{actor_id: $team_id, actor_type: "Team", bypass_mode: "always"}],
+  conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+  rules: [{type: "creation"}]
+}' | gh api --method POST repos/OpenCoven/psyche-build/rulesets --input -
+
+jq -n '{
+  name: "Immutable release tags",
+  target: "tag",
+  enforcement: "active",
+  bypass_actors: [],
+  conditions: {ref_name: {include: ["refs/tags/v*"], exclude: []}},
+  rules: [{type: "update"}, {type: "deletion"}]
+}' | gh api --method POST repos/OpenCoven/psyche-build/rulesets --input -
+```
+
+Verify `main` protection, both active tag rulesets and their exact bypass
+actors, the reviewer team, `prevent_self_review=true`, and both custom
+deployment policies before adding credentials.
+
+Use interactive `gh secret set --env release --repo OpenCoven/psyche-build`
+input for every value in the table above. Verify the exact names with
+`gh secret list --env release`, and require
+`gh secret list --repo OpenCoven/psyche-build` to remain empty. Never pass a
+secret value on a command line or write it to the worktree.
 
 Resolve the unchanged reviewed commit and create the signed annotated tag:
 

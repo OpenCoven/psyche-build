@@ -6,7 +6,7 @@ import {
   assertSingleTmuxCommandLine,
   assertTmuxPaneId,
   quoteTmuxArgument,
-} from '../../utils/tmuxTarget.js';
+} from '../utils/tmuxTarget.js';
 
 /**
  * Thin wrapper around `tmux -C attach-session` (tmux control mode).
@@ -16,8 +16,13 @@ import {
  * commands terminated with \n; responses come back as %begin/%end blocks
  * but we don't use them yet — most ops are fire-and-forget for now.
  *
- * Lifted from meow/psyche-daemon-ws commit cda47c5 into src/services/bridge/
- * per docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md.
+ * Originally lifted from meow/psyche-daemon-ws commit cda47c5 per
+ * docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md, then copied a
+ * second time into src/daemon/. Shared here because the two copies drifted:
+ * only this one learned to handle surrogate pairs, so the daemon streamed
+ * every astral-plane character (emoji, CJK extensions) to clients as U+FFFD,
+ * and only the daemon copy had selectPane. Both transports — the LAN bridge
+ * in ./bridge/ and the loopback daemon in ../daemon/ — now use this module.
  */
 export class TmuxControl extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -84,6 +89,10 @@ export class TmuxControl extends EventEmitter {
     const x = tmuxDimensionArg(cols, 'cols');
     const y = tmuxDimensionArg(rows, 'rows');
     this.command(`resize-pane -t ${quote(target)} -x ${x} -y ${y}`);
+  }
+
+  selectPane(paneId: string): void {
+    this.command(`select-pane -t ${quote(assertTmuxPaneId(paneId))}`);
   }
 
   killPane(paneId: string): void {

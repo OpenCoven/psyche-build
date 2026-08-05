@@ -84,22 +84,57 @@
     covenDiscovery = request.state;
     var requestId = request.requestId;
     renderSessionList();
-    var roots = state.projects.map(function (project) { return project.root; });
-    if (roots.length === 0) {
+    var projectRootGroups = [];
+    state.projects.forEach(function (project) {
+      var candidates = [project.root].concat(
+        (state.env && state.env.native_workspace_v2 === false
+          ? []
+          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
+          return worktree.path;
+        })
+      );
+      var roots = [];
+      candidates.forEach(function (root) {
+        if (root && roots.indexOf(root) === -1) roots.push(root);
+      });
+      if (roots.length > 0) projectRootGroups.push(roots);
+    });
+    if (projectRootGroups.length === 0) {
       covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
       renderSessionList();
       return;
     }
-    var response;
-    try {
-      response = await invoke("coven_sessions", { projectRoots: roots });
-    } catch (_) {
-      response = {
+    var responses = await Promise.all(projectRootGroups.map(function (roots) {
+      return invoke("coven_sessions", { projectRoots: roots }).catch(function () {
+        return {
+          status: "error",
+          sessions: [],
+          message: "Coven sessions could not be loaded",
+        };
+      });
+    }));
+    var sessionsById = new Map();
+    responses.forEach(function (candidate) {
+      (Array.isArray(candidate.sessions) ? candidate.sessions : []).forEach(function (session) {
+        if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
+      });
+    });
+    var sessions = Array.from(sessionsById.values());
+    var hasSuccessfulFamily = responses.some(function (candidate) {
+      return candidate.status === "ready" || candidate.status === "empty";
+    });
+    var firstFailure = responses.find(function (candidate) {
+      return candidate.status !== "ready" && candidate.status !== "empty";
+    });
+    var response = sessions.length > 0
+      ? { status: "ready", sessions: sessions }
+      : hasSuccessfulFamily
+        ? { status: "empty", sessions: [] }
+        : (firstFailure || {
         status: "error",
         sessions: [],
         message: "Coven sessions could not be loaded",
-      };
-    }
+      });
     covenDiscovery = PsycheSessions.applyCovenResponse(
       covenDiscovery, requestId, response
     );
@@ -162,10 +197,56 @@
   function activeProject() {
     return findProject(state.activeProjectId) || state.projects[0] || null;
   }
+  function mergeWorktreePresentationState(project, discovered) {
+    var existing = Array.isArray(project.worktrees) ? project.worktrees : [];
+    return (Array.isArray(discovered) ? discovered : []).map(function (worktree) {
+      var previous = existing.find(function (item) { return item.path === worktree.path; });
+      return Object.assign({}, worktree, { collapsed: previous ? !!previous.collapsed : false });
+    });
+  }
+  function selectedWorktree(project) {
+    project = project || activeProject();
+    if (!project) return null;
+    var worktrees = Array.isArray(project.worktrees) ? project.worktrees : [];
+    return worktrees.find(function (worktree) { return worktree.path === project.selectedWorktreePath; }) ||
+      worktrees.find(function (worktree) { return worktree.is_main; }) ||
+      worktrees[0] ||
+      { path: project.root, branch: null, is_main: true, dirty: false, missing: false };
+  }
+  function activeWorkspaceRoot(project) {
+    var worktree = selectedWorktree(project);
+    return worktree ? worktree.path : (project && project.root);
+  }
+  function refreshProjectWorktrees(project) {
+    if (!project) return Promise.resolve([]);
+    if (state.env && state.env.native_workspace_v2 === false) {
+      project.worktrees = mergeWorktreePresentationState(project, [{
+        path: project.root, branch: null, is_main: true, dirty: false, missing: false,
+      }]);
+      project.selectedWorktreePath = project.root;
+      refreshSidebar();
+      return Promise.resolve(project.worktrees);
+    }
+    return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
+      project.worktrees = mergeWorktreePresentationState(project, worktrees);
+      var selected = selectedWorktree(project);
+      project.selectedWorktreePath = selected ? selected.path : project.root;
+      refreshSidebar();
+      saveWorkspaceSoon();
+      return project.worktrees;
+    }).catch(function () {
+      project.worktrees = mergeWorktreePresentationState(project, [{
+        path: project.root, branch: null, is_main: true, dirty: false, missing: false,
+      }]);
+      project.selectedWorktreePath = project.root;
+      refreshSidebar();
+      return project.worktrees;
+    });
+  }
   function activeProjectThreads() {
     var p = activeProject();
     if (!p) return [];
-    return state.threads.filter(function (t) { return t.projectId === p.id; });
+    return state.threads.filter(function (t) { return t.projectId === p.id && !t.hidden; });
   }
   async function setActiveProject(id) {
     if (state.activeProjectId === id) return true;
@@ -177,7 +258,7 @@
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
-    var threads = state.threads.filter(function (t) { return t.projectId === id; });
+    var threads = state.threads.filter(function (t) { return t.projectId === id && !t.hidden; });
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
         ? project.lastActiveThreadId
@@ -297,13 +378,17 @@
     if (!opts || opts.persist !== false) saveSettings();
   }
 
+  function persistableBrowsers(project) {
+    ensureBrowserModel(project);
+    return project.browsersByWorktree;
+  }
   function persistableProject(project) {
-    return { id: project.id, name: project.name, root: project.root, layout: ensureProjectLayout(project), browser: ensureBrowserModel(project) };
+    return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
   }
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return;
     try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 1, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
+      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
     } catch (_) {}
   }
   function saveWorkspaceSoon() {
@@ -321,23 +406,40 @@
       name: saved.name || String(saved.root).split("/").pop() || saved.root,
       root: saved.root,
       collapsed: false,
+      selectedWorktreePath: saved.selectedWorktreePath || saved.root,
+      worktrees: Array.isArray(saved.worktreePresentation) ? saved.worktreePresentation : [],
       layout: {
         mode: saved.layout && saved.layout.mode ? saved.layout.mode : "terminal",
         side: saved.layout && saved.layout.side ? saved.layout.side : "right",
         splitFrac: typeof (saved.layout && saved.layout.splitFrac) === "number" ? saved.layout.splitFrac : 0.6,
       },
-      browser: { tabs: [], activeTabId: null },
+      browsersByWorktree: {},
     };
-    var savedBrowser = saved.browser || {};
+    var savedBrowsers = saved.browsersByWorktree && typeof saved.browsersByWorktree === "object"
+      ? saved.browsersByWorktree
+      : {};
+    Object.keys(savedBrowsers).forEach(function (workspaceRoot) {
+      project.browsersByWorktree[workspaceRoot] = sanitizeBrowserModel(savedBrowsers[workspaceRoot]);
+    });
+    // v1 stored one browser model per project. Keep it attached to the main
+    // checkout so upgrading never discards tabs or history.
+    if (!project.browsersByWorktree[project.root] && saved.browser) {
+      project.browsersByWorktree[project.root] = sanitizeBrowserModel(saved.browser);
+    }
+    return project;
+  }
+  function sanitizeBrowserModel(savedBrowser) {
+    savedBrowser = savedBrowser || {};
+    var browser = { tabs: [], activeTabId: null };
     if (Array.isArray(savedBrowser.tabs)) {
-      project.browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
+      browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
         var url = tab.url || "about:blank";
         var history = Array.isArray(tab.history) ? tab.history.filter(Boolean).slice(-50) : [];
         return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: !!tab.created && url !== "about:blank", loading: false };
       });
     }
-    project.browser.activeTabId = savedBrowser.activeTabId || (project.browser.tabs[0] && project.browser.tabs[0].id) || null;
-    return project;
+    browser.activeTabId = savedBrowser.activeTabId || (browser.tabs[0] && browser.tabs[0].id) || null;
+    return browser;
   }
 
   // ============================================================
@@ -634,6 +736,7 @@
     var thread = {
       id: id,
       projectId: project ? project.id : null,
+      worktreePath: opts.projectRoot || (project && activeWorkspaceRoot(project)),
       name: opts.name || "thread " + (state.threads.length + 1),
       kind: opts.kind || "shell",
       command: opts.command,
@@ -656,7 +759,7 @@
     // the wrong size and leave artifacts.
     requestAnimationFrame(function () {
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
-      spawnPty(thread, opts.projectRoot || (project && project.root));
+      spawnPty(thread, thread.worktreePath);
     });
     return thread;
   }
@@ -685,7 +788,7 @@
       kind: "coven",
       command: "coven",
       args: ["attach", session.id],
-      projectRoot: project.root,
+      projectRoot: session.cwd || session.projectRoot || project.root,
       covenSessionId: session.id,
     });
   }
@@ -978,6 +1081,105 @@
     refreshTabs();
   }
 
+  function hideThread(id) {
+    var thread = findThread(id);
+    if (!thread) return false;
+    thread.hidden = true;
+    if (state.activeThreadId === id) {
+      var replacement = state.threads.find(function (candidate) {
+        return candidate.id !== id && !candidate.hidden &&
+          candidate.projectId === thread.projectId && candidate.status !== "exited";
+      });
+      state.activeThreadId = null;
+      if (replacement) focusThread(replacement.id);
+      else Array.prototype.forEach.call(terminalHost.children, function (el) {
+        el.classList.remove("active");
+      });
+    }
+    refreshSidebar();
+    refreshTabs();
+    return true;
+  }
+
+  function reopenThreads(projectId, worktreePath) {
+    var reopened = 0;
+    state.threads.forEach(function (thread) {
+      if (thread.projectId === projectId && thread.worktreePath === worktreePath && thread.hidden) {
+        thread.hidden = false;
+        reopened += 1;
+      }
+    });
+    if (reopened) {
+      refreshSidebar();
+      refreshTabs();
+    }
+    return reopened;
+  }
+
+  function duplicateThread(thread) {
+    if (!thread || thread.status === "exited") return null;
+    return createThread({
+      project: findProject(thread.projectId),
+      name: thread.name + " copy",
+      kind: thread.kind,
+      command: thread.command,
+      args: Array.isArray(thread.args) ? thread.args.slice() : [],
+      env: Object.assign({}, thread.env || {}),
+      projectRoot: thread.worktreePath,
+      covenSessionId: thread.covenSessionId,
+    });
+  }
+
+  var sessionContextMenu = null;
+  function closeSessionContextMenu() {
+    if (sessionContextMenu && sessionContextMenu.parentNode) {
+      sessionContextMenu.parentNode.removeChild(sessionContextMenu);
+    }
+    sessionContextMenu = null;
+  }
+  function openSessionContextMenu(event, actions) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSessionContextMenu();
+    var menu = document.createElement("div");
+    menu.className = "session-context-menu";
+    menu.setAttribute("role", "menu");
+    menu.style.left = Math.max(8, event.clientX) + "px";
+    menu.style.top = Math.max(8, event.clientY) + "px";
+    actions.forEach(function (action) {
+      if (!action) return;
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "session-context-item" + (action.danger ? " danger" : "");
+      item.setAttribute("role", "menuitem");
+      item.textContent = action.label;
+      item.addEventListener("click", function () {
+        closeSessionContextMenu();
+        action.run();
+      });
+      menu.appendChild(item);
+    });
+    document.body.appendChild(menu);
+    sessionContextMenu = menu;
+    var rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8) {
+      menu.style.left = Math.max(8, window.innerWidth - rect.width - 8) + "px";
+    }
+    if (rect.bottom > window.innerHeight - 8) {
+      menu.style.top = Math.max(8, window.innerHeight - rect.height - 8) + "px";
+    }
+    var first = menu.querySelector("button");
+    if (first) first.focus();
+  }
+  document.addEventListener("pointerdown", function (event) {
+    if (sessionContextMenu && !sessionContextMenu.contains(event.target)) {
+      closeSessionContextMenu();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeSessionContextMenu();
+  });
+
   function fitActiveTerm() {
     var thread = findThread(state.activeThreadId);
     if (!thread || !thread.fit) return;
@@ -1166,184 +1368,357 @@
     var currentSearchQuery = sessionFilter;
     var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
-    var hasSearchResult = false;
 
     state.projects.forEach(function (project) {
-      var localRows = state.threads.filter(function (t) { return t.projectId === project.id; });
-      var remoteRows = covenDiscovery.sessionsByProject.get(project.root) || [];
-      var filtered = PsycheSessions.filterProjectSessions(
+      var localRows = state.threads.filter(function (t) {
+        return t.projectId === project.id && !t.hidden;
+      });
+      var remoteRows = [];
+      [project.root].concat(
+        (state.env && state.env.native_workspace_v2 === false
+          ? []
+          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
+          return worktree.path;
+        })
+      ).forEach(function (root) {
+        (covenDiscovery.sessionsByProject.get(root) || []).forEach(function (session) {
+          if (!remoteRows.some(function (candidate) { return candidate.id === session.id; })) {
+            remoteRows.push(session);
+          }
+        });
+      });
+      var railModel = PsycheSessions.buildProjectRailModel(
         project, localRows, remoteRows, currentSearchQuery
       );
       var inlineState = covenInlineState(covenDiscovery.phase);
-      var showInlineState = Boolean(inlineState && (!needle || filtered.projectMatches));
-      if (filtered.psycheSessions.length === 0 &&
-          filtered.covenSessions.length === 0 && !showInlineState) return;
-      matched += filtered.psycheSessions.length + filtered.covenSessions.length;
-      if (needle) hasSearchResult = true;
+      var showInlineState = Boolean(inlineState && (!needle || railModel.projectMatches));
+      var visibleWorktrees = railModel.worktrees.filter(function (entry) {
+        return entry.matches || entry.rows.length > 0;
+      });
+      if (railModel.projectRows.length > 0) {
+        visibleWorktrees.push({
+          worktree: {
+            path: "",
+            branch: "Unresolved sessions",
+            is_main: false,
+            dirty: false,
+            missing: true,
+            collapsed: false,
+            virtual: true,
+          },
+          matches: true,
+          rows: railModel.projectRows,
+        });
+      }
+      if (visibleWorktrees.length === 0 && !showInlineState) return;
+      matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
+        return count + entry.rows.length;
+      }, 0);
 
       var group = document.createElement("div");
       group.className = "session-group";
 
-      var head = document.createElement("div");
+      var head = document.createElement("button");
+      head.type = "button";
       head.className = "session-group-head";
       head.textContent = project.name;
       head.title = project.root || project.name;
+      var projectAttention = visibleWorktrees.reduce(function (count, entry) {
+        return count + entry.rows.filter(function (row) { return row.needsAttention; }).length;
+      }, 0);
+      if (projectAttention > 0) {
+        var projectBadge = document.createElement("span");
+        projectBadge.className = "session-attention-badge";
+        projectBadge.textContent = String(projectAttention);
+        projectBadge.setAttribute("aria-label", projectAttention + " sessions need attention");
+        head.appendChild(projectBadge);
+      }
+      head.addEventListener("click", function () { setActiveProject(project.id); });
       group.appendChild(head);
 
-      if (filtered.psycheSessions.length > 0) {
-        var psycheLabel = document.createElement("div");
-        psycheLabel.className = "session-subsection-label";
-        psycheLabel.textContent = "Psyche";
-        group.appendChild(psycheLabel);
-      }
+      visibleWorktrees.forEach(function (entry) {
+        var worktree = entry.worktree;
+        var threads = entry.rows.filter(function (row) {
+          return row.source === "psyche";
+        }).map(function (row) { return row.value; });
+        var covenSessions = entry.rows.filter(function (row) {
+          return row.source === "coven";
+        }).map(function (row) { return row.value; });
 
-      filtered.psycheSessions.forEach(function (thread) {
-        var wrapper = document.createElement("div");
-        wrapper.className = "session-row-wrap";
-        var row = document.createElement("button");
-        row.type = "button";
-        row.className = "session-row " + sessionStatusClass(thread) +
-          (state.activeThreadId === thread.id ? " active" : "");
-        row.dataset.threadId = thread.id;
-        if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
-        row.title = thread.name + " — " + (project.root || "");
-        row.innerHTML =
-          '<span class="session-dot"></span>' +
-          '<span class="session-text">' +
-            '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
-            '<span class="session-sub">' + escapeHtml(shortenRoot(project.root)) + "</span>" +
-          "</span>";
-
-        row.addEventListener("click", async function () {
-          // Switching project first keeps layout/browser state consistent, then
-          // focus the specific thread the user clicked.
+        var worktreeGroup = document.createElement("div");
+        worktreeGroup.className = "session-worktree-group" +
+          (!worktree.virtual && project.selectedWorktreePath === worktree.path ? " selected" : "") +
+          (worktree.missing ? " missing" : "");
+        var worktreeHead = document.createElement("button");
+        worktreeHead.type = "button";
+        worktreeHead.className = "session-worktree-head";
+        var worktreeName = worktree.branch || (worktree.is_main ? "main checkout" : shortenRoot(worktree.path));
+        worktreeHead.innerHTML =
+          '<span class="worktree-twisty">' + (worktree.collapsed ? "▶" : "▼") + "</span>" +
+          '<span class="worktree-name">' + escapeHtml(worktreeName) + "</span>" +
+          (worktree.dirty ? '<span class="worktree-state" title="Uncommitted changes">●</span>' : "") +
+          (worktree.missing ? '<span class="worktree-warning" title="Worktree is missing">!</span>' : "");
+        var worktreeAttention = entry.rows.filter(function (row) {
+          return row.needsAttention;
+        }).length;
+        if (worktreeAttention > 0) {
+          var worktreeBadge = document.createElement("span");
+          worktreeBadge.className = "session-attention-badge";
+          worktreeBadge.textContent = String(worktreeAttention);
+          worktreeBadge.setAttribute(
+            "aria-label", worktreeAttention + " sessions need attention in this worktree"
+          );
+          worktreeHead.appendChild(worktreeBadge);
+        }
+        worktreeHead.title = worktree.virtual ? "Sessions with no available worktree" : worktree.path;
+        worktreeHead.disabled = Boolean(worktree.virtual);
+        worktreeHead.addEventListener("click", async function () {
+          if (worktree.virtual) return;
           if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
-          await focusThread(thread.id);
+          project.selectedWorktreePath = worktree.path;
+          worktree.collapsed = false;
+          renderPanel(currentPanel());
+          loadAgentSkills();
+          refreshSidebar();
+          syncProjectBrowser();
+          saveWorkspaceSoon();
         });
-        var titleEl = row.querySelector(".session-title");
-        function beginSessionRename(e) {
-          e.stopPropagation();
-          editLabelInline(titleEl, "sidebar", {
-            initial: thread.name,
-            host: wrapper,
-            hide: row,
-            ariaLabel: "Session name",
-            onCommit: function (v) { renameThread(thread.id, v); },
-            done: function () {
-              renderSessionList();
-              var replacementRows = sessionListEl.querySelectorAll(".session-row");
-              for (var i = 0; i < replacementRows.length; i++) {
-                if (replacementRows[i].dataset.threadId === thread.id) {
-                  replacementRows[i].focus();
-                  break;
-                }
-              }
-            },
+        worktreeHead.addEventListener("dblclick", function (event) {
+          if (worktree.virtual) return;
+          event.preventDefault();
+          worktree.collapsed = !worktree.collapsed;
+          refreshSidebar();
+          saveWorkspaceSoon();
+        });
+        worktreeHead.addEventListener("keydown", function (event) {
+          if (worktree.virtual || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+          var collapse = event.key === "ArrowLeft";
+          if (worktree.collapsed === collapse) return;
+          event.preventDefault();
+          worktree.collapsed = collapse;
+          refreshSidebar();
+          saveWorkspaceSoon();
+          requestAnimationFrame(function () {
+            var heads = sessionListEl.querySelectorAll(".session-worktree-head");
+            for (var i = 0; i < heads.length; i++) {
+              if (heads[i].title === worktree.path) { heads[i].focus(); break; }
+            }
+          });
+        });
+        var hiddenThreads = state.threads.filter(function (thread) {
+          return thread.projectId === project.id && thread.worktreePath === worktree.path &&
+            thread.hidden;
+        });
+        if (!worktree.virtual) {
+          worktreeHead.addEventListener("contextmenu", function (event) {
+            var actions = [{
+              label: "Open Psyche Terminal",
+              run: async function () {
+                project.selectedWorktreePath = worktree.path;
+                if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+                ensureProjectPsyche(project);
+                refreshSidebar();
+                saveWorkspaceSoon();
+              },
+            }];
+            if (hiddenThreads.length > 0) {
+              actions.push({
+                label: "Show " + hiddenThreads.length + " hidden session" +
+                  (hiddenThreads.length === 1 ? "" : "s"),
+                run: function () { reopenThreads(project.id, worktree.path); },
+              });
+            }
+            openSessionContextMenu(event, actions);
           });
         }
-        row.addEventListener("dblclick", beginSessionRename);
-        row.addEventListener("keydown", function (e) {
-          if (e.key !== "F2") return;
-          e.preventDefault();
-          beginSessionRename(e);
-        });
+        worktreeGroup.appendChild(worktreeHead);
 
-        var close = document.createElement("button");
-        close.type = "button";
-        close.className = "session-close";
-        close.title = "Close session";
-        close.setAttribute("aria-label", "Close session");
-        close.textContent = "×";
-        close.addEventListener("click", function (e) {
-          e.stopPropagation();
-          closeThread(thread.id);
-        });
-        wrapper.appendChild(row);
-        wrapper.appendChild(close);
-        group.appendChild(wrapper);
-      });
-
-      if (filtered.covenSessions.length > 0 || showInlineState) {
-        var covenLabel = document.createElement("div");
-        covenLabel.className = "session-subsection-label";
-        covenLabel.textContent = "Coven";
-        group.appendChild(covenLabel);
-      }
-
-      filtered.covenSessions.forEach(function (session) {
-        var presentation = PsycheSessions.statusPresentation(session.status);
-        var primary = typeof session.title === "string" ? session.title.trim() : "";
-        if (!primary) primary = session.id;
-        var harness = typeof session.harness === "string" ? session.harness.trim() : "";
-
-        var activeAttachment = state.threads.find(function (thread) {
-          return thread.id === state.activeThreadId &&
-            thread.projectId === project.id &&
-            thread.covenSessionId === session.id && thread.status !== "exited";
-        });
-        var isActive = Boolean(activeAttachment);
-        var row = document.createElement("button");
-        row.type = "button";
-        row.className = "session-row session-coven-row " +
-          covenToneClass(presentation.tone) +
-          (presentation.label === "starting" ? " coven-starting" : "") +
-          (isActive ? " active" : "");
-        row.dataset.covenSessionId = session.id;
-        if (isActive) row.setAttribute("aria-current", "true");
-        row.setAttribute(
-          "aria-label", primary + " — " + presentation.label + " — " + session.id
-        );
-        row.title = primary + " — " + presentation.label + " — " + session.id;
-
-        var dot = document.createElement("span");
-        dot.className = "session-dot";
-        var text = document.createElement("span");
-        text.className = "session-text";
-        var title = document.createElement("span");
-        title.className = "session-title";
-        title.textContent = primary;
-        var meta = document.createElement("span");
-        meta.className = "session-coven-meta";
-        if (harness) {
-          var harnessMeta = document.createElement("span");
-          harnessMeta.className = "session-coven-harness";
-          harnessMeta.textContent = harness;
-          meta.appendChild(harnessMeta);
-          var harnessSeparator = document.createElement("span");
-          harnessSeparator.className = "session-coven-separator";
-          harnessSeparator.textContent = " · ";
-          meta.appendChild(harnessSeparator);
+        if (!worktree.collapsed && threads.length > 0) {
+          var psycheLabel = document.createElement("div");
+          psycheLabel.className = "session-subsection-label";
+          psycheLabel.textContent = "Psyche";
+          worktreeGroup.appendChild(psycheLabel);
         }
-        var statusMeta = document.createElement("span");
-        statusMeta.className = "session-coven-status";
-        statusMeta.textContent = presentation.label;
-        meta.appendChild(statusMeta);
-        var idSeparator = document.createElement("span");
-        idSeparator.className = "session-coven-separator";
-        idSeparator.textContent = " · ";
-        meta.appendChild(idSeparator);
-        var idMeta = document.createElement("span");
-        idMeta.className = "session-coven-id";
-        idMeta.textContent = session.id;
-        meta.appendChild(idMeta);
-        text.appendChild(title);
-        text.appendChild(meta);
-        row.appendChild(dot);
-        row.appendChild(text);
 
-        row.addEventListener("click", function () {
-          try {
-            Promise.resolve(openCovenSession(project, session)).catch(function () {
-              setStatus("Coven session could not be opened", "error");
+        if (!worktree.collapsed) threads.forEach(function (thread) {
+          var wrapper = document.createElement("div");
+          wrapper.className = "session-row-wrap";
+          var row = document.createElement("button");
+          row.type = "button";
+          row.className = "session-row " + sessionStatusClass(thread) +
+            (state.activeThreadId === thread.id ? " active" : "");
+          row.dataset.threadId = thread.id;
+          if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
+          row.title = thread.name + " — " + worktree.path;
+          row.innerHTML =
+            '<span class="session-dot"></span>' +
+            '<span class="session-text">' +
+              '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
+              '<span class="session-sub">' +
+                escapeHtml((thread.kind || "shell") + " · " + shortenRoot(worktree.path)) +
+              "</span>" +
+            "</span>";
+
+          row.addEventListener("click", async function () {
+            if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+            await focusThread(thread.id);
+          });
+          var titleEl = row.querySelector(".session-title");
+          function beginSessionRename(e) {
+            e.stopPropagation();
+            editLabelInline(titleEl, "sidebar", {
+              initial: thread.name,
+              host: wrapper,
+              hide: row,
+              ariaLabel: "Session name",
+              onCommit: function (v) { renameThread(thread.id, v); },
+              done: function () {
+                renderSessionList();
+                var replacementRows = sessionListEl.querySelectorAll(".session-row");
+                for (var i = 0; i < replacementRows.length; i++) {
+                  if (replacementRows[i].dataset.threadId === thread.id) {
+                    replacementRows[i].focus();
+                    break;
+                  }
+                }
+              },
             });
-          } catch (_) {
-            setStatus("Coven session could not be opened", "error");
           }
+          row.addEventListener("dblclick", beginSessionRename);
+          row.addEventListener("keydown", function (e) {
+            if (e.key !== "F2") return;
+            e.preventDefault();
+            beginSessionRename(e);
+          });
+          row.addEventListener("contextmenu", function (event) {
+            openSessionContextMenu(event, [
+              { label: "Focus", run: function () { focusThread(thread.id); } },
+              { label: "Rename…", run: function () {
+                beginSessionRename({ stopPropagation: function () {} });
+              } },
+              thread.status !== "exited"
+                ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
+                : null,
+              thread.status !== "exited"
+                ? { label: "Interrupt", run: function () { sendToThread(thread, "\x03"); } }
+                : null,
+              { label: "Hide", run: function () { hideThread(thread.id); } },
+              { label: "Stop and close", danger: true, run: function () { closeThread(thread.id); } },
+            ]);
+          });
+
+          var close = document.createElement("button");
+          close.type = "button";
+          close.className = "session-close";
+          close.title = "Hide session";
+          close.setAttribute("aria-label", "Hide session");
+          close.textContent = "×";
+          close.addEventListener("click", function (e) {
+            e.stopPropagation();
+            hideThread(thread.id);
+          });
+          wrapper.appendChild(row);
+          wrapper.appendChild(close);
+          worktreeGroup.appendChild(wrapper);
         });
-        group.appendChild(row);
+
+        if (!worktree.collapsed && covenSessions.length > 0) {
+          var covenLabel = document.createElement("div");
+          covenLabel.className = "session-subsection-label";
+          covenLabel.textContent = "Coven";
+          worktreeGroup.appendChild(covenLabel);
+        }
+
+        if (!worktree.collapsed) covenSessions.forEach(function (session) {
+          var presentation = PsycheSessions.statusPresentation(session.status);
+          var primary = typeof session.title === "string" ? session.title.trim() : "";
+          if (!primary) primary = session.id;
+          var harness = typeof session.harness === "string" ? session.harness.trim() : "";
+          var activeAttachment = state.threads.find(function (thread) {
+            return thread.id === state.activeThreadId && thread.projectId === project.id &&
+              thread.covenSessionId === session.id && thread.status !== "exited";
+          });
+          var isActive = Boolean(activeAttachment);
+          var row = document.createElement("button");
+          row.type = "button";
+          row.className = "session-row session-coven-row " +
+            covenToneClass(presentation.tone) +
+            (presentation.label === "starting" ? " coven-starting" : "") +
+            (isActive ? " active" : "");
+          row.dataset.covenSessionId = session.id;
+          if (isActive) row.setAttribute("aria-current", "true");
+          row.setAttribute("aria-label", primary + " — " + presentation.label + " — " + session.id);
+          row.title = primary + " — " + presentation.label + " — " + session.id;
+
+          var dot = document.createElement("span");
+          dot.className = "session-dot";
+          var text = document.createElement("span");
+          text.className = "session-text";
+          var title = document.createElement("span");
+          title.className = "session-title";
+          title.textContent = primary;
+          var meta = document.createElement("span");
+          meta.className = "session-coven-meta";
+          if (harness) {
+            var harnessMeta = document.createElement("span");
+            harnessMeta.className = "session-coven-harness";
+            harnessMeta.textContent = harness;
+            meta.appendChild(harnessMeta);
+            var harnessSeparator = document.createElement("span");
+            harnessSeparator.className = "session-coven-separator";
+            harnessSeparator.textContent = " · ";
+            meta.appendChild(harnessSeparator);
+          }
+          var statusMeta = document.createElement("span");
+          statusMeta.className = "session-coven-status";
+          statusMeta.textContent = presentation.label;
+          meta.appendChild(statusMeta);
+          var idSeparator = document.createElement("span");
+          idSeparator.className = "session-coven-separator";
+          idSeparator.textContent = " · ";
+          meta.appendChild(idSeparator);
+          var idMeta = document.createElement("span");
+          idMeta.className = "session-coven-id";
+          idMeta.textContent = session.id;
+          meta.appendChild(idMeta);
+          text.appendChild(title);
+          text.appendChild(meta);
+          row.appendChild(dot);
+          row.appendChild(text);
+          row.addEventListener("click", function () {
+            try {
+              Promise.resolve(openCovenSession(project, session)).catch(function () {
+                setStatus("Coven session could not be opened", "error");
+              });
+            } catch (_) {
+              setStatus("Coven session could not be opened", "error");
+            }
+          });
+          row.addEventListener("contextmenu", function (event) {
+            openSessionContextMenu(event, [{
+              label: isActive ? "Focus attachment" : "Attach",
+              run: function () { openCovenSession(project, session); },
+            }]);
+          });
+          worktreeGroup.appendChild(row);
+        });
+
+        if (!worktree.collapsed && threads.length === 0) {
+          var noPanes = document.createElement("div");
+          noPanes.className = "session-worktree-empty";
+          noPanes.textContent = worktree.missing
+            ? "Unavailable"
+            : covenSessions.length ? "No local panes — press ⌘T" : "No panes — select and press ⌘T";
+          worktreeGroup.appendChild(noPanes);
+        }
+        group.appendChild(worktreeGroup);
       });
 
       if (showInlineState) {
+        var stateLabel = document.createElement("div");
+        stateLabel.className = "session-subsection-label";
+        stateLabel.textContent = "Coven";
+        group.appendChild(stateLabel);
         var inline = document.createElement("div");
         inline.className = "session-inline-state";
         inline.textContent = inlineState.text;
@@ -1354,13 +1729,13 @@
       sessionListEl.appendChild(group);
     });
 
-    if (matched === 0 && (!needle || !hasSearchResult)) {
+    if (matched === 0) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
       empty.textContent = needle
         ? "No sessions match “" + sessionFilter.trim() + "”"
         : state.projects.length
-          ? "No sessions yet — ⌘T opens one."
+          ? "No matching projects, worktrees, or panes."
           : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
@@ -1402,6 +1777,26 @@
         sessionSearchEl.blur();
         e.stopPropagation();
       }
+    });
+  }
+  if (sessionListEl) {
+    sessionListEl.addEventListener("keydown", function (event) {
+      if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
+      var items = Array.prototype.filter.call(
+        sessionListEl.querySelectorAll(
+          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, .session-close"
+        ),
+        function (item) { return item.offsetParent !== null; }
+      );
+      if (!items.length) return;
+      var current = items.indexOf(document.activeElement);
+      var next = current;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = items.length - 1;
+      else if (event.key === "ArrowDown") next = Math.min(items.length - 1, current + 1);
+      else next = current <= 0 ? 0 : current - 1;
+      event.preventDefault();
+      items[next].focus();
     });
   }
 
@@ -1599,6 +1994,7 @@
   async function openFileTab(path, project) {
     project = project || activeProject();
     if (!project) return;
+    var workspaceRoot = activeWorkspaceRoot(project);
     var existing = state.openFiles.filter(function (f) {
       return f.path === path && f.projectId === project.id;
     })[0];
@@ -1614,13 +2010,14 @@
     if (!canOpen) return false;
 
     fileCounter += 1;
-    var rel = relativeToRoot(project.root, path);
+    var rel = relativeToRoot(workspaceRoot, path);
     var file = {
       id: "f" + fileCounter,
       path: path,
       rel: rel,
       name: rel.split("/").pop() || rel,
       projectId: project.id,
+      workspaceRoot: workspaceRoot,
       text: "",
       originalText: "",
       dirty: false,
@@ -1640,7 +2037,7 @@
     state.openFiles.push(file);
     activateFileTabNow(file.id);
     try {
-      var res = await invoke("fs_read_text", { root: project.root, path: path });
+      var res = await invoke("fs_read_text", { root: workspaceRoot, path: path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(res.text || ""));
       file.truncated = res.truncated;
       file.binary = res.binary;
@@ -1900,7 +2297,7 @@
       return false;
     }
     try {
-      var loaded = await invoke("fs_read_text", { root: project.root, path: file.path });
+      var loaded = await invoke("fs_read_text", { root: file.workspaceRoot || project.root, path: file.path });
       Object.assign(file, window.PsycheCodeEditor.createFileBuffer(loaded.text || ""), {
         loading: false,
         error: null,
@@ -1948,7 +2345,7 @@
     }
     try {
       var saved = await invoke("fs_write_text", {
-        root: project.root,
+        root: file.workspaceRoot || project.root,
         path: file.path,
         text: file.text,
         expectedText: file.originalText,
@@ -2299,10 +2696,11 @@
    */
   function loadAgentSkills(verbose) {
     var project = activeProject();
+    var workspaceRoot = activeWorkspaceRoot(project);
     invoke("agent_skills", {
       harness: "claude",
-      projectRoot: project ? project.root : null,
-      project_root: project ? project.root : null,
+      projectRoot: workspaceRoot || null,
+      project_root: workspaceRoot || null,
     }).then(function (skills) {
       state.agentSkills = Array.isArray(skills) ? skills : [];
       if (verbose) {
@@ -2354,6 +2752,9 @@
   function sendToActive(text) {
     var thread = findThread(state.activeThreadId);
     if (!thread) return;
+    sendToThread(thread, text);
+  }
+  function sendToThread(thread, text) {
     var bytes = Array.from(new TextEncoder().encode(text));
     invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
       function () {}
@@ -2534,11 +2935,15 @@
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
       var project = state.projects[i];
-      var browser = ensureBrowserModel(project);
-      for (var j = 0; j < browser.tabs.length; j++) {
-        var tab = browser.tabs[j];
-        if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
-          return { project: project, tab: tab };
+      ensureBrowserModel(project);
+      var workspaceRoots = Object.keys(project.browsersByWorktree);
+      for (var w = 0; w < workspaceRoots.length; w++) {
+        var browser = project.browsersByWorktree[workspaceRoots[w]];
+        for (var j = 0; j < browser.tabs.length; j++) {
+          var tab = browser.tabs[j];
+          if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
+            return { project: project, browser: browser, tab: tab };
+          }
         }
       }
     }
@@ -2551,7 +2956,9 @@
     if (url) pair.tab.url = url;
     if (title && String(title).trim()) pair.tab.title = String(title).trim();
     else pair.tab.title = tabTitle(pair.tab.url);
-    if (pair.project.id === state.activeProjectId) { renderBrowserTabs(); syncUrlInput(); }
+    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+      renderBrowserTabs(); syncUrlInput();
+    }
     saveWorkspaceSoon();
   }
   listen("browser:page-load", function (event) {
@@ -2563,7 +2970,9 @@
     } else if (payload.phase === "finished") {
       markBrowserTabLoaded(payload.label, payload.url, "");
     }
-    if (pair.project.id === state.activeProjectId) { renderBrowserTabs(); updateBrowserControls(); }
+    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+      renderBrowserTabs(); updateBrowserControls();
+    }
   }).catch(function () {});
   listen("browser:title", function (event) {
     var payload = event.payload || {};
@@ -2572,10 +2981,14 @@
   listen("browser:focus", function () {
     markActiveSurface("browser");
   }).catch(function () {});
-  function ensureBrowserModel(project) {
+  function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
-    if (!project.browser) project.browser = { tabs: [], activeTabId: null };
-    return project.browser;
+    if (!project.browsersByWorktree) project.browsersByWorktree = {};
+    var root = workspaceRoot || activeWorkspaceRoot(project) || project.root;
+    if (!project.browsersByWorktree[root]) {
+      project.browsersByWorktree[root] = { tabs: [], activeTabId: null };
+    }
+    return project.browsersByWorktree[root];
   }
   function makeBrowserTabId() { return "bt" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
   function tabTitle(url) {
@@ -2907,8 +3320,9 @@
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffViewer = window.PsycheCodeEditor.createDiffViewer({ parent: diffEditorHostEl });
 
-  function diffCacheKey(projectId, path, staged) {
-    return projectId + "\0" + path + "\0" + (staged ? "staged" : "unstaged");
+  function diffCacheKey(projectId, workspaceRoot, path, staged) {
+    return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
+      (staged ? "staged" : "unstaged");
   }
 
   function invalidateProjectDiffs(projectId) {
@@ -2968,9 +3382,10 @@
     if (!fileTreeEl) return;
     var project = activeProject();
     if (!project) { panelMessage(fileTreeEl, "No project open — ⌘O to add one."); return; }
-    if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(project.root);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    if (filesCrumbEl) filesCrumbEl.textContent = shortenRoot(workspaceRoot);
     fileTreeEl.innerHTML = "";
-    await appendDirInto(fileTreeEl, project.root, project.root, 0);
+    await appendDirInto(fileTreeEl, workspaceRoot, workspaceRoot, 0);
     if (!fileTreeEl.firstChild) panelMessage(fileTreeEl, "Empty directory.");
   }
 
@@ -3092,7 +3507,7 @@
     var projectId = project.id;
     var status;
     try {
-      status = await invoke("git_status", { root: project.root });
+      status = await invoke("git_status", { root: activeWorkspaceRoot(project) });
     } catch (err) {
       if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
           !activeProject() || activeProject().id !== projectId ||
@@ -3127,7 +3542,7 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, f.path, stagedDiffFor(f));
+      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f));
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
@@ -3139,7 +3554,7 @@
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, f.path, stagedDiffFor(f)) === selectedDiffKey;
+      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f)) === selectedDiffKey;
     }) || status.files[0];
     showDiff(project, target);
   }
@@ -3148,7 +3563,7 @@
     if (!project || !entry || !diffEditorHostEl) return;
     if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, entry.path, staged);
+    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
@@ -3164,7 +3579,7 @@
     resetDiffDetail("Loading diff…");
     try {
       var result = await invoke("git_diff", {
-        root: project.root,
+        root: activeWorkspaceRoot(project),
         path: entry.path,
         staged: staged,
       });
@@ -3198,8 +3613,9 @@
 
     var status, commits;
     try {
-      status = await invoke("git_status", { root: project.root });
-      commits = status.is_repo ? await invoke("git_log", { root: project.root, limit: 30 }) : [];
+      var workspaceRoot = activeWorkspaceRoot(project);
+      status = await invoke("git_status", { root: workspaceRoot });
+      commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
@@ -3300,11 +3716,12 @@
     if (!(await showTerminalView())) return null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
-    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browser: { tabs: [], activeTabId: null } };
+    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browsersByWorktree: {} };
     state.projects.push(project);
     state.activeProjectId = project.id;
     restoreProjectLayout(project);
     refreshSidebar();
+    await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
     if (!isBootstrapping) requestCovenRefresh();
@@ -3339,12 +3756,14 @@
 
   function ensureProjectPsyche(project) {
     if (!project) return null;
-    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.kind === "psyche" && t.status !== "exited"; });
+    var worktree = selectedWorktree(project);
+    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.worktreePath === worktree.path && t.kind === "psyche" && t.status !== "exited"; });
     if (existing) { focusThread(existing.id); return existing; }
     return spawnDefaultThreadIn(project);
   }
 
   function spawnDefaultThreadIn(project) {
+    var worktree = selectedWorktree(project);
     if (state.env && state.env.psyche_entry && state.env.node_path) {
       var shell = (state.env.default_shell) || "/bin/zsh";
       var quoted = function (s) {
@@ -3357,7 +3776,7 @@
         kind: "psyche",
         command: shell,
         args: ["-l", "-c", cmd],
-        projectRoot: project.root,
+        projectRoot: worktree.path,
         env: tauriPsycheEnv(),
       });
     } else {
@@ -3367,20 +3786,21 @@
         kind: "shell",
         command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
         args: ["-l"],
-        projectRoot: project.root,
+        projectRoot: worktree.path,
       });
     }
   }
 
   function spawnDefaultThread() {
     var project = activeProject();
+    var worktree = selectedWorktree(project);
     return createThread({
       project: project,
       name: "shell " + (state.threads.length + 1),
       kind: "shell",
       command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
       args: ["-l"],
-      projectRoot: project && project.root,
+      projectRoot: worktree && worktree.path,
     });
   }
 
@@ -3444,6 +3864,9 @@
       project = activeProject();
       if (project) restoreProjectLayout(project);
       isRestoringWorkspace = false;
+      await Promise.all(state.projects.map(function (savedProject) {
+        return refreshProjectWorktrees(savedProject);
+      }));
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {

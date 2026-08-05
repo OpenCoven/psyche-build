@@ -163,6 +163,25 @@ final class WireProtocolContractTests: XCTestCase {
         }
     }
 
+    func testWorkspaceSnapshotFixtureDecodesAndRoundTrips() throws {
+        let data = try Data(
+            contentsOf: Self.fixtureDirectory.appendingPathComponent("workspace-snapshot.json")
+        )
+        let snapshot = try JSONDecoder().decode(WorkspaceSnapshotEnvelope.self, from: data)
+
+        XCTAssertEqual(snapshot.type, "workspace.snapshot.result")
+        XCTAssertEqual(snapshot.workspace.revision, 42)
+        XCTAssertEqual(snapshot.workspace.projects.first?.worktrees.count, 2)
+        XCTAssertEqual(
+            snapshot.workspace.projects.first?.projectPanes.first?.recoverability,
+            "missing-worktree"
+        )
+        XCTAssertEqual(
+            try comparableJSON(JSONEncoder().encode(snapshot)),
+            try comparableJSON(data)
+        )
+    }
+
     // MARK: - Spot checks the host side also asserts
 
     func testDecodedPaneSnapshotUsesTheWireIdSpelling() throws {

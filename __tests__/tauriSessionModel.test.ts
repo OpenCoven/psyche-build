@@ -1,21 +1,6 @@
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
-type CovenSessionFixture = {
-  id: string;
-};
-
-const sessionId = (session: CovenSessionFixture) => session.id;
-
-const model = await import(
-  pathToFileURL(
-    join(
-      process.cwd(),
-      'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
-    ),
-  ).href,
-);
+import * as model from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
 
 describe('Tauri Coven session model', () => {
   test('accepts only safe Coven session identifiers', () => {
@@ -69,7 +54,7 @@ describe('Tauri Coven session model', () => {
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
+    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
       'new', 'a', 'b', 'old', 'z', 'a-nonlive',
     ]);
     expect(sessions).toEqual(original);
@@ -86,7 +71,7 @@ describe('Tauri Coven session model', () => {
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
+    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
       'Z', 'z', '.old', ':old', 'Aold', 'a-old',
     ]);
     expect(sessions).toEqual(original);
@@ -99,17 +84,21 @@ describe('Tauri Coven session model', () => {
       { id: 'A-hour', status: 'running', updatedAt: '2026-01-01T24:00:00Z' },
       { id: 'a-minute', status: 'running', updatedAt: '2026-01-01T00:60:00Z' },
       { id: 'invalid-offset-minute', status: 'running', updatedAt: '2026-01-01T00:00:00+01:60' },
+      { id: 'invalid-offset-limit', status: 'running', updatedAt: '2026-01-01T00:00:00+14:01' },
+      { id: 'invalid-negative-offset-limit', status: 'running', updatedAt: '2026-01-01T00:00:00-14:01' },
       { id: 'z-second', status: 'running', updatedAt: '2026-01-01T00:00:60Z' },
       { id: '-offset-hour', status: 'running', updatedAt: '2026-01-01T00:00:00+24:00' },
       { id: 'valid-leap', status: 'running', updatedAt: '2024-02-29T00:00:00Z' },
       { id: 'valid-offset', status: 'running', updatedAt: '2026-08-04T10:00:00+05:30' },
+      { id: 'valid-offset-limit', status: 'running', updatedAt: '2026-08-04T10:00:00+14:00' },
       { id: 'valid-fraction', status: 'running', updatedAt: '2026-08-04T05:00:00.123Z' },
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
-      'valid-fraction', 'valid-offset', 'valid-leap',
-      '-offset-hour', '.feb30', ':nonleap', 'A-hour', 'a-minute', 'invalid-offset-minute', 'z-second',
+    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
+      'valid-fraction', 'valid-offset', 'valid-offset-limit', 'valid-leap',
+      '-offset-hour', '.feb30', ':nonleap', 'A-hour', 'a-minute', 'invalid-negative-offset-limit',
+      'invalid-offset-limit', 'invalid-offset-minute', 'z-second',
     ]);
     expect(sessions).toEqual(original);
   });
@@ -128,8 +117,8 @@ describe('Tauri Coven session model', () => {
     const grouped = model.groupCovenSessions(sessions);
 
     expect([...grouped.keys()]).toEqual(['/alpha', '/beta']);
-    expect(grouped.get('/alpha')?.map(sessionId)).toEqual(['live', 'later']);
-    expect(grouped.get('/beta')?.map(sessionId)).toEqual(['beta']);
+    expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'later']);
+    expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['beta']);
     expect(sessions).toHaveLength(7);
   });
 
@@ -168,6 +157,51 @@ describe('Tauri Coven session model', () => {
     expect(covenSessions).toEqual(remoteOriginal);
   });
 
+  test('normalizes local and Coven sessions into their most-specific worktree rows', () => {
+    const project = {
+      name: 'Alpha',
+      root: '/repo',
+      worktrees: [
+        { path: '/repo', branch: 'main' },
+        { path: '/external/feature', branch: 'feature' },
+        { path: '/external/feature/nested', branch: 'nested' },
+      ],
+    };
+    const modelResult = model.buildProjectRailModel(
+      project,
+      [{ id: 'local', name: 'Local', worktreePath: '/external/feature' }],
+      [{
+        id: 'remote', projectRoot: '/external/feature',
+        cwd: '/external/feature/nested/app', title: 'Remote', status: 'waiting',
+      }],
+      '',
+    );
+
+    expect(modelResult.worktrees[1].rows).toEqual([
+      expect.objectContaining({ source: 'psyche', id: 'local', worktreePath: '/external/feature' }),
+    ]);
+    expect(modelResult.worktrees[2].rows).toEqual([
+      expect.objectContaining({
+        source: 'coven', id: 'remote', worktreePath: '/external/feature/nested',
+        needsAttention: true,
+      }),
+    ]);
+  });
+
+  test('keeps sessions whose cwd has no known worktree in an explicit project group', () => {
+    const result = model.buildProjectRailModel(
+      { name: 'Alpha', root: '/repo', worktrees: [{ path: '/repo', branch: 'main' }] },
+      [{ id: 'orphan', name: 'Orphan', worktreePath: '/removed/worktree' }],
+      [],
+      '',
+    );
+
+    expect(result.projectRows).toEqual([
+      expect.objectContaining({ id: 'orphan', worktreePath: null }),
+    ]);
+    expect(result.worktrees[0].rows).toEqual([]);
+  });
+
   test('creates an idle discovery state and only shows first-request loading', () => {
     const initial = model.createCovenDiscoveryState();
 
@@ -201,7 +235,7 @@ describe('Tauri Coven session model', () => {
       ],
     }, 100);
     expect(ready).toMatchObject({ phase: 'ready', message: 'updated', refreshedAt: 100 });
-    expect(ready.sessionsByProject.get('/alpha').map(sessionId)).toEqual(['live', 'done']);
+    expect(ready.sessionsByProject.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'done']);
 
     for (const status of ['unavailable', 'incompatible', 'error']) {
       const next = model.beginCovenRequest(ready);

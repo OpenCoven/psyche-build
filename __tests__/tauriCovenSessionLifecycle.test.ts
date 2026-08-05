@@ -67,8 +67,11 @@ describe('native Coven session discovery lifecycle', () => {
     );
   });
 
-  it('refreshes every current project root through the request-id model', async () => {
-    const state = { projects: [{ root: '/alpha' }, { root: '/beta/' }] };
+  it('refreshes each project and its worktrees as an isolated root family', async () => {
+    const state = { projects: [
+      { root: '/alpha', worktrees: [{ path: '/external/alpha-feature' }] },
+      { root: '/beta/', worktrees: [] },
+    ] };
     const invoke = vi.fn().mockResolvedValue({
       status: 'ready',
       sessions: [{ id: 'live', projectRoot: '/alpha', status: 'running' }],
@@ -87,9 +90,12 @@ describe('native Coven session discovery lifecycle', () => {
 
     await harness.refreshCovenSessions();
 
-    expect(invoke).toHaveBeenCalledOnce();
-    expect(invoke).toHaveBeenCalledWith('coven_sessions', {
-      projectRoots: ['/alpha', '/beta/'],
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'coven_sessions', {
+      projectRoots: ['/alpha', '/external/alpha-feature'],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'coven_sessions', {
+      projectRoots: ['/beta/'],
     });
     expect(harness.discovery()).toMatchObject({ phase: 'ready', requestId: 1 });
     expect(harness.discovery().sessionsByProject.get('/alpha')?.[0]?.id).toBe('live');
@@ -300,6 +306,7 @@ describe('native Coven session discovery lifecycle', () => {
         setStatus: vi.fn(), showTerminalView: async () => true,
         makeProjectId: () => 'p1', restoreProjectLayout: vi.fn(),
         refreshSidebar: vi.fn(), syncProjectBrowser: vi.fn(), saveWorkspaceSoon: vi.fn(),
+        refreshProjectWorktrees: vi.fn().mockResolvedValue([]),
         isBootstrapping: false, requestCovenRefresh, setActiveProject: vi.fn(),
       }
     );
@@ -333,6 +340,7 @@ describe('native Coven session discovery lifecycle', () => {
       currentBrowserTab: () => null, navigateBrowser: vi.fn(),
       refreshSidebar: vi.fn(), refreshTabs: vi.fn(), renderBrowserTabs: vi.fn(),
       syncProjectBrowser: vi.fn(), loadAgentSkills: vi.fn(), saveWorkspaceNow: vi.fn(),
+      refreshProjectWorktrees: vi.fn().mockResolvedValue([]),
       startCovenPolling,
     }, '{ boot, bootstrapping: function () { return isBootstrapping; } }');
 
@@ -351,6 +359,7 @@ describe('native Coven session attachment', () => {
       (opts: Record<string, unknown>) => Record<string, unknown>
     >(extractFunctionSource(mainJs, 'createThread'), {
       makeThreadId: () => 't1', activeProject: () => null, state,
+      activeWorkspaceRoot: () => null,
       refreshSidebar: () => undefined, refreshTabs: () => undefined,
       mountTerminal: () => undefined, focusThread: () => undefined,
       requestAnimationFrame: () => 1, spawnPty: () => undefined,

@@ -249,7 +249,20 @@ class FakeDocument {
   }
 }
 
-type Project = { id: string; name: string; root: string };
+type Project = {
+  id: string;
+  name: string;
+  root: string;
+  selectedWorktreePath?: string;
+  worktrees?: Array<{
+    path: string;
+    branch: string | null;
+    is_main: boolean;
+    dirty: boolean;
+    missing: boolean;
+    collapsed?: boolean;
+  }>;
+};
 type LocalThread = {
   id: string;
   projectId: string;
@@ -257,6 +270,8 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   covenSessionId?: string | null;
+  worktreePath?: string;
+  kind?: string;
 };
 type RemoteSession = {
   id: string;
@@ -265,6 +280,7 @@ type RemoteSession = {
   harness?: string;
   status?: string;
   updatedAt?: string;
+  cwd?: string;
 };
 
 function createRenderer(options: {
@@ -298,6 +314,7 @@ function createRenderer(options: {
   const setActiveProject = vi.fn().mockResolvedValue(true);
   const focusThread = vi.fn().mockResolvedValue(undefined);
   const closeThread = vi.fn();
+  const hideThread = vi.fn();
   const editLabelInline = vi.fn();
   const renameThread = vi.fn((id: string, value: string) => {
     const thread = state.threads.find((candidate) => candidate.id === id);
@@ -333,7 +350,7 @@ function createRenderer(options: {
   const harness = Function(
     'document', 'sessionListEl', 'editingContext', 'sessionFilter', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread',
+    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
     'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
@@ -363,6 +380,7 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    hideThread,
     renameThread,
     editLabelInlineImpl,
     openCovenSession,
@@ -382,6 +400,7 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    hideThread,
     renameThread,
     editLabelInline,
     openCovenSession,
@@ -437,6 +456,35 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['Coven']);
     expect(remoteOnly.sessionListEl.querySelector('.session-coven-row')?.dataset.covenSessionId)
       .toBe('remote');
+  });
+
+  it('places local and Coven sessions under the worktree that owns their cwd', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha', selectedWorktreePath: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+          { path: '/alpha-feature', branch: 'feature', is_main: false, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'local-feature', projectId: 'alpha', name: 'Local feature',
+        status: 'running', worktreePath: '/alpha-feature',
+      }],
+      sessions: [{
+        id: 'remote-feature', projectRoot: '/alpha-feature', cwd: '/alpha-feature/packages/app',
+        title: 'Remote feature', status: 'running',
+      }],
+    });
+
+    renderer.render();
+
+    const worktrees = renderer.sessionListEl.querySelectorAll('.session-worktree-group');
+    expect(worktrees).toHaveLength(2);
+    expect(worktrees[0].querySelectorAll('.session-row')).toHaveLength(0);
+    expect(worktrees[1].querySelector('.session-row')?.dataset.threadId).toBe('local-feature');
+    expect(worktrees[1].querySelector('.session-coven-row')?.dataset.covenSessionId)
+      .toBe('remote-feature');
   });
 
   it('delegates project, local-title, and remote field searches to the shared model', () => {
@@ -547,6 +595,22 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.editLabelInline).not.toHaveBeenCalled();
   });
 
+  it('aggregates attention badges from normalized waiting rows', () => {
+    const renderer = createRenderer({
+      sessions: [{
+        id: 'waiting', projectRoot: '/alpha', title: 'Needs input', status: 'waiting',
+      }],
+    });
+
+    renderer.render();
+
+    const badges = renderer.sessionListEl.querySelectorAll('.session-attention-badge');
+    expect(textOf(badges)).toEqual(['1', '1']);
+    expect(badges[0].getAttribute('aria-label')).toBe('1 sessions need attention');
+    expect(badges[1].getAttribute('aria-label'))
+      .toBe('1 sessions need attention in this worktree');
+  });
+
   it('does not mark an exited attachment active', () => {
     const renderer = createRenderer({
       activeThreadId: 'attached',
@@ -612,7 +676,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.focusThread).toHaveBeenCalledWith('local');
 
     const closeEvent = await close?.emit('click');
-    expect(renderer.closeThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).toHaveBeenCalledWith('local');
     expect(closeEvent?.propagationStopped).toBe(true);
 
     const title = localRow.querySelector('.session-title');
@@ -634,8 +698,8 @@ describe('Tauri Coven session project rail', () => {
 
     const empty = createRenderer();
     empty.render();
-    expect(empty.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No sessions yet — ⌘T opens one.');
+    expect(empty.sessionListEl.querySelector('.session-worktree-empty')?.textContent)
+      .toBe('No panes — select and press ⌘T');
   });
 
   it('mounts the real local rename input beside controls and restores activation after settle', async () => {
@@ -721,7 +785,7 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).not.toMatch(/waiting[^}]*animation:/s);
     expect(styles).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.session-coven-row\.coven-starting/s);
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
-    expect(rendererSource).toContain('PsycheSessions.filterProjectSessions');
+    expect(rendererSource).toContain('PsycheSessions.buildProjectRailModel');
     expect(rendererSource).toContain('PsycheSessions.statusPresentation');
     expect(rendererSource).not.toMatch(/"coven-tone-"\s*\+\s*presentation\.tone/);
     expect(rendererSource).not.toContain('treeitem');

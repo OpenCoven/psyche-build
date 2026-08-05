@@ -88,6 +88,61 @@ public struct PaneSnapshot: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public struct WorkspaceSnapshotEnvelope: Codable, Sendable, Equatable {
+    public let type: String
+    public let requestID: String
+    public let workspace: WorkspaceSnapshot
+
+    enum CodingKeys: String, CodingKey {
+        case type, requestID = "requestId", workspace
+    }
+}
+
+public struct WorkspaceSnapshot: Codable, Sendable, Equatable {
+    public let revision: Int
+    public let projects: [WorkspaceProjectSnapshot]
+}
+
+public struct WorkspaceProjectSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let root: String
+    public let title: String
+    public let worktrees: [WorkspaceWorktreeSnapshot]
+    public let projectPanes: [WorkspacePaneSnapshot]
+    public let runningCount: Int
+    public let attentionCount: Int
+}
+
+public struct WorkspaceWorktreeSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public var id: String { path }
+    public let path: String
+    public let head: String
+    public let branch: String?
+    public let isMain: Bool
+    public let detached: Bool
+    public let bare: Bool
+    public let locked: Bool
+    public let lockReason: String?
+    public let prunable: Bool
+    public let pruneReason: String?
+    public let dirty: Bool
+    public let missing: Bool
+    public let panes: [WorkspacePaneSnapshot]
+    public let runningCount: Int
+    public let attentionCount: Int
+}
+
+public struct WorkspacePaneSnapshot: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let cwd: String
+    public let title: String?
+    public let kind: String
+    public let agent: String?
+    public let status: String
+    public let needsAttention: Bool?
+    public let recoverability: String
+}
+
 public struct AttentionEvent: Codable, Sendable, Equatable {
     public let paneID: String
     public let reason: PaneStatus

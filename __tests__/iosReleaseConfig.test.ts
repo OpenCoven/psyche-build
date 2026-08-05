@@ -69,6 +69,25 @@ describe('iOS production release configuration', () => {
     expect(iosReadme).toContain('PsycheApp/Resources/Info.plist');
   });
 
+  test('declares a system launch screen and complete phone and tablet orientations', () => {
+    for (const key of [
+      'UILaunchScreen',
+      'UISupportedInterfaceOrientations',
+      'UISupportedInterfaceOrientations~ipad',
+    ]) {
+      expect(projectYml).toContain(`${key}:`);
+      expect(sourceInfoPlist).toContain(`<key>${key}</key>`);
+    }
+
+    expect(sourceInfoPlist).toMatch(/<key>UILaunchScreen<\/key>\s*<dict\/>/);
+    expect(sourceInfoPlist).toMatch(
+      /<key>UISupportedInterfaceOrientations<\/key>\s*<array>[\s\S]*?<string>UIInterfaceOrientationPortrait<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeLeft<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeRight<\/string>[\s\S]*?<\/array>/,
+    );
+    expect(sourceInfoPlist).toMatch(
+      /<key>UISupportedInterfaceOrientations~ipad<\/key>\s*<array>[\s\S]*?<string>UIInterfaceOrientationPortrait<\/string>[\s\S]*?<string>UIInterfaceOrientationPortraitUpsideDown<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeLeft<\/string>[\s\S]*?<string>UIInterfaceOrientationLandscapeRight<\/string>[\s\S]*?<\/array>/,
+    );
+  });
+
   test('uses production identifiers for every generated target', () => {
     expect(projectYml).toContain('PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.core');
     expect(projectYml).toContain('PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.coretests');

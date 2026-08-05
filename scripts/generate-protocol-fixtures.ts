@@ -8,7 +8,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CLIENT_FIXTURES, SERVER_FIXTURES } from '../protocol-fixtures/fixtures.js';
+import {
+  CLIENT_FIXTURES,
+  SERVER_FIXTURES,
+  WORKSPACE_SNAPSHOT_FIXTURE,
+} from '../protocol-fixtures/fixtures.js';
 
 const DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../protocol-fixtures');
 
@@ -32,6 +36,7 @@ export function serialize(fixtures: unknown): string {
 export const OUTPUTS = [
   ['client-messages.json', CLIENT_FIXTURES],
   ['server-messages.json', SERVER_FIXTURES],
+  ['workspace-snapshot.json', WORKSPACE_SNAPSHOT_FIXTURE],
 ] as const;
 
 if (import.meta.url === `file://${process.argv[1]}`) {

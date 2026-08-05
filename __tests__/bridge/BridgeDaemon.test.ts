@@ -9,6 +9,7 @@ import {
   type Project,
   type Ritual,
 } from "../../src/services/bridge/wireProtocol";
+import { WORKSPACE_SNAPSHOT_FIXTURE } from "../../protocol-fixtures/fixtures";
 
 // ---------------------------------------------------------------------------
 // Fake TokenStore — in-memory, no filesystem I/O
@@ -57,12 +58,9 @@ describe("BridgeDaemon", () => {
       projectName: "psyche",
       sessionName: "test-session",
       hubFactory: noopHubFactory,
-      paneProvider: () => [{
-        id: "%1", displayName: "psyche", kind: "control",
-        projectId: "p1", projectName: "psyche",
-        worktreePath: null, agent: null, status: "unknown",
-      }],
-      projectProvider: () => [{ id: "p1", displayName: "psyche", attentionCount: 0 }],
+      paneProvider: () => { throw new Error("legacy pane provider should not run"); },
+      projectProvider: () => { throw new Error("legacy project provider should not run"); },
+      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
       ...noopRituals,
       tokenStore: new FakeTokenStore() as any,
     });
@@ -109,12 +107,9 @@ describe("BridgeDaemon", () => {
       projectName: "psyche",
       sessionName: "test-session",
       hubFactory: noopHubFactory,
-      paneProvider: () => [{
-        id: "%1", displayName: "psyche", kind: "control",
-        projectId: "p1", projectName: "psyche",
-        worktreePath: null, agent: null, status: "unknown",
-      }],
-      projectProvider: () => [{ id: "p1", displayName: "psyche", attentionCount: 0 }],
+      paneProvider: () => { throw new Error("legacy pane provider should not run"); },
+      projectProvider: () => { throw new Error("legacy project provider should not run"); },
+      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
       ...noopRituals,
       tokenStore,
     });
@@ -138,8 +133,8 @@ describe("BridgeDaemon", () => {
       client.on("error", reject);
       setTimeout(() => reject(new Error("timeout")), 2000);
     });
-    expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(1);
-    expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("p1");
+    expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(3);
+    expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("project-1");
     client.close();
     await daemon.stop();
   });

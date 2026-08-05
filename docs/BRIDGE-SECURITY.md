@@ -60,7 +60,9 @@ line, and everything after it is parsed as a new tmux command. tmux ships
 - `assertSingleTmuxCommandLine` — a final check on the assembled command, so a
   future call site that skips the guards above still cannot cross the boundary.
 
-Anything reaching `TmuxControl` goes through all three. Note that
+Anything reaching `TmuxControl` goes through all three. That class lives in
+`src/services/tmuxControl.ts` and is shared by both transports — it was
+duplicated per transport until the copies drifted. Note that
 `bridge.ts` reaches tmux a different way — `execFileSync` with an argument
 array — which is not affected by any of this; do not "helpfully" convert those
 call sites to shell strings.
@@ -179,7 +181,7 @@ The rules above are pinned by:
 |---|---|
 | `__tests__/utils/tmuxTarget.test.ts` | the shared pane-id and quoting guard |
 | `__tests__/utils/base64.test.ts` | strict base64 validation of wire payloads |
-| `__tests__/daemon/tmuxControl.test.ts`, `__tests__/bridge/tmuxControl.test.ts` | no tmux command is built from an injecting pane id |
+| `__tests__/services/tmuxControl.test.ts` | no tmux command is built from an injecting pane id |
 | `__tests__/bridge/PairingFlow.test.ts` | the pairing attempt budget |
 | `__tests__/bridge/bridgeDaemonHardening.test.ts` | pairing, input validation, socket errors, frame cap — over a real TLS WebSocket |
 | `__tests__/daemon/daemonConnection.test.ts` | auth, project scoping, crash resistance, stream limits |

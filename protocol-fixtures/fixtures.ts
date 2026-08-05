@@ -2,6 +2,7 @@ import type {
   ClientMessage,
   ServerMessage,
 } from '../src/services/bridge/wireProtocol.js';
+import type { ServerResponse } from '../src/daemon/protocol.js';
 
 /**
  * Typed source of truth for the wire-protocol fixtures.
@@ -19,16 +20,24 @@ import type {
 
 /**
  * Strips optionality at every depth, so a fixture must spell out every field.
- * Adding `foo?: string` to a payload makes every fixture for it a compile
- * error until the author supplies a value — which is the moment to also update
- * the Swift struct.
+ * Optional fields accept an explicit `undefined` sentinel, which keeps the
+ * compile-time completeness check while matching their omitted JSON wire shape.
+ * Adding `foo?: string` to a payload makes every fixture for it a compile error
+ * until the author supplies a value or that sentinel — which is the moment to
+ * also update the Swift struct.
  *
  * Unions like `string | null` are left alone: they are not object types, so the
  * mapped branch does not apply and `null` stays a legal value.
  */
+type OptionalKeys<T extends object> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? K : never
+}[keyof T];
+
 type Complete<T> =
   T extends readonly (infer E)[] ? Complete<E>[]
-    : T extends object ? { [K in keyof T]-?: Complete<T[K]> }
+    : T extends object
+      ? { [K in Exclude<keyof T, OptionalKeys<T>>]: Complete<T[K]> }
+        & { [K in OptionalKeys<T>]: Complete<Exclude<T[K], undefined>> | undefined }
       : T;
 
 type CompleteMessage<M> = M extends { type: infer T; payload: infer P }
@@ -37,6 +46,14 @@ type CompleteMessage<M> = M extends { type: infer T; payload: infer P }
 
 export type ClientFixture = CompleteMessage<ClientMessage>;
 export type ServerFixture = CompleteMessage<ServerMessage>;
+type CompleteDaemonMessage<M> = M extends { type: infer T }
+  ? { [K in keyof M]-?: Complete<M[K]> } & { type: T }
+  : never;
+
+export type WorkspaceSnapshotFixture = CompleteDaemonMessage<Extract<
+  ServerResponse,
+  { type: 'workspace.snapshot.result' }
+>>;
 
 /**
  * Keys may carry a `_variant` suffix to cover a second shape of the same
@@ -170,3 +187,79 @@ export const SERVER_FIXTURES = {
     payload: { code: 'pane_not_found', message: 'pane is not registered in this psyche project' },
   },
 } satisfies Record<string, ServerFixture>;
+
+export const WORKSPACE_SNAPSHOT_FIXTURE = {
+  type: 'workspace.snapshot.result',
+  requestId: 'workspace-1',
+  workspace: {
+    revision: 42,
+    projects: [{
+      id: 'project-1',
+      root: '/repo',
+      title: 'psyche-build',
+      worktrees: [{
+        path: '/repo',
+        head: '0123456789abcdef0123456789abcdef01234567',
+        branch: 'main',
+        isMain: true,
+        detached: false,
+        bare: false,
+        locked: false,
+        lockReason: undefined,
+        prunable: false,
+        pruneReason: undefined,
+        dirty: true,
+        missing: false,
+        panes: [{
+          id: '%3',
+          cwd: '/repo',
+          title: 'implementation',
+          kind: 'agent',
+          agent: 'coven-code',
+          status: 'running',
+          needsAttention: false,
+          recoverability: 'healthy',
+        }],
+        runningCount: 1,
+        attentionCount: 0,
+      }, {
+        path: '/worktrees/review',
+        head: 'fedcba9876543210fedcba9876543210fedcba98',
+        branch: 'review',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: true,
+        lockReason: 'manual review',
+        prunable: true,
+        pruneReason: 'gitdir file points to non-existent location',
+        dirty: false,
+        missing: true,
+        panes: [{
+          id: 'coven:review',
+          cwd: '/worktrees/review',
+          title: 'review lane',
+          kind: 'coven-session',
+          agent: 'coven-code',
+          status: 'waiting',
+          needsAttention: true,
+          recoverability: 'healthy',
+        }],
+        runningCount: 0,
+        attentionCount: 1,
+      }],
+      projectPanes: [{
+        id: '%9',
+        cwd: '/missing/worktree',
+        title: 'orphaned pane',
+        kind: 'terminal',
+        agent: undefined,
+        status: 'exited',
+        needsAttention: false,
+        recoverability: 'missing-worktree',
+      }],
+      runningCount: 1,
+      attentionCount: 1,
+    }],
+  },
+} satisfies WorkspaceSnapshotFixture;
