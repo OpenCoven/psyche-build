@@ -1015,10 +1015,11 @@
   }
 
   /**
-   * Replace `el`'s text with an <input>, focused and selected. Calls
-   * onCommit(value) on Enter / blur if the value changed; Escape cancels.
-   * Sets editingContext so the surface's refresh loop pauses until the edit
-   * settles, then runs `done()` (which usually re-renders).
+   * Mount a focused, selected <input> in `el`, or in opts.host while
+   * opts.hide is temporarily removed from view and the accessibility tree.
+   * Calls onCommit(value) on Enter / blur if the value changed; Escape
+   * cancels. Sets editingContext so the surface's refresh loop pauses until
+   * the edit settles, then runs `done()` (which usually re-renders).
    */
   function editLabelInline(el, surface, opts) {
     if (!el) return;
@@ -1031,8 +1032,18 @@
     input.value = initial;
     input.spellcheck = false;
     input.autocomplete = "off";
+    if (opts.ariaLabel) input.setAttribute("aria-label", opts.ariaLabel);
 
-    el.replaceChildren(input);
+    var hiddenEl = opts.hide || null;
+    var hiddenAria = hiddenEl ? hiddenEl.getAttribute("aria-hidden") : null;
+    var hiddenTabindex = hiddenEl ? hiddenEl.getAttribute("tabindex") : null;
+    if (hiddenEl) {
+      hiddenEl.classList.add("inline-edit-hidden");
+      hiddenEl.setAttribute("aria-hidden", "true");
+      hiddenEl.setAttribute("tabindex", "-1");
+    }
+    if (opts.host) opts.host.appendChild(input);
+    else el.replaceChildren(input);
     // Defer focus by a tick so the dblclick text-selection doesn't override.
     requestAnimationFrame(function () {
       input.focus();
@@ -1051,6 +1062,14 @@
           try { opts.onCommit(value.trim()); } catch (_) {}
         }
       }
+      if (hiddenEl) {
+        hiddenEl.classList.remove("inline-edit-hidden");
+        if (hiddenAria === null) hiddenEl.removeAttribute("aria-hidden");
+        else hiddenEl.setAttribute("aria-hidden", hiddenAria);
+        if (hiddenTabindex === null) hiddenEl.removeAttribute("tabindex");
+        else hiddenEl.setAttribute("tabindex", hiddenTabindex);
+      }
+      if (opts.host && input.parentNode === opts.host) opts.host.removeChild(input);
       if (typeof opts.done === "function") opts.done();
     }
     input.addEventListener("keydown", function (e) {
@@ -1076,9 +1095,9 @@
   // 7b. Sessions sidebar
   // ============================================================
 
-  // One row per thread, grouped under its project. Threads are the "sessions"
-  // — state.threads is the source of truth, so this renders from the same data
-  // the tab strip and terminal host use rather than tracking its own copy.
+  // Local rows remain backed by state.threads, the same source used by the tab
+  // strip and terminal host. Coven discovery contributes read-only remote rows
+  // without copying them into the local lifecycle.
 
   var themeSelectEl = document.getElementById("theme-select");
   var solidBgEl = document.getElementById("solid-bg");
@@ -1106,24 +1125,61 @@
     return "";
   }
 
+  function covenInlineState(phase) {
+    if (phase === "loading") {
+      return { text: "Coven — loading…", title: "" };
+    }
+    if (phase === "unavailable") {
+      return {
+        text: "Coven unavailable",
+        title: "Coven daemon is not running; run `coven daemon start`",
+      };
+    }
+    if (phase === "incompatible") {
+      return {
+        text: "Coven update required",
+        title: "Coven daemon API update required",
+      };
+    }
+    if (phase === "error") {
+      return {
+        text: "Coven could not load",
+        title: "Coven sessions could not be loaded",
+      };
+    }
+    return null;
+  }
+
+  function covenToneClass(tone) {
+    if (tone === "ok") return "coven-tone-ok";
+    if (tone === "warn") return "coven-tone-warn";
+    if (tone === "muted") return "coven-tone-muted";
+    if (tone === "danger") return "coven-tone-danger";
+    return "coven-tone-neutral";
+  }
+
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
     sessionListEl.innerHTML = "";
 
-    var needle = sessionFilter.trim().toLowerCase();
+    var currentSearchQuery = sessionFilter;
+    var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
+    var hasSearchResult = false;
 
     state.projects.forEach(function (project) {
-      var threads = state.threads.filter(function (t) { return t.projectId === project.id; });
-      if (needle) {
-        var projectHit = project.name.toLowerCase().indexOf(needle) !== -1;
-        threads = threads.filter(function (t) {
-          return projectHit || String(t.name).toLowerCase().indexOf(needle) !== -1;
-        });
-      }
-      if (threads.length === 0) return;
-      matched += threads.length;
+      var localRows = state.threads.filter(function (t) { return t.projectId === project.id; });
+      var remoteRows = covenDiscovery.sessionsByProject.get(project.root) || [];
+      var filtered = PsycheSessions.filterProjectSessions(
+        project, localRows, remoteRows, currentSearchQuery
+      );
+      var inlineState = covenInlineState(covenDiscovery.phase);
+      var showInlineState = Boolean(inlineState && (!needle || filtered.projectMatches));
+      if (filtered.psycheSessions.length === 0 &&
+          filtered.covenSessions.length === 0 && !showInlineState) return;
+      matched += filtered.psycheSessions.length + filtered.covenSessions.length;
+      if (needle) hasSearchResult = true;
 
       var group = document.createElement("div");
       group.className = "session-group";
@@ -1134,50 +1190,162 @@
       head.title = project.root || project.name;
       group.appendChild(head);
 
-      threads.forEach(function (thread) {
+      if (filtered.psycheSessions.length > 0) {
+        var psycheLabel = document.createElement("div");
+        psycheLabel.className = "session-subsection-label";
+        psycheLabel.textContent = "Psyche";
+        group.appendChild(psycheLabel);
+      }
+
+      filtered.psycheSessions.forEach(function (thread) {
+        var wrapper = document.createElement("div");
+        wrapper.className = "session-row-wrap";
         var row = document.createElement("button");
         row.type = "button";
         row.className = "session-row " + sessionStatusClass(thread) +
           (state.activeThreadId === thread.id ? " active" : "");
         row.dataset.threadId = thread.id;
-        row.setAttribute("role", "treeitem");
-        row.setAttribute("aria-selected", state.activeThreadId === thread.id ? "true" : "false");
+        if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
         row.title = thread.name + " — " + (project.root || "");
         row.innerHTML =
           '<span class="session-dot"></span>' +
           '<span class="session-text">' +
             '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
             '<span class="session-sub">' + escapeHtml(shortenRoot(project.root)) + "</span>" +
-          "</span>" +
-          '<button class="session-close" title="Close session" aria-label="Close session">×</button>';
+          "</span>";
 
-        row.addEventListener("click", async function (e) {
-          if (e.target && e.target.classList.contains("session-close")) return;
+        row.addEventListener("click", async function () {
           // Switching project first keeps layout/browser state consistent, then
           // focus the specific thread the user clicked.
           if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
           await focusThread(thread.id);
         });
-        row.querySelector(".session-close").addEventListener("click", function (e) {
-          e.stopPropagation();
-          closeThread(thread.id);
-        });
         var titleEl = row.querySelector(".session-title");
-        titleEl.addEventListener("dblclick", function (e) {
+        function beginSessionRename(e) {
           e.stopPropagation();
           editLabelInline(titleEl, "sidebar", {
             initial: thread.name,
+            host: wrapper,
+            hide: row,
+            ariaLabel: "Session name",
             onCommit: function (v) { renameThread(thread.id, v); },
             done: function () { renderSessionList(); },
           });
+        }
+        row.addEventListener("dblclick", beginSessionRename);
+        row.addEventListener("keydown", function (e) {
+          if (e.key !== "F2") return;
+          e.preventDefault();
+          beginSessionRename(e);
+        });
+
+        var close = document.createElement("button");
+        close.type = "button";
+        close.className = "session-close";
+        close.title = "Close session";
+        close.setAttribute("aria-label", "Close session");
+        close.textContent = "×";
+        close.addEventListener("click", function (e) {
+          e.stopPropagation();
+          closeThread(thread.id);
+        });
+        wrapper.appendChild(row);
+        wrapper.appendChild(close);
+        group.appendChild(wrapper);
+      });
+
+      if (filtered.covenSessions.length > 0 || showInlineState) {
+        var covenLabel = document.createElement("div");
+        covenLabel.className = "session-subsection-label";
+        covenLabel.textContent = "Coven";
+        group.appendChild(covenLabel);
+      }
+
+      filtered.covenSessions.forEach(function (session) {
+        var presentation = PsycheSessions.statusPresentation(session.status);
+        var primary = typeof session.title === "string" ? session.title.trim() : "";
+        if (!primary) primary = session.id;
+        var harness = typeof session.harness === "string" ? session.harness.trim() : "";
+
+        var activeAttachment = state.threads.find(function (thread) {
+          return thread.id === state.activeThreadId &&
+            thread.projectId === project.id &&
+            thread.covenSessionId === session.id && thread.status !== "exited";
+        });
+        var isActive = Boolean(activeAttachment);
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "session-row session-coven-row " +
+          covenToneClass(presentation.tone) +
+          (presentation.label === "starting" ? " coven-starting" : "") +
+          (isActive ? " active" : "");
+        row.dataset.covenSessionId = session.id;
+        if (isActive) row.setAttribute("aria-current", "true");
+        row.setAttribute(
+          "aria-label", primary + " — " + presentation.label + " — " + session.id
+        );
+        row.title = primary + " — " + presentation.label + " — " + session.id;
+
+        var dot = document.createElement("span");
+        dot.className = "session-dot";
+        var text = document.createElement("span");
+        text.className = "session-text";
+        var title = document.createElement("span");
+        title.className = "session-title";
+        title.textContent = primary;
+        var meta = document.createElement("span");
+        meta.className = "session-coven-meta";
+        if (harness) {
+          var harnessMeta = document.createElement("span");
+          harnessMeta.className = "session-coven-harness";
+          harnessMeta.textContent = harness;
+          meta.appendChild(harnessMeta);
+          var harnessSeparator = document.createElement("span");
+          harnessSeparator.className = "session-coven-separator";
+          harnessSeparator.textContent = " · ";
+          meta.appendChild(harnessSeparator);
+        }
+        var statusMeta = document.createElement("span");
+        statusMeta.className = "session-coven-status";
+        statusMeta.textContent = presentation.label;
+        meta.appendChild(statusMeta);
+        var idSeparator = document.createElement("span");
+        idSeparator.className = "session-coven-separator";
+        idSeparator.textContent = " · ";
+        meta.appendChild(idSeparator);
+        var idMeta = document.createElement("span");
+        idMeta.className = "session-coven-id";
+        idMeta.textContent = session.id;
+        meta.appendChild(idMeta);
+        text.appendChild(title);
+        text.appendChild(meta);
+        row.appendChild(dot);
+        row.appendChild(text);
+
+        row.addEventListener("click", function () {
+          try {
+            Promise.resolve(openCovenSession(project, session)).catch(function () {
+              setStatus("Coven session could not be opened", "error");
+            });
+          } catch (_) {
+            setStatus("Coven session could not be opened", "error");
+          }
         });
         group.appendChild(row);
       });
 
+      if (showInlineState) {
+        var inline = document.createElement("div");
+        inline.className = "session-inline-state";
+        inline.textContent = inlineState.text;
+        if (inlineState.title) inline.title = inlineState.title;
+        group.appendChild(inline);
+      }
+
       sessionListEl.appendChild(group);
     });
 
-    if (matched === 0) {
+    if (matched === 0 && (!needle || !hasSearchResult)) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
       empty.textContent = needle
