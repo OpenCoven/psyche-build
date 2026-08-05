@@ -12,6 +12,7 @@ import {
 } from '../../src/daemon/index.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
+import type { BridgeSpawnRequest } from '../../src/daemon/bridge.js';
 
 /**
  * The loopback daemon is scoped to exactly one project root, and every pane
@@ -70,7 +71,15 @@ class RecordingTmux extends TmuxControl {
   override sendKeysHex(paneId: string): void { this.calls.push({ op: 'input', paneId }); }
 }
 
-function buildConnection(projectRoot: string, opts: { authed?: boolean; tmux?: TmuxControl } = {}) {
+function buildConnection(
+  projectRoot: string,
+  opts: {
+    authed?: boolean;
+    tmux?: TmuxControl;
+    workspaceProvider?: ConnectionDeps['workspaceProvider'];
+    spawnPane?: ConnectionDeps['spawnPane'];
+  } = {},
+) {
   const ws = new FakeSocket();
   const tmux = opts.tmux ?? new RecordingTmux('psyche-test');
   const deps: ConnectionDeps = {
@@ -80,6 +89,8 @@ function buildConnection(projectRoot: string, opts: { authed?: boolean; tmux?: T
     authedViaHeader: opts.authed ?? true,
     tmux,
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+    workspaceProvider: opts.workspaceProvider,
+    spawnPane: opts.spawnPane,
   };
   const conn = new Connection(ws as any, deps);
   conn.bind();
@@ -250,6 +261,163 @@ describe('daemon connection project scoping', () => {
 
     expect(ws.sent[0]).toMatchObject({ type: 'error', code: 'invalid_pane' });
     expect(tmux.calls).toEqual([]);
+  });
+});
+
+describe('daemon workspace projection', () => {
+  it('returns the shared project-worktree-pane snapshot', async () => {
+    const root = await projectWithPanes([]);
+    const workspace = {
+      revision: 12,
+      projects: [{
+        id: root,
+        root,
+        title: 'project',
+        worktrees: [],
+        projectPanes: [],
+        runningCount: 0,
+        attentionCount: 0,
+      }],
+    };
+    const workspaceProvider = vi.fn(async () => workspace);
+    const { ws } = buildConnection(root, { workspaceProvider });
+
+    await request(ws, { type: 'workspace.snapshot', requestId: 'workspace-1' });
+
+    expect(workspaceProvider).toHaveBeenCalledOnce();
+    expect(ws.sent).toEqual([{
+      type: 'workspace.snapshot.result',
+      requestId: 'workspace-1',
+      workspace,
+    }]);
+  });
+
+  it('emits an ordered workspace change after a successful pane mutation', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3', title: 'old' }]);
+    const workspace = {
+      revision: 13,
+      projects: [{
+        id: root,
+        root,
+        title: 'project',
+        worktrees: [],
+        projectPanes: [],
+        runningCount: 0,
+        attentionCount: 0,
+      }],
+    };
+    const { ws } = buildConnection(root, {
+      workspaceProvider: vi.fn(async () => workspace),
+    });
+
+    await request(ws, {
+      type: 'panes.meta',
+      requestId: 'rename-1',
+      id: 'psyche-1',
+      title: 'renamed',
+    });
+    await waitFor(() => ws.sent.length === 2, 'workspace change event');
+
+    expect(ws.sent).toEqual([
+      { type: 'ack', requestId: 'rename-1', ok: true },
+      { type: 'workspace.changed', revision: 13, sequence: 1, workspace },
+    ]);
+  });
+});
+
+describe('daemon lane creation', () => {
+  it('replays an idempotent single-lane result without spawning or emitting twice', async () => {
+    const root = await projectWithPanes([]);
+    const spawnPane = vi.fn(async () => ({
+      id: '%7',
+      pane: { id: '%7', cwd: root, title: 'lane' },
+      worktreePath: `${root}/.psyche/worktrees/lane`,
+      branch: 'lane',
+    }));
+    const workspaceProvider = vi.fn(async () => ({ revision: 1, projects: [] }));
+    const { ws } = buildConnection(root, { spawnPane, workspaceProvider });
+
+    await request(ws, {
+      type: 'panes.spawn', requestId: 'first', idempotencyKey: 'lane-1', cwd: root,
+      title: 'lane',
+    });
+    await waitFor(() => ws.sent.length === 2, 'first workspace change');
+    await request(ws, {
+      type: 'panes.spawn', requestId: 'replay', idempotencyKey: 'lane-1', cwd: root,
+      title: 'lane',
+    });
+
+    expect(spawnPane).toHaveBeenCalledOnce();
+    expect(ws.sent.map((message) => message.type)).toEqual([
+      'panes.spawn.result', 'workspace.changed', 'panes.spawn.result',
+    ]);
+    expect(ws.sent[0]).toMatchObject({ requestId: 'first', id: '%7' });
+    expect(ws.sent[2]).toMatchObject({ requestId: 'replay', id: '%7' });
+  });
+
+  it('keeps successful siblings when a batch lane launch partially fails', async () => {
+    const root = await projectWithPanes([]);
+    const spawnPane = vi.fn(async (
+      _projectRoot: string,
+      _sessionName: string,
+      launch: BridgeSpawnRequest,
+    ) => {
+      if (launch.title === 'broken') {
+        throw Object.assign(new Error('tmux refused lane'), { code: 'spawn_failed' });
+      }
+      return {
+        id: launch.title === 'one' ? '%1' : '%3',
+        pane: { id: launch.title === 'one' ? '%1' : '%3', cwd: root, title: launch.title },
+        worktreePath: `${root}/.psyche/worktrees/${launch.title}`,
+        branch: launch.title ?? 'lane',
+      };
+    });
+    const { ws } = buildConnection(root, {
+      spawnPane,
+      workspaceProvider: vi.fn(async () => ({ revision: 2, projects: [] })),
+    });
+
+    await request(ws, {
+      type: 'panes.spawnMany', requestId: 'batch', idempotencyKey: 'batch-1',
+      launches: [
+        { cwd: root, title: 'one' },
+        { cwd: root, title: 'broken' },
+        { cwd: root, title: 'three' },
+      ],
+    });
+    await waitFor(() => ws.sent.length === 2, 'batch workspace change');
+
+    expect(ws.sent[0]).toEqual({
+      type: 'panes.spawnMany.result',
+      requestId: 'batch',
+      outcomes: [
+        expect.objectContaining({ index: 0, ok: true, id: '%1' }),
+        { index: 1, ok: false, code: 'spawn_failed', message: 'tmux refused lane' },
+        expect.objectContaining({ index: 2, ok: true, id: '%3' }),
+      ],
+    });
+    expect(ws.sent[1].type).toBe('workspace.changed');
+    expect(spawnPane).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects unbounded batches and unsafe idempotency keys before spawning', async () => {
+    const root = await projectWithPanes([]);
+    const spawnPane = vi.fn();
+    const { ws } = buildConnection(root, { spawnPane });
+
+    await request(ws, {
+      type: 'panes.spawnMany', requestId: 'empty', idempotencyKey: 'batch', launches: [],
+    });
+    await request(ws, {
+      type: 'panes.spawnMany', requestId: 'unsafe', idempotencyKey: 'bad key',
+      launches: [{ cwd: root }],
+    });
+
+    expect(ws.sent).toEqual([
+      expect.objectContaining({ requestId: 'empty', code: 'invalid_batch' }),
+      expect.objectContaining({ requestId: 'unsafe', code: 'invalid_idempotency_key' }),
+    ]);
+    expect(spawnPane).not.toHaveBeenCalled();
   });
 });
 
