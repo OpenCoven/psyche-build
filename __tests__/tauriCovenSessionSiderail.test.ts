@@ -314,6 +314,7 @@ function createRenderer(options: {
   const setActiveProject = vi.fn().mockResolvedValue(true);
   const focusThread = vi.fn().mockResolvedValue(undefined);
   const closeThread = vi.fn();
+  const hideThread = vi.fn();
   const editLabelInline = vi.fn();
   const renameThread = vi.fn((id: string, value: string) => {
     const thread = state.threads.find((candidate) => candidate.id === id);
@@ -349,7 +350,7 @@ function createRenderer(options: {
   const harness = Function(
     'document', 'sessionListEl', 'editingContext', 'sessionFilter', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread',
+    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
     'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
@@ -379,6 +380,7 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    hideThread,
     renameThread,
     editLabelInlineImpl,
     openCovenSession,
@@ -398,6 +400,7 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    hideThread,
     renameThread,
     editLabelInline,
     openCovenSession,
@@ -673,7 +676,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.focusThread).toHaveBeenCalledWith('local');
 
     const closeEvent = await close?.emit('click');
-    expect(renderer.closeThread).toHaveBeenCalledWith('local');
+    expect(renderer.hideThread).toHaveBeenCalledWith('local');
     expect(closeEvent?.propagationStopped).toBe(true);
 
     const title = localRow.querySelector('.session-title');

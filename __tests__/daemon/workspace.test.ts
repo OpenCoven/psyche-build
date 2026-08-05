@@ -29,7 +29,39 @@ describe('daemon workspace snapshot', () => {
         dirty: true,
         missing: false,
       },
+      {
+        path: '/external/review',
+        head: '987654',
+        branch: 'review',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: false,
+        prunable: false,
+        dirty: false,
+        missing: false,
+      },
     ]);
+
+    const listCovenSessions = vi.fn(async (root: string) => root === '/external/review' ? [{
+      id: 'external-session',
+      projectRoot: '/external/review',
+      cwd: '/external/review',
+      harness: 'coven-code',
+      title: 'External review',
+      status: 'running' as const,
+      createdAt: '2026-08-04T00:00:00Z',
+      updatedAt: '2026-08-04T00:01:00Z',
+    }] : [{
+      id: 'session-1',
+      projectRoot: '/repo',
+      cwd: '/repo',
+      harness: 'coven-code',
+      title: 'Review',
+      status: 'waiting' as const,
+      createdAt: '2026-08-04T00:00:00Z',
+      updatedAt: '2026-08-04T00:01:00Z',
+    }]);
 
     const snapshot = await readDaemonWorkspaceSnapshot('/repo', {
       revision: () => 42,
@@ -41,26 +73,19 @@ describe('daemon workspace snapshot', () => {
         agent: 'codex',
         title: 'Implement rail',
       }],
-      listCovenSessions: async () => [{
-        id: 'session-1',
-        projectRoot: '/repo',
-        cwd: '/repo',
-        harness: 'coven-code',
-        title: 'Review',
-        status: 'waiting',
-        createdAt: '2026-08-04T00:00:00Z',
-        updatedAt: '2026-08-04T00:01:00Z',
-      }],
+      listCovenSessions,
     });
 
     expect(readWorktrees).toHaveBeenCalledWith('/repo');
+    expect(listCovenSessions).toHaveBeenCalledTimes(3);
+    expect(listCovenSessions).toHaveBeenCalledWith('/external/review');
     expect(snapshot).toMatchObject({
       revision: 42,
       projects: [{
         id: '/repo',
         root: '/repo',
         title: 'repo',
-        runningCount: 1,
+        runningCount: 2,
         attentionCount: 1,
         worktrees: [
           {
@@ -73,6 +98,10 @@ describe('daemon workspace snapshot', () => {
             branch: 'feature',
             dirty: true,
             panes: [{ id: '%7', kind: 'agent', agent: 'codex' }],
+          },
+          {
+            path: '/external/review',
+            panes: [{ id: 'external-session', kind: 'coven-session' }],
           },
         ],
       }],

@@ -84,7 +84,7 @@
     covenDiscovery = request.state;
     var requestId = request.requestId;
     renderSessionList();
-    var roots = [];
+    var projectRootGroups = [];
     state.projects.forEach(function (project) {
       var candidates = [project.root].concat(
         (state.env && state.env.native_workspace_v2 === false
@@ -93,25 +93,48 @@
           return worktree.path;
         })
       );
+      var roots = [];
       candidates.forEach(function (root) {
         if (root && roots.indexOf(root) === -1) roots.push(root);
       });
+      if (roots.length > 0) projectRootGroups.push(roots);
     });
-    if (roots.length === 0) {
+    if (projectRootGroups.length === 0) {
       covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
       renderSessionList();
       return;
     }
-    var response;
-    try {
-      response = await invoke("coven_sessions", { projectRoots: roots });
-    } catch (_) {
-      response = {
+    var responses = await Promise.all(projectRootGroups.map(function (roots) {
+      return invoke("coven_sessions", { projectRoots: roots }).catch(function () {
+        return {
+          status: "error",
+          sessions: [],
+          message: "Coven sessions could not be loaded",
+        };
+      });
+    }));
+    var sessionsById = new Map();
+    responses.forEach(function (candidate) {
+      (Array.isArray(candidate.sessions) ? candidate.sessions : []).forEach(function (session) {
+        if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
+      });
+    });
+    var sessions = Array.from(sessionsById.values());
+    var hasSuccessfulFamily = responses.some(function (candidate) {
+      return candidate.status === "ready" || candidate.status === "empty";
+    });
+    var firstFailure = responses.find(function (candidate) {
+      return candidate.status !== "ready" && candidate.status !== "empty";
+    });
+    var response = sessions.length > 0
+      ? { status: "ready", sessions: sessions }
+      : hasSuccessfulFamily
+        ? { status: "empty", sessions: [] }
+        : (firstFailure || {
         status: "error",
         sessions: [],
         message: "Coven sessions could not be loaded",
-      };
-    }
+      });
     covenDiscovery = PsycheSessions.applyCovenResponse(
       covenDiscovery, requestId, response
     );
@@ -1587,12 +1610,12 @@
           var close = document.createElement("button");
           close.type = "button";
           close.className = "session-close";
-          close.title = "Close session";
-          close.setAttribute("aria-label", "Close session");
+          close.title = "Hide session";
+          close.setAttribute("aria-label", "Hide session");
           close.textContent = "×";
           close.addEventListener("click", function (e) {
             e.stopPropagation();
-            closeThread(thread.id);
+            hideThread(thread.id);
           });
           wrapper.appendChild(row);
           wrapper.appendChild(close);
@@ -3297,8 +3320,9 @@
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffViewer = window.PsycheCodeEditor.createDiffViewer({ parent: diffEditorHostEl });
 
-  function diffCacheKey(projectId, path, staged) {
-    return projectId + "\0" + path + "\0" + (staged ? "staged" : "unstaged");
+  function diffCacheKey(projectId, workspaceRoot, path, staged) {
+    return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
+      (staged ? "staged" : "unstaged");
   }
 
   function invalidateProjectDiffs(projectId) {
@@ -3518,7 +3542,7 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, f.path, stagedDiffFor(f));
+      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f));
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
@@ -3530,7 +3554,7 @@
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, f.path, stagedDiffFor(f)) === selectedDiffKey;
+      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f)) === selectedDiffKey;
     }) || status.files[0];
     showDiff(project, target);
   }
@@ -3539,7 +3563,7 @@
     if (!project || !entry || !diffEditorHostEl) return;
     if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, entry.path, staged);
+    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");

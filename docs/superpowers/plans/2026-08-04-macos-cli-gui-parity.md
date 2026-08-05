@@ -23,9 +23,9 @@
 ### Task 2: Expose a revisioned read model
 
 - [x] Add `workspace.snapshot` to the canonical control contract.
-- [x] Add ordered `workspace.changed` events with revision and sequence identifiers.
+- [ ] Add ordered `workspace.changed` events with revision and sequence identifiers. (Connection-local emission exists; host-wide broadcast ordering remains.)
 - [x] Generate or validate protocol fixtures for TypeScript, Rust/Tauri, and Swift consumers.
-- [x] Preserve legacy protocol adapters as read-only compatibility paths.
+- [ ] Preserve legacy protocol adapters as read-only compatibility paths. (The detached projection exists and is tested; production bridge wiring remains.)
 
 ### Task 3: Render the macOS project/worktree/pane rail
 
@@ -53,7 +53,7 @@
 
 - [ ] Reconcile host/app restart against tmux, Git, Psyche metadata, and Coven before enabling mutation.
 - [ ] Test traversal, symlink escape, pane-ID injection, cross-project operations, expired previews, replayed commands, and unauthorized actors.
-- [x] Gate the new workspace behind `native_workspace_v2` and retain rollback for one release.
+- [ ] Gate the new workspace behind `native_workspace_v2` and retain rollback for one release. (Discovery is gated; a true flat-rail rollback remains.)
 - [ ] Run root test/typecheck/build/smoke, protocol fixture diff checks, Rust format/test/check, native web build, packaged app/DMG build, and the manual multi-project lifecycle smoke. (Automated gates and a DMG launch smoke pass; the interactive multi-project lifecycle remains.)
 - [ ] Promote after two consecutive releases complete the packaged smoke without using the embedded-TUI fallback.
 

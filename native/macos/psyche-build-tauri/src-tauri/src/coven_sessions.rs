@@ -894,7 +894,11 @@ fn normalize_session(
         Path::new(&cwd)
             .canonicalize()
             .ok()
-            .filter(|canonical_cwd| canonical_cwd.starts_with(&canonical_project_root))
+            .filter(|canonical_cwd| {
+                requested_roots
+                    .keys()
+                    .any(|requested_root| canonical_cwd.starts_with(requested_root))
+            })
             .map(|_| cwd)
     });
 
@@ -1664,24 +1668,30 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_cwds_within_the_matched_project_root() {
+    fn keeps_only_cwds_within_requested_project_or_worktree_roots() {
         let tree = TempTree::new("cwd-scope");
         let project = tree.directory("project");
         let inside = tree.directory("project/inside");
+        let linked_worktree = tree.directory("external-worktree");
         let outside = tree.directory("outside");
-        let requested = vec![project.clone()];
+        let requested = vec![project.clone(), linked_worktree.clone()];
         let payload = json!([
             { "id": "inside", "projectRoot": project, "cwd": inside },
+            { "id": "linked", "projectRoot": project, "cwd": linked_worktree },
             { "id": "outside", "projectRoot": project, "cwd": outside }
         ]);
 
         let sessions = normalize_sessions(payload, &requested).unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
         assert_eq!(
             sessions[0].cwd.as_deref(),
             Some(inside.to_string_lossy().as_ref())
         );
-        assert_eq!(sessions[1].cwd, None);
+        assert_eq!(
+            sessions[1].cwd.as_deref(),
+            Some(linked_worktree.to_string_lossy().as_ref())
+        );
+        assert_eq!(sessions[2].cwd, None);
     }
 
     #[test]
