@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { readOrCreateToken, tokenFilePath } from './token.js';
@@ -43,6 +43,7 @@ import {
 import type { CovenClient } from './bridge.js';
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
+import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
 
 export interface DaemonOptions {
   port: number;
@@ -74,6 +75,8 @@ export const AUTH_DEADLINE_MS = 10_000;
  * unbounded count is both a memory leak and a duplicate-output bug.
  */
 export const MAX_STREAMS_PER_CONNECTION = 64;
+export const MAX_BATCH_LANES = 16;
+export const MAX_IDEMPOTENT_SPAWNS = 128;
 
 export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void> {
   const projectRoot = opts.projectRoot ?? findGitRoot() ?? process.cwd();
@@ -166,6 +169,11 @@ export interface ConnectionDeps {
   tmux: TmuxControl;
   capabilityRouter: AgenticCapabilityRouter;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
+  spawnPane?: (
+    projectRoot: string,
+    sessionName: string,
+    request: BridgeSpawnRequest,
+  ) => Promise<BridgeSpawnResult>;
 }
 
 /**
@@ -178,6 +186,10 @@ export class Connection {
   private authed: boolean;
   private workspaceSequence = 0;
   private activeStreams = new Map<StreamId, { paneId: string }>();
+  private idempotentSpawns = new Map<string, {
+    fingerprint: string;
+    result: Promise<BridgeSpawnResult>;
+  }>();
   private authTimer: NodeJS.Timeout | null = null;
   /**
    * One `output` listener per connection, not one per stream.
@@ -645,7 +657,7 @@ export class Connection {
       }
       case 'panes.spawn': {
         try {
-          const result = await spawnBridgePane(this.deps.projectRoot, this.deps.tmux.sessionName, msg);
+          const { result, replayed } = await this.spawnPane(msg, msg.idempotencyKey);
           this.send({
             type: 'panes.spawn.result',
             requestId: msg.requestId,
@@ -654,7 +666,7 @@ export class Connection {
             worktreePath: result.worktreePath,
             branch: result.branch,
           });
-          await this.emitWorkspaceChanged();
+          if (!replayed) await this.emitWorkspaceChanged();
         } catch (e) {
           this.send({
             type: 'error',
@@ -663,6 +675,47 @@ export class Connection {
             message: bridgeErrorMessage(e),
           });
         }
+        return;
+      }
+      case 'panes.spawnMany': {
+        if (!Array.isArray(msg.launches) || msg.launches.length < 1 ||
+            msg.launches.length > MAX_BATCH_LANES) {
+          this.send({
+            type: 'error', requestId: msg.requestId, code: 'invalid_batch',
+            message: `launches must contain 1-${MAX_BATCH_LANES} lanes`,
+          });
+          return;
+        }
+        if (!validIdempotencyKey(msg.idempotencyKey)) {
+          this.send({
+            type: 'error', requestId: msg.requestId, code: 'invalid_idempotency_key',
+            message: 'idempotencyKey must be 1-128 safe characters',
+          });
+          return;
+        }
+
+        const outcomes = [];
+        let changed = false;
+        for (let index = 0; index < msg.launches.length; index += 1) {
+          const launch = msg.launches[index];
+          try {
+            const spawned = await this.spawnPane(
+              { ...launch, requestId: msg.requestId },
+              batchLaneIdempotencyKey(msg.idempotencyKey, index),
+            );
+            outcomes.push({ index, ok: true as const, ...spawned.result });
+            if (!spawned.replayed) changed = true;
+          } catch (error) {
+            outcomes.push({
+              index,
+              ok: false as const,
+              code: bridgeErrorCode(error, 'spawn_failed'),
+              message: bridgeErrorMessage(error),
+            });
+          }
+        }
+        this.send({ type: 'panes.spawnMany.result', requestId: msg.requestId, outcomes });
+        if (changed) await this.emitWorkspaceChanged();
         return;
       }
       default: {
@@ -675,6 +728,60 @@ export class Connection {
       }
     }
   }
+
+  private spawnPane(
+    request: BridgeSpawnRequest,
+    idempotencyKey?: string,
+  ): Promise<{ result: BridgeSpawnResult; replayed: boolean }> {
+    const spawn = this.deps.spawnPane ?? spawnBridgePane;
+    if (idempotencyKey === undefined) {
+      return spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request)
+        .then((result) => ({ result, replayed: false }));
+    }
+    if (!validIdempotencyKey(idempotencyKey)) {
+      return Promise.reject(Object.assign(
+        new Error('idempotencyKey must be 1-128 safe characters'),
+        { code: 'invalid_idempotency_key' },
+      ));
+    }
+
+    const fingerprint = JSON.stringify({
+      cwd: request.cwd,
+      branch: request.branch,
+      startPointBranch: request.startPointBranch,
+      agent: request.agent,
+      title: request.title,
+      prompt: request.prompt,
+      existingWorktree: request.existingWorktree,
+    });
+    const existing = this.idempotentSpawns.get(idempotencyKey);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        return Promise.reject(Object.assign(
+          new Error('idempotencyKey was already used for a different lane'),
+          { code: 'idempotency_conflict' },
+        ));
+      }
+      return existing.result.then((result) => ({ result, replayed: true }));
+    }
+
+    const result = spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request);
+    this.idempotentSpawns.set(idempotencyKey, { fingerprint, result });
+    if (this.idempotentSpawns.size > MAX_IDEMPOTENT_SPAWNS) {
+      const oldest = this.idempotentSpawns.keys().next().value;
+      if (oldest !== undefined) this.idempotentSpawns.delete(oldest);
+    }
+    return result.then((value) => ({ result: value, replayed: false }));
+  }
+}
+
+function validIdempotencyKey(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+function batchLaneIdempotencyKey(batchKey: string, index: number): string {
+  const digest = createHash('sha256').update(batchKey).digest('hex').slice(0, 32);
+  return `batch:${digest}:${index}`;
 }
 
 export async function dispatchCovenCapabilityRequest(

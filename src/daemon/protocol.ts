@@ -100,6 +100,31 @@ export interface PaneStatusResult {
   };
 }
 
+export type PaneLaunchRequest = {
+  cwd: string;
+  branch?: string;
+  startPointBranch?: string;
+  agent?: string;
+  title?: string;
+  prompt?: string;
+  existingWorktree?: {
+    slug: string;
+    worktreePath: string;
+    branchName: string;
+  };
+};
+
+export type PaneSpawnResult = {
+  id: PaneId;
+  pane?: PaneSummary;
+  worktreePath?: string;
+  branch?: string;
+};
+
+export type PaneBatchSpawnOutcome =
+  | ({ index: number; ok: true } & PaneSpawnResult)
+  | { index: number; ok: false; code: string; message: string };
+
 export type ClientRequest =
   | { type: 'hello'; token: string; clientName?: string }
   | { type: 'workspace.snapshot'; requestId: string }
@@ -112,7 +137,8 @@ export type ClientRequest =
   | { type: 'coven.capabilities.execute'; requestId: string; sessionId: string; capability: CovenCapabilityRequest }
   | { type: 'coven.desktop.state'; requestId: string; sessionId: string }
   | { type: 'coven.desktop.action'; requestId: string; sessionId: string; action: CovenDesktopUseQuickAction }
-  | { type: 'panes.spawn'; requestId: string; cwd: string; branch?: string; agent?: string; title?: string; prompt?: string }
+  | ({ type: 'panes.spawn'; requestId: string; idempotencyKey?: string } & PaneLaunchRequest)
+  | { type: 'panes.spawnMany'; requestId: string; idempotencyKey: string; launches: PaneLaunchRequest[] }
   | { type: 'panes.capture'; requestId: string; id: PaneId; lines?: number }
   | { type: 'panes.status'; requestId: string; id: PaneId }
   | { type: 'panes.attach'; requestId: string; id: PaneId; cols?: number; rows?: number }
@@ -139,6 +165,7 @@ export type ServerResponse =
   | { type: 'coven.desktop.state.result'; requestId: string; state: CovenDesktopUseState }
   | { type: 'coven.desktop.action.result'; requestId: string; sessionId: string; action: CovenDesktopUseQuickAction; accepted: boolean }
   | { type: 'panes.spawn.result'; requestId: string; id: PaneId; pane?: PaneSummary; worktreePath?: string; branch?: string }
+  | { type: 'panes.spawnMany.result'; requestId: string; outcomes: PaneBatchSpawnOutcome[] }
   | { type: 'panes.capture.result'; requestId: string; id: PaneId; text: string; lines: number }
   | { type: 'panes.status.result'; requestId: string; status: PaneStatusResult }
   | { type: 'panes.attach.result'; requestId: string; streamId: StreamId; id: PaneId }
