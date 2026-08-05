@@ -10,7 +10,7 @@ import {
   tokensMatch,
   type ConnectionDeps,
 } from '../../src/daemon/index.js';
-import { TmuxControl } from '../../src/daemon/tmuxControl.js';
+import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 
 /**

@@ -34,7 +34,7 @@ import {
   type BridgeSpawnRequest,
   type BridgeSpawnResult,
 } from '../daemon/bridge.js';
-import { tmuxSessionNameForRoot } from '../services/bridge/tmuxControl.js';
+import { tmuxSessionNameForRoot } from '../services/tmuxControl.js';
 import { Orchestrator } from '../orchestration/orchestrator.js';
 import { createBridgePaneBackend } from '../orchestration/bridgePaneBackend.js';
 import {

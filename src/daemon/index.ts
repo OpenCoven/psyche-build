@@ -15,7 +15,7 @@ import {
   buildDesktopUseQuickInput,
   buildDesktopUseStateFromEvents,
 } from '../utils/covenDesktopUse.js';
-import { TmuxControl, tmuxSessionNameForRoot, tmuxSessionExists } from './tmuxControl.js';
+import { TmuxControl, tmuxSessionNameForRoot, tmuxSessionExists } from '../services/tmuxControl.js';
 import { isTmuxPaneId } from '../utils/tmuxTarget.js';
 import { decodeBase64Payload } from '../utils/base64.js';
 import {
