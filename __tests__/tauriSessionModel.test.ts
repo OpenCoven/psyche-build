@@ -2,6 +2,12 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
+type CovenSessionFixture = {
+  id: string;
+};
+
+const sessionId = (session: CovenSessionFixture) => session.id;
+
 const model = await import(
   pathToFileURL(
     join(
@@ -63,7 +69,7 @@ describe('Tauri Coven session model', () => {
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
+    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
       'new', 'a', 'b', 'old', 'z', 'a-nonlive',
     ]);
     expect(sessions).toEqual(original);
@@ -80,7 +86,7 @@ describe('Tauri Coven session model', () => {
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
+    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
       'Z', 'z', '.old', ':old', 'Aold', 'a-old',
     ]);
     expect(sessions).toEqual(original);
@@ -101,7 +107,7 @@ describe('Tauri Coven session model', () => {
     ];
     const original = [...sessions];
 
-    expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
+    expect(model.sortCovenSessions(sessions).map(sessionId)).toEqual([
       'valid-fraction', 'valid-offset', 'valid-leap',
       '-offset-hour', '.feb30', ':nonleap', 'A-hour', 'a-minute', 'invalid-offset-minute', 'z-second',
     ]);
@@ -122,8 +128,8 @@ describe('Tauri Coven session model', () => {
     const grouped = model.groupCovenSessions(sessions);
 
     expect([...grouped.keys()]).toEqual(['/alpha', '/beta']);
-    expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'later']);
-    expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['beta']);
+    expect(grouped.get('/alpha')?.map(sessionId)).toEqual(['live', 'later']);
+    expect(grouped.get('/beta')?.map(sessionId)).toEqual(['beta']);
     expect(sessions).toHaveLength(7);
   });
 
@@ -195,7 +201,7 @@ describe('Tauri Coven session model', () => {
       ],
     }, 100);
     expect(ready).toMatchObject({ phase: 'ready', message: 'updated', refreshedAt: 100 });
-    expect(ready.sessionsByProject.get('/alpha').map((session) => session.id)).toEqual(['live', 'done']);
+    expect(ready.sessionsByProject.get('/alpha').map(sessionId)).toEqual(['live', 'done']);
 
     for (const status of ['unavailable', 'incompatible', 'error']) {
       const next = model.beginCovenRequest(ready);
