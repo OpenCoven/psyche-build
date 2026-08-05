@@ -75,6 +75,77 @@
     agentSkills: [],
   };
 
+  var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenPollTimer = null;
+  var COVEN_POLL_MS = 5000;
+
+  async function refreshCovenSessions() {
+    var request = PsycheSessions.beginCovenRequest(covenDiscovery);
+    covenDiscovery = request.state;
+    var requestId = request.requestId;
+    renderSessionList();
+    var roots = state.projects.map(function (project) { return project.root; });
+    if (roots.length === 0) {
+      covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
+      renderSessionList();
+      return;
+    }
+    var response;
+    try {
+      response = await invoke("coven_sessions", { projectRoots: roots });
+    } catch (_) {
+      response = {
+        status: "error",
+        sessions: [],
+        message: "Coven sessions could not be loaded",
+      };
+    }
+    covenDiscovery = PsycheSessions.applyCovenResponse(
+      covenDiscovery, requestId, response
+    );
+    renderSessionList();
+  }
+
+  function invalidateCovenDiscovery() {
+    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
+    renderSessionList();
+  }
+
+  function requestCovenRefresh() {
+    if (isBootstrapping) return;
+    return Promise.resolve(refreshCovenSessions()).catch(function () {});
+  }
+
+  function stopCovenPolling() {
+    if (covenPollTimer !== null) {
+      clearInterval(covenPollTimer);
+      covenPollTimer = null;
+    }
+  }
+
+  function startCovenPolling() {
+    stopCovenPolling();
+    if (document.visibilityState === "hidden") return;
+    Promise.resolve(refreshCovenSessions()).catch(function () {});
+    covenPollTimer = setInterval(function () {
+      Promise.resolve(refreshCovenSessions()).catch(function () {});
+    }, COVEN_POLL_MS);
+  }
+
+  function completeCovenBoot() {
+    isBootstrapping = false;
+    startCovenPolling();
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === "hidden") {
+      saveWorkspaceNow();
+      stopCovenPolling();
+    } else {
+      startCovenPolling();
+    }
+  }
+
   /**
    * `editingContext` is non-null while the user is editing a label inline.
    * refreshSidebar / refreshTabs early-return so PTY events (which call them
@@ -155,6 +226,7 @@
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var isRestoringWorkspace = false;
+  var isBootstrapping = true;
   var saveWorkspaceTimer = 0;
 
   function clampInt(value, fallback, min, max) {
@@ -567,6 +639,7 @@
       command: opts.command,
       args: opts.args || [],
       env: opts.env || {},
+      covenSessionId: opts.covenSessionId || null,
       status: "starting",
       spawning: true,
       term: null,
@@ -586,6 +659,35 @@
       spawnPty(thread, opts.projectRoot || (project && project.root));
     });
     return thread;
+  }
+
+  async function openCovenSession(project, session) {
+    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
+      return null;
+    }
+    if (project.id === state.activeProjectId) {
+      if (!(await showTerminalView())) return null;
+    } else if (!(await setActiveProject(project.id))) {
+      return null;
+    }
+    var existing = state.threads.find(function (thread) {
+      return thread.projectId === project.id &&
+        thread.covenSessionId === session.id && thread.status !== "exited";
+    });
+    if (existing) {
+      await focusThread(existing.id);
+      return existing;
+    }
+    var title = typeof session.title === "string" ? session.title.trim() : "";
+    return createThread({
+      project: project,
+      name: title || session.id,
+      kind: "coven",
+      command: "coven",
+      args: ["attach", session.id],
+      projectRoot: project.root,
+      covenSessionId: session.id,
+    });
   }
 
   function spawnPty(thread, projectRoot) {
@@ -1151,6 +1253,7 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    invalidateCovenDiscovery();
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -1184,6 +1287,7 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    requestCovenRefresh();
     return true;
   }
 
@@ -2417,7 +2521,7 @@
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   window.addEventListener("beforeunload", saveWorkspaceNow);
-  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") saveWorkspaceNow(); });
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 
   // -------- Resizable splitter between terminal-area and browser-pane --------
   //
@@ -3026,6 +3130,7 @@
     refreshSidebar();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (!isBootstrapping) requestCovenRefresh();
     return project;
   }
 
@@ -3150,29 +3255,32 @@
     };
   }
 
+  async function boot(env) {
+    state.env = env || {};
+    var saved = readSavedWorkspace();
+    var bootRoot = state.env.repo_root || state.env.home || "/";
+    var project = null;
+    if (saved && saved.projects.length) {
+      isRestoringWorkspace = true;
+      state.projects = saved.projects.map(sanitizeSavedProject).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
+      state.activeProjectId = saved.activeProjectId && state.projects.some(function (p) { return p.id === saved.activeProjectId; }) ? saved.activeProjectId : (state.projects[0] && state.projects[0].id);
+      project = activeProject();
+      if (project) restoreProjectLayout(project);
+      isRestoringWorkspace = false;
+    }
+    if (!project) project = await addProject(bootRoot);
+    if (project) {
+      ensureProjectPsyche(project);
+      var activeTab = currentBrowserTab(project);
+      if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
+      restoreProjectLayout(project);
+    }
+    refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
+    completeCovenBoot();
+  }
+
   invoke("app_environment")
-    .then(async function (env) {
-      state.env = env || {};
-      var saved = readSavedWorkspace();
-      var bootRoot = state.env.repo_root || state.env.home || "/";
-      var project = null;
-      if (saved && saved.projects.length) {
-        isRestoringWorkspace = true;
-        state.projects = saved.projects.map(sanitizeSavedProject).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
-        state.activeProjectId = saved.activeProjectId && state.projects.some(function (p) { return p.id === saved.activeProjectId; }) ? saved.activeProjectId : (state.projects[0] && state.projects[0].id);
-        project = activeProject();
-        if (project) restoreProjectLayout(project);
-        isRestoringWorkspace = false;
-      }
-      if (!project) project = await addProject(bootRoot);
-      if (project) {
-        ensureProjectPsyche(project);
-        var activeTab = currentBrowserTab(project);
-        if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
-        restoreProjectLayout(project);
-      }
-      refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
-    })
+    .then(boot)
     .catch(function (err) {
       showBootError("app_environment failed: " + err);
     });
