@@ -82,7 +82,7 @@ function stableStringify(value: unknown): string {
     if (current && typeof current === 'object' && !Array.isArray(current)) {
       return Object.fromEntries(
         Object.entries(current as Record<string, unknown>)
-          .sort(([left], [right]) => left.localeCompare(right)),
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
       );
     }
     return current;
@@ -95,6 +95,9 @@ export function encodeControlMessage(message: ControlRequest | ControlResponse):
 
 export function decodeControlRequest(raw: string): ControlRequest {
   const value = JSON.parse(raw) as Partial<ControlRequest>;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('invalid control request envelope');
+  }
   if (value.version !== CONTROL_PROTOCOL_VERSION) {
     throw new Error(`unsupported control protocol version: ${String(value.version)}`);
   }
