@@ -275,6 +275,25 @@ the failure is transient and manually dispatch the existing immutable tag from
 gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1
 ```
 
+Tag pushes always run the coordinated macOS and internal TestFlight release.
+When TestFlight credentials or Apple distribution infrastructure are not ready,
+an operator may manually publish only the desktop artifacts from the same
+existing immutable tag:
+
+```sh
+gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true
+```
+
+Desktop-only publication still requires `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+`APPLE_PASSWORD`, `APPLE_TEAM_ID`, and `HOMEBREW_TAP_TOKEN` in the protected
+`release` environment. It does not require `APPLE_DISTRIBUTION_CERTIFICATE`,
+`APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`,
+`APP_STORE_CONNECT_ISSUER_ID`, or `APP_STORE_CONNECT_PRIVATE_KEY`. It still
+requires the signed annotated tag, both signed and notarized DMGs, checksums,
+curated notes, protected-environment approval, and Homebrew notification.
+Desktop-only publication does not upload or claim TestFlight availability.
+
 The retry rebuilds the exact tag. Its App Store Connect preflight is
 fail-closed:
 
