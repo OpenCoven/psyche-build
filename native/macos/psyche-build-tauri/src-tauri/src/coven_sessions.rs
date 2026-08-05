@@ -3,16 +3,19 @@ use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 #[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::Url;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const READ_TIMEOUT: Duration = Duration::from_secs(2);
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
 const UNAVAILABLE_MESSAGE: &str = "Coven daemon is not running; run `coven daemon start`";
@@ -279,18 +282,13 @@ fn request_endpoint(endpoint: &CovenEndpoint, path: &str) -> Result<Vec<u8>, Cov
         return Err(CovenAdapterError::Failed);
     }
 
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
     match endpoint {
         #[cfg(unix)]
         CovenEndpoint::Unix(socket) => {
-            let mut stream =
-                UnixStream::connect(socket).map_err(|error| categorize_io_error(&error, true))?;
-            stream
-                .set_read_timeout(Some(READ_TIMEOUT))
-                .map_err(|error| categorize_io_error(&error, false))?;
-            stream
-                .set_write_timeout(Some(READ_TIMEOUT))
-                .map_err(|error| categorize_io_error(&error, false))?;
-            exchange_http(&mut stream, path)
+            let mut stream = connect_unix_before(socket, deadline)
+                .map_err(|error| categorize_io_error(&error, true))?;
+            exchange_http(&mut stream, path, deadline)
         }
         #[cfg(not(unix))]
         CovenEndpoint::Unix(_) => Err(CovenAdapterError::Failed),
@@ -298,20 +296,19 @@ fn request_endpoint(endpoint: &CovenEndpoint, path: &str) -> Result<Vec<u8>, Cov
             if !address.ip().is_loopback() {
                 return Err(CovenAdapterError::Failed);
             }
-            let mut stream = TcpStream::connect_timeout(address, CONNECT_TIMEOUT)
+            let connect_timeout =
+                remaining_before(deadline).map_err(|error| categorize_io_error(&error, false))?;
+            let mut stream = TcpStream::connect_timeout(address, connect_timeout)
                 .map_err(|error| categorize_io_error(&error, false))?;
             stream
-                .set_read_timeout(Some(READ_TIMEOUT))
+                .set_nonblocking(true)
                 .map_err(|error| categorize_io_error(&error, false))?;
-            stream
-                .set_write_timeout(Some(READ_TIMEOUT))
-                .map_err(|error| categorize_io_error(&error, false))?;
-            exchange_http(&mut stream, path)
+            exchange_http(&mut stream, path, deadline)
         }
     }
 }
 
-trait LocalHttpStream: Read + Write {
+trait LocalHttpStream: Read + Write + AsRawFd {
     fn shutdown_write(&self) -> io::Result<()>;
 }
 
@@ -331,29 +328,211 @@ impl LocalHttpStream for UnixStream {
 fn exchange_http<S: LocalHttpStream>(
     stream: &mut S,
     path: &str,
+    deadline: Instant,
 ) -> Result<Vec<u8>, CovenAdapterError> {
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: coven\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
-    stream
-        .write_all(request.as_bytes())
+    write_all_before(stream, request.as_bytes(), deadline)
         .map_err(|error| categorize_io_error(&error, false))?;
-    stream
-        .flush()
-        .map_err(|error| categorize_io_error(&error, false))?;
+    flush_before(stream, deadline).map_err(|error| categorize_io_error(&error, false))?;
+    remaining_before(deadline).map_err(|error| categorize_io_error(&error, false))?;
     stream
         .shutdown_write()
         .map_err(|error| categorize_io_error(&error, false))?;
 
-    let mut response = Vec::new();
-    stream
-        .take((MAX_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut response)
-        .map_err(|error| categorize_io_error(&error, false))?;
-    if response.len() > MAX_RESPONSE_BYTES {
-        return Err(CovenAdapterError::Failed);
-    }
+    let response =
+        read_to_end_before(stream, deadline).map_err(|error| categorize_io_error(&error, false))?;
     parse_http_response(&response).map_err(|_| CovenAdapterError::Failed)
+}
+
+fn remaining_before(deadline: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "Coven exchange deadline elapsed"))
+}
+
+fn write_all_before<S: LocalHttpStream>(
+    stream: &mut S,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        remaining_before(deadline)?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_io(stream.as_raw_fd(), libc::POLLOUT, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn flush_before<S: LocalHttpStream>(stream: &mut S, deadline: Instant) -> io::Result<()> {
+    loop {
+        remaining_before(deadline)?;
+        match stream.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_io(stream.as_raw_fd(), libc::POLLOUT, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn read_to_end_before<S: LocalHttpStream>(
+    stream: &mut S,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    let mut response = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        remaining_before(deadline)?;
+        let remaining_capacity = MAX_RESPONSE_BYTES + 1 - response.len();
+        let read_capacity = buffer.len().min(remaining_capacity);
+        match stream.read(&mut buffer[..read_capacity]) {
+            Ok(0) => return Ok(response),
+            Ok(read) => {
+                response.extend_from_slice(&buffer[..read]);
+                if response.len() > MAX_RESPONSE_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Coven response exceeded the byte limit",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_for_io(stream.as_raw_fd(), libc::POLLIN, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn connect_unix_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let path = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path.is_empty() || path.contains(&0) || path.len() >= address.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Coven socket path is invalid or too long",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, byte) in address.sun_path.iter_mut().zip(path.iter().copied()) {
+        *target = byte as libc::c_char;
+    }
+    let address_length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(target_vendor = "apple")]
+    {
+        address.sun_len = address_length as u8;
+    }
+
+    let raw_fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(raw_fd) };
+    let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    stream.set_nonblocking(true)?;
+
+    let connected = unsafe {
+        libc::connect(
+            raw_fd,
+            std::ptr::addr_of!(address).cast::<libc::sockaddr>(),
+            address_length as libc::socklen_t,
+        )
+    };
+    if connected < 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(code)
+                if matches!(
+                    code,
+                    libc::EINPROGRESS | libc::EALREADY | libc::EWOULDBLOCK | libc::EINTR
+                )
+        ) {
+            return Err(error);
+        }
+        wait_for_unix_connect(raw_fd, deadline)?;
+    }
+    remaining_before(deadline)?;
+    Ok(stream)
+}
+
+#[cfg(unix)]
+fn wait_for_unix_connect(raw_fd: RawFd, deadline: Instant) -> io::Result<()> {
+    wait_for_io(raw_fd, libc::POLLOUT, deadline)?;
+    let mut socket_error: libc::c_int = 0;
+    let mut socket_error_length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            raw_fd,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            std::ptr::addr_of_mut!(socket_error).cast(),
+            std::ptr::addr_of_mut!(socket_error_length),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if socket_error == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(socket_error))
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_io(raw_fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Result<()> {
+    loop {
+        let remaining = remaining_before(deadline)?;
+        let rounded_millis = remaining
+            .as_millis()
+            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0));
+        let timeout = rounded_millis.min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: raw_fd,
+            events,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(std::ptr::addr_of_mut!(descriptor), 1, timeout) };
+        if ready == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Coven exchange deadline elapsed",
+            ));
+        }
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        remaining_before(deadline)?;
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Coven socket descriptor is invalid",
+            ));
+        }
+        return Ok(());
+    }
 }
 
 fn categorize_io_error(error: &io::Error, missing_is_unavailable: bool) -> CovenAdapterError {
@@ -1362,8 +1541,7 @@ mod tests {
 
     #[test]
     fn defines_the_daemon_adapter_limits() {
-        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(2));
-        assert_eq!(READ_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(EXCHANGE_TIMEOUT, Duration::from_secs(2));
         assert_eq!(MAX_RESPONSE_BYTES, 1024 * 1024);
         assert_eq!(STABLE_API_VERSION, "coven.daemon.v1");
     }
@@ -1830,6 +2008,46 @@ mod tests {
             &response,
             "unavailable",
             Some("Coven daemon is not running; run `coven daemon start`"),
+        );
+    }
+
+    #[test]
+    fn enforces_wall_clock_deadline_against_slow_drip_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = CovenEndpoint::Http(listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            configure_fake_tcp_stream(&stream).unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(request, expected_request("/api/v1/health"));
+
+            let response = http_json(br#"{"apiVersion":"coven.daemon.v1"}"#);
+            for byte in response {
+                match stream.write_all(&[byte]) {
+                    Ok(()) => thread::sleep(Duration::from_millis(100)),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("slow-drip server write failed: {error}"),
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = request_endpoint(&endpoint, "/api/v1/health");
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert_eq!(result, Err(CovenAdapterError::Unavailable));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "wall-clock deadline took {elapsed:?}"
         );
     }
 
