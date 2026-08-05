@@ -42,7 +42,9 @@ function updatedAtValue(session) {
   if (offset !== 'Z') {
     const offsetHour = Number(offset.slice(1, 3));
     const offsetMinute = Number(offset.slice(4, 6));
-    if (offsetHour > 23 || offsetMinute > 59) return Number.NEGATIVE_INFINITY;
+    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
+      return Number.NEGATIVE_INFINITY;
+    }
   }
 
   const value = Date.parse(session.updatedAt);
@@ -147,6 +149,79 @@ export function filterProjectSessions(project, psycheSessions, covenSessions, qu
   };
 }
 
+function isInsideOrEqual(parent, candidate) {
+  if (typeof parent !== 'string' || typeof candidate !== 'string') return false;
+  if (candidate === parent) return true;
+  const prefix = parent.endsWith('/') ? parent : `${parent}/`;
+  return candidate.startsWith(prefix);
+}
+
+function owningWorktree(worktrees, cwd) {
+  return [...worktrees]
+    .filter((worktree) => isInsideOrEqual(worktree.path, cwd))
+    .sort((left, right) => right.path.length - left.path.length)[0] ?? null;
+}
+
+/**
+ * Normalize local PTYs and daemon sessions into the same rail-row contract.
+ * Rendering code can still offer source-specific actions, but grouping,
+ * search, status, identity, and worktree ownership have one implementation.
+ */
+export function buildProjectRailModel(project, psycheSessions, covenSessions, query) {
+  const filtered = filterProjectSessions(project, psycheSessions, covenSessions, query);
+  const worktrees = Array.isArray(project?.worktrees) && project.worktrees.length
+    ? project.worktrees
+    : [{
+      path: project?.root ?? '', branch: null, is_main: true,
+      dirty: false, missing: false, collapsed: false,
+    }];
+  const rows = [];
+
+  for (const session of filtered.psycheSessions) {
+    const cwd = typeof session?.worktreePath === 'string' && session.worktreePath
+      ? session.worktreePath
+      : project?.root ?? '';
+    rows.push({
+      key: `psyche:${session?.id ?? ''}`,
+      source: 'psyche',
+      id: session?.id ?? '',
+      title: session?.name ?? session?.title ?? session?.id ?? '',
+      status: session?.status ?? 'unknown',
+      needsAttention: Boolean(session?.needsAttention),
+      worktreePath: owningWorktree(worktrees, cwd)?.path ?? null,
+      value: session,
+    });
+  }
+
+  for (const session of filtered.covenSessions) {
+    const cwd = typeof session?.cwd === 'string' && session.cwd
+      ? session.cwd
+      : session?.projectRoot ?? '';
+    rows.push({
+      key: `coven:${session?.id ?? ''}`,
+      source: 'coven',
+      id: session?.id ?? '',
+      title: session?.title?.trim() || session?.id || '',
+      status: statusPresentation(session?.status).label,
+      needsAttention: statusPresentation(session?.status).label === 'waiting',
+      worktreePath: owningWorktree(worktrees, cwd)?.path ?? null,
+      value: session,
+    });
+  }
+
+  const normalizedQuery = typeof query === 'string' ? query.trim().toLowerCase() : '';
+  const projectMatches = !normalizedQuery || filtered.projectMatches;
+  return {
+    projectMatches,
+    worktrees: worktrees.map((worktree) => ({
+      worktree,
+      matches: projectMatches || contains(worktree.branch ?? worktree.path, normalizedQuery),
+      rows: rows.filter((row) => row.worktreePath === worktree.path),
+    })),
+    projectRows: rows.filter((row) => row.worktreePath === null),
+  };
+}
+
 export function createCovenDiscoveryState() {
   return {
     phase: 'idle',
@@ -178,7 +253,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
 
   const status = normalizeStatus(response?.status);
   const message = normalizedMessage(response?.message);
-  const allowedStatuses = new Set(['ready', 'unavailable', 'incompatible', 'error']);
+  const allowedStatuses = new Set(['ready', 'empty', 'unavailable', 'incompatible', 'error']);
   if (!allowedStatuses.has(status)) {
     return {
       ...state,
@@ -189,7 +264,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
     };
   }
 
-  if (status === 'ready') {
+  if (status === 'ready' || status === 'empty') {
     return {
       ...state,
       phase: 'ready',

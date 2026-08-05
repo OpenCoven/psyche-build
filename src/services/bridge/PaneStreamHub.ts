@@ -1,4 +1,4 @@
-import { TmuxControl } from "./tmuxControl.js";
+import { TmuxControl } from "../tmuxControl.js";
 import { PaneOutputBuffer } from "./PaneOutputBuffer.js";
 
 /**

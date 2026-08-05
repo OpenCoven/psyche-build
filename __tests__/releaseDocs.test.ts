@@ -151,6 +151,59 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toMatch(/secret audit[\s\S]*public[\s\S]*tag/i);
   });
 
+  it('creates the release environment only after publication and permits immutable-tag recovery', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+    const publicIndex = runbook.indexOf('-f visibility=public');
+    const environmentIndex = runbook.indexOf('environments/release --input');
+    const secretIndex = runbook.indexOf(
+      'gh secret set --env release --repo OpenCoven/psyche-build',
+    );
+
+    expect(publicIndex).toBeGreaterThan(-1);
+    expect(environmentIndex).toBeGreaterThan(publicIndex);
+    expect(secretIndex).toBeGreaterThan(environmentIndex);
+    expect(runbook).toContain('custom_branch_policies: true');
+    expect(runbook).toContain('-f name=main -f type=branch');
+    expect(runbook).toContain("-f name='v*' -f type=tag");
+    expect(runbook).not.toContain('protected-branch deployment policy');
+  });
+
+  it('protects main with the exact CI checks and no administrative rewrite path', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toContain(
+      'gh api --method PUT repos/OpenCoven/psyche-build/branches/main/protection --input -',
+    );
+    expect(runbook).toContain('{context: "TypeScript and Rust"}');
+    expect(runbook).toContain('{context: "iOS"}');
+    expect(runbook).toContain('enforce_admins: true');
+    expect(runbook).toContain('required_approving_review_count: 1');
+    expect(runbook).toContain('require_last_push_approval: true');
+    expect(runbook).toContain('required_linear_history: true');
+    expect(runbook).toContain('allow_force_pushes: false');
+    expect(runbook).toContain('allow_deletions: false');
+    expect(runbook).toContain('required_conversation_resolution: true');
+  });
+
+  it('uses separate tag rulesets so release-manager bypass cannot rewrite tags', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toMatch(/two separate active tag rulesets/i);
+    expect(runbook).toContain('name: "Release tag creation"');
+    expect(runbook).toContain('name: "Immutable release tags"');
+    expect(runbook).toContain(
+      'bypass_actors: [{actor_id: $team_id, actor_type: "Team", bypass_mode: "always"}]',
+    );
+    expect(runbook).toContain('rules: [{type: "creation"}]');
+    expect(runbook).toContain('bypass_actors: []');
+    expect(runbook).toContain('rules: [{type: "update"}, {type: "deletion"}]');
+    expect(
+      runbook.match(
+        /gh api --method POST repos\/OpenCoven\/psyche-build\/rulesets --input -/g,
+      ),
+    ).toHaveLength(2);
+  });
+
   it('documents the executable release and recovery contracts', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
 

@@ -264,25 +264,29 @@ fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
 ) -> Result<Vec<CovenSessionSummary>, CovenAdapterError> {
-    let health_body = request_endpoint(endpoint, "/api/v1/health")?;
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let health_body = request_endpoint(endpoint, "/api/v1/health", deadline)?;
     let health: CovenHealthResponse =
         serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
     if health.api_version != STABLE_API_VERSION {
         return Err(CovenAdapterError::Incompatible);
     }
 
-    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions")?;
+    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions", deadline)?;
     let sessions_value =
         serde_json::from_slice(&sessions_body).map_err(|_| CovenAdapterError::Failed)?;
     normalize_sessions(sessions_value, project_roots).map_err(|_| CovenAdapterError::Failed)
 }
 
-fn request_endpoint(endpoint: &CovenEndpoint, path: &str) -> Result<Vec<u8>, CovenAdapterError> {
+fn request_endpoint(
+    endpoint: &CovenEndpoint,
+    path: &str,
+    deadline: Instant,
+) -> Result<Vec<u8>, CovenAdapterError> {
     if !matches!(path, "/api/v1/health" | "/api/v1/sessions") {
         return Err(CovenAdapterError::Failed);
     }
 
-    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
     match endpoint {
         #[cfg(unix)]
         CovenEndpoint::Unix(socket) => {
@@ -894,7 +898,11 @@ fn normalize_session(
         Path::new(&cwd)
             .canonicalize()
             .ok()
-            .filter(|canonical_cwd| canonical_cwd.starts_with(&canonical_project_root))
+            .filter(|canonical_cwd| {
+                requested_roots
+                    .keys()
+                    .any(|requested_root| canonical_cwd.starts_with(requested_root))
+            })
             .map(|_| cwd)
     });
 
@@ -1664,44 +1672,30 @@ mod tests {
     }
 
     #[test]
-    fn keeps_only_cwds_within_the_matched_project_root() {
+    fn keeps_only_cwds_within_requested_project_or_worktree_roots() {
         let tree = TempTree::new("cwd-scope");
         let project = tree.directory("project");
         let inside = tree.directory("project/inside");
+        let linked_worktree = tree.directory("external-worktree");
         let outside = tree.directory("outside");
-        let requested = vec![project.clone()];
+        let requested = vec![project.clone(), linked_worktree.clone()];
         let payload = json!([
             { "id": "inside", "projectRoot": project, "cwd": inside },
+            { "id": "linked", "projectRoot": project, "cwd": linked_worktree },
             { "id": "outside", "projectRoot": project, "cwd": outside }
         ]);
 
         let sessions = normalize_sessions(payload, &requested).unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
         assert_eq!(
             sessions[0].cwd.as_deref(),
             Some(inside.to_string_lossy().as_ref())
         );
-        assert_eq!(sessions[1].cwd, None);
-    }
-
-    #[test]
-    fn keeps_cwds_within_any_requested_project_or_worktree_root() {
-        let tree = TempTree::new("cwd-worktree-scope");
-        let project = tree.directory("project");
-        let worktree = tree.directory("linked-worktree");
-        let cwd = tree.directory("linked-worktree/app");
-        let requested = vec![project.clone(), worktree];
-        let payload = json!([
-            { "id": "worktree", "projectRoot": project, "cwd": cwd }
-        ]);
-
-        let sessions = normalize_sessions(payload, &requested).unwrap();
-
-        assert_eq!(sessions.len(), 1);
         assert_eq!(
-            sessions[0].cwd.as_deref(),
-            Some(cwd.to_string_lossy().as_ref())
+            sessions[1].cwd.as_deref(),
+            Some(linked_worktree.to_string_lossy().as_ref())
         );
+        assert_eq!(sessions[2].cwd, None);
     }
 
     #[test]
@@ -2060,7 +2054,11 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = request_endpoint(&endpoint, "/api/v1/health");
+        let result = request_endpoint(
+            &endpoint,
+            "/api/v1/health",
+            Instant::now() + EXCHANGE_TIMEOUT,
+        );
         let elapsed = started.elapsed();
         server.join().unwrap();
 

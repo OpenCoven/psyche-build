@@ -4,6 +4,7 @@ export {
   createCovenDiscoveryState,
   filterProjectSessions,
   groupCovenSessions,
+  buildProjectRailModel,
   invalidateCovenRequests,
   isSafeCovenSessionId,
   sortCovenSessions,

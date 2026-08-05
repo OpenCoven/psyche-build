@@ -82,7 +82,7 @@ import {
 import type { PsycheConfig, PsychePane } from './types.js';
 import { BridgeDaemon } from './services/bridge/BridgeDaemon.js';
 import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtocol.js';
-import { tmuxSessionNameForRoot } from './services/bridge/tmuxControl.js';
+import { tmuxSessionNameForRoot } from './services/tmuxControl.js';
 import { listAvailableRituals } from './utils/rituals.js';
 import os from 'node:os';
 
