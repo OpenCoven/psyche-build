@@ -617,11 +617,15 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:\s*1;[^}]*outline:/s);
     expect(styles).toMatch(/\.session-row-wrap:hover\s+\.session-row:not\(\.active\)/);
     expect(styles).not.toMatch(/\.session-row-wrap:hover\s+\.session-row\s*\{/);
+    expect(styles).not.toContain('session-coven');
+    expect(styles).not.toContain('coven-tone');
+    expect(styles).not.toContain('session-inline-state');
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
     expect(rendererSource).toContain('PsycheSessions.buildProjectRailModel');
     expect(rendererSource).toContain('project, localRows, [], currentSearchQuery');
-    expect(rendererSource).not.toContain('session-coven-row');
+    expect(rendererSource).not.toContain('covenDiscovery');
     expect(rendererSource).not.toContain('openCovenSession');
+    expect(rendererSource).not.toContain('statusPresentation');
     expect(rendererSource).not.toContain('treeitem');
     expect(rendererSource).not.toContain('aria-selected');
   });
