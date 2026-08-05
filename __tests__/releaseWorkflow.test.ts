@@ -100,7 +100,7 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('default: false');
     expect(verifyJob).toContain('desktop_only: ${{ steps.release.outputs.desktop_only }}');
     expect(verifyJob).toContain(
-      'DESKTOP_ONLY="${{ github.event_name == \'workflow_dispatch\' && inputs.desktop_only || false }}"',
+      'DESKTOP_ONLY="${{ github.event_name == \'workflow_dispatch\' && github.event.inputs.desktop_only == \'true\' }}"',
     );
     expect(verifyJob).toContain('echo "desktop_only=$DESKTOP_ONLY" >> "$GITHUB_OUTPUT"');
   });

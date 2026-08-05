@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_TAG="$RAW_RELEASE_TAG"
-          DESKTOP_ONLY="${{ github.event_name == 'workflow_dispatch' && inputs.desktop_only || false }}"
+          DESKTOP_ONLY="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.desktop_only == 'true' }}"
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must use stable vMAJOR.MINOR.PATCH form"
             exit 1
