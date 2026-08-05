@@ -87,7 +87,9 @@
     var roots = [];
     state.projects.forEach(function (project) {
       var candidates = [project.root].concat(
-        (Array.isArray(project.worktrees) ? project.worktrees : []).map(function (worktree) {
+        (state.env && state.env.native_workspace_v2 === false
+          ? []
+          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
           return worktree.path;
         })
       );
@@ -353,13 +355,17 @@
     if (!opts || opts.persist !== false) saveSettings();
   }
 
+  function persistableBrowsers(project) {
+    ensureBrowserModel(project);
+    return project.browsersByWorktree;
+  }
   function persistableProject(project) {
-    return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browser: ensureBrowserModel(project) };
+    return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
   }
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return;
     try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 1, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
+      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
     } catch (_) {}
   }
   function saveWorkspaceSoon() {
@@ -384,18 +390,33 @@
         side: saved.layout && saved.layout.side ? saved.layout.side : "right",
         splitFrac: typeof (saved.layout && saved.layout.splitFrac) === "number" ? saved.layout.splitFrac : 0.6,
       },
-      browser: { tabs: [], activeTabId: null },
+      browsersByWorktree: {},
     };
-    var savedBrowser = saved.browser || {};
+    var savedBrowsers = saved.browsersByWorktree && typeof saved.browsersByWorktree === "object"
+      ? saved.browsersByWorktree
+      : {};
+    Object.keys(savedBrowsers).forEach(function (workspaceRoot) {
+      project.browsersByWorktree[workspaceRoot] = sanitizeBrowserModel(savedBrowsers[workspaceRoot]);
+    });
+    // v1 stored one browser model per project. Keep it attached to the main
+    // checkout so upgrading never discards tabs or history.
+    if (!project.browsersByWorktree[project.root] && saved.browser) {
+      project.browsersByWorktree[project.root] = sanitizeBrowserModel(saved.browser);
+    }
+    return project;
+  }
+  function sanitizeBrowserModel(savedBrowser) {
+    savedBrowser = savedBrowser || {};
+    var browser = { tabs: [], activeTabId: null };
     if (Array.isArray(savedBrowser.tabs)) {
-      project.browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
+      browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
         var url = tab.url || "about:blank";
         var history = Array.isArray(tab.history) ? tab.history.filter(Boolean).slice(-50) : [];
         return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: !!tab.created && url !== "about:blank", loading: false };
       });
     }
-    project.browser.activeTabId = savedBrowser.activeTabId || (project.browser.tabs[0] && project.browser.tabs[0].id) || null;
-    return project;
+    browser.activeTabId = savedBrowser.activeTabId || (browser.tabs[0] && browser.tabs[0].id) || null;
+    return browser;
   }
 
   // ============================================================
@@ -1436,6 +1457,7 @@
           renderPanel(currentPanel());
           loadAgentSkills();
           refreshSidebar();
+          syncProjectBrowser();
           saveWorkspaceSoon();
         });
         worktreeHead.addEventListener("dblclick", function (event) {
@@ -2877,11 +2899,15 @@
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
       var project = state.projects[i];
-      var browser = ensureBrowserModel(project);
-      for (var j = 0; j < browser.tabs.length; j++) {
-        var tab = browser.tabs[j];
-        if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
-          return { project: project, tab: tab };
+      ensureBrowserModel(project);
+      var workspaceRoots = Object.keys(project.browsersByWorktree);
+      for (var w = 0; w < workspaceRoots.length; w++) {
+        var browser = project.browsersByWorktree[workspaceRoots[w]];
+        for (var j = 0; j < browser.tabs.length; j++) {
+          var tab = browser.tabs[j];
+          if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
+            return { project: project, browser: browser, tab: tab };
+          }
         }
       }
     }
@@ -2894,7 +2920,9 @@
     if (url) pair.tab.url = url;
     if (title && String(title).trim()) pair.tab.title = String(title).trim();
     else pair.tab.title = tabTitle(pair.tab.url);
-    if (pair.project.id === state.activeProjectId) { renderBrowserTabs(); syncUrlInput(); }
+    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+      renderBrowserTabs(); syncUrlInput();
+    }
     saveWorkspaceSoon();
   }
   listen("browser:page-load", function (event) {
@@ -2906,7 +2934,9 @@
     } else if (payload.phase === "finished") {
       markBrowserTabLoaded(payload.label, payload.url, "");
     }
-    if (pair.project.id === state.activeProjectId) { renderBrowserTabs(); updateBrowserControls(); }
+    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+      renderBrowserTabs(); updateBrowserControls();
+    }
   }).catch(function () {});
   listen("browser:title", function (event) {
     var payload = event.payload || {};
@@ -2915,10 +2945,14 @@
   listen("browser:focus", function () {
     markActiveSurface("browser");
   }).catch(function () {});
-  function ensureBrowserModel(project) {
+  function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
-    if (!project.browser) project.browser = { tabs: [], activeTabId: null };
-    return project.browser;
+    if (!project.browsersByWorktree) project.browsersByWorktree = {};
+    var root = workspaceRoot || activeWorkspaceRoot(project) || project.root;
+    if (!project.browsersByWorktree[root]) {
+      project.browsersByWorktree[root] = { tabs: [], activeTabId: null };
+    }
+    return project.browsersByWorktree[root];
   }
   function makeBrowserTabId() { return "bt" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
   function tabTitle(url) {
@@ -3645,7 +3679,7 @@
     if (!(await showTerminalView())) return null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
-    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browser: { tabs: [], activeTabId: null } };
+    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browsersByWorktree: {} };
     state.projects.push(project);
     state.activeProjectId = project.id;
     restoreProjectLayout(project);

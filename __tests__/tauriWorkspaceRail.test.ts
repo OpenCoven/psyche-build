@@ -43,6 +43,15 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(styles).toMatch(/\.session-worktree-group\s*\{/);
   });
 
+  it('scopes browser tabs to the selected worktree and migrates project browser state', () => {
+    expect(mainJs).toMatch(/browsersByWorktree/);
+    expect(mainJs).toMatch(/ensureBrowserModel\(project,\s*workspaceRoot\)/);
+    expect(mainJs).toMatch(/workspaceRoot\s*\|\|\s*activeWorkspaceRoot\(project\)/);
+    expect(mainJs).toMatch(/saved\.browsersByWorktree/);
+    expect(mainJs).toMatch(/saved\.browser/);
+    expect(mainJs).toMatch(/project\.selectedWorktreePath\s*=\s*worktree\.path;[\s\S]*?syncProjectBrowser\(\)/);
+  });
+
   it('supports keyboard traversal, collapse controls, and attention badges', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);

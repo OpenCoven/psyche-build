@@ -31,7 +31,7 @@
 
 - [x] Replace the flat local-thread rail with expandable project and worktree groups.
 - [x] Render local panes and project-scoped Coven sessions through one normalized row model.
-- [ ] Scope Files, Diffs, Git, browser state, and new-lane defaults to the selected worktree. (Files, Diffs, Git, and new-pane cwd are complete; browser persistence remains project-scoped.)
+- [x] Scope Files, Diffs, Git, browser state, and new-lane defaults to the selected worktree.
 - [x] Preserve collapse, selection, and layout preferences without persisting runtime truth.
 - [x] Add search, keyboard navigation, context menus, accessibility labels, attention badges, and recoverable stale/missing states.
 
