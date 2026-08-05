@@ -8,7 +8,6 @@
         "id": "project-1",
         "projectPanes": [
           {
-            "agent": "",
             "cwd": "/missing/worktree",
             "id": "%9",
             "kind": "terminal",
@@ -30,7 +29,6 @@
             "dirty": true,
             "head": "0123456789abcdef0123456789abcdef01234567",
             "isMain": true,
-            "lockReason": "",
             "locked": false,
             "missing": false,
             "panes": [
@@ -47,7 +45,6 @@
             ],
             "path": "/repo",
             "prunable": false,
-            "pruneReason": "",
             "runningCount": 1
           },
           {

@@ -42,7 +42,9 @@ function updatedAtValue(session) {
   if (offset !== 'Z') {
     const offsetHour = Number(offset.slice(1, 3));
     const offsetMinute = Number(offset.slice(4, 6));
-    if (offsetHour > 23 || offsetMinute > 59) return Number.NEGATIVE_INFINITY;
+    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
+      return Number.NEGATIVE_INFINITY;
+    }
   }
 
   const value = Date.parse(session.updatedAt);

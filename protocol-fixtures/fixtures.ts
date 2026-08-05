@@ -20,16 +20,24 @@ import type { ServerResponse } from '../src/daemon/protocol.js';
 
 /**
  * Strips optionality at every depth, so a fixture must spell out every field.
- * Adding `foo?: string` to a payload makes every fixture for it a compile
- * error until the author supplies a value — which is the moment to also update
- * the Swift struct.
+ * Optional fields accept an explicit `undefined` sentinel, which keeps the
+ * compile-time completeness check while matching their omitted JSON wire shape.
+ * Adding `foo?: string` to a payload makes every fixture for it a compile error
+ * until the author supplies a value or that sentinel — which is the moment to
+ * also update the Swift struct.
  *
  * Unions like `string | null` are left alone: they are not object types, so the
  * mapped branch does not apply and `null` stays a legal value.
  */
+type OptionalKeys<T extends object> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? K : never
+}[keyof T];
+
 type Complete<T> =
   T extends readonly (infer E)[] ? Complete<E>[]
-    : T extends object ? { [K in keyof T]-?: Complete<T[K]> }
+    : T extends object
+      ? { [K in Exclude<keyof T, OptionalKeys<T>>]: Complete<T[K]> }
+        & { [K in OptionalKeys<T>]: Complete<Exclude<T[K], undefined>> | undefined }
       : T;
 
 type CompleteMessage<M> = M extends { type: infer T; payload: infer P }
@@ -197,9 +205,9 @@ export const WORKSPACE_SNAPSHOT_FIXTURE = {
         detached: false,
         bare: false,
         locked: false,
-        lockReason: '',
+        lockReason: undefined,
         prunable: false,
-        pruneReason: '',
+        pruneReason: undefined,
         dirty: true,
         missing: false,
         panes: [{
@@ -245,7 +253,7 @@ export const WORKSPACE_SNAPSHOT_FIXTURE = {
         cwd: '/missing/worktree',
         title: 'orphaned pane',
         kind: 'terminal',
-        agent: '',
+        agent: undefined,
         status: 'exited',
         needsAttention: false,
         recoverability: 'missing-worktree',

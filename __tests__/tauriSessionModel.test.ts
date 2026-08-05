@@ -84,17 +84,21 @@ describe('Tauri Coven session model', () => {
       { id: 'A-hour', status: 'running', updatedAt: '2026-01-01T24:00:00Z' },
       { id: 'a-minute', status: 'running', updatedAt: '2026-01-01T00:60:00Z' },
       { id: 'invalid-offset-minute', status: 'running', updatedAt: '2026-01-01T00:00:00+01:60' },
+      { id: 'invalid-offset-limit', status: 'running', updatedAt: '2026-01-01T00:00:00+14:01' },
+      { id: 'invalid-negative-offset-limit', status: 'running', updatedAt: '2026-01-01T00:00:00-14:01' },
       { id: 'z-second', status: 'running', updatedAt: '2026-01-01T00:00:60Z' },
       { id: '-offset-hour', status: 'running', updatedAt: '2026-01-01T00:00:00+24:00' },
       { id: 'valid-leap', status: 'running', updatedAt: '2024-02-29T00:00:00Z' },
       { id: 'valid-offset', status: 'running', updatedAt: '2026-08-04T10:00:00+05:30' },
+      { id: 'valid-offset-limit', status: 'running', updatedAt: '2026-08-04T10:00:00+14:00' },
       { id: 'valid-fraction', status: 'running', updatedAt: '2026-08-04T05:00:00.123Z' },
     ];
     const original = [...sessions];
 
     expect(model.sortCovenSessions(sessions).map((session) => session.id)).toEqual([
-      'valid-fraction', 'valid-offset', 'valid-leap',
-      '-offset-hour', '.feb30', ':nonleap', 'A-hour', 'a-minute', 'invalid-offset-minute', 'z-second',
+      'valid-fraction', 'valid-offset', 'valid-offset-limit', 'valid-leap',
+      '-offset-hour', '.feb30', ':nonleap', 'A-hour', 'a-minute', 'invalid-negative-offset-limit',
+      'invalid-offset-limit', 'invalid-offset-minute', 'z-second',
     ]);
     expect(sessions).toEqual(original);
   });
