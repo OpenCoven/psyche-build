@@ -17,6 +17,8 @@ import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
+import type { WorkspaceSnapshot } from "../../workspace/snapshot.js";
+import { workspaceToLegacyReadModel } from "../../workspace/legacyAdapters.js";
 
 export interface BridgeDaemonOptions {
   serverId?: string;
@@ -24,6 +26,8 @@ export interface BridgeDaemonOptions {
   projectName?: string | null;
   paneProvider: () => PaneSnapshot[];
   projectProvider: () => Project[];
+  /** Canonical source for legacy list requests when the host exposes it. */
+  workspaceProvider?: () => WorkspaceSnapshot;
   sessionName: string;  // required
   hubFactory?: (sessionName: string) => PaneStreamHub;  // for tests
   ritualProvider: (projectId: string | null) => Ritual[];
@@ -213,11 +217,11 @@ export class BridgeDaemon {
       }
       case "listPanes":
         if (!this.requireAuthenticated(s)) return;
-        s.send({ type: "paneList", payload: this.opts.paneProvider() });
+        s.send({ type: "paneList", payload: this.readLegacyState().panes });
         return;
       case "listProjects":
         if (!this.requireAuthenticated(s)) return;
-        s.send({ type: "projectList", payload: this.opts.projectProvider() });
+        s.send({ type: "projectList", payload: this.readLegacyState().projects });
         return;
       case "ping":
         s.send({ type: "pong", payload: { token: m.payload.token } });
@@ -302,16 +306,24 @@ export class BridgeDaemon {
 
   private broadcastStateUpdates(): void {
     if (!this.listener) return;
-    let panes: PaneSnapshot[] | undefined;
-    let projects: Project[] | undefined;
+    let legacy: { panes: PaneSnapshot[]; projects: Project[] } | undefined;
     for (const session of this.listener.activeSessions) {
       if (session.state === "authenticated") {
-        projects ??= this.opts.projectProvider();
-        panes ??= this.opts.paneProvider();
-        session.send({ type: "projectList", payload: projects });
-        session.send({ type: "paneListChanged", payload: panes });
+        legacy ??= this.readLegacyState();
+        session.send({ type: "projectList", payload: legacy.projects });
+        session.send({ type: "paneListChanged", payload: legacy.panes });
       }
     }
+  }
+
+  private readLegacyState(): { panes: PaneSnapshot[]; projects: Project[] } {
+    if (this.opts.workspaceProvider) {
+      return workspaceToLegacyReadModel(this.opts.workspaceProvider());
+    }
+    return {
+      panes: this.opts.paneProvider(),
+      projects: this.opts.projectProvider(),
+    };
   }
 
   private subscribePane(s: Session, paneId: string, sinceSeq: number | null) {
