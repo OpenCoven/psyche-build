@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "type": "command.result",
+  "requestId": "req-1",
+  "commandId": "cmd-1",
+  "outcome": {
+    "status": "succeeded"
+  }
+}
