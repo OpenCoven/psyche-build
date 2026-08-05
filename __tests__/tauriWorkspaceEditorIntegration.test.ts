@@ -64,7 +64,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
     expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
+      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
     );
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
