@@ -213,7 +213,7 @@
   function activeProjectThreads() {
     var p = activeProject();
     if (!p) return [];
-    return state.threads.filter(function (t) { return t.projectId === p.id; });
+    return state.threads.filter(function (t) { return t.projectId === p.id && !t.hidden; });
   }
   async function setActiveProject(id) {
     if (state.activeProjectId === id) return true;
@@ -225,7 +225,7 @@
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
-    var threads = state.threads.filter(function (t) { return t.projectId === id; });
+    var threads = state.threads.filter(function (t) { return t.projectId === id && !t.hidden; });
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
         ? project.lastActiveThreadId
@@ -1029,6 +1029,105 @@
     refreshTabs();
   }
 
+  function hideThread(id) {
+    var thread = findThread(id);
+    if (!thread) return false;
+    thread.hidden = true;
+    if (state.activeThreadId === id) {
+      var replacement = state.threads.find(function (candidate) {
+        return candidate.id !== id && !candidate.hidden &&
+          candidate.projectId === thread.projectId && candidate.status !== "exited";
+      });
+      state.activeThreadId = null;
+      if (replacement) focusThread(replacement.id);
+      else Array.prototype.forEach.call(terminalHost.children, function (el) {
+        el.classList.remove("active");
+      });
+    }
+    refreshSidebar();
+    refreshTabs();
+    return true;
+  }
+
+  function reopenThreads(projectId, worktreePath) {
+    var reopened = 0;
+    state.threads.forEach(function (thread) {
+      if (thread.projectId === projectId && thread.worktreePath === worktreePath && thread.hidden) {
+        thread.hidden = false;
+        reopened += 1;
+      }
+    });
+    if (reopened) {
+      refreshSidebar();
+      refreshTabs();
+    }
+    return reopened;
+  }
+
+  function duplicateThread(thread) {
+    if (!thread || thread.status === "exited") return null;
+    return createThread({
+      project: findProject(thread.projectId),
+      name: thread.name + " copy",
+      kind: thread.kind,
+      command: thread.command,
+      args: Array.isArray(thread.args) ? thread.args.slice() : [],
+      env: Object.assign({}, thread.env || {}),
+      projectRoot: thread.worktreePath,
+      covenSessionId: thread.covenSessionId,
+    });
+  }
+
+  var sessionContextMenu = null;
+  function closeSessionContextMenu() {
+    if (sessionContextMenu && sessionContextMenu.parentNode) {
+      sessionContextMenu.parentNode.removeChild(sessionContextMenu);
+    }
+    sessionContextMenu = null;
+  }
+  function openSessionContextMenu(event, actions) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSessionContextMenu();
+    var menu = document.createElement("div");
+    menu.className = "session-context-menu";
+    menu.setAttribute("role", "menu");
+    menu.style.left = Math.max(8, event.clientX) + "px";
+    menu.style.top = Math.max(8, event.clientY) + "px";
+    actions.forEach(function (action) {
+      if (!action) return;
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "session-context-item" + (action.danger ? " danger" : "");
+      item.setAttribute("role", "menuitem");
+      item.textContent = action.label;
+      item.addEventListener("click", function () {
+        closeSessionContextMenu();
+        action.run();
+      });
+      menu.appendChild(item);
+    });
+    document.body.appendChild(menu);
+    sessionContextMenu = menu;
+    var rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8) {
+      menu.style.left = Math.max(8, window.innerWidth - rect.width - 8) + "px";
+    }
+    if (rect.bottom > window.innerHeight - 8) {
+      menu.style.top = Math.max(8, window.innerHeight - rect.height - 8) + "px";
+    }
+    var first = menu.querySelector("button");
+    if (first) first.focus();
+  }
+  document.addEventListener("pointerdown", function (event) {
+    if (sessionContextMenu && !sessionContextMenu.contains(event.target)) {
+      closeSessionContextMenu();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeSessionContextMenu();
+  });
+
   function fitActiveTerm() {
     var thread = findThread(state.activeThreadId);
     if (!thread || !thread.fit) return;
@@ -1219,7 +1318,9 @@
     var matched = 0;
 
     state.projects.forEach(function (project) {
-      var localRows = state.threads.filter(function (t) { return t.projectId === project.id; });
+      var localRows = state.threads.filter(function (t) {
+        return t.projectId === project.id && !t.hidden;
+      });
       var remoteRows = [];
       [project.root].concat(
         (Array.isArray(project.worktrees) ? project.worktrees : []).map(function (worktree) {
@@ -1349,6 +1450,19 @@
             }
           });
         });
+        var hiddenThreads = state.threads.filter(function (thread) {
+          return thread.projectId === project.id && thread.worktreePath === worktree.path &&
+            thread.hidden;
+        });
+        if (!worktree.virtual && hiddenThreads.length > 0) {
+          worktreeHead.addEventListener("contextmenu", function (event) {
+            openSessionContextMenu(event, [{
+              label: "Show " + hiddenThreads.length + " hidden session" +
+                (hiddenThreads.length === 1 ? "" : "s"),
+              run: function () { reopenThreads(project.id, worktree.path); },
+            }]);
+          });
+        }
         worktreeGroup.appendChild(worktreeHead);
 
         if (!worktree.collapsed && threads.length > 0) {
@@ -1407,6 +1521,22 @@
             if (e.key !== "F2") return;
             e.preventDefault();
             beginSessionRename(e);
+          });
+          row.addEventListener("contextmenu", function (event) {
+            openSessionContextMenu(event, [
+              { label: "Focus", run: function () { focusThread(thread.id); } },
+              { label: "Rename…", run: function () {
+                beginSessionRename({ stopPropagation: function () {} });
+              } },
+              thread.status !== "exited"
+                ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
+                : null,
+              thread.status !== "exited"
+                ? { label: "Interrupt", run: function () { sendToThread(thread, "\x03"); } }
+                : null,
+              { label: "Hide", run: function () { hideThread(thread.id); } },
+              { label: "Stop and close", danger: true, run: function () { closeThread(thread.id); } },
+            ]);
           });
 
           var close = document.createElement("button");
@@ -1495,6 +1625,12 @@
             } catch (_) {
               setStatus("Coven session could not be opened", "error");
             }
+          });
+          row.addEventListener("contextmenu", function (event) {
+            openSessionContextMenu(event, [{
+              label: isActive ? "Focus attachment" : "Attach",
+              run: function () { openCovenSession(project, session); },
+            }]);
           });
           worktreeGroup.appendChild(row);
         });
@@ -2548,6 +2684,9 @@
   function sendToActive(text) {
     var thread = findThread(state.activeThreadId);
     if (!thread) return;
+    sendToThread(thread, text);
+  }
+  function sendToThread(thread, text) {
     var bytes = Array.from(new TextEncoder().encode(text));
     invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
       function () {}

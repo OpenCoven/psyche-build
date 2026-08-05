@@ -43,4 +43,17 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
   });
+
+  it('offers reversible session context actions and labels destructive close explicitly', () => {
+    expect(mainJs).toMatch(/function\s+hideThread\(id\)/);
+    expect(mainJs).toMatch(/function\s+reopenThreads\(projectId,\s*worktreePath\)/);
+    expect(mainJs).toMatch(/function\s+duplicateThread\(thread\)/);
+    expect(mainJs).toMatch(/row\.addEventListener\("contextmenu"/);
+    expect(mainJs).toContain('label: "Hide"');
+    expect(mainJs).toContain('label: "Interrupt"');
+    expect(mainJs).toContain('label: "Stop and close"');
+    expect(mainJs).toContain('" hidden session"');
+    expect(styles).toMatch(/\.session-context-menu\s*\{/);
+    expect(styles).toMatch(/\.session-context-item\.danger\s*\{/);
+  });
 });

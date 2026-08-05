@@ -33,12 +33,12 @@
 - [x] Render local panes and project-scoped Coven sessions through one normalized row model.
 - [ ] Scope Files, Diffs, Git, browser state, and new-lane defaults to the selected worktree. (Files, Diffs, Git, and new-pane cwd are complete; browser persistence remains project-scoped.)
 - [x] Preserve collapse, selection, and layout preferences without persisting runtime truth.
-- [ ] Add search, keyboard navigation, context menus, accessibility labels, attention badges, and recoverable stale/missing states.
+- [x] Add search, keyboard navigation, context menus, accessibility labels, attention badges, and recoverable stale/missing states.
 
 ### Task 4: Add reversible GUI workflows
 
 - [ ] Route single- and multi-agent lane creation through shared host commands with idempotency.
-- [ ] Add attach, focus, resize, prompt, interrupt, rename, duplicate, hide, reopen, and non-destructive close actions.
+- [x] Add attach, focus, resize, prompt, interrupt, rename, duplicate, hide, reopen, and non-destructive close actions.
 - [x] Preserve successful siblings when a multi-lane launch partially fails.
 - [ ] Retain “Open Psyche Terminal” as a fallback until each workflow has packaged-app proof.
 
