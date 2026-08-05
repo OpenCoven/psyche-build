@@ -1362,7 +1362,16 @@
               hide: row,
               ariaLabel: "Session name",
               onCommit: function (v) { renameThread(thread.id, v); },
-              done: function () { renderSessionList(); },
+              done: function () {
+                renderSessionList();
+                var replacementRows = sessionListEl.querySelectorAll(".session-row");
+                for (var i = 0; i < replacementRows.length; i++) {
+                  if (replacementRows[i].dataset.threadId === thread.id) {
+                    replacementRows[i].focus();
+                    break;
+                  }
+                }
+              },
             });
           }
           row.addEventListener("dblclick", beginSessionRename);

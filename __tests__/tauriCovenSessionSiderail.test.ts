@@ -94,7 +94,7 @@ class FakeElement {
   private ownText = '';
   private html = '';
 
-  constructor(tagName: string) {
+  constructor(tagName: string, private readonly ownerDocument: FakeDocument | null = null) {
     this.tagName = tagName.toUpperCase();
   }
 
@@ -200,6 +200,7 @@ class FakeElement {
 
   focus() {
     this.focused = true;
+    if (this.ownerDocument) this.ownerDocument.activeElement = this;
   }
 
   select() {
@@ -239,9 +240,10 @@ class FakeElement {
 
 class FakeDocument {
   readonly created: FakeElement[] = [];
+  activeElement: FakeElement | null = null;
 
   createElement(tagName: string) {
-    const element = new FakeElement(tagName);
+    const element = new FakeElement(tagName, this);
     this.created.push(element);
     return element;
   }
@@ -723,6 +725,7 @@ describe('Tauri Coven session project rail', () => {
     const rerenderedWrapper = renderer.sessionListEl.querySelector('.session-row-wrap');
     const rerenderedActivation = rerenderedWrapper?.querySelector('.session-row');
     const rerenderedTitle = rerenderedActivation?.querySelector('.session-title');
+    expect(renderer.document.activeElement).toBe(rerenderedActivation);
     await rerenderedActivation?.emit('dblclick', {
       target: rerenderedTitle ?? rerenderedActivation,
     });
@@ -736,6 +739,10 @@ describe('Tauri Coven session project rail', () => {
     expect(rerenderedActivation?.getAttribute('aria-hidden')).toBeNull();
     expect(rerenderedActivation?.getAttribute('tabindex')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-title')?.textContent).toBe('Renamed');
+    const cancelledActivation = renderer.sessionListEl
+      .querySelector('.session-row-wrap')
+      ?.querySelector('.session-row');
+    expect(renderer.document.activeElement).toBe(cancelledActivation);
   });
 
   it('defines restrained labels, metadata, inline state, fixed tones, and reduced motion', () => {
