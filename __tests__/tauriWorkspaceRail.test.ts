@@ -24,6 +24,13 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/project\.worktrees\s*=\s*mergeWorktreePresentationState\(/);
   });
 
+  it('ships workspace v2 enabled with an environment rollback switch', () => {
+    expect(tauri).toMatch(/native_workspace_v2:\s*bool/);
+    expect(tauri).toMatch(/feature_flag_enabled\("PSYCHE_NATIVE_WORKSPACE_V2",\s*true\)/);
+    expect(mainJs).toMatch(/state\.env\.native_workspace_v2\s*===\s*false/);
+    expect(mainJs).toMatch(/project\.selectedWorktreePath\s*=\s*project\.root/);
+  });
+
   it('renders project, worktree, then pane rows and scopes new panes to selection', () => {
     expect(mainJs).toMatch(/session-worktree-group/);
     expect(mainJs).toMatch(/session-worktree-head/);

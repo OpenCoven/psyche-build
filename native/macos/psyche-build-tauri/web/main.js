@@ -194,6 +194,14 @@
   }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
+    if (state.env && state.env.native_workspace_v2 === false) {
+      project.worktrees = mergeWorktreePresentationState(project, [{
+        path: project.root, branch: null, is_main: true, dirty: false, missing: false,
+      }]);
+      project.selectedWorktreePath = project.root;
+      refreshSidebar();
+      return Promise.resolve(project.worktrees);
+    }
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
       project.worktrees = mergeWorktreePresentationState(project, worktrees);
       var selected = selectedWorktree(project);
@@ -1323,7 +1331,9 @@
       });
       var remoteRows = [];
       [project.root].concat(
-        (Array.isArray(project.worktrees) ? project.worktrees : []).map(function (worktree) {
+        (state.env && state.env.native_workspace_v2 === false
+          ? []
+          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
           return worktree.path;
         })
       ).forEach(function (root) {

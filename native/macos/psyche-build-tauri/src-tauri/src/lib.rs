@@ -464,12 +464,28 @@ pub struct AppEnvironment {
     pub psyche_entry: Option<String>,
     pub node_path: Option<String>,
     pub default_shell: String,
+    pub native_workspace_v2: bool,
+}
+
+fn feature_flag_value(value: Option<&str>, default: bool) -> bool {
+    match value {
+        Some(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "disabled"
+        ),
+        None => default,
+    }
+}
+
+fn feature_flag_enabled(name: &str, default: bool) -> bool {
+    feature_flag_value(std::env::var(name).ok().as_deref(), default)
 }
 
 #[tauri::command]
 fn app_environment() -> AppEnvironment {
     let home = std::env::var("HOME").ok();
     let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let native_workspace_v2 = feature_flag_enabled("PSYCHE_NATIVE_WORKSPACE_V2", true);
 
     // Try to find a `node` on PATH. portable-pty inherits the parent env, so
     // launching `node` from there should work even if PATH munging in spawn
@@ -494,6 +510,7 @@ fn app_environment() -> AppEnvironment {
         psyche_entry,
         node_path,
         default_shell,
+        native_workspace_v2,
     }
 }
 
@@ -1877,6 +1894,18 @@ mod workspace_panel_tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn parses_feature_flag_values_without_mutating_process_environment() {
+        assert!(feature_flag_value(None, true));
+        assert!(!feature_flag_value(None, false));
+        assert!(feature_flag_value(Some("1"), false));
+        assert!(feature_flag_value(Some("true"), false));
+        assert!(!feature_flag_value(Some("0"), true));
+        assert!(!feature_flag_value(Some(" FALSE "), true));
+        assert!(!feature_flag_value(Some("off"), true));
+        assert!(!feature_flag_value(Some("Disabled"), true));
     }
 
     fn save_temp_paths(target: &Path) -> Vec<PathBuf> {

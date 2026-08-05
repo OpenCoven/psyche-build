@@ -53,7 +53,7 @@
 
 - [ ] Reconcile host/app restart against tmux, Git, Psyche metadata, and Coven before enabling mutation.
 - [ ] Test traversal, symlink escape, pane-ID injection, cross-project operations, expired previews, replayed commands, and unauthorized actors.
-- [ ] Gate the new workspace behind `native_workspace_v2` and retain rollback for one release.
+- [x] Gate the new workspace behind `native_workspace_v2` and retain rollback for one release.
 - [ ] Run root test/typecheck/build/smoke, protocol fixture diff checks, Rust format/test/check, native web build, packaged app/DMG build, and the manual multi-project lifecycle smoke.
 - [ ] Promote after two consecutive releases complete the packaged smoke without using the embedded-TUI fallback.
 
