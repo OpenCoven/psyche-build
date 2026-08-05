@@ -1232,45 +1232,33 @@
           }
         });
       });
-      var filtered = PsycheSessions.filterProjectSessions(
+      var railModel = PsycheSessions.buildProjectRailModel(
         project, localRows, remoteRows, currentSearchQuery
       );
-      var projectHit = !needle || filtered.projectMatches;
       var inlineState = covenInlineState(covenDiscovery.phase);
-      var showInlineState = Boolean(inlineState && (!needle || filtered.projectMatches));
-      var worktrees = Array.isArray(project.worktrees) && project.worktrees.length
-        ? project.worktrees
-        : [{ path: project.root, branch: null, is_main: true, dirty: false, missing: false }];
-
-      function worktreeForSession(session) {
-        var cwd = typeof session.cwd === "string" && session.cwd
-          ? session.cwd
-          : typeof session.projectRoot === "string" ? session.projectRoot : "";
-        if (cwd) {
-          var candidates = worktrees.filter(function (worktree) {
-            return cwd === worktree.path || cwd.indexOf(worktree.path + "/") === 0;
-          }).sort(function (left, right) { return right.path.length - left.path.length; });
-          if (candidates.length) return candidates[0];
-        }
-        return worktrees.find(function (worktree) {
-          return worktree.path === project.selectedWorktreePath;
-        }) || worktrees.find(function (worktree) { return worktree.is_main; }) || worktrees[0];
-      }
-
-      var visibleWorktrees = worktrees.filter(function (worktree) {
-        var worktreeHit = projectHit ||
-          String(worktree.branch || worktree.path).toLowerCase().indexOf(needle) !== -1;
-        var localHit = filtered.psycheSessions.some(function (thread) {
-          return thread.worktreePath === worktree.path ||
-            (!thread.worktreePath && worktree.path === project.root);
-        });
-        var remoteHit = filtered.covenSessions.some(function (session) {
-          return worktreeForSession(session).path === worktree.path;
-        });
-        return !needle || worktreeHit || localHit || remoteHit;
+      var showInlineState = Boolean(inlineState && (!needle || railModel.projectMatches));
+      var visibleWorktrees = railModel.worktrees.filter(function (entry) {
+        return entry.matches || entry.rows.length > 0;
       });
+      if (railModel.projectRows.length > 0) {
+        visibleWorktrees.push({
+          worktree: {
+            path: "",
+            branch: "Unresolved sessions",
+            is_main: false,
+            dirty: false,
+            missing: true,
+            collapsed: false,
+            virtual: true,
+          },
+          matches: true,
+          rows: railModel.projectRows,
+        });
+      }
       if (visibleWorktrees.length === 0 && !showInlineState) return;
-      matched += visibleWorktrees.length + filtered.psycheSessions.length + filtered.covenSessions.length;
+      matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
+        return count + entry.rows.length;
+      }, 0);
 
       var group = document.createElement("div");
       group.className = "session-group";
@@ -1283,18 +1271,18 @@
       head.addEventListener("click", function () { setActiveProject(project.id); });
       group.appendChild(head);
 
-      visibleWorktrees.forEach(function (worktree) {
-        var threads = filtered.psycheSessions.filter(function (thread) {
-          return thread.worktreePath === worktree.path ||
-            (!thread.worktreePath && worktree.path === project.root);
-        });
-        var covenSessions = filtered.covenSessions.filter(function (session) {
-          return worktreeForSession(session).path === worktree.path;
-        });
+      visibleWorktrees.forEach(function (entry) {
+        var worktree = entry.worktree;
+        var threads = entry.rows.filter(function (row) {
+          return row.source === "psyche";
+        }).map(function (row) { return row.value; });
+        var covenSessions = entry.rows.filter(function (row) {
+          return row.source === "coven";
+        }).map(function (row) { return row.value; });
 
         var worktreeGroup = document.createElement("div");
         worktreeGroup.className = "session-worktree-group" +
-          (project.selectedWorktreePath === worktree.path ? " selected" : "") +
+          (!worktree.virtual && project.selectedWorktreePath === worktree.path ? " selected" : "") +
           (worktree.missing ? " missing" : "");
         var worktreeHead = document.createElement("button");
         worktreeHead.type = "button";
@@ -1305,8 +1293,10 @@
           '<span class="worktree-name">' + escapeHtml(worktreeName) + "</span>" +
           (worktree.dirty ? '<span class="worktree-state" title="Uncommitted changes">●</span>' : "") +
           (worktree.missing ? '<span class="worktree-warning" title="Worktree is missing">!</span>' : "");
-        worktreeHead.title = worktree.path;
+        worktreeHead.title = worktree.virtual ? "Sessions with no available worktree" : worktree.path;
+        worktreeHead.disabled = Boolean(worktree.virtual);
         worktreeHead.addEventListener("click", async function () {
+          if (worktree.virtual) return;
           if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
           project.selectedWorktreePath = worktree.path;
           worktree.collapsed = false;
@@ -1316,6 +1306,7 @@
           saveWorkspaceSoon();
         });
         worktreeHead.addEventListener("dblclick", function (event) {
+          if (worktree.virtual) return;
           event.preventDefault();
           worktree.collapsed = !worktree.collapsed;
           refreshSidebar();

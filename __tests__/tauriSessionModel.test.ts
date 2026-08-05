@@ -153,6 +153,51 @@ describe('Tauri Coven session model', () => {
     expect(covenSessions).toEqual(remoteOriginal);
   });
 
+  test('normalizes local and Coven sessions into their most-specific worktree rows', () => {
+    const project = {
+      name: 'Alpha',
+      root: '/repo',
+      worktrees: [
+        { path: '/repo', branch: 'main' },
+        { path: '/external/feature', branch: 'feature' },
+        { path: '/external/feature/nested', branch: 'nested' },
+      ],
+    };
+    const modelResult = model.buildProjectRailModel(
+      project,
+      [{ id: 'local', name: 'Local', worktreePath: '/external/feature' }],
+      [{
+        id: 'remote', projectRoot: '/external/feature',
+        cwd: '/external/feature/nested/app', title: 'Remote', status: 'waiting',
+      }],
+      '',
+    );
+
+    expect(modelResult.worktrees[1].rows).toEqual([
+      expect.objectContaining({ source: 'psyche', id: 'local', worktreePath: '/external/feature' }),
+    ]);
+    expect(modelResult.worktrees[2].rows).toEqual([
+      expect.objectContaining({
+        source: 'coven', id: 'remote', worktreePath: '/external/feature/nested',
+        needsAttention: true,
+      }),
+    ]);
+  });
+
+  test('keeps sessions whose cwd has no known worktree in an explicit project group', () => {
+    const result = model.buildProjectRailModel(
+      { name: 'Alpha', root: '/repo', worktrees: [{ path: '/repo', branch: 'main' }] },
+      [{ id: 'orphan', name: 'Orphan', worktreePath: '/removed/worktree' }],
+      [],
+      '',
+    );
+
+    expect(result.projectRows).toEqual([
+      expect.objectContaining({ id: 'orphan', worktreePath: null }),
+    ]);
+    expect(result.worktrees[0].rows).toEqual([]);
+  });
+
   test('creates an idle discovery state and only shows first-request loading', () => {
     const initial = model.createCovenDiscoveryState();
 

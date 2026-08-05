@@ -766,7 +766,7 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).not.toMatch(/waiting[^}]*animation:/s);
     expect(styles).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.session-coven-row\.coven-starting/s);
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
-    expect(rendererSource).toContain('PsycheSessions.filterProjectSessions');
+    expect(rendererSource).toContain('PsycheSessions.buildProjectRailModel');
     expect(rendererSource).toContain('PsycheSessions.statusPresentation');
     expect(rendererSource).not.toMatch(/"coven-tone-"\s*\+\s*presentation\.tone/);
     expect(rendererSource).not.toContain('treeitem');

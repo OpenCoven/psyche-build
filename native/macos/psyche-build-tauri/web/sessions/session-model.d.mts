@@ -48,6 +48,35 @@ export function filterProjectSessions<L extends LocalSession, C extends CovenSes
   psycheSessions: L[];
   covenSessions: C[];
 };
+export type ProjectRailRow<L, C> = {
+  key: string;
+  source: 'psyche' | 'coven';
+  id: string;
+  title: string;
+  status: string;
+  needsAttention: boolean;
+  worktreePath: string | null;
+  value: L | C;
+};
+export type WorktreeRailInput = { path: string; branch?: string | null };
+export function buildProjectRailModel<L extends LocalSession, C extends CovenSession>(
+  project: {
+    root?: string;
+    name?: string;
+    worktrees?: WorktreeRailInput[];
+  },
+  psycheSessions: L[],
+  covenSessions: C[],
+  query: string,
+): {
+  projectMatches: boolean;
+  worktrees: Array<{
+    worktree: WorktreeRailInput;
+    matches: boolean;
+    rows: Array<ProjectRailRow<L, C>>;
+  }>;
+  projectRows: Array<ProjectRailRow<L, C>>;
+};
 export function createCovenDiscoveryState(): CovenDiscoveryState;
 export function beginCovenRequest(state: CovenDiscoveryState): {
   requestId: number;
