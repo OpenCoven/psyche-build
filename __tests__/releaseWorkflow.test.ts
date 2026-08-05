@@ -91,6 +91,34 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('[ "$TAG_TARGET_SHA" != "$HEAD_COMMIT" ]');
   });
 
+  it('allows only manual dispatches to select desktop-only publication', () => {
+    const workflow = workflowSource();
+    const verifyJob = workflowJobSource(workflow, 'verify');
+
+    expect(workflow).toContain('desktop_only:');
+    expect(workflow).toContain('type: boolean');
+    expect(workflow).toContain('default: false');
+    expect(verifyJob).toContain('desktop_only: ${{ steps.release.outputs.desktop_only }}');
+    expect(verifyJob).toContain(
+      'DESKTOP_ONLY="${{ github.event_name == \'workflow_dispatch\' && inputs.desktop_only || false }}"',
+    );
+    expect(verifyJob).toContain('echo "desktop_only=$DESKTOP_ONLY" >> "$GITHUB_OUTPUT"');
+  });
+
+  it('skips TestFlight only for verified desktop-only dispatches', () => {
+    const workflow = workflowSource();
+    const iosJob = workflowJobSource(workflow, 'upload-ios');
+    const publishJob = workflowJobSource(workflow, 'publish');
+
+    expect(iosJob).toContain("if: needs.verify.outputs.desktop_only != 'true'");
+    expect(publishJob).toContain('if: >-');
+    expect(publishJob).toContain("needs.verify.result == 'success'");
+    expect(publishJob).toContain("needs.build-macos.result == 'success'");
+    expect(publishJob).toContain("needs.upload-ios.result == 'success'");
+    expect(publishJob).toContain("needs.verify.outputs.desktop_only == 'true'");
+    expect(publishJob).toContain("needs.upload-ios.result == 'skipped'");
+  });
+
   it('requires Apple signing and notarization before an artifact is accepted', () => {
     const workflow = workflowSource();
 
