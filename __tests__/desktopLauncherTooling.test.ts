@@ -90,8 +90,31 @@ describe('desktop launcher tooling', () => {
   });
 
   it('verifies the app is actually running rather than assuming open() worked', () => {
-    const script = readLauncher();
+    const script = readLauncherCode();
 
     expect(script).toMatch(/pgrep -x "\$APP_NAME"/);
+  });
+
+  it('never inlines a resolver into another command', () => {
+    // Under `set -e`, a command substitution that fails as an *argument* does
+    // not abort: the exit status belongs to the outer command, so the failure
+    // is swallowed and the caller runs on with an empty string. Every resolver
+    // must therefore be assigned on a line of its own.
+    const script = readLauncherCode();
+
+    const inlined = script
+      .split('\n')
+      .filter((line) => /\$\(resolve_[a-z_]+\)/.test(line))
+      .filter((line) => !/^\s*[a-z_]+="\$\(resolve_[a-z_]+\)"\s*$/.test(line));
+
+    expect(inlined).toEqual([]);
+  });
+
+  it('splits declaration from assignment so `local` cannot mask a failure', () => {
+    // `local cli="$(resolve)"` takes local's exit status (always 0) and hides
+    // the resolver's failure; `local cli` then `cli="$(resolve)"` propagates it.
+    const script = readLauncherCode();
+
+    expect(script).not.toMatch(/local\s+[a-z_]+="\$\(/);
   });
 });
