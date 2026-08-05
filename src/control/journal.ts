@@ -48,28 +48,38 @@ export class ControlJournal {
   }
 
   private static async replay(journalPath: string): Promise<ControlEvent[]> {
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = await readFile(journalPath, 'utf8');
+      raw = await readFile(journalPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
     if (raw.length === 0) return [];
-    const endsWithNewline = raw.endsWith('\n');
-    const rawLines = raw.split('\n');
-    if (rawLines[rawLines.length - 1] === '') rawLines.pop();
+    const endsWithNewline = raw[raw.length - 1] === 0x0a;
+    const segments: Buffer[] = [];
+    let start = 0;
+    for (let index = 0; index < raw.length; index += 1) {
+      if (raw[index] === 0x0a) {
+        segments.push(raw.subarray(start, index));
+        start = index + 1;
+      }
+    }
+    if (start < raw.length) segments.push(raw.subarray(start));
+    while (segments.length > 0 && segments[segments.length - 1].length === 0) {
+      segments.pop();
+    }
     const events: ControlEvent[] = [];
     let expectedSequence = 1;
-    for (let index = 0; index < rawLines.length; index += 1) {
-      const isLastLine = index === rawLines.length - 1;
-      const line = rawLines[index];
+    for (let index = 0; index < segments.length; index += 1) {
+      const isLastLine = index === segments.length - 1;
+      const lineBuffer = segments[index];
       let parsed: ControlEvent;
       try {
-        parsed = JSON.parse(line) as ControlEvent;
+        parsed = JSON.parse(lineBuffer.toString('utf8')) as ControlEvent;
       } catch (error) {
         if (isLastLine && !endsWithNewline) {
-          await truncate(journalPath, raw.length - line.length);
+          await truncate(journalPath, raw.length - lineBuffer.length);
           break;
         }
         throw new Error(`journal corruption at line ${index + 1}`);
@@ -106,7 +116,13 @@ export class ControlJournal {
       this.currentSequence = event.sequence;
       this.events.push(event);
       this.indexIdempotency(event);
-      for (const listener of this.listeners) listener(event);
+      for (const listener of this.listeners) {
+        try {
+          listener(event);
+        } catch {
+          // A subscriber error must not undo a durably committed append.
+        }
+      }
       resolveEvent(event);
     }).catch((error) => {
       rejectEvent(error);

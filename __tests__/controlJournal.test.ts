@@ -40,4 +40,40 @@ describe('ControlJournal', () => {
     await writeFile(path.join(runtime, 'events.ndjson'), '{"sequence":1}\nnot-json\n');
     await expect(ControlJournal.open(root, 1)).rejects.toThrow('journal corruption');
   });
+
+  it('preserves a committed multibyte event when truncating an incomplete final line', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 1);
+    await journal.append('command.requested', { commandId: 'c1', note: 'café ☕ 日本語' });
+    await appendFile(journal.path, '{"sequence":2');
+    const reopened = await ControlJournal.open(root, 1);
+    expect(reopened.sequence).toBe(1);
+    expect(reopened.read(0)).toHaveLength(1);
+    expect(reopened.read(0)[0].payload.note).toBe('café ☕ 日本語');
+    const again = await ControlJournal.open(root, 1);
+    expect(again.sequence).toBe(1);
+    expect(again.read(0)[0].payload.note).toBe('café ☕ 日本語');
+  });
+
+  it('resolves append and keeps the event durable even if a subscriber throws', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 1);
+    journal.subscribe(() => { throw new Error('listener boom'); });
+    await expect(journal.append('command.requested', { commandId: 'c1' }))
+      .resolves.toMatchObject({ sequence: 1 });
+    const reopened = await ControlJournal.open(root, 1);
+    expect(reopened.sequence).toBe(1);
+  });
+
+  it('tolerates trailing blank lines in the journal file', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-journal-'));
+    roots.push(root);
+    const journal = await ControlJournal.open(root, 1);
+    await journal.append('command.requested', { commandId: 'c1' });
+    await appendFile(journal.path, '\n');
+    const reopened = await ControlJournal.open(root, 1);
+    expect(reopened.sequence).toBe(1);
+  });
 });
