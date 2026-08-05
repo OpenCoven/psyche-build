@@ -269,7 +269,6 @@ describe('Tauri Coven session model', () => {
       refreshedAt: 103,
     });
   });
-
   test('turns malformed responses into errors and suppresses stale results by identity', () => {
     const first = model.beginCovenRequest(model.createCovenDiscoveryState());
     const second = model.beginCovenRequest(first.state);

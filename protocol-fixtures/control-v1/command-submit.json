@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "type": "command.submit",
+  "requestId": "req-1",
+  "command": {
+    "id": "cmd-1",
+    "idempotencyKey": "idem-1",
+    "kind": "pane.takeover",
+    "projectRoot": "/repo",
+    "createdAt": "2026-08-03T20:00:00.000Z",
+    "payload": {
+      "paneId": "%3"
+    }
+  }
+}
