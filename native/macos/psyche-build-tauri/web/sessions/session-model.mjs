@@ -253,7 +253,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
 
   const status = normalizeStatus(response?.status);
   const message = normalizedMessage(response?.message);
-  const allowedStatuses = new Set(['ready', 'unavailable', 'incompatible', 'error']);
+  const allowedStatuses = new Set(['ready', 'empty', 'unavailable', 'incompatible', 'error']);
   if (!allowedStatuses.has(status)) {
     return {
       ...state,
@@ -264,7 +264,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
     };
   }
 
-  if (status === 'ready') {
+  if (status === 'ready' || status === 'empty') {
     return {
       ...state,
       phase: 'ready',
