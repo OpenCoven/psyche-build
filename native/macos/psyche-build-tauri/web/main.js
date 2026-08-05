@@ -205,7 +205,6 @@
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var isRestoringWorkspace = false;
-  var isBootstrapping = true;
   var saveWorkspaceTimer = 0;
 
   function clampInt(value, fallback, min, max) {
@@ -660,35 +659,6 @@
       spawnPty(thread, thread.worktreePath);
     });
     return thread;
-  }
-
-  async function openCovenSession(project, session) {
-    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
-      return null;
-    }
-    if (project.id === state.activeProjectId) {
-      if (!(await showTerminalView())) return null;
-    } else if (!(await setActiveProject(project.id))) {
-      return null;
-    }
-    var existing = state.threads.find(function (thread) {
-      return thread.projectId === project.id &&
-        thread.covenSessionId === session.id && thread.status !== "exited";
-    });
-    if (existing) {
-      await focusThread(existing.id);
-      return existing;
-    }
-    var title = typeof session.title === "string" ? session.title.trim() : "";
-    return createThread({
-      project: project,
-      name: title || session.id,
-      kind: "coven",
-      command: "coven",
-      args: ["attach", session.id],
-      projectRoot: session.cwd || session.projectRoot || project.root,
-      covenSessionId: session.id,
-    });
   }
 
   function spawnPty(thread, projectRoot) {
@@ -1224,39 +1194,6 @@
     return "";
   }
 
-  function covenInlineState(phase) {
-    if (phase === "loading") {
-      return { text: "Coven — loading…", title: "" };
-    }
-    if (phase === "unavailable") {
-      return {
-        text: "Coven unavailable",
-        title: "Coven daemon is not running; run `coven daemon start`",
-      };
-    }
-    if (phase === "incompatible") {
-      return {
-        text: "Coven update required",
-        title: "Coven daemon API update required",
-      };
-    }
-    if (phase === "error") {
-      return {
-        text: "Coven could not load",
-        title: "Coven sessions could not be loaded",
-      };
-    }
-    return null;
-  }
-
-  function covenToneClass(tone) {
-    if (tone === "ok") return "coven-tone-ok";
-    if (tone === "warn") return "coven-tone-warn";
-    if (tone === "muted") return "coven-tone-muted";
-    if (tone === "danger") return "coven-tone-danger";
-    return "coven-tone-neutral";
-  }
-
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -1509,18 +1446,6 @@
         group.appendChild(worktreeGroup);
       });
 
-      if (showInlineState) {
-        var stateLabel = document.createElement("div");
-        stateLabel.className = "session-subsection-label";
-        stateLabel.textContent = "Coven";
-        group.appendChild(stateLabel);
-        var inline = document.createElement("div");
-        inline.className = "session-inline-state";
-        inline.textContent = inlineState.text;
-        if (inlineState.title) inline.title = inlineState.title;
-        group.appendChild(inline);
-      }
-
       sessionListEl.appendChild(group);
     });
 
@@ -1620,7 +1545,6 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
-    invalidateCovenDiscovery();
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -1654,7 +1578,6 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
-    requestCovenRefresh();
     return true;
   }
 
@@ -3519,7 +3442,6 @@
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (!isBootstrapping) requestCovenRefresh();
     return project;
   }
 

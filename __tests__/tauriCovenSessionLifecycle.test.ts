@@ -57,7 +57,7 @@ function functionSource(source: string, name: string) {
       index += 1;
       continue;
     }
-    if (character === '"' || character === '\'' || character === '`') {
+    if (character === '"' || character === "'" || character === '`') {
       quote = character;
       continue;
     }
@@ -66,7 +66,6 @@ function functionSource(source: string, name: string) {
       depth -= 1;
       if (depth === 0) return source.slice(match.index, index + 1);
     }
-
   }
   throw new Error(`unterminated function ${name}`);
 }
@@ -95,7 +94,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       'if (document.visibilityState === "hidden") saveWorkspaceNow();'
     );
     expect(visibilityChange).not.toMatch(/Coven|Polling/);
-
     expect(mainJs).toContain(
       'document.addEventListener("visibilitychange", handleVisibilityChange);'
     );
