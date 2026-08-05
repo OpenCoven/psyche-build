@@ -68,6 +68,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('label: "Hide"');
     expect(mainJs).toContain('label: "Interrupt"');
     expect(mainJs).toContain('label: "Stop and close"');
+    expect(mainJs).toContain('label: "Open Psyche Terminal"');
     expect(mainJs).toContain('" hidden session"');
     expect(styles).toMatch(/\.session-context-menu\s*\{/);
     expect(styles).toMatch(/\.session-context-item\.danger\s*\{/);

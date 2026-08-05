@@ -1486,13 +1486,26 @@
           return thread.projectId === project.id && thread.worktreePath === worktree.path &&
             thread.hidden;
         });
-        if (!worktree.virtual && hiddenThreads.length > 0) {
+        if (!worktree.virtual) {
           worktreeHead.addEventListener("contextmenu", function (event) {
-            openSessionContextMenu(event, [{
-              label: "Show " + hiddenThreads.length + " hidden session" +
-                (hiddenThreads.length === 1 ? "" : "s"),
-              run: function () { reopenThreads(project.id, worktree.path); },
-            }]);
+            var actions = [{
+              label: "Open Psyche Terminal",
+              run: async function () {
+                project.selectedWorktreePath = worktree.path;
+                if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+                ensureProjectPsyche(project);
+                refreshSidebar();
+                saveWorkspaceSoon();
+              },
+            }];
+            if (hiddenThreads.length > 0) {
+              actions.push({
+                label: "Show " + hiddenThreads.length + " hidden session" +
+                  (hiddenThreads.length === 1 ? "" : "s"),
+                run: function () { reopenThreads(project.id, worktree.path); },
+              });
+            }
+            openSessionContextMenu(event, actions);
           });
         }
         worktreeGroup.appendChild(worktreeHead);

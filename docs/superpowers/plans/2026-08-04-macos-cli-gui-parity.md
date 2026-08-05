@@ -40,7 +40,7 @@
 - [ ] Route single- and multi-agent lane creation through shared host commands with idempotency.
 - [x] Add attach, focus, resize, prompt, interrupt, rename, duplicate, hide, reopen, and non-destructive close actions.
 - [x] Preserve successful siblings when a multi-lane launch partially fails.
-- [ ] Retain “Open Psyche Terminal” as a fallback until each workflow has packaged-app proof.
+- [x] Retain “Open Psyche Terminal” as a fallback until each workflow has packaged-app proof.
 
 ### Task 5: Add full human-facing workflow parity
 
