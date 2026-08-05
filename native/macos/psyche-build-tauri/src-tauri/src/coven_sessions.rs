@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 #[cfg(unix)]
@@ -65,6 +66,33 @@ pub(crate) struct CovenSessionsResponse {
     sessions: Vec<CovenSessionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+fn error_response() -> CovenSessionsResponse {
+    CovenSessionsResponse {
+        status: "error".to_string(),
+        sessions: Vec::new(),
+        message: Some(ERROR_MESSAGE.to_string()),
+    }
+}
+
+fn coven_environment<I>(values: I) -> Result<HashMap<String, String>, ()>
+where
+    I: IntoIterator<Item = (&'static str, Option<OsString>)>,
+{
+    let mut env = HashMap::new();
+    for (key, value) in values {
+        if let Some(value) = value {
+            env.insert(key.to_string(), value.into_string().map_err(|_| ())?);
+        }
+    }
+    Ok(env)
+}
+
+fn home_path(value: Option<OsString>) -> PathBuf {
+    value
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn resolve_endpoint(env: &HashMap<String, String>, home: &Path) -> Result<CovenEndpoint, String> {
@@ -165,7 +193,6 @@ fn is_safe_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-#[allow(dead_code)]
 fn load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -186,11 +213,47 @@ fn load_coven_sessions(
             sessions: Vec::new(),
             message: Some(INCOMPATIBLE_MESSAGE.to_string()),
         },
-        Err(CovenAdapterError::Failed) => CovenSessionsResponse {
-            status: "error".to_string(),
-            sessions: Vec::new(),
-            message: Some(ERROR_MESSAGE.to_string()),
-        },
+        Err(CovenAdapterError::Failed) => error_response(),
+    }
+}
+
+fn discover(
+    env: &HashMap<String, String>,
+    home: &Path,
+    project_roots: Vec<String>,
+) -> CovenSessionsResponse {
+    let endpoint = match resolve_endpoint(env, home) {
+        Ok(endpoint) => endpoint,
+        Err(_) => return error_response(),
+    };
+    let project_roots = project_roots
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+    load_coven_sessions(&endpoint, &project_roots)
+}
+
+#[tauri::command]
+pub(crate) async fn coven_sessions(project_roots: Vec<String>) -> CovenSessionsResponse {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let env = match coven_environment([
+            ("COVEN_SOCKET", std::env::var_os("COVEN_SOCKET")),
+            ("COVEN_HOME", std::env::var_os("COVEN_HOME")),
+            ("COVEN_URL", std::env::var_os("COVEN_URL")),
+            ("COVEN_PORT", std::env::var_os("COVEN_PORT")),
+        ]) {
+            Ok(env) => env,
+            Err(()) => return error_response(),
+        };
+        let home = home_path(std::env::var_os("HOME"));
+
+        discover(&env, &home, project_roots)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => error_response(),
     }
 }
 
@@ -698,6 +761,7 @@ fn optional_string(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
@@ -1070,6 +1134,47 @@ mod tests {
         assert_eq!(response.status, status);
         assert!(response.sessions.is_empty());
         assert_eq!(response.message.as_deref(), message);
+    }
+
+    #[test]
+    fn collects_only_configured_unicode_coven_environment_values() {
+        let env = coven_environment([
+            ("COVEN_SOCKET", Some(OsString::from("/tmp/coven.sock"))),
+            ("COVEN_HOME", None),
+            ("COVEN_URL", Some(OsString::from("http://127.0.0.1:7777"))),
+            ("COVEN_PORT", Some(OsString::from("7778"))),
+        ])
+        .unwrap();
+
+        assert_eq!(env.len(), 3);
+        assert_eq!(
+            env.get("COVEN_SOCKET").map(String::as_str),
+            Some("/tmp/coven.sock")
+        );
+        assert_eq!(
+            env.get("COVEN_URL").map(String::as_str),
+            Some("http://127.0.0.1:7777")
+        );
+        assert_eq!(env.get("COVEN_PORT").map(String::as_str), Some("7778"));
+    }
+
+    #[test]
+    fn falls_back_to_root_when_home_is_missing() {
+        assert_eq!(home_path(None), PathBuf::from("/"));
+        assert_eq!(
+            home_path(Some(OsString::from("/Users/tester"))),
+            PathBuf::from("/Users/tester")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_unicode_coven_environment_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        assert!(
+            coven_environment([("COVEN_SOCKET", Some(OsString::from_vec(vec![0xff])),)]).is_err()
+        );
     }
 
     #[cfg(unix)]
