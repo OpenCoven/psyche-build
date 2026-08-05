@@ -65,4 +65,30 @@ describe('project owner lock', () => {
     expect(recovered.epoch).toBeGreaterThan(0);
     await recovered.release();
   });
+
+  it('rolls back the fence when finalization fails so the same live pid can retry', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-owner-'));
+    roots.push(root);
+    const runtimeDir = path.join(root, '.psyche', 'runtime');
+    await mkdir(runtimeDir, { recursive: true });
+    // Occupy nextEpoch's temp path with a directory so the epoch write fails
+    // after the fence has already been claimed.
+    const epochTemp = path.join(runtimeDir, `owner-epoch.json.${process.pid}.tmp`);
+    await mkdir(epochTemp, { recursive: true });
+    await expect(acquireOwnerLock(root, { pid: process.pid, isProcessAlive: () => true }))
+      .rejects.toThrow();
+    // Clear the transient condition; the same still-alive pid must not be self-locked.
+    await rm(epochTemp, { recursive: true, force: true });
+    const recovered = await acquireOwnerLock(root, { pid: process.pid, isProcessAlive: () => true });
+    expect(recovered.epoch).toBeGreaterThan(0);
+    await recovered.release();
+  });
+
+  it('treats release as a no-op when the lock is already gone', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-owner-'));
+    roots.push(root);
+    const lock = await acquireOwnerLock(root, { pid: 101, isProcessAlive: () => false });
+    await rm(path.join(root, '.psyche', 'runtime', 'owner.lock'), { recursive: true, force: true });
+    await expect(lock.release()).resolves.toBeUndefined();
+  });
 });

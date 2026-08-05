@@ -67,29 +67,41 @@ export async function acquireOwnerLock(
     }
   }
 
-  const epoch = await nextEpoch(epochPath);
-  const record: OwnerRecord = {
-    pid,
-    nonce,
-    epoch,
-    acquiredAt: new Date().toISOString(),
-  };
-  const recordTemp = path.join(lockDir, `owner.${nonce}.tmp`);
-  const handle = await open(recordTemp, 'wx');
+  let epoch: number;
   try {
-    await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
+    epoch = await nextEpoch(epochPath);
+    const record: OwnerRecord = {
+      pid,
+      nonce,
+      epoch,
+      acquiredAt: new Date().toISOString(),
+    };
+    const recordTemp = path.join(lockDir, `owner.${nonce}.tmp`);
+    const handle = await open(recordTemp, 'wx');
+    try {
+      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(recordTemp, recordPath);
+  } catch (error) {
+    await rm(lockDir, { recursive: true, force: true });
+    throw error;
   }
-  await rename(recordTemp, recordPath);
 
   return {
     epoch,
     nonce,
     release: async () => {
-      const current = JSON.parse(await readFile(recordPath, 'utf8')) as OwnerRecord;
-      if (current.nonce === nonce) await rm(lockDir, { recursive: true });
+      let current: OwnerRecord;
+      try {
+        current = JSON.parse(await readFile(recordPath, 'utf8')) as OwnerRecord;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
+      if (current.nonce === nonce) await rm(lockDir, { recursive: true, force: true });
     },
   };
 }
