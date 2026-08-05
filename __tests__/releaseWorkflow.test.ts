@@ -520,6 +520,9 @@ describe('macOS release workflow contract', () => {
     expect(rustToolchain).toContain('channel = "1.95.0"');
     expect(rustToolchain).toContain('components = ["rustfmt"]');
     expect(workflow.match(/toolchain: 1\.95\.0/g)).toHaveLength(2);
+    expect(workflow).toContain(
+      'dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable action commit 2026-03-27',
+    );
     expect(workflow).not.toMatch(/^\s*toolchain:\s*stable\s*$/m);
   });
 });
