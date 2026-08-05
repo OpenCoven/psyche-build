@@ -112,6 +112,15 @@ describe('macOS release workflow contract', () => {
     expect(workflow).toContain('tags: ["v*"]');
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).toContain('ref: ${{ github.event.inputs.tag || github.ref }}');
+    const verifyJob = workflowJobSource(workflow, 'verify');
+    expect(verifyJob).toContain(
+      "if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'",
+    );
+    const canRunVerify = (eventName: string, ref: string) =>
+      eventName !== 'workflow_dispatch' || ref === 'refs/heads/main';
+    expect(canRunVerify('push', 'refs/tags/v0.0.1')).toBe(true);
+    expect(canRunVerify('workflow_dispatch', 'refs/heads/main')).toBe(true);
+    expect(canRunVerify('workflow_dispatch', 'refs/heads/untrusted')).toBe(false);
     expect(workflow).toContain('runner: macos-15');
     expect(workflow).toContain('runner: macos-15-intel');
     expect(workflow).toContain('target: aarch64-apple-darwin');

@@ -24,6 +24,9 @@ permissions:
 jobs:
   verify:
     name: Verify release source
+    # Recovery dispatches must load this workflow from protected main before the
+    # release environment can expose credentials to any workflow step.
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: macos-15
     timeout-minutes: 60
     environment: release
