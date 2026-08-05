@@ -252,6 +252,24 @@ describe('Tauri Coven session model', () => {
     }
   });
 
+  test('treats a healthy empty response as ready with no sessions', () => {
+    const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
+    const empty = model.applyCovenResponse(
+      requested.state,
+      requested.requestId,
+      { status: 'empty', sessions: [] },
+      103,
+    );
+
+    expect(empty).toEqual({
+      phase: 'ready',
+      sessionsByProject: new Map(),
+      message: null,
+      requestId: requested.requestId,
+      refreshedAt: 103,
+    });
+  });
+
   test('turns malformed responses into errors and suppresses stale results by identity', () => {
     const first = model.beginCovenRequest(model.createCovenDiscoveryState());
     const second = model.beginCovenRequest(first.state);

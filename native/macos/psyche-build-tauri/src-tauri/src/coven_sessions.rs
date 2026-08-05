@@ -264,25 +264,29 @@ fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
 ) -> Result<Vec<CovenSessionSummary>, CovenAdapterError> {
-    let health_body = request_endpoint(endpoint, "/api/v1/health")?;
+    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+    let health_body = request_endpoint(endpoint, "/api/v1/health", deadline)?;
     let health: CovenHealthResponse =
         serde_json::from_slice(&health_body).map_err(|_| CovenAdapterError::Failed)?;
     if health.api_version != STABLE_API_VERSION {
         return Err(CovenAdapterError::Incompatible);
     }
 
-    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions")?;
+    let sessions_body = request_endpoint(endpoint, "/api/v1/sessions", deadline)?;
     let sessions_value =
         serde_json::from_slice(&sessions_body).map_err(|_| CovenAdapterError::Failed)?;
     normalize_sessions(sessions_value, project_roots).map_err(|_| CovenAdapterError::Failed)
 }
 
-fn request_endpoint(endpoint: &CovenEndpoint, path: &str) -> Result<Vec<u8>, CovenAdapterError> {
+fn request_endpoint(
+    endpoint: &CovenEndpoint,
+    path: &str,
+    deadline: Instant,
+) -> Result<Vec<u8>, CovenAdapterError> {
     if !matches!(path, "/api/v1/health" | "/api/v1/sessions") {
         return Err(CovenAdapterError::Failed);
     }
 
-    let deadline = Instant::now() + EXCHANGE_TIMEOUT;
     match endpoint {
         #[cfg(unix)]
         CovenEndpoint::Unix(socket) => {
@@ -2050,7 +2054,11 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = request_endpoint(&endpoint, "/api/v1/health");
+        let result = request_endpoint(
+            &endpoint,
+            "/api/v1/health",
+            Instant::now() + EXCHANGE_TIMEOUT,
+        );
         let elapsed = started.elapsed();
         server.join().unwrap();
 
