@@ -14,7 +14,7 @@ import { launchAgentInPane } from './agentLaunch.js';
 import { autoApproveTrustPrompt } from './paneCreation.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { splitPane, getTerminalDimensions } from './tmux.js';
-import { recalculateAndApplyLayout } from './layoutManager.js';
+import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import { SettingsManager } from './settingsManager.js';
 import { LogService } from '../services/LogService.js';
@@ -28,6 +28,7 @@ export interface AttachAgentOptions {
   existingPanes: PsychePane[];
   sessionProjectRoot: string;
   sessionConfigPath: string;
+  sidebarWidth?: number;
 }
 
 /**
@@ -67,7 +68,9 @@ export async function attachAgentToWorktree(
     existingPanes,
     sessionProjectRoot,
     sessionConfigPath,
+    sidebarWidth: optionsSidebarWidth,
   } = options;
+  const sidebarWidth = optionsSidebarWidth ?? SIDEBAR_WIDTH;
 
   if (!targetPane.worktreePath) {
     throw new Error('Target pane has no worktree to attach to');
@@ -125,6 +128,8 @@ export async function attachAgentToWorktree(
       allContentPaneIds,
       dimensions.width,
       dimensions.height,
+      undefined,
+      { sidebarWidth },
     );
     await tmuxService.refreshClient();
   }

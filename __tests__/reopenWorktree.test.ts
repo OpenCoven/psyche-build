@@ -179,4 +179,28 @@ describe('reopenWorktree', () => {
 
     expect(result.pane.projectName).toBe('Renamed Repo');
   });
+
+  it('keeps the compact sidebar width through initial setup and layout reconciliation', async () => {
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+
+    await reopenWorktree({
+      slug: 'reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
+      projectRoot: '/repo',
+      existingPanes: [],
+      sessionProjectRoot: '/repo',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      sidebarWidth: 4,
+    });
+
+    expect(setupSidebarLayoutMock).toHaveBeenCalledWith('%0', '/repo', 4);
+    expect(recalculateAndApplyLayoutMock).toHaveBeenCalledWith(
+      '%0',
+      ['%1'],
+      160,
+      40,
+      undefined,
+      { sidebarWidth: 4 },
+    );
+  });
 });

@@ -29,6 +29,7 @@ import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
+import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
 
 export interface CreatePaneOptions {
   prompt: string;
@@ -48,11 +49,28 @@ export interface CreatePaneOptions {
   skipAgentSelection?: boolean; // Explicitly allow creating pane with no agent
   sessionConfigPath?: string; // Shared psyche config file for the current session
   sessionProjectRoot?: string; // Session root that owns sidebar/welcome pane state
+  sidebarWidth?: number;
 }
 
 export interface CreatePaneResult {
   pane: PsychePane;
   needsAgentChoice: boolean;
+}
+
+async function updatePanesConfig(
+  configPath: string,
+  update: (config: PsycheConfig) => void
+): Promise<PsycheConfig> {
+  return withPanesConfigFileWriteLock(configPath, async () => {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as PsycheConfig;
+    if (Array.isArray(config)) {
+      throw new Error('Pane config must use object form');
+    }
+
+    update(config);
+    atomicWriteJsonSync(configPath, config);
+    return config;
+  });
 }
 
 async function waitForPaneReady(
@@ -88,6 +106,7 @@ export async function createPane(
     skipAgentSelection = false,
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
+    sidebarWidth: optionsSidebarWidth,
   } = options;
   let { agent, projectRoot: optionsProjectRoot } = options;
 
@@ -132,6 +151,7 @@ export async function createPane(
 
   const sessionProjectRoot = optionsSessionProjectRoot
     || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
+  const sidebarWidth = optionsSidebarWidth ?? SIDEBAR_WIDTH;
   let paneProjectName = path.basename(projectRoot);
 
   // If no agent specified, check settings for default agent unless caller explicitly disabled auto-selection.
@@ -210,10 +230,11 @@ export async function createPane(
           'paneCreation'
         );
         controlPaneId = originalPaneId;
-        config.controlPaneId = controlPaneId;
-        config.controlPaneSize = SIDEBAR_WIDTH;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
+        await updatePanesConfig(configPath, (latestConfig) => {
+          latestConfig.controlPaneId = controlPaneId;
+          latestConfig.controlPaneSize = sidebarWidth;
+          latestConfig.lastUpdated = new Date().toISOString();
+        });
       }
       // Else: Pane exists, we can use it
     }
@@ -221,11 +242,11 @@ export async function createPane(
     // If control pane ID is missing, save it
     if (!controlPaneId) {
       controlPaneId = originalPaneId;
-      config.controlPaneId = controlPaneId;
-      config.controlPaneSize = SIDEBAR_WIDTH;
-      config.lastUpdated = new Date().toISOString();
-
-      atomicWriteJsonSync(configPath, config);
+      await updatePanesConfig(configPath, (latestConfig) => {
+        latestConfig.controlPaneId = controlPaneId;
+        latestConfig.controlPaneSize = sidebarWidth;
+        latestConfig.lastUpdated = new Date().toISOString();
+      });
     }
   } catch (error) {
     // Fallback if config loading fails
@@ -250,7 +271,7 @@ export async function createPane(
     if (isFirstContentPane) {
       // First, create the tmux pane but DON'T destroy welcome pane yet
       // This way we can save the pane to config first, THEN destroy welcome pane
-      paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
+      paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
     } else {
       // Subsequent panes - always split horizontally, let layout manager organize
       // Get actual psyche pane IDs (not welcome pane) from existingPanes
@@ -274,11 +295,11 @@ export async function createPane(
       );
 
       try {
-        const configContent = fs.readFileSync(configPath, 'utf-8');
-        const config: PsycheConfig = JSON.parse(configContent);
-        config.controlPaneId = currentPaneId;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
+        await updatePanesConfig(configPath, (latestConfig) => {
+          latestConfig.controlPaneId = currentPaneId;
+          latestConfig.controlPaneSize = sidebarWidth;
+          latestConfig.lastUpdated = new Date().toISOString();
+        });
         controlPaneId = currentPaneId; // Update local variable
       } catch (configError) {
         LogService.getInstance().error(
@@ -290,7 +311,7 @@ export async function createPane(
 
       // Retry pane creation with corrected controlPaneId
       if (isFirstContentPane) {
-        paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
+        paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
       } else {
         const psychePaneIds = existingPanes.map(p => p.paneId);
         const targetPane = psychePaneIds[psychePaneIds.length - 1];
@@ -323,7 +344,9 @@ export async function createPane(
       controlPaneId,
       allContentPaneIds,
       dimensions.width,
-      dimensions.height
+      dimensions.height,
+      undefined,
+      { sidebarWidth }
     );
 
     // Refresh tmux to apply changes
@@ -612,13 +635,26 @@ export async function createPane(
   // before we kill the welcome pane (prevents spurious "0 panes" welcome recreation).
   if (isFirstContentPane) {
     try {
-      const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configContent);
+      const config = await updatePanesConfig(configPath, (latestConfig) => {
+        const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
+        const existingPaneIndex = latestPanes.findIndex((pane) => pane.id === newPane.id);
+        latestConfig.panes = existingPaneIndex === -1
+          ? [...latestPanes, newPane]
+          : latestPanes.map((pane, index) => index === existingPaneIndex ? newPane : pane);
+        latestConfig.lastUpdated = new Date().toISOString();
+      });
 
-      // Add the new pane to the config (panesCount becomes 1)
-      config.panes = [...existingPanes, newPane];
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
+      if (controlPaneId) {
+        const dimensions = getTerminalDimensions();
+        await recalculateAndApplyLayout(
+          controlPaneId,
+          config.panes.map((pane) => pane.paneId),
+          dimensions.width,
+          dimensions.height,
+          undefined,
+          { sidebarWidth }
+        );
+      }
     } catch (error) {
       // Log but don't fail - welcome pane cleanup is not critical
     }

@@ -8,6 +8,7 @@ import path from 'path';
 import type { PsycheConfig } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
+import { SIDEBAR_WIDTH } from './layoutManager.js';
 
 /**
  * Recreate welcome pane and recalculate layout after the last pane is removed
@@ -15,7 +16,10 @@ import { TmuxService } from '../services/TmuxService.js';
  *
  * @param projectRoot - The project root directory
  */
-export async function handleLastPaneRemoved(projectRoot: string): Promise<void> {
+export async function handleLastPaneRemoved(
+  projectRoot: string,
+  sidebarWidth: number = SIDEBAR_WIDTH
+): Promise<void> {
   const tmuxService = TmuxService.getInstance();
 
   try {
@@ -37,17 +41,24 @@ export async function handleLastPaneRemoved(projectRoot: string): Promise<void> 
 
     // Recreate welcome pane
     const { createWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    await createWelcomePaneCoordinated(projectRoot, controlPaneId);
+    await createWelcomePaneCoordinated(
+      projectRoot,
+      controlPaneId,
+      undefined,
+      sidebarWidth
+    );
 
     // Recalculate layout to fix sidebar size
     const { recalculateAndApplyLayout } = await import('./layoutManager.js');
     const dimensions = await tmuxService.getTerminalDimensions();
 
-    recalculateAndApplyLayout(
+    await recalculateAndApplyLayout(
       controlPaneId,
       [], // No content panes
       dimensions.width,
-      dimensions.height
+      dimensions.height,
+      undefined,
+      { sidebarWidth }
     );
   } catch (error) {
     LogService.getInstance().error(

@@ -17,6 +17,7 @@ import { cleanupPromptFilesForSlug } from '../../utils/promptStore.js';
 import { buildDevWatchRespawnCommand } from '../../utils/devWatchCommand.js';
 import { isActiveDevSourcePath } from '../../utils/devSource.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
+import { SIDEBAR_WIDTH } from '../../utils/layoutManager.js';
 
 const PANE_KILL_VERIFY_DELAYS_MS = [50, 150, 300];
 
@@ -311,6 +312,9 @@ async function executeCloseOption(
       try {
         const config: PsycheConfig = JSON.parse(fs.readFileSync(panesFile, 'utf-8'));
         if (config.controlPaneId && updatedPanes.length > 0) {
+          const sidebarWidth = context.sidebarWidth
+            ?? config.controlPaneSize
+            ?? SIDEBAR_WIDTH;
           // Verify control pane exists before attempting layout
           const paneListCheck = execSync('tmux list-panes -F "#{pane_id}"', {
             encoding: 'utf-8',
@@ -339,7 +343,9 @@ async function executeCloseOption(
                 config.controlPaneId,
                 validPaneIds,
                 dimensions.width,
-                dimensions.height
+                dimensions.height,
+                undefined,
+                { sidebarWidth }
               );
 
               LogService.getInstance().debug(
@@ -360,7 +366,10 @@ async function executeCloseOption(
       // If we just closed the last pane, recreate the welcome pane and recalculate layout
       if (updatedPanes.length === 0) {
         const { handleLastPaneRemoved } = await import('../../utils/postPaneCleanup.js');
-        await handleLastPaneRemoved(sessionProjectRoot);
+        await handleLastPaneRemoved(
+          sessionProjectRoot,
+          context.sidebarWidth ?? SIDEBAR_WIDTH
+        );
       }
 
       const hasRemainingPaneForWorktree = Boolean(

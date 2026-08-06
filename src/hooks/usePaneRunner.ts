@@ -11,9 +11,17 @@ interface Params {
   projectSettings: ProjectSettings;
   setStatusMessage: (msg: string) => void;
   setRunningCommand: (v: boolean) => void;
+  sidebarWidth?: number;
 }
 
-export default function usePaneRunner({ panes, savePanes, projectSettings, setStatusMessage, setRunningCommand }: Params) {
+export default function usePaneRunner({
+  panes,
+  savePanes,
+  projectSettings,
+  setStatusMessage,
+  setRunningCommand,
+  sidebarWidth = SIDEBAR_WIDTH,
+}: Params) {
   const copyNonGitFiles = async (worktreePath: string, sourceProjectRoot?: string) => {
     try {
       setStatusMessage('Copying non-git files from main...');
@@ -146,7 +154,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();
-        enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
+        enforceControlPaneSize(controlPaneId, sidebarWidth);
       } catch {}
       await tmuxService.selectPane('{last}');
       setStatusMessage(`Attached ${type} window`);

@@ -635,11 +635,15 @@ async function createAndMonitorConflictPane(
       agent,
       projectName: context.projectName,
       existingPanes: context.panes,
+      sidebarWidth: context.sidebarWidth,
     });
 
     // Add the new pane to the panes list
-    const updatedPanes = [...context.panes, conflictPane];
-    await context.savePanes(updatedPanes);
+    if (context.appendPanes) {
+      await context.appendPanes([conflictPane]);
+    } else {
+      await context.savePanes([...context.panes, conflictPane]);
+    }
 
     // Notify about the new pane
     if (context.onPaneUpdate) {
@@ -665,7 +669,11 @@ async function createAndMonitorConflictPane(
           const stateManager = StateManager.getInstance();
           const currentPanes = stateManager.getPanes();
           const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
-          await context.savePanes(panesWithoutConflictPane);
+          await context.savePanes(panesWithoutConflictPane, {
+            observedPanes: currentPanes.some((candidate) => candidate.id === conflictPane.id)
+              ? currentPanes
+              : [...currentPanes, conflictPane],
+          });
 
           // Mark this worktree as completed
           item.status = 'completed';

@@ -4,7 +4,8 @@ import type { PsycheConfig, PsycheThemeName } from '../types.js';
 import { createWelcomePane, welcomePaneExists, destroyWelcomePane } from './welcomePane.js';
 import { LogService } from '../services/LogService.js';
 import { atomicWriteJsonSync } from './atomicWrite.js';
-import { withPanesConfigWriteLock } from './panesConfigQueue.js';
+import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
+import { SIDEBAR_WIDTH } from './layoutManager.js';
 
 // Global lock to prevent concurrent welcome pane operations
 let creationLock = false;
@@ -79,9 +80,10 @@ async function destroyWelcomePaneWithConfigLockHeld(
  */
 export async function destroyWelcomePaneCoordinated(projectRoot: string): Promise<boolean> {
   const logService = LogService.getInstance();
+  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
   try {
-    return await withPanesConfigWriteLock(() =>
+    return await withPanesConfigFileWriteLock(configPath, () =>
       destroyWelcomePaneWithConfigLockHeld(projectRoot)
     );
   } catch (error) {
@@ -93,7 +95,8 @@ export async function destroyWelcomePaneCoordinated(projectRoot: string): Promis
 async function createWelcomePaneWithConfigLockHeld(
   projectRoot: string,
   controlPaneId: string,
-  themeName?: PsycheThemeName
+  themeName?: PsycheThemeName,
+  sidebarWidth?: number
 ): Promise<boolean> {
   const logService = LogService.getInstance();
   const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
@@ -112,7 +115,15 @@ async function createWelcomePaneWithConfigLockHeld(
   }
 
   // Create the welcome pane
-  const welcomePaneId = await createWelcomePane(controlPaneId, projectRoot, themeName);
+  const effectiveSidebarWidth = sidebarWidth ?? (typeof config.controlPaneSize === 'number'
+    ? config.controlPaneSize
+    : SIDEBAR_WIDTH);
+  const welcomePaneId = await createWelcomePane(
+    controlPaneId,
+    projectRoot,
+    themeName,
+    effectiveSidebarWidth
+  );
 
   if (welcomePaneId) {
     // Update config with new welcome pane ID (use atomic write)
@@ -137,7 +148,8 @@ async function createWelcomePaneWithConfigLockHeld(
 export async function createWelcomePaneCoordinated(
   projectRoot: string,
   controlPaneId: string,
-  themeName?: PsycheThemeName
+  themeName?: PsycheThemeName,
+  sidebarWidth?: number
 ): Promise<boolean> {
   const logService = LogService.getInstance();
 
@@ -148,8 +160,14 @@ export async function createWelcomePaneCoordinated(
   }
 
   try {
-    return await withPanesConfigWriteLock(() =>
-      createWelcomePaneWithConfigLockHeld(projectRoot, controlPaneId, themeName)
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    return await withPanesConfigFileWriteLock(configPath, () =>
+      createWelcomePaneWithConfigLockHeld(
+        projectRoot,
+        controlPaneId,
+        themeName,
+        sidebarWidth
+      )
     );
   } catch (error) {
     logService.error('Failed to create welcome pane', 'WelcomePaneManager', undefined, error instanceof Error ? error : undefined);
@@ -172,8 +190,8 @@ export async function syncWelcomePaneVisibility(
   const logService = LogService.getInstance();
 
   try {
-    return await withPanesConfigWriteLock(async () => {
-      const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    return await withPanesConfigFileWriteLock(configPath, async () => {
       if (!fs.existsSync(configPath)) {
         return false;
       }

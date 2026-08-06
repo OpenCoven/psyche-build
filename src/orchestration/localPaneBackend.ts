@@ -22,6 +22,7 @@ export interface LocalPaneBackendOptions {
     options: CreatePaneOptions,
     availableAgents: AgentName[],
   ) => Promise<CreatePaneResult>;
+  sidebarWidth?: number;
 }
 
 export interface LocalPaneBackend {
@@ -73,6 +74,7 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         projectRoot: lane.projectRoot,
         existingPanes: [...options.basePanes, ...created],
         sessionProjectRoot: options.sessionProjectRoot,
+        ...(options.sidebarWidth === undefined ? {} : { sidebarWidth: options.sidebarWidth }),
         ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
       },
       options.availableAgents,

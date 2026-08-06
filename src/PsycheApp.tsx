@@ -362,6 +362,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     isLoading,
     loadPanes,
     savePanes,
+    appendPanes,
     saveSidebarProjects,
     eventMode,
   } = usePanes(
@@ -467,6 +468,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     projectSettings,
     setStatusMessage,
     setRunningCommand,
+    sidebarWidth: sidePanelWidth,
   })
 
   // Spinner animation and branch detection now handled in hooks
@@ -478,6 +480,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   } = usePaneCreation({
     panes,
     savePanes,
+    appendPanes,
     projectName,
     sessionProjectRoot: projectRoot || process.cwd(),
     panesFile,
@@ -485,6 +488,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     setStatusMessage,
     loadPanes,
     availableAgents,
+    sidebarWidth: sidePanelWidth,
   })
 
   // Initialize services
@@ -1084,7 +1088,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       }
 
-      await savePanes([...existingPanes, shellPane])
+      await appendPanes([shellPane])
       await loadPanes()
       return shellPane
     } catch (error: any) {
@@ -1351,6 +1355,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
+            sidebarWidth: sidePanelWidth,
           })
         : await resumeBranchWorkspace({
             agent: selectedAgent!,
@@ -1359,11 +1364,11 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
+            sidebarWidth: sidePanelWidth,
           })
 
       // Save the pane
-      const updatedPanes = [...panes, result.pane]
-      await savePanes(updatedPanes)
+      await appendPanes([result.pane])
 
       await loadPanes()
 
@@ -1565,9 +1570,11 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   const actionSystem = useActionSystem({
     panes,
     savePanes,
+    appendPanes,
     sessionName,
     projectName,
     defaultProjectRoot: sessionProjectRoot,
+    sidebarWidth: sidePanelWidth,
     onPaneRemove: async (paneId) => {
       const nextSelection = resolveSelectionAfterPaneClose(
         panes,
@@ -1803,6 +1810,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     handleReopenWorktree,
     setDevSourceFromPane: handleSetDevSourceFromPane,
     savePanes,
+    appendPanes,
     sidebarProjects,
     saveSidebarProjects,
     loadPanes,

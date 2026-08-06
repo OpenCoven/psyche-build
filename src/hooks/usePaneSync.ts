@@ -86,7 +86,11 @@ export async function enforcePaneTitles(
 export async function savePanesToFile(
   panesFile: string,
   panes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  options: {
+    observedPanes?: PsychePane[];
+    appendUnobservedPanes?: boolean;
+  } = {}
 ): Promise<PsychePane[]> {
   return withWriteLock(async () => {
     let activePanes = panes;
@@ -133,17 +137,80 @@ export async function savePanesToFile(
     } catch {}
 
     // Save in config format (use atomic write to prevent race conditions)
+    const observedPaneIds = new Set(
+      (options.observedPanes || activePanes).map((pane) => pane.id)
+    );
+    const activePanesById = new Map(activePanes.map((pane) => [pane.id, pane]));
+    const persistedPanes = Array.isArray(config.panes) ? config.panes : [];
+    const persistedPaneIds = new Set(persistedPanes.map((pane) => pane.id));
+    const rebasedPanes = persistedPanes.flatMap((persistedPane) => {
+      if (!observedPaneIds.has(persistedPane.id)) {
+        return [persistedPane];
+      }
+
+      const activePane = activePanesById.get(persistedPane.id);
+      return activePane ? [activePane] : [];
+    });
+    if (options.appendUnobservedPanes !== false) {
+      for (const activePane of activePanes) {
+        if (!persistedPaneIds.has(activePane.id)) {
+          rebasedPanes.push(activePane);
+        }
+      }
+    }
+
     const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
     const projectName = config.projectName || path.basename(projectRoot);
     const normalizedSidebarProjects = normalizeSidebarProjects(
       config.sidebarProjects,
-      activePanes,
+      rebasedPanes,
       projectRoot,
       projectName
     );
     config.sidebarProjects = normalizedSidebarProjects;
     config.panes = syncPaneColorThemes(
-      activePanes,
+      rebasedPanes,
+      normalizedSidebarProjects,
+      projectRoot
+    );
+    config.lastUpdated = new Date().toISOString();
+    await atomicWriteJson(panesFile, config);
+
+    return config.panes;
+  });
+}
+
+export async function appendPanesToFile(
+  panesFile: string,
+  panesToAppend: PsychePane[],
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+): Promise<PsychePane[]> {
+  return withWriteLock(async () => {
+    let config: StoredPsycheConfig = { panes: [] };
+    try {
+      const content = await fs.readFile(panesFile, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (!Array.isArray(parsed)) {
+        config = parsed as StoredPsycheConfig;
+      }
+    } catch {}
+
+    const existingPanes = Array.isArray(config.panes) ? config.panes : [];
+    const existingPaneIds = new Set(existingPanes.map((pane) => pane.id));
+    const appendedPanes = panesToAppend.filter((pane) => !existingPaneIds.has(pane.id));
+    const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
+    const projectName = config.projectName || path.basename(projectRoot);
+    const nextPanes = [...existingPanes, ...appendedPanes];
+    const normalizedSidebarProjects = normalizeSidebarProjects(
+      config.sidebarProjects,
+      nextPanes,
+      projectRoot,
+      projectName
+    );
+
+    config.sidebarProjects = normalizedSidebarProjects;
+    config.panes = syncPaneColorThemes(
+      nextPanes,
       normalizedSidebarProjects,
       projectRoot
     );
@@ -265,7 +332,8 @@ export function rebindAndFilterPanes(
 export async function saveUpdatedPaneConfig(
   panesFile: string,
   activePanes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  observedPanes: PsychePane[] = activePanes
 ): Promise<void> {
   await withWriteLock(async () => {
     // Re-read config in case it changed
@@ -278,18 +346,37 @@ export async function saveUpdatedPaneConfig(
       }
     } catch {}
 
-    // Update with remapped panes
+    const observedPaneIds = new Set(observedPanes.map((pane) => pane.id));
+    const activePanesById = new Map(activePanes.map((pane) => [pane.id, pane]));
+    const persistedPanes = Array.isArray(currentConfig.panes) ? currentConfig.panes : [];
+    const persistedPaneIds = new Set(persistedPanes.map((pane) => pane.id));
+    const rebasedPanes = persistedPanes.flatMap((persistedPane) => {
+      if (!observedPaneIds.has(persistedPane.id)) {
+        return [persistedPane];
+      }
+
+      const activePane = activePanesById.get(persistedPane.id);
+      return activePane ? [activePane] : [];
+    });
+    for (const activePane of activePanes) {
+      if (!observedPaneIds.has(activePane.id) && !persistedPaneIds.has(activePane.id)) {
+        rebasedPanes.push(activePane);
+      }
+    }
+
+    // Update remapped panes without overwriting additions or removals that
+    // occurred after the loader captured its snapshot.
     const projectRoot = currentConfig.projectRoot || path.dirname(path.dirname(panesFile));
     const projectName = currentConfig.projectName || path.basename(projectRoot);
     const normalizedSidebarProjects = normalizeSidebarProjects(
       currentConfig.sidebarProjects,
-      activePanes,
+      rebasedPanes,
       projectRoot,
       projectName
     );
     currentConfig.sidebarProjects = normalizedSidebarProjects;
     currentConfig.panes = syncPaneColorThemes(
-      activePanes,
+      rebasedPanes,
       normalizedSidebarProjects,
       projectRoot
     );
@@ -307,9 +394,12 @@ export async function saveUpdatedPaneConfig(
  * Handles cleanup when the last pane is removed
  * Recreates welcome pane and recalculates layout
  */
-export async function handleLastPaneRemoval(projectRoot: string): Promise<void> {
+export async function handleLastPaneRemoval(
+  projectRoot: string,
+  sidebarWidth?: number
+): Promise<void> {
   const { handleLastPaneRemoved } = await import('../utils/postPaneCleanup.js');
-  await handleLastPaneRemoved(projectRoot);
+  await handleLastPaneRemoved(projectRoot, sidebarWidth);
 }
 
 /**

@@ -105,11 +105,15 @@ async function createAndLaunchConflictPane(
       agent,
       projectName: context.projectName,
       existingPanes: context.panes,
+      sidebarWidth: context.sidebarWidth,
     });
 
     // Add the new pane to the panes list
-    const updatedPanes = [...context.panes, conflictPane];
-    await context.savePanes(updatedPanes);
+    if (context.appendPanes) {
+      await context.appendPanes([conflictPane]);
+    } else {
+      await context.savePanes([...context.panes, conflictPane]);
+    }
 
     // Notify about the new pane
     if (context.onPaneUpdate) {
@@ -141,7 +145,11 @@ async function createAndLaunchConflictPane(
           // Remove conflict pane from state
           const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
           console.error(`[conflictResolution] Removing conflict pane ${conflictPane.id}, remaining: ${panesWithoutConflictPane.map(p => p.id).join(', ')}`);
-          await context.savePanes(panesWithoutConflictPane);
+          await context.savePanes(panesWithoutConflictPane, {
+            observedPanes: currentPanes.some((candidate) => candidate.id === conflictPane.id)
+              ? currentPanes
+              : [...currentPanes, conflictPane],
+          });
 
           // Now trigger the cleanup flow for the original pane
           // We need to execute the merge completion flow

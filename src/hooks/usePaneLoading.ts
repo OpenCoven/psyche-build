@@ -24,7 +24,7 @@ import {
   applyStoredPaneLayoutWithinConfigWriteLock,
   SIDEBAR_WIDTH,
 } from '../utils/layoutManager.js';
-import { withPanesConfigWriteLock } from '../utils/panesConfigQueue.js';
+import { withPanesConfigFileWriteLock } from '../utils/panesConfigQueue.js';
 
 interface PaneLoadResult {
   panes: PsychePane[];
@@ -481,7 +481,7 @@ export async function loadAndProcessPanes(
   const paneMetadataChanged = paneMetadataSignature(reboundPanes) !== loadedPaneSignature;
   let config: PsycheConfig | undefined;
   if (paneMetadataChanged) {
-    config = await withPanesConfigWriteLock(async () => {
+    config = await withPanesConfigFileWriteLock(panesFile, async () => {
       const savedConfig = await savePaneMetadata(
         panesFile,
         loadedPanes,

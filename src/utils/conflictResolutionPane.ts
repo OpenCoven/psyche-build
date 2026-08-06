@@ -41,6 +41,7 @@ export interface ConflictResolutionPaneOptions {
   agent: AgentName;
   projectName: string;
   existingPanes: PsychePane[];
+  sidebarWidth?: number;
 }
 
 /**
@@ -49,7 +50,15 @@ export interface ConflictResolutionPaneOptions {
 export async function createConflictResolutionPane(
   options: ConflictResolutionPaneOptions
 ): Promise<PsychePane> {
-  const { sourceBranch, targetBranch, targetRepoPath, agent, projectName, existingPanes } = options;
+  const {
+    sourceBranch,
+    targetBranch,
+    targetRepoPath,
+    agent,
+    projectName,
+    existingPanes,
+    sidebarWidth = SIDEBAR_WIDTH,
+  } = options;
   const tmuxService = TmuxService.getInstance();
   const { SettingsManager } = await import('./settingsManager.js');
   const settings = new SettingsManager(targetRepoPath).getSettings();
@@ -86,7 +95,7 @@ export async function createConflictResolutionPane(
   // Don't apply global layouts - just enforce sidebar width
   try {
     const controlPaneId = tmuxService.getCurrentPaneIdSync();
-    await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
+    await enforceControlPaneSize(controlPaneId, sidebarWidth);
   } catch {}
 
   // CD into the target repository (where we'll resolve conflicts)

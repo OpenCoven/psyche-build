@@ -14,6 +14,7 @@ import { SettingsManager } from '../utils/settingsManager.js';
 interface Params {
   panes: PsychePane[];
   savePanes: (p: PsychePane[]) => Promise<void>;
+  appendPanes?: (panes: PsychePane[]) => Promise<PsychePane[]>;
   projectName: string;
   sessionProjectRoot: string;
   panesFile: string;
@@ -21,6 +22,7 @@ interface Params {
   setStatusMessage: (msg: string) => void;
   loadPanes: () => Promise<void>;
   availableAgents: AgentName[];
+  sidebarWidth?: number;
 }
 
 interface CreateNewPaneOptions {
@@ -83,6 +85,7 @@ function enqueueManagedWorktreePruning(
 export default function usePaneCreation({
   panes,
   savePanes,
+  appendPanes,
   projectName,
   sessionProjectRoot,
   panesFile,
@@ -90,6 +93,7 @@ export default function usePaneCreation({
   setStatusMessage,
   loadPanes,
   availableAgents,
+  sidebarWidth,
 }: Params) {
   const openInEditor = async (currentPrompt: string, setPrompt: (v: string) => void) => {
     try {
@@ -131,6 +135,7 @@ export default function usePaneCreation({
         mergeTargetChain: options.mergeTargetChain,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
+        sidebarWidth,
       },
       availableAgents
     );
@@ -156,8 +161,12 @@ export default function usePaneCreation({
       const pane = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
-      const updatedPanes = [...panesForCreation, pane];
-      await savePanes(updatedPanes);
+      const updatedPanes = appendPanes
+        ? await appendPanes([pane])
+        : [...panesForCreation, pane];
+      if (!appendPanes) {
+        await savePanes(updatedPanes);
+      }
       enqueueManagedWorktreePruning([pane.projectRoot || sessionProjectRoot], updatedPanes);
 
       await loadPanes();
@@ -216,6 +225,7 @@ export default function usePaneCreation({
         basePanes: panesForCreation,
         availableAgents,
         slugBase,
+        sidebarWidth,
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
 
@@ -245,8 +255,12 @@ export default function usePaneCreation({
       // Successful lanes are persisted even when siblings failed — a partial
       // result still leaves usable work behind.
       if (createdPanes.length > 0) {
-        const updatedPanes = [...panesForCreation, ...createdPanes];
-        await savePanes(updatedPanes);
+        const updatedPanes = appendPanes
+          ? await appendPanes(createdPanes)
+          : [...panesForCreation, ...createdPanes];
+        if (!appendPanes) {
+          await savePanes(updatedPanes);
+        }
         enqueueManagedWorktreePruning(
           createdPanes.map((pane) => pane.projectRoot || sessionProjectRoot),
           updatedPanes

@@ -72,7 +72,11 @@ export const ensurePaneBorderStatusForCurrentSession = (): void => {
  * @param cwd Optional working directory for the new content pane
  * @returns The newly created content area pane ID
  */
-export const setupSidebarLayout = (controlPaneId: string, cwd?: string): string => {
+export const setupSidebarLayout = (
+  controlPaneId: string,
+  cwd?: string,
+  sidebarWidth: number = SIDEBAR_WIDTH
+): string => {
   try {
     const tmuxService = TmuxService.getInstance();
 
@@ -92,7 +96,7 @@ export const setupSidebarLayout = (controlPaneId: string, cwd?: string): string 
 
     // Resize control pane to fixed width (sync version for initial setup)
     try {
-      tmuxService.resizePaneSync(controlPaneId, { width: SIDEBAR_WIDTH });
+      tmuxService.resizePaneSync(controlPaneId, { width: sidebarWidth });
     } catch {
       // Ignore resize errors during initial setup
     }

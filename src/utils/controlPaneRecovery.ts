@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { SIDEBAR_WIDTH } from './layoutManager.js';
 import { atomicWriteJson } from './atomicWrite.js';
+import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
 
 interface RecoveryConfig {
   controlPaneId?: string;
@@ -58,6 +59,23 @@ async function readConfig(configPath: string): Promise<RecoveryConfig | null> {
   }
 }
 
+async function saveRecoveredControlPane(
+  configPath: string,
+  controlPaneId: string
+): Promise<void> {
+  await withPanesConfigFileWriteLock(configPath, async () => {
+    const config = await readConfig(configPath);
+    if (!config) {
+      return;
+    }
+
+    config.controlPaneId = controlPaneId;
+    config.controlPaneSize = getSidebarWidth(config);
+    config.lastUpdated = new Date().toISOString();
+    await atomicWriteJson(configPath, config);
+  });
+}
+
 function parsePaneRows(output: string): PaneRow[] {
   if (!output) return [];
 
@@ -73,6 +91,12 @@ function parsePaneRows(output: string): PaneRow[] {
       };
     })
     .filter((pane) => pane.paneId.startsWith('%'));
+}
+
+function getSidebarWidth(config: RecoveryConfig): number {
+  return typeof config.controlPaneSize === 'number' && config.controlPaneSize > 0
+    ? config.controlPaneSize
+    : SIDEBAR_WIDTH;
 }
 
 function resolveDistIndexPath(): string {
@@ -125,6 +149,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   if (!controlPaneId) {
     return;
   }
+  const sidebarWidth = getSidebarWidth(config);
 
   const paneList = runTmux([
     'list-panes',
@@ -155,10 +180,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   // If psyche already exists in another pane, just update config ownership.
   const existingPsychePane = panes.find((pane) => pane.paneTitle === 'psyche');
   if (existingPsychePane) {
-    config.controlPaneId = existingPsychePane.paneId;
-    config.controlPaneSize = SIDEBAR_WIDTH;
-    config.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(configPath, config);
+    await saveRecoveredControlPane(configPath, existingPsychePane.paneId);
     return;
   }
 
@@ -180,7 +202,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
     '-t',
     anchorPaneId,
     '-l',
-    String(SIDEBAR_WIDTH),
+    String(sidebarWidth),
     '-c',
     projectRoot,
     '-P',
@@ -195,10 +217,7 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   runTmux(['select-pane', '-t', newControlPaneId, '-T', 'psyche']);
   runTmux(['send-keys', '-t', newControlPaneId, `node "${resolveDistIndexPath()}"`, 'Enter']);
 
-  config.controlPaneId = newControlPaneId;
-  config.controlPaneSize = SIDEBAR_WIDTH;
-  config.lastUpdated = new Date().toISOString();
-  await atomicWriteJson(configPath, config);
+  await saveRecoveredControlPane(configPath, newControlPaneId);
 }
 
 void recoverControlPaneIfNeeded();

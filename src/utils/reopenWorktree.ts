@@ -28,6 +28,7 @@ import {
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
+import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -37,10 +38,27 @@ export interface ReopenWorktreeOptions {
   sessionConfigPath?: string; // Shared psyche config path for this session
   sessionProjectRoot?: string; // Session root for welcome pane/layout state
   existingPanes: PsychePane[];
+  sidebarWidth?: number;
 }
 
 export interface ReopenWorktreeResult {
   pane: PsychePane;
+}
+
+async function updatePanesConfig(
+  configPath: string,
+  update: (config: PsycheConfig) => void
+): Promise<PsycheConfig> {
+  return withPanesConfigFileWriteLock(configPath, async () => {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as PsycheConfig;
+    if (Array.isArray(config)) {
+      throw new Error('Pane config must use object form');
+    }
+
+    update(config);
+    atomicWriteJsonSync(configPath, config);
+    return config;
+  });
 }
 
 /**
@@ -58,12 +76,14 @@ export async function reopenWorktree(
     existingPanes,
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
+    sidebarWidth: optionsSidebarWidth,
   } = options;
   let paneProjectName = path.basename(projectRoot);
   const settings = new SettingsManager(projectRoot).getSettings();
   const metadata = readWorktreeMetadata(worktreePath);
   const sessionProjectRoot = optionsSessionProjectRoot
     || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
+  const sidebarWidth = optionsSidebarWidth ?? SIDEBAR_WIDTH;
 
   const tmuxService = TmuxService.getInstance();
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
@@ -89,19 +109,21 @@ export async function reopenWorktree(
       const exists = await tmuxService.paneExists(controlPaneId);
       if (!exists) {
         controlPaneId = originalPaneId;
-        config.controlPaneId = controlPaneId;
-        config.controlPaneSize = SIDEBAR_WIDTH;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
+        await updatePanesConfig(configPath, (latestConfig) => {
+          latestConfig.controlPaneId = controlPaneId;
+          latestConfig.controlPaneSize = sidebarWidth;
+          latestConfig.lastUpdated = new Date().toISOString();
+        });
       }
     }
 
     if (!controlPaneId) {
       controlPaneId = originalPaneId;
-      config.controlPaneId = controlPaneId;
-      config.controlPaneSize = SIDEBAR_WIDTH;
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
+      await updatePanesConfig(configPath, (latestConfig) => {
+        latestConfig.controlPaneId = controlPaneId;
+        latestConfig.controlPaneSize = sidebarWidth;
+        latestConfig.lastUpdated = new Date().toISOString();
+      });
     }
   } catch {
     controlPaneId = originalPaneId;
@@ -120,7 +142,7 @@ export async function reopenWorktree(
   let paneInfo: string;
 
   if (isFirstContentPane) {
-    paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
+    paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
     await new Promise((resolve) => setTimeout(resolve, 300));
   } else {
     // Subsequent panes - always split horizontally
@@ -150,7 +172,9 @@ export async function reopenWorktree(
       controlPaneId,
       allContentPaneIds,
       dimensions.width,
-      dimensions.height
+      dimensions.height,
+      undefined,
+      { sidebarWidth }
     );
 
     await tmuxService.refreshClient();
@@ -242,12 +266,26 @@ export async function reopenWorktree(
   // so loadPanes sees a pane in config and doesn't recreate the welcome pane.
   if (isFirstContentPane) {
     try {
-      const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configContent);
+      const config = await updatePanesConfig(configPath, (latestConfig) => {
+        const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
+        const existingPaneIndex = latestPanes.findIndex((pane) => pane.id === newPane.id);
+        latestConfig.panes = existingPaneIndex === -1
+          ? [...latestPanes, newPane]
+          : latestPanes.map((pane, index) => index === existingPaneIndex ? newPane : pane);
+        latestConfig.lastUpdated = new Date().toISOString();
+      });
 
-      config.panes = [...existingPanes, newPane];
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
+      if (controlPaneId) {
+        const dimensions = getTerminalDimensions();
+        await recalculateAndApplyLayout(
+          controlPaneId,
+          config.panes.map((pane) => pane.paneId),
+          dimensions.width,
+          dimensions.height,
+          undefined,
+          { sidebarWidth }
+        );
+      }
     } catch {
       // Log but don't fail
     }

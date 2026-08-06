@@ -16,9 +16,17 @@ interface Params {
   setStatusMessage: (msg: string) => void;
   setShowMergeConfirmation: (v: boolean) => void;
   setMergedPane: (pane: PsychePane | null) => void;
+  sidebarWidth?: number;
 }
 
-export default function useWorktreeActions({ panes, savePanes, setStatusMessage, setShowMergeConfirmation, setMergedPane }: Params) {
+export default function useWorktreeActions({
+  panes,
+  savePanes,
+  setStatusMessage,
+  setShowMergeConfirmation,
+  setMergedPane,
+  sidebarWidth = SIDEBAR_WIDTH,
+}: Params) {
   const showTemporary = useTemporaryStatus(setStatusMessage);
 
   const closePane = useCallback(async (pane: PsychePane) => {
@@ -36,7 +44,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();
-        enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
+        enforceControlPaneSize(controlPaneId, sidebarWidth);
       } catch {}
 
       const updatedPanes = panes.filter(p => p.id !== pane.id);
@@ -46,7 +54,7 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
     } catch {
       showTemporary('Failed to close pane', 2000);
     }
-  }, [panes, savePanes, showTemporary]);
+  }, [panes, savePanes, showTemporary, sidebarWidth]);
 
   const mergeWorktree = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {

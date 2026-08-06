@@ -27,6 +27,7 @@ import { validateSystemRequirements, printValidationResults } from './utils/syst
 import { getUntrackedPanes } from './utils/shellPaneDetection.js';
 import { runFirstRunOnboardingIfNeeded } from './utils/onboarding.js';
 import { atomicWriteJson } from './utils/atomicWrite.js';
+import { withPanesConfigFileWriteLock } from './utils/panesConfigQueue.js';
 import { buildDevWatchCommand, buildDevWatchRespawnCommand } from './utils/devWatchCommand.js';
 import { shouldUseQuietDevWatchExit } from './utils/devWatchExit.js';
 import {
@@ -240,7 +241,12 @@ class Psyche {
         controlPaneId: undefined,
         controlPaneSize: 40  // Sidebar width
       };
-      await fs.writeFile(this.panesFile, JSON.stringify(initialConfig, null, 2));
+      await withPanesConfigFileWriteLock(this.panesFile, async () => {
+        if (await this.fileExists(this.panesFile)) {
+          return;
+        }
+        await atomicWriteJson(this.panesFile, initialConfig);
+      });
     }
 
     const inTmux = process.env.TMUX !== undefined;
@@ -409,6 +415,18 @@ class Psyche {
       // Load existing config
       const configContent = await fs.readFile(this.panesFile, 'utf-8');
       const config = JSON.parse(configContent);
+      const updateWelcomePaneId = async (welcomePaneId: string | undefined) => {
+        config.welcomePaneId = welcomePaneId;
+        config.lastUpdated = new Date().toISOString();
+        await withPanesConfigFileWriteLock(this.panesFile, async () => {
+          const latestConfig = JSON.parse(
+            await fs.readFile(this.panesFile, 'utf-8')
+          ) as PsycheConfig;
+          latestConfig.welcomePaneId = welcomePaneId;
+          latestConfig.lastUpdated = new Date().toISOString();
+          await atomicWriteJson(this.panesFile, latestConfig);
+        });
+      };
 
       // Ensure panes array exists
       if (!config.panes) {
@@ -416,6 +434,9 @@ class Psyche {
       }
 
       const oldControlPaneId = config.controlPaneId;
+      const sidebarWidth = typeof config.controlPaneSize === 'number'
+        ? config.controlPaneSize
+        : SIDEBAR_WIDTH;
       const sessionPaneIds = execSync(
         `tmux list-panes -t '${sessionNameForCurrentTmux}' -F "#{pane_id}"`,
         { encoding: 'utf-8', stdio: 'pipe' }
@@ -449,17 +470,24 @@ class Psyche {
 
       controlPaneId = nextControlPaneId;
       config.controlPaneId = nextControlPaneId;
-      config.controlPaneSize = SIDEBAR_WIDTH;
+      config.controlPaneSize = sidebarWidth;
 
       // If this is initial load or control pane changed, resize the sidebar
       if (needsUpdate) {
         // Resize control pane to sidebar width
-        await tmuxService.resizePane(controlPaneId, { width: SIDEBAR_WIDTH });
+        await tmuxService.resizePane(controlPaneId, { width: sidebarWidth });
         // Refresh client
         await tmuxService.refreshClient();
         // Save updated config
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await withPanesConfigFileWriteLock(this.panesFile, async () => {
+          const latestConfig = JSON.parse(
+            await fs.readFile(this.panesFile, 'utf-8')
+          ) as PsycheConfig;
+          latestConfig.controlPaneId = nextControlPaneId;
+          latestConfig.controlPaneSize = sidebarWidth;
+          latestConfig.lastUpdated = new Date().toISOString();
+          await atomicWriteJson(this.panesFile, latestConfig);
+        });
       }
 
       // Create welcome pane if there are no psyche panes and no existing welcome pane
@@ -520,9 +548,7 @@ class Psyche {
           );
           // Clear stale welcome pane ID from config
           const staleWelcomePaneId = config.welcomePaneId;
-          config.welcomePaneId = undefined;
-          config.lastUpdated = new Date().toISOString();
-          await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+          await updateWelcomePaneId(undefined);
           LogService.getInstance().debug(
             `Cleared stale welcome pane ID ${staleWelcomePaneId} from config`,
             'Setup'
@@ -582,9 +608,7 @@ class Psyche {
 
       if (!hasValidWelcomePane && welcomePaneIdsInSession.length > 0) {
         const recoveredWelcomePaneId = welcomePaneIdsInSession[0];
-        config.welcomePaneId = recoveredWelcomePaneId;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await updateWelcomePaneId(recoveredWelcomePaneId);
         hasValidWelcomePane = true;
         LogService.getInstance().warn(
           `Recovered untracked welcome pane ${recoveredWelcomePaneId} from tmux state`,
@@ -622,30 +646,31 @@ class Psyche {
       if (controlPaneId && !hasAnyPanes) {
         if (!hasValidWelcomePane) {
           // Create new welcome pane
-          const welcomePaneId = await createWelcomePane(controlPaneId, this.projectRoot);
+          const welcomePaneId = await createWelcomePane(
+            controlPaneId,
+            this.projectRoot,
+            undefined,
+            sidebarWidth
+          );
           if (welcomePaneId) {
-            config.welcomePaneId = welcomePaneId;
-            config.lastUpdated = new Date().toISOString();
-            await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+            await updateWelcomePaneId(welcomePaneId);
             LogService.getInstance().info(`Created welcome pane: ${welcomePaneId}`, 'Setup');
           }
         } else {
           // Welcome pane exists from previous session - fix the layout
           LogService.getInstance().debug('Welcome pane exists, applying correct layout', 'Setup');
 
-          // Apply correct layout: sidebar (40) | welcome pane (rest)
+          // Apply the persisted sidebar width alongside the welcome pane.
           // Use "latest" mode so window auto-follows terminal size
           // Batch layout commands into single tmux call for better performance
-          execSync(`tmux set-window-option window-size latest \\; set-window-option main-pane-width ${SIDEBAR_WIDTH} \\; select-layout main-vertical`, { stdio: 'pipe' });
+          execSync(`tmux set-window-option window-size latest \\; set-window-option main-pane-width ${sidebarWidth} \\; select-layout main-vertical`, { stdio: 'pipe' });
           await tmuxService.refreshClient();
         }
       } else if (hasValidWelcomePane && hasAnyPanes) {
         // If welcome pane exists but there are other panes, destroy it
         LogService.getInstance().info('Destroying welcome pane because other panes exist', 'Setup');
         await destroyWelcomePane(config.welcomePaneId);
-        config.welcomePaneId = undefined;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await updateWelcomePaneId(undefined);
       }
     } catch (error) {
       // Ignore errors in sidebar setup - will work without it

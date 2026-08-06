@@ -10,8 +10,14 @@ const tmuxServiceMock = vi.hoisted(() => ({
 }));
 
 vi.mock('fs/promises', () => ({
-  default: { readFile: readFileMock },
+  default: {
+    readFile: readFileMock,
+    open: vi.fn(async () => ({ close: vi.fn(async () => {}), writeFile: vi.fn(async () => {}) })),
+    unlink: vi.fn(async () => {}),
+  },
   readFile: readFileMock,
+  open: vi.fn(async () => ({ close: vi.fn(async () => {}), writeFile: vi.fn(async () => {}) })),
+  unlink: vi.fn(async () => {}),
 }));
 
 vi.mock('../src/utils/atomicWrite.js', () => ({

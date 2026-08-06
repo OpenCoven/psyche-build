@@ -9,7 +9,7 @@ import { TmuxService } from '../services/TmuxService.js';
 import { LogService } from '../services/LogService.js';
 import { StateManager } from '../shared/StateManager.js';
 import { atomicWriteJson } from './atomicWrite.js';
-import { withPanesConfigWriteLock } from './panesConfigQueue.js';
+import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
 
 export const SIDEBAR_WIDTH = DEFAULT_SIDEBAR_WIDTH;
 
@@ -84,7 +84,10 @@ async function applyStoredPaneLayoutWithConfigLockHeld(
 export async function applyStoredPaneLayout(
   options: ApplyStoredPaneLayoutOptions
 ): Promise<PaneLayout> {
-  return withPanesConfigWriteLock(() => applyStoredPaneLayoutWithConfigLockHeld(options));
+  return withPanesConfigFileWriteLock(
+    options.panesFile,
+    () => applyStoredPaneLayoutWithConfigLockHeld(options)
+  );
 }
 
 export async function applyStoredPaneLayoutWithinConfigWriteLock(

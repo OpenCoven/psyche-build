@@ -13,6 +13,7 @@ import {
 } from './usePaneLoading.js';
 import {
   enforcePaneTitles,
+  appendPanesToFile,
   savePanesToFile,
   rebindAndFilterPanes,
   saveUpdatedPaneConfig,
@@ -28,7 +29,7 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import {
-  withPanesConfigWriteLock as withWriteLock,
+  withPanesConfigFileWriteLock,
 } from '../utils/panesConfigQueue.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 
@@ -60,6 +61,27 @@ export default function usePanes(
   const paneEventService = useRef(PaneEventService.getInstance());
   const sidebarWidthRef = useRef(sidebarWidth ?? SIDEBAR_WIDTH);
   sidebarWidthRef.current = sidebarWidth ?? SIDEBAR_WIDTH;
+  const withWriteLock = <T>(operation: () => Promise<T>) =>
+    withPanesConfigFileWriteLock(panesFile, operation);
+
+  useEffect(() => {
+    const effectiveSidebarWidth = sidebarWidth ?? SIDEBAR_WIDTH;
+    void withWriteLock(async () => {
+      try {
+        const content = await fs.readFile(panesFile, 'utf-8');
+        const config = JSON.parse(content) as PsycheConfig;
+        if (Array.isArray(config) || config.controlPaneSize === effectiveSidebarWidth) {
+          return;
+        }
+
+        config.controlPaneSize = effectiveSidebarWidth;
+        config.lastUpdated = new Date().toISOString();
+        await atomicWriteJson(panesFile, config);
+      } catch {
+        // The normal config initialization/loading path will retry on its next update.
+      }
+    }).catch(() => undefined);
+  }, [panesFile, sidebarWidth]);
 
   useEffect(() => {
     panesRef.current = panes;
@@ -175,7 +197,12 @@ export default function usePanes(
           // Save before reconciling so a failed tmux projection leaves the prior
           // persisted layout while retaining the current pane metadata.
           if (currentPaneIds !== newPaneIds || shellPanesAdded || shellPanesRemoved) {
-            await saveUpdatedPaneConfig(panesFile, finalPanes, withWriteLock);
+            await saveUpdatedPaneConfig(
+              panesFile,
+              finalPanes,
+              withWriteLock,
+              loadedPanes
+            );
 
             await reconcileStoredPaneLayout(
               panesFile,
@@ -189,7 +216,10 @@ export default function usePanes(
               // If shell panes were removed and we now have 0 panes, recreate welcome pane.
               if (finalPanes.length === 0) {
                 const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-                await handleLastPaneRemoval(sessionProjectRoot);
+                await handleLastPaneRemoval(
+                  sessionProjectRoot,
+                  sidebarWidthRef.current
+                );
               }
             }
           }
@@ -208,9 +238,21 @@ export default function usePanes(
     }
   };
 
-  const savePanes = async (newPanes: PsychePane[]) => {
+  const savePanes = async (
+    newPanes: PsychePane[],
+    options: { observedPanes?: PsychePane[] } = {}
+  ) => {
     const previousPanes = panesRef.current;
-    const updatedPanes = await savePanesToFile(panesFile, newPanes, withWriteLock);
+    const observedPanes = options.observedPanes || panes;
+    const updatedPanes = await savePanesToFile(
+      panesFile,
+      newPanes,
+      withWriteLock,
+      {
+        observedPanes,
+        appendUnobservedPanes: false,
+      }
+    );
     panesRef.current = updatedPanes;
     setPanes(updatedPanes);
 
@@ -246,6 +288,38 @@ export default function usePanes(
     }
   };
 
+  const appendPanes = async (panesToAppend: PsychePane[]) => {
+    const updatedPanes = await appendPanesToFile(
+      panesFile,
+      panesToAppend,
+      withWriteLock
+    );
+    panesRef.current = updatedPanes;
+    setPanes(updatedPanes);
+
+    const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+    const nextSidebarProjects = normalizeSidebarProjects(
+      sidebarProjectsRef.current,
+      updatedPanes,
+      fallbackProjectRoot,
+      path.basename(fallbackProjectRoot)
+    );
+    if (JSON.stringify(sidebarProjectsRef.current) !== JSON.stringify(nextSidebarProjects)) {
+      sidebarProjectsRef.current = nextSidebarProjects;
+      setSidebarProjects(nextSidebarProjects);
+    }
+
+    await reconcileStoredPaneLayout(
+      panesFile,
+      updatedPanes,
+      controlPaneId,
+      undefined,
+      () => sidebarWidthRef.current
+    );
+
+    return updatedPanes;
+  };
+
   const saveSidebarProjects = async (newSidebarProjects: SidebarProject[]) => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
@@ -269,12 +343,12 @@ export default function usePanes(
       const projectName = config.projectName || path.basename(projectRoot);
       const normalizedProjects = normalizeSidebarProjects(
         newSidebarProjects,
-        config.panes || panesRef.current,
+        config.panes || [],
         projectRoot,
         projectName
       );
       const syncedPanes = syncPaneColorThemes(
-        panesRef.current,
+        config.panes || [],
         normalizedProjects,
         projectRoot
       );
@@ -386,6 +460,7 @@ export default function usePanes(
     isLoading,
     loadPanes,
     savePanes,
+    appendPanes,
     saveSidebarProjects,
     eventMode,
   } as const;

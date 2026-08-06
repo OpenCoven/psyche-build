@@ -175,6 +175,7 @@ interface UseInputHandlingParams {
   ) => Promise<void>
   setDevSourceFromPane: (pane: PsychePane) => Promise<void>
   savePanes: (panes: PsychePane[]) => Promise<void>
+  appendPanes?: (panes: PsychePane[]) => Promise<PsychePane[]>
   sidebarProjects: SidebarProject[]
   saveSidebarProjects: (projects: SidebarProject[]) => Promise<SidebarProject[]>
   loadPanes: () => Promise<void>
@@ -249,6 +250,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     handleReopenWorktree,
     setDevSourceFromPane,
     savePanes,
+    appendPanes,
     sidebarProjects,
     saveSidebarProjects,
     loadPanes,
@@ -281,6 +283,13 @@ export function useInputHandling(params: UseInputHandlingParams) {
     if (showStartupPrimer) {
       completeStartupPrimer?.("completed-first-action")
     }
+  }
+  const persistAddedPanes = async (newPanes: PsychePane[]) => {
+    if (appendPanes) {
+      await appendPanes(newPanes)
+      return
+    }
+    await savePanes([...panes, ...newPanes])
   }
 
   useEffect(() => {
@@ -341,7 +350,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await savePanes([...panes, shellPane])
+      await persistAddedPanes([shellPane])
 
       setIsCreatingPane(false)
       setStatusMessage("Terminal pane created")
@@ -407,7 +416,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       await tmuxService.sendShellCommand(newPaneId, buildCovenAttachCommand(session.id))
       await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       await client.sendInput?.(session.id, buildDesktopUseQuickInput("test"))
-      await savePanes([...panes, desktopPane])
+      await persistAddedPanes([desktopPane])
       await loadPanes()
 
       setStatusMessage("Desktop-use pane connected to Coven")
@@ -549,7 +558,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await savePanes([...panes, shellPane])
+      await persistAddedPanes([shellPane])
 
       setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -624,7 +633,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       await tmuxService.setPaneTitle(newPaneId, slug)
-      await savePanes([...panes, browserPane])
+      await persistAddedPanes([browserPane])
       await loadPanes()
 
       setStatusMessage(`Opened file browser for ${getPaneDisplayName(selectedPane)}`)
@@ -1694,6 +1703,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
             existingPanes: [...panes, ...createdPanes],
             sessionProjectRoot: projectRoot,
             sessionConfigPath: panesFile,
+            sidebarWidth: sidePanelWidth,
           })
           createdPanes.push(result.pane)
         } catch {
@@ -1702,8 +1712,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       if (createdPanes.length > 0) {
-        const updatedPanes = [...panes, ...createdPanes]
-        await savePanes(updatedPanes)
+        if (appendPanes) {
+          await appendPanes(createdPanes)
+        } else {
+          await savePanes([...panes, ...createdPanes])
+        }
         await loadPanes()
       }
 

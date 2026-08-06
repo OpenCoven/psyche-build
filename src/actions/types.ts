@@ -92,7 +92,12 @@ export interface ActionContext {
   currentPaneId?: string;
   sessionName: string;
   projectName: string;
-  savePanes: (panes: PsychePane[]) => Promise<void>;
+  savePanes: (
+    panes: PsychePane[],
+    options?: { observedPanes?: PsychePane[] }
+  ) => Promise<void>;
+  appendPanes?: (panes: PsychePane[]) => Promise<PsychePane[]>;
+  sidebarWidth?: number;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;
