@@ -77,6 +77,14 @@ export function seedPaneLayout(paneIds: string[]): PaneLayout {
     return { version: 1, root: null };
   }
 
+  const seenPaneIds = new Set<string>();
+  for (const paneId of paneIds) {
+    if (seenPaneIds.has(paneId)) {
+      throw new Error(`Pane layout cannot contain duplicate pane ID ${paneId}`);
+    }
+    seenPaneIds.add(paneId);
+  }
+
   let root: PaneLayoutNode = { kind: 'leaf', paneId: paneIds[paneIds.length - 1] };
 
   for (let index = paneIds.length - 2; index >= 0; index -= 1) {

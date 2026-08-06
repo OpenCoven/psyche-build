@@ -9,6 +9,12 @@ import {
 } from '../src/layout/PaneLayoutTree.js';
 
 describe('PaneLayoutTree', () => {
+  it('rejects duplicate pane IDs when seeding a layout', () => {
+    expect(() => seedPaneLayout(['psyche-1', 'psyche-1'])).toThrow(
+      'Pane layout cannot contain duplicate pane ID psyche-1'
+    );
+  });
+
   it('seeds a deterministic right-branching tree from legacy visible pane order', () => {
     expect(seedPaneLayout(['psyche-1', 'psyche-2', 'psyche-3'])).toEqual({
       version: 1,
