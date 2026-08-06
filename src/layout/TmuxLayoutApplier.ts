@@ -1,6 +1,5 @@
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { generateSidebarGridLayout } from '../utils/tmux.js';
 import type { LayoutConfig } from '../utils/layoutManager.js';
 import type { LayoutConfiguration } from './LayoutCalculator.js';
 
@@ -60,11 +59,8 @@ export class TmuxLayoutApplier {
   /**
    * Applies the calculated layout to tmux panes
    *
-   * Strategy:
-   * 1. Generate custom layout string using sidebar grid algorithm
-   * 2. Apply layout via tmux select-layout
-   * 3. Fallback to main-vertical if custom layout fails
-   * 4. Ultimate fallback: just resize sidebar
+   * The persistent-tree controller replaces custom automatic layouts. This
+   * legacy path retains tmux's built-in layout as a fallback until then.
    *
    * @param controlPaneId - ID of sidebar/control pane
    * @param contentPaneIds - IDs of content panes (in display order)
@@ -86,36 +82,8 @@ export class TmuxLayoutApplier {
     }
 
     try {
-      // Always use custom layout string generation - unified approach for all cases
-      // Use the calculated window dimensions, not current tmux dimensions (may be stale)
-      const layoutString = generateSidebarGridLayout(
-        controlPaneId,
-        contentPaneIds,
-        this.config.SIDEBAR_WIDTH,
-        layout.windowWidth,
-        terminalHeight,
-        layout.cols,
-        this.config.MAX_COMFORTABLE_WIDTH
-      );
-
-      if (layoutString) {
-        // Log pane state right before applying layout
-        this.logPaneState();
-
-        // selectLayoutSync returns false on failure (doesn't throw)
-        const success = this.tmuxService.selectLayoutSync(layoutString);
-        if (!success) {
-          // LogService.getInstance().debug('Layout application failed, using fallback', 'Layout');
-          // Fallback to main-vertical if custom layout fails
-          this.applyMainVerticalFallback();
-        }
-      } else {
-        // Empty layout string - fallback to main-vertical
-        // LogService.getInstance().debug('Empty layout string, using main-vertical fallback', 'Layout');
-        this.applyMainVerticalFallback();
-      }
-    } catch (error) {
-      // Fallback: just resize sidebar
+      this.applyMainVerticalFallback();
+    } catch {
       this.resizeControlPane(controlPaneId);
     }
   }
