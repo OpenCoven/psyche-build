@@ -263,6 +263,7 @@ type LocalThread = {
   needsAttention?: boolean;
   status?: string;
   spawning?: boolean;
+  hidden?: boolean;
   covenSessionId?: string | null;
   worktreePath?: string;
   kind?: string;
@@ -473,6 +474,67 @@ describe('Tauri Coven session project rail', () => {
     expect(badges[0].getAttribute('aria-label')).toBe('1 sessions need attention');
     expect(badges[1].getAttribute('aria-label'))
       .toBe('1 sessions need attention in this worktree');
+  });
+
+  it('omits a project when its only worktree session is hidden', () => {
+    const renderer = createRenderer({
+      projects: [
+        {
+          id: 'alpha', name: 'Alpha', root: '/alpha',
+          worktrees: [
+            { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+          ],
+        },
+        {
+          id: 'beta', name: 'Beta', root: '/beta',
+          worktrees: [
+            { path: '/beta', branch: 'main', is_main: true, dirty: false, missing: false },
+          ],
+        },
+      ],
+      threads: [
+        {
+          id: 'hidden-alpha', projectId: 'alpha', name: 'Hidden Alpha',
+          status: 'running', worktreePath: '/alpha', hidden: true,
+        },
+        {
+          id: 'visible-beta', projectId: 'beta', name: 'Visible Beta',
+          status: 'running', worktreePath: '/beta',
+        },
+      ],
+    });
+
+    renderer.render();
+
+    const groups = renderer.sessionListEl.querySelectorAll('.session-group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].textContent).toContain('Beta');
+    expect(renderer.sessionListEl.textContent).not.toContain('Alpha');
+    expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
+      .toBe('visible-beta');
+  });
+
+  it('keeps unresolved sessions visible because their fallback group is populated', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'orphan', projectId: 'alpha', name: 'Orphan session',
+        status: 'running', worktreePath: '/removed/worktree',
+      }],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-worktree-head')?.title)
+      .toBe('Sessions with no available worktree');
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('orphan');
   });
 
   it('searches only local thread metadata', () => {
