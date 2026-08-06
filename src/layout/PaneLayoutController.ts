@@ -9,7 +9,7 @@ import {
   visiblePaneLayout,
 } from './PaneLayoutTree.js';
 
-const SIDEBAR_WIDTH = 40;
+export const DEFAULT_SIDEBAR_WIDTH = 40;
 
 export type PaneLayoutMutation =
   | { kind: 'insert'; paneId: string; targetPaneId: string; direction: PaneSplitDirection }
@@ -22,6 +22,7 @@ export interface ApplyPaneLayoutMutationOptions {
   controlPaneId: string;
   terminalWidth: number;
   terminalHeight: number;
+  sidebarWidth?: number;
   mutation: PaneLayoutMutation;
   selectLayout: (layout: string) => boolean | Promise<boolean>;
 }
@@ -98,7 +99,7 @@ export async function applyPaneLayoutMutation(
     controlPaneId: options.controlPaneId,
     root: projectedRoot,
     panes: panesById,
-    sidebarWidth: SIDEBAR_WIDTH,
+    sidebarWidth: options.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH,
     windowWidth: options.terminalWidth,
     windowHeight: options.terminalHeight,
   });

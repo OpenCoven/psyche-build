@@ -102,6 +102,35 @@ describe('applyStoredPaneLayout', () => {
     expect(tmuxServiceMock.refreshClient).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the compact sidebar width for both the control pane and compiled layout', async () => {
+    readFileMock.mockResolvedValue(JSON.stringify({
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [pane('psyche-1', '%1')],
+      settings: {},
+      lastUpdated: 'before',
+    }));
+    const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
+
+    await applyStoredPaneLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [pane('psyche-1', '%1')],
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      sidebarWidth: 4,
+      mutation: { kind: 'reconcile' },
+    });
+
+    expect(tmuxServiceMock.resizePane).toHaveBeenCalledWith('%0', { width: 4 });
+    expect(tmuxServiceMock.selectLayout).toHaveBeenCalledWith(
+      expect.stringContaining('4x60,0,0,0')
+    );
+    expect(tmuxServiceMock.selectLayout).toHaveBeenCalledWith(
+      expect.stringContaining(',5,0,1')
+    );
+  });
+
   it('does not persist when tmux rejects the layout', async () => {
     tmuxServiceMock.selectLayout.mockRejectedValueOnce(new Error('tmux unavailable'));
     const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
@@ -153,5 +182,40 @@ describe('applyStoredPaneLayout', () => {
         lastUpdated: 'during-tmux-apply',
       })
     );
+  });
+
+  it('serializes layout persistence with other pane config writers', async () => {
+    let releaseTmuxApply: (() => void) | undefined;
+    const tmuxApplyPending = new Promise<void>((resolve) => {
+      releaseTmuxApply = resolve;
+    });
+    tmuxServiceMock.selectLayout.mockImplementationOnce(async () => tmuxApplyPending);
+
+    const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
+    const { withPanesConfigWriteLock } = await import('../src/utils/panesConfigQueue.js');
+    const applyLayout = applyStoredPaneLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [pane('psyche-1', '%1'), pane('psyche-2', '%2')],
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      mutation: { kind: 'reconcile' },
+    });
+    await vi.waitFor(() => {
+      expect(tmuxServiceMock.selectLayout).toHaveBeenCalledTimes(1);
+    });
+
+    let otherWriterStarted = false;
+    const otherWriter = withPanesConfigWriteLock(async () => {
+      otherWriterStarted = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(otherWriterStarted).toBe(false);
+    releaseTmuxApply?.();
+    await applyLayout;
+    await otherWriter;
+    expect(otherWriterStarted).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import { withPanesConfigWriteLock } from '../utils/panesConfigQueue.js';
 
 type StoredPsycheConfig = Partial<PsycheConfig> & { panes: PsychePane[] };
 
@@ -323,21 +324,23 @@ export async function destroyWelcomePaneIfNeeded(
   if (!shouldDestroyWelcome) return;
 
   try {
-    // Load config to get welcomePaneId
-    const configContent = await fs.readFile(panesFile, 'utf-8');
-    const config = JSON.parse(configContent);
-    if (config.welcomePaneId) {
-      LogService.getInstance().debug(
-        `Destroying welcome pane ${config.welcomePaneId} because panes were added`,
-        'shellDetection'
-      );
-      const { destroyWelcomePane } = await import('../utils/welcomePane.js');
-      await destroyWelcomePane(config.welcomePaneId);
-      // Clear welcomePaneId from config (will be saved by caller)
-      config.welcomePaneId = undefined;
-      // Write the config immediately to clear welcomePaneId
-      await atomicWriteJson(panesFile, config);
-    }
+    await withPanesConfigWriteLock(async () => {
+      // Load config to get welcomePaneId
+      const configContent = await fs.readFile(panesFile, 'utf-8');
+      const config = JSON.parse(configContent);
+      if (config.welcomePaneId) {
+        LogService.getInstance().debug(
+          `Destroying welcome pane ${config.welcomePaneId} because panes were added`,
+          'shellDetection'
+        );
+        const { destroyWelcomePane } = await import('../utils/welcomePane.js');
+        await destroyWelcomePane(config.welcomePaneId);
+        // Clear welcomePaneId from config (will be saved by caller)
+        config.welcomePaneId = undefined;
+        // Write the config immediately to clear welcomePaneId
+        await atomicWriteJson(panesFile, config);
+      }
+    });
   } catch (error) {
     LogService.getInstance().debug('Failed to destroy welcome pane', 'shellDetection');
   }

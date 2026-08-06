@@ -369,7 +369,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     false,
     sessionName,
     controlPaneId,
-    useHooks
+    useHooks,
+    sidePanelWidth
   )
 
   // Check for tmux hooks preference on startup

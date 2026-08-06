@@ -19,7 +19,12 @@ import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { syncHiddenStateFromCurrentWindow } from '../utils/paneVisibility.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
-import { applyStoredPaneLayout } from '../utils/layoutManager.js';
+import {
+  applyStoredPaneLayout,
+  applyStoredPaneLayoutWithinConfigWriteLock,
+  SIDEBAR_WIDTH,
+} from '../utils/layoutManager.js';
+import { withPanesConfigWriteLock } from '../utils/panesConfigQueue.js';
 
 interface PaneLoadResult {
   panes: PsychePane[];
@@ -27,9 +32,16 @@ interface PaneLoadResult {
   titleToId: Map<string, string>;
 }
 
+type SidebarWidthProvider = number | (() => number);
+
+function getSidebarWidth(sidebarWidth: SidebarWidthProvider): number {
+  return typeof sidebarWidth === 'function' ? sidebarWidth() : sidebarWidth;
+}
+
 async function savePaneMetadata(
   panesFile: string,
-  panes: PsychePane[]
+  observedPanes: PsychePane[],
+  reconciledPanes: PsychePane[]
 ): Promise<PsycheConfig | undefined> {
   try {
     const config = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
@@ -37,12 +49,32 @@ async function savePaneMetadata(
       return undefined;
     }
 
+    const observedPaneIds = new Set(observedPanes.map((pane) => pane.id));
+    const reconciledPanesById = new Map(
+      reconciledPanes.map((pane) => [pane.id, pane])
+    );
+    const rebasedPanes = (config.panes || []).flatMap((latestPane) => {
+      if (!observedPaneIds.has(latestPane.id)) {
+        return [latestPane];
+      }
+
+      const reconciledPane = reconciledPanesById.get(latestPane.id);
+      if (!reconciledPane) {
+        return [];
+      }
+
+      return [{
+        ...latestPane,
+        paneId: reconciledPane.paneId,
+        hidden: reconciledPane.hidden,
+      }];
+    });
     const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
     const projectName = config.projectName || path.basename(projectRoot);
-    config.panes = panes;
+    config.panes = rebasedPanes;
     config.sidebarProjects = normalizeSidebarProjects(
       config.sidebarProjects,
-      panes,
+      rebasedPanes,
       projectRoot,
       projectName
     );
@@ -62,7 +94,9 @@ export async function reconcileStoredPaneLayout(
   panesFile: string,
   panes: PsychePane[],
   controlPaneId: string | undefined,
-  knownPaneIds?: string[]
+  knownPaneIds?: string[],
+  sidebarWidth: SidebarWidthProvider = SIDEBAR_WIDTH,
+  configWriteLockHeld = false
 ): Promise<void> {
   if (!controlPaneId) {
     return;
@@ -76,12 +110,16 @@ export async function reconcileStoredPaneLayout(
     }
 
     const dimensions = await tmuxService.getTerminalDimensions();
-    await applyStoredPaneLayout({
+    const applyLayout = configWriteLockHeld
+      ? applyStoredPaneLayoutWithinConfigWriteLock
+      : applyStoredPaneLayout;
+    await applyLayout({
       panesFile,
       panes,
       controlPaneId,
       terminalWidth: dimensions.width,
       terminalHeight: dimensions.height,
+      sidebarWidth: getSidebarWidth(sidebarWidth),
       mutation: { kind: 'reconcile' },
     });
   } catch (error) {
@@ -381,7 +419,8 @@ export async function recreateKilledWorktreePanes(
  */
 export async function loadAndProcessPanes(
   panesFile: string,
-  isInitialLoad: boolean
+  isInitialLoad: boolean,
+  sidebarWidth: SidebarWidthProvider = SIDEBAR_WIDTH
 ): Promise<PaneLoadResult> {
   const loadedPanes = await loadPanesFromFile(panesFile);
   const loadedPaneSignature = paneMetadataSignature(loadedPanes);
@@ -442,7 +481,27 @@ export async function loadAndProcessPanes(
   const paneMetadataChanged = paneMetadataSignature(reboundPanes) !== loadedPaneSignature;
   let config: PsycheConfig | undefined;
   if (paneMetadataChanged) {
-    config = await savePaneMetadata(panesFile, reboundPanes);
+    config = await withPanesConfigWriteLock(async () => {
+      const savedConfig = await savePaneMetadata(
+        panesFile,
+        loadedPanes,
+        reboundPanes
+      );
+      if (savedConfig) {
+        await reconcileStoredPaneLayout(
+          panesFile,
+          savedConfig.panes,
+          savedConfig.controlPaneId,
+          allPaneIds,
+          sidebarWidth,
+          true
+        );
+      }
+      return savedConfig;
+    });
+    if (config) {
+      reboundPanes = config.panes;
+    }
   } else if (isInitialLoad) {
     try {
       const parsed = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
@@ -454,12 +513,13 @@ export async function loadAndProcessPanes(
     }
   }
 
-  if ((isInitialLoad || paneMetadataChanged) && config) {
+  if (isInitialLoad && !paneMetadataChanged && config) {
     await reconcileStoredPaneLayout(
       panesFile,
       reboundPanes,
       config.controlPaneId,
-      allPaneIds
+      allPaneIds,
+      sidebarWidth
     );
   }
 

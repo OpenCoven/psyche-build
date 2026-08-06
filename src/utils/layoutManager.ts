@@ -2,14 +2,16 @@ import fs from 'fs/promises';
 import type { PaneLayout, PsycheConfig, PsychePane } from '../types.js';
 import {
   applyPaneLayoutMutation,
+  DEFAULT_SIDEBAR_WIDTH,
   type PaneLayoutMutation,
 } from '../layout/PaneLayoutController.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { LogService } from '../services/LogService.js';
 import { StateManager } from '../shared/StateManager.js';
 import { atomicWriteJson } from './atomicWrite.js';
+import { withPanesConfigWriteLock } from './panesConfigQueue.js';
 
-export const SIDEBAR_WIDTH = 40;
+export const SIDEBAR_WIDTH = DEFAULT_SIDEBAR_WIDTH;
 
 function paneBindingSignature(panes: PsychePane[]): string {
   return panes
@@ -18,14 +20,19 @@ function paneBindingSignature(panes: PsychePane[]): string {
     .join('|');
 }
 
-export async function applyStoredPaneLayout(options: {
+type ApplyStoredPaneLayoutOptions = {
   panesFile: string;
   panes: PsychePane[];
   controlPaneId: string;
   terminalWidth: number;
   terminalHeight: number;
+  sidebarWidth?: number;
   mutation: PaneLayoutMutation;
-}): Promise<PaneLayout> {
+};
+
+async function applyStoredPaneLayoutWithConfigLockHeld(
+  options: ApplyStoredPaneLayoutOptions
+): Promise<PaneLayout> {
   const rawConfig = JSON.parse(await fs.readFile(options.panesFile, 'utf-8')) as PsycheConfig;
   if (Array.isArray(rawConfig)) {
     throw new Error('Pane layout requires an object-form config');
@@ -33,8 +40,9 @@ export async function applyStoredPaneLayout(options: {
 
   const tmuxService = TmuxService.getInstance();
   const hasVisibleContentPanes = options.panes.some((pane) => !pane.hidden);
+  const sidebarWidth = options.sidebarWidth ?? SIDEBAR_WIDTH;
 
-  await tmuxService.resizePane(options.controlPaneId, { width: SIDEBAR_WIDTH });
+  await tmuxService.resizePane(options.controlPaneId, { width: sidebarWidth });
 
   const { layout } = await applyPaneLayoutMutation({
     paneLayout: rawConfig.paneLayout,
@@ -42,6 +50,7 @@ export async function applyStoredPaneLayout(options: {
     controlPaneId: options.controlPaneId,
     terminalWidth: options.terminalWidth,
     terminalHeight: options.terminalHeight,
+    sidebarWidth,
     mutation: options.mutation,
     selectLayout: async (compiledLayout) => {
       if (!hasVisibleContentPanes) {
@@ -72,6 +81,18 @@ export async function applyStoredPaneLayout(options: {
   return layout;
 }
 
+export async function applyStoredPaneLayout(
+  options: ApplyStoredPaneLayoutOptions
+): Promise<PaneLayout> {
+  return withPanesConfigWriteLock(() => applyStoredPaneLayoutWithConfigLockHeld(options));
+}
+
+export async function applyStoredPaneLayoutWithinConfigWriteLock(
+  options: ApplyStoredPaneLayoutOptions
+): Promise<PaneLayout> {
+  return applyStoredPaneLayoutWithConfigLockHeld(options);
+}
+
 /**
  * Temporary compatibility bridge for Task 4 call sites. It deliberately only
  * reconciles the persisted layout and never recreates the legacy grid.
@@ -82,7 +103,7 @@ export async function recalculateAndApplyLayout(
   terminalWidth: number,
   terminalHeight: number,
   _legacyConfig?: unknown,
-  _legacyOptions?: unknown
+  legacyOptions?: { sidebarWidth?: number }
 ): Promise<void> {
   const state = StateManager.getInstance().getState();
   if (!state.panesFile) {
@@ -110,6 +131,7 @@ export async function recalculateAndApplyLayout(
       controlPaneId,
       terminalWidth,
       terminalHeight,
+      sidebarWidth: legacyOptions?.sidebarWidth,
       mutation: { kind: 'reconcile' },
     });
   } catch (error) {

@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type { AgentSessionReference, PsycheConfig } from '../types.js';
 import { atomicWriteJson } from './atomicWrite.js';
+import { withPanesConfigWriteLock } from './panesConfigQueue.js';
 
 export interface CodexSessionEventData {
   sessionId?: string;
@@ -87,16 +88,18 @@ export async function persistPaneAgentSessionReference(
 ): Promise<void> {
   if (!panesFile) return;
 
-  const raw = await fs.readFile(panesFile, 'utf8');
-  const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
-  if (Array.isArray(parsed)) return;
+  await withPanesConfigWriteLock(async () => {
+    const raw = await fs.readFile(panesFile, 'utf8');
+    const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
+    if (Array.isArray(parsed)) return;
 
-  const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
-  const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
-  if (!pane) return;
+    const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
+    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
+    if (!pane) return;
 
-  pane.agentSession = agentSession;
-  parsed.panes = panes;
-  parsed.lastUpdated = new Date().toISOString();
-  await atomicWriteJson(panesFile, parsed);
+    pane.agentSession = agentSession;
+    parsed.panes = panes;
+    parsed.lastUpdated = new Date().toISOString();
+    await atomicWriteJson(panesFile, parsed);
+  });
 }

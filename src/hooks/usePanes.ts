@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import fs from 'fs/promises';
 import path from 'path';
-import PQueue from 'p-queue';
 import type { PsycheConfig, PsychePane, SidebarProject } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
@@ -28,14 +27,10 @@ import { PaneEventService, type PaneEventMode } from '../services/PaneEventServi
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
-
-// Use p-queue for proper concurrency control instead of manual write lock
-// This prevents race conditions and provides better visibility into queue state
-const configQueue = new PQueue({ concurrency: 1 });
-
-async function withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
-  return configQueue.add(operation);
-}
+import {
+  withPanesConfigWriteLock as withWriteLock,
+} from '../utils/panesConfigQueue.js';
+import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 
 export interface UsePanesOptions {
   panesFile: string;
@@ -50,7 +45,8 @@ export default function usePanes(
   skipLoading: boolean,
   sessionName?: string,
   controlPaneId?: string,
-  useHooks?: boolean // undefined = not yet decided, true = use hooks, false = use polling
+  useHooks?: boolean, // undefined = not yet decided, true = use hooks, false = use polling
+  sidebarWidth?: number
 ) {
   const [panes, setPanes] = useState<PsychePane[]>([]);
   const panesRef = useRef<PsychePane[]>([]);
@@ -62,6 +58,8 @@ export default function usePanes(
   const isLoadingPanes = useRef(false); // Guard against concurrent loadPanes calls
   const pendingLoad = useRef(false);
   const paneEventService = useRef(PaneEventService.getInstance());
+  const sidebarWidthRef = useRef(sidebarWidth ?? SIDEBAR_WIDTH);
+  sidebarWidthRef.current = sidebarWidth ?? SIDEBAR_WIDTH;
 
   useEffect(() => {
     panesRef.current = panes;
@@ -89,7 +87,8 @@ export default function usePanes(
         // Load panes from file and rebind IDs based on tmux state
         const { panes: loadedPanes, allPaneIds, titleToId } = await loadAndProcessPanes(
           panesFile,
-          !initialLoadComplete.current
+          !initialLoadComplete.current,
+          () => sidebarWidthRef.current
         );
         const loadedSidebarProjects = await loadSidebarProjectsFromFile(panesFile, loadedPanes);
 
@@ -182,7 +181,8 @@ export default function usePanes(
               panesFile,
               finalPanes,
               controlPaneId,
-              allPaneIds
+              allPaneIds,
+              () => sidebarWidthRef.current
             );
 
             if (shellPanesRemoved) {
@@ -236,7 +236,13 @@ export default function usePanes(
         && !updatedPanes.some((candidate) => candidate.id === pane.id)
     );
     if (paneMetadataChanged || shellMetadataRemoved) {
-      await reconcileStoredPaneLayout(panesFile, updatedPanes, controlPaneId);
+      await reconcileStoredPaneLayout(
+        panesFile,
+        updatedPanes,
+        controlPaneId,
+        undefined,
+        () => sidebarWidthRef.current
+      );
     }
   };
 
