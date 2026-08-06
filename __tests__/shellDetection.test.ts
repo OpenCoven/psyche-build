@@ -144,4 +144,39 @@ describe('detectAndAddShellPanes', () => {
       shellPanesAdded: false,
     });
   });
+
+  it('does not persist an earlier shell when a later stale target cannot be recovered', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const focused = pane('focused', '%1');
+    getUntrackedPanesMock.mockResolvedValue([
+      { paneId: '%2', title: 'zsh' },
+      { paneId: '%3', title: 'bash' },
+    ]);
+    createShellPaneMock
+      .mockResolvedValueOnce(pane('detected-1', '%2'))
+      .mockResolvedValueOnce(pane('detected-2', '%3'));
+    capturePaneInsertionMock
+      .mockResolvedValueOnce({
+        targetPaneId: 'focused',
+        targetTmuxPaneId: '%1',
+        direction: 'vertical',
+      })
+      .mockRejectedValueOnce(new Error('Pane layout insertion target %1 is no longer available'))
+      .mockResolvedValueOnce(undefined);
+    tmuxServiceMock.getAllPaneIds.mockResolvedValue(['%0', '%2', '%3']);
+
+    const result = await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [focused],
+      ['%0', '%1', '%2', '%3'],
+      { focusedTmuxPaneId: '%1' }
+    );
+
+    expect(capturePaneInsertionMock).toHaveBeenCalledTimes(3);
+    expect(insertPaneIntoStoredLayoutMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      updatedPanes: [focused],
+      shellPanesAdded: false,
+    });
+  });
 });

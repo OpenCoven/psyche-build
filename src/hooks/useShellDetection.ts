@@ -83,15 +83,19 @@ export async function detectAndAddShellPanes(
       nextId++;
     }
 
-    let updatedPanes = [...activePanes];
-    for (const shellPane of newShellPanes) {
-      if (!paneLayoutControlPaneId) {
-        throw new Error('Pane layout cannot be updated without a control pane');
-      }
+    if (!paneLayoutControlPaneId) {
+      throw new Error('Pane layout cannot be updated without a control pane');
+    }
 
+    const plannedInsertions: Array<{
+      pane: PsychePane;
+      insertion: NonNullable<Awaited<ReturnType<typeof captureShellPaneInsertion>>>;
+    }> = [];
+    let plannedPanes = [...activePanes];
+    for (const shellPane of newShellPanes) {
       const insertion = await captureShellPaneInsertion({
         panesFile,
-        panes: updatedPanes,
+        panes: plannedPanes,
         focusedTmuxPaneId: options.focusedTmuxPaneId,
         selectedPaneId: options.selectedPaneId,
       });
@@ -99,6 +103,12 @@ export async function detectAndAddShellPanes(
         throw new Error('Pane layout has no visible insertion target');
       }
 
+      plannedInsertions.push({ pane: shellPane, insertion });
+      plannedPanes = [...plannedPanes, shellPane];
+    }
+
+    let updatedPanes = [...activePanes];
+    for (const { pane: shellPane, insertion } of plannedInsertions) {
       await insertPaneIntoStoredLayout({
         panesFile,
         panes: updatedPanes,

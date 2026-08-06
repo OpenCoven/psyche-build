@@ -280,11 +280,10 @@ export default function usePanes(
       return previousPane !== undefined
         && (previousPane.hidden !== pane.hidden || previousPane.paneId !== pane.paneId);
     });
-    const shellMetadataRemoved = previousPanes.some(
-      (pane) => pane.type === 'shell'
-        && !updatedPanes.some((candidate) => candidate.id === pane.id)
+    const paneMetadataRemoved = previousPanes.some(
+      (pane) => !updatedPanes.some((candidate) => candidate.id === pane.id)
     );
-    if (paneMetadataChanged || shellMetadataRemoved) {
+    if (paneMetadataChanged || paneMetadataRemoved) {
       await reconcileStoredPaneLayout(
         panesFile,
         updatedPanes,

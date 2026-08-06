@@ -26,6 +26,7 @@ import type { PsycheConfig, PsychePane } from '../types.js';
 import {
   capturePaneInsertion,
   insertPaneIntoStoredLayout,
+  removePaneFromStoredLayout,
   type PaneInsertion,
 } from '../utils/layoutManager.js';
 import {
@@ -83,6 +84,8 @@ export interface BridgeSpawnDeps {
     targetPaneId?: string,
   ) => string;
   sendTmuxCommand: (paneId: string, command: string) => void;
+  /** Remove a pane whose config persistence failed after it was created. */
+  killTmuxPane?: (paneId: string) => void;
   getFocusedTmuxPaneId?: (sessionName: string) => string | null;
   /**
    * Type a prompt into a send-keys agent's TUI after it starts.
@@ -420,25 +423,31 @@ export async function openProjectCovenSession(
     },
     lastUpdated: now,
   });
-  const pane = placement
-    ? makePane(placement.config)
-    : await mutateBridgeConfig(projectRoot, (config) => {
-      const record = makePane(config);
-      config.projectName = config.projectName || path.basename(projectRoot);
-      config.projectRoot = projectRoot;
-      config.settings = config.settings || {};
-      config.panes = [...(Array.isArray(config.panes) ? config.panes : []), record];
-      config.lastUpdated = now;
-      return record;
-    });
-  if (placement) {
-    await insertPaneIntoStoredLayout({
-      panesFile: bridgeConfigPath(projectRoot),
-      panes: placement.panes,
-      pane: rawPaneForLayout(pane),
-      controlPaneId: placement.controlPaneId,
-      insertion: placement.insertion,
-    });
+  let pane: RawConfigPane;
+  try {
+    pane = placement
+      ? makePane(placement.config)
+      : await mutateBridgeConfig(projectRoot, (config) => {
+        const record = makePane(config);
+        config.projectName = config.projectName || path.basename(projectRoot);
+        config.projectRoot = projectRoot;
+        config.settings = config.settings || {};
+        config.panes = [...(Array.isArray(config.panes) ? config.panes : []), record];
+        config.lastUpdated = now;
+        return record;
+      });
+    if (placement) {
+      await insertPaneIntoStoredLayout({
+        panesFile: bridgeConfigPath(projectRoot),
+        panes: placement.panes,
+        pane: rawPaneForLayout(pane),
+        controlPaneId: placement.controlPaneId,
+        insertion: placement.insertion,
+      });
+    }
+  } catch (error) {
+    cleanupSpawnedTmuxPane(paneId, deps);
+    throw error;
   }
   deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
 
@@ -1056,24 +1065,30 @@ export async function spawnBridgePane(
     agentStatus: agent ? 'working' : 'idle',
     lastUpdated: now,
   };
-  const settings = placement
-    ? placement.config.settings
-    : await mutateBridgeConfig(scoped.projectRoot, (config) => {
-      config.projectName = config.projectName || path.basename(scoped.projectRoot);
-      config.projectRoot = scoped.projectRoot;
-      config.settings = config.settings || {};
-      config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-      config.lastUpdated = now;
-      return config.settings;
-    });
-  if (placement) {
-    await insertPaneIntoStoredLayout({
-      panesFile: bridgeConfigPath(scoped.projectRoot),
-      panes: placement.panes,
-      pane: rawPaneForLayout(pane),
-      controlPaneId: placement.controlPaneId,
-      insertion: placement.insertion,
-    });
+  let settings: PsycheConfig['settings'] | undefined;
+  try {
+    settings = placement
+      ? placement.config.settings
+      : await mutateBridgeConfig(scoped.projectRoot, (config) => {
+        config.projectName = config.projectName || path.basename(scoped.projectRoot);
+        config.projectRoot = scoped.projectRoot;
+        config.settings = config.settings || {};
+        config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
+        config.lastUpdated = now;
+        return config.settings;
+      });
+    if (placement) {
+      await insertPaneIntoStoredLayout({
+        panesFile: bridgeConfigPath(scoped.projectRoot),
+        panes: placement.panes,
+        pane: rawPaneForLayout(pane),
+        controlPaneId: placement.controlPaneId,
+        insertion: placement.insertion,
+      });
+    }
+  } catch (error) {
+    cleanupSpawnedTmuxPane(paneId, deps);
+    throw error;
   }
   // Persisted, so the slug is now discoverable from config itself.
   if (attaching) releaseSiblingSlug(slug);
@@ -1144,7 +1159,8 @@ export const defaultKillDeps: BridgeKillDeps = {
 };
 
 /**
- * Terminate a pane registered in this project and drop its config record.
+ * Terminate a pane registered in this project and remove its config record and
+ * persistent layout leaf.
  *
  * Deliberately NON-destructive to git state: the worktree and branch are left
  * exactly as they are, and are returned so the caller can report what remains.
@@ -1185,16 +1201,23 @@ export async function killBridgePane(
     }
   }
 
-  // Re-read under the mutation lock and match by id: the snapshot above may be
-  // stale if a concurrent spawn appended since, and dropping the record by
-  // object identity against a stale copy would filter nothing.
-  await mutateBridgeConfig(scoped.projectRoot, (current) => {
-    const panes = Array.isArray(current.panes) ? current.panes : [];
-    current.panes = panes.filter(
-      (candidate) => candidate.id !== pane.id && candidate.paneId !== pane.paneId,
-    );
-    current.lastUpdated = new Date().toISOString();
-  });
+  if (typeof config.controlPaneId === 'string' && config.controlPaneId) {
+    await removePaneFromStoredLayout({
+      panesFile: bridgeConfigPath(scoped.projectRoot),
+      paneId: psychePaneId,
+      controlPaneId: config.controlPaneId,
+    });
+  } else {
+    // Legacy configs without a control pane have no persistent layout to
+    // reconcile, but still need their record removed under the mutation lock.
+    await mutateBridgeConfig(scoped.projectRoot, (current) => {
+      const panes = Array.isArray(current.panes) ? current.panes : [];
+      current.panes = panes.filter(
+        (candidate) => candidate.id !== pane.id && candidate.paneId !== pane.paneId,
+      );
+      current.lastUpdated = new Date().toISOString();
+    });
+  }
 
   return {
     id: psychePaneId,
@@ -1209,6 +1232,15 @@ export async function killBridgePane(
 
 export function killTmuxPane(paneId: string): void {
   execFileSync('tmux', ['kill-pane', '-t', paneId], { stdio: 'ignore' });
+}
+
+function cleanupSpawnedTmuxPane(paneId: string, deps: BridgeSpawnDeps): void {
+  try {
+    (deps.killTmuxPane ?? killTmuxPane)(paneId);
+  } catch {
+    // The persistence failure remains the actionable error if pane cleanup
+    // also fails.
+  }
 }
 
 export function tmuxPaneExists(paneId: string): boolean | undefined {
@@ -1300,6 +1332,7 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
     }
   },
   createTmuxPane,
+  killTmuxPane,
   sendTmuxCommand,
 };
 

@@ -4,6 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { killBridgePane } from '../../src/daemon/bridge.js';
 
+const tmuxServiceMock = vi.hoisted(() => ({
+  getTerminalDimensions: vi.fn(async () => ({ width: 200, height: 60 })),
+  resizePane: vi.fn(async () => {}),
+  selectLayout: vi.fn(async () => {}),
+  refreshClient: vi.fn(async () => {}),
+}));
+
+vi.mock('../../src/services/TmuxService.js', () => ({
+  TmuxService: {
+    getInstance: () => tmuxServiceMock,
+  },
+}));
+
 let projectRoot: string;
 let worktreePath: string;
 
@@ -45,6 +58,7 @@ function deps(exists: boolean | undefined = true) {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   projectRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-kill-')));
   worktreePath = path.join(projectRoot, '.psyche', 'worktrees', 'fix-auth');
   fs.mkdirSync(worktreePath, { recursive: true });
@@ -96,6 +110,33 @@ describe('killBridgePane', () => {
     const remaining = readConfig().panes;
     expect(remaining).toHaveLength(1);
     expect(remaining[0].id).toBe('psyche-2');
+  });
+
+  it('removes the killed pane leaf from the persisted layout', async () => {
+    const survivingPane = pane({ id: 'psyche-2', paneId: '%4', slug: 'other' });
+    const removedPane = pane();
+    writeConfig([survivingPane, removedPane]);
+    const config = readConfig();
+    config.controlPaneId = '%0';
+    config.paneLayout = {
+      version: 1,
+      root: {
+        kind: 'split',
+        direction: 'vertical',
+        ratio: 0.5,
+        first: { kind: 'leaf', paneId: survivingPane.id },
+        second: { kind: 'leaf', paneId: removedPane.id },
+      },
+    };
+    fs.writeFileSync(configPath(), JSON.stringify(config));
+
+    await killBridgePane(projectRoot, '%3', deps());
+
+    expect(readConfig().panes).toEqual([survivingPane]);
+    expect(readConfig().paneLayout.root).toEqual({
+      kind: 'leaf',
+      paneId: survivingPane.id,
+    });
   });
 
   it('still deregisters a pane whose tmux pane is already gone', async () => {

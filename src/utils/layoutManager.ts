@@ -50,6 +50,8 @@ type ApplyStoredPaneLayoutOptions = {
   panes: PsychePane[];
   /** Pane metadata that should be persisted only after tmux accepts the layout. */
   persistPanes?: PsychePane[];
+  /** Pane metadata that should be removed only after tmux accepts the layout. */
+  removePersistedPaneIds?: string[];
   controlPaneId: string;
   terminalWidth: number;
   terminalHeight: number;
@@ -68,6 +70,14 @@ function appendMissingPanes(
   ];
 }
 
+function removePersistedPanes(
+  currentPanes: PsychePane[],
+  paneIdsToRemove: readonly string[]
+): PsychePane[] {
+  const paneIds = new Set(paneIdsToRemove);
+  return currentPanes.filter((pane) => !paneIds.has(pane.id));
+}
+
 async function applyStoredPaneLayoutWithConfigLockHeld(
   options: ApplyStoredPaneLayoutOptions
 ): Promise<PaneLayout> {
@@ -78,9 +88,14 @@ async function applyStoredPaneLayoutWithConfigLockHeld(
 
   const tmuxService = TmuxService.getInstance();
   const persistedPanes = Array.isArray(rawConfig.panes) ? rawConfig.panes : [];
+  const panesAfterRemoval = options.removePersistedPaneIds
+    ? removePersistedPanes(persistedPanes, options.removePersistedPaneIds)
+    : persistedPanes;
   const panes = options.persistPanes
-    ? appendMissingPanes(persistedPanes, options.persistPanes)
-    : options.panes;
+    ? appendMissingPanes(panesAfterRemoval, options.persistPanes)
+    : options.removePersistedPaneIds
+      ? panesAfterRemoval
+      : options.panes;
   const hasVisibleContentPanes = panes.some((pane) => !pane.hidden);
   const sidebarWidth = options.sidebarWidth ?? SIDEBAR_WIDTH;
 
@@ -114,12 +129,18 @@ async function applyStoredPaneLayoutWithConfigLockHeld(
   if (paneBindingSignature(latestPanes) !== paneBindingSignature(persistedPanes)) {
     throw new Error('Pane metadata changed while applying pane layout');
   }
+  const latestPanesAfterRemoval = options.removePersistedPaneIds
+    ? removePersistedPanes(latestPanes, options.removePersistedPaneIds)
+    : latestPanes;
+  const nextPanes = options.persistPanes
+    ? appendMissingPanes(latestPanesAfterRemoval, options.persistPanes)
+    : latestPanesAfterRemoval;
 
   await atomicWriteJson(options.panesFile, {
     ...latestConfig,
-    ...(options.persistPanes
+    ...(options.persistPanes || options.removePersistedPaneIds
       ? {
-          panes: appendMissingPanes(latestPanes, options.persistPanes),
+          panes: nextPanes,
           lastUpdated: new Date().toISOString(),
         }
       : {}),
@@ -213,5 +234,25 @@ export async function insertPaneIntoStoredLayout(
           direction: options.insertion.direction,
         }
       : { kind: 'reconcile' },
+  });
+}
+
+export async function removePaneFromStoredLayout(options: {
+  panesFile: string;
+  paneId: string;
+  controlPaneId: string;
+  sidebarWidth?: number;
+}): Promise<PaneLayout> {
+  const tmuxService = TmuxService.getInstance();
+  const dimensions = await tmuxService.getTerminalDimensions();
+  return applyStoredPaneLayout({
+    panesFile: options.panesFile,
+    panes: [],
+    removePersistedPaneIds: [options.paneId],
+    controlPaneId: options.controlPaneId,
+    terminalWidth: dimensions.width,
+    terminalHeight: dimensions.height,
+    sidebarWidth: options.sidebarWidth,
+    mutation: { kind: 'reconcile' },
   });
 }
