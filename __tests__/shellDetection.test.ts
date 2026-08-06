@@ -3,7 +3,7 @@ import type { PsychePane } from '../src/types.js';
 
 const readFileMock = vi.hoisted(() => vi.fn());
 const capturePaneInsertionMock = vi.hoisted(() => vi.fn());
-const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn());
+const insertPanesIntoStoredLayoutMock = vi.hoisted(() => vi.fn());
 const getUntrackedPanesMock = vi.hoisted(() => vi.fn());
 const createShellPaneMock = vi.hoisted(() => vi.fn());
 const tmuxServiceMock = vi.hoisted(() => ({
@@ -27,7 +27,7 @@ vi.mock('../src/utils/paneColors.js', () => ({
 
 vi.mock('../src/utils/layoutManager.js', () => ({
   capturePaneInsertion: capturePaneInsertionMock,
-  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
+  insertPanesIntoStoredLayout: insertPanesIntoStoredLayoutMock,
 }));
 
 vi.mock('../src/services/TmuxService.js', () => ({
@@ -63,7 +63,7 @@ describe('detectAndAddShellPanes', () => {
       targetTmuxPaneId: '%1',
       direction: 'vertical',
     });
-    insertPaneIntoStoredLayoutMock.mockResolvedValue({});
+    insertPanesIntoStoredLayoutMock.mockResolvedValue({});
   });
 
   it('inserts externally detected shells beside the focused content pane', async () => {
@@ -87,16 +87,18 @@ describe('detectAndAddShellPanes', () => {
       focusedTmuxPaneId: '%1',
       selectedPaneId: 'selected',
     });
-    expect(insertPaneIntoStoredLayoutMock).toHaveBeenCalledWith({
+    expect(insertPanesIntoStoredLayoutMock).toHaveBeenCalledWith({
       panesFile: '/project/.psyche/psyche.config.json',
       panes: [focused],
-      pane: pane('detected', '%2'),
+      insertions: [{
+        pane: pane('detected', '%2'),
+        insertion: {
+          targetPaneId: 'focused',
+          targetTmuxPaneId: '%1',
+          direction: 'vertical',
+        },
+      }],
       controlPaneId: '%0',
-      insertion: {
-        targetPaneId: 'focused',
-        targetTmuxPaneId: '%1',
-        direction: 'vertical',
-      },
       sidebarWidth: 4,
     });
     expect(result.updatedPanes).toEqual([focused, pane('detected', '%2')]);
@@ -138,7 +140,7 @@ describe('detectAndAddShellPanes', () => {
 
     expect(tmuxServiceMock.getAllPaneIds).toHaveBeenCalledWith('window');
     expect(capturePaneInsertionMock).toHaveBeenCalledTimes(2);
-    expect(insertPaneIntoStoredLayoutMock).not.toHaveBeenCalled();
+    expect(insertPanesIntoStoredLayoutMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       updatedPanes: [stale],
       shellPanesAdded: false,
@@ -173,7 +175,7 @@ describe('detectAndAddShellPanes', () => {
     );
 
     expect(capturePaneInsertionMock).toHaveBeenCalledTimes(3);
-    expect(insertPaneIntoStoredLayoutMock).not.toHaveBeenCalled();
+    expect(insertPanesIntoStoredLayoutMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       updatedPanes: [focused],
       shellPanesAdded: false,

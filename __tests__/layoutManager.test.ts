@@ -4,6 +4,7 @@ import type { PsychePane } from '../src/types.js';
 const readFileMock = vi.hoisted(() => vi.fn());
 const atomicWriteJsonMock = vi.hoisted(() => vi.fn());
 const tmuxServiceMock = vi.hoisted(() => ({
+  getTerminalDimensions: vi.fn(async () => ({ width: 201, height: 60 })),
   resizePane: vi.fn(async () => {}),
   selectLayout: vi.fn(async () => {}),
   refreshClient: vi.fn(async () => {}),
@@ -198,6 +199,64 @@ describe('applyStoredPaneLayout', () => {
         paneLayout: layout,
       })
     );
+  });
+
+  it('does not persist detected shells when a later staged insertion fails', async () => {
+    const existing = pane('psyche-1', '%1');
+    const firstDetected = pane('detected-1', '%2');
+    const secondDetected = pane('detected-2', '%3');
+    const config = {
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [existing],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: { kind: 'leaf' as const, paneId: existing.id },
+      },
+    };
+    readFileMock.mockImplementation(async () => JSON.stringify(config));
+
+    const { insertPanesIntoStoredLayout } = await import('../src/utils/layoutManager.js');
+
+    await expect(insertPanesIntoStoredLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [existing],
+      insertions: [
+        {
+          pane: firstDetected,
+          insertion: {
+            targetPaneId: existing.id,
+            targetTmuxPaneId: existing.paneId,
+            direction: 'vertical',
+          },
+        },
+        {
+          pane: secondDetected,
+          insertion: {
+            targetPaneId: 'missing-pane',
+            targetTmuxPaneId: existing.paneId,
+            direction: 'vertical',
+          },
+        },
+      ],
+      controlPaneId: '%0',
+    })).rejects.toThrow('Pane layout does not contain target pane ID missing-pane');
+
+    expect(atomicWriteJsonMock).not.toHaveBeenCalled();
+    expect(config).toEqual({
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [existing],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: { kind: 'leaf', paneId: existing.id },
+      },
+    });
+    expect(tmuxServiceMock.selectLayout).not.toHaveBeenCalled();
   });
 
   it('does not persist a remove mutation when tmux rejects it', async () => {

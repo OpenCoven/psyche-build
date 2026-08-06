@@ -38,6 +38,17 @@ interface InsertPaneIntoStoredLayoutOptions {
   sidebarWidth?: number;
 }
 
+interface InsertPanesIntoStoredLayoutOptions {
+  panesFile: string;
+  panes: PsychePane[];
+  insertions: Array<{
+    pane: PsychePane;
+    insertion?: PaneInsertion;
+  }>;
+  controlPaneId: string;
+  sidebarWidth?: number;
+}
+
 function paneBindingSignature(panes: PsychePane[]): string {
   return panes
     .map((pane) => `${pane.id}:${pane.paneId}:${pane.hidden === true}`)
@@ -216,24 +227,41 @@ export async function capturePaneInsertion(
 export async function insertPaneIntoStoredLayout(
   options: InsertPaneIntoStoredLayoutOptions
 ): Promise<PaneLayout> {
+  return insertPanesIntoStoredLayout({
+    panesFile: options.panesFile,
+    panes: options.panes,
+    insertions: [{ pane: options.pane, insertion: options.insertion }],
+    controlPaneId: options.controlPaneId,
+    sidebarWidth: options.sidebarWidth,
+  });
+}
+
+export async function insertPanesIntoStoredLayout(
+  options: InsertPanesIntoStoredLayoutOptions
+): Promise<PaneLayout> {
   const tmuxService = TmuxService.getInstance();
   const dimensions = await tmuxService.getTerminalDimensions();
+  const insertedPanes = options.insertions.map(({ pane }) => pane);
   return applyStoredPaneLayout({
     panesFile: options.panesFile,
-    panes: [...options.panes, options.pane],
-    persistPanes: [options.pane],
+    panes: [...options.panes, ...insertedPanes],
+    persistPanes: insertedPanes,
     controlPaneId: options.controlPaneId,
     terminalWidth: dimensions.width,
     terminalHeight: dimensions.height,
     sidebarWidth: options.sidebarWidth,
-    mutation: options.insertion
-      ? {
-          kind: 'insert',
-          paneId: options.pane.id,
-          targetPaneId: options.insertion.targetPaneId,
-          direction: options.insertion.direction,
-        }
-      : { kind: 'reconcile' },
+    mutation: {
+      kind: 'batch',
+      mutations: options.insertions.map(({ pane, insertion }) => insertion
+        ? {
+            kind: 'insert',
+            paneId: pane.id,
+            targetPaneId: insertion.targetPaneId,
+            direction: insertion.direction,
+          }
+        : { kind: 'reconcile' }
+      ),
+    },
   });
 }
 

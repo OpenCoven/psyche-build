@@ -7,7 +7,7 @@ import { TmuxService } from '../services/TmuxService.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import {
   capturePaneInsertion,
-  insertPaneIntoStoredLayout,
+  insertPanesIntoStoredLayout,
 } from '../utils/layoutManager.js';
 
 /**
@@ -107,18 +107,14 @@ export async function detectAndAddShellPanes(
       plannedPanes = [...plannedPanes, shellPane];
     }
 
-    let updatedPanes = [...activePanes];
-    for (const { pane: shellPane, insertion } of plannedInsertions) {
-      await insertPaneIntoStoredLayout({
-        panesFile,
-        panes: updatedPanes,
-        pane: shellPane,
-        controlPaneId: paneLayoutControlPaneId,
-        insertion,
-        sidebarWidth: options.sidebarWidth,
-      });
-      updatedPanes = [...updatedPanes, shellPane];
-    }
+    await insertPanesIntoStoredLayout({
+      panesFile,
+      panes: activePanes,
+      insertions: plannedInsertions,
+      controlPaneId: paneLayoutControlPaneId,
+      sidebarWidth: options.sidebarWidth,
+    });
+    const updatedPanes = [...activePanes, ...newShellPanes];
 
   //     LogService.getInstance().debug(
   //       `Added ${newShellPanes.length} shell panes to tracking`,

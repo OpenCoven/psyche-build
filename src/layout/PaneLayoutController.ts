@@ -14,7 +14,8 @@ export const DEFAULT_SIDEBAR_WIDTH = 40;
 export type PaneLayoutMutation =
   | { kind: 'insert'; paneId: string; targetPaneId: string; direction: PaneSplitDirection }
   | { kind: 'remove'; paneId: string }
-  | { kind: 'reconcile' };
+  | { kind: 'reconcile' }
+  | { kind: 'batch'; mutations: PaneLayoutMutation[] };
 
 export interface ApplyPaneLayoutMutationOptions {
   paneLayout: PaneLayout | undefined;
@@ -58,9 +59,19 @@ function seedLayoutForMutation(
   panes: ApplyPaneLayoutMutationOptions['panes'],
   mutation: PaneLayoutMutation
 ): PaneLayout {
-  const paneIds = mutation.kind === 'insert'
-    ? panes.filter((pane) => pane.id !== mutation.paneId).map((pane) => pane.id)
-    : panes.map((pane) => pane.id);
+  const insertedPaneIds = new Set<string>();
+  const collectInsertedPaneIds = (currentMutation: PaneLayoutMutation): void => {
+    if (currentMutation.kind === 'insert') {
+      insertedPaneIds.add(currentMutation.paneId);
+    } else if (currentMutation.kind === 'batch') {
+      currentMutation.mutations.forEach(collectInsertedPaneIds);
+    }
+  };
+  collectInsertedPaneIds(mutation);
+
+  const paneIds = panes
+    .filter((pane) => !insertedPaneIds.has(pane.id))
+    .map((pane) => pane.id);
 
   return seedPaneLayout(paneIds);
 }
@@ -80,6 +91,11 @@ function applyMutation(
       return removePane(layout, mutation.paneId);
     case 'reconcile':
       return prunePaneLayout(layout, knownPaneIds);
+    case 'batch':
+      return mutation.mutations.reduce(
+        (nextLayout, nextMutation) => applyMutation(nextLayout, nextMutation, knownPaneIds),
+        layout
+      );
   }
 }
 
