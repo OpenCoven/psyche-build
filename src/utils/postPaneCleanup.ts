@@ -8,7 +8,7 @@ import path from 'path';
 import type { PsycheConfig } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { SIDEBAR_WIDTH } from './layoutManager.js';
+import { applyStoredPaneLayout, SIDEBAR_WIDTH } from './layoutManager.js';
 
 /**
  * Recreate welcome pane and recalculate layout after the last pane is removed
@@ -48,18 +48,21 @@ export async function handleLastPaneRemoved(
       sidebarWidth
     );
 
-    // Recalculate layout to fix sidebar size
-    const { recalculateAndApplyLayout } = await import('./layoutManager.js');
     const dimensions = await tmuxService.getTerminalDimensions();
-
-    await recalculateAndApplyLayout(
+    const panesFile = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    const config = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
+    if (Array.isArray(config)) {
+      throw new Error('Pane layout requires an object-form config');
+    }
+    await applyStoredPaneLayout({
+      panesFile,
+      panes: config.panes || [],
       controlPaneId,
-      [], // No content panes
-      dimensions.width,
-      dimensions.height,
-      undefined,
-      { sidebarWidth }
-    );
+      terminalWidth: dimensions.width,
+      terminalHeight: dimensions.height,
+      sidebarWidth,
+      mutation: { kind: 'reconcile' },
+    });
   } catch (error) {
     LogService.getInstance().error(
       'Failed to handle last pane removal',

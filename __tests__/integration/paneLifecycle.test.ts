@@ -26,6 +26,12 @@ const fsMock = vi.hoisted(() => ({
   mkdirSync: vi.fn(),
 }));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => ({
+  targetPaneId: 'psyche-existing',
+  targetTmuxPaneId: '%1',
+  direction: 'vertical' as const,
+})));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 
 // Mock child_process
 const mockExecSync = createMockExecSync({});
@@ -81,6 +87,12 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
 
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
   destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
+}));
+
+vi.mock('../../src/utils/layoutManager.js', () => ({
+  SIDEBAR_WIDTH: 40,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 
 // Mock fs for reading config

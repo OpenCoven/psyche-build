@@ -33,6 +33,8 @@ interface CreateNewPaneOptions {
   skipAgentSelection?: boolean;
   startPointBranch?: string;
   mergeTargetChain?: MergeTargetReference[];
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 const MAX_PARALLEL_PANE_CREATIONS = 4;
@@ -133,6 +135,8 @@ export default function usePaneCreation({
         skipAgentSelection: options.skipAgentSelection,
         startPointBranch: options.startPointBranch,
         mergeTargetChain: options.mergeTargetChain,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
         sidebarWidth,
@@ -190,6 +194,7 @@ export default function usePaneCreation({
     options: Pick<
       CreateNewPaneOptions,
       'existingPanes' | 'targetProjectRoot' | 'startPointBranch' | 'mergeTargetChain'
+      | 'focusedTmuxPaneId' | 'selectedPaneId'
     > = {}
   ): Promise<PsychePane[]> => {
     const panesForCreation = options.existingPanes ?? panes;
@@ -226,6 +231,8 @@ export default function usePaneCreation({
         availableAgents,
         slugBase,
         sidebarWidth,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
 

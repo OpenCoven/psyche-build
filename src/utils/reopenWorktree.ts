@@ -4,10 +4,12 @@ import { TmuxService } from '../services/TmuxService.js';
 import {
   ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
-  getTerminalDimensions,
-  splitPane,
 } from './tmux.js';
-import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import type { PsychePane, PsycheConfig } from '../types.js';
 import { atomicWriteJsonSync } from './atomicWrite.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
@@ -39,6 +41,8 @@ export interface ReopenWorktreeOptions {
   sessionProjectRoot?: string; // Session root for welcome pane/layout state
   existingPanes: PsychePane[];
   sidebarWidth?: number;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 export interface ReopenWorktreeResult {
@@ -77,6 +81,8 @@ export async function reopenWorktree(
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
     sidebarWidth: optionsSidebarWidth,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = options;
   let paneProjectName = path.basename(projectRoot);
   const settings = new SettingsManager(projectRoot).getSettings();
@@ -138,6 +144,14 @@ export async function reopenWorktree(
 
   // Determine if this is the first content pane
   const isFirstContentPane = existingPanes.length === 0;
+  const insertion = isFirstContentPane
+    ? undefined
+    : await capturePaneInsertion({
+        panesFile: configPath,
+        panes: existingPanes,
+        focusedTmuxPaneId,
+        selectedPaneId,
+      });
 
   let paneInfo: string;
 
@@ -145,10 +159,13 @@ export async function reopenWorktree(
     paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
     await new Promise((resolve) => setTimeout(resolve, 300));
   } else {
-    // Subsequent panes - always split horizontally
-    const psychePaneIds = existingPanes.map(p => p.paneId);
-    const targetPane = psychePaneIds[psychePaneIds.length - 1];
-    paneInfo = splitPane({ targetPane });
+    if (!insertion) {
+      throw new Error('Pane layout has no visible insertion target');
+    }
+    paneInfo = await tmuxService.splitPane({
+      targetPane: insertion.targetTmuxPaneId,
+      cwd: projectRoot,
+    });
   }
 
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -161,23 +178,6 @@ export async function reopenWorktree(
     await tmuxService.setPaneTitle(paneInfo, paneTitle);
   } catch {
     // Ignore if setting title fails
-  }
-
-  // Apply optimal layout
-  if (controlPaneId) {
-    const dimensions = getTerminalDimensions();
-    const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-
-    await recalculateAndApplyLayout(
-      controlPaneId,
-      allContentPaneIds,
-      dimensions.width,
-      dimensions.height,
-      undefined,
-      { sidebarWidth }
-    );
-
-    await tmuxService.refreshClient();
   }
 
   // CD into the worktree
@@ -262,34 +262,17 @@ export async function reopenWorktree(
     mergeTargetChain: metadata?.mergeTargetChain,
   };
 
-  // Pre-save pane to config before destroying welcome pane (first content pane only),
-  // so loadPanes sees a pane in config and doesn't recreate the welcome pane.
-  if (isFirstContentPane) {
-    try {
-      const config = await updatePanesConfig(configPath, (latestConfig) => {
-        const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
-        const existingPaneIndex = latestPanes.findIndex((pane) => pane.id === newPane.id);
-        latestConfig.panes = existingPaneIndex === -1
-          ? [...latestPanes, newPane]
-          : latestPanes.map((pane, index) => index === existingPaneIndex ? newPane : pane);
-        latestConfig.lastUpdated = new Date().toISOString();
-      });
-
-      if (controlPaneId) {
-        const dimensions = getTerminalDimensions();
-        await recalculateAndApplyLayout(
-          controlPaneId,
-          config.panes.map((pane) => pane.paneId),
-          dimensions.width,
-          dimensions.height,
-          undefined,
-          { sidebarWidth }
-        );
-      }
-    } catch {
-      // Log but don't fail
-    }
+  if (!controlPaneId) {
+    throw new Error('Pane layout cannot be updated without a control pane');
   }
+  await insertPaneIntoStoredLayout({
+    panesFile: configPath,
+    panes: existingPanes,
+    pane: newPane,
+    controlPaneId,
+    insertion,
+    sidebarWidth,
+  });
 
   // Always destroy welcome pane if one exists — shell panes can make isFirstContentPane
   // false even when no real content pane exists yet.

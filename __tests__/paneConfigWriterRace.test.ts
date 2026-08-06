@@ -31,7 +31,10 @@ const tmuxServiceMock = vi.hoisted(() => ({
   getTerminalDimensions: vi.fn(async () => ({ width: 160, height: 40 })),
 }));
 const setupSidebarLayoutMock = vi.hoisted(() => vi.fn(() => '%new'));
-const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() =>
+  vi.fn(async (_options?: { pane: PsychePane }) => ({}))
+);
 
 vi.mock('fs', () => ({
   default: fsSyncMock,
@@ -60,7 +63,8 @@ vi.mock('../src/utils/tmux.js', () => ({
 
 vi.mock('../src/utils/layoutManager.js', () => ({
   SIDEBAR_WIDTH: 40,
-  recalculateAndApplyLayout: recalculateAndApplyLayoutMock,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
   applyStoredPaneLayout: vi.fn(async () => ({})),
   applyStoredPaneLayoutWithinConfigWriteLock: vi.fn(async () => ({})),
 }));
@@ -233,6 +237,16 @@ describe.each([
       config = clone(next as TestConfig);
     });
     tmuxServiceMock.paneExists.mockImplementation(async () => true);
+    insertPaneIntoStoredLayoutMock.mockImplementation(async (options) => {
+      if (!options) {
+        return {};
+      }
+      config = {
+        ...config,
+        panes: [...config.panes, options.pane],
+      };
+      return {};
+    });
   });
 
   it('rebases after queued loader metadata reconciliation without pane loss or resurrection', async () => {

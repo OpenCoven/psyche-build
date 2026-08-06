@@ -13,8 +13,11 @@ import type { AgentName } from './agentLaunch.js';
 import { launchAgentInPane } from './agentLaunch.js';
 import { autoApproveTrustPrompt } from './paneCreation.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { splitPane, getTerminalDimensions } from './tmux.js';
-import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import { SettingsManager } from './settingsManager.js';
 import { LogService } from '../services/LogService.js';
@@ -29,6 +32,8 @@ export interface AttachAgentOptions {
   sessionProjectRoot: string;
   sessionConfigPath: string;
   sidebarWidth?: number;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 /**
@@ -69,6 +74,8 @@ export async function attachAgentToWorktree(
     sessionProjectRoot,
     sessionConfigPath,
     sidebarWidth: optionsSidebarWidth,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = options;
   const sidebarWidth = optionsSidebarWidth ?? SIDEBAR_WIDTH;
 
@@ -96,10 +103,19 @@ export async function attachAgentToWorktree(
     controlPaneId = originalPaneId;
   }
 
-  // Split from the last existing pane (standard grid placement)
-  const psychePaneIds = existingPanes.map(p => p.paneId);
-  const splitTarget = psychePaneIds[psychePaneIds.length - 1];
-  const paneInfo = splitPane({ targetPane: splitTarget, cwd: projectRoot });
+  const insertion = await capturePaneInsertion({
+    panesFile: sessionConfigPath,
+    panes: existingPanes,
+    focusedTmuxPaneId,
+    selectedPaneId: selectedPaneId ?? targetPane.id,
+  });
+  if (!insertion) {
+    throw new Error('Pane layout has no visible insertion target');
+  }
+  const paneInfo = await tmuxService.splitPane({
+    targetPane: insertion.targetTmuxPaneId,
+    cwd: projectRoot,
+  });
 
   // Wait for pane to be ready
   const start = Date.now();
@@ -117,21 +133,6 @@ export async function attachAgentToWorktree(
     await tmuxService.setPaneTitle(paneInfo, paneTitle);
   } catch {
     // Ignore title errors
-  }
-
-  // Recalculate layout
-  if (controlPaneId) {
-    const dimensions = getTerminalDimensions();
-    const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-    await recalculateAndApplyLayout(
-      controlPaneId,
-      allContentPaneIds,
-      dimensions.width,
-      dimensions.height,
-      undefined,
-      { sidebarWidth },
-    );
-    await tmuxService.refreshClient();
   }
 
   // cd into the existing worktree (no git worktree add)
@@ -200,6 +201,18 @@ export async function attachAgentToWorktree(
     permissionMode: settings.permissionMode,
     autopilot: settings.enableAutopilotByDefault ?? false,
   };
+
+  if (!controlPaneId) {
+    throw new Error('Pane layout cannot be updated without a control pane');
+  }
+  await insertPaneIntoStoredLayout({
+    panesFile: sessionConfigPath,
+    panes: existingPanes,
+    pane: newPane,
+    controlPaneId,
+    insertion,
+    sidebarWidth,
+  });
 
   // Switch focus back to control pane
   await tmuxService.selectPane(originalPaneId);

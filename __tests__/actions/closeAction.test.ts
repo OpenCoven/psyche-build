@@ -19,6 +19,7 @@ vi.mock('child_process', () => ({
 }));
 
 const mockEnqueueCleanup = vi.fn();
+const applyStoredPaneLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
@@ -26,6 +27,11 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
       enqueueCleanup: mockEnqueueCleanup,
     })),
   },
+}));
+
+vi.mock('../../src/utils/layoutManager.js', () => ({
+  SIDEBAR_WIDTH: 40,
+  applyStoredPaneLayout: applyStoredPaneLayoutMock,
 }));
 
 // Create a persistent mock state manager instance
@@ -197,6 +203,37 @@ describe('closeAction', () => {
 
       // Verify pane was removed
       expect(savePanesSpy).toHaveBeenCalledWith([pane2]);
+    });
+
+    it('removes the closed leaf through the layout controller after tmux accepts the kill', async () => {
+      const pane1 = createWorktreePane({ id: 'psyche-1', paneId: '%1' });
+      const pane2 = createWorktreePane({ id: 'psyche-2', paneId: '%2' });
+      const mockContext = createMockContext([pane1, pane2]);
+
+      let paneKilled = false;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          return paneKilled ? '%0\n%2\n' : '%0\n%1\n%2\n';
+        }
+        if (command.includes('kill-pane')) {
+          paneKilled = true;
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+        controlPaneSize: 4,
+      }));
+
+      const result = await closePane(pane1, mockContext);
+      await result.onSelect!('kill_only');
+
+      expect(applyStoredPaneLayoutMock).toHaveBeenCalledWith(expect.objectContaining({
+        panes: [pane2],
+        controlPaneId: '%0',
+        sidebarWidth: 4,
+        mutation: { kind: 'remove', paneId: 'psyche-1' },
+      }));
     });
 
     it('should call onPaneRemove callback with tmux pane ID', async () => {

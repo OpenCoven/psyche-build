@@ -153,6 +153,88 @@ describe('applyStoredPaneLayout', () => {
     expect(atomicWriteJsonMock).not.toHaveBeenCalled();
   });
 
+  it('inserts a new pane beside its resolved target before persisting metadata', async () => {
+    const existing = pane('psyche-1', '%1');
+    const inserted = pane('psyche-2', '%2');
+    readFileMock.mockResolvedValue(JSON.stringify({
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [existing],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: { kind: 'leaf', paneId: existing.id },
+      },
+    }));
+    const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
+
+    const layout = await applyStoredPaneLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [existing, inserted],
+      persistPanes: [inserted],
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      mutation: {
+        kind: 'insert',
+        paneId: inserted.id,
+        targetPaneId: existing.id,
+        direction: 'vertical',
+      },
+    });
+
+    expect(layout.root).toEqual({
+      kind: 'split',
+      direction: 'vertical',
+      ratio: 0.5,
+      first: { kind: 'leaf', paneId: existing.id },
+      second: { kind: 'leaf', paneId: inserted.id },
+    });
+    expect(atomicWriteJsonMock).toHaveBeenCalledWith(
+      '/project/.psyche/psyche.config.json',
+      expect.objectContaining({
+        panes: [existing, inserted],
+        paneLayout: layout,
+      })
+    );
+  });
+
+  it('does not persist a remove mutation when tmux rejects it', async () => {
+    const existing = pane('psyche-1', '%1');
+    const removed = pane('psyche-2', '%2');
+    readFileMock.mockResolvedValue(JSON.stringify({
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [existing],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: {
+          kind: 'split',
+          direction: 'horizontal',
+          ratio: 0.5,
+          first: { kind: 'leaf', paneId: existing.id },
+          second: { kind: 'leaf', paneId: removed.id },
+        },
+      },
+    }));
+    tmuxServiceMock.selectLayout.mockRejectedValueOnce(new Error('tmux unavailable'));
+    const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
+
+    await expect(applyStoredPaneLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [existing],
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      mutation: { kind: 'remove', paneId: removed.id },
+    })).rejects.toThrow('tmux unavailable');
+
+    expect(atomicWriteJsonMock).not.toHaveBeenCalled();
+  });
+
   it('merges the accepted layout into config fields saved while tmux was applying it', async () => {
     const initialConfig = {
       projectName: 'project',

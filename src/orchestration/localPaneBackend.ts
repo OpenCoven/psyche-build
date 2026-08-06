@@ -23,6 +23,8 @@ export interface LocalPaneBackendOptions {
     availableAgents: AgentName[],
   ) => Promise<CreatePaneResult>;
   sidebarWidth?: number;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 export interface LocalPaneBackend {
@@ -75,6 +77,12 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         existingPanes: [...options.basePanes, ...created],
         sessionProjectRoot: options.sessionProjectRoot,
         ...(options.sidebarWidth === undefined ? {} : { sidebarWidth: options.sidebarWidth }),
+        ...(options.focusedTmuxPaneId === undefined
+          ? {}
+          : { focusedTmuxPaneId: options.focusedTmuxPaneId }),
+        ...(options.selectedPaneId === undefined
+          ? {}
+          : { selectedPaneId: options.selectedPaneId }),
         ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
       },
       options.availableAgents,

@@ -216,4 +216,53 @@ describe('loadAndProcessPanes', () => {
 
     expect(config.panes.map((entry) => entry.id)).toEqual(['psyche-1']);
   });
+
+  it('reconciles a manually exited shell without flattening surviving siblings', async () => {
+    const panesFile = '/project/.psyche/psyche.config.json';
+    let config: PsycheConfig = {
+      projectName: 'project',
+      projectRoot: '/project',
+      controlPaneId: '%0',
+      panes: [pane('psyche-1', '%1'), pane('psyche-3', '%3')],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: {
+          kind: 'split',
+          direction: 'horizontal',
+          ratio: 0.5,
+          first: { kind: 'leaf', paneId: 'psyche-1' },
+          second: {
+            kind: 'split',
+            direction: 'vertical',
+            ratio: 0.5,
+            first: { kind: 'leaf', paneId: 'psyche-2' },
+            second: { kind: 'leaf', paneId: 'psyche-3' },
+          },
+        },
+      },
+    };
+    readFileMock.mockImplementation(async () => JSON.stringify(config));
+    atomicWriteJsonMock.mockImplementation(async (_file: string, next: PsycheConfig) => {
+      config = clone(next);
+    });
+    tmuxServiceMock.getAllPaneIds.mockResolvedValue(['%0', '%1', '%3']);
+
+    const { reconcileStoredPaneLayout } = await import('../src/hooks/usePaneLoading.js');
+    await reconcileStoredPaneLayout(
+      panesFile,
+      config.panes,
+      '%0',
+      ['%0', '%1', '%3']
+    );
+
+    expect(config.paneLayout?.root).toEqual({
+      kind: 'split',
+      direction: 'horizontal',
+      ratio: 0.5,
+      first: { kind: 'leaf', paneId: 'psyche-1' },
+      second: { kind: 'leaf', paneId: 'psyche-3' },
+    });
+  });
 });

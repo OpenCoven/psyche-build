@@ -17,7 +17,7 @@ import { cleanupPromptFilesForSlug } from '../../utils/promptStore.js';
 import { buildDevWatchRespawnCommand } from '../../utils/devWatchCommand.js';
 import { isActiveDevSourcePath } from '../../utils/devSource.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
-import { SIDEBAR_WIDTH } from '../../utils/layoutManager.js';
+import { applyStoredPaneLayout, SIDEBAR_WIDTH } from '../../utils/layoutManager.js';
 
 const PANE_KILL_VERIFY_DELAYS_MS = [50, 150, 300];
 
@@ -306,58 +306,29 @@ async function executeCloseOption(
         await context.onPaneRemove(pane.paneId); // Pass tmux pane ID, not psyche ID
       }
 
-      // Recalculate layout for remaining panes
-      // CRITICAL FIX: Use validated pane IDs, not just the ones from config
-      // The config may have stale IDs if panes were killed between save and layout
+      // Remove the logical leaf only after tmux confirmed the pane is closed.
+      // The controller applies the projected tree before it persists it, so a
+      // rejected tmux layout leaves the previously stored topology intact.
       try {
         const config: PsycheConfig = JSON.parse(fs.readFileSync(panesFile, 'utf-8'));
-        if (config.controlPaneId && updatedPanes.length > 0) {
+        if (config.controlPaneId) {
           const sidebarWidth = context.sidebarWidth
             ?? config.controlPaneSize
             ?? SIDEBAR_WIDTH;
-          // Verify control pane exists before attempting layout
-          const paneListCheck = execSync('tmux list-panes -F "#{pane_id}"', {
-            encoding: 'utf-8',
-            stdio: 'pipe',
-            timeout: 5000
+          const { getTerminalDimensions } = await import('../../utils/tmux.js');
+          const dimensions = getTerminalDimensions();
+          await applyStoredPaneLayout({
+            panesFile,
+            panes: updatedPanes,
+            controlPaneId: config.controlPaneId,
+            terminalWidth: dimensions.width,
+            terminalHeight: dimensions.height,
+            sidebarWidth,
+            mutation: { kind: 'remove', paneId: pane.id },
           });
-          const currentPaneIds = paneListCheck.trim().split('\n').filter(Boolean);
-
-          if (!currentPaneIds.includes(config.controlPaneId)) {
-            LogService.getInstance().debug(
-              `Control pane ${config.controlPaneId} no longer exists, skipping layout recalc`,
-              'paneActions'
-            );
-          } else {
-            // Filter to only panes that actually exist in tmux
-            const validPaneIds = updatedPanes
-              .map(p => p.paneId)
-              .filter(id => currentPaneIds.includes(id));
-
-            if (validPaneIds.length > 0) {
-              const { recalculateAndApplyLayout } = await import('../../utils/layoutManager.js');
-              const { getTerminalDimensions } = await import('../../utils/tmux.js');
-              const dimensions = getTerminalDimensions();
-
-              recalculateAndApplyLayout(
-                config.controlPaneId,
-                validPaneIds,
-                dimensions.width,
-                dimensions.height,
-                undefined,
-                { sidebarWidth }
-              );
-
-              LogService.getInstance().debug(
-                `Recalculated layout after closing pane: ${validPaneIds.length} panes remaining`,
-                'paneActions'
-              );
-            }
-          }
         }
       } catch (error) {
-        // Log but don't fail - layout recalc is non-critical
-        LogService.getInstance().debug('Failed to recalculate layout after pane close', 'paneActions');
+        LogService.getInstance().debug('Failed to apply pane layout after close', 'paneActions');
       }
 
       // Trigger pane_closed hook (after everything is cleaned up)

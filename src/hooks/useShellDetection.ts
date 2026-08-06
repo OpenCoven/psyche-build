@@ -4,6 +4,10 @@ import type { PsychePane } from '../types.js';
 import { getUntrackedPanes, createShellPane, getNextPsycheId } from '../utils/shellPaneDetection.js';
 import { LogService } from '../services/LogService.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+} from '../utils/layoutManager.js';
 
 /**
  * Detects untracked panes (manually created via tmux commands)
@@ -12,7 +16,11 @@ import { syncPaneColorThemes } from '../utils/paneColors.js';
 export async function detectAndAddShellPanes(
   panesFile: string,
   activePanes: PsychePane[],
-  allPaneIds: string[]
+  allPaneIds: string[],
+  options: {
+    focusedTmuxPaneId?: string | null;
+    sidebarWidth?: number;
+  } = {}
 ): Promise<{ updatedPanes: PsychePane[]; shellPanesAdded: boolean }> {
   // Only detect if we have pane IDs from tmux
   if (allPaneIds.length === 0) {
@@ -23,6 +31,7 @@ export async function detectAndAddShellPanes(
     // Get controlPaneId and welcomePaneId from config
     let controlPaneId: string | undefined;
     let welcomePaneId: string | undefined;
+    let paneLayoutControlPaneId: string | undefined;
     let projectRoot = path.dirname(path.dirname(panesFile));
     let sidebarProjects: import('../types.js').SidebarProject[] = [];
 
@@ -30,6 +39,7 @@ export async function detectAndAddShellPanes(
       const configContent = await fs.readFile(panesFile, 'utf-8');
       const config = JSON.parse(configContent);
       controlPaneId = config.controlPaneId;
+      paneLayoutControlPaneId = config.controlPaneId;
       welcomePaneId = config.welcomePaneId;
       projectRoot = config.projectRoot || projectRoot;
       sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
@@ -71,16 +81,45 @@ export async function detectAndAddShellPanes(
       nextId++;
     }
 
-    // Add new shell panes to active panes
-    const updatedPanes = [...activePanes, ...newShellPanes];
+    let updatedPanes = [...activePanes];
+    for (const shellPane of newShellPanes) {
+      if (!paneLayoutControlPaneId) {
+        throw new Error('Pane layout cannot be updated without a control pane');
+      }
+
+      const insertion = await capturePaneInsertion({
+        panesFile,
+        panes: updatedPanes,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+      });
+      if (!insertion) {
+        throw new Error('Pane layout has no visible insertion target');
+      }
+
+      await insertPaneIntoStoredLayout({
+        panesFile,
+        panes: updatedPanes,
+        pane: shellPane,
+        controlPaneId: paneLayoutControlPaneId,
+        insertion,
+        sidebarWidth: options.sidebarWidth,
+      });
+      updatedPanes = [...updatedPanes, shellPane];
+    }
 
   //     LogService.getInstance().debug(
   //       `Added ${newShellPanes.length} shell panes to tracking`,
   //       'shellDetection'
   //     );
 
-    return { updatedPanes, shellPanesAdded: true };
+    return { updatedPanes, shellPanesAdded: newShellPanes.length > 0 };
   } catch (error) {
+    LogService.getInstance().error(
+      `Failed to add detected shell panes: ${error instanceof Error ? error.message : String(error)}`,
+      'shellDetection',
+      undefined,
+      error instanceof Error ? error : undefined
+    );
   //     LogService.getInstance().debug(
   //       'Failed to detect untracked panes',
   //       'shellDetection'

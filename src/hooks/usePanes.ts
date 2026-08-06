@@ -47,7 +47,8 @@ export default function usePanes(
   sessionName?: string,
   controlPaneId?: string,
   useHooks?: boolean, // undefined = not yet decided, true = use hooks, false = use polling
-  sidebarWidth?: number
+  sidebarWidth?: number,
+  focusedTmuxPaneId?: string | null
 ) {
   const [panes, setPanes] = useState<PsychePane[]>([]);
   const panesRef = useRef<PsychePane[]>([]);
@@ -152,7 +153,11 @@ export default function usePanes(
           const { updatedPanes, shellPanesAdded: added } = await detectAndAddShellPanes(
             panesFile,
             finalPanes,
-            allPaneIds
+            allPaneIds,
+            {
+              focusedTmuxPaneId,
+              sidebarWidth: sidebarWidthRef.current,
+            }
           );
           finalPanes = updatedPanes;
           shellPanesAdded = added;

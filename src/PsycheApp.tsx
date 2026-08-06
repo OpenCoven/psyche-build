@@ -23,7 +23,11 @@ import useCovenSessions from "./hooks/useCovenSessions.js"
 import useCovenDesktopUse from "./hooks/useCovenDesktopUse.js"
 
 // Utils
-import { SIDEBAR_WIDTH } from "./utils/layoutManager.js"
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from "./utils/layoutManager.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
 import { StateManager } from "./shared/StateManager.js"
 import {
@@ -372,7 +376,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     sessionName,
     controlPaneId,
     useHooks,
-    sidePanelWidth
+    sidePanelWidth,
+    focusedPaneId
   )
 
   // Check for tmux hooks preference on startup
@@ -928,14 +933,17 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         return
       }
 
+      const focusedIndex = panes.findIndex((pane) => pane.paneId === focusedPaneId)
+      if (focusedIndex === -1) {
+        // An externally-created shell becomes active before detection can
+        // assign Psyche metadata. Keep the last known content focus so the
+        // detector inserts that shell beside it.
+        return
+      }
+
       setFocusedPaneId((currentPaneId) =>
         currentPaneId === focusedPaneId ? currentPaneId : focusedPaneId
       )
-
-      const focusedIndex = panes.findIndex((pane) => pane.paneId === focusedPaneId)
-      if (focusedIndex === -1) {
-        return
-      }
 
       setSelectedIndex((currentIndex) =>
         currentIndex === focusedIndex ? currentIndex : focusedIndex
@@ -978,8 +986,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
   // savePanes moved to usePanes
 
-  // applySmartLayout moved to utils/tmux
-
   // Helper function to handle agent choice and pane creation
   const selectAgentsForPaneCreation = async (
     targetProjectRoot?: string
@@ -1019,6 +1025,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         skipAgentSelection: true,
         startPointBranch: createOptions?.startPointBranch,
         mergeTargetChain: createOptions?.mergeTargetChain,
+        focusedTmuxPaneId: focusedPaneId,
+        selectedPaneId: selectedPane?.id,
       })
       return pane ? 1 : 0
     }
@@ -1028,6 +1036,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       targetProjectRoot,
       startPointBranch: createOptions?.startPointBranch,
       mergeTargetChain: createOptions?.mergeTargetChain,
+      focusedTmuxPaneId: focusedPaneId,
+      selectedPaneId: selectedPane?.id,
     })
     return createdPanes.length
   }
@@ -1063,7 +1073,21 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
-      const newPaneId = await tmuxService.splitPane({ cwd: targetProjectRoot })
+      const insertion = controlPaneId
+        ? await capturePaneInsertion({
+            panesFile,
+            panes: existingPanes,
+            focusedTmuxPaneId: focusedPaneId,
+            selectedPaneId: selectedPane?.id,
+          })
+        : undefined
+      if (!insertion && existingPanes.some((pane) => !pane.hidden)) {
+        throw new Error("Pane layout has no visible insertion target")
+      }
+      const newPaneId = await tmuxService.splitPane({
+        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
+        cwd: targetProjectRoot,
+      })
       await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
 
       const shellPane = await createShellPane(
@@ -1089,6 +1113,17 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       }
 
+      if (!controlPaneId) {
+        throw new Error("Pane layout cannot be updated without a control pane")
+      }
+      await insertPaneIntoStoredLayout({
+        panesFile,
+        panes: existingPanes,
+        pane: shellPane,
+        controlPaneId,
+        insertion,
+        sidebarWidth: sidePanelWidth,
+      })
       await appendPanes([shellPane])
       await loadPanes()
       return shellPane
@@ -1146,6 +1181,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             targetProjectRoot,
             skipAgentSelection: true,
             existingPanes: workingPanes,
+            focusedTmuxPaneId: focusedPaneId,
+            selectedPaneId: selectedPane?.id,
           })
           if (pane) {
             workingPanes = [...workingPanes, pane]
@@ -1157,6 +1194,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         const createdPanes = await createPanesForAgentsHook(prompt, selectedAgents, {
           existingPanes: workingPanes,
           targetProjectRoot,
+          focusedTmuxPaneId: focusedPaneId,
+          selectedPaneId: selectedPane?.id,
         })
         if (createdPanes.length > 0) {
           workingPanes = [...workingPanes, ...createdPanes]
@@ -1357,6 +1396,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionConfigPath: panesFile,
             existingPanes: panes,
             sidebarWidth: sidePanelWidth,
+            focusedTmuxPaneId: focusedPaneId,
+            selectedPaneId: selectedPane?.id,
           })
         : await resumeBranchWorkspace({
             agent: selectedAgent!,
@@ -1366,6 +1407,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionConfigPath: panesFile,
             existingPanes: panes,
             sidebarWidth: sidePanelWidth,
+            focusedTmuxPaneId: focusedPaneId,
+            selectedPaneId: selectedPane?.id,
           })
 
       // Save the pane
@@ -1831,6 +1874,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     sidePanelCollapsed,
     sidePanelWidth,
     onToggleSidePanel: toggleSidePanel,
+    focusedTmuxPaneId: focusedPaneId,
+    selectedPaneId: selectedPane?.id,
   })
 
   // Calculate available height for content (terminal height - footer lines - active status messages)

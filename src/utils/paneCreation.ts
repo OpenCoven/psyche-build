@@ -6,10 +6,13 @@ import { TmuxService } from '../services/TmuxService.js';
 import {
   ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
-  getTerminalDimensions,
   splitPane,
 } from './tmux.js';
-import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import { generateSlug } from './slug.js';
 import { capturePaneContent } from './paneCapture.js';
 import { triggerHook, triggerHookSync, initializeHooksDirectory } from './hooks.js';
@@ -50,6 +53,8 @@ export interface CreatePaneOptions {
   sessionConfigPath?: string; // Shared psyche config file for the current session
   sessionProjectRoot?: string; // Session root that owns sidebar/welcome pane state
   sidebarWidth?: number;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 export interface CreatePaneResult {
@@ -107,6 +112,8 @@ export async function createPane(
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
     sidebarWidth: optionsSidebarWidth,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = options;
   let { agent, projectRoot: optionsProjectRoot } = options;
 
@@ -263,6 +270,14 @@ export async function createPane(
   // Determine if this is the first content pane
   // Check existingPanes instead of contentPaneIds, because contentPaneIds includes the welcome pane
   const isFirstContentPane = existingPanes.length === 0;
+  const insertion = isFirstContentPane
+    ? undefined
+    : await capturePaneInsertion({
+        panesFile: configPath,
+        panes: existingPanes,
+        focusedTmuxPaneId,
+        selectedPaneId,
+      });
 
   let paneInfo: string;
 
@@ -273,13 +288,10 @@ export async function createPane(
       // This way we can save the pane to config first, THEN destroy welcome pane
       paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
     } else {
-      // Subsequent panes - always split horizontally, let layout manager organize
-      // Get actual psyche pane IDs (not welcome pane) from existingPanes
-      const psychePaneIds = existingPanes.map(p => p.paneId);
-      const targetPane = psychePaneIds[psychePaneIds.length - 1]; // Split from the most recent psyche pane
-
-      // Always split horizontally - the layout manager will organize panes optimally
-      paneInfo = splitPane({ targetPane, cwd: projectRoot });
+      if (!insertion) {
+        throw new Error('Pane layout has no visible insertion target');
+      }
+      paneInfo = splitPane({ targetPane: insertion.targetTmuxPaneId, cwd: projectRoot });
     }
   } catch (error) {
     // Check if error is due to stale pane ID (can't find pane)
@@ -313,9 +325,10 @@ export async function createPane(
       if (isFirstContentPane) {
         paneInfo = setupSidebarLayout(controlPaneId, projectRoot, sidebarWidth);
       } else {
-        const psychePaneIds = existingPanes.map(p => p.paneId);
-        const targetPane = psychePaneIds[psychePaneIds.length - 1];
-        paneInfo = splitPane({ targetPane, cwd: projectRoot });
+        if (!insertion) {
+          throw new Error('Pane layout has no visible insertion target');
+        }
+        paneInfo = splitPane({ targetPane: insertion.targetTmuxPaneId, cwd: projectRoot });
       }
     } else {
       // Different error, re-throw
@@ -333,24 +346,6 @@ export async function createPane(
     await tmuxService.setPaneTitle(paneInfo, paneTitle);
   } catch {
     // Ignore if setting title fails
-  }
-
-  // Apply optimal layout using the layout manager
-  if (controlPaneId) {
-    const dimensions = getTerminalDimensions();
-    const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-
-    await recalculateAndApplyLayout(
-      controlPaneId,
-      allContentPaneIds,
-      dimensions.width,
-      dimensions.height,
-      undefined,
-      { sidebarWidth }
-    );
-
-    // Refresh tmux to apply changes
-    await tmuxService.refreshClient();
   }
 
   // Trigger pane_created hook (after pane created, before worktree)
@@ -582,6 +577,18 @@ export async function createPane(
     throw new Error(`worktree_created hook failed for "${slug}": ${hookError}`);
   }
 
+  if (!controlPaneId) {
+    throw new Error('Pane layout cannot be updated without a control pane');
+  }
+  await insertPaneIntoStoredLayout({
+    panesFile: configPath,
+    panes: existingPanes,
+    pane: newPane,
+    controlPaneId,
+    insertion,
+    sidebarWidth,
+  });
+
   // Launch agent if specified
   if (agent) {
     // Codex hooks must be installed before launch so the wrapped command can
@@ -629,36 +636,6 @@ export async function createPane(
 
   // Keep focus on the new pane
   await tmuxService.selectPane(paneInfo);
-
-  // CRITICAL: Save the pane to config IMMEDIATELY before destroying welcome pane.
-  // Only needed for the first content pane — ensures loadPanes sees a pane in config
-  // before we kill the welcome pane (prevents spurious "0 panes" welcome recreation).
-  if (isFirstContentPane) {
-    try {
-      const config = await updatePanesConfig(configPath, (latestConfig) => {
-        const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
-        const existingPaneIndex = latestPanes.findIndex((pane) => pane.id === newPane.id);
-        latestConfig.panes = existingPaneIndex === -1
-          ? [...latestPanes, newPane]
-          : latestPanes.map((pane, index) => index === existingPaneIndex ? newPane : pane);
-        latestConfig.lastUpdated = new Date().toISOString();
-      });
-
-      if (controlPaneId) {
-        const dimensions = getTerminalDimensions();
-        await recalculateAndApplyLayout(
-          controlPaneId,
-          config.panes.map((pane) => pane.paneId),
-          dimensions.width,
-          dimensions.height,
-          undefined,
-          { sidebarWidth }
-        );
-      }
-    } catch (error) {
-      // Log but don't fail - welcome pane cleanup is not critical
-    }
-  }
 
   // Always destroy the welcome pane if one exists in config.
   // We do this unconditionally because shell panes detected by detectAndAddShellPanes

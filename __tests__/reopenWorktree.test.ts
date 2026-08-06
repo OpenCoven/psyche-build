@@ -8,6 +8,7 @@ const tmuxServiceMock = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
   getCurrentSessionNameSync: vi.fn(() => 'psyche-test'),
   paneExists: vi.fn(async () => true),
+  splitPane: vi.fn(async () => '%1'),
   setSessionOptionSync: vi.fn(),
   setPaneTitle: vi.fn(async () => {}),
   refreshClient: vi.fn(async () => {}),
@@ -18,7 +19,12 @@ const tmuxServiceMock = vi.hoisted(() => ({
 
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%1'));
 const setupSidebarLayoutMock = vi.hoisted(() => vi.fn(() => '%1'));
-const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => ({
+  targetPaneId: 'psyche-1',
+  targetTmuxPaneId: '%9',
+  direction: 'vertical',
+})));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'codex']));
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
@@ -54,7 +60,8 @@ vi.mock('../src/utils/tmux.js', () => ({
 
 vi.mock('../src/utils/layoutManager.js', () => ({
   SIDEBAR_WIDTH: 40,
-  recalculateAndApplyLayout: recalculateAndApplyLayoutMock,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 
 vi.mock('../src/utils/settingsManager.js', () => ({
@@ -104,6 +111,11 @@ describe('reopenWorktree', () => {
       agent: 'codex',
       permissionMode: 'bypassPermissions',
       branchName: 'feature/reopen-me',
+    });
+    capturePaneInsertionMock.mockResolvedValue({
+      targetPaneId: 'psyche-1',
+      targetTmuxPaneId: '%9',
+      direction: 'vertical',
     });
   });
 
@@ -180,7 +192,7 @@ describe('reopenWorktree', () => {
     expect(result.pane.projectName).toBe('Renamed Repo');
   });
 
-  it('keeps the compact sidebar width through initial setup and layout reconciliation', async () => {
+  it('keeps the compact sidebar width through initial setup and tree insertion', async () => {
     const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
 
     await reopenWorktree({
@@ -194,13 +206,11 @@ describe('reopenWorktree', () => {
     });
 
     expect(setupSidebarLayoutMock).toHaveBeenCalledWith('%0', '/repo', 4);
-    expect(recalculateAndApplyLayoutMock).toHaveBeenCalledWith(
-      '%0',
-      ['%1'],
-      160,
-      40,
-      undefined,
-      { sidebarWidth: 4 },
+    expect(insertPaneIntoStoredLayoutMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        controlPaneId: '%0',
+        sidebarWidth: 4,
+      })
     );
   });
 });

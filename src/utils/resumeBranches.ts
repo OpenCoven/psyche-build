@@ -57,6 +57,8 @@ export interface ResumeBranchWorkspaceOptions {
   sessionConfigPath?: string;
   sessionProjectRoot?: string;
   sidebarWidth?: number;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 export interface ResumableBranchScanOptions {
@@ -961,6 +963,8 @@ export async function resumeBranchWorkspace(
     sessionConfigPath,
     sessionProjectRoot,
     sidebarWidth,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = options;
 
   const workspaceStates = await getWorkspaceBranchStatesAsync(projectRoot, branchName);
@@ -1006,6 +1010,8 @@ export async function resumeBranchWorkspace(
       sessionConfigPath,
       sessionProjectRoot,
       sidebarWidth,
+      focusedTmuxPaneId,
+      selectedPaneId,
     },
     [agent]
   );

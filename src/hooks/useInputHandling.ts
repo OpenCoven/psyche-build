@@ -23,7 +23,11 @@ import {
   type ResumableBranchCandidate,
 } from "../utils/resumeBranches.js"
 import { enforceControlPaneSize } from "../utils/tmux.js"
-import { SIDEBAR_WIDTH } from "../utils/layoutManager.js"
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from "../utils/layoutManager.js"
 import { suggestCommand } from "../utils/commands.js"
 import type { PopupManager } from "../services/PopupManager.js"
 import { getPaneProjectName, getPaneProjectRoot } from "../utils/paneProject.js"
@@ -205,6 +209,8 @@ interface UseInputHandlingParams {
   sidePanelCollapsed?: boolean
   sidePanelWidth?: number
   onToggleSidePanel?: () => void
+  focusedTmuxPaneId?: string | null
+  selectedPaneId?: string
 }
 
 /**
@@ -272,6 +278,8 @@ export function useInputHandling(params: UseInputHandlingParams) {
     sidePanelCollapsed = false,
     sidePanelWidth = SIDEBAR_WIDTH,
     onToggleSidePanel,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = params
 
   const layoutRefreshDebounceRef = useRef<NodeJS.Timeout | null>(null)
@@ -292,6 +300,38 @@ export function useInputHandling(params: UseInputHandlingParams) {
       return
     }
     await savePanes([...panes, ...newPanes])
+  }
+  const captureLayoutInsertion = async (existingPanes: PsychePane[] = panes) => {
+    if (!controlPaneId) {
+      return undefined
+    }
+    const insertion = await capturePaneInsertion({
+      panesFile,
+      panes: existingPanes,
+      focusedTmuxPaneId,
+      selectedPaneId,
+    })
+    if (!insertion && existingPanes.some((pane) => !pane.hidden)) {
+      throw new Error("Pane layout has no visible insertion target")
+    }
+    return insertion
+  }
+  const persistLayoutInsertion = async (
+    pane: PsychePane,
+    existingPanes: PsychePane[],
+    insertion: Awaited<ReturnType<typeof captureLayoutInsertion>>
+  ) => {
+    if (!controlPaneId) {
+      throw new Error("Pane layout cannot be updated without a control pane")
+    }
+    await insertPaneIntoStoredLayout({
+      panesFile,
+      panes: existingPanes,
+      pane,
+      controlPaneId,
+      insertion,
+      sidebarWidth: sidePanelWidth,
+    })
   }
 
   useEffect(() => {
@@ -336,7 +376,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage("Creating terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
-      const newPaneId = await tmuxService.splitPane({ cwd: targetProjectRoot })
+      const insertion = await captureLayoutInsertion()
+      const newPaneId = await tmuxService.splitPane({
+        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
+        cwd: targetProjectRoot,
+      })
 
       // Wait for pane creation to settle
       await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
@@ -352,6 +396,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
+      await persistLayoutInsertion(shellPane, panes, insertion)
       await persistAddedPanes([shellPane])
 
       setIsCreatingPane(false)
@@ -385,7 +430,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }, client)
 
       const tmuxService = TmuxService.getInstance()
-      const newPaneId = await tmuxService.splitPane({ cwd: targetProjectRoot })
+      const insertion = await captureLayoutInsertion()
+      const newPaneId = await tmuxService.splitPane({
+        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
+        cwd: targetProjectRoot,
+      })
       await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
 
       const nextId = getNextPsycheId(panes)
@@ -418,6 +467,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       await tmuxService.sendShellCommand(newPaneId, buildCovenAttachCommand(session.id))
       await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       await client.sendInput?.(session.id, buildDesktopUseQuickInput("test"))
+      await persistLayoutInsertion(desktopPane, panes, insertion)
       await persistAddedPanes([desktopPane])
       await loadPanes()
 
@@ -545,7 +595,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage(`Opening terminal in ${getPaneDisplayName(selectedPane)}...`)
 
       const tmuxService = TmuxService.getInstance()
-      const newPaneId = await tmuxService.splitPane({ cwd: selectedPane.worktreePath })
+      const insertion = await captureLayoutInsertion()
+      const newPaneId = await tmuxService.splitPane({
+        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
+        cwd: selectedPane.worktreePath,
+      })
 
       // Wait for pane creation to settle
       await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
@@ -560,6 +614,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
+      await persistLayoutInsertion(shellPane, panes, insertion)
       await persistAddedPanes([shellPane])
 
       setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
@@ -606,7 +661,9 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage(`Opening file browser for ${getPaneDisplayName(selectedPane)}...`)
 
       const tmuxService = TmuxService.getInstance()
+      const insertion = await captureLayoutInsertion()
       const newPaneId = await tmuxService.splitPane({
+        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
         cwd: selectedPane.worktreePath,
         command: buildFilesOnlyCommand(),
       })
@@ -635,6 +692,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       await tmuxService.setPaneTitle(newPaneId, slug)
+      await persistLayoutInsertion(browserPane, panes, insertion)
       await persistAddedPanes([browserPane])
       await loadPanes()
 
@@ -1714,6 +1772,8 @@ export function useInputHandling(params: UseInputHandlingParams) {
             sessionProjectRoot: projectRoot,
             sessionConfigPath: panesFile,
             sidebarWidth: sidePanelWidth,
+            focusedTmuxPaneId,
+            selectedPaneId: selectedPane.id,
           })
           createdPanes.push(result.pane)
         } catch {
