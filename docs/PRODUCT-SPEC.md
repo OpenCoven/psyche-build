@@ -40,7 +40,7 @@ Human / OpenMeow / OpenClaw
 - **Agent** — Coven Code, Claude Code, Codex, OpenCode, Cline CLI, Gemini CLI, Qwen CLI, Amp CLI, pi CLI, Cursor CLI, Copilot CLI, Crush CLI, or another configured coding launcher.
 - **Ritual** — a reusable project setup recipe for opening a known pane layout.
 - **Conductor** — a human, OpenClaw familiar, Cody/OpenMeow, or bridge process coordinating work.
-- **Coven session** — an optional Coven-managed harness session that Psyche Build can launch or open when a local Coven daemon is available.
+- **Coven session** — an optional Coven-managed harness session that Psyche Build's CLI or bridge can launch or open when a local Coven daemon is available. The macOS app rail does not render daemon-discovered sessions.
 
 ## Target user
 
@@ -98,7 +98,7 @@ Psyche Build-specific additions:
 - source `psyche-build` package and `psyche` command, validated through the package archive;
 - cleaned public docs and branding;
 - local bridge/daemon direction;
-- Coven session list/open/launch integration;
+- Coven daemon and bridge session list/open/launch integration;
 - OpenMeow/OpenClaw orchestration path.
 
 ## v0 scope
@@ -115,7 +115,7 @@ Psyche Build-specific additions:
 - Pane file browser and visibility controls.
 - Merge/PR-oriented pane menu flows.
 - Local daemon/control bridge.
-- Coven session list/open/launch integration when a local Coven daemon is running.
+- Coven daemon and bridge session list/open/launch integration when a local Coven daemon is running; the macOS rail remains app-origin only.
 - Smoke docs and contributor loop.
 
 ### Not yet

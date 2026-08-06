@@ -1211,7 +1211,7 @@
         project, localRows, [], currentSearchQuery
       );
       var visibleWorktrees = railModel.worktrees.filter(function (entry) {
-        return entry.matches || entry.rows.length > 0;
+        return entry.rows.length > 0;
       });
       if (railModel.projectRows.length > 0) {
         visibleWorktrees.push({
@@ -1435,14 +1435,6 @@
           worktreeGroup.appendChild(wrapper);
         });
 
-        if (!worktree.collapsed && threads.length === 0) {
-          var noPanes = document.createElement("div");
-          noPanes.className = "session-worktree-empty";
-          noPanes.textContent = worktree.missing
-            ? "Unavailable"
-            : "No panes — select and press ⌘T";
-          worktreeGroup.appendChild(noPanes);
-        }
         group.appendChild(worktreeGroup);
       });
 
