@@ -73,6 +73,7 @@ import {
   getSidePanelWidth,
   shouldAutoCollapseSidePanel,
   shouldUseCompactSidePanel,
+  SIDE_PANEL_EXPAND_GLYPH,
 } from "./utils/sidePanel.js"
 
 const __filename = fileURLToPath(import.meta.url)
@@ -141,7 +142,7 @@ const SidePanelRail: React.FC = () => (
     <Text color={COLORS.accent} bold>≡</Text>
     <Text color={COLORS.border}>│</Text>
     <Text color={COLORS.border}>│</Text>
-    <Text color={COLORS.accent}>›</Text>
+    <Text color={COLORS.accent}>{SIDE_PANEL_EXPAND_GLYPH}</Text>
   </Box>
 )
 
@@ -1907,6 +1908,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           <SidePanelRail />
         ) : (
           <PanesGrid
+            showCollapseControl
             panes={panes}
             selectedIndex={selectedIndex}
             activeProjectRoot={activeProjectRoot}

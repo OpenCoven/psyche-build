@@ -25,6 +25,7 @@ import InlineNameEditor from "../ui/InlineNameEditor.js"
 import type { InlineRenameState } from "../../utils/inlineRename.js"
 import type { CovenSessionsLoadState } from "../../utils/covenSessions.js"
 import type { DesktopUseStateMap } from "../../hooks/useCovenDesktopUse.js"
+import { SIDE_PANEL_COLLAPSE_GLYPH } from "../../utils/sidePanel.js"
 
 interface PanesGridProps {
   panes: PsychePane[]
@@ -42,6 +43,7 @@ interface PanesGridProps {
   inlineRename?: InlineRenameState | null
   covenSessionsState?: CovenSessionsLoadState
   desktopUseStates?: DesktopUseStateMap
+  showCollapseControl?: boolean
 }
 
 const PROJECT_BUSY_FRAMES = ['◴', '◷', '◶', '◵']
@@ -63,6 +65,7 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
   inlineRename,
   covenSessionsState,
   desktopUseStates,
+  showCollapseControl,
 }) => {
   const actionLayout = useMemo(
     () => buildProjectActionLayout(
@@ -164,6 +167,12 @@ const PanesGrid: React.FC<PanesGridProps> = memo(({
 
   return (
     <Box flexDirection="column">
+      {showCollapseControl && (
+        <Box width={HEADER_WIDTH} justifyContent="flex-end">
+          <Text color={COLORS.accent}>{SIDE_PANEL_COLLAPSE_GLYPH}</Text>
+        </Box>
+      )}
+
       {paneGroups.map((group, groupIndex) => (
         <Box key={group.projectRoot} flexDirection="column">
           {(() => {

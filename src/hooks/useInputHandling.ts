@@ -86,7 +86,9 @@ import {
   resolveSidebarMouseTarget,
   type SidebarMouseTarget,
 } from "../utils/sidebarMouse.js"
-import { SIDE_PANEL_COLLAPSED_WIDTH } from "../utils/sidePanel.js"
+import {
+  SIDE_PANEL_COLLAPSED_WIDTH,
+} from "../utils/sidePanel.js"
 import {
   MAX_INLINE_NAME_LENGTH,
   type InlineRenameState,
@@ -1055,12 +1057,20 @@ export function useInputHandling(params: UseInputHandlingParams) {
       return false
     }
 
-    if (onToggleSidePanel && mouseEvent.column <= SIDE_PANEL_COLLAPSED_WIDTH) {
-      onToggleSidePanel()
+    if (sidePanelCollapsed) {
+      if (onToggleSidePanel && mouseEvent.column <= SIDE_PANEL_COLLAPSED_WIDTH) {
+        onToggleSidePanel()
+      }
       return true
     }
 
-    if (sidePanelCollapsed) {
+    if (mouseEvent.row === 1 && mouseEvent.column === sidePanelWidth) {
+      onToggleSidePanel?.()
+      return true
+    }
+
+    const adjustedRow = mouseEvent.row - 1
+    if (adjustedRow <= 0) {
       return true
     }
 
@@ -1072,7 +1082,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
     )
     const target = resolveSidebarMouseTarget(
       layout,
-      mouseEvent.row,
+      adjustedRow,
       mouseEvent.column,
       { isLoading }
     )
