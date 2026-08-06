@@ -265,4 +265,69 @@ describe('loadAndProcessPanes', () => {
       second: { kind: 'leaf', paneId: 'psyche-3' },
     });
   });
+
+  it('preserves surviving nested sibling topology during recovery reconciliation', async () => {
+    const panesFile = '/project/.psyche/psyche.config.json';
+    let config: PsycheConfig = {
+      projectName: 'project',
+      projectRoot: '/project',
+      controlPaneId: '%0',
+      panes: [
+        pane('psyche-1', '%1'),
+        pane('psyche-3', '%3'),
+        pane('psyche-4', '%4'),
+      ],
+      settings: {},
+      lastUpdated: 'before',
+      paneLayout: {
+        version: 1,
+        root: {
+          kind: 'split',
+          direction: 'horizontal',
+          ratio: 0.5,
+          first: { kind: 'leaf', paneId: 'psyche-1' },
+          second: {
+            kind: 'split',
+            direction: 'vertical',
+            ratio: 0.5,
+            first: {
+              kind: 'split',
+              direction: 'horizontal',
+              ratio: 0.5,
+              first: { kind: 'leaf', paneId: 'psyche-2' },
+              second: { kind: 'leaf', paneId: 'psyche-3' },
+            },
+            second: { kind: 'leaf', paneId: 'psyche-4' },
+          },
+        },
+      },
+    };
+    readFileMock.mockImplementation(async () => JSON.stringify(config));
+    atomicWriteJsonMock.mockImplementation(async (_file: string, next: PsycheConfig) => {
+      config = clone(next);
+    });
+    tmuxServiceMock.getAllPaneIds.mockResolvedValue(['%0', '%1', '%3', '%4']);
+
+    const { reconcileStoredPaneLayout } = await import('../src/hooks/usePaneLoading.js');
+    await reconcileStoredPaneLayout(
+      panesFile,
+      config.panes,
+      '%0',
+      ['%0', '%1', '%3', '%4']
+    );
+
+    expect(config.paneLayout?.root).toEqual({
+      kind: 'split',
+      direction: 'horizontal',
+      ratio: 0.5,
+      first: { kind: 'leaf', paneId: 'psyche-1' },
+      second: {
+        kind: 'split',
+        direction: 'vertical',
+        ratio: 0.5,
+        first: { kind: 'leaf', paneId: 'psyche-3' },
+        second: { kind: 'leaf', paneId: 'psyche-4' },
+      },
+    });
+  });
 });

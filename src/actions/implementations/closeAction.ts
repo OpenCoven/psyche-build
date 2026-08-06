@@ -248,9 +248,41 @@ async function executeCloseOption(
         };
       }
 
-      // Remove from config only after tmux confirms the pane is gone. The
-      // lifecycle close marker suppresses recreation while the close is in
-      // progress.
+      // Project and apply the logical removal before dropping pane metadata.
+      // If tmux rejects the projection, preserve both the registered pane and
+      // its stored topology so the next load can recover consistently.
+      let config: PsycheConfig | undefined;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(panesFile, 'utf-8')) as PsycheConfig;
+        if (!Array.isArray(parsed)) {
+          config = parsed;
+        }
+      } catch {
+        LogService.getInstance().debug(
+          'Could not read pane layout before close; skipping layout projection',
+          'paneActions'
+        );
+      }
+      if (config?.controlPaneId) {
+        const sidebarWidth = context.sidebarWidth
+          ?? config.controlPaneSize
+          ?? SIDEBAR_WIDTH;
+        const { getTerminalDimensions } = await import('../../utils/tmux.js');
+        const dimensions = getTerminalDimensions();
+        await applyStoredPaneLayout({
+          panesFile,
+          panes: updatedPanes,
+          controlPaneId: config.controlPaneId,
+          terminalWidth: dimensions.width,
+          terminalHeight: dimensions.height,
+          sidebarWidth,
+          mutation: { kind: 'remove', paneId: pane.id },
+        });
+      }
+
+      // Remove from config only after tmux confirms both the pane kill and
+      // the stored-layout projection. The lifecycle close marker suppresses
+      // recreation while the close is in progress.
       await context.savePanes(updatedPanes);
 
       // Best-effort cleanup of any stored prompt files for this pane slug
@@ -304,31 +336,6 @@ async function executeCloseOption(
 
       if (context.onPaneRemove) {
         await context.onPaneRemove(pane.paneId); // Pass tmux pane ID, not psyche ID
-      }
-
-      // Remove the logical leaf only after tmux confirmed the pane is closed.
-      // The controller applies the projected tree before it persists it, so a
-      // rejected tmux layout leaves the previously stored topology intact.
-      try {
-        const config: PsycheConfig = JSON.parse(fs.readFileSync(panesFile, 'utf-8'));
-        if (config.controlPaneId) {
-          const sidebarWidth = context.sidebarWidth
-            ?? config.controlPaneSize
-            ?? SIDEBAR_WIDTH;
-          const { getTerminalDimensions } = await import('../../utils/tmux.js');
-          const dimensions = getTerminalDimensions();
-          await applyStoredPaneLayout({
-            panesFile,
-            panes: updatedPanes,
-            controlPaneId: config.controlPaneId,
-            terminalWidth: dimensions.width,
-            terminalHeight: dimensions.height,
-            sidebarWidth,
-            mutation: { kind: 'remove', paneId: pane.id },
-          });
-        }
-      } catch (error) {
-        LogService.getInstance().debug('Failed to apply pane layout after close', 'paneActions');
       }
 
       // Trigger pane_closed hook (after everything is cleaned up)

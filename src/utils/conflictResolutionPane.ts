@@ -4,15 +4,21 @@
  * Utilities for creating a new pane specifically for AI-assisted merge conflict resolution
  */
 
-import type { PsychePane } from '../types.js';
+import fs from 'fs';
+import type { PsycheConfig, PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
+import { StateManager } from '../shared/StateManager.js';
 import {
   enforceControlPaneSize,
   ensurePaneBorderStatusForCurrentSession,
   splitPane,
 } from './tmux.js';
 import { capturePaneContent } from './paneCapture.js';
-import { SIDEBAR_WIDTH } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import { TMUX_LAYOUT_APPLY_DELAY, TMUX_SPLIT_DELAY } from '../constants/timing.js';
 import {
   buildPromptReadAndDeleteSnippet,
@@ -42,6 +48,8 @@ export interface ConflictResolutionPaneOptions {
   projectName: string;
   existingPanes: PsychePane[];
   sidebarWidth?: number;
+  sessionConfigPath?: string;
+  controlPaneId?: string;
 }
 
 /**
@@ -69,8 +77,24 @@ export async function createConflictResolutionPane(
   // Get current pane info
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
-  // Get current pane count
-  const paneCount = tmuxService.getAllPaneIdsSync().length;
+  const sessionConfigPath = options.sessionConfigPath
+    ?? StateManager.getInstance().getState().panesFile;
+  if (!sessionConfigPath) {
+    throw new Error('Pane layout cannot be updated without a session config');
+  }
+  const controlPaneId = options.controlPaneId
+    ?? getControlPaneId(sessionConfigPath);
+  if (!controlPaneId) {
+    throw new Error('Pane layout cannot be updated without a control pane');
+  }
+  const insertion = await capturePaneInsertion({
+    panesFile: sessionConfigPath,
+    panes: existingPanes,
+    focusedTmuxPaneId: originalPaneId,
+  });
+  if (!insertion) {
+    throw new Error('Pane layout has no visible insertion target');
+  }
 
   // Enable pane borders to show titles
   try {
@@ -80,7 +104,10 @@ export async function createConflictResolutionPane(
   }
 
   // Create new pane
-  const paneInfo = splitPane();
+  const paneInfo = splitPane({
+    targetPane: insertion.targetTmuxPaneId,
+    cwd: targetRepoPath,
+  });
 
   // Wait for pane creation to settle
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -226,6 +253,15 @@ export async function createConflictResolutionPane(
     // Note: No worktreePath - this pane operates directly in the target repo
   };
 
+  await insertPaneIntoStoredLayout({
+    panesFile: sessionConfigPath,
+    panes: existingPanes,
+    pane: newPane,
+    controlPaneId,
+    insertion,
+    sidebarWidth,
+  });
+
   // Switch back to the original pane
   await tmuxService.selectPane(originalPaneId);
 
@@ -237,6 +273,11 @@ export async function createConflictResolutionPane(
   }
 
   return newPane;
+}
+
+function getControlPaneId(sessionConfigPath: string): string | undefined {
+  const config = JSON.parse(fs.readFileSync(sessionConfigPath, 'utf-8')) as PsycheConfig;
+  return Array.isArray(config) ? undefined : config.controlPaneId;
 }
 
 /**

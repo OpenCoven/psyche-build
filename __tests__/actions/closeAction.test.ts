@@ -236,6 +236,38 @@ describe('closeAction', () => {
       }));
     });
 
+    it('keeps persisted pane metadata and topology unchanged when layout application rejects', async () => {
+      const pane1 = createWorktreePane({ id: 'psyche-1', paneId: '%1' });
+      const pane2 = createWorktreePane({ id: 'psyche-2', paneId: '%2' });
+      const mockContext = createMockContext([pane1, pane2]);
+      const savePanesSpy = vi.spyOn(mockContext, 'savePanes');
+      const paneLayout = {
+        version: 1,
+        root: {
+          kind: 'split' as const,
+          direction: 'vertical' as const,
+          ratio: 0.5,
+          first: { kind: 'leaf' as const, paneId: 'psyche-1' },
+          second: { kind: 'leaf' as const, paneId: 'psyche-2' },
+        },
+      };
+
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+        paneLayout,
+      }));
+      applyStoredPaneLayoutMock.mockRejectedValueOnce(new Error('tmux rejected pane layout'));
+
+      const result = await closePane(pane1, mockContext);
+      const executeResult = await result.onSelect!('kill_only');
+
+      expectError(executeResult, 'Failed to close pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(JSON.parse(vi.mocked(fs.readFileSync).mock.results[0]?.value as string).paneLayout)
+        .toEqual(paneLayout);
+    });
+
     it('should call onPaneRemove callback with tmux pane ID', async () => {
       const mockPane = createWorktreePane({ paneId: '%42' });
       const mockContext = createMockContext([mockPane]);

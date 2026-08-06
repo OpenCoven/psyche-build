@@ -6,6 +6,9 @@ const capturePaneInsertionMock = vi.hoisted(() => vi.fn());
 const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn());
 const getUntrackedPanesMock = vi.hoisted(() => vi.fn());
 const createShellPaneMock = vi.hoisted(() => vi.fn());
+const tmuxServiceMock = vi.hoisted(() => ({
+  getAllPaneIds: vi.fn(),
+}));
 
 vi.mock('fs/promises', () => ({
   default: { readFile: readFileMock },
@@ -25,6 +28,12 @@ vi.mock('../src/utils/paneColors.js', () => ({
 vi.mock('../src/utils/layoutManager.js', () => ({
   capturePaneInsertion: capturePaneInsertionMock,
   insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
+}));
+
+vi.mock('../src/services/TmuxService.js', () => ({
+  TmuxService: {
+    getInstance: () => tmuxServiceMock,
+  },
 }));
 
 vi.mock('../src/services/LogService.js', () => ({
@@ -57,7 +66,7 @@ describe('detectAndAddShellPanes', () => {
     insertPaneIntoStoredLayoutMock.mockResolvedValue({});
   });
 
-  it('inserts externally detected shells beside the last focused content pane', async () => {
+  it('inserts externally detected shells beside the focused content pane', async () => {
     const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
     const focused = pane('focused', '%1');
 
@@ -65,13 +74,18 @@ describe('detectAndAddShellPanes', () => {
       '/project/.psyche/psyche.config.json',
       [focused],
       ['%0', '%1', '%2'],
-      { focusedTmuxPaneId: '%1', sidebarWidth: 4 }
+      {
+        focusedTmuxPaneId: '%1',
+        selectedPaneId: 'selected',
+        sidebarWidth: 4,
+      }
     );
 
     expect(capturePaneInsertionMock).toHaveBeenCalledWith({
       panesFile: '/project/.psyche/psyche.config.json',
       panes: [focused],
       focusedTmuxPaneId: '%1',
+      selectedPaneId: 'selected',
     });
     expect(insertPaneIntoStoredLayoutMock).toHaveBeenCalledWith({
       panesFile: '/project/.psyche/psyche.config.json',
@@ -86,5 +100,48 @@ describe('detectAndAddShellPanes', () => {
       sidebarWidth: 4,
     });
     expect(result.updatedPanes).toEqual([focused, pane('detected', '%2')]);
+  });
+
+  it('uses the selected target when no focused target is available', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const selected = pane('selected', '%1');
+
+    await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [selected],
+      ['%0', '%1', '%2'],
+      { selectedPaneId: 'selected' }
+    );
+
+    expect(capturePaneInsertionMock).toHaveBeenCalledWith({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [selected],
+      focusedTmuxPaneId: undefined,
+      selectedPaneId: 'selected',
+    });
+  });
+
+  it('refreshes stale targets without persisting a shell or layout mutation when none remains', async () => {
+    const { detectAndAddShellPanes } = await import('../src/hooks/useShellDetection.js');
+    const stale = pane('stale', '%1');
+    capturePaneInsertionMock
+      .mockRejectedValueOnce(new Error('Pane layout insertion target %1 is no longer available'))
+      .mockResolvedValueOnce(undefined);
+    tmuxServiceMock.getAllPaneIds.mockResolvedValue(['%0', '%2']);
+
+    const result = await detectAndAddShellPanes(
+      '/project/.psyche/psyche.config.json',
+      [stale],
+      ['%0', '%1', '%2'],
+      { focusedTmuxPaneId: '%1' }
+    );
+
+    expect(tmuxServiceMock.getAllPaneIds).toHaveBeenCalledWith('window');
+    expect(capturePaneInsertionMock).toHaveBeenCalledTimes(2);
+    expect(insertPaneIntoStoredLayoutMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      updatedPanes: [stale],
+      shellPanesAdded: false,
+    });
   });
 });

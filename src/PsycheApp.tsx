@@ -168,6 +168,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   /* panes state moved to usePanes */
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
+  const selectedPaneIdRef = useRef<string | undefined>(undefined)
   const { statusMessage, setStatusMessage } = useStatusMessages()
   const [isCreatingPane, setIsCreatingPane] = useState(false)
   const {
@@ -377,7 +378,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     controlPaneId,
     useHooks,
     sidePanelWidth,
-    focusedPaneId
+    focusedPaneId,
+    selectedPaneIdRef
   )
 
   // Check for tmux hooks preference on startup
@@ -678,6 +680,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
     return undefined
   }, [projectActionLayout.groups, selectedIndex])
+  selectedPaneIdRef.current = selectedPane?.id
   const selectedProjectRoot = useMemo(() => {
     if (selectedPane) {
       return getPaneProjectRoot(selectedPane, sessionProjectRoot)

@@ -48,7 +48,8 @@ export default function usePanes(
   controlPaneId?: string,
   useHooks?: boolean, // undefined = not yet decided, true = use hooks, false = use polling
   sidebarWidth?: number,
-  focusedTmuxPaneId?: string | null
+  focusedTmuxPaneId?: string | null,
+  selectedPaneIdRef?: { current?: string }
 ) {
   const [panes, setPanes] = useState<PsychePane[]>([]);
   const panesRef = useRef<PsychePane[]>([]);
@@ -156,6 +157,7 @@ export default function usePanes(
             allPaneIds,
             {
               focusedTmuxPaneId,
+              selectedPaneId: selectedPaneIdRef?.current,
               sidebarWidth: sidebarWidthRef.current,
             }
           );

@@ -146,8 +146,8 @@ export async function applyStoredPaneLayoutWithinConfigWriteLock(
 
 /**
  * Captures the logical leaf and physical pane dimensions before tmux creates
- * another pane. A missing physical pane is an error rather than a fallback:
- * the next lifecycle reload is responsible for rebinding stale tmux IDs.
+ * another pane. If focus became stale while the panes were being inspected,
+ * fall back through the selected and stored visible leaves that still exist.
  */
 export async function capturePaneInsertion(
   options: CapturePaneInsertionOptions
@@ -162,27 +162,34 @@ export async function capturePaneInsertion(
     // The current in-memory panes still provide focus and selected targets.
   }
 
-  const targetPane = resolvePaneInsertionTarget({
-    panes: options.panes,
-    paneLayout: paneLayout ?? seedPaneLayout(options.panes.map((pane) => pane.id)),
-    focusedTmuxPaneId: options.focusedTmuxPaneId,
-    selectedPaneId: options.selectedPaneId,
-  });
-  if (!targetPane) {
-    return undefined;
-  }
-
   const paneInfo = await TmuxService.getInstance().getAllPaneInfo('window');
-  const physicalTarget = paneInfo.find((pane) => pane.paneId === targetPane.paneId);
-  if (!physicalTarget) {
-    throw new Error(`Pane layout insertion target ${targetPane.paneId} is no longer available`);
+  const unavailablePaneIds = new Set<string>();
+  const targetLayout = paneLayout ?? seedPaneLayout(options.panes.map((pane) => pane.id));
+
+  while (unavailablePaneIds.size < options.panes.length) {
+    const targetPane = resolvePaneInsertionTarget({
+      panes: options.panes.filter((pane) => !unavailablePaneIds.has(pane.id)),
+      paneLayout: targetLayout,
+      focusedTmuxPaneId: options.focusedTmuxPaneId,
+      selectedPaneId: options.selectedPaneId,
+    });
+    if (!targetPane) {
+      return undefined;
+    }
+
+    const physicalTarget = paneInfo.find((pane) => pane.paneId === targetPane.paneId);
+    if (physicalTarget) {
+      return {
+        targetPaneId: targetPane.id,
+        targetTmuxPaneId: targetPane.paneId,
+        direction: adaptiveSplitDirection(physicalTarget),
+      };
+    }
+
+    unavailablePaneIds.add(targetPane.id);
   }
 
-  return {
-    targetPaneId: targetPane.id,
-    targetTmuxPaneId: targetPane.paneId,
-    direction: adaptiveSplitDirection(physicalTarget),
-  };
+  return undefined;
 }
 
 export async function insertPaneIntoStoredLayout(

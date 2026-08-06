@@ -3,6 +3,7 @@ import path from 'path';
 import type { PsychePane } from '../types.js';
 import { getUntrackedPanes, createShellPane, getNextPsycheId } from '../utils/shellPaneDetection.js';
 import { LogService } from '../services/LogService.js';
+import { TmuxService } from '../services/TmuxService.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import {
   capturePaneInsertion,
@@ -19,6 +20,7 @@ export async function detectAndAddShellPanes(
   allPaneIds: string[],
   options: {
     focusedTmuxPaneId?: string | null;
+    selectedPaneId?: string;
     sidebarWidth?: number;
   } = {}
 ): Promise<{ updatedPanes: PsychePane[]; shellPanesAdded: boolean }> {
@@ -87,10 +89,11 @@ export async function detectAndAddShellPanes(
         throw new Error('Pane layout cannot be updated without a control pane');
       }
 
-      const insertion = await capturePaneInsertion({
+      const insertion = await captureShellPaneInsertion({
         panesFile,
         panes: updatedPanes,
         focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
       });
       if (!insertion) {
         throw new Error('Pane layout has no visible insertion target');
@@ -126,4 +129,30 @@ export async function detectAndAddShellPanes(
   //     );
     return { updatedPanes: activePanes, shellPanesAdded: false };
   }
+}
+
+async function captureShellPaneInsertion(options: {
+  panesFile: string;
+  panes: PsychePane[];
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
+}) {
+  const capture = () => capturePaneInsertion(options);
+  let insertion;
+  let refreshed = false;
+
+  try {
+    insertion = await capture();
+  } catch {
+    await TmuxService.getInstance().getAllPaneIds('window');
+    refreshed = true;
+    insertion = await capture();
+  }
+
+  if (!insertion && !refreshed) {
+    await TmuxService.getInstance().getAllPaneIds('window');
+    insertion = await capture();
+  }
+
+  return insertion;
 }
