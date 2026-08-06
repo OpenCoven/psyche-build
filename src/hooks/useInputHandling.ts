@@ -28,6 +28,7 @@ import {
   insertPaneIntoStoredLayout,
   SIDEBAR_WIDTH,
 } from "../utils/layoutManager.js"
+import { rollbackLocalPaneCreation } from "../utils/localPaneCreationRollback.js"
 import { suggestCommand } from "../utils/commands.js"
 import type { PopupManager } from "../services/PopupManager.js"
 import { getPaneProjectName, getPaneProjectRoot } from "../utils/paneProject.js"
@@ -396,7 +397,12 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await persistLayoutInsertion(shellPane, panes, insertion)
+      try {
+        await persistLayoutInsertion(shellPane, panes, insertion)
+      } catch (error) {
+        await rollbackLocalPaneCreation({ tmuxService, paneId: newPaneId })
+        throw error
+      }
       await persistAddedPanes([shellPane])
 
       setIsCreatingPane(false)
@@ -467,7 +473,16 @@ export function useInputHandling(params: UseInputHandlingParams) {
       await tmuxService.sendShellCommand(newPaneId, buildCovenAttachCommand(session.id))
       await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       await client.sendInput?.(session.id, buildDesktopUseQuickInput("test"))
-      await persistLayoutInsertion(desktopPane, panes, insertion)
+      try {
+        await persistLayoutInsertion(desktopPane, panes, insertion)
+      } catch (error) {
+        await rollbackLocalPaneCreation({
+          tmuxService,
+          paneId: newPaneId,
+          cleanup: () => client.killSession?.(session.id),
+        })
+        throw error
+      }
       await persistAddedPanes([desktopPane])
       await loadPanes()
 
@@ -614,7 +629,12 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await persistLayoutInsertion(shellPane, panes, insertion)
+      try {
+        await persistLayoutInsertion(shellPane, panes, insertion)
+      } catch (error) {
+        await rollbackLocalPaneCreation({ tmuxService, paneId: newPaneId })
+        throw error
+      }
       await persistAddedPanes([shellPane])
 
       setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
@@ -692,7 +712,12 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       await tmuxService.setPaneTitle(newPaneId, slug)
-      await persistLayoutInsertion(browserPane, panes, insertion)
+      try {
+        await persistLayoutInsertion(browserPane, panes, insertion)
+      } catch (error) {
+        await rollbackLocalPaneCreation({ tmuxService, paneId: newPaneId })
+        throw error
+      }
       await persistAddedPanes([browserPane])
       await loadPanes()
 

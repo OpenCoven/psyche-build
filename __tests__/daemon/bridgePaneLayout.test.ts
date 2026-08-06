@@ -40,6 +40,7 @@ beforeEach(async () => {
     projectRoot: root,
     projectName: 'project',
     controlPaneId: '%0',
+    controlPaneSize: 4,
     panes: [existingPane],
     paneLayout: {
       version: 1,
@@ -110,6 +111,8 @@ describe('daemon bridge pane placement', () => {
         panesFile: path.join(root, '.psyche', 'psyche.config.json'),
         panes: [pane('existing', '%1')],
         controlPaneId: '%0',
+        sidebarWidth: 4,
+        resolveSidebarWidthFromConfig: true,
         insertion: {
           targetPaneId: 'existing',
           targetTmuxPaneId: '%1',

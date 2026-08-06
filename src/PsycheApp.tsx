@@ -28,6 +28,7 @@ import {
   insertPaneIntoStoredLayout,
   SIDEBAR_WIDTH,
 } from "./utils/layoutManager.js"
+import { rollbackLocalPaneCreation } from "./utils/localPaneCreationRollback.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
 import { StateManager } from "./shared/StateManager.js"
 import {
@@ -1119,14 +1120,19 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       if (!controlPaneId) {
         throw new Error("Pane layout cannot be updated without a control pane")
       }
-      await insertPaneIntoStoredLayout({
-        panesFile,
-        panes: existingPanes,
-        pane: shellPane,
-        controlPaneId,
-        insertion,
-        sidebarWidth: sidePanelWidth,
-      })
+      try {
+        await insertPaneIntoStoredLayout({
+          panesFile,
+          panes: existingPanes,
+          pane: shellPane,
+          controlPaneId,
+          insertion,
+          sidebarWidth: sidePanelWidth,
+        })
+      } catch (error) {
+        await rollbackLocalPaneCreation({ tmuxService, paneId: newPaneId })
+        throw error
+      }
       await appendPanes([shellPane])
       await loadPanes()
       return shellPane

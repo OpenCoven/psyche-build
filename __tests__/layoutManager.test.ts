@@ -138,6 +138,34 @@ describe('applyStoredPaneLayout', () => {
     );
   });
 
+  it('resolves the bridge sidebar width from config while holding the layout lock', async () => {
+    readFileMock.mockResolvedValue(JSON.stringify({
+      projectName: 'project',
+      projectRoot: '/project',
+      controlPaneSize: 4,
+      panes: [pane('psyche-1', '%1')],
+      settings: {},
+      lastUpdated: 'before',
+    }));
+    const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');
+
+    await applyStoredPaneLayout({
+      panesFile: '/project/.psyche/psyche.config.json',
+      panes: [pane('psyche-1', '%1')],
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      sidebarWidth: 40,
+      resolveSidebarWidthFromConfig: true,
+      mutation: { kind: 'reconcile' },
+    });
+
+    expect(tmuxServiceMock.resizePane).toHaveBeenCalledWith('%0', { width: 4 });
+    expect(tmuxServiceMock.selectLayout).toHaveBeenCalledWith(
+      expect.stringContaining('4x60,0,0,0')
+    );
+  });
+
   it('does not persist when tmux rejects the layout', async () => {
     tmuxServiceMock.selectLayout.mockRejectedValueOnce(new Error('tmux unavailable'));
     const { applyStoredPaneLayout } = await import('../src/utils/layoutManager.js');

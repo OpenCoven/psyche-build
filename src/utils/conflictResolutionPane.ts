@@ -39,6 +39,7 @@ import {
 } from './agentLaunch.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import { resolveProjectColorTheme } from './paneColors.js';
+import { rollbackLocalPaneCreation } from './localPaneCreationRollback.js';
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -253,14 +254,19 @@ export async function createConflictResolutionPane(
     // Note: No worktreePath - this pane operates directly in the target repo
   };
 
-  await insertPaneIntoStoredLayout({
-    panesFile: sessionConfigPath,
-    panes: existingPanes,
-    pane: newPane,
-    controlPaneId,
-    insertion,
-    sidebarWidth,
-  });
+  try {
+    await insertPaneIntoStoredLayout({
+      panesFile: sessionConfigPath,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth,
+    });
+  } catch (error) {
+    await rollbackLocalPaneCreation({ tmuxService, paneId: paneInfo });
+    throw error;
+  }
 
   // Switch back to the original pane
   await tmuxService.selectPane(originalPaneId);

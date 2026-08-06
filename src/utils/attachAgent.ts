@@ -23,6 +23,7 @@ import { SettingsManager } from './settingsManager.js';
 import { LogService } from '../services/LogService.js';
 import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
+import { rollbackLocalPaneCreation } from './localPaneCreationRollback.js';
 
 export interface AttachAgentOptions {
   targetPane: PsychePane;
@@ -205,14 +206,19 @@ export async function attachAgentToWorktree(
   if (!controlPaneId) {
     throw new Error('Pane layout cannot be updated without a control pane');
   }
-  await insertPaneIntoStoredLayout({
-    panesFile: sessionConfigPath,
-    panes: existingPanes,
-    pane: newPane,
-    controlPaneId,
-    insertion,
-    sidebarWidth,
-  });
+  try {
+    await insertPaneIntoStoredLayout({
+      panesFile: sessionConfigPath,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth,
+    });
+  } catch (error) {
+    await rollbackLocalPaneCreation({ tmuxService, paneId: paneInfo });
+    throw error;
+  }
 
   // Switch focus back to control pane
   await tmuxService.selectPane(originalPaneId);

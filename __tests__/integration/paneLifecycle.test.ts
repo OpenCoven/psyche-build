@@ -424,7 +424,8 @@ describe('Pane Lifecycle Integration Tests', () => {
       const worktreeCall = mockExecSync.mock.calls.find(([cmd]) =>
         typeof cmd === 'string' && cmd.includes('git worktree add')
       );
-      expect(worktreeCall?.[0]).toContain('cd "/target/repo" && git worktree add "/target/repo/.psyche/worktrees/target-slug"');
+      expect(worktreeCall?.[0]).toContain('git worktree add "/target/repo/.psyche/worktrees/target-slug"');
+      expect(worktreeCall?.[1]).toMatchObject({ cwd: '/target/repo' });
     });
 
     it('should destroy the welcome pane when tracked shell panes make the pane list non-empty', async () => {

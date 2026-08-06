@@ -29,6 +29,7 @@ import {
   removePaneFromStoredLayout,
   type PaneInsertion,
 } from '../utils/layoutManager.js';
+import { withPanesConfigFileWriteLock } from '../utils/panesConfigQueue.js';
 import {
   isAgenticCapability,
   type AgenticCapabilityRouter,
@@ -443,6 +444,8 @@ export async function openProjectCovenSession(
         pane: rawPaneForLayout(pane),
         controlPaneId: placement.controlPaneId,
         insertion: placement.insertion,
+        sidebarWidth: placement.config.controlPaneSize,
+        resolveSidebarWidthFromConfig: true,
       });
     }
   } catch (error) {
@@ -840,33 +843,18 @@ async function claimWorktree<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-/**
- * Serializes read-modify-write on the project config.
- *
- * readBridgeConfig -> mutate -> writeBridgeConfig is check-then-act on a whole
- * file. Concurrent spawns each read the same snapshot, append their own pane,
- * and the last write wins — so spawning three lanes at once persisted two.
- * Like the worktree claim, this only became reachable when lanes started
- * running in parallel.
- */
-let configMutation: Promise<unknown> = Promise.resolve();
-
 export async function mutateBridgeConfig<T>(
   projectRoot: string,
   mutate: (config: BridgeConfig) => T | Promise<T>,
 ): Promise<T> {
-  const previous = configMutation;
-  let release!: () => void;
-  configMutation = new Promise<void>((resolve) => { release = resolve; });
-  await previous.catch(() => undefined);
-  try {
+  const configPath = bridgeConfigPath(projectRoot);
+  await mkdir(path.dirname(configPath), { recursive: true });
+  return withPanesConfigFileWriteLock(configPath, async () => {
     const config = await readBridgeConfig(projectRoot);
     const result = await mutate(config);
     await writeBridgeConfig(projectRoot, config);
     return result;
-  } finally {
-    release();
-  }
+  });
 }
 
 /**
@@ -1084,6 +1072,8 @@ export async function spawnBridgePane(
         pane: rawPaneForLayout(pane),
         controlPaneId: placement.controlPaneId,
         insertion: placement.insertion,
+        sidebarWidth: placement.config.controlPaneSize,
+        resolveSidebarWidthFromConfig: true,
       });
     }
   } catch (error) {
@@ -1206,6 +1196,8 @@ export async function killBridgePane(
       panesFile: bridgeConfigPath(scoped.projectRoot),
       paneId: psychePaneId,
       controlPaneId: config.controlPaneId,
+      sidebarWidth: config.controlPaneSize,
+      resolveSidebarWidthFromConfig: true,
     });
   } else {
     // Legacy configs without a control pane have no persistent layout to

@@ -31,6 +31,7 @@ import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
 import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
+import { rollbackLocalPaneCreation } from './localPaneCreationRollback.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -265,14 +266,19 @@ export async function reopenWorktree(
   if (!controlPaneId) {
     throw new Error('Pane layout cannot be updated without a control pane');
   }
-  await insertPaneIntoStoredLayout({
-    panesFile: configPath,
-    panes: existingPanes,
-    pane: newPane,
-    controlPaneId,
-    insertion,
-    sidebarWidth,
-  });
+  try {
+    await insertPaneIntoStoredLayout({
+      panesFile: configPath,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth,
+    });
+  } catch (error) {
+    await rollbackLocalPaneCreation({ tmuxService, paneId: paneInfo });
+    throw error;
+  }
 
   // Always destroy welcome pane if one exists — shell panes can make isFirstContentPane
   // false even when no real content pane exists yet.

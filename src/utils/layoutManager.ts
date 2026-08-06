@@ -36,6 +36,8 @@ interface InsertPaneIntoStoredLayoutOptions {
   controlPaneId: string;
   insertion?: PaneInsertion;
   sidebarWidth?: number;
+  /** Resolve the width from the config reread while the layout lock is held. */
+  resolveSidebarWidthFromConfig?: boolean;
 }
 
 interface InsertPanesIntoStoredLayoutOptions {
@@ -47,6 +49,8 @@ interface InsertPanesIntoStoredLayoutOptions {
   }>;
   controlPaneId: string;
   sidebarWidth?: number;
+  /** Resolve the width from the config reread while the layout lock is held. */
+  resolveSidebarWidthFromConfig?: boolean;
 }
 
 function paneBindingSignature(panes: PsychePane[]): string {
@@ -67,6 +71,8 @@ type ApplyStoredPaneLayoutOptions = {
   terminalWidth: number;
   terminalHeight: number;
   sidebarWidth?: number;
+  /** Resolve the width from the config reread while the layout lock is held. */
+  resolveSidebarWidthFromConfig?: boolean;
   mutation: PaneLayoutMutation;
 };
 
@@ -108,7 +114,10 @@ async function applyStoredPaneLayoutWithConfigLockHeld(
       ? panesAfterRemoval
       : options.panes;
   const hasVisibleContentPanes = panes.some((pane) => !pane.hidden);
-  const sidebarWidth = options.sidebarWidth ?? SIDEBAR_WIDTH;
+  const sidebarWidth = options.resolveSidebarWidthFromConfig
+    && typeof rawConfig.controlPaneSize === 'number'
+    ? rawConfig.controlPaneSize
+    : options.sidebarWidth ?? SIDEBAR_WIDTH;
 
   await tmuxService.resizePane(options.controlPaneId, { width: sidebarWidth });
 
@@ -233,6 +242,7 @@ export async function insertPaneIntoStoredLayout(
     insertions: [{ pane: options.pane, insertion: options.insertion }],
     controlPaneId: options.controlPaneId,
     sidebarWidth: options.sidebarWidth,
+    resolveSidebarWidthFromConfig: options.resolveSidebarWidthFromConfig,
   });
 }
 
@@ -250,6 +260,7 @@ export async function insertPanesIntoStoredLayout(
     terminalWidth: dimensions.width,
     terminalHeight: dimensions.height,
     sidebarWidth: options.sidebarWidth,
+    resolveSidebarWidthFromConfig: options.resolveSidebarWidthFromConfig,
     mutation: {
       kind: 'batch',
       mutations: options.insertions.map(({ pane, insertion }) => insertion
@@ -270,6 +281,8 @@ export async function removePaneFromStoredLayout(options: {
   paneId: string;
   controlPaneId: string;
   sidebarWidth?: number;
+  /** Resolve the width from the config reread while the layout lock is held. */
+  resolveSidebarWidthFromConfig?: boolean;
 }): Promise<PaneLayout> {
   const tmuxService = TmuxService.getInstance();
   const dimensions = await tmuxService.getTerminalDimensions();
@@ -281,6 +294,7 @@ export async function removePaneFromStoredLayout(options: {
     terminalWidth: dimensions.width,
     terminalHeight: dimensions.height,
     sidebarWidth: options.sidebarWidth,
+    resolveSidebarWidthFromConfig: options.resolveSidebarWidthFromConfig,
     mutation: { kind: 'reconcile' },
   });
 }

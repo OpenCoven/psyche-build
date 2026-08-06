@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  mutateBridgeConfig,
   openProjectCovenSession,
   type BridgeSpawnDeps,
   type CovenClient,
 } from '../../src/daemon/bridge.js';
 import type { CovenSessionSummary } from '../../src/daemon/protocol.js';
 import { updatePaneMeta } from '../../src/daemon/index.js';
+import { withPanesConfigFileWriteLock } from '../../src/utils/panesConfigQueue.js';
 
 /**
  * `.psyche/psyche.config.json` *is* the pane registry: it is the only record
@@ -151,6 +153,63 @@ describe('project config write integrity', () => {
 });
 
 describe('project config concurrent mutation', () => {
+  it('rebases a bridge mutation after a layout transaction holding the shared config lock', async () => {
+    const root = await tempProject({
+      projectName: 'project',
+      projectRoot: '/project',
+      panes: [{ id: 'psyche-1', paneId: '%1' }],
+      settings: {},
+    });
+    const configPath = path.join(root, CONFIG_REL);
+    let releaseLayout: (() => void) | undefined;
+    const layoutBlocked = new Promise<void>((resolve) => {
+      releaseLayout = resolve;
+    });
+    let layoutLockHeld!: () => void;
+    const layoutLockAcquired = new Promise<void>((resolve) => {
+      layoutLockHeld = resolve;
+    });
+    let bridgeMutationEntered = false;
+
+    const layoutTransaction = withPanesConfigFileWriteLock(configPath, async () => {
+      layoutLockHeld();
+      await layoutBlocked;
+      const current = await readConfig(root);
+      await writeFile(configPath, JSON.stringify({
+        ...current,
+        controlPaneSize: 4,
+        paneLayout: {
+          version: 1,
+          root: { kind: 'leaf', paneId: 'psyche-1' },
+        },
+      }));
+    });
+    await layoutLockAcquired;
+
+    const bridgeMutation = mutateBridgeConfig(root, (config) => {
+      bridgeMutationEntered = true;
+      config.settings = { ...config.settings, showFooterTips: true };
+    });
+
+    // The old bridge-only queue let this callback read while the layout
+    // transaction held the file lock. It then wrote that stale snapshot after
+    // the layout completed, erasing the tree.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const enteredWhileLayoutLocked = bridgeMutationEntered;
+    releaseLayout?.();
+    await Promise.all([layoutTransaction, bridgeMutation]);
+
+    expect(enteredWhileLayoutLocked).toBe(false);
+    await expect(readConfig(root)).resolves.toMatchObject({
+      controlPaneSize: 4,
+      paneLayout: {
+        version: 1,
+        root: { kind: 'leaf', paneId: 'psyche-1' },
+      },
+      settings: { showFooterTips: true },
+    });
+  });
+
   it('keeps every pane when coven sessions open concurrently', async () => {
     // Regression: this path did its own read-modify-write outside the mutation
     // lock, so two concurrent opens read the same snapshot and the second write

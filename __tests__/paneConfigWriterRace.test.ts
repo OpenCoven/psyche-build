@@ -23,6 +23,7 @@ const tmuxServiceMock = vi.hoisted(() => ({
   sendShellCommand: vi.fn(async () => {}),
   sendTmuxKeys: vi.fn(async () => {}),
   selectPane: vi.fn(async () => {}),
+  killPane: vi.fn(async () => {}),
   getAllPaneInfo: vi.fn(async () => [
     { paneId: '%0', title: 'psyche' },
     { paneId: '%1', title: 'worker' },
@@ -271,5 +272,13 @@ describe.each([
     expect(config.panes.map((entry) => entry.id)).toEqual(['worker', expect.stringMatching(/^psyche-/)]);
     expect(config.panes[0]?.hidden).toBe(false);
     expect(config.preservedField).toBe('preserved');
+  });
+
+  it('removes the newly created tmux pane when layout persistence rejects', async () => {
+    insertPaneIntoStoredLayoutMock.mockRejectedValueOnce(new Error('layout write failed'));
+
+    await expect(create([])).rejects.toThrow('layout write failed');
+
+    expect(tmuxServiceMock.killPane).toHaveBeenCalledWith('%new');
   });
 });

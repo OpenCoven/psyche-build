@@ -1,6 +1,6 @@
 import path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import type { PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -33,6 +33,7 @@ import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
 import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
+import { rollbackLocalPaneCreation } from './localPaneCreationRollback.js';
 
 export interface CreatePaneOptions {
   prompt: string;
@@ -89,6 +90,32 @@ async function waitForPaneReady(
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+}
+
+function cleanupCreatedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  branchName: string,
+  options: { removeWorktree: boolean; removeBranch: boolean },
+): void {
+  if (options.removeWorktree) {
+    try {
+      execFileSync('git', ['-C', projectRoot, 'worktree', 'remove', '--force', worktreePath], {
+        stdio: 'ignore',
+      });
+    } catch {
+      // The pane layout error is the actionable failure.
+    }
+  }
+  if (options.removeBranch) {
+    try {
+      execFileSync('git', ['-C', projectRoot, 'branch', '-D', branchName], {
+        stdio: 'ignore',
+      });
+    } catch {
+      // The branch may not exist when worktree creation was incomplete.
+    }
   }
 }
 
@@ -209,6 +236,8 @@ export async function createPane(
 
   const worktreePath = existingWorktree?.worktreePath
     || path.join(projectRoot, '.psyche', 'worktrees', slug);
+  let worktreeCreatedByThisCall = false;
+  let branchCreatedByThisCall = false;
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
   // Load config to get control pane info
@@ -414,12 +443,7 @@ export async function createPane(
         }
       }
 
-      const maxWorktreeAttempts = 3;
-      const maxWaitTime = 5000; // 5 seconds max
-      const checkInterval = 100; // Check every 100ms
-      let worktreeCreated = fs.existsSync(worktreePath);
-
-      for (let attempt = 1; attempt <= maxWorktreeAttempts && !worktreeCreated; attempt++) {
+      if (!fs.existsSync(worktreePath)) {
         // Check if branch already exists (from a deleted worktree or a previous attempt)
         let branchExists = false;
         try {
@@ -439,29 +463,17 @@ export async function createPane(
         const worktreeAddCmd = branchExists
           ? `git worktree add "${worktreePath}" "${branchName}"`
           : `git worktree add "${worktreePath}" -b "${branchName}"${startPoint}`;
-        const worktreeCmd = `cd "${projectRoot}" && ${worktreeAddCmd} && cd "${worktreePath}"`;
-
-        // Send the git worktree command (auto-quoted by sendShellCommand)
-        await tmuxService.sendShellCommand(paneInfo, worktreeCmd);
-        await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-        const startTime = Date.now();
-        while (!fs.existsSync(worktreePath) && (Date.now() - startTime) < maxWaitTime) {
-          await new Promise((resolve) => setTimeout(resolve, checkInterval));
-        }
-
-        worktreeCreated = fs.existsSync(worktreePath);
-        if (!worktreeCreated && attempt < maxWorktreeAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-        }
+        execSync(worktreeAddCmd, {
+          encoding: 'utf-8',
+          stdio: 'pipe',
+          cwd: projectRoot,
+        });
+        worktreeCreatedByThisCall = true;
+        branchCreatedByThisCall = !branchExists;
       }
 
-      // Verify worktree was created successfully
-      if (!worktreeCreated) {
-        throw new Error(`Worktree directory not created at ${worktreePath} after ${maxWorktreeAttempts} attempts`);
-      }
-
-      // Give a bit more time for git to finish setting up the worktree
+      await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
+      await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
@@ -580,14 +592,28 @@ export async function createPane(
   if (!controlPaneId) {
     throw new Error('Pane layout cannot be updated without a control pane');
   }
-  await insertPaneIntoStoredLayout({
-    panesFile: configPath,
-    panes: existingPanes,
-    pane: newPane,
-    controlPaneId,
-    insertion,
-    sidebarWidth,
-  });
+  try {
+    await insertPaneIntoStoredLayout({
+      panesFile: configPath,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth,
+    });
+  } catch (error) {
+    await rollbackLocalPaneCreation({
+      tmuxService,
+      paneId: paneInfo,
+      cleanup: worktreeCreatedByThisCall || branchCreatedByThisCall
+        ? () => cleanupCreatedWorktree(projectRoot, worktreePath, branchName, {
+            removeWorktree: worktreeCreatedByThisCall,
+            removeBranch: branchCreatedByThisCall,
+          })
+        : undefined,
+    });
+    throw error;
+  }
 
   // Launch agent if specified
   if (agent) {

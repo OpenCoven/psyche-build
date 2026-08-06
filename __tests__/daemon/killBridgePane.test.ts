@@ -139,6 +139,22 @@ describe('killBridgePane', () => {
     });
   });
 
+  it('keeps the compact control pane width while removing a layout leaf', async () => {
+    writeConfig([pane()]);
+    const config = readConfig();
+    config.controlPaneId = '%0';
+    config.controlPaneSize = 4;
+    config.paneLayout = {
+      version: 1,
+      root: { kind: 'leaf', paneId: 'psyche-1' },
+    };
+    fs.writeFileSync(configPath(), JSON.stringify(config));
+
+    await killBridgePane(projectRoot, '%3', deps());
+
+    expect(tmuxServiceMock.resizePane).toHaveBeenCalledWith('%0', { width: 4 });
+  });
+
   it('still deregisters a pane whose tmux pane is already gone', async () => {
     writeConfig([pane()]);
     const d = deps(false);
