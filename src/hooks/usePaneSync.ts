@@ -1,18 +1,19 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { PsychePane } from '../types.js';
+import type { PsycheConfig, PsychePane } from '../types.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT } from '../constants/timing.js';
-import type { PsycheConfig } from './usePaneLoading.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+
+type StoredPsycheConfig = Partial<PsycheConfig> & { panes: PsychePane[] };
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -121,12 +122,12 @@ export async function savePanesToFile(
     }
 
     // Read existing config to preserve other fields
-    let config: PsycheConfig = { panes: [] };
+    let config: StoredPsycheConfig = { panes: [] };
     try {
       const content = await fs.readFile(panesFile, 'utf-8');
       const parsed = JSON.parse(content);
       if (!Array.isArray(parsed)) {
-        config = parsed;
+        config = parsed as StoredPsycheConfig;
       }
     } catch {}
 
@@ -267,12 +268,12 @@ export async function saveUpdatedPaneConfig(
 ): Promise<void> {
   await withWriteLock(async () => {
     // Re-read config in case it changed
-    let currentConfig: PsycheConfig = { panes: [] };
+    let currentConfig: StoredPsycheConfig = { panes: [] };
     try {
       const content = await fs.readFile(panesFile, 'utf-8');
       const parsed = JSON.parse(content);
       if (!Array.isArray(parsed)) {
-        currentConfig = parsed;
+        currentConfig = parsed as StoredPsycheConfig;
       }
     } catch {}
 

@@ -10,6 +10,7 @@ import {
   loadSidebarProjectsFromFile,
   recreateKilledWorktreePanes,
   fetchTmuxPaneIds,
+  reconcileStoredPaneLayout,
 } from './usePaneLoading.js';
 import {
   enforcePaneTitles,
@@ -24,8 +25,6 @@ import {
 } from './useShellDetection.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { PaneEventService, type PaneEventMode } from '../services/PaneEventService.js';
-import { enforceControlPaneSize } from '../utils/tmux.js';
-import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
@@ -147,14 +146,16 @@ export default function usePanes(
         // reflecting any user-defined display names in the visible border title.
         await enforcePaneTitles(finalPanes, allPaneIds, controlPaneId);
 
-        // Check if panes changed (compare IDs and paneIds only)
-        const currentPaneIds = panesRef.current.map(p => `${p.id}:${p.paneId}`).sort().join(',');
-        const newPaneIds = finalPanes.map(p => `${p.id}:${p.paneId}`).sort().join(',');
+        // Check whether persisted pane identity or visibility metadata changed.
+        const currentPaneIds = panesRef.current
+          .map(p => `${p.id}:${p.paneId}:${p.hidden === true}`)
+          .sort()
+          .join(',');
+        const newPaneIds = finalPanes
+          .map(p => `${p.id}:${p.paneId}:${p.hidden === true}`)
+          .sort()
+          .join(',');
 
-        // Check if IDs were remapped
-        const idsChanged = finalPanes.some((pane, idx) =>
-          loadedPanes[idx] && loadedPanes[idx].paneId !== pane.paneId
-        );
         const sidebarProjectsChanged = JSON.stringify(sidebarProjectsRef.current)
           !== JSON.stringify(nextSidebarProjects);
 
@@ -172,26 +173,23 @@ export default function usePanes(
             setSidebarProjects(nextSidebarProjects);
           }
 
-          // Save to file if IDs were remapped OR if shell panes were added/removed
-          if (idsChanged || shellPanesAdded || shellPanesRemoved) {
+          // Save before reconciling so a failed tmux projection leaves the prior
+          // persisted layout while retaining the current pane metadata.
+          if (currentPaneIds !== newPaneIds || shellPanesAdded || shellPanesRemoved) {
             await saveUpdatedPaneConfig(panesFile, finalPanes, withWriteLock);
+
+            await reconcileStoredPaneLayout(
+              panesFile,
+              finalPanes,
+              controlPaneId,
+              allPaneIds
+            );
 
             if (shellPanesRemoved) {
               // If shell panes were removed and we now have 0 panes, recreate welcome pane.
               if (finalPanes.length === 0) {
                 const sessionProjectRoot = path.dirname(path.dirname(panesFile));
                 await handleLastPaneRemoval(sessionProjectRoot);
-              } else if (controlPaneId) {
-                // Manual shell exits bypass closeAction's layout recalc path.
-                // Re-apply layout so adjacent panes are rebalanced.
-                try {
-                  await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
-                } catch (error) {
-                  LogService.getInstance().debug(
-                    `Layout rebalance after shell close failed: ${error instanceof Error ? error.message : String(error)}`,
-                    'usePanes'
-                  );
-                }
               }
             }
           }
@@ -211,6 +209,7 @@ export default function usePanes(
   };
 
   const savePanes = async (newPanes: PsychePane[]) => {
+    const previousPanes = panesRef.current;
     const updatedPanes = await savePanesToFile(panesFile, newPanes, withWriteLock);
     panesRef.current = updatedPanes;
     setPanes(updatedPanes);
@@ -225,6 +224,19 @@ export default function usePanes(
     if (JSON.stringify(sidebarProjectsRef.current) !== JSON.stringify(nextSidebarProjects)) {
       sidebarProjectsRef.current = nextSidebarProjects;
       setSidebarProjects(nextSidebarProjects);
+    }
+
+    const paneMetadataChanged = updatedPanes.some((pane) => {
+      const previousPane = previousPanes.find((candidate) => candidate.id === pane.id);
+      return previousPane !== undefined
+        && (previousPane.hidden !== pane.hidden || previousPane.paneId !== pane.paneId);
+    });
+    const shellMetadataRemoved = previousPanes.some(
+      (pane) => pane.type === 'shell'
+        && !updatedPanes.some((candidate) => candidate.id === pane.id)
+    );
+    if (paneMetadataChanged || shellMetadataRemoved) {
+      await reconcileStoredPaneLayout(panesFile, updatedPanes, controlPaneId);
     }
   };
 

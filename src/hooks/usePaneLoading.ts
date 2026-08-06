@@ -1,12 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { PsychePane, SidebarProject } from '../types.js';
+import type { PsycheConfig, PsychePane, SidebarProject } from '../types.js';
 import { splitPane } from '../utils/tmux.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
-import { TMUX_COMMAND_TIMEOUT, TMUX_RETRY_DELAY } from '../constants/timing.js';
+import { TMUX_RETRY_DELAY } from '../constants/timing.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { buildAgentResumeOrLaunchCommand } from '../utils/agentLaunch.js';
@@ -16,29 +16,88 @@ import {
   installCodexPaneHooks,
 } from '../utils/codexHooks.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
-import {
-  getVisiblePanes,
-  syncHiddenStateFromCurrentWindow,
-} from '../utils/paneVisibility.js';
+import { syncHiddenStateFromCurrentWindow } from '../utils/paneVisibility.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
-
-// Separate config structure to match new format
-export interface PsycheConfig {
-  projectName?: string;
-  projectRoot?: string;
-  panes: PsychePane[];
-  sidebarProjects?: SidebarProject[];
-  settings?: any;
-  lastUpdated?: string;
-  controlPaneId?: string;
-  welcomePaneId?: string;
-}
+import { applyStoredPaneLayout } from '../utils/layoutManager.js';
 
 interface PaneLoadResult {
   panes: PsychePane[];
   allPaneIds: string[];
   titleToId: Map<string, string>;
+}
+
+async function savePaneMetadata(
+  panesFile: string,
+  panes: PsychePane[]
+): Promise<PsycheConfig | undefined> {
+  try {
+    const config = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
+    if (Array.isArray(config)) {
+      return undefined;
+    }
+
+    const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
+    const projectName = config.projectName || path.basename(projectRoot);
+    config.panes = panes;
+    config.sidebarProjects = normalizeSidebarProjects(
+      config.sidebarProjects,
+      panes,
+      projectRoot,
+      projectName
+    );
+    config.lastUpdated = new Date().toISOString();
+    await atomicWriteJson(panesFile, config);
+    return config;
+  } catch (error) {
+    LogService.getInstance().debug(
+      `Failed to save reconciled pane metadata: ${error}`,
+      'usePaneLoading'
+    );
+    return undefined;
+  }
+}
+
+export async function reconcileStoredPaneLayout(
+  panesFile: string,
+  panes: PsychePane[],
+  controlPaneId: string | undefined,
+  knownPaneIds?: string[]
+): Promise<void> {
+  if (!controlPaneId) {
+    return;
+  }
+
+  const tmuxService = TmuxService.getInstance();
+  try {
+    const paneIds = knownPaneIds ?? await tmuxService.getAllPaneIds('session');
+    if (!paneIds.includes(controlPaneId)) {
+      return;
+    }
+
+    const dimensions = await tmuxService.getTerminalDimensions();
+    await applyStoredPaneLayout({
+      panesFile,
+      panes,
+      controlPaneId,
+      terminalWidth: dimensions.width,
+      terminalHeight: dimensions.height,
+      mutation: { kind: 'reconcile' },
+    });
+  } catch (error) {
+    LogService.getInstance().error(
+      'Failed to reconcile stored pane layout',
+      'usePaneLoading',
+      undefined,
+      error instanceof Error ? error : undefined
+    );
+  }
+}
+
+function paneMetadataSignature(panes: PsychePane[]): string {
+  return panes
+    .map((pane) => `${pane.id}:${pane.paneId}:${pane.hidden === true}`)
+    .join('|');
 }
 
 async function restoreAgentSessionForPane(
@@ -166,9 +225,9 @@ export async function loadSidebarProjectsFromFile(
   try {
     const content = await fs.readFile(panesFile, 'utf-8');
     const parsed: any = JSON.parse(content);
-    const config = Array.isArray(parsed)
+    const config = (Array.isArray(parsed)
       ? { panes: parsed as PsychePane[] }
-      : parsed as PsycheConfig;
+      : parsed) as Partial<PsycheConfig>;
     const configPanes = Array.isArray(config.panes) ? config.panes : [];
     const effectivePanes = panes || configPanes;
     const projectRoot = config.projectRoot || fallbackProjectRoot;
@@ -225,11 +284,6 @@ export async function recreateMissingPanes(
     }
   }
 
-  // Apply even-horizontal layout after creating panes
-  try {
-    await tmuxService.selectLayout('even-horizontal');
-    await tmuxService.refreshClient();
-  } catch {}
 }
 
 /**
@@ -314,35 +368,6 @@ export async function recreateKilledWorktreePanes(
     }
   }
 
-  // Recalculate layout after recreating panes
-  try {
-    const configContent = await fs.readFile(panesFile, 'utf-8');
-    const config = JSON.parse(configContent);
-    if (config.controlPaneId) {
-      const { recalculateAndApplyLayout } = await import('../utils/layoutManager.js');
-      const { getTerminalDimensions } = await import('../utils/tmux.js');
-      const dimensions = getTerminalDimensions();
-
-      const contentPaneIds = getVisiblePanes(updatedPanes).map(p => p.paneId);
-      recalculateAndApplyLayout(
-        config.controlPaneId,
-        contentPaneIds,
-        dimensions.width,
-        dimensions.height
-      );
-
-  //       LogService.getInstance().debug(
-  //         `Recalculated layout after recreating worktree panes`,
-  //         'shellDetection'
-  //       );
-    }
-  } catch (error) {
-  //     LogService.getInstance().debug(
-  //       'Failed to recalculate layout after recreating worktree panes',
-  //       'shellDetection'
-  //     );
-  }
-
   return updatedPanes;
 }
 
@@ -359,6 +384,7 @@ export async function loadAndProcessPanes(
   isInitialLoad: boolean
 ): Promise<PaneLoadResult> {
   const loadedPanes = await loadPanesFromFile(panesFile);
+  const loadedPaneSignature = paneMetadataSignature(loadedPanes);
   let { allPaneIds, titleToId, currentWindowPaneIds } = await fetchTmuxPaneIds();
 
   // Attempt to rebind panes whose IDs changed by matching on their stable tmux title.
@@ -386,29 +412,6 @@ export async function loadAndProcessPanes(
         p => !(p.type === 'shell' && !allPaneIds.includes(p.paneId))
       );
 
-      // Save the cleaned config immediately to prevent these panes from reappearing
-      try {
-        const fs = await import('fs/promises');
-        const configContent = await fs.readFile(panesFile, 'utf-8');
-        const config = JSON.parse(configContent);
-        config.panes = reboundPanes;
-        const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
-        const projectName = config.projectName || path.basename(projectRoot);
-        config.sidebarProjects = normalizeSidebarProjects(
-          config.sidebarProjects,
-          reboundPanes,
-          projectRoot,
-          projectName
-        );
-        config.lastUpdated = new Date().toISOString();
-        await atomicWriteJson(panesFile, config);
-        LogService.getInstance().debug('Saved cleaned config after removing stale shell panes', 'usePaneLoading');
-      } catch (saveError) {
-        LogService.getInstance().debug(
-          `Failed to save cleaned config: ${saveError}`,
-          'usePaneLoading'
-        );
-      }
     }
   }
 
@@ -433,6 +436,30 @@ export async function loadAndProcessPanes(
     reboundPanes = syncHiddenStateFromCurrentWindow(
       reboundPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds)),
       currentWindowPaneIds
+    );
+  }
+
+  const paneMetadataChanged = paneMetadataSignature(reboundPanes) !== loadedPaneSignature;
+  let config: PsycheConfig | undefined;
+  if (paneMetadataChanged) {
+    config = await savePaneMetadata(panesFile, reboundPanes);
+  } else if (isInitialLoad) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
+      if (!Array.isArray(parsed)) {
+        config = parsed;
+      }
+    } catch {
+      // The regular pane loader already handles unavailable configs.
+    }
+  }
+
+  if ((isInitialLoad || paneMetadataChanged) && config) {
+    await reconcileStoredPaneLayout(
+      panesFile,
+      reboundPanes,
+      config.controlPaneId,
+      allPaneIds
     );
   }
 
