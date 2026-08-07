@@ -99,6 +99,7 @@ export interface PullRequestOverviewResult {
 }
 
 type ErrorFactory = () => never;
+type PlainRecord = Record<string, unknown>;
 
 type CheckBucket = 'pending' | 'pass' | 'fail' | 'skipping' | 'cancel';
 type CheckOutcome = 'pending' | 'passed' | 'failed' | 'skipped' | 'cancelled';
@@ -112,25 +113,34 @@ const PULL_REQUEST_STATES = ['OPEN', 'CLOSED', 'MERGED'] as const;
 const REVIEW_DECISIONS = ['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'] as const;
 const MERGEABLE_STATES = ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'] as const;
 const REPOSITORY_VISIBILITIES = ['PUBLIC', 'PRIVATE', 'INTERNAL'] as const;
+const MISSING_PROPERTY = Symbol('missingProperty');
+const RFC_3339_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|([+-])(\d{2}):(\d{2}))$/;
 
 export function parseGitHubAccount(value: unknown, host: string): GitHubAccountRef {
   try {
     const normalizedHost = requireNonEmptyString(host, invalidGitHubAccount).trim().toLowerCase();
     const record = requireRecord(value, invalidGitHubAccount);
-    const login = requireNonEmptyString(record.login, invalidGitHubAccount);
-    const url = requireHttpsUrl(record.url, invalidGitHubAccount);
+    const login = requireNonEmptyString(
+      getOwnDataProperty(record, 'login', invalidGitHubAccount),
+      invalidGitHubAccount,
+    );
+    const url = requireHttpsUrl(
+      getOwnDataProperty(record, 'url', invalidGitHubAccount),
+      invalidGitHubAccount,
+    );
     if (new URL(url).hostname.toLowerCase() !== normalizedHost) {
       invalidGitHubAccount();
     }
 
-    const idValue = record.id;
+    const idValue = getOptionalOwnDataProperty(record, 'id', invalidGitHubAccount);
     const parsed: GitHubAccountRef = {
       host: normalizedHost,
       login,
       source: 'gh',
     };
 
-    if (idValue !== undefined && idValue !== null) {
+    if (idValue !== MISSING_PROPERTY && idValue !== null) {
       parsed.id = parseAccountId(idValue, invalidGitHubAccount);
     }
 
@@ -145,14 +155,24 @@ export function parseRepositoryPermissions(value: unknown): RepositoryPermission
     return null;
   }
 
-  const record = requireRecord(value, invalidRepositoryPermissions);
-  return {
-    admin: requireBoolean(record.admin, invalidRepositoryPermissions),
-    maintain: requireBoolean(record.maintain, invalidRepositoryPermissions),
-    push: requireBoolean(record.push, invalidRepositoryPermissions),
-    triage: requireBoolean(record.triage, invalidRepositoryPermissions),
-    pull: requireBoolean(record.pull, invalidRepositoryPermissions),
-  };
+  try {
+    const record = requireRecord(value, invalidRepositoryPermissions);
+    return {
+      admin: requireBoolean(getOwnDataProperty(record, 'admin', invalidRepositoryPermissions), invalidRepositoryPermissions),
+      maintain: requireBoolean(
+        getOwnDataProperty(record, 'maintain', invalidRepositoryPermissions),
+        invalidRepositoryPermissions,
+      ),
+      push: requireBoolean(getOwnDataProperty(record, 'push', invalidRepositoryPermissions), invalidRepositoryPermissions),
+      triage: requireBoolean(
+        getOwnDataProperty(record, 'triage', invalidRepositoryPermissions),
+        invalidRepositoryPermissions,
+      ),
+      pull: requireBoolean(getOwnDataProperty(record, 'pull', invalidRepositoryPermissions), invalidRepositoryPermissions),
+    };
+  } catch {
+    return invalidRepositoryPermissions();
+  }
 }
 
 export function parsePullRequestOverview(
@@ -169,41 +189,88 @@ export function parsePullRequestOverview(
     const parsedPermissions = parseRepositoryPermissionsForOverview(permissions);
     const checks = parseChecks(allChecks, requiredChecks);
 
-    const author = requireRecord(record.author, invalidPullRequestOverview);
-    const commits = requireArray(record.commits, invalidPullRequestOverview);
+    const author = requireRecord(
+      getOwnDataProperty(record, 'author', invalidPullRequestOverview),
+      invalidPullRequestOverview,
+    );
+    const commitCount = parseCommitCount(
+      getOwnDataProperty(record, 'commits', invalidPullRequestOverview),
+    );
 
     return {
       repository: parsedRepository,
-      number: requireNonNegativeInteger(record.number, invalidPullRequestOverview),
-      url: requireHttpsUrl(record.url, invalidPullRequestOverview),
-      title: requireNonEmptyString(record.title, invalidPullRequestOverview),
-      bodyPreview: requireString(record.body, invalidPullRequestOverview).slice(0, MAX_PR_BODY_PREVIEW),
-      state: requireEnumValue(record.state, PULL_REQUEST_STATES, invalidPullRequestOverview),
-      isDraft: requireBoolean(record.isDraft, invalidPullRequestOverview),
-      authorLogin: requireNonEmptyString(author.login, invalidPullRequestOverview),
-      baseRefName: requireNonEmptyString(record.baseRefName, invalidPullRequestOverview),
-      headRefName: requireNonEmptyString(record.headRefName, invalidPullRequestOverview),
-      labels: parseLabels(record.labels),
-      assignees: parseLoginList(record.assignees),
-      requestedReviewers: parseLoginList(record.reviewRequests),
+      number: requireNonNegativeInteger(
+        getOwnDataProperty(record, 'number', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      url: requireHttpsUrl(getOwnDataProperty(record, 'url', invalidPullRequestOverview), invalidPullRequestOverview),
+      title: requireNonEmptyString(
+        getOwnDataProperty(record, 'title', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      bodyPreview: requireString(
+        getOwnDataProperty(record, 'body', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ).slice(0, MAX_PR_BODY_PREVIEW),
+      state: requireEnumValue(
+        getOwnDataProperty(record, 'state', invalidPullRequestOverview),
+        PULL_REQUEST_STATES,
+        invalidPullRequestOverview,
+      ),
+      isDraft: requireBoolean(
+        getOwnDataProperty(record, 'isDraft', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      authorLogin: requireNonEmptyString(
+        getOwnDataProperty(author, 'login', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      baseRefName: requireNonEmptyString(
+        getOwnDataProperty(record, 'baseRefName', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      headRefName: requireNonEmptyString(
+        getOwnDataProperty(record, 'headRefName', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      labels: parseLabels(getOwnDataProperty(record, 'labels', invalidPullRequestOverview)),
+      assignees: parseLoginList(getOwnDataProperty(record, 'assignees', invalidPullRequestOverview)),
+      requestedReviewers: parseLoginList(
+        getOwnDataProperty(record, 'reviewRequests', invalidPullRequestOverview),
+      ),
       viewerPermissions: parsedPermissions,
       reviewDecision: parseNullableEnumValue(
-        record.reviewDecision,
+        getOwnDataProperty(record, 'reviewDecision', invalidPullRequestOverview),
         REVIEW_DECISIONS,
         invalidPullRequestOverview,
       ),
       mergeable: parseNullableEnumValue(
-        record.mergeable,
+        getOwnDataProperty(record, 'mergeable', invalidPullRequestOverview),
         MERGEABLE_STATES,
         invalidPullRequestOverview,
       ),
-      mergeStateStatus: parseNullableNonEmptyString(record.mergeStateStatus, invalidPullRequestOverview),
+      mergeStateStatus: parseNullableNonEmptyString(
+        getOwnDataProperty(record, 'mergeStateStatus', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
       checks,
-      additions: requireNonNegativeInteger(record.additions, invalidPullRequestOverview),
-      deletions: requireNonNegativeInteger(record.deletions, invalidPullRequestOverview),
-      changedFiles: requireNonNegativeInteger(record.changedFiles, invalidPullRequestOverview),
-      commitCount: commits.length,
-      updatedAt: requireDateString(record.updatedAt, invalidPullRequestOverview),
+      additions: requireNonNegativeInteger(
+        getOwnDataProperty(record, 'additions', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      deletions: requireNonNegativeInteger(
+        getOwnDataProperty(record, 'deletions', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      changedFiles: requireNonNegativeInteger(
+        getOwnDataProperty(record, 'changedFiles', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      commitCount,
+      updatedAt: requireDateString(
+        getOwnDataProperty(record, 'updatedAt', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
       fetchedAt: requireDateString(fetchedAt, invalidPullRequestOverview),
     };
   } catch {
@@ -223,11 +290,19 @@ function invalidPullRequestOverview(): never {
   throw new Error('invalid pull request overview');
 }
 
-function requireRecord(value: unknown, onError: ErrorFactory): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+function requireRecord(value: unknown, onError: ErrorFactory): PlainRecord {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return onError();
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return onError();
+    }
+    return value as PlainRecord;
+  } catch {
     return onError();
   }
-  return value as Record<string, unknown>;
 }
 
 function requireArray(value: unknown, onError: ErrorFactory): unknown[] {
@@ -282,9 +357,35 @@ function requireHttpsUrl(value: unknown, onError: ErrorFactory): string {
 
 function requireDateString(value: unknown, onError: ErrorFactory): string {
   const parsed = requireNonEmptyString(value, onError);
-  if (Number.isNaN(Date.parse(parsed))) {
+  const match = RFC_3339_TIMESTAMP.exec(parsed);
+  if (!match) {
     return onError();
   }
+  const year = Number.parseInt(match[1]!, 10);
+  const month = Number.parseInt(match[2]!, 10);
+  const day = Number.parseInt(match[3]!, 10);
+  const hour = Number.parseInt(match[4]!, 10);
+  const minute = Number.parseInt(match[5]!, 10);
+  const second = Number.parseInt(match[6]!, 10);
+
+  if (month < 1 || month > 12) {
+    return onError();
+  }
+  if (day < 1 || day > getDaysInMonth(year, month)) {
+    return onError();
+  }
+  if (hour > 23 || minute > 59 || second > 59) {
+    return onError();
+  }
+
+  if (match[8] !== 'Z') {
+    const offsetHour = Number.parseInt(match[10]!, 10);
+    const offsetMinute = Number.parseInt(match[11]!, 10);
+    if (offsetHour > 23 || offsetMinute > 59) {
+      return onError();
+    }
+  }
+
   return parsed;
 }
 
@@ -333,20 +434,23 @@ function parseAccountId(value: unknown, onError: ErrorFactory): string {
 function parseRepositoryRef(value: unknown, onError: ErrorFactory): GitHubRepositoryRef {
   const record = requireRecord(value, onError);
   const repository: GitHubRepositoryRef = {
-    host: requireNonEmptyString(record.host, onError).trim().toLowerCase(),
-    owner: requireNonEmptyString(record.owner, onError),
-    name: requireNonEmptyString(record.name, onError),
-    url: requireHttpsUrl(record.url, onError),
+    host: requireNonEmptyString(getOwnDataProperty(record, 'host', onError), onError).trim().toLowerCase(),
+    owner: requireNonEmptyString(getOwnDataProperty(record, 'owner', onError), onError),
+    name: requireNonEmptyString(getOwnDataProperty(record, 'name', onError), onError),
+    url: requireHttpsUrl(getOwnDataProperty(record, 'url', onError), onError),
   };
 
-  if (record.visibility !== undefined) {
-    repository.visibility = requireEnumValue(record.visibility, REPOSITORY_VISIBILITIES, onError);
+  const visibility = getOptionalOwnDataProperty(record, 'visibility', onError);
+  if (visibility !== MISSING_PROPERTY) {
+    repository.visibility = requireEnumValue(visibility, REPOSITORY_VISIBILITIES, onError);
   }
-  if (record.archived !== undefined) {
-    repository.archived = requireBoolean(record.archived, onError);
+  const archived = getOptionalOwnDataProperty(record, 'archived', onError);
+  if (archived !== MISSING_PROPERTY) {
+    repository.archived = requireBoolean(archived, onError);
   }
-  if (record.fork !== undefined) {
-    repository.fork = requireBoolean(record.fork, onError);
+  const fork = getOptionalOwnDataProperty(record, 'fork', onError);
+  if (fork !== MISSING_PROPERTY) {
+    repository.fork = requireBoolean(fork, onError);
   }
 
   return repository;
@@ -366,8 +470,14 @@ function parseLabels(value: unknown): readonly { name: string; color: string }[]
   return requireArray(value, invalidPullRequestOverview).map((entry) => {
     const record = requireRecord(entry, invalidPullRequestOverview);
     return {
-      name: requireNonEmptyString(record.name, invalidPullRequestOverview),
-      color: requireNonEmptyString(record.color, invalidPullRequestOverview),
+      name: requireNonEmptyString(
+        getOwnDataProperty(record, 'name', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
+      color: requireNonEmptyString(
+        getOwnDataProperty(record, 'color', invalidPullRequestOverview),
+        invalidPullRequestOverview,
+      ),
     };
   });
 }
@@ -375,7 +485,10 @@ function parseLabels(value: unknown): readonly { name: string; color: string }[]
 function parseLoginList(value: unknown): readonly string[] {
   return requireArray(value, invalidPullRequestOverview).map((entry) => {
     const record = requireRecord(entry, invalidPullRequestOverview);
-    return requireNonEmptyString(record.login, invalidPullRequestOverview);
+    return requireNonEmptyString(
+      getOwnDataProperty(record, 'login', invalidPullRequestOverview),
+      invalidPullRequestOverview,
+    );
   });
 }
 
@@ -383,11 +496,12 @@ function parseChecks(allChecks: unknown, requiredChecks: unknown): PullRequestCh
   const parsedAllChecks = requireArray(allChecks, invalidPullRequestOverview).map((entry) =>
     parseCheck(entry, invalidPullRequestOverview),
   );
-  const requiredKeys = new Set(
-    requireArray(requiredChecks, invalidPullRequestOverview).map((entry) =>
-      parseCheck(entry, invalidPullRequestOverview).key,
-    ),
-  );
+  const requiredCounts = new Map<string, number>();
+  for (const check of requireArray(requiredChecks, invalidPullRequestOverview).map((entry) =>
+    parseCheck(entry, invalidPullRequestOverview),
+  )) {
+    requiredCounts.set(check.key, (requiredCounts.get(check.key) ?? 0) + 1);
+  }
 
   const summary: PullRequestCheckSummary = {
     total: 0,
@@ -404,7 +518,11 @@ function parseChecks(allChecks: unknown, requiredChecks: unknown): PullRequestCh
     summary.total += 1;
     incrementSummary(summary, check.outcome);
 
-    const target = requiredKeys.has(check.key) ? summary.required : summary.optional;
+    const remainingRequired = requiredCounts.get(check.key) ?? 0;
+    const target = remainingRequired > 0 ? summary.required : summary.optional;
+    if (remainingRequired > 0) {
+      requiredCounts.set(check.key, remainingRequired - 1);
+    }
     target.total += 1;
     if (check.outcome === 'pending') {
       target.pending += 1;
@@ -421,14 +539,14 @@ function parseChecks(allChecks: unknown, requiredChecks: unknown): PullRequestCh
 function parseCheck(value: unknown, onError: ErrorFactory): ParsedCheck {
   const record = requireRecord(value, onError);
   const bucket = requireEnumValue(
-    record.bucket,
+    getOwnDataProperty(record, 'bucket', onError),
     ['pending', 'pass', 'fail', 'skipping', 'cancel'] as const,
     onError,
   );
-  const workflow = requireNonEmptyString(record.workflow, onError);
-  const name = requireNonEmptyString(record.name, onError);
-  const link = requireHttpsUrl(record.link, onError);
-  requireNonEmptyString(record.state, onError);
+  const workflow = requireNonEmptyString(getOwnDataProperty(record, 'workflow', onError), onError);
+  const name = requireNonEmptyString(getOwnDataProperty(record, 'name', onError), onError);
+  const link = requireHttpsUrl(getOwnDataProperty(record, 'link', onError), onError);
+  requireNonEmptyString(getOwnDataProperty(record, 'state', onError), onError);
 
   return {
     key: buildRequiredCheckKey(workflow, name, link),
@@ -436,8 +554,69 @@ function parseCheck(value: unknown, onError: ErrorFactory): ParsedCheck {
   };
 }
 
+function parseCommitCount(value: unknown): number {
+  const commits = requireArray(value, invalidPullRequestOverview);
+  for (const entry of commits) {
+    const record = requireRecord(entry, invalidPullRequestOverview);
+    requireNonEmptyString(
+      getOwnDataProperty(record, 'oid', invalidPullRequestOverview),
+      invalidPullRequestOverview,
+    );
+  }
+  return commits.length;
+}
+
 function buildRequiredCheckKey(workflow: string, name: string, link: string): string {
   return `${workflow}\0${name}\0${link}`;
+}
+
+function getOwnDataProperty(record: PlainRecord, key: string, onError: ErrorFactory): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      return onError();
+    }
+    return descriptor.value;
+  } catch {
+    return onError();
+  }
+}
+
+function getOptionalOwnDataProperty(
+  record: PlainRecord,
+  key: string,
+  onError: ErrorFactory,
+): unknown | typeof MISSING_PROPERTY {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (!descriptor) {
+      return MISSING_PROPERTY;
+    }
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      return onError();
+    }
+    return descriptor.value;
+  } catch {
+    return onError();
+  }
+}
+
+function getDaysInMonth(year: number, month: number): number {
+  switch (month) {
+    case 2:
+      return isLeapYear(year) ? 29 : 28;
+    case 4:
+    case 6:
+    case 9:
+    case 11:
+      return 30;
+    default:
+      return 31;
+  }
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function mapCheckOutcome(bucket: CheckBucket): CheckOutcome {
