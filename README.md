@@ -75,7 +75,7 @@ The doctor output also calls out supported agent CLIs and the Coven boundary:
 - Without an agent CLI, Psyche Build can still open and manage plain terminal panes.
 - With a supported agent CLI, Psyche Build can launch agent panes from prompts.
 - Without Coven, Psyche Build still manages tmux panes, worktrees, merge, PR, settings, rituals, and local file browsing.
-- With a local Coven daemon, Psyche Build can also list, open, and launch scoped Coven harness sessions.
+- With a local Coven daemon, Psyche Build's CLI and bridge can list, open, and launch scoped Coven harness sessions.
 
 ## What it does
 
@@ -92,7 +92,7 @@ Psyche Build creates a tmux pane for each task. Every work pane gets its own git
 - **Multi-project cockpit** — add multiple repos to the same session and switch scope from the sidebar
 - **Rituals** — open, save, and attach reusable project setup recipes without restoring brittle tmux snapshots
 - **Fix OpenClaw cockpit** — a built-in ritual opens Coven repair, verification, diff watch, and session panes so rescue work stays visible
-- **Coven sessions** — when Coven is running locally, the sidebar shows live session status and `[o]` opens any session as a visible Psyche Build pane
+- **Coven sessions** — the CLI sidebar can show live session status and `[o]` opens a session as a visible Psyche Build pane; the macOS app rail intentionally shows app-origin local threads only
 - **Lifecycle hooks** — run scripts on worktree create, pre-merge, post-merge, and more
 
 ## Keyboard Shortcuts
@@ -161,7 +161,10 @@ changes.
 
 ## Coven and OpenCoven
 
-Psyche Build works as a standalone tmux/worktree cockpit. It also speaks to Coven when a local Coven daemon is available, so OpenCoven-managed harness sessions can appear beside normal Psyche Build panes.
+Psyche Build works as a standalone tmux/worktree cockpit. Its CLI and bridge
+also speak to Coven when a local daemon is available, so OpenCoven-managed
+harness sessions can appear beside normal Psyche Build panes. The macOS app
+rail intentionally does not render daemon-discovered sessions.
 
 Coven is the harness substrate. Psyche Build is the cockpit. OpenMeow and OpenClaw can sit above them as intake and orchestration layers.
 

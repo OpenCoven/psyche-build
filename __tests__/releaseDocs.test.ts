@@ -219,6 +219,29 @@ describe('v0.0.1 release documentation contract', () => {
     expect(runbook).toContain('gh workflow run Release');
   });
 
+  it('documents desktop-only recovery without weakening coordinated releases', async () => {
+    const runbook = await readFile('docs/RELEASE.md', 'utf8');
+
+    expect(runbook).toContain(
+      'gh workflow run Release --repo OpenCoven/psyche-build --ref main -f tag=v0.0.1 -f desktop_only=true',
+    );
+    expect(runbook).toContain('Desktop-only publication still requires');
+    for (const secret of [
+      'APPLE_CERTIFICATE',
+      'APPLE_CERTIFICATE_PASSWORD',
+      'APPLE_SIGNING_IDENTITY',
+      'APPLE_ID',
+      'APPLE_PASSWORD',
+      'APPLE_TEAM_ID',
+      'HOMEBREW_TAP_TOKEN',
+    ]) {
+      expect(runbook).toContain(secret);
+    }
+    expect(runbook).toContain(
+      'Tag pushes always run the coordinated macOS and internal TestFlight release',
+    );
+  });
+
   it('validates and tags the exact clean fetched origin/main commit', async () => {
     const runbook = await readFile('docs/RELEASE.md', 'utf8');
     const orderedCommands = [

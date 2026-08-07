@@ -13,6 +13,11 @@ on:
         description: "Existing vMAJOR.MINOR.PATCH tag to rebuild"
         required: true
         type: string
+      desktop_only:
+        description: "Publish macOS and Homebrew without TestFlight"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -32,6 +37,7 @@ jobs:
       release_tag: ${{ steps.release.outputs.tag }}
       release_version: ${{ steps.release.outputs.version }}
       release_sha: ${{ steps.release.outputs.sha }}
+      desktop_only: ${{ steps.release.outputs.desktop_only }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -58,6 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_TAG="$RAW_RELEASE_TAG"
+          DESKTOP_ONLY="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.desktop_only == 'true' }}"
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must use stable vMAJOR.MINOR.PATCH form"
             exit 1
@@ -78,6 +85,7 @@ jobs:
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
           echo "sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "desktop_only=$DESKTOP_ONLY" >> "$GITHUB_OUTPUT"
 
       - name: Require a verified signed tag
         env:
@@ -405,6 +413,7 @@ jobs:
   upload-ios:
     name: Upload iOS build to TestFlight
     needs: verify
+    if: needs.verify.outputs.desktop_only != 'true'
     runs-on: macos-15
     timeout-minutes: 60
     environment: release
@@ -709,6 +718,17 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [verify, build-macos, upload-ios]
+    if: >-
+      always() &&
+      needs.verify.result == 'success' &&
+      needs.build-macos.result == 'success' &&
+      (
+        needs.upload-ios.result == 'success' ||
+        (
+          needs.verify.outputs.desktop_only == 'true' &&
+          needs.upload-ios.result == 'skipped'
+        )
+      )
     environment: release
     runs-on: macos-15
     timeout-minutes: 20

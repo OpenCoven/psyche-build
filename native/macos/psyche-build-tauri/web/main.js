@@ -75,110 +75,8 @@
     agentSkills: [],
   };
 
-  var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
-  var covenPollTimer = null;
-  var COVEN_POLL_MS = 5000;
-
-  async function refreshCovenSessions() {
-    var request = PsycheSessions.beginCovenRequest(covenDiscovery);
-    covenDiscovery = request.state;
-    var requestId = request.requestId;
-    renderSessionList();
-    var projectRootGroups = [];
-    state.projects.forEach(function (project) {
-      var candidates = [project.root].concat(
-        (state.env && state.env.native_workspace_v2 === false
-          ? []
-          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
-          return worktree.path;
-        })
-      );
-      var roots = [];
-      candidates.forEach(function (root) {
-        if (root && roots.indexOf(root) === -1) roots.push(root);
-      });
-      if (roots.length > 0) projectRootGroups.push(roots);
-    });
-    if (projectRootGroups.length === 0) {
-      covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
-      renderSessionList();
-      return;
-    }
-    var responses = await Promise.all(projectRootGroups.map(function (roots) {
-      return invoke("coven_sessions", { projectRoots: roots }).catch(function () {
-        return {
-          status: "error",
-          sessions: [],
-          message: "Coven sessions could not be loaded",
-        };
-      });
-    }));
-    var sessionsById = new Map();
-    responses.forEach(function (candidate) {
-      (Array.isArray(candidate.sessions) ? candidate.sessions : []).forEach(function (session) {
-        if (!sessionsById.has(session.id)) sessionsById.set(session.id, session);
-      });
-    });
-    var sessions = Array.from(sessionsById.values());
-    var hasSuccessfulFamily = responses.some(function (candidate) {
-      return candidate.status === "ready" || candidate.status === "empty";
-    });
-    var firstFailure = responses.find(function (candidate) {
-      return candidate.status !== "ready" && candidate.status !== "empty";
-    });
-    var response = sessions.length > 0
-      ? { status: "ready", sessions: sessions }
-      : hasSuccessfulFamily
-        ? { status: "empty", sessions: [] }
-        : (firstFailure || {
-        status: "error",
-        sessions: [],
-        message: "Coven sessions could not be loaded",
-      });
-    covenDiscovery = PsycheSessions.applyCovenResponse(
-      covenDiscovery, requestId, response
-    );
-    renderSessionList();
-  }
-
-  function invalidateCovenDiscovery() {
-    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
-    renderSessionList();
-  }
-
-  function requestCovenRefresh() {
-    if (isBootstrapping) return;
-    return Promise.resolve(refreshCovenSessions()).catch(function () {});
-  }
-
-  function stopCovenPolling() {
-    if (covenPollTimer !== null) {
-      clearInterval(covenPollTimer);
-      covenPollTimer = null;
-    }
-  }
-
-  function startCovenPolling() {
-    stopCovenPolling();
-    if (document.visibilityState === "hidden") return;
-    Promise.resolve(refreshCovenSessions()).catch(function () {});
-    covenPollTimer = setInterval(function () {
-      Promise.resolve(refreshCovenSessions()).catch(function () {});
-    }, COVEN_POLL_MS);
-  }
-
-  function completeCovenBoot() {
-    isBootstrapping = false;
-    startCovenPolling();
-  }
-
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") {
-      saveWorkspaceNow();
-      stopCovenPolling();
-    } else {
-      startCovenPolling();
-    }
+    if (document.visibilityState === "hidden") saveWorkspaceNow();
   }
 
   /**
@@ -307,7 +205,6 @@
   var WORKSPACE_STATE_KEY = "psyche.tauri.workspace.v1";
   var settings = loadSettings();
   var isRestoringWorkspace = false;
-  var isBootstrapping = true;
   var saveWorkspaceTimer = 0;
 
   function clampInt(value, fallback, min, max) {
@@ -762,35 +659,6 @@
       spawnPty(thread, thread.worktreePath);
     });
     return thread;
-  }
-
-  async function openCovenSession(project, session) {
-    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
-      return null;
-    }
-    if (project.id === state.activeProjectId) {
-      if (!(await showTerminalView())) return null;
-    } else if (!(await setActiveProject(project.id))) {
-      return null;
-    }
-    var existing = state.threads.find(function (thread) {
-      return thread.projectId === project.id &&
-        thread.covenSessionId === session.id && thread.status !== "exited";
-    });
-    if (existing) {
-      await focusThread(existing.id);
-      return existing;
-    }
-    var title = typeof session.title === "string" ? session.title.trim() : "";
-    return createThread({
-      project: project,
-      name: title || session.id,
-      kind: "coven",
-      command: "coven",
-      args: ["attach", session.id],
-      projectRoot: session.cwd || session.projectRoot || project.root,
-      covenSessionId: session.id,
-    });
   }
 
   function spawnPty(thread, projectRoot) {
@@ -1298,8 +1166,7 @@
   // ============================================================
 
   // Local rows remain backed by state.threads, the same source used by the tab
-  // strip and terminal host. Coven discovery contributes read-only remote rows
-  // without copying them into the local lifecycle.
+  // strip and terminal host.
 
   var themeSelectEl = document.getElementById("theme-select");
   var solidBgEl = document.getElementById("solid-bg");
@@ -1327,39 +1194,6 @@
     return "";
   }
 
-  function covenInlineState(phase) {
-    if (phase === "loading") {
-      return { text: "Coven — loading…", title: "" };
-    }
-    if (phase === "unavailable") {
-      return {
-        text: "Coven unavailable",
-        title: "Coven daemon is not running; run `coven daemon start`",
-      };
-    }
-    if (phase === "incompatible") {
-      return {
-        text: "Coven update required",
-        title: "Coven daemon API update required",
-      };
-    }
-    if (phase === "error") {
-      return {
-        text: "Coven could not load",
-        title: "Coven sessions could not be loaded",
-      };
-    }
-    return null;
-  }
-
-  function covenToneClass(tone) {
-    if (tone === "ok") return "coven-tone-ok";
-    if (tone === "warn") return "coven-tone-warn";
-    if (tone === "muted") return "coven-tone-muted";
-    if (tone === "danger") return "coven-tone-danger";
-    return "coven-tone-neutral";
-  }
-
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -1373,27 +1207,11 @@
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden;
       });
-      var remoteRows = [];
-      [project.root].concat(
-        (state.env && state.env.native_workspace_v2 === false
-          ? []
-          : (Array.isArray(project.worktrees) ? project.worktrees : [])).map(function (worktree) {
-          return worktree.path;
-        })
-      ).forEach(function (root) {
-        (covenDiscovery.sessionsByProject.get(root) || []).forEach(function (session) {
-          if (!remoteRows.some(function (candidate) { return candidate.id === session.id; })) {
-            remoteRows.push(session);
-          }
-        });
-      });
       var railModel = PsycheSessions.buildProjectRailModel(
-        project, localRows, remoteRows, currentSearchQuery
+        project, localRows, [], currentSearchQuery
       );
-      var inlineState = covenInlineState(covenDiscovery.phase);
-      var showInlineState = Boolean(inlineState && (!needle || railModel.projectMatches));
       var visibleWorktrees = railModel.worktrees.filter(function (entry) {
-        return entry.matches || entry.rows.length > 0;
+        return entry.rows.length > 0;
       });
       if (railModel.projectRows.length > 0) {
         visibleWorktrees.push({
@@ -1410,7 +1228,7 @@
           rows: railModel.projectRows,
         });
       }
-      if (visibleWorktrees.length === 0 && !showInlineState) return;
+      if (visibleWorktrees.length === 0) return;
       matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
         return count + entry.rows.length;
       }, 0);
@@ -1438,12 +1256,7 @@
 
       visibleWorktrees.forEach(function (entry) {
         var worktree = entry.worktree;
-        var threads = entry.rows.filter(function (row) {
-          return row.source === "psyche";
-        }).map(function (row) { return row.value; });
-        var covenSessions = entry.rows.filter(function (row) {
-          return row.source === "coven";
-        }).map(function (row) { return row.value; });
+        var threads = entry.rows.map(function (row) { return row.value; });
 
         var worktreeGroup = document.createElement("div");
         worktreeGroup.className = "session-worktree-group" +
@@ -1622,109 +1435,8 @@
           worktreeGroup.appendChild(wrapper);
         });
 
-        if (!worktree.collapsed && covenSessions.length > 0) {
-          var covenLabel = document.createElement("div");
-          covenLabel.className = "session-subsection-label";
-          covenLabel.textContent = "Coven";
-          worktreeGroup.appendChild(covenLabel);
-        }
-
-        if (!worktree.collapsed) covenSessions.forEach(function (session) {
-          var presentation = PsycheSessions.statusPresentation(session.status);
-          var primary = typeof session.title === "string" ? session.title.trim() : "";
-          if (!primary) primary = session.id;
-          var harness = typeof session.harness === "string" ? session.harness.trim() : "";
-          var activeAttachment = state.threads.find(function (thread) {
-            return thread.id === state.activeThreadId && thread.projectId === project.id &&
-              thread.covenSessionId === session.id && thread.status !== "exited";
-          });
-          var isActive = Boolean(activeAttachment);
-          var row = document.createElement("button");
-          row.type = "button";
-          row.className = "session-row session-coven-row " +
-            covenToneClass(presentation.tone) +
-            (presentation.label === "starting" ? " coven-starting" : "") +
-            (isActive ? " active" : "");
-          row.dataset.covenSessionId = session.id;
-          if (isActive) row.setAttribute("aria-current", "true");
-          row.setAttribute("aria-label", primary + " — " + presentation.label + " — " + session.id);
-          row.title = primary + " — " + presentation.label + " — " + session.id;
-
-          var dot = document.createElement("span");
-          dot.className = "session-dot";
-          var text = document.createElement("span");
-          text.className = "session-text";
-          var title = document.createElement("span");
-          title.className = "session-title";
-          title.textContent = primary;
-          var meta = document.createElement("span");
-          meta.className = "session-coven-meta";
-          if (harness) {
-            var harnessMeta = document.createElement("span");
-            harnessMeta.className = "session-coven-harness";
-            harnessMeta.textContent = harness;
-            meta.appendChild(harnessMeta);
-            var harnessSeparator = document.createElement("span");
-            harnessSeparator.className = "session-coven-separator";
-            harnessSeparator.textContent = " · ";
-            meta.appendChild(harnessSeparator);
-          }
-          var statusMeta = document.createElement("span");
-          statusMeta.className = "session-coven-status";
-          statusMeta.textContent = presentation.label;
-          meta.appendChild(statusMeta);
-          var idSeparator = document.createElement("span");
-          idSeparator.className = "session-coven-separator";
-          idSeparator.textContent = " · ";
-          meta.appendChild(idSeparator);
-          var idMeta = document.createElement("span");
-          idMeta.className = "session-coven-id";
-          idMeta.textContent = session.id;
-          meta.appendChild(idMeta);
-          text.appendChild(title);
-          text.appendChild(meta);
-          row.appendChild(dot);
-          row.appendChild(text);
-          row.addEventListener("click", function () {
-            try {
-              Promise.resolve(openCovenSession(project, session)).catch(function () {
-                setStatus("Coven session could not be opened", "error");
-              });
-            } catch (_) {
-              setStatus("Coven session could not be opened", "error");
-            }
-          });
-          row.addEventListener("contextmenu", function (event) {
-            openSessionContextMenu(event, [{
-              label: isActive ? "Focus attachment" : "Attach",
-              run: function () { openCovenSession(project, session); },
-            }]);
-          });
-          worktreeGroup.appendChild(row);
-        });
-
-        if (!worktree.collapsed && threads.length === 0) {
-          var noPanes = document.createElement("div");
-          noPanes.className = "session-worktree-empty";
-          noPanes.textContent = worktree.missing
-            ? "Unavailable"
-            : covenSessions.length ? "No local panes — press ⌘T" : "No panes — select and press ⌘T";
-          worktreeGroup.appendChild(noPanes);
-        }
         group.appendChild(worktreeGroup);
       });
-
-      if (showInlineState) {
-        var stateLabel = document.createElement("div");
-        stateLabel.className = "session-subsection-label";
-        stateLabel.textContent = "Coven";
-        group.appendChild(stateLabel);
-        var inline = document.createElement("div");
-        inline.className = "session-inline-state";
-        inline.textContent = inlineState.text;
-        if (inlineState.title) inline.title = inlineState.title;
-        group.appendChild(inline);
-      }
 
       sessionListEl.appendChild(group);
     });
@@ -1825,7 +1537,6 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
-    invalidateCovenDiscovery();
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -1859,7 +1570,6 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
-    requestCovenRefresh();
     return true;
   }
 
@@ -3724,7 +3434,6 @@
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (!isBootstrapping) requestCovenRefresh();
     return project;
   }
 
@@ -3876,7 +3585,6 @@
       restoreProjectLayout(project);
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
-    completeCovenBoot();
   }
 
   invoke("app_environment")
