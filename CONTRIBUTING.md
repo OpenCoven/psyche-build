@@ -6,8 +6,16 @@ This project is built while running Psyche Build itself. The goal is a fast, rep
 
 - Node.js 18+
 - `pnpm`
+- Corepack 0.31.0 (required for release validation)
 - `tmux` 3.0+
 - Git 2.20+
+
+Some supported Node.js distributions omit Corepack. Before running the release
+validation checklist, install the pinned version when `corepack` is unavailable:
+
+```bash
+npm install --global corepack@0.31.0
+```
 
 ## Local Development (Dogfood Loop)
 
