@@ -46,4 +46,45 @@ describe('PromptDispatcher', () => {
     });
     expect(send).not.toHaveBeenCalled();
   });
+
+  it('resolves to a failed outcome instead of throwing when envelope.utf8 is not a string', async () => {
+    const send = vi.fn(async () => {});
+    const dispatcher = new PromptDispatcher(send);
+    const malformed = { ...envelope(), utf8: undefined as never };
+    await expect(dispatcher.dispatch(malformed)).resolves.toMatchObject({
+      status: 'failed',
+      code: 'prompt_envelope_invalid',
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('resolves to a failed outcome instead of throwing when send rejects with undefined', async () => {
+    const dispatcher = new PromptDispatcher(async () => {
+      throw undefined;
+    });
+    await expect(dispatcher.dispatch(envelope())).resolves.toMatchObject({
+      status: 'failed',
+      code: 'prompt_dispatch_failed',
+    });
+  });
+
+  it('confirms a dispatch when send resolves with a receiptId', async () => {
+    const dispatcher = new PromptDispatcher(async () => ({ receiptId: 'receipt-9' }));
+    expect(await dispatcher.dispatch(envelope())).toEqual({
+      status: 'confirmed',
+      promptId: 'prompt-1',
+      receiptId: 'receipt-9',
+    });
+  });
+
+  it('fails a dispatch when send throws a plain error', async () => {
+    const dispatcher = new PromptDispatcher(async () => {
+      throw new Error('boom');
+    });
+    expect(await dispatcher.dispatch(envelope())).toMatchObject({
+      status: 'failed',
+      code: 'prompt_dispatch_failed',
+      message: 'boom',
+    });
+  });
 });

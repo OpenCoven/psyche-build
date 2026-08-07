@@ -13,6 +13,14 @@ export class PromptDispatcher {
   ) {}
 
   async dispatch(envelope: PromptEnvelope): Promise<PromptDispatchOutcome> {
+    if (typeof envelope?.utf8 !== 'string') {
+      return {
+        status: 'failed',
+        promptId: envelope?.promptId ?? 'unknown',
+        code: 'prompt_envelope_invalid',
+        message: 'prompt envelope is missing string utf8 content',
+      };
+    }
     const hash = createHash('sha256').update(envelope.utf8).digest('hex');
     if (hash !== envelope.contentHash) {
       return {
@@ -28,7 +36,9 @@ export class PromptDispatcher {
         ? { status: 'confirmed', promptId: envelope.promptId, receiptId: result.receiptId }
         : { status: 'dispatched', promptId: envelope.promptId };
     } catch (error) {
-      const ambiguous = (error as { ambiguous?: boolean }).ambiguous === true;
+      const ambiguous =
+        typeof error === 'object' && error !== null &&
+        (error as { ambiguous?: boolean }).ambiguous === true;
       return {
         status: ambiguous ? 'unknown' : 'failed',
         promptId: envelope.promptId,
