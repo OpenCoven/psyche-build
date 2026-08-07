@@ -47,6 +47,35 @@ export interface WorktreeOperationLease {
   release: () => Promise<void>;
 }
 
+/**
+ * Serializes every lifecycle mutation for one Psyche project.
+ *
+ * Exact-path leases protect a single worktree. They cannot protect a root
+ * worktree and a child-repository worktree from each other because those paths
+ * deliberately have different lock keys. Callers acquire this lease first,
+ * then any exact-path leases, to make those compound workspace mutations safe.
+ */
+export interface ProjectWorktreeLifecycleLease {
+  canonicalProjectRoot: string;
+  lockDir: string;
+  nonce: string;
+  release: () => Promise<void>;
+}
+
+export interface ProjectWorktreeLifecycleLeaseRequest {
+  /**
+   * Main project root when it is already known. This is preferred for nested
+   * repositories so their lifecycle mutations share the root project's lease.
+   */
+  projectRoot?: string;
+  /**
+   * Used to discover the main project root for legacy callers that only know
+   * a worktree path.
+   */
+  worktreePath?: string;
+  operation: string;
+}
+
 export interface WorktreeOperationLeaseOptions {
   pid?: number;
   isProcessAlive?: (pid: number) => boolean;
@@ -70,10 +99,18 @@ interface LeasePaths {
   lockKey: string;
 }
 
+interface ProjectLifecycleLeasePaths {
+  canonicalProjectRoot: string;
+  runtimeDir: string;
+  lockDir: string;
+}
+
 interface LockReadResult {
   record?: WorktreeOperationLeaseRecord;
   missing: boolean;
 }
+
+const PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME = 'project-worktree-lifecycle.lock';
 
 /**
  * Acquires an exclusive, filesystem-backed lease for a single worktree.
@@ -88,6 +125,7 @@ export async function acquireWorktreeOperationLease(
   if (!request.operation.trim()) {
     throw new Error('A worktree operation lease requires an operation name');
   }
+
 
   const paths = await resolveLeasePaths(request);
   const pid = options.pid ?? process.pid;
@@ -209,6 +247,133 @@ export async function acquireWorktreeOperationLease(
   };
 }
 
+
+/**
+ * Acquires the project-wide lifecycle lease before a caller takes any
+ * worktree-specific lease. The lock is rooted outside managed worktrees, so
+ * an in-flight removal cannot remove its own coordination state.
+ */
+export async function acquireProjectWorktreeLifecycleLease(
+  request: ProjectWorktreeLifecycleLeaseRequest,
+  options: WorktreeOperationLeaseOptions = {},
+): Promise<ProjectWorktreeLifecycleLease> {
+  if (!request.operation.trim()) {
+    throw new Error('A project worktree lifecycle lease requires an operation name');
+  }
+
+  const paths = await resolveProjectLifecycleLeasePaths(request);
+  const pid = options.pid ?? process.pid;
+  const isOwnerProcessAlive = options.isProcessAlive ?? isProcessAlive;
+  const resolveProcessStartIdentity = options.getProcessStartIdentity ?? getProcessStartIdentity;
+  const sleep = options.sleep ?? defaultSleep;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const now = options.now ?? (() => new Date());
+  const createNonce = options.createNonce ?? randomUUID;
+
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error('project worktree lifecycle lease pollIntervalMs must be greater than zero');
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error('project worktree lifecycle lease timeoutMs must not be negative');
+  }
+
+  await mkdir(paths.runtimeDir, { recursive: true });
+  const nonce = createNonce();
+  if (!isSafeNonce(nonce)) {
+    throw new Error('project worktree lifecycle lease nonce contains unsupported characters');
+  }
+
+  const resolvedProcessStartIdentity = resolveProcessStartIdentity(pid);
+  const processStartIdentity = isSafeProcessStartIdentity(resolvedProcessStartIdentity)
+    ? resolvedProcessStartIdentity
+    : undefined;
+  const record: WorktreeOperationLeaseRecord = {
+    pid,
+    ...(processStartIdentity ? { processStartIdentity } : {}),
+    nonce,
+    canonicalPath: paths.canonicalProjectRoot,
+    operation: request.operation,
+    acquiredAt: now().toISOString(),
+  };
+  const candidateDir = path.join(
+    paths.runtimeDir,
+    `${PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME}.candidate.${nonce}`,
+  );
+  const candidateRecordPath = path.join(candidateDir, LEASE_FILE_NAME);
+  const deadline = Date.now() + timeoutMs;
+  let acquired = false;
+  let lastWaitReason = 'another project worktree lifecycle mutation is in progress';
+
+  try {
+    await mkdir(candidateDir);
+    await writeLeaseRecord(candidateRecordPath, record);
+
+    while (true) {
+      try {
+        await rename(candidateDir, paths.lockDir);
+        acquired = true;
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST' && code !== 'ENOTEMPTY') {
+          throw error;
+        }
+      }
+
+      const current = await readLeaseRecord(paths.lockDir);
+      if (current.record) {
+        if (isLeaseOwnerStale(
+          current.record,
+          isOwnerProcessAlive,
+          resolveProcessStartIdentity,
+        )) {
+          if (await quarantineProjectLifecycleLease(
+            paths,
+            current.record,
+            isOwnerProcessAlive,
+            resolveProcessStartIdentity,
+          )) {
+            continue;
+          }
+          lastWaitReason = `stale lifecycle lease recovery is in progress for pid ${current.record.pid}`;
+        } else {
+          lastWaitReason = `lifecycle lease is held by live or unverifiable pid ${current.record.pid}`;
+        }
+      } else if (current.missing) {
+        lastWaitReason = 'lifecycle lease was released while waiting';
+      } else {
+        lastWaitReason = 'lifecycle lease metadata is unavailable or invalid';
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `Timed out waiting for project worktree lifecycle lease for ${paths.canonicalProjectRoot}: ${lastWaitReason}`,
+        );
+      }
+      await sleep(Math.min(pollIntervalMs, remainingMs));
+    }
+  } finally {
+    if (!acquired) {
+      await rm(candidateDir, { recursive: true, force: true });
+    }
+  }
+
+  return {
+    canonicalProjectRoot: paths.canonicalProjectRoot,
+    lockDir: paths.lockDir,
+    nonce,
+    release: async () => {
+      const current = await readLeaseRecord(paths.lockDir);
+      if (!current.record || current.record.nonce !== nonce) {
+        return;
+      }
+      await rm(paths.lockDir, { recursive: true, force: true });
+    },
+  };
+}
+
 async function resolveLeasePaths(
   request: WorktreeOperationLeaseRequest,
 ): Promise<LeasePaths> {
@@ -226,6 +391,7 @@ async function resolveLeasePaths(
       `Could not resolve a main project root for worktree operation lease: ${canonicalWorktreePath}`,
     );
   }
+
 
   const runtimeDir = canonicalizePathWithExistingAncestor(
     path.join(canonicalProjectRoot, '.psyche', 'runtime'),
@@ -247,6 +413,32 @@ async function resolveLeasePaths(
     locksDir,
     lockDir: path.join(locksDir, `${lockKey}.lock`),
     lockKey,
+  };
+}
+
+
+async function resolveProjectLifecycleLeasePaths(
+  request: ProjectWorktreeLifecycleLeaseRequest,
+): Promise<ProjectLifecycleLeasePaths> {
+  const canonicalProjectRoot = request.projectRoot
+    ? canonicalizePathWithExistingAncestor(request.projectRoot)
+    : request.worktreePath
+      ? await discoverMainProjectRoot(
+        canonicalizePathWithExistingAncestor(request.worktreePath),
+      )
+      : undefined;
+
+  if (!canonicalProjectRoot) {
+    throw new Error(
+      'Could not resolve a main project root for project worktree lifecycle lease',
+    );
+  }
+
+  const runtimeDir = path.join(canonicalProjectRoot, '.psyche', 'runtime');
+  return {
+    canonicalProjectRoot,
+    runtimeDir,
+    lockDir: path.join(runtimeDir, PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME),
   };
 }
 
@@ -332,11 +524,39 @@ async function quarantineDeadLease(
     return false;
   }
 
+
   // Keeping the nonce-specific quarantine directory prevents a delayed stale
   // contender from ever renaming a later live lease into this old quarantine.
   const quarantineDir = path.join(
     paths.locksDir,
     `${paths.lockKey}.stale.${record.nonce}`,
+  );
+  try {
+    await rename(paths.lockDir, quarantineDir);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+
+async function quarantineProjectLifecycleLease(
+  paths: ProjectLifecycleLeasePaths,
+  record: WorktreeOperationLeaseRecord,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
+): Promise<boolean> {
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity)) {
+    return false;
+  }
+
+  const quarantineDir = path.join(
+    paths.runtimeDir,
+    `${PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME}.stale.${record.nonce}`,
   );
   try {
     await rename(paths.lockDir, quarantineDir);

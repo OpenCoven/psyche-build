@@ -20,7 +20,12 @@ import {
   type CreatedWorktreeIdentity,
   type WorktreeCreationReservation,
 } from '../services/WorktreeCleanupService.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import type { ProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
+import {
+  mutateProjectPaneConfig,
+  projectPaneConfigPath,
+  upsertProjectPaneConfigPanes,
+} from '../services/ProjectPaneConfig.js';
 import {
   appendSlugSuffix,
   launchAgentInPane,
@@ -34,6 +39,12 @@ import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+  type VerifiedPaneTeardownResult,
+} from './paneTeardown.js';
 
 export interface CreatePaneOptions {
   prompt: string;
@@ -58,6 +69,12 @@ export interface CreatePaneOptions {
   skipAgentSelection?: boolean; // Explicitly allow creating pane with no agent
   sessionConfigPath?: string; // Shared psyche config file for the current session
   sessionProjectRoot?: string; // Session root that owns sidebar/welcome pane state
+  /**
+   * A caller that already owns the project lifecycle lease (for example
+   * resumeBranches) passes it through so reuse does not try to re-acquire the
+   * non-reentrant project lock.
+   */
+  projectLifecycleLease?: ProjectWorktreeLifecycleLease;
 }
 
 export interface CreatePaneResult {
@@ -106,6 +123,62 @@ async function persistPaneBeforeAgentLaunch(
   });
 }
 
+interface PaneRecoveryRecordResult {
+  durable: boolean;
+  message: string;
+}
+
+async function terminatePaneForRollback(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<VerifiedPaneTeardownResult> {
+  return tearDownPaneWithVerification({
+    probe: () => probePanePresence(tmuxService, paneId),
+    kill: () => tmuxService.killPane(paneId),
+  });
+}
+
+async function probePanePresence(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<TmuxPanePresence> {
+  const probe = (tmuxService as TmuxService & {
+    probePanePresence?: (id: string) => Promise<TmuxPanePresence>;
+  }).probePanePresence;
+  if (probe) {
+    return probe.call(tmuxService, paneId);
+  }
+
+  try {
+    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function persistPaneRecoveryRecord(
+  sessionProjectRoot: string,
+  pane: PsychePane,
+): Promise<PaneRecoveryRecordResult> {
+  const configPath = projectPaneConfigPath(sessionProjectRoot);
+  try {
+    await upsertProjectPaneConfigPanes(sessionProjectRoot, [pane]);
+    return {
+      durable: true,
+      message: `retained recovery record ${pane.id} in ${configPath}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
+  } catch (error) {
+    return {
+      durable: false,
+      message: `could not persist recovery record ${pane.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }. ${paneRecoveryInstructions(pane.paneId, configPath)}`,
+    };
+  }
+}
+
 /**
  * Core pane creation logic that can be used by both TUI and API
  * Returns the newly created pane and whether agent choice is needed
@@ -139,7 +212,8 @@ export async function createPane(
         availableAgents
       );
     },
-    options.projectRoot
+    options.projectRoot,
+    options.projectLifecycleLease,
   );
 }
 
@@ -398,14 +472,48 @@ async function createPaneWithReuseReservation(
     await tmuxService.refreshClient();
   }
 
+  // Construct the recovery record before any fallible post-pane work. If tmux
+  // later cannot confirm teardown, this exact record can be persisted while
+  // the creation/reuse lease is still held.
+  const newPane: PsychePane = {
+    id: `psyche-${Date.now()}`,
+    slug,
+    displayName: existingWorktreeMetadata?.displayName,
+    branchName: branchName !== slug ? branchName : undefined,
+    prompt: prompt || 'No initial prompt',
+    paneId: paneInfo,
+    projectRoot,
+    projectName: paneProjectName,
+    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
+    worktreePath,
+    agent,
+    permissionMode: settings.permissionMode,
+    autopilot: settings.enableAutopilotByDefault ?? false,
+    mergeTargetChain,
+  };
+
   // Trigger pane_created hook (after pane created, before worktree)
-  await triggerHook('pane_created', projectRoot, undefined, {
-    PSYCHE_PANE_ID: `psyche-${Date.now()}`,
-    PSYCHE_SLUG: slug,
-    PSYCHE_PROMPT: prompt,
-    PSYCHE_AGENT: agent || 'unknown',
-    PSYCHE_TMUX_PANE_ID: paneInfo,
-  });
+  try {
+    await triggerHook('pane_created', projectRoot, undefined, {
+      PSYCHE_PANE_ID: newPane.id,
+      PSYCHE_SLUG: slug,
+      PSYCHE_PROMPT: prompt,
+      PSYCHE_AGENT: agent || 'unknown',
+      PSYCHE_TMUX_PANE_ID: paneInfo,
+    });
+  } catch (error) {
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+    throw new Error(
+      `Failed to create pane "${slug}": pane_created hook failed: ${
+        error instanceof Error ? error.message : String(error)
+      }${
+        recovery ? `; ${recovery.message}` : ''
+      }`,
+    );
+  }
 
   // Check if this is a hooks editing session (before worktree creation)
   const isHooksEditingSession = !!prompt && (
@@ -428,7 +536,11 @@ async function createPaneWithReuseReservation(
       await new Promise((resolve) => setTimeout(resolve, 300));
     } else {
       creationReservation = await WorktreeCleanupService.getInstance()
-        .beginWorktreeCreation(worktreePath, projectRoot);
+        .beginWorktreeCreation(
+          worktreePath,
+          projectRoot,
+          options.projectLifecycleLease,
+        );
 
       // IMPORTANT: Prune stale worktrees first to avoid conflicts
       // This must run synchronously from psyche, not in the pane
@@ -629,26 +741,30 @@ async function createPaneWithReuseReservation(
       undefined,
       error instanceof Error ? error : undefined
     );
-    try {
-      await tmuxService.killPane(paneInfo);
-    } catch (killError) {
-      LogService.getInstance().warn(
-        `Failed to kill pane ${paneInfo} after worktree creation failure: ${killError}`,
-        'paneCreation'
-      );
-    }
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
     let rollbackError: string | undefined;
-    if (creationReservation && createdWorktreeIdentity) {
+    if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
         createdWorktreeIdentity
       );
       if (!rollbackResult.success) {
         rollbackError = rollbackResult.error || 'unknown rollback failure';
       }
-    } else if (worktreeCreatedByThisAttempt) {
+    } else if (teardown.presence === 'absent' && worktreeCreatedByThisAttempt) {
       rollbackError = 'worktree identity could not be recorded';
     }
-    await creationReservation?.cancel();
+    if (teardown.presence === 'absent' || recovery?.durable) {
+      await creationReservation?.cancel();
+    } else if (creationReservation) {
+      LogService.getInstance().error(
+        `Retaining creation lease for ${newPane.worktreePath}: pane teardown is ${teardown.presence} and recovery record is not durable`,
+        'paneCreation',
+        newPane.id,
+      );
+    }
     if (controlPaneId) {
       try {
         await tmuxService.selectPane(controlPaneId);
@@ -659,30 +775,11 @@ async function createPaneWithReuseReservation(
     throw new Error(
       `Failed to create worktree for "${slug}": ${errorMsg}${
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }${
+        recovery ? `; ${recovery.message}` : ''
       }`
     );
   }
-
-  // Build the pane object now so the worktree_created hook can receive full
-  // pane context. The hook must succeed before we launch the agent — a
-  // failing hook means the worktree is in an unknown state and running a
-  // prompt against it would be dangerous.
-  const newPane: PsychePane = {
-    id: `psyche-${Date.now()}`,
-    slug,
-    displayName: existingWorktreeMetadata?.displayName,
-    branchName: branchName !== slug ? branchName : undefined,
-    prompt: prompt || 'No initial prompt',
-    paneId: paneInfo,
-    projectRoot,
-    projectName: paneProjectName,
-    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
-    worktreePath,
-    agent,
-    permissionMode: settings.permissionMode,
-    autopilot: settings.enableAutopilotByDefault ?? false,
-    mergeTargetChain,
-  };
 
   // Run worktree_created hook synchronously BEFORE launching the agent.
   // If the hook fails, tear down the pane and abort so the agent never
@@ -695,15 +792,11 @@ async function createPaneWithReuseReservation(
       `worktree_created hook failed for ${slug}: ${hookError}`,
       'paneCreation'
     );
-    try {
-      await tmuxService.killPane(paneInfo);
-    } catch (killError) {
-      LogService.getInstance().warn(
-        `Failed to kill pane ${paneInfo} after worktree_created hook failure: ${killError}`,
-        'paneCreation'
-      );
-    }
-    if (creationReservation && createdWorktreeIdentity) {
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+    if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
         createdWorktreeIdentity
       );
@@ -716,7 +809,7 @@ async function createPaneWithReuseReservation(
           new Error(rollbackError)
         );
       }
-    } else if (worktreeCreatedByThisAttempt) {
+    } else if (teardown.presence === 'absent' && worktreeCreatedByThisAttempt) {
       rollbackError = 'worktree identity could not be recorded';
       LogService.getInstance().error(
         `Failed to roll back newly created worktree for ${slug}: ${rollbackError}`,
@@ -725,7 +818,15 @@ async function createPaneWithReuseReservation(
         new Error(rollbackError)
       );
     }
-    await creationReservation?.cancel();
+    if (teardown.presence === 'absent' || recovery?.durable) {
+      await creationReservation?.cancel();
+    } else if (creationReservation) {
+      LogService.getInstance().error(
+        `Retaining creation lease for ${newPane.worktreePath}: pane teardown is ${teardown.presence} and recovery record is not durable`,
+        'paneCreation',
+        newPane.id,
+      );
+    }
     if (controlPaneId) {
       try {
         await tmuxService.selectPane(controlPaneId);
@@ -736,6 +837,8 @@ async function createPaneWithReuseReservation(
     throw new Error(
       `worktree_created hook failed for "${slug}": ${hookError}${
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }${
+        recovery ? `; ${recovery.message}` : ''
       }`
     );
   }
@@ -747,16 +850,12 @@ async function createPaneWithReuseReservation(
     await persistPaneBeforeAgentLaunch(options, sessionProjectRoot, newPane);
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
-    try {
-      await tmuxService.killPane(paneInfo);
-    } catch (killError) {
-      LogService.getInstance().warn(
-        `Failed to kill pane ${paneInfo} after pane persistence failure: ${killError}`,
-        'paneCreation'
-      );
-    }
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
     let rollbackError: string | undefined;
-    if (creationReservation && createdWorktreeIdentity) {
+    if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
         createdWorktreeIdentity
       );
@@ -764,10 +863,20 @@ async function createPaneWithReuseReservation(
         rollbackError = rollbackResult.error || 'unknown rollback failure';
       }
     }
-    await creationReservation?.cancel();
+    if (teardown.presence === 'absent' || recovery?.durable) {
+      await creationReservation?.cancel();
+    } else if (creationReservation) {
+      LogService.getInstance().error(
+        `Retaining creation lease for ${newPane.worktreePath}: pane teardown is ${teardown.presence} and recovery record is not durable`,
+        'paneCreation',
+        newPane.id,
+      );
+    }
     throw new Error(
       `Failed to persist pane "${slug}" before agent launch: ${persistenceError}${
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }${
+        recovery ? `; ${recovery.message}` : ''
       }`
     );
   }

@@ -355,6 +355,45 @@ export async function upsertProjectPaneConfigPanes(
 }
 
 /**
+ * Applies only the property-level intent between two snapshots of one already
+ * persisted pane. This is for lifecycle follow-up fields (for example
+ * orchestration metadata) that arrive after the initial pane record is
+ * durable. Concurrent writers can add agentSession or future fields without
+ * being overwritten by a stale full-record upsert.
+ */
+export async function persistProjectPaneConfigPaneDelta(
+  projectRoot: string,
+  originatingPane: ProjectPaneConfigPane,
+  nextPane: ProjectPaneConfigPane,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane>> {
+  const originatingId = paneRecordId(originatingPane);
+  const nextId = paneRecordId(nextPane);
+  if (!originatingId || originatingId !== nextId) {
+    throw new Error('Pane property delta requires matching persisted pane IDs');
+  }
+
+  return mutateProjectPaneConfig(projectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+    const index = panes.findIndex((pane) => paneRecordId(pane) === originatingId);
+    if (index === -1) {
+      throw new Error(
+        `Cannot apply pane property delta: persisted pane "${originatingId}" no longer exists`,
+      );
+    }
+
+    const delta = getPanePropertyDelta(originatingPane, nextPane);
+    const merged = delta
+      ? applyPanePropertyDelta(panes[index], delta)
+      : panes[index];
+    panes[index] = merged;
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+    return merged;
+  }, options);
+}
+
+/**
  * Removes only explicitly named psyche pane IDs from the fresh locked
  * registry. IDs absent from an in-memory UI snapshot are never inferred as
  * removals.
@@ -540,6 +579,85 @@ function findPaneRecordIndex(
     return -1;
   }
   return panes.findIndex((pane) => paneRecordId(pane) === id);
+}
+
+interface PanePropertyDelta {
+  changed: Map<string, unknown>;
+  deleted: Set<string>;
+}
+
+function getPanePropertyDelta(
+  originatingPane: ProjectPaneConfigPane,
+  nextPane: ProjectPaneConfigPane,
+): PanePropertyDelta | undefined {
+  const originating = asRecord(originatingPane);
+  const next = asRecord(nextPane);
+  const changed = new Map<string, unknown>();
+  const deleted = new Set<string>();
+  const properties = new Set([
+    ...Object.keys(originating),
+    ...Object.keys(next),
+  ]);
+
+  for (const property of properties) {
+    if (property === 'id') {
+      continue;
+    }
+
+    const hadOriginatingValue = hasOwnProperty(originating, property);
+    const hasNextValue = hasOwnProperty(next, property);
+    const originatingValue = originating[property];
+    const nextValue = next[property];
+
+    if (
+      hadOriginatingValue
+      && originatingValue !== undefined
+      && (!hasNextValue || nextValue === undefined)
+    ) {
+      deleted.add(property);
+      continue;
+    }
+
+    if (
+      hasNextValue
+      && nextValue !== undefined
+      && (
+        !hadOriginatingValue
+        || originatingValue === undefined
+        || !panePropertyValuesEqual(originatingValue, nextValue)
+      )
+    ) {
+      changed.set(property, nextValue);
+    }
+  }
+
+  return changed.size > 0 || deleted.size > 0
+    ? { changed, deleted }
+    : undefined;
+}
+
+function applyPanePropertyDelta(
+  freshPane: ProjectPaneConfigPane,
+  delta: PanePropertyDelta,
+): ProjectPaneConfigPane {
+  const merged = {
+    ...asRecord(freshPane),
+  };
+  for (const property of delta.deleted) {
+    delete merged[property];
+  }
+  for (const [property, value] of delta.changed) {
+    merged[property] = value;
+  }
+  return merged;
+}
+
+function hasOwnProperty(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function panePropertyValuesEqual(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || JSON.stringify(left) === JSON.stringify(right);
 }
 
 async function readLockRecord(lockDir: string): Promise<LockReadResult> {

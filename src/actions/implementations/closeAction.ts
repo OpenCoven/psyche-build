@@ -17,96 +17,56 @@ import { cleanupPromptFilesForSlug } from '../../utils/promptStore.js';
 import { buildDevWatchRespawnCommand } from '../../utils/devWatchCommand.js';
 import { isActiveDevSourcePath } from '../../utils/devSource.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+  type VerifiedPaneTeardownResult,
+} from '../../utils/paneTeardown.js';
 
-const PANE_KILL_VERIFY_DELAYS_MS = [50, 150, 300];
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function parseTmuxPaneIds(output: string | Buffer): Set<string> {
-  const ids = new Set<string>();
-
-  for (const line of output.toString().split('\n')) {
-    const match = line.trim().match(/^%\d+/);
-    if (match) {
-      ids.add(match[0]);
-    }
-  }
-
-  return ids;
-}
-
-function tmuxPaneExists(paneId: string): boolean {
+function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
   try {
     const paneList = execSync('tmux list-panes -a -F "#{pane_id}"', {
       encoding: 'utf-8',
       stdio: 'pipe',
       timeout: 5000,
     });
-    return parseTmuxPaneIds(paneList).has(paneId);
+    return paneList
+      .toString()
+      .split('\n')
+      .map((line) => line.trim())
+      .map((line) => line.match(/^%\d+/)?.[0] || line)
+      .includes(paneId)
+      ? 'present'
+      : 'absent';
   } catch {
-    LogService.getInstance().debug(
-      `Could not verify pane ${paneId} exists, treating as already closed`,
+    LogService.getInstance().warn(
+      `Could not verify whether pane ${paneId} exists; preserving pane record and worktree`,
       'paneActions'
     );
-    return false;
+    return 'unknown';
   }
 }
 
-async function waitForTmuxPaneToClose(paneId: string): Promise<boolean> {
-  if (!tmuxPaneExists(paneId)) {
-    return true;
-  }
+async function killTmuxPaneReliably(pane: PsychePane): Promise<VerifiedPaneTeardownResult> {
+  const result = await tearDownPaneWithVerification({
+    probe: () => probeTmuxPanePresence(pane.paneId),
+    kill: () => {
+      execSync(`tmux kill-pane -t '${pane.paneId}'`, {
+        stdio: 'pipe',
+        timeout: 5000,
+      });
+    },
+  });
 
-  for (const delay of PANE_KILL_VERIFY_DELAYS_MS) {
-    await sleep(delay);
-    if (!tmuxPaneExists(paneId)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-async function killTmuxPaneReliably(pane: PsychePane): Promise<boolean> {
-  if (!tmuxPaneExists(pane.paneId)) {
-    LogService.getInstance().debug(
-      `Pane ${pane.paneId} already gone, skipping kill`,
-      'paneActions'
-    );
-    return true;
-  }
-
-  try {
-    execSync(`tmux kill-pane -t '${pane.paneId}'`, {
-      stdio: 'pipe',
-      timeout: 5000,
-    });
-  } catch (killError) {
-    if (await waitForTmuxPaneToClose(pane.paneId)) {
-      return true;
-    }
-
-    LogService.getInstance().error(
-      `Error killing pane ${pane.paneId}`,
+  if (result.presence === 'present') {
+    LogService.getInstance().warn(
+      `Pane ${pane.paneId} still exists after kill attempt`,
       'paneActions',
-      pane.id,
-      killError instanceof Error ? killError : undefined
+      pane.id
     );
-    return false;
   }
-
-  if (await waitForTmuxPaneToClose(pane.paneId)) {
-    return true;
-  }
-
-  LogService.getInstance().warn(
-    `Pane ${pane.paneId} still exists after kill attempt`,
-    'paneActions',
-    pane.id
-  );
-  return false;
+  return result;
 }
 
 /**
@@ -238,11 +198,16 @@ async function executeCloseOption(
       // the worktree. Sending C-c first can drop an agent back to a shell if
       // kill-pane fails, so close the pane directly and treat a surviving pane
       // as a failed close.
-      const paneClosed = await killTmuxPaneReliably(pane);
-      if (!paneClosed) {
+      const paneTeardown = await killTmuxPaneReliably(pane);
+      if (paneTeardown.presence !== 'absent') {
+        const teardownMessage = paneTeardown.presence === 'unknown'
+          ? `Could not confirm pane "${paneName}" closed; pane record and worktree were preserved. ${
+            paneRecoveryInstructions(pane.paneId, panesFile)
+          }`
+          : `Failed to close pane "${paneName}"; it is still present and worktree cleanup was not started`;
         return {
           type: 'error',
-          message: `Failed to close pane "${paneName}"; worktree cleanup was not started`,
+          message: teardownMessage,
           dismissable: true,
         };
       }

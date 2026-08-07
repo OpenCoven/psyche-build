@@ -298,6 +298,13 @@ export default function usePaneCreation({
         persistCreatedPane: async (_pane, previousPanes, panesToPersist) => {
           await savePanes(panesToPersist, previousPanes);
         },
+        persistOrchestrationMetadata: async (originatingPane, nextPane) => {
+          // This is a one-pane property delta. Do not write the original
+          // pre-lane array here: StatusDetector may have added agentSession
+          // between createPane's durable save and this orchestration update.
+          await savePanes([nextPane], [originatingPane]);
+          return nextPane;
+        },
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
 
@@ -325,10 +332,11 @@ export default function usePaneCreation({
       }
 
       // Successful lanes are persisted even when siblings failed — a partial
-      // result still leaves usable work behind.
+      // result still leaves usable work behind. Each lane was already made
+      // durable by createPane and then patched with its orchestration delta;
+      // a stale whole-array save here would erase concurrent pane fields.
       if (createdPanes.length > 0) {
         const updatedPanes = [...panesForCreation, ...createdPanes];
-        await savePanes(updatedPanes, panesForCreation);
         enqueueManagedWorktreePruning(
           createdPanes.map((pane) => pane.projectRoot || sessionProjectRoot),
           updatedPanes,

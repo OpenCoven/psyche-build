@@ -21,10 +21,16 @@ import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import {
-  readProjectPaneConfigUnderLock,
+  projectPaneConfigPath,
   removeProjectPaneConfigPanes,
-  upsertProjectPaneConfigPanes,
+  transactProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+  type VerifiedPaneTeardownResult,
+} from './paneTeardown.js';
 
 export interface AttachAgentOptions {
   targetPane: PsychePane;
@@ -94,7 +100,6 @@ async function attachAgentToReservedWorktree(
     targetPane,
     prompt,
     agent,
-    existingPanes,
     sessionProjectRoot,
   } = options;
   if (!targetPane.worktreePath) {
@@ -105,108 +110,129 @@ async function attachAgentToReservedWorktree(
   const settingsManager = new SettingsManager(projectRoot);
   const settings = settingsManager.getSettings();
 
-  // Generate a unique slug for this sibling
-  const slug = generateSiblingSlugForTargetPane(targetPane, existingPanes);
-
   const tmuxService = TmuxService.getInstance();
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
-
-  // Read the control-pane state through the shared config lease so an
-  // attachment never reads a partially written registry.
-  let controlPaneId = originalPaneId;
-  try {
-    const config = await readProjectPaneConfigUnderLock(sessionProjectRoot);
-    if (typeof config.controlPaneId === 'string' && config.controlPaneId) {
-      controlPaneId = config.controlPaneId;
-    }
-  } catch {
-    // The current pane is a safe fallback when config reads are transiently
-    // unavailable. Persistence below still uses the cross-process API.
-  }
-
-  let paneInfo: string | undefined;
-  try {
-    // Split from the last existing pane (standard grid placement)
-    const psychePaneIds = existingPanes.map(p => p.paneId);
-    const splitTarget = psychePaneIds[psychePaneIds.length - 1];
-    paneInfo = splitPane({ targetPane: splitTarget, cwd: projectRoot });
-
-    // Wait for pane to be ready
-    const start = Date.now();
-    while ((Date.now() - start) < 600) {
-      if (await tmuxService.paneExists(paneInfo)) break;
-      await new Promise(r => setTimeout(r, 30));
-    }
-
-    // Set pane title
-    try {
-      const paneProjectName = targetPane.projectName || path.basename(projectRoot);
-      const paneTitle = projectRoot === sessionProjectRoot
-        ? slug
-        : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
-      await tmuxService.setPaneTitle(paneInfo, paneTitle);
-    } catch {
-      // Ignore title errors
-    }
-
-    // Recalculate layout
-    if (controlPaneId) {
-      const dimensions = getTerminalDimensions();
-      const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-      await recalculateAndApplyLayout(
-        controlPaneId,
-        allContentPaneIds,
-        dimensions.width,
-        dimensions.height,
-      );
-      await tmuxService.refreshClient();
-    }
-
-    // cd into the existing worktree (no git worktree add)
-    const cdCmd = `cd "${worktreePath}"`;
-    await tmuxService.sendShellCommand(paneInfo, cdCmd);
-    await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-    // Small delay for cd to complete
-    await new Promise(r => setTimeout(r, 300));
-  } catch (error) {
-    if (paneInfo) {
-      await killAttachedPane(tmuxService, paneInfo, slug, 'setup failure');
-    }
-    throw new Error(
-      `Failed to prepare attached pane "${slug}": ${errorMessage(error)}`,
-    );
-  }
-  if (!paneInfo) {
-    throw new Error(`Failed to prepare attached pane "${slug}": tmux returned no pane ID`);
-  }
-
   const psychePaneId = `psyche-${Date.now()}`;
-  const newPane: PsychePane = {
-    id: psychePaneId,
-    slug,
-    branchName: targetPane.branchName,
-    prompt: prompt || 'No initial prompt',
-    paneId: paneInfo,
-    projectRoot,
-    projectName: targetPane.projectName,
-    colorTheme: targetPane.colorTheme || resolveProjectColorTheme(projectRoot, []),
-    worktreePath,
-    agent,
-    permissionMode: settings.permissionMode,
-    autopilot: settings.enableAutopilotByDefault ?? false,
-  };
+  let paneInfo: string | undefined;
+  let newPane: PsychePane | undefined;
 
-  // A reused worktree remains reserved until this record is durable, so
-  // cleanup cannot remove it between pane creation and agent launch.
-  try {
-    await upsertProjectPaneConfigPanes(sessionProjectRoot, [newPane]);
-  } catch (error) {
-    await killAttachedPane(tmuxService, paneInfo, slug, 'pane persistence failure');
-    throw new Error(
-      `Failed to persist attached pane "${slug}" before agent launch: ${errorMessage(error)}`,
-    );
-  }
+  // The worktree reuse reservation holds the project lifecycle lease before
+  // this transaction starts. Allocate from the transaction's fresh panes and
+  // make the exact record durable before another attach can allocate a
+  // sibling. Caller-provided existingPanes is deliberately not consulted.
+  const transaction = await transactProjectPaneConfig(
+    sessionProjectRoot,
+    async ({ config, persist }) => {
+      const freshPanes = Array.isArray(config.panes)
+        ? config.panes as PsychePane[]
+        : [];
+      const slug = generateSiblingSlugForTargetPane(targetPane, freshPanes);
+      let controlPaneId = typeof config.controlPaneId === 'string' && config.controlPaneId
+        ? config.controlPaneId
+        : originalPaneId;
+
+      try {
+        if (controlPaneId && !(await tmuxService.paneExists(controlPaneId))) {
+          controlPaneId = originalPaneId;
+        }
+      } catch {
+        // The transaction still protects allocation; the current pane is a
+        // safe layout fallback when tmux cannot answer this cosmetic probe.
+        controlPaneId = originalPaneId;
+      }
+
+      try {
+        const panesForLayout = freshPanes.length > 0
+          ? freshPanes
+          : [targetPane];
+        const splitTarget = panesForLayout.at(-1)?.paneId;
+        paneInfo = splitPane({ targetPane: splitTarget, cwd: projectRoot });
+        if (!paneInfo) {
+          throw new Error('tmux returned no pane ID');
+        }
+
+        newPane = {
+          id: psychePaneId,
+          slug,
+          branchName: targetPane.branchName,
+          prompt: prompt || 'No initial prompt',
+          paneId: paneInfo,
+          projectRoot,
+          projectName: targetPane.projectName,
+          colorTheme: targetPane.colorTheme || resolveProjectColorTheme(projectRoot, []),
+          worktreePath,
+          agent,
+          permissionMode: settings.permissionMode,
+          autopilot: settings.enableAutopilotByDefault ?? false,
+        };
+
+        const start = Date.now();
+        while ((Date.now() - start) < 600) {
+          if (await tmuxService.paneExists(paneInfo)) break;
+          await new Promise(r => setTimeout(r, 30));
+        }
+
+        try {
+          const paneProjectName = targetPane.projectName || path.basename(projectRoot);
+          const paneTitle = projectRoot === sessionProjectRoot
+            ? slug
+            : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
+          await tmuxService.setPaneTitle(paneInfo, paneTitle);
+        } catch {
+          // Ignore title errors.
+        }
+
+        if (controlPaneId) {
+          const dimensions = getTerminalDimensions();
+          const allContentPaneIds = [...panesForLayout.map(p => p.paneId), paneInfo];
+          await recalculateAndApplyLayout(
+            controlPaneId,
+            allContentPaneIds,
+            dimensions.width,
+            dimensions.height,
+          );
+          await tmuxService.refreshClient();
+        }
+
+        await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
+        await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
+        await new Promise(r => setTimeout(r, 300));
+
+        config.projectName = config.projectName || path.basename(sessionProjectRoot);
+        config.projectRoot = config.projectRoot || sessionProjectRoot;
+        config.panes = [...freshPanes, newPane];
+        config.lastUpdated = new Date().toISOString();
+        await persist();
+        return newPane;
+      } catch (error) {
+        const teardown = paneInfo
+          ? await killAttachedPane(tmuxService, paneInfo, slug, 'setup or persistence failure')
+          : undefined;
+        const recovery = teardown && teardown.presence !== 'absent' && newPane
+          ? await persistAttachedRecoveryRecord(
+            config,
+            persist,
+            freshPanes,
+            newPane,
+            sessionProjectRoot,
+          )
+          : undefined;
+        const recoveryMessage = teardown && teardown.presence !== 'absent'
+          ? `; ${recovery || paneRecoveryInstructions(
+            paneInfo || psychePaneId,
+            projectPaneConfigPath(sessionProjectRoot),
+          )}`
+          : '';
+        throw new Error(
+          `Failed to prepare attached pane "${slug}": ${errorMessage(error)}${recoveryMessage}`,
+        );
+      }
+    },
+  );
+  const attachedPane = transaction.result as PsychePane;
+  newPane = attachedPane;
+  const slug = attachedPane.slug;
+  const attachedPaneId = attachedPane.paneId;
 
   let codexHookEventFile: string | undefined;
   if (agent === 'codex') {
@@ -214,7 +240,7 @@ async function attachAgentToReservedWorktree(
       codexHookEventFile = installCodexPaneHooks({
         worktreePath,
         psychePaneId,
-        tmuxPaneId: paneInfo,
+        tmuxPaneId: attachedPaneId,
       }).eventFile;
     } catch (error) {
       LogService.getInstance().warn(
@@ -227,7 +253,7 @@ async function attachAgentToReservedWorktree(
 
   try {
     await launchAgentInPane({
-      paneId: paneInfo,
+      paneId: attachedPaneId,
       agent,
       prompt,
       slug,
@@ -242,9 +268,9 @@ async function attachAgentToReservedWorktree(
   } catch (error) {
     const cleanupError = await removeFailedAttachedPane(
       tmuxService,
-      paneInfo,
+      attachedPaneId,
       sessionProjectRoot,
-      newPane,
+      attachedPane,
     );
     throw new Error(
       `Failed to launch attached agent for "${slug}": ${errorMessage(error)}${
@@ -255,17 +281,17 @@ async function attachAgentToReservedWorktree(
 
   // Auto-approve trust prompts for Claude
   if (agent === 'claude') {
-    autoApproveTrustPrompt(paneInfo, prompt).catch(() => {
+    autoApproveTrustPrompt(attachedPaneId, prompt).catch(() => {
       // Ignore errors in background monitoring
     });
   }
 
   // Keep focus on the new pane
   try {
-    await tmuxService.selectPane(paneInfo);
+    await tmuxService.selectPane(attachedPaneId);
   } catch (error) {
     LogService.getInstance().warn(
-      `Failed to focus attached pane ${paneInfo}: ${errorMessage(error)}`,
+      `Failed to focus attached pane ${attachedPaneId}: ${errorMessage(error)}`,
       'attachAgent',
       psychePaneId,
     );
@@ -294,7 +320,7 @@ async function attachAgentToReservedWorktree(
     'attachAgent',
   );
 
-  return { pane: newPane };
+  return { pane: attachedPane };
 }
 
 async function killAttachedPane(
@@ -302,18 +328,18 @@ async function killAttachedPane(
   paneId: string,
   slug: string,
   reason: string,
-): Promise<string | undefined> {
-  try {
-    await tmuxService.killPane(paneId);
-    return undefined;
-  } catch (error) {
-    const message = errorMessage(error);
+): Promise<VerifiedPaneTeardownResult> {
+  const result = await tearDownPaneWithVerification({
+    probe: () => probeAttachedPanePresence(tmuxService, paneId),
+    kill: () => tmuxService.killPane(paneId),
+  });
+  if (result.presence !== 'absent') {
     LogService.getInstance().warn(
-      `Failed to kill attached pane ${paneId} for ${slug} after ${reason}: ${message}`,
+      `Could not confirm attached pane ${paneId} is gone for ${slug} after ${reason}`,
       'attachAgent',
     );
-    return message;
   }
+  return result;
 }
 
 /**
@@ -327,14 +353,16 @@ async function removeFailedAttachedPane(
   sessionProjectRoot: string,
   pane: PsychePane,
 ): Promise<string | undefined> {
-  const killError = await killAttachedPane(
+  const teardown = await killAttachedPane(
     tmuxService,
     paneId,
     pane.slug,
     'agent launch failure',
   );
-  if (killError) {
-    return `failed to kill pane ${paneId}; retained tracked pane record ${pane.id}`;
+  if (teardown.presence !== 'absent') {
+    return `could not confirm pane ${paneId} is closed (${teardown.presence}); retained tracked pane record ${pane.id}. ${
+      paneRecoveryInstructions(paneId, projectPaneConfigPath(sessionProjectRoot))
+    }`;
   }
 
   try {
@@ -348,6 +376,52 @@ async function removeFailedAttachedPane(
       pane.id,
     );
     return `failed to remove pane record ${pane.id} after killing pane ${paneId}: ${message}`;
+  }
+}
+
+async function persistAttachedRecoveryRecord(
+  config: Record<string, unknown>,
+  persist: () => Promise<void>,
+  freshPanes: PsychePane[],
+  pane: PsychePane,
+  sessionProjectRoot: string,
+): Promise<string> {
+  const panes = Array.isArray(config.panes)
+    ? config.panes as PsychePane[]
+    : freshPanes;
+  if (!panes.some((candidate) => candidate.id === pane.id)) {
+    config.panes = [...panes, pane];
+  }
+  config.lastUpdated = new Date().toISOString();
+
+  const configPath = projectPaneConfigPath(sessionProjectRoot);
+  try {
+    await persist();
+    return `retained recovery record ${pane.id} in ${configPath}. ${
+      paneRecoveryInstructions(pane.paneId, configPath)
+    }`;
+  } catch (error) {
+    return `could not persist recovery record ${pane.id}: ${errorMessage(error)}. ${
+      paneRecoveryInstructions(pane.paneId, configPath)
+    }`;
+  }
+}
+
+async function probeAttachedPanePresence(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<TmuxPanePresence> {
+  const probe = (tmuxService as TmuxService & {
+    probePanePresence?: (id: string) => Promise<TmuxPanePresence>;
+  }).probePanePresence;
+  if (probe) {
+    return probe.call(tmuxService, paneId);
+  }
+
+  try {
+    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
   }
 }
 

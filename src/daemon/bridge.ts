@@ -32,6 +32,12 @@ import {
   transactProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+  type VerifiedPaneTeardownResult,
+} from '../utils/paneTeardown.js';
 import type { PsycheConfig } from '../types.js';
 import {
   isAgenticCapability,
@@ -87,6 +93,11 @@ export interface BridgeSpawnDeps {
   readCreatedWorktreeBranch?: (worktreePath: string) => string | null;
   /** Used only to tear down a pane when config persistence did not succeed. */
   killTmuxPane?: (paneId: string) => void;
+  /**
+   * A tri-state probe. Absence must be confirmed before a failed spawn rolls
+   * back its worktree or removes its pane record.
+   */
+  probeTmuxPane?: (paneId: string) => TmuxPanePresence;
   /**
    * Type a prompt into a send-keys agent's TUI after it starts.
    *
@@ -403,19 +414,6 @@ export async function openProjectCovenSession(
     projectRoot,
     async ({ config, persist }) => {
       const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
-      let paneTeardownAttempted = false;
-      const tearDownPane = (): string | undefined => {
-        if (paneTeardownAttempted) {
-          return undefined;
-        }
-        paneTeardownAttempted = true;
-        try {
-          (deps.killTmuxPane ?? killTmuxPane)(paneId);
-          return undefined;
-        } catch (error) {
-          return error instanceof Error ? error.message : String(error);
-        }
-      };
 
       const now = new Date().toISOString();
       const record: RawConfigPane = {
@@ -447,34 +445,67 @@ export async function openProjectCovenSession(
       try {
         await persist();
       } catch (error) {
-        const teardownFailure = tearDownPane();
+        const teardown = await tearDownBridgeTmuxPane(deps, paneId);
+        let recoveryFailure: string | undefined;
+        if (teardown.presence !== 'absent') {
+          try {
+            // The record is still in config. Retrying this exact persist while
+            // the transaction lease is held creates a recovery record for a
+            // pane whose absence cannot be confirmed.
+            await persist();
+          } catch (recoveryError) {
+            recoveryFailure = bridgeErrorMessage(recoveryError);
+          }
+        }
         const message = bridgeErrorMessage(error);
         throw bridgeError(
           bridgeErrorCode(error, 'config_persist_failed'),
-          `${message}${teardownFailure ? `; failed to kill created pane: ${teardownFailure}` : ''}`,
+          `${message}${
+            teardown.presence === 'absent'
+              ? ''
+              : `; pane teardown is ${teardown.presence}; retained recovery record ${
+                record.id
+              } in ${projectPaneConfigPath(projectRoot)}. ${
+                paneRecoveryInstructions(paneId, projectPaneConfigPath(projectRoot))
+              }${recoveryFailure ? `; recovery persist failed: ${recoveryFailure}` : ''}`
+          }`,
         );
       }
 
       try {
         deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
       } catch (error) {
+        // A durable record is removed only after tmux has confirmed the pane
+        // is absent. A kill request or probe error is not enough evidence to
+        // orphan a possibly live Coven attachment.
+        const teardown = await tearDownBridgeTmuxPane(deps, paneId);
+        if (teardown.presence !== 'absent') {
+          throw bridgeError(
+            bridgeErrorCode(error, 'coven_attach_failed'),
+            `${bridgeErrorMessage(error)}; pane teardown is ${teardown.presence}; retained pane record ${
+              record.id
+            } in ${projectPaneConfigPath(projectRoot)}. ${
+              paneRecoveryInstructions(paneId, projectPaneConfigPath(projectRoot))
+            }`,
+          );
+        }
+
         config.panes = (config.panes || []).filter(
           (candidate) => candidate.id !== record.id,
         );
-        let compensationFailure: string | undefined;
         try {
           await persist();
         } catch (persistError) {
-          compensationFailure = bridgeErrorMessage(persistError);
+          throw bridgeError(
+            bridgeErrorCode(error, 'coven_attach_failed'),
+            `${bridgeErrorMessage(error)}; pane ${paneId} was confirmed closed but failed to remove pane record ${
+              record.id
+            }: ${bridgeErrorMessage(persistError)}`,
+          );
         }
-        const teardownFailure = tearDownPane();
-        const failures = [
-          compensationFailure && `failed to remove persisted pane record: ${compensationFailure}`,
-          teardownFailure && `failed to kill created pane: ${teardownFailure}`,
-        ].filter((value): value is string => Boolean(value));
         throw bridgeError(
           bridgeErrorCode(error, 'coven_attach_failed'),
-          `${bridgeErrorMessage(error)}${failures.length ? `; ${failures.join('; ')}` : ''}`,
+          bridgeErrorMessage(error),
         );
       }
 
@@ -912,21 +943,6 @@ function nextBridgePaneId(): string {
  * and live inside the project, which is what stops an arbitrary path arriving
  * over the wire from being used.
  */
-/**
- * Sibling slugs handed out but not yet written to config.
- *
- * The create path does not need this: createGitWorktree makes the directory
- * inside the claim mutex, so the next uniqueSlug scan sees it. Attaching
- * creates nothing on disk, so without an explicit reservation two concurrent
- * attaches to the same worktree both read the same config and both pick
- * fix-auth-a2.
- */
-const reservedSiblingSlugs = new Set<string>();
-
-export function releaseSiblingSlug(slug: string): void {
-  reservedSiblingSlugs.delete(slug);
-}
-
 async function resolveSharedWorktree(
   projectRoot: string,
   existing: { slug: string; worktreePath: string; branchName: string },
@@ -958,23 +974,10 @@ async function resolveSharedWorktree(
   // later report and merge decision would inherit that lie.
   const branch = readWorktreeBranch(resolved) ?? existing.branchName;
 
-  // Allocate under the same mutex the create path uses, and consult the
-  // in-flight reservations as well as config, so concurrent attaches to one
-  // worktree cannot land on the same sibling slug.
-  return claimWorktree(async () => {
-    const config = await readBridgeConfig(projectRoot);
-    const panes = Array.isArray(config.panes) ? config.panes : [];
-    const taken = [
-      ...panes.map((pane) => ({ slug: String(pane.slug ?? '') })),
-      ...[...reservedSiblingSlugs].map((slug) => ({ slug })),
-    ];
-    const slug = generateSiblingSlugForTargetPane(
-      { slug: existing.slug, worktreePath: resolved },
-      taken,
-    );
-    reservedSiblingSlugs.add(slug);
-    return { slug, branch, worktreePath: resolved };
-  });
+  // Slug allocation belongs in the worktree lease + config transaction below.
+  // Reading it here would make the caller's snapshot a cross-process
+  // check-then-act race.
+  return { slug: existing.slug, branch, worktreePath: resolved };
 }
 
 /** Branch actually checked out in a worktree, or null if detached/unreadable. */
@@ -1030,7 +1033,7 @@ export async function spawnBridgePane(
   let creationIdentity: CreatedWorktreeIdentity | undefined;
   let paneId: string | undefined;
   let panePersisted = false;
-  let siblingSlugReleased = false;
+  let rollbackBlockedByUnconfirmedPane = false;
 
   const allocated: {
     slug: string;
@@ -1102,11 +1105,11 @@ export async function spawnBridgePane(
       }
     });
   const { slug, branch, worktreePath } = allocated;
-    if (!attaching) {
-      const createdAllocation = allocated as BridgeCreatedWorktreeAllocation;
-      creationReservation = createdAllocation.reservation;
-      creationIdentity = createdAllocation.identity;
-    }
+  if (!attaching) {
+    const createdAllocation = allocated as BridgeCreatedWorktreeAllocation;
+    creationReservation = createdAllocation.reservation;
+    creationIdentity = createdAllocation.identity;
+  }
 
   try {
     if (attaching) {
@@ -1119,25 +1122,20 @@ export async function spawnBridgePane(
     return await finishSpawn(worktreePath);
   } catch (error) {
     let rollbackFailure: string | undefined;
-    if (!panePersisted && paneId) {
-      try {
-        deps.killTmuxPane?.(paneId);
-      } catch {
-        // The primary failure remains the config or tmux error. A later load
-        // can recover an untracked pane if tmux refuses this best-effort kill.
-      }
-    }
-
-    if (attaching && !siblingSlugReleased) {
-      releaseSiblingSlug(slug);
-    } else if (!panePersisted && creationReservation && creationIdentity) {
+    if (
+      !attaching
+      && !panePersisted
+      && !rollbackBlockedByUnconfirmedPane
+      && creationReservation
+      && creationIdentity
+    ) {
       const rollback = await creationReservation.rollbackCreatedWorktree(creationIdentity);
       if (!rollback.success) {
         rollbackFailure = rollback.error || 'unknown rollback failure';
       }
     }
 
-    if (creationReservation) {
+    if (creationReservation && !rollbackBlockedByUnconfirmedPane) {
       await creationReservation.cancel();
     }
     if (rollbackFailure) {
@@ -1150,38 +1148,92 @@ export async function spawnBridgePane(
   }
 
   async function finishSpawn(paneWorktreePath: string): Promise<BridgeSpawnResult> {
-    const title = request.title || slug;
-    paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
-    const now = new Date().toISOString();
-    const pane: RawConfigPane = {
-      id: nextBridgePaneId(),
-      slug,
-      title,
-      displayName: title,
-      prompt: request.prompt || '',
-      paneId,
-      projectRoot: scoped.projectRoot,
-      projectName: path.basename(scoped.projectRoot),
-      type: 'worktree',
-      worktreePath: paneWorktreePath,
-      branchName: branch,
-      branch,
-      agent,
-      agentStatus: agent ? 'working' : 'idle',
-      lastUpdated: now,
-    };
-    const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
-      config.projectName = config.projectName || path.basename(scoped.projectRoot);
-      config.projectRoot = scoped.projectRoot;
-      config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-      config.lastUpdated = now;
-      return config.settings;
-    });
-    panePersisted = true;
-    if (attaching) {
-      releaseSiblingSlug(slug);
-      siblingSlugReleased = true;
-    } else if (creationReservation) {
+    const transaction = await transactProjectPaneConfig(
+      scoped.projectRoot,
+      async ({ config, persist }) => {
+        const freshPanes = Array.isArray(config.panes)
+          ? config.panes as RawConfigPane[]
+          : [];
+        // Existing-worktree attachments make no filesystem claim, so their
+        // sibling slug must be allocated from the fresh locked registry.
+        const paneSlug = attaching
+          ? generateSiblingSlugForTargetPane(
+            { slug, worktreePath: paneWorktreePath },
+            freshPanes.map((candidate) => ({ slug: String(candidate.slug ?? '') })),
+          )
+          : slug;
+        // A sibling's visible title must carry the reserved slug as well;
+        // otherwise concurrent attaches can create distinct records that
+        // rebind to the same tmux title.
+        const title = attaching
+          ? `${request.title || paneSlug} [${paneSlug}]`
+          : request.title || paneSlug;
+        paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
+        const now = new Date().toISOString();
+        const pane: RawConfigPane = {
+          id: nextBridgePaneId(),
+          slug: paneSlug,
+          title,
+          displayName: title,
+          prompt: request.prompt || '',
+          paneId,
+          projectRoot: scoped.projectRoot,
+          projectName: path.basename(scoped.projectRoot),
+          type: 'worktree',
+          worktreePath: paneWorktreePath,
+          branchName: branch,
+          branch,
+          agent,
+          agentStatus: agent ? 'working' : 'idle',
+          lastUpdated: now,
+        };
+        config.projectName = config.projectName || path.basename(scoped.projectRoot);
+        config.projectRoot = scoped.projectRoot;
+        config.panes = [...freshPanes, pane];
+        config.lastUpdated = now;
+
+        try {
+          await persist();
+          panePersisted = true;
+        } catch (error) {
+          const teardown = await tearDownBridgeTmuxPane(deps, paneId);
+          if (teardown.presence !== 'absent') {
+            let recoveryFailure: string | undefined;
+            try {
+              // The exact pane is still present in config. Retry the same
+              // write while both the worktree and config leases are held.
+              await persist();
+              panePersisted = true;
+            } catch (recoveryError) {
+              rollbackBlockedByUnconfirmedPane = true;
+              recoveryFailure = bridgeErrorMessage(recoveryError);
+            }
+            throw bridgeError(
+              bridgeErrorCode(error, 'config_persist_failed'),
+              `${bridgeErrorMessage(error)}; pane teardown is ${teardown.presence}; ${
+                panePersisted
+                  ? `retained recovery record ${pane.id} in ${projectPaneConfigPath(scoped.projectRoot)}`
+                  : `could not persist recovery record ${pane.id}`
+              }. ${paneRecoveryInstructions(
+                paneId,
+                projectPaneConfigPath(scoped.projectRoot),
+              )}${recoveryFailure ? `; recovery persist failed: ${recoveryFailure}` : ''}`,
+            );
+          }
+          throw error;
+        }
+
+        return {
+          pane,
+          paneSlug,
+          settings: config.settings,
+        };
+      },
+    );
+    const { pane, paneSlug, settings } = transaction.result;
+    const persistedPaneId = String(pane.paneId);
+
+    if (!attaching && creationReservation) {
       await creationReservation.complete();
       creationReservation = undefined;
     }
@@ -1189,24 +1241,24 @@ export async function spawnBridgePane(
     if (agent) {
       const launchCommand = await buildLaunchCommand(
         scoped.projectRoot,
-        slug,
+        paneSlug,
         agent,
         request.prompt,
-        settings?.permissionMode,
+        (settings as PsycheConfig['settings'] | undefined)?.permissionMode,
       );
-      deps.sendTmuxCommand(paneId, launchCommand);
+      deps.sendTmuxCommand(persistedPaneId, launchCommand);
 
       // send-keys agents were launched bare above; type the prompt into their
       // TUI once it is up. Without this the prompt is silently dropped.
       const prompt = request.prompt;
       if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
         const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
-        await sendPromptKeys({ paneId, prompt, agent });
+        await sendPromptKeys({ paneId: persistedPaneId, prompt, agent });
       }
     }
 
     return {
-      id: paneId,
+      id: persistedPaneId,
       pane: rawPaneToSummary(pane, scoped.projectRoot),
       worktreePath: paneWorktreePath,
       branch,
@@ -1263,8 +1315,18 @@ export async function killBridgePane(
   const psychePaneId = String(found.id ?? tmuxPaneId);
   const pane = found;
 
+  const initialPresence = deps.tmuxPaneExists(tmuxPaneId);
+  if (initialPresence === undefined) {
+    throw bridgeError(
+      'pane_probe_unknown',
+      `could not confirm whether tmux pane ${tmuxPaneId} exists; retained pane record. ${
+        paneRecoveryInstructions(tmuxPaneId, projectPaneConfigPath(scoped.projectRoot))
+      }`,
+    );
+  }
+
   let killed = false;
-  if (deps.tmuxPaneExists(tmuxPaneId) !== false) {
+  if (initialPresence) {
     try {
       deps.killTmuxPane(tmuxPaneId);
       killed = true;
@@ -1272,6 +1334,16 @@ export async function killBridgePane(
       throw bridgeError(
         'pane_kill_failed',
         `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const afterKill = deps.tmuxPaneExists(tmuxPaneId);
+    if (afterKill !== false) {
+      throw bridgeError(
+        afterKill === undefined ? 'pane_probe_unknown' : 'pane_kill_unconfirmed',
+        `could not confirm tmux pane ${tmuxPaneId} is absent; retained pane record. ${
+          paneRecoveryInstructions(tmuxPaneId, projectPaneConfigPath(scoped.projectRoot))
+        }`,
       );
     }
   }
@@ -1298,17 +1370,45 @@ export async function killBridgePane(
   };
 }
 
+async function tearDownBridgeTmuxPane(
+  deps: Pick<BridgeSpawnDeps, 'killTmuxPane' | 'probeTmuxPane'>,
+  paneId: string,
+): Promise<VerifiedPaneTeardownResult> {
+  return tearDownPaneWithVerification({
+    probe: () => deps.probeTmuxPane?.(paneId) ?? 'unknown',
+    kill: () => (deps.killTmuxPane ?? killTmuxPane)(paneId),
+  });
+}
+
 export function killTmuxPane(paneId: string): void {
   execFileSync('tmux', ['kill-pane', '-t', paneId], { stdio: 'ignore' });
 }
 
-export function tmuxPaneExists(paneId: string): boolean | undefined {
+export function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
   try {
-    execFileSync('tmux', ['display-message', '-p', '-t', paneId, '#{pane_id}'], { stdio: 'ignore' });
-    return true;
+    const output = execFileSync(
+      'tmux',
+      ['list-panes', '-a', '-F', '#{pane_id}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+    );
+    return output
+      .split('\n')
+      .map((line) => line.trim())
+      .includes(paneId)
+      ? 'present'
+      : 'absent';
   } catch {
-    return false;
+    return 'unknown';
   }
+}
+
+export function tmuxPaneExists(paneId: string): boolean | undefined {
+  const presence = probeTmuxPanePresence(paneId);
+  return presence === 'present'
+    ? true
+    : presence === 'absent'
+      ? false
+      : undefined;
 }
 
 export function createTmuxPane(sessionName: string, cwd: string, title?: string): string {
@@ -1377,6 +1477,7 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
   createTmuxPane,
   sendTmuxCommand,
   killTmuxPane,
+  probeTmuxPane: probeTmuxPanePresence,
 };
 
 /**

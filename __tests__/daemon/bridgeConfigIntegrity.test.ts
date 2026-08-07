@@ -78,6 +78,7 @@ function fakeClient(sessions: CovenSessionSummary[]): CovenClient {
 /** Spawn deps that create nothing — the config write is what is under test. */
 function fakeDeps(): BridgeSpawnDeps & { commands: string[]; killed: string[] } {
   let next = 0;
+  let panePresent = true;
   const commands: string[] = [];
   const killed: string[] = [];
   return {
@@ -86,7 +87,11 @@ function fakeDeps(): BridgeSpawnDeps & { commands: string[]; killed: string[] } 
     tmuxSessionExists: () => true,
     createTmuxPane: () => `%${++next}`,
     sendTmuxCommand: (_paneId, command) => { commands.push(command); },
-    killTmuxPane: (paneId) => { killed.push(paneId); },
+    probeTmuxPane: () => panePresent ? 'present' : 'absent',
+    killTmuxPane: (paneId) => {
+      killed.push(paneId);
+      panePresent = false;
+    },
   };
 }
 
@@ -200,8 +205,11 @@ describe('Coven pane persistence boundaries', () => {
       chmodSync(psycheDir, 0o500);
       return '%persist-failure';
     };
+    let panePresent = true;
+    deps.probeTmuxPane = () => panePresent ? 'present' : 'absent';
     deps.killTmuxPane = (paneId) => {
       deps.killed.push(paneId);
+      panePresent = false;
       chmodSync(psycheDir, 0o700);
     };
 

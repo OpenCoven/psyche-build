@@ -38,9 +38,12 @@ function pane(overrides: Record<string, unknown> = {}) {
 }
 
 function deps(exists: boolean | undefined = true) {
+  let presence = exists;
   return {
-    tmuxPaneExists: vi.fn(() => exists),
-    killTmuxPane: vi.fn(),
+    tmuxPaneExists: vi.fn(() => presence),
+    killTmuxPane: vi.fn(() => {
+      presence = false;
+    }),
   };
 }
 
@@ -126,6 +129,37 @@ describe('killBridgePane', () => {
       .rejects.toMatchObject({ code: 'pane_kill_failed' });
 
     // The pane is still live, so it must still be registered.
+    expect(readConfig().panes).toHaveLength(1);
+  });
+
+  it('does not drop the config record when tmux presence is unknown', async () => {
+    writeConfig([pane()]);
+    const d = {
+      tmuxPaneExists: vi.fn(() => undefined),
+      killTmuxPane: vi.fn(),
+    };
+
+    await expect(killBridgePane(projectRoot, '%3', d))
+      .rejects.toMatchObject({ code: 'pane_probe_unknown' });
+
+    expect(d.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toHaveLength(1);
+  });
+
+  it('retains the record when kill succeeds but the follow-up probe is uncertain', async () => {
+    writeConfig([pane()]);
+    let probes = 0;
+    const d = {
+      tmuxPaneExists: vi.fn(() => {
+        probes += 1;
+        return probes === 1 ? true : undefined;
+      }),
+      killTmuxPane: vi.fn(),
+    };
+
+    await expect(killBridgePane(projectRoot, '%3', d))
+      .rejects.toMatchObject({ code: 'pane_probe_unknown' });
+
     expect(readConfig().panes).toHaveLength(1);
   });
 });

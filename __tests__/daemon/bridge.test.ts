@@ -384,6 +384,81 @@ describe('daemon bridge Coven helpers', () => {
     });
   });
 
+  it('confirms Coven pane teardown before removing a failed attach record', async () => {
+    const root = await tempDir('psyche-bridge-coven-attach-failure-');
+    let present = true;
+    const events: string[] = [];
+
+    await expect(openProjectCovenSession(
+      root,
+      'psyche-test',
+      'session-1',
+      {
+        listSessions: async () => [{
+          id: 'session-1',
+          projectRoot: root,
+          harness: 'codex',
+          title: 'Fix tests',
+          status: 'running',
+          createdAt: '2026-04-27T10:00:00Z',
+          updatedAt: '2026-04-27T10:01:00Z',
+        }],
+      },
+      {
+        tmuxSessionExists: () => true,
+        createTmuxPane: () => '%42',
+        sendTmuxCommand: () => { throw new Error('coven attach failed'); },
+        probeTmuxPane: () => present ? 'present' : 'absent',
+        killTmuxPane: () => {
+          events.push('kill');
+          present = false;
+        },
+      },
+    )).rejects.toThrow(/coven attach failed/);
+
+    expect(events).toEqual(['kill']);
+    const config = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes).toEqual([]);
+  });
+
+  it('retains a Coven pane record when attach teardown is unknown', async () => {
+    const root = await tempDir('psyche-bridge-coven-attach-unknown-');
+    let killCalled = false;
+
+    await expect(openProjectCovenSession(
+      root,
+      'psyche-test',
+      'session-1',
+      {
+        listSessions: async () => [{
+          id: 'session-1',
+          projectRoot: root,
+          harness: 'codex',
+          title: 'Fix tests',
+          status: 'running',
+          createdAt: '2026-04-27T10:00:00Z',
+          updatedAt: '2026-04-27T10:01:00Z',
+        }],
+      },
+      {
+        tmuxSessionExists: () => true,
+        createTmuxPane: () => '%42',
+        sendTmuxCommand: () => { throw new Error('coven attach failed'); },
+        probeTmuxPane: () => 'unknown',
+        killTmuxPane: () => { killCalled = true; },
+      },
+    )).rejects.toThrow(/retained pane record.*Recovery required/);
+
+    expect(killCalled).toBe(false);
+    const config = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    );
+    expect(config.panes).toHaveLength(1);
+    expect(config.panes[0]).toMatchObject({ paneId: '%42', shellType: 'coven' });
+  });
+
   it('refuses to open Coven sessions outside the current project scope', async () => {
     const root = await tempDir('psyche-bridge-coven-root-');
     const outside = await tempDir('psyche-bridge-coven-outside-');

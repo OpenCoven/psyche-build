@@ -80,6 +80,7 @@ const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
 const mockBeginWorktreeCreation = vi.fn();
 const mockPersistReusedPane = vi.fn(async () => {});
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
+const upsertProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
@@ -93,6 +94,8 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
 
 vi.mock('../../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+  projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
+  upsertProjectPaneConfigPanes: upsertProjectPaneConfigPanesMock,
 }));
 
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
@@ -147,6 +150,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       const result = await mutation(config);
       return { config, result };
     });
+    upsertProjectPaneConfigPanesMock.mockResolvedValue(undefined);
     mockTriggerHook.mockImplementation(() => Promise.resolve());
     mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
 
@@ -831,6 +835,40 @@ describe('Pane Lifecycle Integration Tests', () => {
       expect(
         getSendKeysCommands().some((cmd) => cmd.includes('claude'))
       ).toBe(false);
+    });
+
+    it('persists a recovery record and blocks rollback when tmux absence is unknown', async () => {
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('tmux list-panes -a -F')) {
+          throw new Error('tmux list-panes timed out');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'persist recovery record',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          persistCreatedPane: async () => {
+            throw new Error('config disk unavailable');
+          },
+        },
+        ['claude'],
+      )).rejects.toThrow(/retained recovery record.*Recovery required/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(upsertProjectPaneConfigPanesMock).toHaveBeenCalledWith(
+        '/test',
+        [expect.objectContaining({
+          paneId: '%1',
+          worktreePath: expect.stringContaining('/.psyche/worktrees/'),
+        })],
+      );
     });
 
     it('does not let a second creator roll back the winner for the same planned worktree', async () => {

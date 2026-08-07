@@ -6,7 +6,11 @@ import { triggerHook } from '../utils/hooks.js';
 import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
-import { acquireWorktreeOperationLease } from './WorktreeOperationLease.js';
+import {
+  acquireProjectWorktreeLifecycleLease,
+  acquireWorktreeOperationLease,
+  type ProjectWorktreeLifecycleLease,
+} from './WorktreeOperationLease.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
   readProjectPaneConfigUnderLock,
@@ -169,8 +173,13 @@ export class WorktreeCleanupService {
     worktreePath: string,
     operation: (canonicalWorktreePath: string) => Promise<T> | T,
     projectRoot?: string,
+    projectLifecycleLease?: ProjectWorktreeLifecycleLease,
   ): Promise<T> {
-    const reservation = await this.beginWorktreeReuseReservation(worktreePath, projectRoot);
+    const reservation = await this.beginWorktreeReuseReservation(
+      worktreePath,
+      projectRoot,
+      projectLifecycleLease,
+    );
     let completed = false;
 
     try {
@@ -188,8 +197,16 @@ export class WorktreeCleanupService {
   async beginWorktreeReuseReservation(
     worktreePath: string,
     projectRoot?: string,
+    projectLifecycleLease?: ProjectWorktreeLifecycleLease,
   ): Promise<WorktreeReuseReservation> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
+    const ownedProjectLifecycleLease = projectLifecycleLease
+      ? undefined
+      : await acquireProjectWorktreeLifecycleLease({
+        projectRoot,
+        worktreePath: canonicalWorktreePath,
+        operation: 'reuse',
+      });
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
     let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
 
@@ -216,13 +233,15 @@ export class WorktreeCleanupService {
       const settle = (outcome: 'completed' | 'canceled'): Promise<void> => {
         if (!settlePromise) {
           this.removeActiveReuseReservation(canonicalWorktreePath);
-          releaseLock();
-          settlePromise = operationLease!.release().then(() => {
-            this.logger.debug(
-              `Reuse reservation ${outcome} for ${canonicalWorktreePath}`,
-              'paneActions'
-            );
-          });
+          settlePromise = operationLease!.release()
+            .finally(releaseLock)
+            .then(async () => {
+              await ownedProjectLifecycleLease?.release();
+              this.logger.debug(
+                `Reuse reservation ${outcome} for ${canonicalWorktreePath}`,
+                'paneActions'
+              );
+            });
         }
         return settlePromise;
       };
@@ -235,6 +254,7 @@ export class WorktreeCleanupService {
     } catch (error) {
       await operationLease?.release();
       releaseLock();
+      await ownedProjectLifecycleLease?.release();
       throw error;
     }
   }
@@ -291,8 +311,16 @@ export class WorktreeCleanupService {
   async beginWorktreeCreation(
     worktreePath: string,
     mainRepoPath: string,
+    projectLifecycleLease?: ProjectWorktreeLifecycleLease,
   ): Promise<WorktreeCreationReservation> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
+    const ownedProjectLifecycleLease = projectLifecycleLease
+      ? undefined
+      : await acquireProjectWorktreeLifecycleLease({
+        projectRoot: mainRepoPath,
+        worktreePath: canonicalWorktreePath,
+        operation: 'create',
+      });
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
     let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
 
@@ -307,7 +335,9 @@ export class WorktreeCleanupService {
       let settlePromise: Promise<void> | undefined;
       const settle = (): Promise<void> => {
         if (!settlePromise) {
-          settlePromise = operationLease!.release().finally(releaseLock);
+          settlePromise = operationLease!.release()
+            .finally(releaseLock)
+            .then(() => ownedProjectLifecycleLease?.release());
         }
         return settlePromise;
       };
@@ -343,6 +373,7 @@ export class WorktreeCleanupService {
     } catch (error) {
       await operationLease?.release();
       releaseLock();
+      await ownedProjectLifecycleLease?.release();
       throw error;
     }
   }
@@ -351,12 +382,15 @@ export class WorktreeCleanupService {
     job: CreatedWorktreeRollbackJob
   ): Promise<WorktreeRollbackResult> {
     const canonicalWorktreePath = canonicalizePathWithExistingAncestor(job.worktreePath);
-    return this.withWorktreeLifecycleLock(
-      canonicalWorktreePath,
+    return this.withProjectLifecycleLease(
       job.mainRepoPath,
+      canonicalWorktreePath,
       'rollback',
-      async () => {
-        return this.rollbackCreatedWorktreeWhileLeased({
+      async (projectLifecycleLease) => this.withWorktreeLifecycleLock(
+        canonicalWorktreePath,
+        job.mainRepoPath,
+        'rollback',
+        async () => this.rollbackCreatedWorktreeWhileLeased({
           canonicalWorktreePath,
           branchName: job.branchName,
           startingOid: job.startingOid || job.branchOid,
@@ -365,8 +399,9 @@ export class WorktreeCleanupService {
           mainRepoPath: job.mainRepoPath,
           deleteBranch: job.deleteBranch,
           configProjectRoot: job.configProjectRoot || job.mainRepoPath,
-        });
-      }
+        }),
+        projectLifecycleLease,
+      ),
     );
   }
 
@@ -433,38 +468,23 @@ export class WorktreeCleanupService {
       };
     }
 
-    // Setup and hooks can create files after the worktree has been allocated.
-    // This code runs while the creation/rollback operation lease is still
-    // held, so a clean result is the last safe point before a forced removal.
-    const worktreeStatus = this.runGitTextSync(
-      ['status', '--porcelain=v1', '--untracked-files=all'],
-      identity.canonicalWorktreePath,
-    );
-    if (!worktreeStatus.success) {
-      const error = `could not verify newly created worktree cleanliness; preserved at ${identity.canonicalWorktreePath}: ${worktreeStatus.error}`;
-      this.logger.warn(
-        `Refusing forced rollback for newly created worktree at ${identity.canonicalWorktreePath}: ${error}`,
-        'paneActions',
-      );
-      return { success: false, error };
-    }
-    if (worktreeStatus.output) {
-      const error = `newly created worktree has modified or untracked files; preserved at ${identity.canonicalWorktreePath}`;
-      this.logger.warn(
-        `Refusing forced rollback for newly created worktree at ${identity.canonicalWorktreePath}: git status reports modified or untracked files`,
-        'paneActions',
-      );
-      return { success: false, error };
-    }
-
+    // `git worktree remove` is deliberately the final dirtiness check. A
+    // status precheck races with hooks, editors, and agents writing after the
+    // check; Git's non-forced removal is the atomic authority. In particular,
+    // do not delete ignored user files such as .env to make a rollback pass.
     const removeResult = this.runGitTextSync(
-      ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
+      ['worktree', 'remove', identity.canonicalWorktreePath],
       identity.mainRepoPath
     );
     if (!removeResult.success) {
+      const error = `failed to remove newly created worktree; preserved worktree and branch at ${identity.canonicalWorktreePath}: ${removeResult.error}`;
+      this.logger.warn(
+        error,
+        'paneActions',
+      );
       return {
         success: false,
-        error: `failed to remove newly created worktree: ${removeResult.error}`,
+        error,
       };
     }
 
@@ -555,84 +575,94 @@ export class WorktreeCleanupService {
       job.pane.id
     );
 
-    const allWorktreesRemoved = await this.withWorktreeLifecycleLock(
-      job.canonicalWorktreePath,
+    let allWorktreesRemoved = false;
+    await this.withProjectLifecycleLease(
       job.mainRepoPath,
+      job.canonicalWorktreePath,
       'cleanup',
-      async () => {
-        if (
-          !this.canRunDestructiveCleanup(job)
-          || !this.haveUnchangedQueuedBranchOids(job)
-        ) {
-          return false;
+      async (projectLifecycleLease) => {
+        allWorktreesRemoved = await this.withWorktreeLifecycleLock(
+          job.canonicalWorktreePath,
+          job.mainRepoPath,
+          'cleanup',
+          async () => {
+            if (
+              !this.canRunDestructiveCleanup(job)
+              || !this.haveUnchangedQueuedBranchOids(job)
+            ) {
+              return false;
+            }
+
+            for (const target of job.worktreeTargets) {
+              const removeTarget = () => this.removeValidatedWorktreeTarget(job, target);
+              const removed = target.canonicalWorktreePath === job.canonicalWorktreePath
+                ? await removeTarget()
+                : await this.withWorktreeLifecycleLock(
+                  target.canonicalWorktreePath,
+                  target.repoPath,
+                  'cleanup',
+                  removeTarget,
+                  projectLifecycleLease,
+                );
+
+              // Nested worktree removal must succeed before the parent can be
+              // removed; otherwise a reused nested worktree could be deleted with
+              // its parent directory.
+              if (!removed) {
+                return false;
+              }
+            }
+
+            return true;
+          },
+          projectLifecycleLease,
+        );
+
+        if (job.deleteBranch && allWorktreesRemoved) {
+          await this.withWorktreeLock(job.canonicalWorktreePath, async () => {
+            for (const target of job.branchTargets) {
+              if (!this.canRunDestructiveCleanup(job)) {
+                continue;
+              }
+
+              if (!this.areAllWorktreesRemoved(job)) {
+                this.logger.warn(
+                  `Skipping branch deletion for ${job.pane.slug}: worktree removal is no longer confirmed`,
+                  'paneActions',
+                  job.pane.id
+                );
+                break;
+              }
+
+              const currentOid = this.getBranchOid(target.repoPath, target.branchName);
+              if (!currentOid.success || currentOid.output !== target.branchOid) {
+                this.logger.warn(
+                  `Skipping branch deletion for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
+                  'paneActions',
+                  job.pane.id
+                );
+                continue;
+              }
+
+              const deleteBranchResult = await this.runGitCommand(
+                ['branch', '-D', target.branchName],
+                target.repoPath
+              );
+              if (!deleteBranchResult.success) {
+                this.logger.warn(
+                  `Branch deletion reported an error for ${job.pane.slug} in ${target.repoPath}: ${deleteBranchResult.error}`,
+                  'paneActions',
+                  job.pane.id
+                );
+              }
+            }
+          });
         }
-
-        for (const target of job.worktreeTargets) {
-          const removeTarget = () => this.removeValidatedWorktreeTarget(job, target);
-          const removed = target.canonicalWorktreePath === job.canonicalWorktreePath
-            ? await removeTarget()
-            : await this.withWorktreeLifecycleLock(
-              target.canonicalWorktreePath,
-              target.repoPath,
-              'cleanup',
-              removeTarget
-            );
-
-          // Nested worktree removal must succeed before the parent can be
-          // removed; otherwise a reused nested worktree could be deleted with
-          // its parent directory.
-          if (!removed) {
-            return false;
-          }
-        }
-
-        return true;
-      }
+      },
     );
 
     // The hook should run after deletion is attempted, regardless of outcome.
     await triggerHook('worktree_removed', job.paneProjectRoot, job.pane);
-
-    if (job.deleteBranch && allWorktreesRemoved) {
-      await this.withWorktreeLock(job.canonicalWorktreePath, async () => {
-        for (const target of job.branchTargets) {
-          if (!this.canRunDestructiveCleanup(job)) {
-            continue;
-          }
-
-          if (!this.areAllWorktreesRemoved(job)) {
-            this.logger.warn(
-              `Skipping branch deletion for ${job.pane.slug}: worktree removal is no longer confirmed`,
-              'paneActions',
-              job.pane.id
-            );
-            break;
-          }
-
-          const currentOid = this.getBranchOid(target.repoPath, target.branchName);
-          if (!currentOid.success || currentOid.output !== target.branchOid) {
-            this.logger.warn(
-              `Skipping branch deletion for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
-              'paneActions',
-              job.pane.id
-            );
-            continue;
-          }
-
-          const deleteBranchResult = await this.runGitCommand(
-            ['branch', '-D', target.branchName],
-            target.repoPath
-          );
-          if (!deleteBranchResult.success) {
-            this.logger.warn(
-              `Branch deletion reported an error for ${job.pane.slug} in ${target.repoPath}: ${deleteBranchResult.error}`,
-              'paneActions',
-              job.pane.id
-            );
-          }
-        }
-      });
-    }
 
     this.logger.debug(
       `Finished background worktree cleanup for ${job.pane.slug}`,
@@ -680,20 +710,50 @@ export class WorktreeCleanupService {
     canonicalWorktreePath: string,
     projectRoot: string,
     operation: 'cleanup' | 'prune' | 'rollback',
-    callback: () => Promise<T> | T
+    callback: () => Promise<T> | T,
+    projectLifecycleLease?: ProjectWorktreeLifecycleLease,
   ): Promise<T> {
-    return this.withWorktreeLock(canonicalWorktreePath, async () => {
-      const lease = await acquireWorktreeOperationLease({
-        worktreePath: canonicalWorktreePath,
+    const ownedProjectLifecycleLease = projectLifecycleLease
+      ? undefined
+      : await acquireProjectWorktreeLifecycleLease({
         projectRoot,
+        worktreePath: canonicalWorktreePath,
         operation,
       });
-      try {
-        return await callback();
-      } finally {
-        await lease.release();
-      }
+    try {
+      return await this.withWorktreeLock(canonicalWorktreePath, async () => {
+        const lease = await acquireWorktreeOperationLease({
+          worktreePath: canonicalWorktreePath,
+          projectRoot,
+          operation,
+        });
+        try {
+          return await callback();
+        } finally {
+          await lease.release();
+        }
+      });
+    } finally {
+      await ownedProjectLifecycleLease?.release();
+    }
+  }
+
+  private async withProjectLifecycleLease<T>(
+    projectRoot: string,
+    worktreePath: string,
+    operation: 'cleanup' | 'prune' | 'rollback',
+    callback: (lease: ProjectWorktreeLifecycleLease) => Promise<T> | T,
+  ): Promise<T> {
+    const lease = await acquireProjectWorktreeLifecycleLease({
+      projectRoot,
+      worktreePath,
+      operation,
     });
+    try {
+      return await callback(lease);
+    } finally {
+      await lease.release();
+    }
   }
 
   private async withWorktreeLock<T>(
@@ -910,13 +970,13 @@ export class WorktreeCleanupService {
     }
 
     const removeResult = await this.runGitCommand(
-      ['worktree', 'remove', target.canonicalWorktreePath, '--force'],
+      ['worktree', 'remove', target.canonicalWorktreePath],
       target.repoPath
     );
 
     if (!removeResult.success) {
       this.logger.warn(
-        `Worktree removal reported an error for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
+        `Worktree removal preserved ${target.canonicalWorktreePath} for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
         'paneActions',
         job.pane.id
       );
@@ -1145,52 +1205,60 @@ export class WorktreeCleanupService {
       `Pruning ${targets.length} old managed worktree${targets.length === 1 ? '' : 's'} for ${job.projectRoot}`,
       'paneActions'
     );
-    for (const target of targets) {
-      await this.withWorktreeLifecycleLock(
-        target.canonicalWorktreePath,
-        job.projectRoot,
-        'prune',
-        async () => {
-          if (
-            target.blockedByActiveReuseReservation
-            || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
-          ) {
-            this.logger.debug(
-              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: worktree is actively reserved for reuse`,
-              'paneActions'
-            );
-            return;
-          }
+    await this.withProjectLifecycleLease(
+      job.projectRoot,
+      targets[0].canonicalWorktreePath,
+      'prune',
+      async (projectLifecycleLease) => {
+        for (const target of targets) {
+          await this.withWorktreeLifecycleLock(
+            target.canonicalWorktreePath,
+            job.projectRoot,
+            'prune',
+            async () => {
+              if (
+                target.blockedByActiveReuseReservation
+                || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
+              ) {
+                this.logger.debug(
+                  `Managed worktree pruning skipped ${target.canonicalWorktreePath}: worktree is actively reserved for reuse`,
+                  'paneActions'
+                );
+                return;
+              }
 
-          if (
-            this.getCleanupGeneration(target.canonicalWorktreePath)
-            !== target.expectedGeneration
-          ) {
-            this.logger.debug(
-              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
-              'paneActions'
-            );
-            return;
-          }
+              if (
+                this.getCleanupGeneration(target.canonicalWorktreePath)
+                !== target.expectedGeneration
+              ) {
+                this.logger.debug(
+                  `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
+                  'paneActions'
+                );
+                return;
+              }
 
-          if (!this.configAllowsManagedPrune(job, target.canonicalWorktreePath)) {
-            return;
-          }
+              if (!this.configAllowsManagedPrune(job, target.canonicalWorktreePath)) {
+                return;
+              }
 
-          const removeResult = await this.runGitCommand(
-            ['worktree', 'remove', target.canonicalWorktreePath],
-            job.projectRoot
+              const removeResult = await this.runGitCommand(
+                ['worktree', 'remove', target.canonicalWorktreePath],
+                job.projectRoot
+              );
+
+              if (!removeResult.success) {
+                this.logger.warn(
+                  `Managed worktree pruning skipped ${target.canonicalWorktreePath}: preserved dirty or inaccessible worktree: ${removeResult.error}`,
+                  'paneActions'
+                );
+              }
+            },
+            projectLifecycleLease,
           );
-
-          if (!removeResult.success) {
-            this.logger.warn(
-              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${removeResult.error}`,
-              'paneActions'
-            );
-          }
         }
-      );
-    }
+      },
+    );
   }
 
   private configAllowsManagedPrune(

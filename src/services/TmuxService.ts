@@ -3,6 +3,7 @@ import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import type { TmuxPanePresence } from '../utils/paneTeardown.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -140,14 +141,16 @@ export class TmuxService {
       encoding?: BufferEncoding;
       stdio?: 'pipe' | 'inherit';
       silent?: boolean;
+      timeout?: number;
     } = {}
   ): string {
-    const { encoding = 'utf-8', stdio = 'pipe', silent = false } = options;
+    const { encoding = 'utf-8', stdio = 'pipe', silent = false, timeout } = options;
 
     try {
       const result = execSync(command, {
         encoding,
         stdio,
+        ...(timeout !== undefined ? { timeout } : {}),
       });
       return typeof result === 'string' ? result.trim() : '';
     } catch (error) {
@@ -503,6 +506,29 @@ export class TmuxService {
     } catch {
       // Expected - pane doesn't exist
       return false;
+    }
+  }
+
+  /**
+   * Probes a pane without treating a failed tmux query as absence. Destructive
+   * lifecycle callers use this tri-state result before removing a durable pane
+   * record or rolling back its worktree.
+   */
+  async probePanePresence(paneId: string): Promise<TmuxPanePresence> {
+    try {
+      const output = this.execute(
+        `tmux list-panes -a -F '#{pane_id}'`,
+        { silent: true, timeout: 5000 },
+      );
+      return output
+        .split('\n')
+        .map((line) => line.trim())
+        .map((line) => line.match(/^%\d+/)?.[0] || line)
+        .includes(paneId)
+        ? 'present'
+        : 'absent';
+    } catch {
+      return 'unknown';
     }
   }
 

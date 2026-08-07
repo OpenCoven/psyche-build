@@ -4,6 +4,7 @@ import { createPane, type CreatePaneOptions, type CreatePaneResult } from '../ut
 import { laneSlugSuffix } from './adapters.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
+import { persistProjectPaneConfigPaneDelta } from '../services/ProjectPaneConfig.js';
 
 export interface LocalPaneBackendOptions {
   projectName: string;
@@ -38,6 +39,15 @@ export interface LocalPaneBackendOptions {
     options: CreatePaneOptions,
     availableAgents: AgentName[],
   ) => Promise<CreatePaneResult>;
+  /**
+   * Injectable for tests and alternate persistence surfaces. The originating
+   * pane is the exact record createPane made durable before launching its
+   * agent, never the task's stale pre-lane pane array.
+   */
+  persistOrchestrationMetadata?: (
+    originatingPane: PsychePane,
+    nextPane: PsychePane,
+  ) => Promise<PsychePane>;
 }
 
 export interface LocalPaneBackend {
@@ -57,6 +67,15 @@ export interface LocalPaneBackend {
  */
 export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalPaneBackend {
   const createPaneFn = options.createPaneFn ?? createPane;
+  const persistOrchestrationMetadata = options.persistOrchestrationMetadata
+    ?? (async (originatingPane: PsychePane, nextPane: PsychePane): Promise<PsychePane> => {
+      const mutation = await persistProjectPaneConfigPaneDelta(
+        options.sessionProjectRoot,
+        originatingPane,
+        nextPane,
+      );
+      return mutation.result as PsychePane;
+    });
   const created: PsychePane[] = [];
 
   // The first createPane call in a session may build the sidebar layout and
@@ -123,12 +142,26 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
       );
     }
 
-    result.pane.orchestration = {
-      taskId: lane.taskId,
-      laneId: lane.id,
-      traceId: lane.traceId,
-      mode: lane.mode,
+    // createPane persisted this pane before it launched the agent. Capture
+    // that exact fresh record as the delta origin; using panesBeforeCurrent
+    // would make a concurrent StatusDetector agentSession write look like a
+    // local deletion when this metadata is saved.
+    const persistedPane = {
+      ...result.pane,
     };
+    const paneWithOrchestration: PsychePane = {
+      ...persistedPane,
+      orchestration: {
+        taskId: lane.taskId,
+        laneId: lane.id,
+        traceId: lane.traceId,
+        mode: lane.mode,
+      },
+    };
+    result.pane = await persistOrchestrationMetadata(
+      persistedPane,
+      paneWithOrchestration,
+    );
     created.push(result.pane);
 
     return { pane: result.pane };

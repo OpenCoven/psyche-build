@@ -181,6 +181,69 @@ describe('closeAction', () => {
   });
 
   describe('close execution - kill_only', () => {
+    it('preserves the record when a transient tmux probe cannot confirm absence', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          throw new Error('tmux probe timed out');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_only');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
+    it('removes a record when tmux confirms the pane is already absent', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return '';
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      expect(savePanesSpy).toHaveBeenCalled();
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        typeof command === 'string' && command.includes('kill-pane')
+      )).toBe(false);
+    });
+
+    it('keeps the record when kill outcome cannot be verified', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      let killAttempted = false;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          if (!killAttempted) return '%42\n';
+          throw new Error('tmux probe timed out after kill');
+        }
+        if (command.includes('kill-pane')) {
+          killAttempted = true;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_only');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
     it('should remove pane from tracking when kill_only selected', async () => {
       const pane1 = createWorktreePane({ id: 'psyche-1' });
       const pane2 = createWorktreePane({ id: 'psyche-2' });

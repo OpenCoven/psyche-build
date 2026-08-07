@@ -221,9 +221,7 @@ describe('createPanesForAgents', () => {
     expect(h.savePanes).not.toHaveBeenCalled();
   });
 
-  // Persisting once at the end is what makes the fan-out atomic from the
-  // config's point of view rather than N interleaved writes.
-  it('persists all created panes in a single save', async () => {
+  it('persists one targeted orchestration delta per created lane', async () => {
     let n = 0;
     createPaneMock.mockImplementation(async () => ({
       pane: pane(`psyche-${++n}`),
@@ -233,8 +231,13 @@ describe('createPanesForAgents', () => {
 
     await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude', 'codex']);
 
-    expect(h.savePanes).toHaveBeenCalledTimes(1);
-    expect(h.savePanes.mock.calls[0][0]).toHaveLength(4);
+    expect(h.savePanes).toHaveBeenCalledTimes(3);
+    for (const [nextPanes] of h.savePanes.mock.calls) {
+      expect(nextPanes).toHaveLength(1);
+      expect(nextPanes[0].orchestration).toMatchObject({
+        taskId: expect.any(String),
+      });
+    }
     expect(h.loadPanes).toHaveBeenCalledTimes(1);
   });
 
@@ -262,7 +265,7 @@ describe('createPanesForAgents', () => {
       const created = await h.api.createPanesForAgents('Fix auth', ['coven-code', 'claude', 'codex']);
 
       expect(created.map((p) => p.id)).toEqual(['psyche-coven-code', 'psyche-codex']);
-      expect(h.savePanes).toHaveBeenCalledTimes(1);
+      expect(h.savePanes).toHaveBeenCalledTimes(2);
     });
 
     it('reports how many lanes failed', async () => {

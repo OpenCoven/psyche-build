@@ -196,7 +196,7 @@ export function cleanupAfterMerge(
 ): { success: boolean; error?: string } {
   try {
     // Remove worktree
-    execSync(`git worktree remove "${worktreePath}" --force`, {
+    execSync(`git worktree remove "${worktreePath}"`, {
       cwd: mainRepoPath,
       stdio: 'pipe',
     });

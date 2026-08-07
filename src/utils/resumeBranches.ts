@@ -10,6 +10,7 @@ import { createPane } from './paneCreation.js';
 import { shellQuote } from './promptStore.js';
 import { SettingsManager } from './settingsManager.js';
 import { writeWorktreeMetadata } from './worktreeMetadata.js';
+import { acquireProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 
 const REMOTE_FALLBACK = 'origin';
 const RESUME_SCAN_EXCLUDED_DIRS = new Set([
@@ -963,71 +964,84 @@ export async function resumeBranchWorkspace(
     persistReusedPane,
   } = options;
 
-  const workspaceStates = await getWorkspaceBranchStatesAsync(projectRoot, branchName);
-  const slug = getAvailableSlug(branchName, projectRoot, existingPanes);
-  const rootWorktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
-  const settings = new SettingsManager(projectRoot).getSettings();
-
   if (!agent) {
     throw new Error(`An agent must be selected before opening ${branchName}`);
   }
 
-  for (const state of workspaceStates) {
-    const worktreePath = state.relativePath
-      ? path.join(rootWorktreePath, state.relativePath)
-      : rootWorktreePath;
-    await ensureLocalBranchAsync(state, branchName, worktreePath);
-  }
+  // This lease spans every workspace repository, including nested child
+  // worktrees. It is intentionally acquired before branch creation and held
+  // through createPane's durable registry write so cleanup cannot interleave
+  // between a resumed root/child worktree and its pane record.
+  const lifecycleLease = await acquireProjectWorktreeLifecycleLease({
+    projectRoot,
+    operation: 'resume',
+  });
+  try {
+    const workspaceStates = await getWorkspaceBranchStatesAsync(projectRoot, branchName);
+    const slug = getAvailableSlug(branchName, projectRoot, existingPanes);
+    const rootWorktreePath = path.join(projectRoot, '.psyche', 'worktrees', slug);
+    const settings = new SettingsManager(projectRoot).getSettings();
 
-  for (const state of workspaceStates) {
-    const worktreePath = state.relativePath
-      ? path.join(rootWorktreePath, state.relativePath)
-      : rootWorktreePath;
-    await createWorktreeAsync(state.repoPath, worktreePath, branchName);
-    writeWorktreeMetadata(worktreePath, {
-      ...(agent && !state.relativePath ? { agent } : {}),
-      permissionMode: state.relativePath ? undefined : settings.permissionMode,
-      branchName: branchName !== slug ? branchName : undefined,
-    });
-  }
-
-  const creation = await createPane(
-    {
-      prompt: '',
-      agent,
-      existingWorktree: {
-        slug,
-        worktreePath: rootWorktreePath,
-        branchName,
-      },
-      projectName: path.basename(projectRoot),
-      existingPanes,
-      projectRoot,
-      sessionConfigPath,
-      sessionProjectRoot,
-      persistReusedPane,
-    },
-    [agent]
-  );
-
-  if (creation.needsAgentChoice) {
-    throw new Error('Agent selection is required to resume this branch');
-  }
-
-  for (const state of workspaceStates) {
-    if (!state.relativePath) {
-      continue;
+    for (const state of workspaceStates) {
+      const worktreePath = state.relativePath
+        ? path.join(rootWorktreePath, state.relativePath)
+        : rootWorktreePath;
+      await ensureLocalBranchAsync(state, branchName, worktreePath);
     }
-    await triggerChildWorktreeHook(
-      state.repoPath,
-      branchName,
-      slug,
-      path.join(rootWorktreePath, state.relativePath),
-      agent
-    );
-  }
 
-  return {
-    pane: creation.pane,
-  };
+    for (const state of workspaceStates) {
+      const worktreePath = state.relativePath
+        ? path.join(rootWorktreePath, state.relativePath)
+        : rootWorktreePath;
+      await createWorktreeAsync(state.repoPath, worktreePath, branchName);
+      writeWorktreeMetadata(worktreePath, {
+        ...(agent && !state.relativePath ? { agent } : {}),
+        permissionMode: state.relativePath ? undefined : settings.permissionMode,
+        branchName: branchName !== slug ? branchName : undefined,
+      });
+    }
+
+    const creation = await createPane(
+      {
+        prompt: '',
+        agent,
+        existingWorktree: {
+          slug,
+          worktreePath: rootWorktreePath,
+          branchName,
+        },
+        projectName: path.basename(projectRoot),
+        existingPanes,
+        projectRoot,
+        sessionConfigPath,
+        sessionProjectRoot,
+        persistReusedPane,
+        projectLifecycleLease: lifecycleLease,
+      },
+      [agent]
+    );
+
+    if (creation.needsAgentChoice) {
+      throw new Error('Agent selection is required to resume this branch');
+    }
+
+    for (const state of workspaceStates) {
+      if (!state.relativePath) {
+        continue;
+      }
+      await triggerChildWorktreeHook(
+        state.repoPath,
+        branchName,
+        slug,
+        path.join(rootWorktreePath, state.relativePath),
+        agent
+      );
+    }
+
+    return {
+      pane: creation.pane,
+    };
+  } finally {
+    await lifecycleLease.release();
+  }
 }

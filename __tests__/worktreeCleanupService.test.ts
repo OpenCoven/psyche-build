@@ -11,6 +11,7 @@ const readFileSyncMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const detectAllWorktreesMock = vi.hoisted(() => vi.fn());
 const acquireWorktreeOperationLeaseMock = vi.hoisted(() => vi.fn());
+const acquireProjectWorktreeLifecycleLeaseMock = vi.hoisted(() => vi.fn());
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 const logger = vi.hoisted(() => ({
@@ -48,6 +49,7 @@ vi.mock('../src/services/LogService.js', () => ({
 
 vi.mock('../src/services/WorktreeOperationLease.js', () => ({
   acquireWorktreeOperationLease: acquireWorktreeOperationLeaseMock,
+  acquireProjectWorktreeLifecycleLease: acquireProjectWorktreeLifecycleLeaseMock,
 }));
 
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
@@ -74,6 +76,7 @@ describe('WorktreeCleanupService', () => {
   let branchOids: Map<string, string>;
   let currentConfig: { projectRoot: string; panes: PsychePane[] };
   let worktreeStatusOutput: string;
+  let worktreeRemoveError: Error | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -81,6 +84,7 @@ describe('WorktreeCleanupService', () => {
     worktreeMappings = new Map();
     branchOids = new Map();
     worktreeStatusOutput = '';
+    worktreeRemoveError = undefined;
     currentConfig = {
       projectRoot: '/test/project',
       panes: [],
@@ -106,6 +110,18 @@ describe('WorktreeCleanupService', () => {
       canonicalWorktreePath: worktreePath,
       lockDir: '/test/project/.psyche/runtime/worktree-locks/test.lock',
       nonce: 'test-lease',
+      release: async () => {},
+    }));
+    acquireProjectWorktreeLifecycleLeaseMock.mockImplementation(async ({
+      projectRoot,
+      worktreePath,
+    }: {
+      projectRoot?: string;
+      worktreePath?: string;
+    }) => ({
+      canonicalProjectRoot: projectRoot || '/test/project',
+      lockDir: `${projectRoot || '/test/project'}/.psyche/runtime/project-worktree-lifecycle.lock`,
+      nonce: `project-lease-${worktreePath || 'root'}`,
       release: async () => {},
     }));
 
@@ -135,6 +151,9 @@ describe('WorktreeCleanupService', () => {
       }
 
       if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
+        if (worktreeRemoveError) {
+          throw worktreeRemoveError;
+        }
         worktreeMappings.get(cwd)?.delete(resolve(gitArgs[2]));
         return '';
       }
@@ -301,20 +320,20 @@ describe('WorktreeCleanupService', () => {
     const worktreeRemovalCalls = gitCalls.filter((call) => call.args[0] === 'worktree');
     expect(worktreeRemovalCalls).toEqual(expect.arrayContaining([
       {
-        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/docs-ui', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/docs-ui'],
         cwd: '/test/project/docs-ui',
       },
       {
-        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/theme-schemas', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react/theme-schemas'],
         cwd: '/test/project/theme-schemas',
       },
       {
-        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
+        args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
         cwd: '/test/project',
       },
     ]));
     expect(worktreeRemovalCalls.at(-1)).toEqual({
-      args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
+      args: ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
       cwd: '/test/project',
     });
 
@@ -494,7 +513,7 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', worktreePath, '--force'],
+      ['worktree', 'remove', worktreePath],
       expect.objectContaining({ cwd: '/test/project' })
     );
   });
@@ -579,7 +598,7 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
       expect.anything()
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -669,6 +688,21 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
+  it('acquires the project lifecycle lease before an exact creation lease', async () => {
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    const reservation = await service.beginWorktreeCreation(
+      '/test/project/.psyche/worktrees/ordered',
+      '/test/project',
+    );
+
+    expect(acquireProjectWorktreeLifecycleLeaseMock.mock.invocationCallOrder[0])
+      .toBeLessThan(acquireWorktreeOperationLeaseMock.mock.invocationCallOrder[0]);
+    await reservation.cancel();
+  });
+
   it('removes the validated canonical target when a queued symlink is retargeted', async () => {
     const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
     tempDirs.push(cleanupRoot);
@@ -701,12 +735,12 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', originalTarget, '--force'],
+      ['worktree', 'remove', originalTarget],
       expect.objectContaining({ cwd: '/test/project' })
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', retargetedTarget, '--force'],
+      ['worktree', 'remove', retargetedTarget],
       expect.anything()
     );
   });
@@ -731,7 +765,7 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
       expect.anything()
     );
     expect(logger.warn).toHaveBeenCalledWith(
@@ -752,7 +786,7 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
       expect.objectContaining({ cwd: '/test/project' })
     );
     expect(spawnMock).toHaveBeenCalledWith(
@@ -806,9 +840,9 @@ describe('WorktreeCleanupService', () => {
     expect(mutateProjectPaneConfigMock).not.toHaveBeenCalled();
   });
 
-  it('preserves a worktree changed by hooks or setup instead of forcing rollback', async () => {
+  it('lets non-forced git removal atomically preserve a dirty rollback target', async () => {
     configureCleanupIdentity();
-    worktreeStatusOutput = '?? .psyche-hooks/setup-created-file\n';
+    worktreeRemoveError = new Error('contains modified or untracked files');
 
     const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
     (WorktreeCleanupService as any).instance = undefined;
@@ -825,17 +859,12 @@ describe('WorktreeCleanupService', () => {
 
     expect(result).toEqual({
       success: false,
-      error: `newly created worktree has modified or untracked files; preserved at ${worktreePath}`,
+      error: `failed to remove newly created worktree; preserved worktree and branch at ${worktreePath}: contains modified or untracked files`,
     });
     expect(execFileSyncMock).toHaveBeenCalledWith(
       'git',
-      ['status', '--porcelain=v1', '--untracked-files=all'],
-      expect.objectContaining({ cwd: worktreePath }),
-    );
-    expect(execFileSyncMock).not.toHaveBeenCalledWith(
-      'git',
-      ['worktree', 'remove', worktreePath, '--force'],
-      expect.anything(),
+      ['worktree', 'remove', worktreePath],
+      expect.objectContaining({ cwd: '/test/project' }),
     );
     expect(
       worktreeMappings.get('/test/project')?.get(resolve(worktreePath))
@@ -844,6 +873,101 @@ describe('WorktreeCleanupService', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining(worktreePath),
       'paneActions',
+    );
+  });
+
+  it('preserves an ignored .env when Git refuses non-forced rollback', async () => {
+    configureCleanupIdentity();
+    const worktreePath = '/test/project/.psyche/worktrees/react';
+    worktreeRemoveError = new Error('worktree contains ignored .env');
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+      worktreePath,
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('preserved worktree and branch');
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', worktreePath],
+      expect.anything(),
+    );
+    expect(execFileSyncMock).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['status']),
+      expect.anything(),
+    );
+    expect(branchOids.get('/test/project')).toBe('abc123');
+  });
+
+  it('lets Git reject a write that races after any local cleanliness observation', async () => {
+    configureCleanupIdentity();
+    const worktreePath = '/test/project/.psyche/worktrees/react';
+    // The write happens after all identity checks. There is intentionally no
+    // status precheck to race: non-forced worktree remove is the final guard.
+    worktreeRemoveError = new Error('worktree became dirty during rollback');
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+      worktreePath,
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(worktreeMappings.get('/test/project')?.get(resolve(worktreePath))).toBe('react');
+    expect(branchOids.get('/test/project')).toBe('abc123');
+  });
+
+  it('preserves a dirty background cleanup target and does not delete its branch', async () => {
+    configureCleanupIdentity();
+    spawnMock.mockImplementation((_command, args) => {
+      const gitArgs = args as string[];
+      const child = new EventEmitter() as MockChildProcess;
+      child.stderr = new EventEmitter();
+      process.nextTick(() => {
+        if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
+          child.stderr?.emit('data', 'worktree contains modified files');
+          child.emit('close', 1);
+          return;
+        }
+        child.emit('close', 0);
+      });
+      return child;
+    });
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
+      expect.anything(),
+    );
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['branch', '-D', 'react'],
+      expect.anything(),
+    );
+    expect(worktreeMappings.get('/test/project')?.get(
+      resolve('/test/project/.psyche/worktrees/react'),
+    )).toBe('react');
+    expect(branchOids.get('/test/project')).toBe('abc123');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Worktree removal preserved'),
+      'paneActions',
+      'psyche-1',
     );
   });
 

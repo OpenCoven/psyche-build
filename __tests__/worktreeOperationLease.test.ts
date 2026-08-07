@@ -12,6 +12,7 @@ import {
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  acquireProjectWorktreeLifecycleLease,
   acquireWorktreeOperationLease,
   type WorktreeOperationLeaseRecord,
 } from '../src/services/WorktreeOperationLease.js';
@@ -39,6 +40,43 @@ function lockDirFor(projectRoot: string, worktreePath: string): string {
 }
 
 describe('worktree operation lease', () => {
+  it('serializes cleanup and resume across root and child worktree paths', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const childWorktreePath = join(worktreePath, 'child-repo');
+    mkdirSync(childWorktreePath, { recursive: true });
+    const cleanup = await acquireProjectWorktreeLifecycleLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        createNonce: () => 'cleanup-owner',
+      },
+    );
+
+    let resumeAcquired = false;
+    const resumePromise = acquireProjectWorktreeLifecycleLease(
+      { projectRoot, worktreePath: childWorktreePath, operation: 'resume' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 101 || pid === 202,
+        pollIntervalMs: 5,
+        timeoutMs: 1_000,
+        createNonce: () => 'resume-owner',
+      },
+    ).then((lease) => {
+      resumeAcquired = true;
+      return lease;
+    });
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    expect(resumeAcquired).toBe(false);
+
+    await cleanup.release();
+    const resume = await resumePromise;
+    expect(resume.canonicalProjectRoot).toBe(resolve(projectRoot));
+    await resume.release();
+  });
+
   it('waits for a live owner before acquiring the same worktree lease', async () => {
     const { projectRoot, worktreePath } = createLeaseTarget();
     const first = await acquireWorktreeOperationLease(

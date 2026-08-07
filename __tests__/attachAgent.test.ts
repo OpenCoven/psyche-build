@@ -4,7 +4,8 @@ import type { PsychePane } from '../src/types.js';
 const tmuxServiceMock = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%1'),
   paneExists: vi.fn(async () => true),
-  setPaneTitle: vi.fn(async () => {}),
+  probePanePresence: vi.fn(async () => 'present'),
+  setPaneTitle: vi.fn(async (_paneId?: string, _title?: string) => {}),
   refreshClient: vi.fn(async () => {}),
   sendShellCommand: vi.fn(async () => {}),
   sendTmuxKeys: vi.fn(async () => {}),
@@ -18,6 +19,7 @@ const withWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 const upsertProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn());
 const removeProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn());
+const transactProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const logServiceMock = vi.hoisted(() => ({
   debug: vi.fn(),
   info: vi.fn(),
@@ -87,6 +89,8 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
   upsertProjectPaneConfigPanes: upsertProjectPaneConfigPanesMock,
   removeProjectPaneConfigPanes: removeProjectPaneConfigPanesMock,
+  transactProjectPaneConfig: transactProjectPaneConfigMock,
+  projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
 }));
 
 import {
@@ -159,22 +163,51 @@ describe('generateSiblingSlugForTargetPane', () => {
 
 describe('attachAgentToWorktree', () => {
   let order: string[];
+  let paneAlive: boolean;
 
   beforeEach(() => {
     vi.clearAllMocks();
     order = [];
+    paneAlive = true;
     splitPaneMock.mockReturnValue('%2');
     tmuxServiceMock.getCurrentPaneIdSync.mockReturnValue('%1');
-    tmuxServiceMock.paneExists.mockResolvedValue(true);
+    tmuxServiceMock.paneExists.mockImplementation(async () => paneAlive);
+    tmuxServiceMock.probePanePresence.mockImplementation(async () => (
+      paneAlive ? 'present' : 'absent'
+    ));
     tmuxServiceMock.setPaneTitle.mockResolvedValue(undefined);
     tmuxServiceMock.refreshClient.mockResolvedValue(undefined);
     tmuxServiceMock.sendShellCommand.mockResolvedValue(undefined);
     tmuxServiceMock.sendTmuxKeys.mockResolvedValue(undefined);
     tmuxServiceMock.selectPane.mockResolvedValue(undefined);
-    tmuxServiceMock.killPane.mockResolvedValue(undefined);
+    tmuxServiceMock.killPane.mockImplementation(async () => {
+      paneAlive = false;
+    });
     readProjectPaneConfigUnderLockMock.mockResolvedValue({ controlPaneId: '%1' });
     upsertProjectPaneConfigPanesMock.mockResolvedValue(undefined);
     removeProjectPaneConfigPanesMock.mockResolvedValue(undefined);
+    transactProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      operation: (transaction: {
+        config: Record<string, unknown>;
+        persist: () => Promise<void>;
+      }) => Promise<unknown>,
+    ) => {
+      const config: Record<string, unknown> = {
+        controlPaneId: '%1',
+        panes: [createTargetPane()],
+      };
+      let persisted = false;
+      const persist = async () => {
+        await upsertProjectPaneConfigPanesMock('/session', config.panes);
+        persisted = true;
+      };
+      const result = await operation({ config, persist });
+      if (!persisted) {
+        await persist();
+      }
+      return { config, result };
+    });
     launchAgentInPaneMock.mockResolvedValue(undefined);
     withWorktreeReuseReservationMock.mockImplementation(async (
       worktreePath: string,
@@ -243,9 +276,10 @@ describe('attachAgentToWorktree', () => {
     });
     tmuxServiceMock.killPane.mockImplementationOnce(async () => {
       order.push('pane-killed');
+      paneAlive = false;
     });
 
-    await expect(attach()).rejects.toThrow(/Failed to persist attached pane/);
+    await expect(attach()).rejects.toThrow(/Failed to prepare attached pane/);
 
     expect(launchAgentInPaneMock).not.toHaveBeenCalled();
     expect(removeProjectPaneConfigPanesMock).not.toHaveBeenCalled();
@@ -266,6 +300,7 @@ describe('attachAgentToWorktree', () => {
     });
     tmuxServiceMock.killPane.mockImplementationOnce(async () => {
       order.push('pane-killed');
+      paneAlive = false;
     });
     removeProjectPaneConfigPanesMock.mockImplementationOnce(async () => {
       order.push('record-removed');
@@ -273,12 +308,97 @@ describe('attachAgentToWorktree', () => {
 
     await expect(attach()).rejects.toThrow(/Failed to launch attached agent/);
 
-    const persistedPane = upsertProjectPaneConfigPanesMock.mock.calls[0][1][0] as PsychePane;
+    const persistedPane = (
+      upsertProjectPaneConfigPanesMock.mock.calls[0][1] as PsychePane[]
+    ).find((pane) => pane.id !== 'psyche-source')!;
     expect(removeProjectPaneConfigPanesMock).toHaveBeenCalledWith(
       '/session',
       [persistedPane.id],
     );
     expect(order.indexOf('pane-killed')).toBeLessThan(order.indexOf('record-removed'));
     expect(order.indexOf('record-removed')).toBeLessThan(order.indexOf('lease-released'));
+  });
+
+  it('retains a durable attached-pane record when teardown is unknown', async () => {
+    launchAgentInPaneMock.mockRejectedValueOnce(new Error('agent executable unavailable'));
+    tmuxServiceMock.probePanePresence.mockResolvedValueOnce('unknown');
+
+    await expect(attach()).rejects.toThrow(/retained tracked pane record.*Recovery required/);
+
+    expect(removeProjectPaneConfigPanesMock).not.toHaveBeenCalled();
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+  });
+
+  it('allocates concurrent sibling slugs from fresh transaction state with matching pane titles', async () => {
+    const config: Record<string, unknown> = {
+      controlPaneId: '%1',
+      panes: [createTargetPane()],
+    };
+    let transactionTail = Promise.resolve();
+    let paneNumber = 1;
+    const titleByPaneId = new Map<string, string>();
+    splitPaneMock.mockImplementation(() => `%${++paneNumber}`);
+    tmuxServiceMock.setPaneTitle.mockImplementation(async (paneId?: string, title?: string) => {
+      if (paneId && title) {
+        titleByPaneId.set(paneId, title);
+      }
+    });
+    transactProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      operation: (transaction: {
+        config: Record<string, unknown>;
+        persist: () => Promise<void>;
+      }) => Promise<unknown>,
+    ) => {
+      const previous = transactionTail;
+      let release!: () => void;
+      transactionTail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        let persisted = false;
+        const result = await operation({
+          config,
+          persist: async () => {
+            persisted = true;
+          },
+        });
+        if (!persisted) {
+          throw new Error('attachment transaction did not persist');
+        }
+        return { config, result };
+      } finally {
+        release();
+      }
+    });
+
+    const targetPane = createTargetPane();
+    const [first, second] = await Promise.all([
+      attachAgentToWorktree({
+        targetPane,
+        prompt: 'Review A',
+        agent: 'claude',
+        existingPanes: [targetPane],
+        sessionProjectRoot: '/session',
+      }),
+      attachAgentToWorktree({
+        targetPane,
+        prompt: 'Review B',
+        agent: 'codex',
+        existingPanes: [targetPane],
+        sessionProjectRoot: '/session',
+      }),
+    ]);
+
+    expect([first.pane.slug, second.pane.slug].sort()).toEqual([
+      'feature-a2',
+      'feature-a3',
+    ]);
+    const panes = config.panes as PsychePane[];
+    expect(new Set(panes.map((pane) => pane.slug)).size).toBe(panes.length);
+    for (const attached of [first.pane, second.pane]) {
+      expect(titleByPaneId.get(attached.paneId)).toBe(attached.slug);
+      expect(panes.find((pane) => pane.paneId === attached.paneId)?.slug)
+        .toBe(attached.slug);
+    }
   });
 });
