@@ -80,6 +80,8 @@ export interface PsychePane {
     updatedAt?: string;
   };
   worktreePath?: string;
+  /** Effective checkout root for a shell pane's observed cwd. */
+  cwdReference?: string;
   browserPath?: string; // Root path when a shell pane is a psyche file browser
   testWindowId?: string;  // Background window for tests
   testStatus?: 'running' | 'passed' | 'failed';

@@ -31,6 +31,7 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
+import { createPsychePaneId } from './paneIdentity.js';
 
 export interface AttachAgentOptions {
   targetPane: PsychePane;
@@ -112,7 +113,7 @@ async function attachAgentToReservedWorktree(
 
   const tmuxService = TmuxService.getInstance();
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
-  const psychePaneId = `psyche-${Date.now()}`;
+  const psychePaneId = createPsychePaneId();
   let paneInfo: string | undefined;
   let newPane: PsychePane | undefined;
 

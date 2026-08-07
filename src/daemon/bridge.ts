@@ -38,6 +38,7 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
+import { createPsychePaneId } from '../utils/paneIdentity.js';
 import type { PsycheConfig } from '../types.js';
 import {
   isAgenticCapability,
@@ -923,15 +924,9 @@ export async function mutateBridgeConfig<T>(
   return mutation.result;
 }
 
-/**
- * Date.now() alone collides when several panes are created inside one
- * millisecond, which concurrent lanes do routinely.
- */
-let paneIdCounter = 0;
-
+/** Allocates a collision-resistant identity across concurrent pane creators. */
 function nextBridgePaneId(): string {
-  paneIdCounter += 1;
-  return `psyche-${Date.now()}-${paneIdCounter}`;
+  return createPsychePaneId();
 }
 
 /**
@@ -1269,6 +1264,11 @@ export async function spawnBridgePane(
 export interface BridgeKillDeps {
   tmuxPaneExists: (paneId: string) => boolean | undefined;
   killTmuxPane: (paneId: string) => void;
+  /**
+   * Optional lifecycle seam after the initial non-destructive probe and
+   * before the locked identity check.
+   */
+  afterInitialProbe?: () => Promise<void> | void;
 }
 
 export interface BridgeKillResult {
@@ -1313,7 +1313,10 @@ export async function killBridgePane(
 
   const tmuxPaneId = String(found.paneId ?? found.id ?? paneId);
   const psychePaneId = String(found.id ?? tmuxPaneId);
-  const pane = found;
+  const expectedIdentity = {
+    id: psychePaneId,
+    paneId: tmuxPaneId,
+  };
 
   const initialPresence = deps.tmuxPaneExists(tmuxPaneId);
   if (initialPresence === undefined) {
@@ -1325,39 +1328,83 @@ export async function killBridgePane(
     );
   }
 
-  let killed = false;
-  if (initialPresence) {
-    try {
-      deps.killTmuxPane(tmuxPaneId);
-      killed = true;
-    } catch (error) {
-      throw bridgeError(
-        'pane_kill_failed',
-        `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  await deps.afterInitialProbe?.();
 
-    const afterKill = deps.tmuxPaneExists(tmuxPaneId);
-    if (afterKill !== false) {
-      throw bridgeError(
-        afterKill === undefined ? 'pane_probe_unknown' : 'pane_kill_unconfirmed',
-        `could not confirm tmux pane ${tmuxPaneId} is absent; retained pane record. ${
-          paneRecoveryInstructions(tmuxPaneId, projectPaneConfigPath(scoped.projectRoot))
-        }`,
-      );
-    }
-  }
+  // The initial read/probe establishes the requested target, but it cannot
+  // authorize a later destructive action. A concurrent rebind may have
+  // replaced the record before this lease was acquired.
+  const mutation = await transactProjectPaneConfig(
+    scoped.projectRoot,
+    async ({ config: currentConfig, persist }) => {
+      const panes = Array.isArray(currentConfig.panes)
+        ? currentConfig.panes as RawConfigPane[]
+        : [];
+      const current = panes.find((candidate) => (
+        rawPaneIdentity(candidate).id === expectedIdentity.id
+      ));
+      if (
+        !current
+        || !sameRawPaneIdentity(rawPaneIdentity(current), expectedIdentity)
+      ) {
+        throw bridgeError(
+          'pane_rebound',
+          `pane "${expectedIdentity.id}" was rebound before it could be killed; retained replacement record`,
+        );
+      }
 
-  // Re-read under the mutation lock and match by id: the snapshot above may be
-  // stale if a concurrent spawn appended since, and dropping the record by
-  // object identity against a stale copy would filter nothing.
-  await mutateBridgeConfig(scoped.projectRoot, (current) => {
-    const panes = Array.isArray(current.panes) ? current.panes : [];
-    current.panes = panes.filter(
-      (candidate) => candidate.id !== pane.id && candidate.paneId !== pane.paneId,
-    );
-    current.lastUpdated = new Date().toISOString();
-  });
+      // Re-probe only after the locked exact-identity check. The pre-lock
+      // result is deliberately not trusted for a kill or deregistration.
+      const currentPresence = deps.tmuxPaneExists(expectedIdentity.paneId);
+      if (currentPresence === undefined) {
+        throw bridgeError(
+          'pane_probe_unknown',
+          `could not confirm whether tmux pane ${expectedIdentity.paneId} exists; retained pane record. ${
+            paneRecoveryInstructions(
+              expectedIdentity.paneId,
+              projectPaneConfigPath(scoped.projectRoot),
+            )
+          }`,
+        );
+      }
+
+      let killed = false;
+      if (currentPresence) {
+        try {
+          deps.killTmuxPane(expectedIdentity.paneId);
+          killed = true;
+        } catch (error) {
+          throw bridgeError(
+            'pane_kill_failed',
+            `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
+        const afterKill = deps.tmuxPaneExists(expectedIdentity.paneId);
+        if (afterKill !== false) {
+          throw bridgeError(
+            afterKill === undefined ? 'pane_probe_unknown' : 'pane_kill_unconfirmed',
+            `could not confirm tmux pane ${expectedIdentity.paneId} is absent; retained pane record. ${
+              paneRecoveryInstructions(
+                expectedIdentity.paneId,
+                projectPaneConfigPath(scoped.projectRoot),
+              )
+            }`,
+          );
+        }
+      }
+
+      // Remove only the exact record that was locked above. Matching either
+      // field independently could deregister a replacement after a rebind.
+      currentConfig.panes = panes.filter((candidate) => !sameRawPaneIdentity(
+        rawPaneIdentity(candidate),
+        expectedIdentity,
+      ));
+      currentConfig.lastUpdated = new Date().toISOString();
+      await persist();
+      return { pane: current, killed };
+    },
+  );
+  const { pane, killed } = mutation.result;
 
   return {
     id: psychePaneId,
@@ -1502,6 +1549,23 @@ function bridgeConfigPath(projectRoot: string): string {
 function findRawPane(config: BridgeConfig, paneId: string): RawConfigPane | undefined {
   const panes = Array.isArray(config.panes) ? config.panes : [];
   return panes.find((pane) => pane.id === paneId || pane.paneId === paneId);
+}
+
+function rawPaneIdentity(pane: RawConfigPane): { id: string; paneId: string } {
+  const id = typeof pane.id === 'string' && pane.id
+    ? pane.id
+    : String(pane.paneId ?? '');
+  const paneId = typeof pane.paneId === 'string' && pane.paneId
+    ? pane.paneId
+    : id;
+  return { id, paneId };
+}
+
+function sameRawPaneIdentity(
+  left: { id: string; paneId: string },
+  right: { id: string; paneId: string },
+): boolean {
+  return left.id === right.id && left.paneId === right.paneId;
 }
 
 function rawPaneToSummary(pane: RawConfigPane, projectRoot: string): PaneSummary {

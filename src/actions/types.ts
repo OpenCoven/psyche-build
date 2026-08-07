@@ -84,6 +84,11 @@ export interface ActionResult {
   dismissable?: boolean;  // Can user dismiss without action?
 }
 
+export interface PaneLifecycleIdentity {
+  id: string;
+  paneId: string;
+}
+
 /**
  * Context provided to action functions
  */
@@ -104,6 +109,13 @@ export interface ActionContext {
    * registry. Merge flows use this instead of replacing a stale pane array.
    */
   removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
+  /**
+   * Removes only records whose durable pane identity still exactly matches.
+   * Merge uses this after teardown so a concurrent rebind cannot be removed.
+   */
+  removePaneIdentitiesFromConfig?: (
+    identities: Iterable<PaneLifecycleIdentity>,
+  ) => Promise<PsychePane[]>;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;

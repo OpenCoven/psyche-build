@@ -13,6 +13,10 @@ import {
 } from './WorktreeOperationLease.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
+  paneReferencesWorktree,
+  pathsOverlap,
+} from '../utils/paneWorktreeReference.js';
+import {
   readProjectPaneConfigUnderLock,
 } from './ProjectPaneConfig.js';
 
@@ -137,17 +141,6 @@ export interface WorktreeReuseReservation {
   canonicalWorktreePath: string;
   complete: () => Promise<void>;
   cancel: () => Promise<void>;
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-  const normalizedLeft = canonicalizePathWithExistingAncestor(left);
-  const normalizedRight = canonicalizePathWithExistingAncestor(right);
-
-  return (
-    normalizedLeft === normalizedRight ||
-    normalizedLeft.startsWith(`${normalizedRight}${path.sep}`) ||
-    normalizedRight.startsWith(`${normalizedLeft}${path.sep}`)
-  );
 }
 
 /**
@@ -424,8 +417,7 @@ export class WorktreeCleanupService {
       const config = await readProjectPaneConfigUnderLock(identity.configProjectRoot);
       const panes = Array.isArray(config.panes) ? config.panes : [];
       stillReferenced = panes.some((pane) => (
-        typeof pane.worktreePath === 'string'
-        && pathsOverlap(pane.worktreePath, identity.canonicalWorktreePath)
+        paneReferencesWorktree(pane, identity.canonicalWorktreePath)
       ));
     } catch (error) {
       return {
@@ -1057,8 +1049,7 @@ export class WorktreeCleanupService {
 
     const protectedWorktreePath = target?.canonicalWorktreePath || job.canonicalWorktreePath;
     if (config.panes.some((pane) => (
-      typeof pane.worktreePath === 'string'
-      && pathsOverlap(pane.worktreePath, protectedWorktreePath)
+      paneReferencesWorktree(pane, protectedWorktreePath)
     ))) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: current config still references ${protectedWorktreePath}`,
@@ -1288,8 +1279,7 @@ export class WorktreeCleanupService {
     }
 
     if (config.panes.some((pane) => (
-      typeof pane.worktreePath === 'string'
-      && pathsOverlap(pane.worktreePath, canonicalWorktreePath)
+      paneReferencesWorktree(pane, canonicalWorktreePath)
     ))) {
       this.logger.debug(
         `Managed worktree pruning skipped ${canonicalWorktreePath}: current config still references it`,
@@ -1312,11 +1302,6 @@ export class WorktreeCleanupService {
       return [];
     }
 
-    const activeWorktreePaths = job.activePanes
-      .map((pane) => pane.worktreePath)
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .map(canonicalizePathWithExistingAncestor);
-
     const managedWorktrees: ManagedWorktreePruneCandidate[] = [];
 
     for (const entry of readdirSync(managedRoot, { withFileTypes: true })) {
@@ -1337,8 +1322,8 @@ export class WorktreeCleanupService {
     }
 
     const activeManagedCount = managedWorktrees.filter((worktree) =>
-      activeWorktreePaths.some((activePath) =>
-        pathsOverlap(worktree.canonicalWorktreePath, activePath)
+      job.activePanes.some((pane) =>
+        paneReferencesWorktree(pane, worktree.canonicalWorktreePath)
       )
     ).length;
 
@@ -1350,8 +1335,8 @@ export class WorktreeCleanupService {
 
     return managedWorktrees
       .filter((worktree) =>
-        !activeWorktreePaths.some((activePath) =>
-          pathsOverlap(worktree.canonicalWorktreePath, activePath)
+        !job.activePanes.some((pane) =>
+          paneReferencesWorktree(pane, worktree.canonicalWorktreePath)
         )
       )
       .sort((left, right) => {

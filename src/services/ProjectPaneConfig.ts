@@ -73,6 +73,11 @@ export interface ProjectPaneConfigTransaction {
   persist: () => Promise<void>;
 }
 
+export interface ProjectPaneConfigPaneIdentity {
+  id: string;
+  paneId: string;
+}
+
 export class ProjectPaneConfigError extends Error {
   readonly code: 'config_unreadable' | 'config_corrupt';
 
@@ -252,6 +257,7 @@ export async function transactProjectPaneConfig<T>(
     const config = await readProjectPaneConfig(lock.canonicalProjectRoot);
     let persisted = false;
     const persist = async (): Promise<void> => {
+      assertUniquePaneIds(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
       await writeProjectPaneConfig(lock.canonicalProjectRoot, config);
       persisted = true;
     };
@@ -325,8 +331,9 @@ export async function mutateProjectPaneUpdateSettings<T>(
 }
 
 /**
- * Upserts exact pane records into the fresh locked registry. It never treats
- * an omitted pane from a stale UI array as a deletion.
+ * Adds exact pane records into the fresh locked registry. A pane ID is a
+ * durable lifecycle identity, so a collision is never silently treated as an
+ * update to another creation attempt.
  */
 export async function upsertProjectPaneConfigPanes(
   projectRoot: string,
@@ -335,22 +342,117 @@ export async function upsertProjectPaneConfigPanes(
 ): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
   return mutateProjectPaneConfig(projectRoot, (config) => {
     const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+    const existingIds = new Set(
+      panes
+        .map(paneRecordId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    const requestedIds = new Set<string>();
 
     for (const nextPane of panesToUpsert) {
-      const index = findPaneRecordIndex(panes, nextPane);
-      if (index === -1) {
-        panes.push(nextPane);
-      } else {
-        panes[index] = {
-          ...asRecord(panes[index]),
-          ...asRecord(nextPane),
-        };
+      const id = paneRecordId(nextPane);
+      if (!id) {
+        throw new Error('Cannot persist pane without an ID');
       }
+      if (existingIds.has(id) || requestedIds.has(id)) {
+        throw new Error(`Duplicate pane ID "${id}" cannot replace an existing pane record`);
+      }
+      requestedIds.add(id);
+      panes.push(nextPane);
     }
 
     config.panes = panes;
     config.lastUpdated = new Date().toISOString();
     return panes;
+  }, options);
+}
+
+/**
+ * Retains a pane record without ever replacing another record that happens to
+ * share its ID. This is used only for recovery after a failed lifecycle
+ * persistence: an already-durable exact identity is accepted as success.
+ */
+export async function ensureProjectPaneConfigPane(
+  projectRoot: string,
+  pane: ProjectPaneConfigPane,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane>> {
+  const expected = paneRecordIdentity(pane);
+  if (!expected) {
+    throw new Error('Cannot retain pane recovery record without an exact ID and pane ID');
+  }
+
+  return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
+    const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+    assertUniquePaneIds(panes, projectPaneConfigPath(projectRoot));
+
+    const existing = panes.find((candidate) => paneRecordId(candidate) === expected.id);
+    if (existing) {
+      if (!hasPaneRecordIdentity(existing, expected)) {
+        throw new Error(
+          `Pane identity conflict for "${expected.id}": existing pane ID changed before recovery`,
+        );
+      }
+      return existing;
+    }
+
+    panes.push(pane);
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+    await persist();
+    return pane;
+  }, options);
+}
+
+/**
+ * Rebinds one exact persisted record to a replacement tmux pane ID. The
+ * originating `{ id, paneId }` must still be current while the config lease is
+ * held; otherwise a concurrent rebind wins and this operation refuses to
+ * overwrite it.
+ */
+export async function replaceProjectPaneConfigPaneIdentity(
+  projectRoot: string,
+  expected: ProjectPaneConfigPaneIdentity,
+  replacement: ProjectPaneConfigPane,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane>> {
+  const replacementIdentity = paneRecordIdentity(replacement);
+  if (!replacementIdentity || replacementIdentity.id !== expected.id) {
+    throw new Error('Pane identity replacement requires the same non-empty pane ID');
+  }
+
+  return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
+    const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+    assertUniquePaneIds(panes, projectPaneConfigPath(projectRoot));
+    const exactIndex = panes.findIndex((candidate) => hasPaneRecordIdentity(candidate, expected));
+
+    if (exactIndex === -1) {
+      const current = panes.find((candidate) => paneRecordId(candidate) === expected.id);
+      if (current && hasPaneRecordIdentity(current, replacementIdentity)) {
+        return current;
+      }
+      throw new Error(
+        `Pane identity conflict for "${expected.id}": expected tmux pane "${expected.paneId}" is no longer current`,
+      );
+    }
+
+    const currentRecord = asRecord(panes[exactIndex]);
+    const replacementRecord = asRecord(replacement);
+    const next = {
+      ...currentRecord,
+      id: expected.id,
+      paneId: replacementIdentity.paneId,
+      ...(
+        typeof replacementRecord.worktreePath === 'string'
+          ? { worktreePath: replacementRecord.worktreePath }
+          : {}
+      ),
+    };
+    panes[exactIndex] = next;
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+    await persist();
+    return next;
   }, options);
 }
 
@@ -419,6 +521,52 @@ export async function removeProjectPaneConfigPanes(
   }, options);
 }
 
+/**
+ * Removes pane records only when every requested `{ id, paneId }` identity is
+ * still exact under one config lease. Destructive callers use this after a
+ * verified tmux teardown so a concurrent rebind cannot lose its replacement.
+ */
+export async function removeProjectPaneConfigPaneIdentities(
+  projectRoot: string,
+  identities: Iterable<ProjectPaneConfigPaneIdentity>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
+  const expected = Array.from(identities);
+  const expectedById = new Map<string, ProjectPaneConfigPaneIdentity>();
+  for (const identity of expected) {
+    if (
+      !identity
+      || typeof identity.id !== 'string'
+      || !identity.id
+      || typeof identity.paneId !== 'string'
+      || !identity.paneId
+      || expectedById.has(identity.id)
+    ) {
+      throw new Error('Pane identity removal requires unique non-empty IDs and pane IDs');
+    }
+    expectedById.set(identity.id, identity);
+  }
+
+  return mutateProjectPaneConfig(projectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+    for (const identity of expectedById.values()) {
+      const current = panes.find((pane) => paneRecordId(pane) === identity.id);
+      if (!current || !hasPaneRecordIdentity(current, identity)) {
+        throw new Error(
+          `Pane identity conflict for "${identity.id}": expected tmux pane "${identity.paneId}" is no longer current`,
+        );
+      }
+    }
+
+    config.panes = panes.filter((pane) => {
+      const identity = paneRecordIdentity(pane);
+      return !identity || !expectedById.has(identity.id);
+    });
+    config.lastUpdated = new Date().toISOString();
+    return config.panes;
+  }, options);
+}
+
 export async function readProjectPaneConfig(
   projectRoot: string,
 ): Promise<ProjectPaneConfig> {
@@ -467,6 +615,7 @@ export async function readProjectPaneConfig(
       `${configPath} has a non-array panes field`,
     );
   }
+  assertUniquePaneIds(config.panes, configPath);
   for (const key of ['settings', 'updateSettings'] as const) {
     const value = config[key];
     if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
@@ -570,15 +719,50 @@ function paneRecordId(value: ProjectPaneConfigPane): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined;
 }
 
-function findPaneRecordIndex(
-  panes: readonly ProjectPaneConfigPane[],
-  nextPane: ProjectPaneConfigPane,
-): number {
-  const id = paneRecordId(nextPane);
+function paneRecordIdentity(
+  value: ProjectPaneConfigPane,
+): ProjectPaneConfigPaneIdentity | undefined {
+  const id = paneRecordId(value);
   if (!id) {
-    return -1;
+    return undefined;
   }
-  return panes.findIndex((pane) => paneRecordId(pane) === id);
+  const paneId = asRecord(value).paneId;
+  return {
+    id,
+    paneId: typeof paneId === 'string' && paneId.length > 0 ? paneId : id,
+  };
+}
+
+function hasPaneRecordIdentity(
+  value: ProjectPaneConfigPane,
+  expected: ProjectPaneConfigPaneIdentity,
+): boolean {
+  const identity = paneRecordIdentity(value);
+  return identity?.id === expected.id && identity.paneId === expected.paneId;
+}
+
+function assertUniquePaneIds(
+  panes: readonly ProjectPaneConfigPane[] | undefined,
+  configPath: string,
+): void {
+  if (!panes) {
+    return;
+  }
+
+  const seen = new Set<string>();
+  for (const pane of panes) {
+    const id = paneRecordId(pane);
+    if (!id) {
+      continue;
+    }
+    if (seen.has(id)) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `${configPath} contains duplicate pane ID "${id}"`,
+      );
+    }
+    seen.add(id);
+  }
 }
 
 interface PanePropertyDelta {

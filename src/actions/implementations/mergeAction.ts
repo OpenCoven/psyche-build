@@ -5,7 +5,6 @@
  * Supports multi-merge: detects sub-worktrees and merges them all sequentially.
  */
 
-import { execSync } from 'child_process';
 import type { PsychePane } from '../../types.js';
 import type { ActionResult, ActionContext } from '../types.js';
 import { triggerHook } from '../../utils/hooks.js';
@@ -25,6 +24,9 @@ import {
   type MergeTargetResolution,
 } from '../../utils/mergeTargets.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
+import { TmuxService } from '../../services/TmuxService.js';
+import { tearDownPaneWithVerification } from '../../utils/paneTeardown.js';
+import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
 
 /**
  * Merge a worktree into the main branch with comprehensive pre-checks.
@@ -130,26 +132,50 @@ async function executeSingleRootMerge(
 
   // Check for sibling panes sharing the same worktree
   const siblingPanes = context.panes.filter(
-    p => p.id !== pane.id && p.worktreePath === pane.worktreePath
+    p => p.id !== pane.id && paneReferencesWorktree(p, pane.worktreePath!)
   );
   let activeContext = context;
 
-  // Helper to kill sibling tmux panes and remove them from config
-  const closeSiblings = async () => {
+  // Kill every sibling with a verified tri-state teardown before touching any
+  // records. A timeout/unknown result can still be a live process using this
+  // worktree, so merging must stop and retain every sibling record.
+  const closeSiblings = async (): Promise<ActionResult | undefined> => {
+    const tmuxService = TmuxService.getInstance();
     for (const sibling of siblingPanes) {
-      try {
-        execSync(`tmux kill-pane -t '${sibling.paneId}'`, { stdio: 'pipe', timeout: 5000 });
-      } catch {
-        // Pane may already be gone
+      const teardown = await tearDownPaneWithVerification({
+        probe: () => tmuxService.probePanePresence(sibling.paneId),
+        kill: () => tmuxService.killPane(sibling.paneId),
+      });
+      if (teardown.presence !== 'absent') {
+        const detail = teardown.error ? `: ${teardown.error}` : '';
+        LogService.getInstance().warn(
+          `Aborted merge of ${paneName}: sibling ${sibling.paneId} is ${teardown.presence} after teardown${detail}`,
+          'mergeAction',
+          sibling.id,
+        );
+        return {
+          type: 'error',
+          title: 'Sibling Pane Could Not Be Closed',
+          message: `Merge aborted because sibling "${getPaneDisplayName(sibling)}" is ${teardown.presence} after teardown. Its pane record and worktree were retained.`,
+          dismissable: true,
+        };
       }
     }
-    if (!activeContext.removePanesFromConfig) {
-      throw new Error('Merge requires targeted pane removal support');
+    if (!activeContext.removePaneIdentitiesFromConfig) {
+      return {
+        type: 'error',
+        title: 'Merge Could Not Safely Close Siblings',
+        message: 'Merge requires exact pane identity removal support; sibling records and worktree were retained.',
+        dismissable: true,
+      };
     }
-    // Remove only the sibling IDs from the fresh locked registry. The action
-    // context may predate daemon-created panes, which must remain intact.
-    const withoutSiblings = await activeContext.removePanesFromConfig(
-      siblingPanes.map((sibling) => sibling.id),
+    // The fresh locked registry must still hold every exact sibling identity.
+    // An ID-only removal could erase a replacement that rebound after teardown.
+    const withoutSiblings = await activeContext.removePaneIdentitiesFromConfig(
+      siblingPanes.map((sibling) => ({
+        id: sibling.id,
+        paneId: sibling.paneId,
+      })),
     );
     activeContext = {
       ...activeContext,
@@ -159,6 +185,7 @@ async function executeSingleRootMerge(
       `Closed ${siblingPanes.length} sibling pane(s) for merge of ${paneName}`,
       'mergeAction',
     );
+    return undefined;
   };
 
   // Helper that produces the merge confirmation flow
@@ -198,7 +225,10 @@ async function executeSingleRootMerge(
       confirmLabel: 'Continue',
       cancelLabel: 'Cancel',
       onConfirm: async () => {
-        await closeSiblings();
+        const closeResult = await closeSiblings();
+        if (closeResult) {
+          return closeResult;
+        }
         return buildMergeConfirmation();
       },
       onCancel: async () => ({

@@ -775,6 +775,58 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
+  it('keeps a managed worktree when a tracked manual shell cwd is inside it', async () => {
+    configureCleanupIdentity();
+    const worktreePath = '/test/project/.psyche/worktrees/react';
+    currentConfig.panes = [{
+      id: 'shell-in-worktree',
+      slug: 'shell-1',
+      prompt: '',
+      paneId: '%9',
+      type: 'shell',
+      cwdReference: `${worktreePath}/src/components`,
+    }];
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', worktreePath],
+      expect.anything(),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('current config still references'),
+      'paneActions',
+      'psyche-1',
+    );
+  });
+
+  it('does not let a shell elsewhere block managed worktree cleanup', async () => {
+    configureCleanupIdentity();
+    currentConfig.panes = [{
+      id: 'shell-elsewhere',
+      slug: 'shell-2',
+      prompt: '',
+      paneId: '%10',
+      type: 'shell',
+      cwdReference: '/test/project/.psyche/worktrees/other/src',
+    }];
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
+      expect.objectContaining({ cwd: '/test/project' }),
+    );
+  });
+
   it('deletes an unchanged worktree and branch after verification', async () => {
     configureCleanupIdentity();
 

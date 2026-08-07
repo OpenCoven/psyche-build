@@ -15,6 +15,7 @@ const tmuxServiceMock = vi.hoisted(() => ({
   sendTmuxKeys: vi.fn(async () => {}),
   selectPane: vi.fn(async () => {}),
   killPane: vi.fn(async () => {}),
+  probePanePresence: vi.fn(async () => 'present'),
 }));
 
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%1'));
@@ -24,9 +25,11 @@ const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'co
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
 const withWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
+const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
 const persistReopenedPaneMock = vi.hoisted(() => vi.fn(async () => {}));
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
+const ensureProjectPaneConfigPaneMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -105,12 +108,15 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       withWorktreeReuseReservation: withWorktreeReuseReservationMock,
+      beginWorktreeReuseReservation: beginWorktreeReuseReservationMock,
     })),
   },
 }));
 
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+  ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
+  projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
 }));
 
 describe('reopenWorktree', () => {
@@ -128,6 +134,17 @@ describe('reopenWorktree', () => {
         operation: (canonicalWorktreePath: string) => Promise<unknown>
       ) => operation(worktreePath)
     );
+    beginWorktreeReuseReservationMock.mockImplementation(async (
+      worktreePath: string,
+    ) => ({
+      canonicalWorktreePath: worktreePath,
+      complete: vi.fn(async () => {}),
+      cancel: vi.fn(async () => {}),
+    }));
+    ensureProjectPaneConfigPaneMock.mockResolvedValue(undefined);
+    persistReopenedPaneMock.mockResolvedValue(undefined);
+    tmuxServiceMock.killPane.mockResolvedValue(undefined);
+    tmuxServiceMock.probePanePresence.mockResolvedValue('present');
     mutateProjectPaneConfigMock.mockImplementation(async (
       _projectRoot: string,
       mutation: (config: Record<string, unknown>) => unknown | Promise<unknown>,
@@ -154,7 +171,7 @@ describe('reopenWorktree', () => {
     expect(tmuxServiceMock.sendShellCommand).toHaveBeenCalledWith(
       '%1',
       expect.stringMatching(
-        /^export PSYCHE_PANE_ID='psyche-\d+'; export PSYCHE_TMUX_PANE_ID='%1'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox$/
+        /^export PSYCHE_PANE_ID='psyche-[\da-f-]+'; export PSYCHE_TMUX_PANE_ID='%1'; codex --enable codex_hooks resume --last --dangerously-bypass-approvals-and-sandbox$/
       )
     );
     expect(tmuxServiceMock.setSessionOptionSync).toHaveBeenCalledWith(
@@ -214,7 +231,7 @@ describe('reopenWorktree', () => {
     expect(result.pane.projectName).toBe('Renamed Repo');
   });
 
-  it('persists a reopened pane inside its reuse reservation', async () => {
+  it('persists a reopened pane inside its worktree lifecycle reservation', async () => {
     const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
 
     await reopenWorktree({
@@ -227,9 +244,8 @@ describe('reopenWorktree', () => {
       persistReopenedPane: persistReopenedPaneMock,
     });
 
-    expect(withWorktreeReuseReservationMock).toHaveBeenCalledWith(
+    expect(beginWorktreeReuseReservationMock).toHaveBeenCalledWith(
       '/repo/.psyche/worktrees/reopen-me',
-      expect.any(Function),
       '/repo'
     );
     expect(persistReopenedPaneMock).toHaveBeenCalledWith(
@@ -245,7 +261,7 @@ describe('reopenWorktree', () => {
     });
 
     try {
-      withWorktreeReuseReservationMock.mockImplementationOnce(() => cleanupReservation);
+      beginWorktreeReuseReservationMock.mockImplementationOnce(() => cleanupReservation);
       const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
       const reopenPromise = reopenWorktree({
         slug: 'reopen-me',
@@ -268,7 +284,7 @@ describe('reopenWorktree', () => {
       expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
       expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
     } finally {
-      withWorktreeReuseReservationMock.mockReset();
+      beginWorktreeReuseReservationMock.mockReset();
     }
   });
 
@@ -278,16 +294,20 @@ describe('reopenWorktree', () => {
     tmuxServiceMock.killPane.mockImplementationOnce(async () => {
       order.push('pane-killed');
     });
-    withWorktreeReuseReservationMock.mockImplementationOnce(async (
+    beginWorktreeReuseReservationMock.mockImplementationOnce(async (
       worktreePath: string,
-      operation: (canonicalWorktreePath: string) => Promise<unknown>,
-    ) => {
-      try {
-        return await operation(worktreePath);
-      } finally {
+    ) => ({
+      canonicalWorktreePath: worktreePath,
+      complete: async () => {
         order.push('lease-released');
-      }
-    });
+      },
+      cancel: async () => {
+        order.push('lease-released');
+      },
+    }));
+    tmuxServiceMock.probePanePresence
+      .mockResolvedValueOnce('present')
+      .mockResolvedValueOnce('absent');
 
     const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
     await expect(reopenWorktree({
@@ -305,6 +325,50 @@ describe('reopenWorktree', () => {
     expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalledWith(
       '%1',
       expect.stringContaining('codex')
+    );
+  });
+
+  it('retains a recovery record when pane teardown is uncertain after a kill failure', async () => {
+    const order: string[] = [];
+    persistReopenedPaneMock.mockRejectedValueOnce(new Error('config unavailable'));
+    tmuxServiceMock.killPane.mockRejectedValueOnce(new Error('tmux refused'));
+    tmuxServiceMock.probePanePresence
+      .mockResolvedValueOnce('present')
+      .mockResolvedValueOnce('unknown');
+    ensureProjectPaneConfigPaneMock.mockImplementationOnce(async () => {
+      order.push('recovery-persisted');
+    });
+    beginWorktreeReuseReservationMock.mockImplementationOnce(async (
+      worktreePath: string,
+    ) => ({
+      canonicalWorktreePath: worktreePath,
+      complete: async () => {
+        order.push('lease-completed');
+      },
+      cancel: async () => {
+        order.push('lease-released');
+      },
+    }));
+
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+    await expect(reopenWorktree({
+      slug: 'reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
+      projectRoot: '/repo',
+      existingPanes: [],
+      sessionProjectRoot: '/repo',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
+    })).rejects.toThrow(/pane teardown is unknown/);
+
+    expect(ensureProjectPaneConfigPaneMock).toHaveBeenCalledWith(
+      '/repo',
+      expect.objectContaining({ paneId: '%1', worktreePath: '/repo/.psyche/worktrees/reopen-me' }),
+    );
+    expect(order).toEqual(['recovery-persisted', 'lease-released']);
+    expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalledWith(
+      '%1',
+      expect.stringContaining('codex'),
     );
   });
 });

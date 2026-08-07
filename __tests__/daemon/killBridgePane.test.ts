@@ -162,4 +162,35 @@ describe('killBridgePane', () => {
 
     expect(readConfig().panes).toHaveLength(1);
   });
+
+  it('does not kill or remove a replacement after a paused read observes a rebind', async () => {
+    writeConfig([pane()]);
+    let releaseProbePause!: () => void;
+    let signalProbePause!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      releaseProbePause = resolve;
+    });
+    const probePaused = new Promise<void>((resolve) => {
+      signalProbePause = resolve;
+    });
+    const d = {
+      tmuxPaneExists: vi.fn(() => true),
+      killTmuxPane: vi.fn(),
+      afterInitialProbe: async () => {
+        signalProbePause();
+        await paused;
+      },
+    };
+
+    const killing = killBridgePane(projectRoot, 'psyche-1', d);
+    await probePaused;
+    writeConfig([pane({ paneId: '%4', slug: 'replacement' })]);
+    releaseProbePause();
+
+    await expect(killing).rejects.toMatchObject({ code: 'pane_rebound' });
+    expect(d.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toEqual([
+      expect.objectContaining({ id: 'psyche-1', paneId: '%4', slug: 'replacement' }),
+    ]);
+  });
 });

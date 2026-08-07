@@ -80,7 +80,7 @@ const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
 const mockBeginWorktreeCreation = vi.fn();
 const mockPersistReusedPane = vi.fn(async () => {});
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
-const upsertProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn(async () => {}));
+const ensureProjectPaneConfigPaneMock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
@@ -95,7 +95,7 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
 vi.mock('../../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
   projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
-  upsertProjectPaneConfigPanes: upsertProjectPaneConfigPanesMock,
+  ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
 }));
 
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
@@ -150,7 +150,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       const result = await mutation(config);
       return { config, result };
     });
-    upsertProjectPaneConfigPanesMock.mockResolvedValue(undefined);
+    ensureProjectPaneConfigPaneMock.mockResolvedValue(undefined);
     mockTriggerHook.mockImplementation(() => Promise.resolve());
     mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
 
@@ -296,6 +296,45 @@ describe('Pane Lifecycle Integration Tests', () => {
         expect(result.pane.prompt).toBe('fix authentication bug');
         expect(result.pane.slug).toBeTruthy();
         expect(result.pane.paneId).toBeTruthy();
+      }
+    });
+
+    it('uses distinct pane IDs for parallel lanes when Date.now is frozen', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      const originalExec = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (
+          command.includes('tmux display-message')
+          && command.includes('#{pane_id}')
+        ) {
+          return options?.encoding === 'utf-8' ? '%1' : Buffer.from('%1');
+        }
+        return originalExec ? originalExec(command, options) : '';
+      });
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+
+      try {
+        const [first, second] = await Promise.all([
+          createPane({
+            prompt: 'parallel first lane',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            slugBase: 'parallel-first',
+          }, ['claude']),
+          createPane({
+            prompt: 'parallel second lane',
+            agent: 'codex',
+            projectName: 'test-project',
+            existingPanes: [],
+            slugBase: 'parallel-second',
+          }, ['codex']),
+        ]);
+
+        expect(new Set([first.pane.id, second.pane.id]).size).toBe(2);
+      } finally {
+        now.mockRestore();
+        mockExecSync.mockImplementation(originalExec!);
       }
     });
 
@@ -862,12 +901,12 @@ describe('Pane Lifecycle Integration Tests', () => {
       )).rejects.toThrow(/retained recovery record.*Recovery required/);
 
       expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
-      expect(upsertProjectPaneConfigPanesMock).toHaveBeenCalledWith(
+      expect(ensureProjectPaneConfigPaneMock).toHaveBeenCalledWith(
         '/test',
-        [expect.objectContaining({
+        expect.objectContaining({
           paneId: '%1',
           worktreePath: expect.stringContaining('/.psyche/worktrees/'),
-        })],
+        }),
       );
     });
 

@@ -364,6 +364,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     savePanes,
     removePaneFromConfig,
     removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     saveSidebarProjects,
     eventMode,
   } = usePanes(
@@ -1569,6 +1570,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     savePanes,
     removePaneFromConfig,
     removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     sessionName,
     projectName,
     defaultProjectRoot: sessionProjectRoot,

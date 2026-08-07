@@ -21,7 +21,17 @@ import {
 } from '../utils/paneVisibility.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import {
+  mutateProjectPaneConfig,
+  projectPaneConfigPath,
+  replaceProjectPaneConfigPaneIdentity,
+} from '../services/ProjectPaneConfig.js';
+import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+} from '../utils/paneTeardown.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -79,6 +89,8 @@ async function restoreAgentSessionForPane(
   await tmuxService.sendShellCommand(paneId, command);
   await tmuxService.sendTmuxKeys(paneId, 'Enter');
 }
+
+class RestoreReservationRetentionError extends Error {}
 
 /**
  * Fetches all tmux pane IDs and titles for the current session
@@ -205,23 +217,19 @@ export async function recreateMissingPanes(
 
   for (const missingPane of missingPanes) {
     try {
-      // Create new pane
-      const newPaneId = splitPane({ cwd: missingPane.worktreePath || process.cwd() });
-
-      // Set pane title
-      await tmuxService.setPaneTitle(newPaneId, getPaneTmuxTitle(missingPane, sessionProjectRoot));
-
-      // Update the pane with new ID
-      missingPane.paneId = newPaneId;
-
-      // Send a message to the pane indicating it was restored
-      await tmuxService.sendKeys(newPaneId, `"echo '# Pane restored: ${missingPane.slug}'" Enter`);
-      const promptPreview = missingPane.prompt?.substring(0, 50) || '';
-      await tmuxService.sendKeys(newPaneId, `"echo '# Original prompt: ${promptPreview}...'" Enter`);
-      await tmuxService.sendKeys(newPaneId, `"cd ${missingPane.worktreePath || process.cwd()}" Enter`);
-      await restoreAgentSessionForPane(tmuxService, missingPane, newPaneId);
+      await restoreMissingPaneWithLease(
+        tmuxService,
+        missingPane,
+        sessionProjectRoot,
+      );
     } catch (error) {
-      // If we can't create the pane, skip it
+      LogService.getInstance().warn(
+        `Failed to restore pane ${missingPane.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        'usePaneLoading',
+        missingPane.id,
+      );
     }
   }
 
@@ -230,6 +238,151 @@ export async function recreateMissingPanes(
     await tmuxService.selectLayout('even-horizontal');
     await tmuxService.refreshClient();
   } catch {}
+}
+
+async function restoreMissingPaneWithLease(
+  tmuxService: TmuxService,
+  missingPane: PsychePane,
+  sessionProjectRoot: string,
+): Promise<void> {
+  if (!missingPane.worktreePath) {
+    throw new Error('Cannot restore a worktree pane without its worktree path');
+  }
+
+  const expected = {
+    id: missingPane.id,
+    paneId: missingPane.paneId,
+  };
+  const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
+    missingPane.worktreePath,
+    missingPane.projectRoot || sessionProjectRoot,
+  );
+  let reservationSettled = false;
+  let retainDestructiveProtection = false;
+
+  try {
+    const worktreePath = reservation.canonicalWorktreePath;
+    const newPaneId = splitPane({ cwd: worktreePath });
+    const reboundPane: PsychePane = {
+      ...missingPane,
+      paneId: newPaneId,
+      worktreePath,
+    };
+
+    try {
+      await tmuxService.setPaneTitle(
+        newPaneId,
+        getPaneTmuxTitle(reboundPane, sessionProjectRoot),
+      );
+    } catch {
+      // The title is only a rebinding aid; lifecycle safety comes from config.
+    }
+
+    try {
+      await replaceProjectPaneConfigPaneIdentity(
+        sessionProjectRoot,
+        expected,
+        reboundPane,
+      );
+    } catch (error) {
+      const persistenceError = error instanceof Error ? error.message : String(error);
+      const teardown = await tearDownRestoredPane(tmuxService, newPaneId);
+      if (teardown.presence === 'absent') {
+        throw new Error(
+          `Failed to persist restored pane ${missingPane.id}: ${persistenceError}`,
+        );
+      }
+
+      const recovery = await persistRestoredPaneRecovery(
+        sessionProjectRoot,
+        expected,
+        reboundPane,
+      );
+      const message = `Failed to persist restored pane ${missingPane.id}: ${persistenceError}; pane teardown is ${teardown.presence}; ${recovery.message}`;
+      if (!recovery.durable) {
+        retainDestructiveProtection = true;
+        throw new RestoreReservationRetentionError(message);
+      }
+      throw new Error(message);
+    }
+
+    // The exact rebound identity is durable before the resumed process can
+    // receive any command. From this point the record protects the worktree.
+    await reservation.complete();
+    reservationSettled = true;
+    Object.assign(missingPane, reboundPane);
+
+    await tmuxService.sendKeys(newPaneId, `"echo '# Pane restored: ${missingPane.slug}'" Enter`);
+    const promptPreview = missingPane.prompt?.substring(0, 50) || '';
+    await tmuxService.sendKeys(newPaneId, `"echo '# Original prompt: ${promptPreview}...'" Enter`);
+    await tmuxService.sendKeys(newPaneId, `"cd ${worktreePath}" Enter`);
+    await restoreAgentSessionForPane(tmuxService, missingPane, newPaneId);
+  } catch (error) {
+    if (error instanceof RestoreReservationRetentionError) {
+      throw new Error(error.message);
+    }
+    throw error;
+  } finally {
+    if (!reservationSettled && !retainDestructiveProtection) {
+      await reservation.cancel();
+    }
+  }
+}
+
+async function tearDownRestoredPane(
+  tmuxService: TmuxService,
+  paneId: string,
+) {
+  return tearDownPaneWithVerification({
+    probe: () => probeRestoredPanePresence(tmuxService, paneId),
+    kill: () => tmuxService.killPane(paneId),
+  });
+}
+
+async function probeRestoredPanePresence(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<TmuxPanePresence> {
+  const probe = (tmuxService as TmuxService & {
+    probePanePresence?: (id: string) => Promise<TmuxPanePresence>;
+  }).probePanePresence;
+  if (probe) {
+    return probe.call(tmuxService, paneId);
+  }
+
+  try {
+    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function persistRestoredPaneRecovery(
+  sessionProjectRoot: string,
+  expected: { id: string; paneId: string },
+  pane: PsychePane,
+): Promise<{ durable: boolean; message: string }> {
+  const configPath = projectPaneConfigPath(sessionProjectRoot);
+  try {
+    await replaceProjectPaneConfigPaneIdentity(
+      sessionProjectRoot,
+      expected,
+      pane,
+    );
+    return {
+      durable: true,
+      message: `retained recovery record ${pane.id} in ${configPath}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
+  } catch (error) {
+    return {
+      durable: false,
+      message: `could not persist recovery record ${pane.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }. ${paneRecoveryInstructions(pane.paneId, configPath)}`,
+    };
+  }
 }
 
 /**
@@ -281,31 +434,17 @@ export async function recreateKilledWorktreePanes(
 
   for (const pane of worktreePanesToRecreate) {
     try {
-      // Create new pane in the worktree directory
-      const newPaneId = splitPane({ cwd: pane.worktreePath });
-
-      // Set pane title
-      await tmuxService.setPaneTitle(newPaneId, getPaneTmuxTitle(pane, sessionProjectRoot));
-
-      // Update the pane with new ID
       const paneIndex = updatedPanes.findIndex(p => p.id === pane.id);
-      if (paneIndex !== -1) {
-        updatedPanes[paneIndex] = { ...pane, paneId: newPaneId };
+      if (paneIndex === -1) {
+        continue;
       }
-
-      // Send a message to the pane indicating it was restored
-      await tmuxService.sendKeys(newPaneId, `"echo '# Pane restored: ${pane.slug}'" Enter`);
-      if (pane.prompt) {
-        const promptPreview = pane.prompt.substring(0, 50) || '';
-        await tmuxService.sendKeys(newPaneId, `"echo '# Original prompt: ${promptPreview}...'" Enter`);
-      }
-      await tmuxService.sendKeys(newPaneId, `"cd ${pane.worktreePath}" Enter`);
-      await restoreAgentSessionForPane(tmuxService, pane, newPaneId);
-
-  //       LogService.getInstance().debug(
-  //         `Recreated worktree pane ${pane.id} (${pane.slug}) with new ID ${newPaneId}`,
-  //         'shellDetection'
-  //       );
+      const reboundPane = { ...updatedPanes[paneIndex] };
+      await restoreMissingPaneWithLease(
+        tmuxService,
+        reboundPane,
+        sessionProjectRoot,
+      );
+      updatedPanes[paneIndex] = reboundPane;
     } catch (error) {
   //       LogService.getInstance().debug(
   //         `Failed to recreate worktree pane ${pane.id} (${pane.slug})`,

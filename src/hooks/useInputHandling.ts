@@ -38,6 +38,7 @@ import {
   type ProjectActionItem,
 } from "../utils/projectActions.js"
 import { createShellPane, getNextPsycheId } from "../utils/shellPaneDetection.js"
+import { createPsychePaneId } from "../utils/paneIdentity.js"
 import type { AgentName } from "../utils/agentLaunch.js"
 import {
   getBulkVisibilityAction,
@@ -379,7 +380,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       const nextId = getNextPsycheId(panes)
       const desktopPane: PsychePane = {
-        id: `psyche-${nextId}`,
+        id: createPsychePaneId(),
         slug: `desktop-use-${nextId}`,
         displayName: "desktop-use",
         prompt,
@@ -611,7 +612,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       const browserPane: PsychePane = {
-        id: `psyche-${getNextPsycheId(panes)}`,
+        id: createPsychePaneId(),
         slug,
         prompt: "",
         paneId: newPaneId,

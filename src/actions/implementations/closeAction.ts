@@ -17,6 +17,7 @@ import { cleanupPromptFilesForSlug } from '../../utils/promptStore.js';
 import { buildDevWatchRespawnCommand } from '../../utils/devWatchCommand.js';
 import { isActiveDevSourcePath } from '../../utils/devSource.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
+import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
 import {
   paneRecoveryInstructions,
   tearDownPaneWithVerification,
@@ -69,6 +70,24 @@ async function killTmuxPaneReliably(pane: PsychePane): Promise<VerifiedPaneTeard
   return result;
 }
 
+function paneKeepsWorktreeActive(
+  candidate: PsychePane,
+  worktreePath: string,
+): boolean {
+  const legacyCwd = (candidate as unknown as { cwd?: unknown }).cwd;
+  return (
+    isActiveDevSourcePath(candidate.worktreePath, worktreePath)
+    || (
+      (
+        candidate.type === 'shell'
+        || Boolean(candidate.cwdReference)
+        || typeof legacyCwd === 'string'
+      )
+      && paneReferencesWorktree(candidate, worktreePath)
+    )
+  );
+}
+
 /**
  * Close a pane - presents options for how to close
  */
@@ -85,7 +104,7 @@ export async function closePane(
 
   const siblingPanesOnWorktree = context.panes.filter(candidate =>
     candidate.id !== pane.id &&
-    isActiveDevSourcePath(candidate.worktreePath, pane.worktreePath)
+    paneKeepsWorktreeActive(candidate, pane.worktreePath!)
   );
 
   if (siblingPanesOnWorktree.length > 0) {
@@ -237,7 +256,9 @@ async function executeCloseOption(
       if (pane.worktreePath && (option === 'kill_and_clean' || option === 'kill_clean_branch')) {
         // Check if sibling panes still share this worktree
         // updatedPanes already excludes the current pane, so any match = active sibling
-        const siblingPanes = updatedPanes.filter(p => p.worktreePath === pane.worktreePath);
+        const siblingPanes = updatedPanes.filter((candidate) =>
+          paneKeepsWorktreeActive(candidate, pane.worktreePath!)
+        );
         if (siblingPanes.length > 0) {
           // Skip worktree/branch deletion — other panes still using it
           LogService.getInstance().info(
@@ -338,7 +359,7 @@ async function executeCloseOption(
       const hasRemainingPaneForWorktree = Boolean(
         pane.worktreePath &&
         updatedPanes.some(candidate =>
-          isActiveDevSourcePath(candidate.worktreePath, pane.worktreePath)
+          paneKeepsWorktreeActive(candidate, pane.worktreePath!)
         )
       );
 

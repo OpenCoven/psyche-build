@@ -7,7 +7,7 @@
 
 import { useState, useCallback, useMemo } from 'react';
 import { executeAction, PaneAction, type ActionContext } from '../actions/index.js';
-import type { ActionResult } from '../actions/types.js';
+import type { ActionResult, PaneLifecycleIdentity } from '../actions/types.js';
 import {
   handleActionResult,
   createInitialTUIState,
@@ -21,6 +21,9 @@ interface UseActionSystemParams {
   savePanes: SavePanes;
   removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
   removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
+  removePaneIdentitiesFromConfig?: (
+    identities: Iterable<PaneLifecycleIdentity>,
+  ) => Promise<PsychePane[]>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
@@ -187,6 +190,7 @@ export default function useActionSystem({
   savePanes,
   removePaneFromConfig,
   removePanesFromConfig,
+  removePaneIdentitiesFromConfig,
   sessionName,
   projectName,
   defaultProjectRoot,
@@ -207,6 +211,7 @@ export default function useActionSystem({
     savePanes,
     removePaneFromConfig,
     removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,
@@ -217,6 +222,7 @@ export default function useActionSystem({
     savePanes,
     removePaneFromConfig,
     removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,

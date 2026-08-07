@@ -27,7 +27,17 @@ import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import {
+  ensureProjectPaneConfigPane,
+  mutateProjectPaneConfig,
+  projectPaneConfigPath,
+} from '../services/ProjectPaneConfig.js';
+import {
+  paneRecoveryInstructions,
+  tearDownPaneWithVerification,
+  type TmuxPanePresence,
+} from './paneTeardown.js';
+import { createPsychePaneId } from './paneIdentity.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -44,6 +54,8 @@ export interface ReopenWorktreeResult {
   pane: PsychePane;
 }
 
+class ReopenReservationRetentionError extends Error {}
+
 /**
  * Reopens a closed worktree by creating a new pane in the existing worktree
  * and launching the best available agent resume command.
@@ -51,16 +63,32 @@ export interface ReopenWorktreeResult {
 export async function reopenWorktree(
   options: ReopenWorktreeOptions
 ): Promise<ReopenWorktreeResult> {
-  return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+  const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
     options.worktreePath,
-    async (canonicalWorktreePath) => {
-      return reopenWorktreeWithReuseReservation({
-      ...options,
-        worktreePath: canonicalWorktreePath,
-      });
-    },
-    options.projectRoot
+    options.projectRoot,
   );
+  let releaseReservation = true;
+  let reservationSettled = false;
+
+  try {
+    const result = await reopenWorktreeWithReuseReservation({
+      ...options,
+      worktreePath: reservation.canonicalWorktreePath,
+    });
+    await reservation.complete();
+    reservationSettled = true;
+    return result;
+  } catch (error) {
+    if (error instanceof ReopenReservationRetentionError) {
+      releaseReservation = false;
+      throw new Error(error.message);
+    }
+    throw error;
+  } finally {
+    if (releaseReservation && !reservationSettled) {
+      await reservation.cancel();
+    }
+  }
 }
 
 async function reopenWorktreeWithReuseReservation(
@@ -199,7 +227,7 @@ async function reopenWorktreeWithReuseReservation(
       ? configuredAgent
       : preferredOrder.find((candidate) => candidateAgents.includes(candidate)));
   const permissionMode = metadata?.permissionMode ?? settings.permissionMode;
-  const psychePaneId = `psyche-${Date.now()}`;
+  const psychePaneId = createPsychePaneId();
   const currentBranch = getCurrentBranch(worktreePath);
   const newPane: PsychePane = {
     id: psychePaneId,
@@ -223,16 +251,23 @@ async function reopenWorktreeWithReuseReservation(
   try {
     await options.persistReopenedPane(newPane);
   } catch (error) {
-    try {
-      await tmuxService.killPane(paneInfo);
-    } catch {
-      // The reuse lease remains held until this callback exits, so cleanup
-      // cannot remove the worktree while tmux teardown is attempted.
+    const persistenceError = error instanceof Error ? error.message : String(error);
+    const teardown = await tearDownReopenedPane(tmuxService, paneInfo);
+    if (teardown.presence !== 'absent') {
+      const recovery = await persistReopenedPaneRecovery(
+        sessionProjectRoot,
+        newPane,
+      );
+      const message = `Failed to persist reopened pane before agent launch: ${persistenceError}; pane teardown is ${teardown.presence}; ${recovery.message}`;
+      if (!recovery.durable) {
+        // Deliberately leave the project/worktree leases held. Without a
+        // durable record we cannot expose this possibly-live pane to cleanup.
+        throw new ReopenReservationRetentionError(message);
+      }
+      throw new Error(message);
     }
     throw new Error(
-      `Failed to persist reopened pane before agent launch: ${
-        error instanceof Error ? error.message : String(error)
-      }`
+      `Failed to persist reopened pane before agent launch: ${persistenceError}`,
     );
   }
 
@@ -284,4 +319,55 @@ async function reopenWorktreeWithReuseReservation(
   return {
     pane: newPane,
   };
+}
+
+async function tearDownReopenedPane(
+  tmuxService: TmuxService,
+  paneId: string,
+) {
+  return tearDownPaneWithVerification({
+    probe: () => probeReopenedPanePresence(tmuxService, paneId),
+    kill: () => tmuxService.killPane(paneId),
+  });
+}
+
+async function probeReopenedPanePresence(
+  tmuxService: TmuxService,
+  paneId: string,
+): Promise<TmuxPanePresence> {
+  const probe = (tmuxService as TmuxService & {
+    probePanePresence?: (id: string) => Promise<TmuxPanePresence>;
+  }).probePanePresence;
+  if (probe) {
+    return probe.call(tmuxService, paneId);
+  }
+
+  try {
+    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function persistReopenedPaneRecovery(
+  sessionProjectRoot: string,
+  pane: PsychePane,
+): Promise<{ durable: boolean; message: string }> {
+  const configPath = projectPaneConfigPath(sessionProjectRoot);
+  try {
+    await ensureProjectPaneConfigPane(sessionProjectRoot, pane);
+    return {
+      durable: true,
+      message: `retained recovery record ${pane.id} in ${configPath}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
+  } catch (error) {
+    return {
+      durable: false,
+      message: `could not persist recovery record ${pane.id}: ${
+        error instanceof Error ? error.message : String(error)
+      }. ${paneRecoveryInstructions(pane.paneId, configPath)}`,
+    };
+  }
 }

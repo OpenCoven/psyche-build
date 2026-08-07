@@ -33,6 +33,7 @@ import {
 } from './agentLaunch.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
 import { resolveProjectColorTheme } from './paneColors.js';
+import { createPsychePaneId } from './paneIdentity.js';
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -206,7 +207,7 @@ export async function createConflictResolutionPane(
 
   // Create the pane object
   const newPane: PsychePane = {
-    id: `psyche-${Date.now()}`,
+    id: createPsychePaneId(),
     slug,
     prompt,
     paneId: paneInfo,

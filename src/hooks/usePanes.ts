@@ -29,8 +29,10 @@ import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import {
   mutateProjectPaneConfig,
+  removeProjectPaneConfigPaneIdentities,
   removeProjectPaneConfigPanes,
 } from '../services/ProjectPaneConfig.js';
+import type { PaneLifecycleIdentity } from '../actions/types.js';
 
 // Use p-queue for proper concurrency control instead of manual write lock
 // This prevents race conditions and provides better visibility into queue state
@@ -286,6 +288,45 @@ export default function usePanes(
     return removePanesFromConfig([paneId]);
   };
 
+  const removePaneIdentitiesFromConfig = async (
+    identities: Iterable<PaneLifecycleIdentity>,
+  ): Promise<PsychePane[]> => {
+    return withWriteLock(async () => {
+      const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+      await removeProjectPaneConfigPaneIdentities(
+        fallbackProjectRoot,
+        identities,
+      );
+      const mutation = await mutateProjectPaneConfig(
+        fallbackProjectRoot,
+        (configRecord) => {
+          const config = configRecord as unknown as PsycheConfig;
+          const projectRoot = config.projectRoot || fallbackProjectRoot;
+          const projectName = config.projectName || path.basename(projectRoot);
+          const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+          const normalizedProjects = normalizeSidebarProjects(
+            config.sidebarProjects,
+            freshPanes,
+            projectRoot,
+            projectName,
+          );
+          config.sidebarProjects = normalizedProjects;
+          config.lastUpdated = new Date().toISOString();
+          return {
+            panes: freshPanes,
+            sidebarProjects: normalizedProjects,
+          };
+        },
+      );
+      const persistedPanes = mutation.result.panes;
+      panesRef.current = persistedPanes;
+      setPanes(persistedPanes);
+      sidebarProjectsRef.current = mutation.result.sidebarProjects;
+      setSidebarProjects(mutation.result.sidebarProjects);
+      return persistedPanes;
+    });
+  };
+
   const saveSidebarProjects = async (newSidebarProjects: SidebarProject[]) => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
@@ -420,6 +461,7 @@ export default function usePanes(
     savePanes,
     removePaneFromConfig,
     removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     saveSidebarProjects,
     eventMode,
   } as const;

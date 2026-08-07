@@ -22,9 +22,9 @@ import {
 } from '../services/WorktreeCleanupService.js';
 import type { ProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
+  ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
   projectPaneConfigPath,
-  upsertProjectPaneConfigPanes,
 } from '../services/ProjectPaneConfig.js';
 import {
   appendSlugSuffix,
@@ -45,6 +45,7 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
+import { createPsychePaneId } from './paneIdentity.js';
 
 export interface CreatePaneOptions {
   prompt: string;
@@ -162,7 +163,7 @@ async function persistPaneRecoveryRecord(
 ): Promise<PaneRecoveryRecordResult> {
   const configPath = projectPaneConfigPath(sessionProjectRoot);
   try {
-    await upsertProjectPaneConfigPanes(sessionProjectRoot, [pane]);
+    await ensureProjectPaneConfigPane(sessionProjectRoot, pane);
     return {
       durable: true,
       message: `retained recovery record ${pane.id} in ${configPath}. ${
@@ -476,7 +477,7 @@ async function createPaneWithReuseReservation(
   // later cannot confirm teardown, this exact record can be persisted while
   // the creation/reuse lease is still held.
   const newPane: PsychePane = {
-    id: `psyche-${Date.now()}`,
+    id: createPsychePaneId(),
     slug,
     displayName: existingWorktreeMetadata?.displayName,
     branchName: branchName !== slug ? branchName : undefined,

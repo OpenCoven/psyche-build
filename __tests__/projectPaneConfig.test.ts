@@ -5,6 +5,8 @@ import {
   acquireProjectPaneConfigLock,
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
+  removeProjectPaneConfigPaneIdentities,
+  upsertProjectPaneConfigPanes,
 } from '../src/services/ProjectPaneConfig.js';
 import {
   savePanesToFile,
@@ -26,6 +28,52 @@ function createProject(): string {
 }
 
 describe('project pane config mutation', () => {
+  it('rejects a duplicate pane ID instead of replacing the existing record', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const original = {
+      id: 'psyche-duplicate',
+      paneId: '%1',
+      slug: 'original',
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [original];
+    });
+
+    await expect(upsertProjectPaneConfigPanes(projectRoot, [{
+      id: 'psyche-duplicate',
+      paneId: '%2',
+      slug: 'replacement',
+    }])).rejects.toThrow(/Duplicate pane ID/);
+
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([original]);
+  });
+
+  it('removes a pane only when its exact tmux identity remains current', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const original = {
+      id: 'psyche-exact',
+      paneId: '%1',
+      slug: 'original',
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [original];
+    });
+
+    await expect(removeProjectPaneConfigPaneIdentities(projectRoot, [{
+      id: 'psyche-exact',
+      paneId: '%2',
+    }])).rejects.toThrow(/identity conflict/);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([original]);
+
+    await removeProjectPaneConfigPaneIdentities(projectRoot, [{
+      id: 'psyche-exact',
+      paneId: '%1',
+    }]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([]);
+  });
+
   it('keeps a daemon pane when a stale TUI closes a different pane', async () => {
     const projectRoot = createProject();
     const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
