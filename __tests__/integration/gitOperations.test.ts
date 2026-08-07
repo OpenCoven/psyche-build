@@ -15,6 +15,12 @@ vi.mock('child_process', () => ({
   execSync: mockExecSync,
 }));
 
+const mockExecFileSync = vi.fn();
+vi.mock('node:child_process', () => ({
+  execSync: mockExecSync,
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+}));
+
 // Mock StateManager
 const mockGetState = vi.fn(() => ({ projectRoot: '/test' }));
 const mockPauseConfigWatcher = vi.fn();
@@ -54,7 +60,7 @@ describe('Git Operations Integration Tests', () => {
     gitRepo = createMockGitRepo('main');
 
     // Configure mock execSync for git commands
-    mockExecSync.mockImplementation((command: string, options?: any) => {
+    const runGitCommand = (command: string, options?: any) => {
       const cmd = command.toString().trim();
       const encoding = options?.encoding;
 
@@ -172,7 +178,12 @@ describe('Git Operations Integration Tests', () => {
       }
 
       return returnValue('');
-    });
+    };
+    mockExecSync.mockImplementation(runGitCommand);
+    mockExecFileSync.mockImplementation(
+      (file: string, args: readonly string[] = [], options?: any) =>
+        runGitCommand([file, ...args].join(' '), options)
+    );
   });
 
   afterEach(() => {

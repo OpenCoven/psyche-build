@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import type { PsychePane } from '../src/types.js';
 
 const createPaneMock = vi.fn();
@@ -7,6 +8,22 @@ vi.mock('../src/utils/paneCreation.js', () => ({
 }));
 vi.mock('../src/utils/slug.js', () => ({
   generateSlug: vi.fn(async () => 'fix-auth'),
+}));
+
+const writeFileMock = vi.fn();
+const readFileMock = vi.fn();
+const unlinkMock = vi.fn();
+vi.mock('node:fs/promises', () => ({
+  default: {
+    writeFile: (...args: unknown[]) => writeFileMock(...args),
+    readFile: (...args: unknown[]) => readFileMock(...args),
+    unlink: (...args: unknown[]) => unlinkMock(...args),
+  },
+}));
+
+const spawnMock = vi.fn();
+vi.mock('node:child_process', () => ({
+  spawn: (...args: unknown[]) => spawnMock(...args),
 }));
 
 const enqueuePrune = vi.fn();
@@ -45,6 +62,75 @@ function harness(existing: PsychePane[] = []) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useRealTimers();
+  writeFileMock.mockResolvedValue(undefined);
+  unlinkMock.mockResolvedValue(undefined);
+  delete process.env.EDITOR;
+  delete process.env.VISUAL;
+});
+
+describe('openInEditor', () => {
+  it('launches one executable without a shell, then reads and cleans up the prompt file', async () => {
+    const child = new EventEmitter();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    });
+    readFileMock.mockResolvedValue('# Enter your Claude prompt here\n\nUpdated prompt');
+    const h = harness();
+    let prompt = '';
+
+    await h.api.openInEditor('Original prompt', (value) => {
+      prompt = value;
+    });
+
+    const tmpFile = writeFileMock.mock.calls[0][0];
+    expect(spawnMock).toHaveBeenCalledWith('nano', [tmpFile], {
+      stdio: 'inherit',
+      shell: false,
+    });
+    expect(prompt).toBe('Updated prompt');
+    expect(unlinkMock).toHaveBeenCalledWith(tmpFile);
+  });
+
+  it('reports editor launch failures and still attempts prompt-file cleanup', async () => {
+    const child = new EventEmitter();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit('error', new Error('editor unavailable')));
+      return child;
+    });
+    const h = harness();
+
+    await h.api.openInEditor('Original prompt', vi.fn());
+
+    expect(h.statuses).toContain('Failed to open prompt editor: editor unavailable');
+    expect(unlinkMock).toHaveBeenCalledWith(writeFileMock.mock.calls[0][0]);
+  });
+
+  it('reports prompt-file read failures and still attempts cleanup', async () => {
+    const child = new EventEmitter();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit('close', 0));
+      return child;
+    });
+    readFileMock.mockRejectedValue(new Error('prompt file unavailable'));
+    const h = harness();
+
+    await h.api.openInEditor('Original prompt', vi.fn());
+
+    expect(h.statuses).toContain('Failed to open prompt editor: prompt file unavailable');
+    expect(unlinkMock).toHaveBeenCalledWith(writeFileMock.mock.calls[0][0]);
+  });
+
+  it('rejects hostile editor command strings before launching them', async () => {
+    process.env.EDITOR = 'nano --wait; $(touch sentinel)';
+    const h = harness();
+
+    await h.api.openInEditor('Original prompt', vi.fn());
+
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(h.statuses.some((status) => status.includes('single executable path'))).toBe(true);
+    expect(unlinkMock).toHaveBeenCalledWith(writeFileMock.mock.calls[0][0]);
+  });
 });
 
 describe('createPanesForAgents', () => {

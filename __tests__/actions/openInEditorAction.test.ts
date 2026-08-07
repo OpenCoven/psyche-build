@@ -7,22 +7,27 @@ import { getDefaultEditor, openInEditor } from '../../src/actions/implementation
 import { createMockPane, createShellPane } from '../fixtures/mockPanes.js';
 import { createMockContext } from '../fixtures/mockContext.js';
 import { expectSuccess, expectError } from '../helpers/actionAssertions.js';
-import { execSync } from 'child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
-vi.mock('child_process', () => ({
-  execSync: vi.fn(),
+const runProcessMock = vi.fn();
+vi.mock('../../src/utils/runProcess.js', () => ({
+  runProcess: (...args: unknown[]) => runProcessMock(...args),
 }));
 
 describe('openInEditorAction', () => {
   const originalEnv = process.env;
+  const sentinelPath = path.join(process.cwd(), '.editor-shell-sentinel');
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runProcessMock.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
     process.env = { ...originalEnv };
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.env = originalEnv;
+    await fs.rm(sentinelPath, { force: true });
   });
 
   it('should default to Xcode on macOS and code elsewhere', () => {
@@ -38,14 +43,11 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     const result = await openInEditor(mockPane, mockContext);
 
-    expect(execSync).toHaveBeenCalledWith(
-      `${getDefaultEditor()} "/test/worktree/path"`,
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith(getDefaultEditor(), {
+      args: ['/test/worktree/path'],
+    });
     expectSuccess(result, getDefaultEditor());
   });
 
@@ -56,14 +58,9 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     const result = await openInEditor(mockPane, mockContext);
 
-    expect(execSync).toHaveBeenCalledWith(
-      'vim "/test/path"',
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith('vim', { args: ['/test/path'] });
     expectSuccess(result, 'vim');
   });
 
@@ -73,14 +70,9 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     const result = await openInEditor(mockPane, mockContext, { editor: 'emacs' });
 
-    expect(execSync).toHaveBeenCalledWith(
-      'emacs "/test/path"',
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith('emacs', { args: ['/test/path'] });
     expectSuccess(result, 'emacs');
   });
 
@@ -91,14 +83,9 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     await openInEditor(mockPane, mockContext, { editor: 'nano' });
 
-    expect(execSync).toHaveBeenCalledWith(
-      'nano "/test/path"',
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith('nano', { args: ['/test/path'] });
   });
 
   it('should return error for shell pane without worktree', async () => {
@@ -116,9 +103,7 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockImplementation(() => {
-      throw new Error('editor not found');
-    });
+    runProcessMock.mockRejectedValue(new Error('editor not found'));
 
     const result = await openInEditor(mockPane, mockContext);
 
@@ -132,15 +117,11 @@ describe('openInEditorAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     await openInEditor(mockPane, mockContext);
 
-    // Verify path is properly quoted
-    expect(execSync).toHaveBeenCalledWith(
-      `${getDefaultEditor()} "/test/path with spaces/worktree"`,
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith(getDefaultEditor(), {
+      args: ['/test/path with spaces/worktree'],
+    });
   });
 
   it('should support various editor commands', async () => {
@@ -148,16 +129,24 @@ describe('openInEditorAction', () => {
     const mockPane = createMockPane({ worktreePath: '/test' });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     for (const editor of editors) {
       vi.clearAllMocks();
+      runProcessMock.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
       await openInEditor(mockPane, mockContext, { editor });
 
-      expect(execSync).toHaveBeenCalledWith(
-        `${editor} "/test"`,
-        { stdio: 'pipe' }
-      );
+      expect(runProcessMock).toHaveBeenCalledWith(editor, { args: ['/test'] });
     }
+  });
+
+  it('rejects whitespace-bearing editor command strings without executing them', async () => {
+    process.env.EDITOR = `code --wait; $(touch ${sentinelPath})`;
+    const mockPane = createMockPane({ worktreePath: '/test/path' });
+    const mockContext = createMockContext([mockPane]);
+
+    const result = await openInEditor(mockPane, mockContext);
+
+    expectError(result, 'single executable path');
+    expect(runProcessMock).not.toHaveBeenCalled();
+    await expect(fs.access(sentinelPath)).rejects.toThrow();
   });
 });
