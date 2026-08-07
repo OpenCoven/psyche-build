@@ -327,13 +327,17 @@ export function mergePaneSnapshots(
 
     const nextPane = nextById.get(freshPane.id);
     const previousPane = previousById.get(freshPane.id);
-    if (
-      nextPane
-      && (
-        !previousPane
-        || !paneSnapshotsEqual(previousPane, nextPane)
-      )
-    ) {
+    if (nextPane && previousPane) {
+      const delta = getPanePropertyDelta(previousPane, nextPane);
+      merged.push(
+        delta
+          ? applyPanePropertyDelta(freshPane, delta)
+          : freshPane
+      );
+    } else if (nextPane && !previousPane) {
+      // A pane newly introduced by this caller has no originating record from
+      // which to derive a property-level intent, so it remains an explicit
+      // full-record addition.
       merged.push(nextPane);
     } else {
       merged.push(freshPane);
@@ -349,8 +353,93 @@ export function mergePaneSnapshots(
   return merged;
 }
 
-function paneSnapshotsEqual(left: PsychePane, right: PsychePane): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+interface PanePropertyDelta {
+  changed: Map<string, unknown>;
+  deleted: Set<string>;
+}
+
+/**
+ * Returns only the caller's intent between two snapshots of the same pane.
+ *
+ * Deletion semantics are intentional: a property is cleared when it had a
+ * defined value in the originating snapshot and is absent or `undefined` in
+ * the next snapshot. Properties absent (or undefined) in both snapshots have
+ * no local intent and therefore cannot erase a concurrently persisted value.
+ */
+function getPanePropertyDelta(
+  previousPane: PsychePane,
+  nextPane: PsychePane,
+): PanePropertyDelta | undefined {
+  const changed = new Map<string, unknown>();
+  const deleted = new Set<string>();
+  const properties = new Set([
+    ...Object.keys(previousPane),
+    ...Object.keys(nextPane),
+  ]);
+
+  for (const property of properties) {
+    if (property === 'id') {
+      continue;
+    }
+
+    const hadPreviousValue = hasOwnProperty(previousPane, property);
+    const hasNextValue = hasOwnProperty(nextPane, property);
+    const previousValue = (previousPane as unknown as Record<string, unknown>)[property];
+    const nextValue = (nextPane as unknown as Record<string, unknown>)[property];
+
+    if (
+      hadPreviousValue
+      && previousValue !== undefined
+      && (!hasNextValue || nextValue === undefined)
+    ) {
+      deleted.add(property);
+      continue;
+    }
+
+    if (
+      hasNextValue
+      && nextValue !== undefined
+      && (
+        !hadPreviousValue
+        || previousValue === undefined
+        || !panePropertyValuesEqual(previousValue, nextValue)
+      )
+    ) {
+      changed.set(property, nextValue);
+    }
+  }
+
+  if (changed.size === 0 && deleted.size === 0) {
+    return undefined;
+  }
+
+  return { changed, deleted };
+}
+
+function applyPanePropertyDelta(
+  freshPane: PsychePane,
+  delta: PanePropertyDelta,
+): PsychePane {
+  const mergedPane = {
+    ...freshPane,
+  } as Record<string, unknown>;
+
+  for (const property of delta.deleted) {
+    delete mergedPane[property];
+  }
+  for (const [property, value] of delta.changed) {
+    mergedPane[property] = value;
+  }
+
+  return mergedPane as unknown as PsychePane;
+}
+
+function hasOwnProperty(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+function panePropertyValuesEqual(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**

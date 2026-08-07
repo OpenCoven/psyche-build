@@ -433,6 +433,30 @@ export class WorktreeCleanupService {
       };
     }
 
+    // Setup and hooks can create files after the worktree has been allocated.
+    // This code runs while the creation/rollback operation lease is still
+    // held, so a clean result is the last safe point before a forced removal.
+    const worktreeStatus = this.runGitTextSync(
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      identity.canonicalWorktreePath,
+    );
+    if (!worktreeStatus.success) {
+      const error = `could not verify newly created worktree cleanliness; preserved at ${identity.canonicalWorktreePath}: ${worktreeStatus.error}`;
+      this.logger.warn(
+        `Refusing forced rollback for newly created worktree at ${identity.canonicalWorktreePath}: ${error}`,
+        'paneActions',
+      );
+      return { success: false, error };
+    }
+    if (worktreeStatus.output) {
+      const error = `newly created worktree has modified or untracked files; preserved at ${identity.canonicalWorktreePath}`;
+      this.logger.warn(
+        `Refusing forced rollback for newly created worktree at ${identity.canonicalWorktreePath}: git status reports modified or untracked files`,
+        'paneActions',
+      );
+      return { success: false, error };
+    }
+
     const removeResult = this.runGitTextSync(
       ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
       identity.mainRepoPath

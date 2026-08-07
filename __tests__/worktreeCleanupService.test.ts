@@ -73,12 +73,14 @@ describe('WorktreeCleanupService', () => {
   let worktreeMappings: Map<string, Map<string, string>>;
   let branchOids: Map<string, string>;
   let currentConfig: { projectRoot: string; panes: PsychePane[] };
+  let worktreeStatusOutput: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
     tempDirs = [];
     worktreeMappings = new Map();
     branchOids = new Map();
+    worktreeStatusOutput = '';
     currentConfig = {
       projectRoot: '/test/project',
       panes: [],
@@ -126,6 +128,10 @@ describe('WorktreeCleanupService', () => {
           throw new Error(`No branch OID configured for ${cwd}`);
         }
         return `${oid}\n`;
+      }
+
+      if (gitArgs[0] === 'status' && gitArgs[1] === '--porcelain=v1') {
+        return worktreeStatusOutput;
       }
 
       if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
@@ -798,6 +804,47 @@ describe('WorktreeCleanupService', () => {
     expect(result).toEqual({ success: true });
     expect(readProjectPaneConfigUnderLockMock).toHaveBeenCalledWith('/test/project');
     expect(mutateProjectPaneConfigMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves a worktree changed by hooks or setup instead of forcing rollback', async () => {
+    configureCleanupIdentity();
+    worktreeStatusOutput = '?? .psyche-hooks/setup-created-file\n';
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance();
+    const worktreePath = '/test/project/.psyche/worktrees/react';
+
+    const result = await service.rollbackCreatedWorktree({
+      worktreePath,
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: `newly created worktree has modified or untracked files; preserved at ${worktreePath}`,
+    });
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      'git',
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      expect.objectContaining({ cwd: worktreePath }),
+    );
+    expect(execFileSyncMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', worktreePath, '--force'],
+      expect.anything(),
+    );
+    expect(
+      worktreeMappings.get('/test/project')?.get(resolve(worktreePath))
+    ).toBe('react');
+    expect(branchOids.get('/test/project')).toBe('abc123');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining(worktreePath),
+      'paneActions',
+    );
   });
 
   it('leaves a newly created worktree intact when its branch identity changes', async () => {

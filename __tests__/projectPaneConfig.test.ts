@@ -134,6 +134,127 @@ describe('project pane config mutation', () => {
     ]));
   });
 
+  it('preserves concurrent pane fields while applying a stale local property change', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const stalePane = {
+      id: 'tui-pane',
+      paneId: '%1',
+      slug: 'tui-pane',
+      prompt: '',
+      autopilot: false,
+    };
+
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [stalePane];
+    });
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{
+        ...stalePane,
+        agentSession: {
+          agent: 'codex',
+          id: 'session-123',
+          updatedAt: '2026-08-07T00:00:00.000Z',
+        },
+      }];
+    });
+
+    await savePanesToFile(
+      configPath,
+      [{ ...stalePane, autopilot: true }] as any,
+      async (operation) => operation(),
+      [stalePane] as any,
+    );
+
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([
+      expect.objectContaining({
+        id: 'tui-pane',
+        autopilot: true,
+        agentSession: {
+          agent: 'codex',
+          id: 'session-123',
+          updatedAt: '2026-08-07T00:00:00.000Z',
+        },
+      }),
+    ]);
+  });
+
+  it('clears a locally deleted pane property without discarding concurrent fields', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const stalePane = {
+      id: 'tui-pane',
+      paneId: '%1',
+      slug: 'tui-pane',
+      prompt: '',
+      displayName: 'Original name',
+    };
+
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [stalePane];
+    });
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{
+        ...stalePane,
+        displayName: 'Concurrent name',
+        agentSession: {
+          agent: 'claude',
+          id: 'session-456',
+          updatedAt: '2026-08-07T00:00:00.000Z',
+        },
+      }];
+    });
+
+    await savePanesToFile(
+      configPath,
+      [{ ...stalePane, displayName: undefined }] as any,
+      async (operation) => operation(),
+      [stalePane] as any,
+    );
+
+    const [persistedPane] = JSON.parse(readFileSync(configPath, 'utf8')).panes;
+    expect(persistedPane).not.toHaveProperty('displayName');
+    expect(persistedPane).toMatchObject({
+      id: 'tui-pane',
+      agentSession: {
+        agent: 'claude',
+        id: 'session-456',
+      },
+    });
+  });
+
+  it('uses local intent deterministically when both writers change one pane property', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const stalePane = {
+      id: 'tui-pane',
+      paneId: '%1',
+      slug: 'tui-pane',
+      prompt: 'Original prompt',
+    };
+
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [stalePane];
+    });
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{ ...stalePane, prompt: 'Concurrent prompt' }];
+    });
+
+    await savePanesToFile(
+      configPath,
+      [{ ...stalePane, prompt: 'Local prompt' }] as any,
+      async (operation) => operation(),
+      [stalePane] as any,
+    );
+
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([
+      expect.objectContaining({
+        id: 'tui-pane',
+        prompt: 'Local prompt',
+      }),
+    ]);
+  });
+
   it('does not resurrect a pane concurrently deleted after the originating snapshot', async () => {
     const projectRoot = createProject();
     const configPath = join(projectRoot, '.psyche', 'psyche.config.json');

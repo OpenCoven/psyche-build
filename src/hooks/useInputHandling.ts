@@ -1693,7 +1693,6 @@ export function useInputHandling(params: UseInputHandlingParams) {
             agent,
             existingPanes: [...panes, ...createdPanes],
             sessionProjectRoot: projectRoot,
-            sessionConfigPath: panesFile,
           })
           createdPanes.push(result.pane)
         } catch {
@@ -1702,8 +1701,9 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       if (createdPanes.length > 0) {
-        const updatedPanes = [...panes, ...createdPanes]
-        await savePanes(updatedPanes, panes)
+        // attachAgentToWorktree makes each pane durable while its reuse
+        // reservation is held. Reload rather than replaying this stale React
+        // snapshot over the cross-process registry.
         await loadPanes()
       }
 
