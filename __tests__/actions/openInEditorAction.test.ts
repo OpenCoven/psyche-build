@@ -47,6 +47,7 @@ describe('openInEditorAction', () => {
 
     expect(runProcessMock).toHaveBeenCalledWith(getDefaultEditor(), {
       args: ['/test/worktree/path'],
+      timeoutMs: 0,
     });
     expectSuccess(result, getDefaultEditor());
   });
@@ -60,7 +61,7 @@ describe('openInEditorAction', () => {
 
     const result = await openInEditor(mockPane, mockContext);
 
-    expect(runProcessMock).toHaveBeenCalledWith('vim', { args: ['/test/path'] });
+    expect(runProcessMock).toHaveBeenCalledWith('vim', { args: ['/test/path'], timeoutMs: 0 });
     expectSuccess(result, 'vim');
   });
 
@@ -72,7 +73,7 @@ describe('openInEditorAction', () => {
 
     const result = await openInEditor(mockPane, mockContext, { editor: 'emacs' });
 
-    expect(runProcessMock).toHaveBeenCalledWith('emacs', { args: ['/test/path'] });
+    expect(runProcessMock).toHaveBeenCalledWith('emacs', { args: ['/test/path'], timeoutMs: 0 });
     expectSuccess(result, 'emacs');
   });
 
@@ -85,7 +86,7 @@ describe('openInEditorAction', () => {
 
     await openInEditor(mockPane, mockContext, { editor: 'nano' });
 
-    expect(runProcessMock).toHaveBeenCalledWith('nano', { args: ['/test/path'] });
+    expect(runProcessMock).toHaveBeenCalledWith('nano', { args: ['/test/path'], timeoutMs: 0 });
   });
 
   it('should return error for shell pane without worktree', async () => {
@@ -121,6 +122,7 @@ describe('openInEditorAction', () => {
 
     expect(runProcessMock).toHaveBeenCalledWith(getDefaultEditor(), {
       args: ['/test/path with spaces/worktree'],
+      timeoutMs: 0,
     });
   });
 
@@ -134,7 +136,7 @@ describe('openInEditorAction', () => {
       runProcessMock.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
       await openInEditor(mockPane, mockContext, { editor });
 
-      expect(runProcessMock).toHaveBeenCalledWith(editor, { args: ['/test'] });
+      expect(runProcessMock).toHaveBeenCalledWith(editor, { args: ['/test'], timeoutMs: 0 });
     }
   });
 

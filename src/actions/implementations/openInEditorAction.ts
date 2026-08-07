@@ -44,7 +44,7 @@ export async function openInEditor(
     const editor = validateEditorExecutable(
       params?.editor || process.env.EDITOR || getDefaultEditor(),
     );
-    await runProcess(editor, { args: [pane.worktreePath] });
+    await runProcess(editor, { args: [pane.worktreePath], timeoutMs: 0 });
 
     return {
       type: 'success',

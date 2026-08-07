@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_024 * 1_024;
-const TERMINATION_GRACE_MS = 1_000;
+const TERMINATION_GRACE_MS = 250;
 
 export interface RunProcessOptions {
   args?: readonly string[];
@@ -69,13 +69,14 @@ export function runProcess(
   }
 
   return new Promise((resolve, reject) => {
-    let process;
+    let child: ChildProcessWithoutNullStreams;
     try {
-      process = spawn(executable, [...args], {
+      child = spawn(executable, [...args], {
         cwd: options.cwd,
         env: options.env,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -87,16 +88,21 @@ export function runProcess(
     const stderrChunks: Buffer[] = [];
     let stdoutSize = 0;
     let stderrSize = 0;
-    let timedOut = false;
-    let outputExceeded = false;
     let settled = false;
     let timeoutId: NodeJS.Timeout | undefined;
     let terminationId: NodeJS.Timeout | undefined;
+    let pendingFailure: { message: string; exitCode: number } | undefined;
 
     const stderr = () => Buffer.concat(stderrChunks).toString('utf8');
     const clearTimers = () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (terminationId) clearTimeout(terminationId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+      if (terminationId) {
+        clearTimeout(terminationId);
+        terminationId = undefined;
+      }
     };
     const fail = (message: string, exitCode: number) => {
       if (settled) return;
@@ -104,67 +110,105 @@ export function runProcess(
       clearTimers();
       reject(new RunProcessError(message, exitCode, stderr()));
     };
-    const terminate = () => {
-      try {
-        process.kill('SIGTERM');
-      } catch {
-        return;
+
+    const destroyStdio = () => {
+      for (const stream of [child.stdin, child.stdout, child.stderr]) {
+        if (!stream.destroyed) stream.destroy();
       }
-      terminationId ??= setTimeout(() => {
-        if (process.exitCode === null && process.signalCode === null) {
-          process.kill('SIGKILL');
-        }
+    };
+
+    const signalProcessTree = (signal: NodeJS.Signals) => {
+      const { pid } = child;
+
+      if (process.platform === 'win32' && pid !== undefined) {
+        try {
+          const taskkill = spawn(
+            'taskkill',
+            ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])],
+            { stdio: 'ignore', windowsHide: true },
+          );
+          taskkill.once('error', () => {
+            child.kill(signal);
+          });
+          taskkill.unref();
+          return;
+        } catch {}
+      }
+
+      if (process.platform !== 'win32' && pid !== undefined) {
+        try {
+          globalThis.process.kill(-pid, signal);
+          return;
+        } catch {}
+      }
+
+      try {
+        child.kill(signal);
+      } catch {}
+    };
+
+    const terminateAndFail = (message: string, exitCode: number) => {
+      if (settled || pendingFailure) return;
+
+      pendingFailure = { message, exitCode };
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+      signalProcessTree('SIGTERM');
+      destroyStdio();
+
+      terminationId = setTimeout(() => {
+        signalProcessTree('SIGKILL');
+        destroyStdio();
+        fail(message, exitCode);
       }, TERMINATION_GRACE_MS);
     };
 
     if (timeoutMs > 0) {
       timeoutId = setTimeout(() => {
-        timedOut = true;
-        terminate();
+        terminateAndFail(`Process timed out after ${timeoutMs}ms: ${executable}`, -1);
       }, timeoutMs);
     }
 
-    process.stdout.on('data', (chunk: Buffer) => {
+    child.stdout.on('data', (chunk: Buffer) => {
       const result = appendOutput(stdoutChunks, stdoutSize, chunk, maxOutputBytes);
       stdoutSize = result.size;
       if (result.exceeded) {
-        outputExceeded = true;
-        terminate();
+        terminateAndFail(
+          `Process exceeded output limit of ${maxOutputBytes} bytes: ${executable}`,
+          -1,
+        );
       }
     });
 
-    process.stderr.on('data', (chunk: Buffer) => {
+    child.stderr.on('data', (chunk: Buffer) => {
       const result = appendOutput(stderrChunks, stderrSize, chunk, maxOutputBytes);
       stderrSize = result.size;
       if (result.exceeded) {
-        outputExceeded = true;
-        terminate();
+        terminateAndFail(
+          `Process exceeded output limit of ${maxOutputBytes} bytes: ${executable}`,
+          -1,
+        );
       }
     });
 
-    process.once('error', (error) => {
+    child.once('error', (error) => {
       const message = error instanceof Error ? error.message : String(error);
       fail(message, -1);
     });
 
-    process.stdin.once('error', (error) => {
+    child.stdin.once('error', (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      fail(message, -1);
+      terminateAndFail(message, -1);
     });
 
-    process.once('close', (code) => {
+    child.once('close', (code) => {
       if (settled) return;
+      if (pendingFailure) return;
       clearTimers();
 
       const exitCode = code ?? -1;
-      if (timedOut) {
-        fail(`Process timed out after ${timeoutMs}ms: ${executable}`, exitCode);
-        return;
-      }
-      if (outputExceeded) {
-        fail(`Process exceeded output limit of ${maxOutputBytes} bytes: ${executable}`, exitCode);
-        return;
-      }
       if (exitCode !== 0) {
         fail(
           stderr().trim() || `Process failed with exit code ${exitCode}: ${executable}`,
@@ -181,6 +225,11 @@ export function runProcess(
       });
     });
 
-    process.stdin.end(options.input);
+    try {
+      child.stdin.end(options.input);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      terminateAndFail(message, -1);
+    }
   });
 }
