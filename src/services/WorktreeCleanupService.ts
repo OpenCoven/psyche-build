@@ -79,6 +79,12 @@ interface WorktreeRemovalTarget {
 interface ManagedWorktreePruneTarget {
   canonicalWorktreePath: string;
   mtimeMs: number;
+  expectedGeneration: number;
+}
+
+interface ManagedWorktreePruneCandidate {
+  canonicalWorktreePath: string;
+  mtimeMs: number;
 }
 
 export interface WorktreeReuseLease {
@@ -285,8 +291,25 @@ export class WorktreeCleanupService {
       return;
     }
 
+    let targets: ManagedWorktreePruneTarget[];
+    try {
+      targets = this.getManagedWorktreePruneTargets(job);
+    } catch (error) {
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+      this.logger.error(
+        `Managed worktree pruning failed for ${job.projectRoot}: ${errorObj.message}`,
+        'paneActions',
+        undefined,
+        errorObj
+      );
+      return;
+    }
+    if (targets.length === 0) {
+      return;
+    }
+
     this.cleanupQueue = this.cleanupQueue
-      .then(() => this.runPruneManagedWorktrees(job))
+      .then(() => this.runPruneManagedWorktrees(job, targets))
       .catch((error) => {
         const errorObj = error instanceof Error ? error : new Error(String(error));
         this.logger.error(
@@ -820,9 +843,10 @@ export class WorktreeCleanupService {
     });
   }
 
-  private async runPruneManagedWorktrees(job: WorktreePruneJob): Promise<void> {
-    const targets = this.getManagedWorktreePruneTargets(job);
-
+  private async runPruneManagedWorktrees(
+    job: WorktreePruneJob,
+    targets = this.getManagedWorktreePruneTargets(job)
+  ): Promise<void> {
     if (targets.length === 0) {
       return;
     }
@@ -831,13 +855,11 @@ export class WorktreeCleanupService {
       `Pruning ${targets.length} old managed worktree${targets.length === 1 ? '' : 's'} for ${job.projectRoot}`,
       'paneActions'
     );
-
     for (const target of targets) {
-      const expectedGeneration = this.getCleanupGeneration(target.canonicalWorktreePath);
       await this.withWorktreeLock(target.canonicalWorktreePath, async () => {
         if (
           this.getCleanupGeneration(target.canonicalWorktreePath)
-          !== expectedGeneration
+          !== target.expectedGeneration
         ) {
           this.logger.debug(
             `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
@@ -910,16 +932,18 @@ export class WorktreeCleanupService {
       return [];
     }
 
-    const managedRoot = path.join(job.projectRoot, '.psyche', 'worktrees');
+    const canonicalProjectRoot = canonicalizePathForCompare(job.projectRoot);
+    const managedRoot = path.join(canonicalProjectRoot, '.psyche', 'worktrees');
     if (!existsSync(managedRoot)) {
       return [];
     }
 
     const activeWorktreePaths = job.activePanes
       .map((pane) => pane.worktreePath)
-      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .map(canonicalizePathForCompare);
 
-    const managedWorktrees: ManagedWorktreePruneTarget[] = [];
+    const managedWorktrees: ManagedWorktreePruneCandidate[] = [];
 
     for (const entry of readdirSync(managedRoot, { withFileTypes: true })) {
       if (!entry.isDirectory()) {
@@ -963,7 +987,11 @@ export class WorktreeCleanupService {
 
         return left.canonicalWorktreePath.localeCompare(right.canonicalWorktreePath);
       })
-      .slice(0, pruneCount);
+      .slice(0, pruneCount)
+      .map((target) => ({
+        ...target,
+        expectedGeneration: this.getCleanupGeneration(target.canonicalWorktreePath),
+      }));
   }
 
   private runGitCommand(args: string[], cwd: string): Promise<CommandResult> {

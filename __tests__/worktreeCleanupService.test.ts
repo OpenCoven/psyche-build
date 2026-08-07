@@ -789,4 +789,39 @@ describe('WorktreeCleanupService', () => {
       'paneActions'
     );
   });
+
+  it('skips a prune target selected before reuse releases without config persistence', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-prune-'));
+    tempDirs.push(projectRoot);
+    const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+    createManagedWorktree(projectRoot, 'newer', new Date('2026-01-02T00:00:00Z'));
+    mkdirSync(join(older, '.git'));
+    utimesSync(older, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    service.enqueuePruneManagedWorktrees({
+      projectRoot,
+      activePanes: [],
+      configPath: join(projectRoot, '.psyche', 'psyche.config.json'),
+      maxManagedWorktrees: 1,
+    });
+    const prunePromise = service.cleanupQueue;
+    const reuseLease = await service.acquireWorktreeReuseLease(older);
+
+    reuseLease.release();
+    await prunePromise;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', older],
+      expect.anything()
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('cleanup generation changed'),
+      'paneActions'
+    );
+  });
 });
