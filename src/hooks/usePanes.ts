@@ -28,6 +28,7 @@ import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import {
+  compareAndRemoveProjectPaneConfigPaneIdentities,
   mutateProjectPaneConfig,
   removeProjectPaneConfigPaneIdentities,
   removeProjectPaneConfigPanes,
@@ -290,40 +291,50 @@ export default function usePanes(
 
   const removePaneIdentitiesFromConfig = async (
     identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: () => Promise<void>,
   ): Promise<PsychePane[]> => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
-      await removeProjectPaneConfigPaneIdentities(
-        fallbackProjectRoot,
-        identities,
-      );
-      const mutation = await mutateProjectPaneConfig(
-        fallbackProjectRoot,
-        (configRecord) => {
-          const config = configRecord as unknown as PsycheConfig;
-          const projectRoot = config.projectRoot || fallbackProjectRoot;
-          const projectName = config.projectName || path.basename(projectRoot);
-          const freshPanes = Array.isArray(config.panes) ? config.panes : [];
-          const normalizedProjects = normalizeSidebarProjects(
-            config.sidebarProjects,
-            freshPanes,
-            projectRoot,
-            projectName,
-          );
-          config.sidebarProjects = normalizedProjects;
-          config.lastUpdated = new Date().toISOString();
-          return {
-            panes: freshPanes,
-            sidebarProjects: normalizedProjects,
-          };
-        },
-      );
-      const persistedPanes = mutation.result.panes;
-      panesRef.current = persistedPanes;
-      setPanes(persistedPanes);
-      sidebarProjectsRef.current = mutation.result.sidebarProjects;
-      setSidebarProjects(mutation.result.sidebarProjects);
-      return persistedPanes;
+      try {
+        await compareAndRemoveProjectPaneConfigPaneIdentities(
+          fallbackProjectRoot,
+          identities,
+          beforeRemove,
+        );
+        const mutation = await mutateProjectPaneConfig(
+          fallbackProjectRoot,
+          (configRecord) => {
+            const config = configRecord as unknown as PsycheConfig;
+            const projectRoot = config.projectRoot || fallbackProjectRoot;
+            const projectName = config.projectName || path.basename(projectRoot);
+            const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+            const normalizedProjects = normalizeSidebarProjects(
+              config.sidebarProjects,
+              freshPanes,
+              projectRoot,
+              projectName,
+            );
+            config.sidebarProjects = normalizedProjects;
+            config.lastUpdated = new Date().toISOString();
+            return {
+              panes: freshPanes,
+              sidebarProjects: normalizedProjects,
+            };
+          },
+        );
+        const persistedPanes = mutation.result.panes;
+        panesRef.current = persistedPanes;
+        setPanes(persistedPanes);
+        sidebarProjectsRef.current = mutation.result.sidebarProjects;
+        setSidebarProjects(mutation.result.sidebarProjects);
+        return persistedPanes;
+      } catch (error) {
+        // Exact-identity failures are intentionally non-destructive, but the
+        // in-memory UI is now stale by definition. Reload it before surfacing
+        // the failure so a concurrent rebind becomes visible immediately.
+        await loadPanes();
+        throw error;
+      }
     });
   };
 

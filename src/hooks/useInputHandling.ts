@@ -1701,10 +1701,11 @@ export function useInputHandling(params: UseInputHandlingParams) {
         }
       }
 
-      if (createdPanes.length > 0) {
+      if (createdPanes.length > 0 || failedAgents.length > 0) {
         // attachAgentToWorktree makes each pane durable while its reuse
-        // reservation is held. Reload rather than replaying this stale React
-        // snapshot over the cross-process registry.
+        // reservation is held. Failed exact-identity cleanup can also mean a
+        // concurrent pane rebind won, so reload rather than replaying this
+        // stale React snapshot over the cross-process registry.
         await loadPanes()
       }
 

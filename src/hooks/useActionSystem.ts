@@ -23,7 +23,9 @@ interface UseActionSystemParams {
   removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
   removePaneIdentitiesFromConfig?: (
     identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: () => Promise<void>,
   ) => Promise<PsychePane[]>;
+  refreshPanes?: () => Promise<void>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
@@ -191,6 +193,7 @@ export default function useActionSystem({
   removePaneFromConfig,
   removePanesFromConfig,
   removePaneIdentitiesFromConfig,
+  refreshPanes,
   sessionName,
   projectName,
   defaultProjectRoot,
@@ -212,6 +215,7 @@ export default function useActionSystem({
     removePaneFromConfig,
     removePanesFromConfig,
     removePaneIdentitiesFromConfig,
+    refreshPanes,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,
@@ -223,6 +227,7 @@ export default function useActionSystem({
     removePaneFromConfig,
     removePanesFromConfig,
     removePaneIdentitiesFromConfig,
+    refreshPanes,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,

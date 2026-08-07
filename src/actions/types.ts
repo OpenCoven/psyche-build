@@ -115,7 +115,14 @@ export interface ActionContext {
    */
   removePaneIdentitiesFromConfig?: (
     identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: () => Promise<void>,
   ) => Promise<PsychePane[]>;
+  /**
+   * Reloads fresh config after a rejected exact-identity lifecycle action.
+   * The caller may otherwise still render a pane that a concurrent writer
+   * rebound while this action was waiting.
+   */
+  refreshPanes?: () => Promise<void>;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;

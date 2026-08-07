@@ -19,6 +19,13 @@ import {
 import {
   readProjectPaneConfigUnderLock,
 } from './ProjectPaneConfig.js';
+import {
+  describeLiveTmuxWorktreeGuard,
+  inspectLiveTmuxWorktreeConsumers,
+} from './LiveTmuxWorktreeGuard.js';
+import {
+  findBlockingWorktreeRecoveryMarker,
+} from './WorktreeRecoveryMarker.js';
 
 export interface WorktreeCleanupJob {
   pane: PsychePane;
@@ -63,6 +70,11 @@ export interface CreatedWorktreeIdentity {
 export interface WorktreeCreationReservation {
   canonicalWorktreePath: string;
   creatorNonce: string;
+  /**
+   * Makes complete/cancel intentionally non-destructive for an uncertain
+   * lifecycle. A recovery marker must later be acknowledged by an operator.
+   */
+  retain: () => void;
   recordCreatedWorktree: (input: {
     branchName: string;
     startingOid: string;
@@ -139,6 +151,11 @@ interface ManagedWorktreePruneCandidate {
 
 export interface WorktreeReuseReservation {
   canonicalWorktreePath: string;
+  /**
+   * Prevents any later automatic complete/cancel path from releasing this
+   * reservation after a possibly-live pane could not be made durable.
+   */
+  retain: () => void;
   complete: () => Promise<void>;
   cancel: () => Promise<void>;
 }
@@ -210,6 +227,15 @@ export class WorktreeCleanupService {
         operation: 'reuse',
       });
       const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
+      const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+        projectRoot || operationLease.canonicalProjectRoot,
+        canonicalWorktreePath,
+      );
+      if (recoveryMarker.blocked) {
+        throw new Error(
+          `Worktree requires operator recovery before reuse: ${recoveryMarker.reason}`,
+        );
+      }
       if (!this.isReusableWorktree(canonicalWorktreePath)) {
         throw new Error(
           `Worktree is no longer available for reuse at ${canonicalWorktreePath}`
@@ -223,7 +249,11 @@ export class WorktreeCleanupService {
       );
 
       let settlePromise: Promise<void> | undefined;
+      let retained = false;
       const settle = (outcome: 'completed' | 'canceled'): Promise<void> => {
+        if (retained) {
+          return Promise.resolve();
+        }
         if (!settlePromise) {
           this.removeActiveReuseReservation(canonicalWorktreePath);
           settlePromise = operationLease!.release()
@@ -241,6 +271,13 @@ export class WorktreeCleanupService {
 
       return {
         canonicalWorktreePath,
+        retain: () => {
+          retained = true;
+          this.logger.warn(
+            `Retained reuse reservation for operator recovery at ${canonicalWorktreePath}`,
+            'paneActions',
+          );
+        },
         complete: () => settle('completed'),
         cancel: () => settle('canceled'),
       };
@@ -324,9 +361,22 @@ export class WorktreeCleanupService {
         operation: 'create',
       });
       this.incrementCleanupGeneration(canonicalWorktreePath);
+      const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+        mainRepoPath,
+        canonicalWorktreePath,
+      );
+      if (recoveryMarker.blocked) {
+        throw new Error(
+          `Worktree requires operator recovery before creation: ${recoveryMarker.reason}`,
+        );
+      }
 
       let settlePromise: Promise<void> | undefined;
+      let retained = false;
       const settle = (): Promise<void> => {
+        if (retained) {
+          return Promise.resolve();
+        }
         if (!settlePromise) {
           settlePromise = operationLease!.release()
             .finally(releaseLock)
@@ -338,6 +388,13 @@ export class WorktreeCleanupService {
       return {
         canonicalWorktreePath,
         creatorNonce: operationLease.nonce,
+        retain: () => {
+          retained = true;
+          this.logger.warn(
+            `Retained creation reservation for operator recovery at ${canonicalWorktreePath}`,
+            'paneActions',
+          );
+        },
         recordCreatedWorktree: ({
           branchName,
           startingOid,
@@ -435,6 +492,17 @@ export class WorktreeCleanupService {
       };
     }
 
+    const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+      identity.mainRepoPath,
+      identity.canonicalWorktreePath,
+    );
+    if (recoveryMarker.blocked) {
+      return {
+        success: false,
+        error: `newly created worktree has an unresolved recovery marker: ${recoveryMarker.reason}`,
+      };
+    }
+
     const mappedBranch = this.getWorktreeBranch(
       identity.mainRepoPath,
       identity.canonicalWorktreePath,
@@ -464,6 +532,16 @@ export class WorktreeCleanupService {
     // status precheck races with hooks, editors, and agents writing after the
     // check; Git's non-forced removal is the atomic authority. In particular,
     // do not delete ignored user files such as .env to make a rollback pass.
+    const tmuxGuard = inspectLiveTmuxWorktreeConsumers(
+      identity.canonicalWorktreePath,
+    );
+    if (tmuxGuard.state !== 'safe') {
+      return {
+        success: false,
+        error: `refusing rollback while ${describeLiveTmuxWorktreeGuard(tmuxGuard)}`,
+      };
+    }
+
     const removeResult = this.runGitTextSync(
       ['worktree', 'remove', identity.canonicalWorktreePath],
       identity.mainRepoPath
@@ -902,6 +980,19 @@ export class WorktreeCleanupService {
       return false;
     }
 
+    const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+      job.mainRepoPath,
+      protectedWorktreePath,
+    );
+    if (recoveryMarker.blocked) {
+      this.logger.warn(
+        `Skipping background worktree cleanup for ${job.pane.slug}: ${recoveryMarker.reason}`,
+        'paneActions',
+        job.pane.id,
+      );
+      return false;
+    }
+
     if (this.cleanupGenerations.get(job.canonicalWorktreePath) !== job.generation) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: cleanup was canceled or superseded`,
@@ -958,6 +1049,18 @@ export class WorktreeCleanupService {
     target: QueuedWorktreeIdentity
   ): Promise<boolean> {
     if (!this.canRunDestructiveCleanup(job, target)) {
+      return false;
+    }
+
+    const tmuxGuard = inspectLiveTmuxWorktreeConsumers(
+      target.canonicalWorktreePath,
+    );
+    if (tmuxGuard.state !== 'safe') {
+      this.logger.warn(
+        `Skipping worktree removal for ${job.pane.slug}: ${describeLiveTmuxWorktreeGuard(tmuxGuard)}`,
+        'paneActions',
+        job.pane.id,
+      );
       return false;
     }
 
@@ -1233,6 +1336,29 @@ export class WorktreeCleanupService {
                 return;
               }
 
+              const recoveryMarker = findBlockingWorktreeRecoveryMarker(
+                job.projectRoot,
+                target.canonicalWorktreePath,
+              );
+              if (recoveryMarker.blocked) {
+                this.logger.warn(
+                  `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${recoveryMarker.reason}`,
+                  'paneActions',
+                );
+                return;
+              }
+
+              const tmuxGuard = inspectLiveTmuxWorktreeConsumers(
+                target.canonicalWorktreePath,
+              );
+              if (tmuxGuard.state !== 'safe') {
+                this.logger.warn(
+                  `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${describeLiveTmuxWorktreeGuard(tmuxGuard)}`,
+                  'paneActions',
+                );
+                return;
+              }
+
               const removeResult = await this.runGitCommand(
                 ['worktree', 'remove', target.canonicalWorktreePath],
                 job.projectRoot
@@ -1360,6 +1486,7 @@ export class WorktreeCleanupService {
     return new Promise((resolve) => {
       const child = spawn('git', args, {
         cwd,
+        shell: false,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
 

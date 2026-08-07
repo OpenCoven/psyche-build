@@ -9,6 +9,10 @@ import { getCurrentBranch, getPaneBranchName } from '../utils/git.js';
 import { cleanupPromptFilesForSlug } from '../utils/promptStore.js';
 import { deriveProjectRootFromWorktreePath } from '../utils/paneProject.js';
 import { useTemporaryStatus } from './useTemporaryStatus.js';
+import {
+  describeLiveTmuxWorktreeGuard,
+  inspectLiveTmuxWorktreeConsumers,
+} from '../services/LiveTmuxWorktreeGuard.js';
 
 interface Params {
   panes: PsychePane[];
@@ -26,6 +30,15 @@ export default function useWorktreeActions({
   setMergedPane,
 }: Params) {
   const showTemporary = useTemporaryStatus(setStatusMessage);
+
+  const assertNoLiveTmuxWorktreeConsumer = (worktreePath: string) => {
+    const guard = inspectLiveTmuxWorktreeConsumers(worktreePath);
+    if (guard.state !== 'safe') {
+      throw new Error(
+        `Refusing worktree removal while ${describeLiveTmuxWorktreeGuard(guard)}`,
+      );
+    }
+  };
 
   const closePane = useCallback(async (pane: PsychePane) => {
     try {
@@ -100,6 +113,7 @@ export default function useWorktreeActions({
       }
 
       // Only remove worktree if merge succeeded
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);
@@ -161,6 +175,7 @@ export default function useWorktreeActions({
       }
 
       // Only remove worktree if merge succeeded
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);
@@ -182,6 +197,7 @@ export default function useWorktreeActions({
 
     try {
       setStatusMessage('Removing worktree with unsaved changes...');
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove --force "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);

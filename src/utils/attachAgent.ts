@@ -19,10 +19,13 @@ import { SettingsManager } from './settingsManager.js';
 import { LogService } from '../services/LogService.js';
 import { installCodexPaneHooks } from './codexHooks.js';
 import { resolveProjectColorTheme } from './paneColors.js';
-import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import {
+  WorktreeCleanupService,
+  type WorktreeReuseReservation,
+} from '../services/WorktreeCleanupService.js';
+import {
+  compareAndRemoveProjectPaneConfigPaneIdentities,
   projectPaneConfigPath,
-  removeProjectPaneConfigPanes,
   transactProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 import {
@@ -32,6 +35,12 @@ import {
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
+import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
+  retainPaneRecovery,
+  type PaneRecoveryPersistenceResult,
+} from './paneLifecycleRecovery.js';
 
 export interface AttachAgentOptions {
   targetPane: PsychePane;
@@ -81,21 +90,41 @@ export async function attachAgentToWorktree(
   }
 
   const projectRoot = options.targetPane.projectRoot || options.sessionProjectRoot;
-  return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+  const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
     options.targetPane.worktreePath,
-    async (canonicalWorktreePath) => attachAgentToReservedWorktree({
-      ...options,
-      targetPane: {
-        ...options.targetPane,
-        worktreePath: canonicalWorktreePath,
-      },
-    }),
     projectRoot,
   );
+  let settled = false;
+  try {
+    const result = await attachAgentToReservedWorktree(
+      {
+        ...options,
+        targetPane: {
+          ...options.targetPane,
+          worktreePath: reservation.canonicalWorktreePath,
+        },
+      },
+      reservation,
+    );
+    await reservation.complete();
+    settled = true;
+    return result;
+  } catch (error) {
+    if (isPaneLifecycleReservationRetainedError(error)) {
+      reservation.retain();
+      settled = true;
+    }
+    throw error;
+  } finally {
+    if (!settled) {
+      await reservation.cancel();
+    }
+  }
 }
 
 async function attachAgentToReservedWorktree(
   options: AttachAgentOptions,
+  reservation: WorktreeReuseReservation,
 ): Promise<{ pane: PsychePane }> {
   const {
     targetPane,
@@ -210,20 +239,33 @@ async function attachAgentToReservedWorktree(
           ? await killAttachedPane(tmuxService, paneInfo, slug, 'setup or persistence failure')
           : undefined;
         const recovery = teardown && teardown.presence !== 'absent' && newPane
-          ? await persistAttachedRecoveryRecord(
-            config,
-            persist,
-            freshPanes,
-            newPane,
+          ? await retainPaneRecovery({
+            projectRoot,
             sessionProjectRoot,
-          )
+            pane: newPane,
+            operation: 'attach-agent',
+            reason: `attached pane setup or persistence failed: ${errorMessage(error)}`,
+            reservation,
+            persistConfigRecovery: () => persistAttachedRecoveryRecord(
+              config,
+              persist,
+              freshPanes,
+              newPane!,
+              sessionProjectRoot,
+            ),
+          })
           : undefined;
         const recoveryMessage = teardown && teardown.presence !== 'absent'
-          ? `; ${recovery || paneRecoveryInstructions(
+          ? `; ${recovery?.message || paneRecoveryInstructions(
             paneInfo || psychePaneId,
             projectPaneConfigPath(sessionProjectRoot),
           )}`
           : '';
+        if (recovery?.retained) {
+          throw new PaneLifecycleReservationRetainedError(
+            `Failed to prepare attached pane "${slug}": ${errorMessage(error)}${recoveryMessage}`,
+          );
+        }
         throw new Error(
           `Failed to prepare attached pane "${slug}": ${errorMessage(error)}${recoveryMessage}`,
         );
@@ -354,20 +396,27 @@ async function removeFailedAttachedPane(
   sessionProjectRoot: string,
   pane: PsychePane,
 ): Promise<string | undefined> {
-  const teardown = await killAttachedPane(
-    tmuxService,
-    paneId,
-    pane.slug,
-    'agent launch failure',
-  );
-  if (teardown.presence !== 'absent') {
-    return `could not confirm pane ${paneId} is closed (${teardown.presence}); retained tracked pane record ${pane.id}. ${
-      paneRecoveryInstructions(paneId, projectPaneConfigPath(sessionProjectRoot))
-    }`;
-  }
-
   try {
-    await removeProjectPaneConfigPanes(sessionProjectRoot, [pane.id]);
+    let teardown: VerifiedPaneTeardownResult | undefined;
+    await compareAndRemoveProjectPaneConfigPaneIdentities(
+      sessionProjectRoot,
+      [{ id: pane.id, paneId }],
+      async () => {
+        teardown = await killAttachedPane(
+          tmuxService,
+          paneId,
+          pane.slug,
+          'agent launch failure',
+        );
+        if (teardown.presence !== 'absent') {
+          throw new Error(
+            `could not confirm pane ${paneId} is closed (${teardown.presence}); retained tracked pane record ${pane.id}. ${
+              paneRecoveryInstructions(paneId, projectPaneConfigPath(sessionProjectRoot))
+            }`,
+          );
+        }
+      },
+    );
     return undefined;
   } catch (error) {
     const message = errorMessage(error);
@@ -376,7 +425,7 @@ async function removeFailedAttachedPane(
       'attachAgent',
       pane.id,
     );
-    return `failed to remove pane record ${pane.id} after killing pane ${paneId}: ${message}`;
+    return `failed to remove exact pane record ${pane.id} after launch failure: ${message}`;
   }
 }
 
@@ -386,7 +435,7 @@ async function persistAttachedRecoveryRecord(
   freshPanes: PsychePane[],
   pane: PsychePane,
   sessionProjectRoot: string,
-): Promise<string> {
+): Promise<PaneRecoveryPersistenceResult> {
   const panes = Array.isArray(config.panes)
     ? config.panes as PsychePane[]
     : freshPanes;
@@ -398,13 +447,19 @@ async function persistAttachedRecoveryRecord(
   const configPath = projectPaneConfigPath(sessionProjectRoot);
   try {
     await persist();
-    return `retained recovery record ${pane.id} in ${configPath}. ${
-      paneRecoveryInstructions(pane.paneId, configPath)
-    }`;
+    return {
+      durable: true,
+      message: `retained recovery record ${pane.id} in ${configPath}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
   } catch (error) {
-    return `could not persist recovery record ${pane.id}: ${errorMessage(error)}. ${
-      paneRecoveryInstructions(pane.paneId, configPath)
-    }`;
+    return {
+      durable: false,
+      message: `could not persist recovery record ${pane.id}: ${errorMessage(error)}. ${
+        paneRecoveryInstructions(pane.paneId, configPath)
+      }`,
+    };
   }
 }
 

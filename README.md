@@ -70,6 +70,12 @@ node /path/to/psyche-build/psyche doctor --fix
 
 `psyche doctor` checks tmux, git, clipboard/navigation support, psyche session styling, and the psyche-managed tmux config block. `--fix` applies safe repairs, backs up an existing `~/.tmux.conf`, and only edits the block between `# >>> psyche` and `# <<< psyche`.
 
+If a pane could not be verified as closed while its config was unavailable,
+Psyche writes a runtime recovery marker and blocks destructive cleanup. Inspect
+the marker with `psyche recover --project /path/to/project`; after reconciling
+the pane and worktree manually, explicitly acknowledge its ID with
+`psyche recover --project /path/to/project --acknowledge <marker-id>`.
+
 The doctor output also calls out supported agent CLIs and the Coven boundary:
 
 - Without an agent CLI, Psyche Build can still open and manage plain terminal panes.

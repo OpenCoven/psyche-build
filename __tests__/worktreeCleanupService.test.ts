@@ -77,6 +77,8 @@ describe('WorktreeCleanupService', () => {
   let currentConfig: { projectRoot: string; panes: PsychePane[] };
   let worktreeStatusOutput: string;
   let worktreeRemoveError: Error | undefined;
+  let liveTmuxPanePaths: string;
+  let liveTmuxQueryError: Error | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -85,6 +87,8 @@ describe('WorktreeCleanupService', () => {
     branchOids = new Map();
     worktreeStatusOutput = '';
     worktreeRemoveError = undefined;
+    liveTmuxPanePaths = '';
+    liveTmuxQueryError = undefined;
     currentConfig = {
       projectRoot: '/test/project',
       panes: [],
@@ -125,7 +129,13 @@ describe('WorktreeCleanupService', () => {
       release: async () => {},
     }));
 
-    execFileSyncMock.mockImplementation((_command, args, options) => {
+    execFileSyncMock.mockImplementation((command, args, options) => {
+      if (command === 'tmux') {
+        if (liveTmuxQueryError) {
+          throw liveTmuxQueryError;
+        }
+        return liveTmuxPanePaths;
+      }
       const gitArgs = args as string[];
       const cwd = String((options as { cwd?: string } | undefined)?.cwd || '');
 
@@ -845,6 +855,56 @@ describe('WorktreeCleanupService', () => {
       'git',
       ['branch', '-D', 'react'],
       expect.objectContaining({ cwd: '/test/project' })
+    );
+  });
+
+  it('refuses cleanup when an untracked pane changed cwd inside the target worktree', async () => {
+    configureCleanupIdentity();
+    liveTmuxPanePaths = '%untracked\t@42\t/test/project/.psyche/worktrees/react/src\n';
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '/test/project/.psyche/worktrees/react'],
+      expect.anything(),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('live tmux pane(s) still use the worktree'),
+      'paneActions',
+      'psyche-1',
+    );
+  });
+
+  it('refuses cleanup when a detached dev or test window still has the target cwd', async () => {
+    configureCleanupIdentity();
+    liveTmuxPanePaths = '%background\t@dev\t/test/project/.psyche/worktrees/react\n';
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses cleanup when the global tmux cwd query is unknown', async () => {
+    configureCleanupIdentity();
+    liveTmuxQueryError = new Error('tmux unavailable');
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    await enqueueAndWait(service);
+
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('could not query live tmux pane paths'),
+      'paneActions',
+      'psyche-1',
     );
   });
 

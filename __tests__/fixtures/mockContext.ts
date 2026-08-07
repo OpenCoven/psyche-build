@@ -39,6 +39,21 @@ export function createMockContext(
     context.panes = nextPanes;
     return nextPanes;
   };
+  context.removePaneIdentitiesFromConfig ??= async (identities, beforeRemove) => {
+    const expected = Array.from(identities);
+    for (const identity of expected) {
+      const current = context.panes.find((pane) => pane.id === identity.id);
+      if (!current || current.paneId !== identity.paneId) {
+        throw new Error(`Pane identity conflict for ${identity.id}`);
+      }
+    }
+    await beforeRemove?.();
+    const ids = new Set(expected.map((identity) => identity.id));
+    const nextPanes = context.panes.filter((pane) => !ids.has(pane.id));
+    await context.savePanes(nextPanes, context.panes);
+    context.panes = nextPanes;
+    return nextPanes;
+  };
 
   return context;
 }

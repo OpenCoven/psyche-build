@@ -24,6 +24,7 @@ import {
   WorktreeCleanupService,
   type CreatedWorktreeIdentity,
   type WorktreeCreationReservation,
+  type WorktreeReuseReservation,
 } from '../services/WorktreeCleanupService.js';
 import {
   mutateProjectPaneConfig,
@@ -92,6 +93,8 @@ export interface BridgeSpawnDeps {
   sendTmuxCommand: (paneId: string, command: string) => void;
   /** Test seam for the fallible post-create Git branch verification. */
   readCreatedWorktreeBranch?: (worktreePath: string) => string | null;
+  /** Test seam for an external branch/config mutation between verification and persistence. */
+  beforeExistingWorktreePersist?: () => Promise<void> | void;
   /** Used only to tear down a pane when config persistence did not succeed. */
   killTmuxPane?: (paneId: string) => void;
   /**
@@ -186,6 +189,11 @@ interface RawConfigPane extends Record<string, unknown> {
   branchName?: string;
   agent?: string;
   agentStatus?: string;
+  worktreeIdentity?: {
+    realpath: string;
+    branch: string;
+    oid: string;
+  };
   needsAttention?: boolean;
   lastUpdated?: string;
 }
@@ -200,6 +208,13 @@ interface BridgeCreatedWorktreeAllocation {
   worktreePath: string;
   reservation: WorktreeCreationReservation;
   identity: CreatedWorktreeIdentity;
+}
+
+interface VerifiedSharedWorktree {
+  slug: string;
+  worktreePath: string;
+  branch: string;
+  oid: string;
 }
 
 export function isPathInsideOrEqual(parent: string, candidate: string): boolean {
@@ -938,10 +953,11 @@ function nextBridgePaneId(): string {
  * and live inside the project, which is what stops an arbitrary path arriving
  * over the wire from being used.
  */
-async function resolveSharedWorktree(
+async function resolveSharedWorktreeUnderLease(
   projectRoot: string,
   existing: { slug: string; worktreePath: string; branchName: string },
-): Promise<{ slug: string; branch: string; worktreePath: string }> {
+  config: BridgeConfig,
+): Promise<VerifiedSharedWorktree> {
   let resolved: string;
   try {
     resolved = await realpath(existing.worktreePath);
@@ -963,16 +979,86 @@ async function resolveSharedWorktree(
     );
   }
 
-  // Read the branch from the worktree rather than trusting the request. A
-  // caller reaching spawnBridgePane directly could otherwise persist a
-  // branchName that has nothing to do with what is checked out, and every
-  // later report and merge decision would inherit that lie.
-  const branch = readWorktreeBranch(resolved) ?? existing.branchName;
+  // The caller's branch name is only a hint. The checked-out branch and its
+  // OID are the identity persisted for this attachment.
+  const branch = readWorktreeBranch(resolved);
+  if (!branch) {
+    throw bridgeError(
+      'invalid_worktree_path',
+      'existing worktree is detached or its checked-out branch cannot be verified',
+    );
+  }
+  const oid = readGitOid(projectRoot, `refs/heads/${branch}`);
 
-  // Slug allocation belongs in the worktree lease + config transaction below.
-  // Reading it here would make the caller's snapshot a cross-process
-  // check-then-act race.
-  return { slug: existing.slug, branch, worktreePath: resolved };
+  // Resolve from the fresh locked registry, not from a request snapshot. A
+  // registered path whose persisted branch disagrees has changed identity and
+  // must not receive an attached agent.
+  const panes = Array.isArray(config.panes) ? config.panes : [];
+  const matchingRecords = panes.filter((pane) => {
+    const panePath = typeof pane.worktreePath === 'string'
+      ? pane.worktreePath
+      : typeof pane.worktreeDir === 'string'
+        ? pane.worktreeDir
+        : undefined;
+    if (!panePath) {
+      return false;
+    }
+    try {
+      return realpathSync(panePath) === resolved;
+    } catch {
+      return false;
+    }
+  });
+  if (matchingRecords.length === 0) {
+    throw bridgeError(
+      'worktree_identity_changed',
+      'existing worktree is not represented by the fresh pane registry',
+    );
+  }
+  for (const record of matchingRecords) {
+    const recordedBranch = typeof record.branchName === 'string'
+      ? record.branchName
+      : typeof record.branch === 'string'
+        ? record.branch
+        : undefined;
+    if (recordedBranch && recordedBranch !== branch) {
+      throw bridgeError(
+        'worktree_identity_changed',
+        `existing worktree branch changed from ${recordedBranch} to ${branch}`,
+      );
+    }
+    const recordedIdentity = record.worktreeIdentity;
+    if (
+      recordedIdentity
+      && (
+        recordedIdentity.realpath !== resolved
+        || recordedIdentity.branch !== branch
+      )
+    ) {
+      throw bridgeError(
+        'worktree_identity_changed',
+        'existing worktree realpath or branch changed',
+      );
+    }
+  }
+
+  return {
+    slug: existing.slug,
+    branch,
+    worktreePath: resolved,
+    oid,
+  };
+}
+
+function sameSharedWorktreeIdentity(
+  left: VerifiedSharedWorktree,
+  right: VerifiedSharedWorktree,
+): boolean {
+  return (
+    left.worktreePath === right.worktreePath
+    && left.branch === right.branch
+    && left.oid === right.oid
+  );
 }
 
 /** Branch actually checked out in a worktree, or null if detached/unreadable. */
@@ -1030,13 +1116,11 @@ export async function spawnBridgePane(
   let panePersisted = false;
   let rollbackBlockedByUnconfirmedPane = false;
 
-  const allocated: {
-    slug: string;
-    branch: string;
-    worktreePath: string;
-  } | BridgeCreatedWorktreeAllocation = attaching
-    ? await resolveSharedWorktree(scoped.projectRoot, request.existingWorktree!)
-    : await claimWorktree<BridgeCreatedWorktreeAllocation>(async () => {
+  let slug = '';
+  let branch = '';
+  let worktreePath = '';
+  if (!attaching) {
+    const allocated = await claimWorktree<BridgeCreatedWorktreeAllocation>(async () => {
       const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
       const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
       const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
@@ -1099,20 +1183,41 @@ export async function spawnBridgePane(
         throw error;
       }
     });
-  const { slug, branch, worktreePath } = allocated;
-  if (!attaching) {
-    const createdAllocation = allocated as BridgeCreatedWorktreeAllocation;
-    creationReservation = createdAllocation.reservation;
-    creationIdentity = createdAllocation.identity;
+    slug = allocated.slug;
+    branch = allocated.branch;
+    worktreePath = allocated.worktreePath;
+    creationReservation = allocated.reservation;
+    creationIdentity = allocated.identity;
   }
 
   try {
     if (attaching) {
-      return await WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
-        worktreePath,
-        async (canonicalWorktreePath) => finishSpawn(canonicalWorktreePath),
-        scoped.projectRoot,
-      );
+      let reservation: WorktreeReuseReservation;
+      try {
+        reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
+          request.existingWorktree!.worktreePath,
+          scoped.projectRoot,
+        );
+      } catch (error) {
+        if (bridgeErrorMessage(error).includes('Worktree is no longer available')) {
+          throw bridgeError(
+            'invalid_worktree_path',
+            'existing worktree path does not exist or is not a reusable git worktree',
+          );
+        }
+        throw error;
+      }
+      let settled = false;
+      try {
+        const result = await finishSpawn(reservation.canonicalWorktreePath);
+        await reservation.complete();
+        settled = true;
+        return result;
+      } finally {
+        if (!settled) {
+          await reservation.cancel();
+        }
+      }
     }
     return await finishSpawn(worktreePath);
   } catch (error) {
@@ -1149,21 +1254,40 @@ export async function spawnBridgePane(
         const freshPanes = Array.isArray(config.panes)
           ? config.panes as RawConfigPane[]
           : [];
+        const sharedIdentity = attaching
+          ? await resolveSharedWorktreeUnderLease(
+            scoped.projectRoot,
+            request.existingWorktree!,
+            config as BridgeConfig,
+          )
+          : undefined;
+        if (
+          sharedIdentity
+          && sharedIdentity.worktreePath !== paneWorktreePath
+        ) {
+          throw bridgeError(
+            'worktree_identity_changed',
+            'existing worktree realpath changed after its lifecycle lease was acquired',
+          );
+        }
+        const effectiveWorktreePath = sharedIdentity?.worktreePath || paneWorktreePath;
+        const effectiveBranch = sharedIdentity?.branch || branch;
+        const effectiveSlug = sharedIdentity?.slug || slug;
         // Existing-worktree attachments make no filesystem claim, so their
         // sibling slug must be allocated from the fresh locked registry.
         const paneSlug = attaching
           ? generateSiblingSlugForTargetPane(
-            { slug, worktreePath: paneWorktreePath },
+            { slug: effectiveSlug, worktreePath: effectiveWorktreePath },
             freshPanes.map((candidate) => ({ slug: String(candidate.slug ?? '') })),
           )
-          : slug;
+          : effectiveSlug;
         // A sibling's visible title must carry the reserved slug as well;
         // otherwise concurrent attaches can create distinct records that
         // rebind to the same tmux title.
         const title = attaching
           ? `${request.title || paneSlug} [${paneSlug}]`
           : request.title || paneSlug;
-        paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
+        paneId = deps.createTmuxPane(sessionName, effectiveWorktreePath, title);
         const now = new Date().toISOString();
         const pane: RawConfigPane = {
           id: nextBridgePaneId(),
@@ -1175,9 +1299,18 @@ export async function spawnBridgePane(
           projectRoot: scoped.projectRoot,
           projectName: path.basename(scoped.projectRoot),
           type: 'worktree',
-          worktreePath: paneWorktreePath,
-          branchName: branch,
-          branch,
+          worktreePath: effectiveWorktreePath,
+          branchName: effectiveBranch,
+          branch: effectiveBranch,
+          ...(sharedIdentity
+            ? {
+              worktreeIdentity: {
+                realpath: sharedIdentity.worktreePath,
+                branch: sharedIdentity.branch,
+                oid: sharedIdentity.oid,
+              },
+            }
+            : {}),
           agent,
           agentStatus: agent ? 'working' : 'idle',
           lastUpdated: now,
@@ -1188,6 +1321,20 @@ export async function spawnBridgePane(
         config.lastUpdated = now;
 
         try {
+          if (sharedIdentity) {
+            await deps.beforeExistingWorktreePersist?.();
+            const reverified = await resolveSharedWorktreeUnderLease(
+              scoped.projectRoot,
+              request.existingWorktree!,
+              config as BridgeConfig,
+            );
+            if (!sameSharedWorktreeIdentity(sharedIdentity, reverified)) {
+              throw bridgeError(
+                'worktree_identity_changed',
+                'existing worktree realpath, branch, or OID changed before persistence',
+              );
+            }
+          }
           await persist();
           panePersisted = true;
         } catch (error) {
@@ -1255,8 +1402,8 @@ export async function spawnBridgePane(
     return {
       id: persistedPaneId,
       pane: rawPaneToSummary(pane, scoped.projectRoot),
-      worktreePath: paneWorktreePath,
-      branch,
+      worktreePath: String(pane.worktreePath),
+      branch: String(pane.branchName || pane.branch),
     };
   }
 }
@@ -1650,7 +1797,6 @@ function createGitWorktree(
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
     execFileSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' });
-    execFileSync('git', ['-C', projectRoot, 'worktree', 'prune'], { stdio: 'ignore' });
     if (listGitWorktreePaths(projectRoot).has(path.resolve(worktreePath))) {
       throw new Error(`worktree path is already registered: ${worktreePath}`);
     }

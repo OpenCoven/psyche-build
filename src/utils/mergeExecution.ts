@@ -6,6 +6,10 @@
 
 import { execSync } from 'child_process';
 import { cleanupPromptFilesForSlug } from './promptStore.js';
+import {
+  describeLiveTmuxWorktreeGuard,
+  inspectLiveTmuxWorktreeConsumers,
+} from '../services/LiveTmuxWorktreeGuard.js';
 
 export interface MergeResult {
   success: boolean;
@@ -195,6 +199,13 @@ export function cleanupAfterMerge(
   branchName: string
 ): { success: boolean; error?: string } {
   try {
+    const tmuxGuard = inspectLiveTmuxWorktreeConsumers(worktreePath);
+    if (tmuxGuard.state !== 'safe') {
+      return {
+        success: false,
+        error: `Refusing worktree removal while ${describeLiveTmuxWorktreeGuard(tmuxGuard)}`,
+      };
+    }
     // Remove worktree
     execSync(`git worktree remove "${worktreePath}"`, {
       cwd: mainRepoPath,

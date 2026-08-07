@@ -15,10 +15,10 @@ const tmuxServiceMock = vi.hoisted(() => ({
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%2'));
 const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
 const launchAgentInPaneMock = vi.hoisted(() => vi.fn(async () => {}));
-const withWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
+const beginWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 const upsertProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn());
-const removeProjectPaneConfigPanesMock = vi.hoisted(() => vi.fn());
+const compareAndRemoveProjectPaneConfigPaneIdentitiesMock = vi.hoisted(() => vi.fn());
 const transactProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const logServiceMock = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -80,7 +80,7 @@ vi.mock('../src/services/LogService.js', () => ({
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
-      withWorktreeReuseReservation: withWorktreeReuseReservationMock,
+      beginWorktreeReuseReservation: beginWorktreeReuseReservationMock,
     })),
   },
 }));
@@ -88,7 +88,7 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
   upsertProjectPaneConfigPanes: upsertProjectPaneConfigPanesMock,
-  removeProjectPaneConfigPanes: removeProjectPaneConfigPanesMock,
+  compareAndRemoveProjectPaneConfigPaneIdentities: compareAndRemoveProjectPaneConfigPaneIdentitiesMock,
   transactProjectPaneConfig: transactProjectPaneConfigMock,
   projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
 }));
@@ -185,7 +185,14 @@ describe('attachAgentToWorktree', () => {
     });
     readProjectPaneConfigUnderLockMock.mockResolvedValue({ controlPaneId: '%1' });
     upsertProjectPaneConfigPanesMock.mockResolvedValue(undefined);
-    removeProjectPaneConfigPanesMock.mockResolvedValue(undefined);
+    compareAndRemoveProjectPaneConfigPaneIdentitiesMock.mockImplementation(async (
+      _projectRoot: string,
+      _identities: unknown,
+      beforeRemove: () => Promise<void>,
+    ) => {
+      await beforeRemove();
+      order.push('record-removed');
+    });
     transactProjectPaneConfigMock.mockImplementation(async (
       _projectRoot: string,
       operation: (transaction: {
@@ -209,16 +216,14 @@ describe('attachAgentToWorktree', () => {
       return { config, result };
     });
     launchAgentInPaneMock.mockResolvedValue(undefined);
-    withWorktreeReuseReservationMock.mockImplementation(async (
+    beginWorktreeReuseReservationMock.mockImplementation(async (
       worktreePath: string,
-      operation: (canonicalWorktreePath: string) => Promise<unknown>,
-    ) => {
-      try {
-        return await operation(worktreePath);
-      } finally {
-        order.push('lease-released');
-      }
-    });
+    ) => ({
+      canonicalWorktreePath: worktreePath,
+      retain: () => order.push('lease-retained'),
+      complete: async () => { order.push('lease-released'); },
+      cancel: async () => { order.push('lease-released'); },
+    }));
   });
 
   function attach(): Promise<{ pane: PsychePane }> {
@@ -256,9 +261,8 @@ describe('attachAgentToWorktree', () => {
 
     expect(launchAgentInPaneMock).not.toHaveBeenCalled();
     expect(order).not.toContain('lease-released');
-    expect(withWorktreeReuseReservationMock).toHaveBeenCalledWith(
+    expect(beginWorktreeReuseReservationMock).toHaveBeenCalledWith(
       WORKTREE_PATH,
-      expect.any(Function),
       '/repo',
     );
 
@@ -282,7 +286,7 @@ describe('attachAgentToWorktree', () => {
     await expect(attach()).rejects.toThrow(/Failed to prepare attached pane/);
 
     expect(launchAgentInPaneMock).not.toHaveBeenCalled();
-    expect(removeProjectPaneConfigPanesMock).not.toHaveBeenCalled();
+    expect(compareAndRemoveProjectPaneConfigPaneIdentitiesMock).not.toHaveBeenCalled();
     expect(order).toEqual([
       'persistence-failed',
       'pane-killed',
@@ -302,18 +306,15 @@ describe('attachAgentToWorktree', () => {
       order.push('pane-killed');
       paneAlive = false;
     });
-    removeProjectPaneConfigPanesMock.mockImplementationOnce(async () => {
-      order.push('record-removed');
-    });
-
     await expect(attach()).rejects.toThrow(/Failed to launch attached agent/);
 
     const persistedPane = (
       upsertProjectPaneConfigPanesMock.mock.calls[0][1] as PsychePane[]
     ).find((pane) => pane.id !== 'psyche-source')!;
-    expect(removeProjectPaneConfigPanesMock).toHaveBeenCalledWith(
+    expect(compareAndRemoveProjectPaneConfigPaneIdentitiesMock).toHaveBeenCalledWith(
       '/session',
-      [persistedPane.id],
+      [{ id: persistedPane.id, paneId: persistedPane.paneId }],
+      expect.any(Function),
     );
     expect(order.indexOf('pane-killed')).toBeLessThan(order.indexOf('record-removed'));
     expect(order.indexOf('record-removed')).toBeLessThan(order.indexOf('lease-released'));
@@ -325,7 +326,11 @@ describe('attachAgentToWorktree', () => {
 
     await expect(attach()).rejects.toThrow(/retained tracked pane record.*Recovery required/);
 
-    expect(removeProjectPaneConfigPanesMock).not.toHaveBeenCalled();
+    expect(compareAndRemoveProjectPaneConfigPaneIdentitiesMock).toHaveBeenCalledWith(
+      '/session',
+      [expect.objectContaining({ paneId: '%2' })],
+      expect.any(Function),
+    );
     expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
   });
 

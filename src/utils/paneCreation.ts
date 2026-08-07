@@ -19,6 +19,7 @@ import {
   WorktreeCleanupService,
   type CreatedWorktreeIdentity,
   type WorktreeCreationReservation,
+  type WorktreeReuseReservation,
 } from '../services/WorktreeCleanupService.js';
 import type { ProjectWorktreeLifecycleLease } from '../services/WorktreeOperationLease.js';
 import {
@@ -46,6 +47,13 @@ import {
   type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
+import { runGitProcess } from './gitProcess.js';
+import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
+  retainPaneRecovery,
+  type PaneRecoveryPersistenceResult,
+} from './paneLifecycleRecovery.js';
 
 export interface CreatePaneOptions {
   prompt: string;
@@ -76,6 +84,12 @@ export interface CreatePaneOptions {
    * non-reentrant project lock.
    */
   projectLifecycleLease?: ProjectWorktreeLifecycleLease;
+  /**
+   * Internal explicit reservation used when reopening an existing worktree.
+   * It is deliberately retained if a possibly-live split pane cannot be
+   * made durable.
+   */
+  reuseReservation?: WorktreeReuseReservation;
 }
 
 export interface CreatePaneResult {
@@ -124,11 +138,6 @@ async function persistPaneBeforeAgentLaunch(
   });
 }
 
-interface PaneRecoveryRecordResult {
-  durable: boolean;
-  message: string;
-}
-
 async function terminatePaneForRollback(
   tmuxService: TmuxService,
   paneId: string,
@@ -160,7 +169,7 @@ async function probePanePresence(
 async function persistPaneRecoveryRecord(
   sessionProjectRoot: string,
   pane: PsychePane,
-): Promise<PaneRecoveryRecordResult> {
+): Promise<PaneRecoveryPersistenceResult> {
   const configPath = projectPaneConfigPath(sessionProjectRoot);
   try {
     await ensureProjectPaneConfigPane(sessionProjectRoot, pane);
@@ -199,23 +208,38 @@ export async function createPane(
   }
 
   const existingWorktree = options.existingWorktree;
-  return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+  const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
     existingWorktree.worktreePath,
-    async (canonicalWorktreePath) => {
-      return createPaneWithReuseReservation(
-        {
-          ...options,
-          existingWorktree: {
-            ...existingWorktree,
-            worktreePath: canonicalWorktreePath,
-          },
-        },
-        availableAgents
-      );
-    },
     options.projectRoot,
     options.projectLifecycleLease,
   );
+  let settled = false;
+  try {
+    const result = await createPaneWithReuseReservation(
+      {
+        ...options,
+        reuseReservation: reservation,
+        existingWorktree: {
+          ...existingWorktree,
+          worktreePath: reservation.canonicalWorktreePath,
+        },
+      },
+      availableAgents,
+    );
+    await reservation.complete();
+    settled = true;
+    return result;
+  } catch (error) {
+    if (isPaneLifecycleReservationRetainedError(error)) {
+      reservation.retain();
+      settled = true;
+    }
+    throw error;
+  } finally {
+    if (!settled) {
+      await reservation.cancel();
+    }
+  }
 }
 
 async function createPaneWithReuseReservation(
@@ -325,7 +349,7 @@ async function createPaneWithReuseReservation(
     : (branchPrefix ? `${branchPrefix}${slug}` : slug);
   const tmuxService = TmuxService.getInstance();
 
-  const worktreePath = existingWorktree?.worktreePath
+  let worktreePath = existingWorktree?.worktreePath
     || path.join(projectRoot, '.psyche', 'worktrees', slug);
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
@@ -386,6 +410,9 @@ async function createPaneWithReuseReservation(
   const isFirstContentPane = existingPanes.length === 0;
 
   let paneInfo: string;
+  let creationReservation: WorktreeCreationReservation | undefined;
+  let createdWorktreeIdentity: CreatedWorktreeIdentity | undefined;
+  let worktreeCreatedByThisAttempt = false;
 
   // Self-healing: Try to create pane, if it fails due to stale controlPaneId, fix and retry
   try {
@@ -445,37 +472,6 @@ async function createPaneWithReuseReservation(
     }
   }
 
-  await waitForPaneReady(tmuxService, paneInfo);
-
-  // Set pane title (project-tagged for collision-safe rebinding across projects)
-  try {
-    const paneTitle = projectRoot === sessionProjectRoot
-      ? slug
-      : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
-    await tmuxService.setPaneTitle(paneInfo, paneTitle);
-  } catch {
-    // Ignore if setting title fails
-  }
-
-  // Apply optimal layout using the layout manager
-  if (controlPaneId) {
-    const dimensions = getTerminalDimensions();
-    const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-
-    await recalculateAndApplyLayout(
-      controlPaneId,
-      allContentPaneIds,
-      dimensions.width,
-      dimensions.height
-    );
-
-    // Refresh tmux to apply changes
-    await tmuxService.refreshClient();
-  }
-
-  // Construct the recovery record before any fallible post-pane work. If tmux
-  // later cannot confirm teardown, this exact record can be persisted while
-  // the creation/reuse lease is still held.
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
@@ -493,6 +489,67 @@ async function createPaneWithReuseReservation(
     mergeTargetChain,
   };
 
+  // From the instant a tmux split succeeds, every readiness/layout/title
+  // failure must either leave an exact durable record or prove the pane is
+  // gone. Construct the identity before touching any fallible post-split
+  // operation so uncertain teardown has something precise to retain.
+  try {
+    await waitForPaneReady(tmuxService, paneInfo);
+
+    const paneTitle = projectRoot === sessionProjectRoot
+      ? slug
+      : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
+    await tmuxService.setPaneTitle(paneInfo, paneTitle);
+
+    if (controlPaneId) {
+      const dimensions = getTerminalDimensions();
+      const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
+      await recalculateAndApplyLayout(
+        controlPaneId,
+        allContentPaneIds,
+        dimensions.width,
+        dimensions.height,
+      );
+      await tmuxService.refreshClient();
+    }
+  } catch (error) {
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await retainPaneRecovery({
+        projectRoot,
+        sessionProjectRoot,
+        pane: newPane,
+        operation: 'pane-creation-post-split',
+        reason: `post-split setup failed: ${error instanceof Error ? error.message : String(error)}`,
+        reservation: options.reuseReservation,
+        persistConfigRecovery: () => persistPaneRecoveryRecord(sessionProjectRoot, newPane),
+      });
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Failed to prepare pane "${slug}" after split: ${error instanceof Error ? error.message : String(error)}; ${recovery.message}`,
+      );
+    }
+    throw new Error(
+      `Failed to prepare pane "${slug}" after split: ${
+        error instanceof Error ? error.message : String(error)
+      }${recovery ? `; ${recovery.message}` : ''}`,
+    );
+  }
+
+  const retainRecoveryAfterUncertainTeardown = (
+    operation: string,
+    reason: string,
+  ) => retainPaneRecovery({
+    projectRoot,
+    sessionProjectRoot,
+    pane: newPane,
+    operation,
+    reason,
+    reservation: creationReservation || options.reuseReservation,
+    persistConfigRecovery: () => persistPaneRecoveryRecord(sessionProjectRoot, newPane),
+  });
+
   // Trigger pane_created hook (after pane created, before worktree)
   try {
     await triggerHook('pane_created', projectRoot, undefined, {
@@ -506,7 +563,17 @@ async function createPaneWithReuseReservation(
     const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
     const recovery = teardown.presence === 'absent'
       ? undefined
-      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+      : await retainRecoveryAfterUncertainTeardown(
+        'pane-created-hook',
+        `pane_created hook failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Failed to create pane "${slug}": pane_created hook failed: ${
+          error instanceof Error ? error.message : String(error)
+        }; ${recovery.message}`,
+      );
+    }
     throw new Error(
       `Failed to create pane "${slug}": pane_created hook failed: ${
         error instanceof Error ? error.message : String(error)
@@ -523,9 +590,6 @@ async function createPaneWithReuseReservation(
   );
 
   // Create git worktree and cd into it
-  let creationReservation: WorktreeCreationReservation | undefined;
-  let createdWorktreeIdentity: CreatedWorktreeIdentity | undefined;
-  let worktreeCreatedByThisAttempt = false;
   try {
     if (existingWorktree) {
       if (!fs.existsSync(path.join(worktreePath, '.git'))) {
@@ -542,18 +606,8 @@ async function createPaneWithReuseReservation(
           projectRoot,
           options.projectLifecycleLease,
         );
-
-      // IMPORTANT: Prune stale worktrees first to avoid conflicts
-      // This must run synchronously from psyche, not in the pane
-      try {
-        execSync('git worktree prune', {
-          encoding: 'utf-8',
-          stdio: 'pipe',
-          cwd: projectRoot,
-        });
-      } catch {
-        // Ignore prune errors, proceed anyway
-      }
+      worktreePath = creationReservation.canonicalWorktreePath;
+      newPane.worktreePath = worktreePath;
 
       // Validate and resolve base branch for new worktrees
       const baseBranch = settings.baseBranch || '';
@@ -583,9 +637,6 @@ async function createPaneWithReuseReservation(
         }
       }
 
-      const maxWorktreeAttempts = 3;
-      const maxWaitTime = 5000; // 5 seconds max
-      const checkInterval = 100; // Check every 100ms
       if (fs.existsSync(worktreePath)) {
         throw new Error(
           `Planned worktree path already exists at ${worktreePath}; refusing to claim another creator's directory`
@@ -617,54 +668,35 @@ async function createPaneWithReuseReservation(
         throw new Error(`Could not resolve starting OID for ${branchName}`);
       }
 
-      let worktreeCreated = false;
-
-      for (let attempt = 1; attempt <= maxWorktreeAttempts && !worktreeCreated; attempt++) {
-        // Build worktree command:
-        // - If branch exists, use it (don't create with -b)
-        // - If branch doesn't exist, create it with -b, optionally from a configured base branch
-        const startPoint = resolvedStartPoint ? ` "${resolvedStartPoint}"` : '';
-        const worktreeAddCmd = branchExists
-          ? `git worktree add "${worktreePath}" "${branchName}"`
-          : `git worktree add "${worktreePath}" -b "${branchName}"${startPoint}`;
-        const worktreeCmd = `cd "${projectRoot}" && ${worktreeAddCmd} && cd "${worktreePath}"`;
-
-        // Send the git worktree command (auto-quoted by sendShellCommand)
-        await tmuxService.sendShellCommand(paneInfo, worktreeCmd);
-        await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-        const startTime = Date.now();
-        while (!fs.existsSync(worktreePath) && (Date.now() - startTime) < maxWaitTime) {
-          await new Promise((resolve) => setTimeout(resolve, checkInterval));
-        }
-
-        worktreeCreated = fs.existsSync(worktreePath);
-        if (worktreeCreated) {
-          // The path was absent before this attempt, so this reservation now
-          // owns its provisional lifecycle. Record that fact before any Git
-          // verification can fail; every later error then runs guarded
-          // rollback instead of silently abandoning a new worktree.
-          worktreeCreatedByThisAttempt = true;
-          createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
-            branchName,
-            startingOid,
-            createdOid: startingOid,
-            deleteBranch: !branchExists,
-            configProjectRoot: sessionProjectRoot,
-          });
-        }
-        if (!worktreeCreated && attempt < maxWorktreeAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-        }
+      const worktreeArgs = branchExists
+        ? ['worktree', 'add', worktreePath, branchName]
+        : [
+          'worktree',
+          'add',
+          worktreePath,
+          '-b',
+          branchName,
+          ...(resolvedStartPoint ? [resolvedStartPoint] : []),
+        ];
+      // Creation ownership begins only after this direct child exits zero.
+      // A directory appearing after a failed child can belong to an external
+      // creator and must never be rolled back by this transaction.
+      const addResult = await runGitProcess(worktreeArgs, projectRoot);
+      if (addResult.exitCode !== 0) {
+        throw new Error(
+          `git ${worktreeArgs.join(' ')} failed with exit code ${
+            addResult.exitCode ?? 'unknown'
+          }${addResult.stderr ? `: ${addResult.stderr}` : ''}`,
+        );
       }
-
-      // Verify worktree was created successfully
-      if (!worktreeCreated) {
-        throw new Error(`Worktree directory not created at ${worktreePath} after ${maxWorktreeAttempts} attempts`);
-      }
-
-      // Give a bit more time for git to finish setting up the worktree
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      worktreeCreatedByThisAttempt = true;
+      createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
+        branchName,
+        startingOid,
+        createdOid: startingOid,
+        deleteBranch: !branchExists,
+        configProjectRoot: sessionProjectRoot,
+      });
 
       const createdOid = execSync(
         `git rev-parse --verify --end-of-options "${branchName}"`,
@@ -695,6 +727,12 @@ async function createPaneWithReuseReservation(
         deleteBranch: !branchExists,
         configProjectRoot: sessionProjectRoot,
       });
+
+      // The pane is moved only after direct Git creation and identity
+      // verification succeed. No tmux shell command creates lifecycle state.
+      await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
+      await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
     try {
@@ -745,7 +783,10 @@ async function createPaneWithReuseReservation(
     const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
     const recovery = teardown.presence === 'absent'
       ? undefined
-      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+      : await retainRecoveryAfterUncertainTeardown(
+        'worktree-creation',
+        `worktree creation failed: ${errorMsg}`,
+      );
     let rollbackError: string | undefined;
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
@@ -756,6 +797,11 @@ async function createPaneWithReuseReservation(
       }
     } else if (teardown.presence === 'absent' && worktreeCreatedByThisAttempt) {
       rollbackError = 'worktree identity could not be recorded';
+    }
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Failed to create worktree for "${slug}": ${errorMsg}; ${recovery.message}`,
+      );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
       await creationReservation?.cancel();
@@ -796,7 +842,10 @@ async function createPaneWithReuseReservation(
     const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
     const recovery = teardown.presence === 'absent'
       ? undefined
-      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+      : await retainRecoveryAfterUncertainTeardown(
+        'worktree-created-hook',
+        `worktree_created hook failed: ${hookError}`,
+      );
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
         createdWorktreeIdentity
@@ -817,6 +866,11 @@ async function createPaneWithReuseReservation(
         'paneCreation',
         newPane.id,
         new Error(rollbackError)
+      );
+    }
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `worktree_created hook failed for "${slug}": ${hookError}; ${recovery.message}`,
       );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
@@ -854,7 +908,10 @@ async function createPaneWithReuseReservation(
     const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
     const recovery = teardown.presence === 'absent'
       ? undefined
-      : await persistPaneRecoveryRecord(sessionProjectRoot, newPane);
+      : await retainRecoveryAfterUncertainTeardown(
+        'pane-persistence',
+        `initial pane persistence failed: ${persistenceError}`,
+      );
     let rollbackError: string | undefined;
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
@@ -863,6 +920,11 @@ async function createPaneWithReuseReservation(
       if (!rollbackResult.success) {
         rollbackError = rollbackResult.error || 'unknown rollback failure';
       }
+    }
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Failed to persist pane "${slug}" before agent launch: ${persistenceError}; ${recovery.message}`,
+      );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
       await creationReservation?.cancel();

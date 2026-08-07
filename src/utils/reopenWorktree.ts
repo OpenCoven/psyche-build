@@ -26,7 +26,10 @@ import {
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
-import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
+import {
+  WorktreeCleanupService,
+  type WorktreeReuseReservation,
+} from '../services/WorktreeCleanupService.js';
 import {
   ensureProjectPaneConfigPane,
   mutateProjectPaneConfig,
@@ -38,6 +41,12 @@ import {
   type TmuxPanePresence,
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
+import {
+  isPaneLifecycleReservationRetainedError,
+  PaneLifecycleReservationRetainedError,
+  retainPaneRecovery,
+  type PaneRecoveryPersistenceResult,
+} from './paneLifecycleRecovery.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -54,8 +63,6 @@ export interface ReopenWorktreeResult {
   pane: PsychePane;
 }
 
-class ReopenReservationRetentionError extends Error {}
-
 /**
  * Reopens a closed worktree by creating a new pane in the existing worktree
  * and launching the best available agent resume command.
@@ -71,15 +78,19 @@ export async function reopenWorktree(
   let reservationSettled = false;
 
   try {
-    const result = await reopenWorktreeWithReuseReservation({
-      ...options,
-      worktreePath: reservation.canonicalWorktreePath,
-    });
+    const result = await reopenWorktreeWithReuseReservation(
+      {
+        ...options,
+        worktreePath: reservation.canonicalWorktreePath,
+      },
+      reservation,
+    );
     await reservation.complete();
     reservationSettled = true;
     return result;
   } catch (error) {
-    if (error instanceof ReopenReservationRetentionError) {
+    if (isPaneLifecycleReservationRetainedError(error)) {
+      reservation.retain();
       releaseReservation = false;
       throw new Error(error.message);
     }
@@ -92,7 +103,8 @@ export async function reopenWorktree(
 }
 
 async function reopenWorktreeWithReuseReservation(
-  options: ReopenWorktreeOptions
+  options: ReopenWorktreeOptions,
+  reservation: WorktreeReuseReservation,
 ): Promise<ReopenWorktreeResult> {
   const {
     agent: requestedAgent,
@@ -163,53 +175,8 @@ async function reopenWorktreeWithReuseReservation(
   // Determine if this is the first content pane
   const isFirstContentPane = existingPanes.length === 0;
 
-  let paneInfo: string;
-
-  if (isFirstContentPane) {
-    paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  } else {
-    // Subsequent panes - always split horizontally
-    const psychePaneIds = existingPanes.map(p => p.paneId);
-    const targetPane = psychePaneIds[psychePaneIds.length - 1];
-    paneInfo = splitPane({ targetPane });
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  // Set pane title
-  try {
-    const paneTitle = projectRoot === sessionProjectRoot
-      ? slug
-      : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
-    await tmuxService.setPaneTitle(paneInfo, paneTitle);
-  } catch {
-    // Ignore if setting title fails
-  }
-
-  // Apply optimal layout
-  if (controlPaneId) {
-    const dimensions = getTerminalDimensions();
-    const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-
-    await recalculateAndApplyLayout(
-      controlPaneId,
-      allContentPaneIds,
-      dimensions.width,
-      dimensions.height
-    );
-
-    await tmuxService.refreshClient();
-  }
-
-  // CD into the worktree
-  await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
-  await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
-
-  // Wait for CD to complete
-  await new Promise((resolve) => setTimeout(resolve, 300));
-
-  // Detect which agent to use - prefer stored metadata, then fall back to enabled/installed order.
+  // Resolve all record fields before tmux allocation. Once a split succeeds,
+  // the exact identity is available immediately for recovery persistence.
   const installedAgents = await getInstalledAgents();
   const enabledAgents = filterEnabledAgents(installedAgents, settings.enabledAgents);
   const candidateAgents = enabledAgents.length > 0 ? enabledAgents : installedAgents;
@@ -229,6 +196,18 @@ async function reopenWorktreeWithReuseReservation(
   const permissionMode = metadata?.permissionMode ?? settings.permissionMode;
   const psychePaneId = createPsychePaneId();
   const currentBranch = getCurrentBranch(worktreePath);
+
+  let paneInfo: string;
+
+  if (isFirstContentPane) {
+    paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
+  } else {
+    // Subsequent panes - always split horizontally
+    const psychePaneIds = existingPanes.map(p => p.paneId);
+    const targetPane = psychePaneIds[psychePaneIds.length - 1];
+    paneInfo = splitPane({ targetPane });
+  }
+
   const newPane: PsychePane = {
     id: psychePaneId,
     slug,
@@ -249,20 +228,47 @@ async function reopenWorktreeWithReuseReservation(
   };
 
   try {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!(await tmuxService.paneExists(paneInfo))) {
+      throw new Error(`newly split pane ${paneInfo} is not present`);
+    }
+    const paneTitle = projectRoot === sessionProjectRoot
+      ? slug
+      : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
+    await tmuxService.setPaneTitle(paneInfo, paneTitle);
+
+    if (controlPaneId) {
+      const dimensions = getTerminalDimensions();
+      const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
+      await recalculateAndApplyLayout(
+        controlPaneId,
+        allContentPaneIds,
+        dimensions.width,
+        dimensions.height,
+      );
+      await tmuxService.refreshClient();
+    }
+
     await options.persistReopenedPane(newPane);
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
     const teardown = await tearDownReopenedPane(tmuxService, paneInfo);
     if (teardown.presence !== 'absent') {
-      const recovery = await persistReopenedPaneRecovery(
+      const recovery = await retainPaneRecovery({
+        projectRoot,
         sessionProjectRoot,
-        newPane,
-      );
+        pane: newPane,
+        operation: 'reopen-worktree',
+        reason: `reopened pane persistence failed: ${persistenceError}`,
+        reservation,
+        persistConfigRecovery: () => persistReopenedPaneRecovery(
+          sessionProjectRoot,
+          newPane,
+        ),
+      });
       const message = `Failed to persist reopened pane before agent launch: ${persistenceError}; pane teardown is ${teardown.presence}; ${recovery.message}`;
-      if (!recovery.durable) {
-        // Deliberately leave the project/worktree leases held. Without a
-        // durable record we cannot expose this possibly-live pane to cleanup.
-        throw new ReopenReservationRetentionError(message);
+      if (recovery.retained) {
+        throw new PaneLifecycleReservationRetainedError(message);
       }
       throw new Error(message);
     }
@@ -270,6 +276,12 @@ async function reopenWorktreeWithReuseReservation(
       `Failed to persist reopened pane before agent launch: ${persistenceError}`,
     );
   }
+
+  // A durable exact record exists before the pane receives a cwd or agent
+  // command. Later launch failures remain visible to normal pane recovery.
+  await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
+  await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
   // Resume the agent session (or start interactive mode when no resume command is available).
   if (agent) {
@@ -352,7 +364,7 @@ async function probeReopenedPanePresence(
 async function persistReopenedPaneRecovery(
   sessionProjectRoot: string,
   pane: PsychePane,
-): Promise<{ durable: boolean; message: string }> {
+): Promise<PaneRecoveryPersistenceResult> {
   const configPath = projectPaneConfigPath(sessionProjectRoot);
   try {
     await ensureProjectPaneConfigPane(sessionProjectRoot, pane);

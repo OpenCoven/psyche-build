@@ -26,11 +26,16 @@ const fsMock = vi.hoisted(() => ({
   mkdirSync: vi.fn(),
 }));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
+const runGitProcessMock = vi.hoisted(() => vi.fn());
 
 // Mock child_process
 const mockExecSync = createMockExecSync({});
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
+}));
+
+vi.mock('../../src/utils/gitProcess.js', () => ({
+  runGitProcess: runGitProcessMock,
 }));
 
 // Mock StateManager
@@ -75,7 +80,7 @@ vi.mock('../../src/services/LogService.js', () => ({
 }));
 
 const mockEnqueueCleanup = vi.fn();
-const mockWithWorktreeReuseReservation = vi.fn();
+const mockBeginWorktreeReuseReservation = vi.fn();
 const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
 const mockBeginWorktreeCreation = vi.fn();
 const mockPersistReusedPane = vi.fn(async () => {});
@@ -85,7 +90,7 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       enqueueCleanup: mockEnqueueCleanup,
-      withWorktreeReuseReservation: mockWithWorktreeReuseReservation,
+      beginWorktreeReuseReservation: mockBeginWorktreeReuseReservation,
       rollbackCreatedWorktree: mockRollbackCreatedWorktree,
       beginWorktreeCreation: mockBeginWorktreeCreation,
     })),
@@ -122,12 +127,12 @@ describe('Pane Lifecycle Integration Tests', () => {
     // Reset all mocks
     vi.clearAllMocks();
     mockEnqueueCleanup.mockReset();
-    mockWithWorktreeReuseReservation.mockImplementation(
-      async (
-        worktreePath: string,
-        operation: (canonicalWorktreePath: string) => Promise<unknown>
-      ) => operation(worktreePath)
-    );
+    mockBeginWorktreeReuseReservation.mockImplementation(async (worktreePath: string) => ({
+      canonicalWorktreePath: worktreePath,
+      retain: () => {},
+      complete: async () => {},
+      cancel: async () => {},
+    }));
     mockRollbackCreatedWorktree.mockReturnValue({ success: true });
     mockBeginWorktreeCreation.mockImplementation(async (worktreePath: string, projectRoot: string) => ({
       canonicalWorktreePath: worktreePath,
@@ -139,6 +144,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         ...input,
       }),
       rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+      retain: () => {},
       complete: async () => {},
       cancel: async () => {},
     }));
@@ -159,6 +165,17 @@ describe('Pane Lifecycle Integration Tests', () => {
     gitRepo = createMockGitRepo('main');
     createdWorktreePaths = new Set<string>();
     killedPaneIds = new Set<string>();
+    runGitProcessMock.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        const worktreePath = args[2];
+        const branchIndex = args.indexOf('-b');
+        const branchName = branchIndex >= 0 ? args[branchIndex + 1] : args[3];
+        createdWorktreePaths.add(worktreePath);
+        createdWorktreePaths.add(`${worktreePath}/.git`);
+        gitRepo = addWorktree(gitRepo, worktreePath, branchName);
+      }
+      return { exitCode: 0, stderr: '' };
+    });
 
     fsMock.existsSync.mockImplementation((target) => {
       const value = String(target);
@@ -375,10 +392,35 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      // Verify git worktree add was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git worktree add'),
-        expect.any(Object)
+      // TUI creation runs Git directly with an argument array rather than
+      // injecting a shell command into the new tmux pane.
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining(['worktree', 'add']),
+        '/test',
+      );
+    });
+
+    it('does not claim or roll back an external creator after direct git add fails', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      runGitProcessMock.mockImplementationOnce(async (args: string[]) => {
+        // Another process creates the planned directory after Psyche's
+        // preflight but before this child reports its exact non-zero status.
+        createdWorktreePaths.add(args[2]);
+        createdWorktreePaths.add(`${args[2]}/.git`);
+        return { exitCode: 128, stderr: 'already exists' };
+      });
+
+      await expect(createPane({
+        prompt: 'external creator race',
+        agent: 'claude',
+        projectName: 'test-project',
+        existingPanes: [],
+      }, ['claude'])).rejects.toThrow(/exit code 128/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining(['worktree', 'add']),
+        '/test',
       );
     });
 
@@ -477,12 +519,16 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       createdWorktreePaths.add(existingWorktreePath);
       createdWorktreePaths.add(`${existingWorktreePath}/.git`);
-      mockWithWorktreeReuseReservation.mockImplementation(async (
+      mockBeginWorktreeReuseReservation.mockImplementation(async (
         worktreePath: string,
-        operation: (canonicalWorktreePath: string) => Promise<unknown>
       ) => {
         cleanupCanceled = true;
-        return operation(worktreePath);
+        return {
+          canonicalWorktreePath: worktreePath,
+          retain: () => {},
+          complete: async () => {},
+          cancel: async () => {},
+        };
       });
       mockTriggerHook.mockImplementation((eventName) => {
         if (eventName === 'before_pane_create') {
@@ -575,15 +621,14 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      const splitCall = mockExecSync.mock.calls.find(([cmd]) =>
-        typeof cmd === 'string' && cmd.includes('tmux split-window')
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          'worktree',
+          'add',
+          '/target/repo/.psyche/worktrees/target-slug',
+        ]),
+        '/target/repo',
       );
-      expect(splitCall?.[0]).toContain('-c "/target/repo"');
-
-      const worktreeCall = mockExecSync.mock.calls.find(([cmd]) =>
-        typeof cmd === 'string' && cmd.includes('git worktree add')
-      );
-      expect(worktreeCall?.[0]).toContain('cd "/target/repo" && git worktree add "/target/repo/.psyche/worktrees/target-slug"');
     });
 
     it('should destroy the welcome pane when tracked shell panes make the pane list non-empty', async () => {
@@ -1010,6 +1055,10 @@ describe('Pane Lifecycle Integration Tests', () => {
         panes: [testPane],
         savePanes: vi.fn(),
         removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
       };
 
       const result = await closePane(testPane, mockContext);
@@ -1043,6 +1092,10 @@ describe('Pane Lifecycle Integration Tests', () => {
         panes: [testPane],
         savePanes: vi.fn(),
         removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1078,6 +1131,10 @@ describe('Pane Lifecycle Integration Tests', () => {
         panes: [testPane],
         savePanes: vi.fn(),
         removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1117,6 +1174,10 @@ describe('Pane Lifecycle Integration Tests', () => {
         panes: [testPane],
         savePanes: vi.fn(),
         removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
       };
 
       mockGetPanes.mockReturnValue([testPane]);

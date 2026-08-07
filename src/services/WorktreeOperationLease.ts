@@ -238,11 +238,7 @@ export async function acquireWorktreeOperationLease(
     lockDir: paths.lockDir,
     nonce,
     release: async () => {
-      const current = await readLeaseRecord(paths.lockDir);
-      if (!current.record || current.record.nonce !== nonce) {
-        return;
-      }
-      await rm(paths.lockDir, { recursive: true, force: true });
+      await releaseOwnedLease(paths.lockDir, nonce);
     },
   };
 }
@@ -365,11 +361,7 @@ export async function acquireProjectWorktreeLifecycleLease(
     lockDir: paths.lockDir,
     nonce,
     release: async () => {
-      const current = await readLeaseRecord(paths.lockDir);
-      if (!current.record || current.record.nonce !== nonce) {
-        return;
-      }
-      await rm(paths.lockDir, { recursive: true, force: true });
+      await releaseOwnedLease(paths.lockDir, nonce);
     },
   };
 }
@@ -567,6 +559,45 @@ async function quarantineProjectLifecycleLease(
       return false;
     }
     throw error;
+  }
+}
+
+/**
+ * Releasing by rename prevents a waiting contender from racing a recursive
+ * delete of the active lock directory. Once moved to its nonce-specific
+ * tombstone, the lease is no longer acquirable; tombstone cleanup is best
+ * effort and cannot block the lifecycle transaction's completion.
+ */
+async function releaseOwnedLease(
+  lockDir: string,
+  nonce: string,
+): Promise<void> {
+  const current = await readLeaseRecord(lockDir);
+  if (!current.record || current.record.nonce !== nonce) {
+    return;
+  }
+
+  const releasedDir = `${lockDir}.released.${nonce}`;
+  try {
+    await rename(lockDir, releasedDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    await rm(releasedDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 25,
+    });
+  } catch {
+    // The lease was released by the atomic rename. A leftover tombstone is
+    // not an active lock and can be removed by later runtime maintenance.
   }
 }
 

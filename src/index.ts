@@ -88,6 +88,10 @@ import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtoc
 import { tmuxSessionNameForRoot } from './services/tmuxControl.js';
 import { listAvailableRituals } from './utils/rituals.js';
 import os from 'node:os';
+import {
+  acknowledgeWorktreeRecoveryMarker,
+  listWorktreeRecoveryMarkers,
+} from './services/WorktreeRecoveryMarker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -116,6 +120,55 @@ function getArgValue(flag: string): string | null {
 
 function isDoctorMode(): boolean {
   return process.argv.slice(2)[0] === 'doctor';
+}
+
+function isRecoveryMode(): boolean {
+  return process.argv.slice(2)[0] === 'recover';
+}
+
+async function handleRecoveryCli(): Promise<number> {
+  const args = process.argv.slice(3);
+  const projectFlagIndex = args.indexOf('--project');
+  const projectRoot = projectFlagIndex >= 0
+    ? args[projectFlagIndex + 1]
+    : process.cwd();
+  if (!projectRoot) {
+    console.error('psyche recover requires a project path after --project');
+    return 1;
+  }
+
+  const acknowledgeIndex = args.indexOf('--acknowledge');
+  if (acknowledgeIndex >= 0) {
+    const markerId = args[acknowledgeIndex + 1];
+    if (!markerId) {
+      console.error('psyche recover --acknowledge requires a marker ID');
+      return 1;
+    }
+    const removed = await acknowledgeWorktreeRecoveryMarker(projectRoot, markerId);
+    console.log(
+      removed
+        ? `Acknowledged worktree recovery marker ${markerId}.`
+        : `No worktree recovery marker found for ${markerId}.`,
+    );
+    return removed ? 0 : 1;
+  }
+
+  const markers = await listWorktreeRecoveryMarkers(projectRoot);
+  if (markers.length === 0) {
+    console.log('No worktree recovery markers found.');
+    return 0;
+  }
+
+  for (const marker of markers) {
+    console.log([
+      `${marker.id} ${marker.operation}`,
+      `  worktree: ${marker.worktreePath}`,
+      `  pane: ${marker.pane.id} (${marker.pane.paneId})`,
+      `  reason: ${marker.reason}`,
+      `  ${marker.operatorInstructions}`,
+    ].join('\n'));
+  }
+  return 2;
 }
 
 async function handleDoctorCli(): Promise<number> {
@@ -1542,6 +1595,10 @@ class Psyche {
     const { runMcpServer } = await import('./mcp/server.js');
     await runMcpServer();
     return;
+  }
+
+  if (isRecoveryMode()) {
+    process.exit(await handleRecoveryCli());
   }
 
   const remotePaneActionArg = getArgValue('--remote-pane-action');

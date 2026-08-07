@@ -105,11 +105,15 @@ async function createAndLaunchConflictPane(
       agent,
       projectName: context.projectName,
       existingPanes: context.panes,
+      sessionProjectRoot: pane.projectRoot || targetRepoPath,
+      persistConflictPane: async (nextPane) => {
+        await context.savePanes([...context.panes, nextPane], context.panes);
+      },
     });
 
-    // Add the new pane to the panes list
+    // The split transaction persisted this exact pane before starting the
+    // merge/agent command. Keep an in-memory list only for follow-up flows.
     const updatedPanes = [...context.panes, conflictPane];
-    await context.savePanes(updatedPanes, context.panes);
 
     // Notify about the new pane
     if (context.onPaneUpdate) {
@@ -127,10 +131,6 @@ async function createAndLaunchConflictPane(
           console.error(`[conflictResolution] Conflicts resolved for ${pane.slug}, cleaning up conflict pane ${conflictPane.id}`);
           const tmuxService = TmuxService.getInstance();
 
-          // Kill the conflict pane first
-          console.error(`[conflictResolution] Killing conflict pane ${conflictPane.paneId}`);
-          await tmuxService.killPane(conflictPane.paneId);
-
           // CRITICAL: Read FRESH panes from StateManager, not stale context.panes
           // The conflict pane was added to state earlier, and StateManager has the latest list
           const { StateManager } = await import('../../shared/StateManager.js');
@@ -139,10 +139,24 @@ async function createAndLaunchConflictPane(
           console.error(`[conflictResolution] Current panes: ${currentPanes.map(p => p.id).join(', ')}`);
 
           // Remove conflict pane from state
-          if (!context.removePanesFromConfig) {
-            throw new Error('Conflict resolution requires targeted pane removal support');
+          if (!context.removePaneIdentitiesFromConfig) {
+            throw new Error('Conflict resolution requires exact pane identity removal support');
           }
-          const panesWithoutConflictPane = await context.removePanesFromConfig([conflictPane.id]);
+          const panesWithoutConflictPane = await context.removePaneIdentitiesFromConfig(
+            [{ id: conflictPane.id, paneId: conflictPane.paneId }],
+            async () => {
+              const { tearDownPaneWithVerification } = await import('../../utils/paneTeardown.js');
+              const teardown = await tearDownPaneWithVerification({
+                probe: () => tmuxService.probePanePresence(conflictPane.paneId),
+                kill: () => tmuxService.killPane(conflictPane.paneId),
+              });
+              if (teardown.presence !== 'absent') {
+                throw new Error(
+                  `Could not confirm conflict pane ${conflictPane.paneId} closed (${teardown.presence})`,
+                );
+              }
+            },
+          );
           console.error(`[conflictResolution] Removing conflict pane ${conflictPane.id}, remaining: ${panesWithoutConflictPane.map(p => p.id).join(', ')}`);
 
           // Now trigger the cleanup flow for the original pane

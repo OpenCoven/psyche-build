@@ -57,6 +57,7 @@ describe('Git Operations Integration Tests', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue('');
     gitRepo = createMockGitRepo('main');
 
     // Configure mock execSync for git commands

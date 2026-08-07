@@ -181,6 +181,67 @@ describe('closeAction', () => {
   });
 
   describe('close execution - kill_only', () => {
+    it('aborts before teardown and refreshes UI when the exact pane identity was rebound', async () => {
+      const pane = createWorktreePane({ id: 'psyche-identity', paneId: '%42' });
+      const refreshPanes = vi.fn(async () => {});
+      const context = createMockContext([pane], {
+        refreshPanes,
+        removePaneIdentitiesFromConfig: vi.fn(async () => {
+          throw new Error('Pane identity conflict for "psyche-identity"');
+        }),
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from('%42\n'));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'Close aborted');
+      expect(refreshPanes).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        typeof command === 'string' && command.includes('kill-pane')
+      )).toBe(false);
+    });
+
+    it('verified-kills owned test and dev windows before removing the pane record', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        testWindowId: '@7',
+        devWindowId: '@8',
+      });
+      const context = createMockContext([pane]);
+      const liveWindows = new Set(['@7', '@8']);
+      let paneAlive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-windows')) {
+          return [...liveWindows].join('\n');
+        }
+        if (command.includes('kill-window')) {
+          const windowId = command.match(/-t '([^']+)'/)?.[1];
+          if (windowId) liveWindows.delete(windowId);
+          return Buffer.from('');
+        }
+        if (command.includes('list-panes')) {
+          return paneAlive ? '%42\n' : '';
+        }
+        if (command.includes('kill-pane')) {
+          paneAlive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      const commands = vi.mocked(execSync).mock.calls
+        .map(([command]) => String(command));
+      expect(commands.findIndex((command) => command.includes("kill-window -t '@7'")))
+        .toBeLessThan(commands.findIndex((command) => command.includes("kill-pane -t '%42'")));
+      expect(commands.some((command) => command.includes("kill-window -t '@8'"))).toBe(true);
+      expect(context.panes).toEqual([]);
+    });
+
     it('preserves the record when a transient tmux probe cannot confirm absence', async () => {
       const pane = createWorktreePane({ paneId: '%42' });
       const context = createMockContext([pane]);
@@ -463,7 +524,13 @@ describe('closeAction', () => {
         worktreePath: sharedWorktreePath,
       });
       const mockContext = createMockContext([closingPane]);
-      mockContext.removePaneFromConfig = vi.fn(async () => [daemonPane]);
+      mockContext.removePaneIdentitiesFromConfig = vi.fn(async (
+        _identities,
+        beforeRemove,
+      ) => {
+        await beforeRemove?.();
+        return [daemonPane];
+      });
 
       vi.mocked(execSync).mockReturnValue(Buffer.from(''));
       vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
@@ -473,7 +540,10 @@ describe('closeAction', () => {
       const result = await closePane(closingPane, mockContext);
       await result.onSelect!('kill_and_clean');
 
-      expect(mockContext.removePaneFromConfig).toHaveBeenCalledWith('tui-close');
+      expect(mockContext.removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
+        [{ id: 'tui-close', paneId: '%42' }],
+        expect.any(Function),
+      );
       expect(mockEnqueueCleanup).not.toHaveBeenCalled();
     });
   });

@@ -78,6 +78,10 @@ export interface ProjectPaneConfigPaneIdentity {
   paneId: string;
 }
 
+export type ProjectPaneConfigIdentityRemovalGuard = (
+  panes: readonly ProjectPaneConfigPane[],
+) => void | Promise<void>;
+
 export class ProjectPaneConfigError extends Error {
   readonly code: 'config_unreadable' | 'config_corrupt';
 
@@ -214,11 +218,7 @@ export async function acquireProjectPaneConfigLock(
     lockDir: paths.lockDir,
     nonce,
     release: async () => {
-      const current = await readLockRecord(paths.lockDir);
-      if (!current.record || current.record.nonce !== nonce) {
-        return;
-      }
-      await rm(paths.lockDir, { recursive: true, force: true });
+      await releaseOwnedConfigLock(paths.lockDir, nonce);
     },
   };
 }
@@ -531,6 +531,25 @@ export async function removeProjectPaneConfigPaneIdentities(
   identities: Iterable<ProjectPaneConfigPaneIdentity>,
   options: ProjectPaneConfigLockOptions = {},
 ): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
+  return compareAndRemoveProjectPaneConfigPaneIdentities(
+    projectRoot,
+    identities,
+    undefined,
+    options,
+  );
+}
+
+/**
+ * Checks every exact `{ id, paneId }` identity and optionally runs a
+ * destructive guard while the same config lease is held. This prevents a
+ * stale UI record from killing or deleting a concurrent replacement pane.
+ */
+export async function compareAndRemoveProjectPaneConfigPaneIdentities(
+  projectRoot: string,
+  identities: Iterable<ProjectPaneConfigPaneIdentity>,
+  beforeRemove: ProjectPaneConfigIdentityRemovalGuard | undefined,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
   const expected = Array.from(identities);
   const expectedById = new Map<string, ProjectPaneConfigPaneIdentity>();
   for (const identity of expected) {
@@ -547,7 +566,7 @@ export async function removeProjectPaneConfigPaneIdentities(
     expectedById.set(identity.id, identity);
   }
 
-  return mutateProjectPaneConfig(projectRoot, (config) => {
+  return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
     const panes = Array.isArray(config.panes) ? [...config.panes] : [];
     for (const identity of expectedById.values()) {
       const current = panes.find((pane) => paneRecordId(pane) === identity.id);
@@ -558,11 +577,13 @@ export async function removeProjectPaneConfigPaneIdentities(
       }
     }
 
+    await beforeRemove?.(panes);
     config.panes = panes.filter((pane) => {
       const identity = paneRecordIdentity(pane);
       return !identity || !expectedById.has(identity.id);
     });
     config.lastUpdated = new Date().toISOString();
+    await persist();
     return config.panes;
   }, options);
 }
@@ -886,6 +907,45 @@ async function quarantineStaleLock(
       return false;
     }
     throw error;
+  }
+}
+
+/**
+ * Move a verified owned lock out of the acquisition name before deleting it.
+ * A recursive rm of the live lock path can race a waiting contender on macOS,
+ * producing ENOTEMPTY and leaving an apparently active lock behind. Rename is
+ * atomic, so the lock is released once this succeeds; deletion is best effort.
+ */
+async function releaseOwnedConfigLock(
+  lockDir: string,
+  nonce: string,
+): Promise<void> {
+  const current = await readLockRecord(lockDir);
+  if (!current.record || current.record.nonce !== nonce) {
+    return;
+  }
+
+  const releasedDir = `${lockDir}.released.${nonce}`;
+  try {
+    await rename(lockDir, releasedDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      return;
+    }
+    throw error;
+  }
+
+  try {
+    await rm(releasedDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 25,
+    });
+  } catch {
+    // The ownership lock has already been atomically released. A later
+    // runtime cleanup may remove this nonce-specific tombstone safely.
   }
 }
 

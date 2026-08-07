@@ -1571,6 +1571,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     removePaneFromConfig,
     removePanesFromConfig,
     removePaneIdentitiesFromConfig,
+    refreshPanes: loadPanes,
     sessionName,
     projectName,
     defaultProjectRoot: sessionProjectRoot,

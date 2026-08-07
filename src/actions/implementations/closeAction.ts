@@ -70,6 +70,68 @@ async function killTmuxPaneReliably(pane: PsychePane): Promise<VerifiedPaneTeard
   return result;
 }
 
+function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
+  try {
+    const windowList = execSync('tmux list-windows -a -F "#{window_id}"', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 5000,
+    });
+    return windowList
+      .toString()
+      .split('\n')
+      .map((line) => line.trim())
+      .includes(windowId)
+      ? 'present'
+      : 'absent';
+  } catch {
+    LogService.getInstance().warn(
+      `Could not verify whether background window ${windowId} exists; preserving pane record and worktree`,
+      'paneActions',
+    );
+    return 'unknown';
+  }
+}
+
+async function killTmuxWindowReliably(
+  windowId: string,
+  pane: PsychePane,
+): Promise<VerifiedPaneTeardownResult> {
+  const result = await tearDownPaneWithVerification({
+    probe: () => probeTmuxWindowPresence(windowId),
+    kill: () => {
+      execSync(`tmux kill-window -t '${windowId}'`, {
+        stdio: 'pipe',
+        timeout: 5000,
+      });
+    },
+  });
+  if (result.presence === 'present') {
+    LogService.getInstance().warn(
+      `Background window ${windowId} still exists after close attempt`,
+      'paneActions',
+      pane.id,
+    );
+  }
+  return result;
+}
+
+async function closeOwnedBackgroundWindows(pane: PsychePane): Promise<void> {
+  const windowIds = Array.from(new Set(
+    [pane.testWindowId, pane.devWindowId].filter(
+      (windowId): windowId is string => typeof windowId === 'string' && windowId.length > 0,
+    ),
+  ));
+  for (const windowId of windowIds) {
+    const teardown = await killTmuxWindowReliably(windowId, pane);
+    if (teardown.presence !== 'absent') {
+      throw new Error(
+        `Could not confirm owned background window ${windowId} closed (${teardown.presence})`,
+      );
+    }
+  }
+}
+
 function paneKeepsWorktreeActive(
   candidate: PsychePane,
   worktreePath: string,
@@ -213,33 +275,38 @@ async function executeCloseOption(
 
       let updatedPanes = context.panes.filter(p => p.id !== pane.id);
 
-      // Kill and verify the tmux pane before mutating pane state or deleting
-      // the worktree. Sending C-c first can drop an agent back to a shell if
-      // kill-pane fails, so close the pane directly and treat a surviving pane
-      // as a failed close.
-      const paneTeardown = await killTmuxPaneReliably(pane);
-      if (paneTeardown.presence !== 'absent') {
-        const teardownMessage = paneTeardown.presence === 'unknown'
-          ? `Could not confirm pane "${paneName}" closed; pane record and worktree were preserved. ${
-            paneRecoveryInstructions(pane.paneId, panesFile)
-          }`
-          : `Failed to close pane "${paneName}"; it is still present and worktree cleanup was not started`;
+      // The identity check, background-window teardown, pane teardown, and
+      // record removal execute under one config lease. A concurrent rebind is
+      // therefore detected before this action can kill its replacement.
+      if (!context.removePaneIdentitiesFromConfig) {
+        throw new Error('Close requires exact pane identity removal support');
+      }
+      try {
+        updatedPanes = await context.removePaneIdentitiesFromConfig(
+          [{ id: pane.id, paneId: pane.paneId }],
+          async () => {
+            await closeOwnedBackgroundWindows(pane);
+            const paneTeardown = await killTmuxPaneReliably(pane);
+            if (paneTeardown.presence !== 'absent') {
+              const message = paneTeardown.presence === 'unknown'
+                ? `Could not confirm pane "${paneName}" closed; pane record and worktree were preserved. ${
+                  paneRecoveryInstructions(pane.paneId, panesFile)
+                }`
+                : `Failed to close pane "${paneName}"; it is still present and worktree cleanup was not started`;
+              throw new Error(message);
+            }
+          },
+        );
+      } catch (error) {
+        await context.refreshPanes?.();
         return {
           type: 'error',
-          message: teardownMessage,
+          message: `Close aborted; pane identity or teardown changed. ${
+            error instanceof Error ? error.message : String(error)
+          }`,
           dismissable: true,
         };
       }
-
-      // Remove from config only after tmux confirms the pane is gone. The
-      // lifecycle close marker suppresses recreation while the close is in
-      // progress. The TUI implementation removes this exact ID from a fresh
-      // config while holding the cross-process config lock, then returns the
-      // merged pane list so a stale UI cannot erase a daemon-created pane.
-      if (!context.removePaneFromConfig) {
-        throw new Error('Close requires targeted pane removal support');
-      }
-      updatedPanes = await context.removePaneFromConfig(pane.id);
 
       // Best-effort cleanup of any stored prompt files for this pane slug
       // (including leftovers from interrupted launches).

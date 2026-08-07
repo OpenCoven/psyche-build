@@ -650,7 +650,6 @@ function ensureLocalBranch(
   }
 
   refreshRemoteBranchState(state, branchName);
-  runGit(state.repoPath, ['worktree', 'prune'], { silent: true });
   state.hasLocalBranch = listLocalBranches(state.repoPath).has(branchName);
 
   if (state.hasRemoteBranch) {
@@ -725,7 +724,6 @@ async function ensureLocalBranchAsync(
   }
 
   await refreshRemoteBranchStateAsync(state, branchName);
-  await runGitAsync(state.repoPath, ['worktree', 'prune'], { silent: true });
   state.hasLocalBranch = (await listLocalBranchesAsync(state.repoPath)).has(branchName);
 
   if (state.hasRemoteBranch) {
@@ -846,7 +844,6 @@ function createWorktree(repoPath: string, worktreePath: string, branchName: stri
   }
 
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-  runGit(repoPath, ['worktree', 'prune'], { silent: true });
   runGit(repoPath, ['worktree', 'add', worktreePath, branchName]);
 }
 
@@ -860,7 +857,6 @@ async function createWorktreeAsync(
   }
 
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-  await runGitAsync(repoPath, ['worktree', 'prune'], { silent: true });
   await runGitAsync(repoPath, ['worktree', 'add', worktreePath, branchName]);
 }
 

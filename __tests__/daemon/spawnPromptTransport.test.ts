@@ -383,6 +383,34 @@ describe('shared-worktree attach', () => {
     expect(record.branchName).toBe(first.branch);
   });
 
+  it('aborts an attach when the verified worktree OID changes before persistence', async () => {
+    const first = await seedWorktree();
+    const h = harness();
+    h.deps.beforeExistingWorktreePersist = () => {
+      execSync(
+        'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m changed-under-lease',
+        { cwd: first.worktreePath },
+      );
+    };
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'identity-race',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review',
+        existingWorktree: {
+          slug: path.basename(first.worktreePath),
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      h.deps,
+    )).rejects.toMatchObject({ code: 'worktree_identity_changed' });
+  });
+
   it('rejects a worktree outside the project root', async () => {
     const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-outside-')));
     try {
