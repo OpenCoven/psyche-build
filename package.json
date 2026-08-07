@@ -23,7 +23,7 @@
     "coding-agents"
   ],
   "engines": {
-    "node": ">=18.11.0"
+    "node": ">=20.10.0"
   },
   "main": "./dist/index.js",
   "exports": {

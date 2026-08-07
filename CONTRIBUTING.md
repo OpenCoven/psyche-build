@@ -4,7 +4,7 @@ This project is built while running Psyche Build itself. The goal is a fast, rep
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20.10.0+
 - `pnpm`
 - Corepack 0.31.0 (required for release validation)
 - `tmux` 3.0+
