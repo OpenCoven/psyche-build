@@ -526,6 +526,20 @@ async function createPaneWithReuseReservation(
         }
 
         worktreeCreated = fs.existsSync(worktreePath);
+        if (worktreeCreated) {
+          // The path was absent before this attempt, so this reservation now
+          // owns its provisional lifecycle. Record that fact before any Git
+          // verification can fail; every later error then runs guarded
+          // rollback instead of silently abandoning a new worktree.
+          worktreeCreatedByThisAttempt = true;
+          createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
+            branchName,
+            startingOid,
+            createdOid: startingOid,
+            deleteBranch: !branchExists,
+            configProjectRoot: sessionProjectRoot,
+          });
+        }
         if (!worktreeCreated && attempt < maxWorktreeAttempts) {
           await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
         }
@@ -560,7 +574,7 @@ async function createPaneWithReuseReservation(
           `Created worktree identity does not match ${branchName} at ${worktreePath}`
         );
       }
-      worktreeCreatedByThisAttempt = true;
+      // Replace the provisional identity only after full Git verification.
       createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
         branchName,
         startingOid,

@@ -113,7 +113,10 @@ export async function acquireWorktreeOperationLease(
     throw new Error('worktree operation lease nonce contains unsupported characters');
   }
 
-  const processStartIdentity = resolveProcessStartIdentity(pid);
+  const resolvedProcessStartIdentity = resolveProcessStartIdentity(pid);
+  const processStartIdentity = isSafeProcessStartIdentity(resolvedProcessStartIdentity)
+    ? resolvedProcessStartIdentity
+    : undefined;
   const record: WorktreeOperationLeaseRecord = {
     pid,
     ...(processStartIdentity
@@ -418,7 +421,7 @@ function isLeaseOwnerStale(
 
   const currentIdentity = resolveProcessStartIdentity(record.pid);
   return (
-    currentIdentity !== undefined
+    isSafeProcessStartIdentity(currentIdentity)
     && currentIdentity !== record.processStartIdentity
   );
 }

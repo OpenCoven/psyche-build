@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   spawnBridgePane,
+  type BridgeSpawnDeps,
   type BridgeSpawnPromptKeysRequest,
 } from '../../src/daemon/bridge.js';
 
@@ -26,17 +27,18 @@ afterEach(() => {
 function harness() {
   const commands: string[] = [];
   const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
+  const deps: BridgeSpawnDeps = {
+    tmuxSessionExists: () => true,
+    createTmuxPane: () => '%9',
+    sendTmuxCommand: (_paneId: string, command: string) => {
+      commands.push(command);
+    },
+    sendPromptKeys,
+  };
   return {
     commands,
     sendPromptKeys,
-    deps: {
-      tmuxSessionExists: () => true,
-      createTmuxPane: () => '%9',
-      sendTmuxCommand: (_paneId: string, command: string) => {
-        commands.push(command);
-      },
-      sendPromptKeys,
-    },
+    deps,
   };
 }
 
@@ -209,6 +211,58 @@ describe('failed lane cleanup', () => {
     // Not fix-auth-2: the failed attempt left nothing behind to collide with.
     expect(path.basename(result.worktreePath)).toBe('fix-auth');
     expect(result.branch).toBe('psyche/fix-auth');
+  });
+
+  it('rolls back provisional ownership when post-create Git verification fails', async () => {
+    // `git worktree add` creates and registers the directory before Psyche
+    // performs its fallible branch verification. Make only that later check
+    // fail while retaining a real, removable worktree.
+    const h = harness();
+    h.deps.readCreatedWorktreeBranch = () => null;
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'verify-failure', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      h.deps,
+    )).rejects.toThrow(/failed to create scoped worktree/);
+
+    const worktreesDir = path.join(root, '.psyche', 'worktrees');
+    expect(fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir) : []).toEqual([]);
+    const branches = execSync("git for-each-ref --format='%(refname:short)' refs/heads", { cwd: root })
+      .toString().split('\n').filter(Boolean);
+    expect(branches.filter((branch) => branch.startsWith('psyche/'))).toEqual([]);
+  });
+
+  it('surfaces a guarded rollback failure to daemon callers', async () => {
+    const h = harness();
+    h.deps.createTmuxPane = (_sessionName, worktreePath) => {
+      // A concurrent owner registering the path makes rollback deliberately
+      // refuse deletion. The daemon must expose that critical condition.
+      fs.writeFileSync(
+        path.join(root, '.psyche', 'psyche.config.json'),
+        JSON.stringify({
+          panes: [{
+            id: 'concurrent-owner',
+            paneId: '%concurrent',
+            slug: 'concurrent-owner',
+            prompt: '',
+            worktreePath,
+          }],
+        }),
+        'utf8',
+      );
+      throw new Error('no space for a new pane');
+    };
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'rollback-failure', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      h.deps,
+    )).rejects.toThrow(
+      /no space for a new pane; rollback failed: newly created worktree is referenced by current pane config/,
+    );
   });
 });
 

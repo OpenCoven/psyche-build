@@ -29,6 +29,7 @@ import {
   mutateProjectPaneConfig,
   projectPaneConfigPath,
   readProjectPaneConfig,
+  transactProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import type { PsycheConfig } from '../types.js';
@@ -82,6 +83,8 @@ export interface BridgeSpawnDeps {
   tmuxSessionExists: (name: string) => boolean;
   createTmuxPane: (sessionName: string, cwd: string, title?: string) => string;
   sendTmuxCommand: (paneId: string, command: string) => void;
+  /** Test seam for the fallible post-create Git branch verification. */
+  readCreatedWorktreeBranch?: (worktreePath: string) => string | null;
   /** Used only to tear down a pane when config persistence did not succeed. */
   killTmuxPane?: (paneId: string) => void;
   /**
@@ -392,42 +395,93 @@ export async function openProjectCovenSession(
   }
 
   const title = `coven:${session.title || session.id.slice(0, 8)}`;
-  const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
-  deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
+  // Keep the config lease through pane creation, initial persistence, attach,
+  // and compensation. This gives the tmux pane a durable registry record
+  // before `coven attach` starts and prevents another writer from observing a
+  // half-completed lifecycle.
+  const transaction = await transactProjectPaneConfig(
+    projectRoot,
+    async ({ config, persist }) => {
+      const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
+      let paneTeardownAttempted = false;
+      const tearDownPane = (): string | undefined => {
+        if (paneTeardownAttempted) {
+          return undefined;
+        }
+        paneTeardownAttempted = true;
+        try {
+          (deps.killTmuxPane ?? killTmuxPane)(paneId);
+          return undefined;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
 
-  const now = new Date().toISOString();
-  // Read-modify-write of the whole config must go through the mutation lock.
-  // Doing it inline here — as this path used to — meant a coven pane opened
-  // while a lane was spawning read the same snapshot as the spawn and clobbered
-  // it, so one of the two panes vanished from the registry.
-  const pane = await mutateBridgeConfig(projectRoot, (config) => {
-    const record: RawConfigPane = {
-      id: nextBridgePaneId(),
-      slug: uniqueCovenPaneSlug(config, session),
-      title,
-      displayName: title,
-      prompt: '',
-      paneId,
-      cwd: session.projectRoot,
-      projectRoot,
-      projectName: path.basename(projectRoot),
-      type: 'shell',
-      shellType: 'coven',
-      covenSession: {
-        id: session.id,
-        harness: session.harness,
-        status: session.status,
-        projectRoot: session.projectRoot,
-      },
-      lastUpdated: now,
-    };
-    config.projectName = config.projectName || path.basename(projectRoot);
-    config.projectRoot = projectRoot;
-    config.settings = config.settings || {};
-    config.panes = [...(Array.isArray(config.panes) ? config.panes : []), record];
-    config.lastUpdated = now;
-    return record;
-  });
+      const now = new Date().toISOString();
+      const record: RawConfigPane = {
+        id: nextBridgePaneId(),
+        slug: uniqueCovenPaneSlug(config as BridgeConfig, session),
+        title,
+        displayName: title,
+        prompt: '',
+        paneId,
+        cwd: session.projectRoot,
+        projectRoot,
+        projectName: path.basename(projectRoot),
+        type: 'shell',
+        shellType: 'coven',
+        covenSession: {
+          id: session.id,
+          harness: session.harness,
+          status: session.status,
+          projectRoot: session.projectRoot,
+        },
+        lastUpdated: now,
+      };
+      const panes = Array.isArray(config.panes) ? config.panes : [];
+      config.projectName = config.projectName || path.basename(projectRoot);
+      config.projectRoot = projectRoot;
+      config.panes = [...panes, record];
+      config.lastUpdated = now;
+
+      try {
+        await persist();
+      } catch (error) {
+        const teardownFailure = tearDownPane();
+        const message = bridgeErrorMessage(error);
+        throw bridgeError(
+          bridgeErrorCode(error, 'config_persist_failed'),
+          `${message}${teardownFailure ? `; failed to kill created pane: ${teardownFailure}` : ''}`,
+        );
+      }
+
+      try {
+        deps.sendTmuxCommand(paneId, buildCovenAttachCommand(session.id));
+      } catch (error) {
+        config.panes = (config.panes || []).filter(
+          (candidate) => candidate.id !== record.id,
+        );
+        let compensationFailure: string | undefined;
+        try {
+          await persist();
+        } catch (persistError) {
+          compensationFailure = bridgeErrorMessage(persistError);
+        }
+        const teardownFailure = tearDownPane();
+        const failures = [
+          compensationFailure && `failed to remove persisted pane record: ${compensationFailure}`,
+          teardownFailure && `failed to kill created pane: ${teardownFailure}`,
+        ].filter((value): value is string => Boolean(value));
+        throw bridgeError(
+          bridgeErrorCode(error, 'coven_attach_failed'),
+          `${bridgeErrorMessage(error)}${failures.length ? `; ${failures.join('; ')}` : ''}`,
+        );
+      }
+
+      return { paneId, pane: record };
+    },
+  );
+  const { paneId, pane } = transaction.result;
 
   return {
     id: paneId,
@@ -993,12 +1047,25 @@ export async function spawnBridgePane(
 
       const reservation = await WorktreeCleanupService.getInstance()
         .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
+      let provisionalIdentity: CreatedWorktreeIdentity | undefined;
       try {
         const creation = createGitWorktree(
           scoped.projectRoot,
           reservation.canonicalWorktreePath,
           nextBranch,
           request.startPointBranch,
+          (provisional) => {
+            // The path was absent before this claim. Mark ownership as soon
+            // as git creates it, before the subsequent Git reads can fail.
+            provisionalIdentity = reservation.recordCreatedWorktree({
+              branchName: nextBranch,
+              startingOid: provisional.startingOid,
+              createdOid: provisional.startingOid,
+              deleteBranch: provisional.branchCreatedByThisAttempt,
+              configProjectRoot: scoped.projectRoot,
+            });
+          },
+          deps.readCreatedWorktreeBranch,
         );
         const identity = reservation.recordCreatedWorktree({
           branchName: nextBranch,
@@ -1015,7 +1082,22 @@ export async function spawnBridgePane(
           identity,
         };
       } catch (error) {
+        let rollbackFailure: string | undefined;
+        if (provisionalIdentity) {
+          const rollback = await reservation.rollbackCreatedWorktree(
+            provisionalIdentity,
+          );
+          if (!rollback.success) {
+            rollbackFailure = rollback.error || 'unknown rollback failure';
+          }
+        }
         await reservation.cancel();
+        if (rollbackFailure) {
+          throw bridgeError(
+            bridgeErrorCode(error, 'worktree_create_failed'),
+            `${bridgeErrorMessage(error)}; rollback failed: ${rollbackFailure}`,
+          );
+        }
         throw error;
       }
     });
@@ -1036,6 +1118,7 @@ export async function spawnBridgePane(
     }
     return await finishSpawn(worktreePath);
   } catch (error) {
+    let rollbackFailure: string | undefined;
     if (!panePersisted && paneId) {
       try {
         deps.killTmuxPane?.(paneId);
@@ -1048,11 +1131,20 @@ export async function spawnBridgePane(
     if (attaching && !siblingSlugReleased) {
       releaseSiblingSlug(slug);
     } else if (!panePersisted && creationReservation && creationIdentity) {
-      await creationReservation.rollbackCreatedWorktree(creationIdentity);
+      const rollback = await creationReservation.rollbackCreatedWorktree(creationIdentity);
+      if (!rollback.success) {
+        rollbackFailure = rollback.error || 'unknown rollback failure';
+      }
     }
 
     if (creationReservation) {
       await creationReservation.cancel();
+    }
+    if (rollbackFailure) {
+      throw bridgeError(
+        bridgeErrorCode(error, 'bridge_spawn_failed'),
+        `${bridgeErrorMessage(error)}; rollback failed: ${rollbackFailure}`,
+      );
     }
     throw error;
   }
@@ -1081,7 +1173,6 @@ export async function spawnBridgePane(
     const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
       config.projectName = config.projectName || path.basename(scoped.projectRoot);
       config.projectRoot = scoped.projectRoot;
-      config.settings = config.settings || {};
       config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
       config.lastUpdated = now;
       return config.settings;
@@ -1381,6 +1472,11 @@ function createGitWorktree(
   worktreePath: string,
   branch: string,
   startPointBranch?: string,
+  onWorktreeCreated?: (provisional: {
+    startingOid: string;
+    branchCreatedByThisAttempt: boolean;
+  }) => void,
+  readCreatedWorktreeBranch: (worktreePath: string) => string | null = readWorktreeBranch,
 ): {
   startingOid: string;
   createdOid: string;
@@ -1407,8 +1503,13 @@ function createGitWorktree(
       execFileSync('git', args, { stdio: 'pipe' });
     }
 
+    onWorktreeCreated?.({
+      startingOid,
+      branchCreatedByThisAttempt: !branchExisted,
+    });
+
     const createdOid = readGitOid(projectRoot, `refs/heads/${branch}`);
-    if (readWorktreeBranch(worktreePath) !== branch) {
+    if (readCreatedWorktreeBranch(worktreePath) !== branch) {
       throw new Error(`created worktree does not point at branch ${branch}`);
     }
     return {

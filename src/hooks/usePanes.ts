@@ -27,7 +27,10 @@ import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import {
+  mutateProjectPaneConfig,
+  removeProjectPaneConfigPanes,
+} from '../services/ProjectPaneConfig.js';
 
 // Use p-queue for proper concurrency control instead of manual write lock
 // This prevents race conditions and provides better visibility into queue state
@@ -237,9 +240,15 @@ export default function usePanes(
     }
   };
 
-  const removePaneFromConfig = async (paneId: string): Promise<PsychePane[]> => {
+  const removePanesFromConfig = async (
+    paneIds: Iterable<string>,
+  ): Promise<PsychePane[]> => {
     return withWriteLock(async () => {
+      const ids = new Set(
+        Array.from(paneIds).filter((paneId) => typeof paneId === 'string' && paneId.length > 0),
+      );
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
+      await removeProjectPaneConfigPanes(fallbackProjectRoot, ids);
       const mutation = await mutateProjectPaneConfig(
         fallbackProjectRoot,
         (configRecord) => {
@@ -247,20 +256,19 @@ export default function usePanes(
           const projectRoot = config.projectRoot || fallbackProjectRoot;
           const projectName = config.projectName || path.basename(projectRoot);
           const freshPanes = Array.isArray(config.panes) ? config.panes : [];
-          const persistedPanes = freshPanes.filter((candidate) => candidate.id !== paneId);
           const normalizedProjects = normalizeSidebarProjects(
             config.sidebarProjects,
-            persistedPanes,
+            freshPanes,
             projectRoot,
             projectName
           );
 
           // Close is intentionally a targeted config mutation: preserve every
           // fresh pane record unchanged and remove only the pane that closed.
-          config.panes = persistedPanes;
+          config.sidebarProjects = normalizedProjects;
           config.lastUpdated = new Date().toISOString();
           return {
-            panes: config.panes,
+            panes: freshPanes,
             sidebarProjects: normalizedProjects,
           };
         }
@@ -272,6 +280,10 @@ export default function usePanes(
       setSidebarProjects(mutation.result.sidebarProjects);
       return persistedPanes;
     });
+  };
+
+  const removePaneFromConfig = async (paneId: string): Promise<PsychePane[]> => {
+    return removePanesFromConfig([paneId]);
   };
 
   const saveSidebarProjects = async (newSidebarProjects: SidebarProject[]) => {
@@ -407,6 +419,7 @@ export default function usePanes(
     loadPanes,
     savePanes,
     removePaneFromConfig,
+    removePanesFromConfig,
     saveSidebarProjects,
     eventMode,
   } as const;

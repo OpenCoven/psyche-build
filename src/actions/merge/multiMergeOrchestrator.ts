@@ -660,12 +660,13 @@ async function createAndMonitorConflictPane(
           // Kill the conflict pane
           await tmuxService.killPane(conflictPane.paneId);
 
-          // Remove conflict pane from state
-          const { StateManager } = await import('../../shared/StateManager.js');
-          const stateManager = StateManager.getInstance();
-          const currentPanes = stateManager.getPanes();
-          const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
-          await context.savePanes(panesWithoutConflictPane);
+          // Remove only this exact conflict pane from the fresh registry.
+          if (!context.removePanesFromConfig) {
+            throw new Error('Multi-merge requires targeted pane removal support');
+          }
+          const panesWithoutConflictPane = await context.removePanesFromConfig([
+            conflictPane.id,
+          ]);
 
           // Mark this worktree as completed
           item.status = 'completed';

@@ -7,7 +7,9 @@ import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
 import { acquireWorktreeOperationLease } from './WorktreeOperationLease.js';
-import { mutateProjectPaneConfig } from './ProjectPaneConfig.js';
+import {
+  readProjectPaneConfigUnderLock,
+} from './ProjectPaneConfig.js';
 
 export interface WorktreeCleanupJob {
   pane: PsychePane;
@@ -396,13 +398,12 @@ export class WorktreeCleanupService {
 
     let stillReferenced = false;
     try {
-      await mutateProjectPaneConfig(identity.configProjectRoot, (config) => {
-        const panes = Array.isArray(config.panes) ? config.panes : [];
-        stillReferenced = panes.some((pane) => (
-          typeof pane.worktreePath === 'string'
-          && pathsOverlap(pane.worktreePath, identity.canonicalWorktreePath)
-        ));
-      });
+      const config = await readProjectPaneConfigUnderLock(identity.configProjectRoot);
+      const panes = Array.isArray(config.panes) ? config.panes : [];
+      stillReferenced = panes.some((pane) => (
+        typeof pane.worktreePath === 'string'
+        && pathsOverlap(pane.worktreePath, identity.canonicalWorktreePath)
+      ));
     } catch (error) {
       return {
         success: false,

@@ -1,8 +1,10 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { AgentSessionReference, PsycheConfig } from '../types.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
-import { atomicWriteJson } from './atomicWrite.js';
+import {
+  mutateProjectPaneConfig,
+  projectRootFromPaneConfigPath,
+} from '../services/ProjectPaneConfig.js';
 
 export interface CodexSessionEventData {
   sessionId?: string;
@@ -88,26 +90,11 @@ export async function persistPaneAgentSessionReference(
 ): Promise<void> {
   if (!panesFile) return;
 
-  const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-  const canonicalProjectConfigPath = path.join(
-    sessionProjectRoot,
-    '.psyche',
-    'psyche.config.json',
-  );
-  if (path.resolve(panesFile) !== path.resolve(canonicalProjectConfigPath)) {
-    // Compatibility for explicit non-project config paths used by embedding
-    // callers. The live TUI and daemon always use the locked project path.
-    const raw = await fs.readFile(panesFile, 'utf8');
-    const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
-    if (Array.isArray(parsed)) return;
-    const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
-    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
-    if (!pane) return;
-    pane.agentSession = agentSession;
-    parsed.panes = panes;
-    parsed.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(panesFile, parsed);
-    return;
+  const sessionProjectRoot = projectRootFromPaneConfigPath(panesFile);
+  if (!sessionProjectRoot) {
+    throw new Error(
+      `Agent session persistence requires the shared project pane config path: ${panesFile}`,
+    );
   }
 
   await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {

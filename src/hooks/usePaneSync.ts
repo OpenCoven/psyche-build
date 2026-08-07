@@ -11,7 +11,10 @@ import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
-import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import {
+  mutateProjectPaneConfig,
+  upsertProjectPaneConfigPanes,
+} from '../services/ProjectPaneConfig.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -84,7 +87,7 @@ export async function savePanesToFile(
   panesFile: string,
   panes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
-  previousPanes: readonly PsychePane[] = [],
+  _previousPanes: readonly PsychePane[] = [],
 ): Promise<PsychePane[]> {
   return withWriteLock(async () => {
     let activePanes = panes;
@@ -121,35 +124,8 @@ export async function savePanesToFile(
     }
 
     const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-    const mutation = await mutateProjectPaneConfig(
-      sessionProjectRoot,
-      (configRecord) => {
-        const config = configRecord as unknown as PsycheConfig;
-        const mergedPanes = mergePaneSnapshots(
-          Array.isArray(config.panes) ? config.panes : [],
-          previousPanes,
-          activePanes,
-        );
-        const projectRoot = config.projectRoot || sessionProjectRoot;
-        const projectName = config.projectName || path.basename(projectRoot);
-        const normalizedSidebarProjects = normalizeSidebarProjects(
-          config.sidebarProjects,
-          mergedPanes,
-          projectRoot,
-          projectName
-        );
-        config.sidebarProjects = normalizedSidebarProjects;
-        config.panes = syncPaneColorThemes(
-          mergedPanes,
-          normalizedSidebarProjects,
-          projectRoot
-        );
-        config.lastUpdated = new Date().toISOString();
-        return config.panes;
-      }
-    );
-
-    return mutation.result as PsychePane[];
+    await upsertProjectPaneConfigPanes(sessionProjectRoot, activePanes);
+    return syncPaneConfigMetadata(sessionProjectRoot);
   });
 }
 
@@ -265,39 +241,14 @@ export async function saveUpdatedPaneConfig(
   panesFile: string,
   activePanes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
-  previousPanes: readonly PsychePane[] = activePanes,
+  _previousPanes: readonly PsychePane[] = activePanes,
 ): Promise<void> {
   await withWriteLock(async () => {
     const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-    const mutation = await mutateProjectPaneConfig(
-      sessionProjectRoot,
-      (configRecord) => {
-        const currentConfig = configRecord as unknown as PsycheConfig;
-        const mergedPanes = mergePaneSnapshots(
-          Array.isArray(currentConfig.panes) ? currentConfig.panes : [],
-          previousPanes,
-          activePanes,
-        );
-        const projectRoot = currentConfig.projectRoot || sessionProjectRoot;
-        const projectName = currentConfig.projectName || path.basename(projectRoot);
-        const normalizedSidebarProjects = normalizeSidebarProjects(
-          currentConfig.sidebarProjects,
-          mergedPanes,
-          projectRoot,
-          projectName
-        );
-        currentConfig.sidebarProjects = normalizedSidebarProjects;
-        currentConfig.panes = syncPaneColorThemes(
-          mergedPanes,
-          normalizedSidebarProjects,
-          projectRoot
-        );
-        currentConfig.lastUpdated = new Date().toISOString();
-        return currentConfig.panes;
-      }
-    );
+    await upsertProjectPaneConfigPanes(sessionProjectRoot, activePanes);
+    const panes = await syncPaneConfigMetadata(sessionProjectRoot);
     LogService.getInstance().debug(
-      `Writing config with ${(mutation.result as PsychePane[]).length} panes`,
+      `Writing config with ${panes.length} panes`,
       'shellDetection'
     );
     LogService.getInstance().debug('Config file written successfully', 'shellDetection');
@@ -305,56 +256,32 @@ export async function saveUpdatedPaneConfig(
 }
 
 /**
- * Reconciles a stale UI snapshot with the config currently on disk. Only
- * explicit local additions, removals, and changed records are applied; panes
- * added by another process remain intact.
+ * Recalculates derived sidebar and color state from a freshly locked pane
+ * registry. Callers must upsert or remove exact pane records before invoking
+ * this helper; it intentionally receives no stale React snapshot.
  */
-export function mergePaneSnapshots(
-  freshPanes: readonly PsychePane[],
-  previousPanes: readonly PsychePane[],
-  nextPanes: readonly PsychePane[],
-): PsychePane[] {
-  const previousById = new Map(previousPanes.map((pane) => [pane.id, pane]));
-  const nextById = new Map(nextPanes.map((pane) => [pane.id, pane]));
-  const explicitlyRemoved = new Set(
-    previousPanes
-      .filter((pane) => !nextById.has(pane.id))
-      .map((pane) => pane.id)
-  );
-  const freshIds = new Set(freshPanes.map((pane) => pane.id));
-  const merged: PsychePane[] = [];
-
-  for (const freshPane of freshPanes) {
-    if (explicitlyRemoved.has(freshPane.id)) {
-      continue;
-    }
-
-    const nextPane = nextById.get(freshPane.id);
-    const previousPane = previousById.get(freshPane.id);
-    if (
-      nextPane
-      && (
-        !previousPane
-        || !paneSnapshotsEqual(previousPane, nextPane)
-      )
-    ) {
-      merged.push(nextPane);
-    } else {
-      merged.push(freshPane);
-    }
-  }
-
-  for (const nextPane of nextPanes) {
-    if (!previousById.has(nextPane.id) && !freshIds.has(nextPane.id)) {
-      merged.push(nextPane);
-    }
-  }
-
-  return merged;
-}
-
-function paneSnapshotsEqual(left: PsychePane, right: PsychePane): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+async function syncPaneConfigMetadata(projectRoot: string): Promise<PsychePane[]> {
+  const mutation = await mutateProjectPaneConfig(projectRoot, (configRecord) => {
+    const config = configRecord as unknown as PsycheConfig;
+    const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+    const effectiveProjectRoot = config.projectRoot || projectRoot;
+    const projectName = config.projectName || path.basename(effectiveProjectRoot);
+    const normalizedSidebarProjects = normalizeSidebarProjects(
+      config.sidebarProjects,
+      freshPanes,
+      effectiveProjectRoot,
+      projectName,
+    );
+    config.sidebarProjects = normalizedSidebarProjects;
+    config.panes = syncPaneColorThemes(
+      freshPanes,
+      normalizedSidebarProjects,
+      effectiveProjectRoot,
+    );
+    config.lastUpdated = new Date().toISOString();
+    return config.panes;
+  });
+  return mutation.result as PsychePane[];
 }
 
 /**

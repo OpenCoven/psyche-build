@@ -932,6 +932,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       const result = await closePane(testPane, mockContext);
@@ -964,6 +965,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -998,6 +1000,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1036,6 +1039,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1068,6 +1072,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       mockGetPanes.mockReturnValue([testPane]);

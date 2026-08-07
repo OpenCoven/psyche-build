@@ -12,6 +12,7 @@ const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const detectAllWorktreesMock = vi.hoisted(() => vi.fn());
 const acquireWorktreeOperationLeaseMock = vi.hoisted(() => vi.fn());
 const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
+const readProjectPaneConfigUnderLockMock = vi.hoisted(() => vi.fn());
 const logger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
@@ -51,6 +52,7 @@ vi.mock('../src/services/WorktreeOperationLease.js', () => ({
 
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+  readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
 }));
 
 type MockChildProcess = EventEmitter & { stderr: EventEmitter | null };
@@ -88,6 +90,7 @@ describe('WorktreeCleanupService', () => {
       const result = await mutation(currentConfig);
       return { config: currentConfig, result };
     });
+    readProjectPaneConfigUnderLockMock.mockImplementation(async () => currentConfig);
     readFileSyncMock.mockImplementation(() => JSON.stringify(currentConfig));
     detectAllWorktreesMock.mockReturnValue([]);
     acquireWorktreeOperationLeaseMock.mockImplementation(async ({
@@ -739,6 +742,26 @@ describe('WorktreeCleanupService', () => {
       )
     ).toBe(false);
     expect(branchOids.has('/test/project')).toBe(false);
+  });
+
+  it('checks rollback references with the read-only config lease', async () => {
+    configureCleanupIdentity();
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance();
+
+    const result = await service.rollbackCreatedWorktree({
+      worktreePath: '/test/project/.psyche/worktrees/react',
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(readProjectPaneConfigUnderLockMock).toHaveBeenCalledWith('/test/project');
+    expect(mutateProjectPaneConfigMock).not.toHaveBeenCalled();
   });
 
   it('leaves a newly created worktree intact when its branch identity changes', async () => {

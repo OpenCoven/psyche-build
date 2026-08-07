@@ -99,6 +99,11 @@ export interface ActionContext {
    * an in-memory snapshot that may be stale across processes.
    */
   removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
+  /**
+   * Removes explicitly named psyche pane records from the fresh locked
+   * registry. Merge flows use this instead of replacing a stale pane array.
+   */
+  removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;

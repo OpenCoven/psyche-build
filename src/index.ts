@@ -26,7 +26,10 @@ import { SIDEBAR_WIDTH } from './utils/layoutManager.js';
 import { validateSystemRequirements, printValidationResults } from './utils/systemCheck.js';
 import { getUntrackedPanes } from './utils/shellPaneDetection.js';
 import { runFirstRunOnboardingIfNeeded } from './utils/onboarding.js';
-import { mutateProjectPaneConfig } from './services/ProjectPaneConfig.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfig,
+} from './services/ProjectPaneConfig.js';
 import { buildDevWatchCommand, buildDevWatchRespawnCommand } from './utils/devWatchCommand.js';
 import { shouldUseQuietDevWatchExit } from './utils/devWatchExit.js';
 import {
@@ -223,25 +226,20 @@ class Psyche {
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();
 
-    // Initialize config file if it doesn't exist
-    if (!await this.fileExists(this.panesFile)) {
-      const initialConfig = {
+    // The shared pane/settings registry is initialized through the same
+    // cross-process lease used by the daemon and TUI mutations. A corrupt or
+    // unreadable file deliberately aborts startup rather than being replaced.
+    await mutateProjectPaneConfig(this.projectRoot, (config) => {
+      config.projectName ??= this.projectName;
+      config.projectRoot ??= this.projectRoot;
+      config.panes ??= [];
+      config.sidebarProjects ??= [{
         projectName: this.projectName,
         projectRoot: this.projectRoot,
-        panes: [],
-        sidebarProjects: [
-          {
-            projectName: this.projectName,
-            projectRoot: this.projectRoot,
-          },
-        ],
-        settings: {},
-        lastUpdated: new Date().toISOString(),
-        controlPaneId: undefined,
-        controlPaneSize: 40  // Sidebar width
-      };
-      await fs.writeFile(this.panesFile, JSON.stringify(initialConfig, null, 2));
-    }
+      }];
+      config.lastUpdated ??= new Date().toISOString();
+      config.controlPaneSize ??= SIDEBAR_WIDTH;
+    });
 
     const inTmux = process.env.TMUX !== undefined;
     const isDev = process.env.PSYCHE_DEV === 'true';
@@ -406,9 +404,9 @@ class Psyche {
       const tmuxService = TmuxService.getInstance();
       controlPaneId = await tmuxService.getCurrentPaneId();
 
-      // Load existing config
-      const configContent = await fs.readFile(this.panesFile, 'utf-8');
-      const config = JSON.parse(configContent);
+      // Read the shared registry without a write side effect. Every mutation
+      // below targets only the field it owns through ProjectPaneConfig.
+      const config = await readProjectPaneConfig(this.projectRoot) as any;
 
       // Ensure panes array exists
       if (!config.panes) {
@@ -457,9 +455,11 @@ class Psyche {
         await tmuxService.resizePane(controlPaneId, { width: SIDEBAR_WIDTH });
         // Refresh client
         await tmuxService.refreshClient();
-        // Save updated config
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+          freshConfig.controlPaneId = nextControlPaneId;
+          freshConfig.controlPaneSize = SIDEBAR_WIDTH;
+          freshConfig.lastUpdated = new Date().toISOString();
+        });
       }
 
       // Create welcome pane if there are no psyche panes and no existing welcome pane
@@ -521,8 +521,13 @@ class Psyche {
           // Clear stale welcome pane ID from config
           const staleWelcomePaneId = config.welcomePaneId;
           config.welcomePaneId = undefined;
-          config.lastUpdated = new Date().toISOString();
-          await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+          await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+            if (freshConfig.welcomePaneId !== staleWelcomePaneId) {
+              return;
+            }
+            freshConfig.welcomePaneId = undefined;
+            freshConfig.lastUpdated = new Date().toISOString();
+          });
           LogService.getInstance().debug(
             `Cleared stale welcome pane ID ${staleWelcomePaneId} from config`,
             'Setup'
@@ -582,14 +587,25 @@ class Psyche {
 
       if (!hasValidWelcomePane && welcomePaneIdsInSession.length > 0) {
         const recoveredWelcomePaneId = welcomePaneIdsInSession[0];
-        config.welcomePaneId = recoveredWelcomePaneId;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
-        hasValidWelcomePane = true;
-        LogService.getInstance().warn(
-          `Recovered untracked welcome pane ${recoveredWelcomePaneId} from tmux state`,
-          'Setup'
+        const recovered = await mutateProjectPaneConfig(
+          this.projectRoot,
+          (freshConfig) => {
+            if (freshConfig.welcomePaneId) {
+              return false;
+            }
+            freshConfig.welcomePaneId = recoveredWelcomePaneId;
+            freshConfig.lastUpdated = new Date().toISOString();
+            return true;
+          },
         );
+        if (recovered.result) {
+          config.welcomePaneId = recoveredWelcomePaneId;
+          hasValidWelcomePane = true;
+          LogService.getInstance().warn(
+            `Recovered untracked welcome pane ${recoveredWelcomePaneId} from tmux state`,
+            'Setup'
+          );
+        }
       }
 
       if (hasValidWelcomePane && config.welcomePaneId) {
@@ -624,10 +640,23 @@ class Psyche {
           // Create new welcome pane
           const welcomePaneId = await createWelcomePane(controlPaneId, this.projectRoot);
           if (welcomePaneId) {
-            config.welcomePaneId = welcomePaneId;
-            config.lastUpdated = new Date().toISOString();
-            await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
-            LogService.getInstance().info(`Created welcome pane: ${welcomePaneId}`, 'Setup');
+            const persisted = await mutateProjectPaneConfig(
+              this.projectRoot,
+              (freshConfig) => {
+                if (freshConfig.welcomePaneId) {
+                  return false;
+                }
+                freshConfig.welcomePaneId = welcomePaneId;
+                freshConfig.lastUpdated = new Date().toISOString();
+                return true;
+              },
+            );
+            if (persisted.result) {
+              config.welcomePaneId = welcomePaneId;
+              LogService.getInstance().info(`Created welcome pane: ${welcomePaneId}`, 'Setup');
+            } else {
+              await destroyWelcomePane(welcomePaneId);
+            }
           }
         } else {
           // Welcome pane exists from previous session - fix the layout
@@ -643,9 +672,15 @@ class Psyche {
         // If welcome pane exists but there are other panes, destroy it
         LogService.getInstance().info('Destroying welcome pane because other panes exist', 'Setup');
         await destroyWelcomePane(config.welcomePaneId);
+        const destroyedWelcomePaneId = config.welcomePaneId;
         config.welcomePaneId = undefined;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+          if (freshConfig.welcomePaneId !== destroyedWelcomePaneId) {
+            return;
+          }
+          freshConfig.welcomePaneId = undefined;
+          freshConfig.lastUpdated = new Date().toISOString();
+        });
       }
     } catch (error) {
       // Ignore errors in sidebar setup - will work without it

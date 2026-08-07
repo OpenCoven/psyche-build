@@ -363,6 +363,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     loadPanes,
     savePanes,
     removePaneFromConfig,
+    removePanesFromConfig,
     saveSidebarProjects,
     eventMode,
   } = usePanes(
@@ -1567,6 +1568,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     panes,
     savePanes,
     removePaneFromConfig,
+    removePanesFromConfig,
     sessionName,
     projectName,
     defaultProjectRoot: sessionProjectRoot,
@@ -1673,9 +1675,9 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       }
 
       // Pane was removed unexpectedly (e.g., user killed tmux pane manually)
-      // Remove it from our tracking
-      const updatedPanes = panes.filter((p) => p.id !== paneId)
-      savePanes(updatedPanes)
+      // Remove this exact record from a fresh locked registry. A stale UI
+      // snapshot must never imply that a concurrently added daemon pane died.
+      void removePaneFromConfig(paneId).catch(() => undefined)
 
       const removedPane = panes.find((p) => p.id === paneId)
       if (

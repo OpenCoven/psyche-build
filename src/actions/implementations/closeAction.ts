@@ -252,11 +252,10 @@ async function executeCloseOption(
       // progress. The TUI implementation removes this exact ID from a fresh
       // config while holding the cross-process config lock, then returns the
       // merged pane list so a stale UI cannot erase a daemon-created pane.
-      if (context.removePaneFromConfig) {
-        updatedPanes = await context.removePaneFromConfig(pane.id);
-      } else {
-        await context.savePanes(updatedPanes);
+      if (!context.removePaneFromConfig) {
+        throw new Error('Close requires targeted pane removal support');
       }
+      updatedPanes = await context.removePaneFromConfig(pane.id);
 
       // Best-effort cleanup of any stored prompt files for this pane slug
       // (including leftovers from interrupted launches).

@@ -29,6 +29,7 @@ export interface ProjectPaneConfig extends Record<string, unknown> {
   projectRoot?: string;
   panes?: ProjectPaneConfigPane[];
   settings?: Record<string, unknown>;
+  updateSettings?: Record<string, unknown>;
   lastUpdated?: string;
 }
 
@@ -60,6 +61,16 @@ export interface ProjectPaneConfigLockOptions {
 export interface ProjectPaneConfigMutationResult<T> {
   config: ProjectPaneConfig;
   result: T;
+}
+
+export interface ProjectPaneConfigTransaction {
+  config: ProjectPaneConfig;
+  /**
+   * Atomically persists the current config while retaining the project-wide
+   * lease. This is for lifecycle operations that must make one record durable
+   * before a subsequent side effect can run.
+   */
+  persist: () => Promise<void>;
 }
 
 export class ProjectPaneConfigError extends Error {
@@ -117,7 +128,10 @@ export async function acquireProjectPaneConfigLock(
     throw new Error('project pane config lock nonce contains unsupported characters');
   }
 
-  const processStartIdentity = resolveProcessStartIdentity(pid);
+  const resolvedProcessStartIdentity = resolveProcessStartIdentity(pid);
+  const processStartIdentity = isSafeProcessStartIdentity(resolvedProcessStartIdentity)
+    ? resolvedProcessStartIdentity
+    : undefined;
   const record: ProjectPaneConfigLockRecord = {
     pid,
     ...(processStartIdentity ? { processStartIdentity } : {}),
@@ -214,17 +228,156 @@ export async function mutateProjectPaneConfig<T>(
   mutation: (config: ProjectPaneConfig) => T | Promise<T>,
   options: ProjectPaneConfigLockOptions = {},
 ): Promise<ProjectPaneConfigMutationResult<T>> {
+  return transactProjectPaneConfig(
+    projectRoot,
+    async ({ config }) => mutation(config),
+    options,
+  );
+}
+
+/**
+ * Runs a config operation while retaining the project-wide lease. Unlike a
+ * normal mutation, callers can make an intermediate state durable before a
+ * follow-up side effect and compensate while still holding that same lease.
+ */
+export async function transactProjectPaneConfig<T>(
+  projectRoot: string,
+  operation: (
+    transaction: ProjectPaneConfigTransaction,
+  ) => T | Promise<T>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<T>> {
   const lock = await acquireProjectPaneConfigLock(projectRoot, options);
   try {
     const config = await readProjectPaneConfig(lock.canonicalProjectRoot);
-    const result = await mutation(config);
-    const configPath = projectPaneConfigPath(lock.canonicalProjectRoot);
-    await mkdir(path.dirname(configPath), { recursive: true });
-    await atomicWriteJson(configPath, config);
+    let persisted = false;
+    const persist = async (): Promise<void> => {
+      await writeProjectPaneConfig(lock.canonicalProjectRoot, config);
+      persisted = true;
+    };
+    const result = await operation({ config, persist });
+    if (!persisted) {
+      await persist();
+    }
     return { config, result };
   } finally {
     await lock.release();
   }
+}
+
+/**
+ * Reads a config while holding the cross-process lease without rewriting it.
+ * Destructive lifecycle checks use this instead of a no-op mutation so a
+ * read-only decision cannot touch the registry's contents or mtime.
+ */
+export async function readProjectPaneConfigUnderLock(
+  projectRoot: string,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfig> {
+  const lock = await acquireProjectPaneConfigLock(projectRoot, options);
+  try {
+    return await readProjectPaneConfig(lock.canonicalProjectRoot);
+  } finally {
+    await lock.release();
+  }
+}
+
+/**
+ * Mutates only the project settings section and retains all unrelated config
+ * fields, including settings introduced by newer clients.
+ */
+export async function mutateProjectPaneSettings<T>(
+  projectRoot: string,
+  mutation: (
+    settings: Record<string, unknown>,
+    config: ProjectPaneConfig,
+  ) => T | Promise<T>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<T>> {
+  return mutateProjectPaneConfig(projectRoot, async (config) => {
+    const settings = mutableConfigSection(config, 'settings');
+    const result = await mutation(settings, config);
+    config.settings = settings;
+    config.lastUpdated = new Date().toISOString();
+    return result;
+  }, options);
+}
+
+/**
+ * Mutates only the updater settings section and retains the pane registry and
+ * every unrelated config field.
+ */
+export async function mutateProjectPaneUpdateSettings<T>(
+  projectRoot: string,
+  mutation: (
+    settings: Record<string, unknown>,
+    config: ProjectPaneConfig,
+  ) => T | Promise<T>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<T>> {
+  return mutateProjectPaneConfig(projectRoot, async (config) => {
+    const settings = mutableConfigSection(config, 'updateSettings');
+    const result = await mutation(settings, config);
+    config.updateSettings = settings;
+    config.lastUpdated = new Date().toISOString();
+    return result;
+  }, options);
+}
+
+/**
+ * Upserts exact pane records into the fresh locked registry. It never treats
+ * an omitted pane from a stale UI array as a deletion.
+ */
+export async function upsertProjectPaneConfigPanes(
+  projectRoot: string,
+  panesToUpsert: readonly ProjectPaneConfigPane[],
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
+  return mutateProjectPaneConfig(projectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? [...config.panes] : [];
+
+    for (const nextPane of panesToUpsert) {
+      const index = findPaneRecordIndex(panes, nextPane);
+      if (index === -1) {
+        panes.push(nextPane);
+      } else {
+        panes[index] = {
+          ...asRecord(panes[index]),
+          ...asRecord(nextPane),
+        };
+      }
+    }
+
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+    return panes;
+  }, options);
+}
+
+/**
+ * Removes only explicitly named psyche pane IDs from the fresh locked
+ * registry. IDs absent from an in-memory UI snapshot are never inferred as
+ * removals.
+ */
+export async function removeProjectPaneConfigPanes(
+  projectRoot: string,
+  paneIds: Iterable<string>,
+  options: ProjectPaneConfigLockOptions = {},
+): Promise<ProjectPaneConfigMutationResult<ProjectPaneConfigPane[]>> {
+  const ids = new Set(
+    Array.from(paneIds).filter((paneId) => typeof paneId === 'string' && paneId.length > 0),
+  );
+
+  return mutateProjectPaneConfig(projectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const remaining = panes.filter((pane) => {
+      const id = paneRecordId(pane);
+      return !id || !ids.has(id);
+    });
+    config.panes = remaining;
+    config.lastUpdated = new Date().toISOString();
+    return remaining;
+  }, options);
 }
 
 export async function readProjectPaneConfig(
@@ -268,11 +421,44 @@ export async function readProjectPaneConfig(
     );
   }
 
-  return parsed as ProjectPaneConfig;
+  const config = parsed as ProjectPaneConfig;
+  if (config.panes !== undefined && !Array.isArray(config.panes)) {
+    throw new ProjectPaneConfigError(
+      'config_corrupt',
+      `${configPath} has a non-array panes field`,
+    );
+  }
+  for (const key of ['settings', 'updateSettings'] as const) {
+    const value = config[key];
+    if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+      throw new ProjectPaneConfigError(
+        'config_corrupt',
+        `${configPath} has a non-object ${key} field`,
+      );
+    }
+  }
+
+  return config;
 }
 
 export function projectPaneConfigPath(projectRoot: string): string {
   return path.join(projectRoot, '.psyche', 'psyche.config.json');
+}
+
+/**
+ * Derives the project root for the canonical shared pane/settings config.
+ * Callers receiving an arbitrary file path must not use it as a substitute
+ * for this cross-process registry.
+ */
+export function projectRootFromPaneConfigPath(configPath: string): string | undefined {
+  const resolved = path.resolve(configPath);
+  if (
+    path.basename(resolved) !== 'psyche.config.json'
+    || path.basename(path.dirname(resolved)) !== '.psyche'
+  ) {
+    return undefined;
+  }
+  return path.dirname(path.dirname(resolved));
 }
 
 async function resolveConfigLockPaths(projectRoot: string): Promise<ConfigLockPaths> {
@@ -308,6 +494,52 @@ async function writeLockRecord(
   } finally {
     await handle.close();
   }
+}
+
+async function writeProjectPaneConfig(
+  canonicalProjectRoot: string,
+  config: ProjectPaneConfig,
+): Promise<void> {
+  const configPath = projectPaneConfigPath(canonicalProjectRoot);
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await atomicWriteJson(configPath, config);
+}
+
+function mutableConfigSection(
+  config: ProjectPaneConfig,
+  key: 'settings' | 'updateSettings',
+): Record<string, unknown> {
+  const value = config[key];
+  if (value === undefined) {
+    return {};
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ProjectPaneConfigError(
+      'config_corrupt',
+      `${key} in ${projectPaneConfigPath(String(config.projectRoot || 'project'))} is not a JSON object`,
+    );
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+function asRecord(value: ProjectPaneConfigPane): Record<string, unknown> {
+  return value as Record<string, unknown>;
+}
+
+function paneRecordId(value: ProjectPaneConfigPane): string | undefined {
+  const id = asRecord(value).id;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+function findPaneRecordIndex(
+  panes: readonly ProjectPaneConfigPane[],
+  nextPane: ProjectPaneConfigPane,
+): number {
+  const id = paneRecordId(nextPane);
+  if (!id) {
+    return -1;
+  }
+  return panes.findIndex((pane) => paneRecordId(pane) === id);
 }
 
 async function readLockRecord(lockDir: string): Promise<LockReadResult> {
@@ -390,7 +622,7 @@ function isLockOwnerStale(
 
   const currentIdentity = resolveProcessStartIdentity(record.pid);
   return (
-    currentIdentity !== undefined
+    isSafeProcessStartIdentity(currentIdentity)
     && currentIdentity !== record.processStartIdentity
   );
 }

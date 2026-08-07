@@ -20,6 +20,7 @@ interface UseActionSystemParams {
   panes: PsychePane[];
   savePanes: (panes: PsychePane[]) => Promise<void>;
   removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
+  removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
@@ -185,6 +186,7 @@ export default function useActionSystem({
   panes,
   savePanes,
   removePaneFromConfig,
+  removePanesFromConfig,
   sessionName,
   projectName,
   defaultProjectRoot,
@@ -204,6 +206,7 @@ export default function useActionSystem({
     projectName,
     savePanes,
     removePaneFromConfig,
+    removePanesFromConfig,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,
@@ -213,6 +216,7 @@ export default function useActionSystem({
     projectName,
     savePanes,
     removePaneFromConfig,
+    removePanesFromConfig,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,

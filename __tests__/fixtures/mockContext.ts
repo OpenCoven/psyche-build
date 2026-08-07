@@ -9,7 +9,7 @@ export function createMockContext(
   panes: PsychePane[] = [],
   overrides?: Partial<ActionContext>
 ): ActionContext {
-  return {
+  const context: ActionContext = {
     panes,
     sessionName: 'test-session',
     projectName: 'test-project',
@@ -21,4 +21,20 @@ export function createMockContext(
     onPaneRemove: undefined,
     ...overrides,
   };
+
+  context.removePaneFromConfig ??= async (paneId: string) => {
+    const nextPanes = context.panes.filter((pane) => pane.id !== paneId);
+    await context.savePanes(nextPanes);
+    context.panes = nextPanes;
+    return nextPanes;
+  };
+  context.removePanesFromConfig ??= async (paneIds: Iterable<string>) => {
+    const ids = new Set(paneIds);
+    const nextPanes = context.panes.filter((pane) => !ids.has(pane.id));
+    await context.savePanes(nextPanes);
+    context.panes = nextPanes;
+    return nextPanes;
+  };
+
+  return context;
 }

@@ -1,15 +1,10 @@
 import { useEffect, useState } from 'react';
-import fs from 'fs/promises';
 import type { ProjectSettings } from '../types.js';
-
-// Config structure matching what we save
-interface PsycheConfig {
-  projectName?: string;
-  projectRoot?: string;
-  panes?: any[];
-  settings?: ProjectSettings;
-  lastUpdated?: string;
-}
+import {
+  mutateProjectPaneSettings,
+  projectRootFromPaneConfigPath,
+  readProjectPaneConfig,
+} from '../services/ProjectPaneConfig.js';
 
 export default function useProjectSettings(settingsFile: string) {
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>({});
@@ -17,14 +12,16 @@ export default function useProjectSettings(settingsFile: string) {
   useEffect(() => {
     const load = async () => {
       try {
-        const content = await fs.readFile(settingsFile, 'utf-8');
-        const parsed = JSON.parse(content);
-        
+        const projectRoot = projectRootFromPaneConfigPath(settingsFile);
+        if (!projectRoot) {
+          throw new Error(`Settings file is not a project pane config: ${settingsFile}`);
+        }
+        const parsed = await readProjectPaneConfig(projectRoot);
+
         // Handle both old format (direct settings) and new format (config with settings field)
         if (parsed.settings !== undefined || parsed.panes !== undefined) {
           // New config format
-          const config = parsed as PsycheConfig;
-          setProjectSettings(config.settings || {});
+          setProjectSettings((parsed.settings || {}) as ProjectSettings);
         } else {
           // Old format or direct settings
           setProjectSettings(parsed as ProjectSettings);
@@ -37,21 +34,14 @@ export default function useProjectSettings(settingsFile: string) {
   }, [settingsFile]);
 
   const saveSettings = async (settings: ProjectSettings) => {
-    // Read existing config to preserve other fields
-    let config: PsycheConfig = {};
-    try {
-      const content = await fs.readFile(settingsFile, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (parsed.panes !== undefined || parsed.settings !== undefined) {
-        config = parsed;
-      }
-    } catch {}
-    
-    // Update settings in config
-    config.settings = settings;
-    config.lastUpdated = new Date().toISOString();
-    
-    await fs.writeFile(settingsFile, JSON.stringify(config, null, 2));
+    const projectRoot = projectRootFromPaneConfigPath(settingsFile);
+    if (!projectRoot) {
+      throw new Error(`Settings file is not a project pane config: ${settingsFile}`);
+    }
+
+    await mutateProjectPaneSettings(projectRoot, (currentSettings) => {
+      Object.assign(currentSettings, settings);
+    });
     setProjectSettings(settings);
   };
 

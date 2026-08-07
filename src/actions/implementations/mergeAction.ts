@@ -143,11 +143,14 @@ async function executeSingleRootMerge(
         // Pane may already be gone
       }
     }
-    // Remove siblings from saved panes
-    const withoutSiblings = activeContext.panes.filter(
-      p => !siblingPanes.some(s => s.id === p.id)
+    if (!activeContext.removePanesFromConfig) {
+      throw new Error('Merge requires targeted pane removal support');
+    }
+    // Remove only the sibling IDs from the fresh locked registry. The action
+    // context may predate daemon-created panes, which must remain intact.
+    const withoutSiblings = await activeContext.removePanesFromConfig(
+      siblingPanes.map((sibling) => sibling.id),
     );
-    await activeContext.savePanes(withoutSiblings);
     activeContext = {
       ...activeContext,
       panes: withoutSiblings,

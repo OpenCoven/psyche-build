@@ -139,9 +139,11 @@ async function createAndLaunchConflictPane(
           console.error(`[conflictResolution] Current panes: ${currentPanes.map(p => p.id).join(', ')}`);
 
           // Remove conflict pane from state
-          const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
+          if (!context.removePanesFromConfig) {
+            throw new Error('Conflict resolution requires targeted pane removal support');
+          }
+          const panesWithoutConflictPane = await context.removePanesFromConfig([conflictPane.id]);
           console.error(`[conflictResolution] Removing conflict pane ${conflictPane.id}, remaining: ${panesWithoutConflictPane.map(p => p.id).join(', ')}`);
-          await context.savePanes(panesWithoutConflictPane);
 
           // Now trigger the cleanup flow for the original pane
           // We need to execute the merge completion flow

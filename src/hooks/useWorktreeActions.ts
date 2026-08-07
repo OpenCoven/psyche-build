@@ -12,13 +12,19 @@ import { useTemporaryStatus } from './useTemporaryStatus.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  removePaneFromConfig: (paneId: string) => Promise<PsychePane[]>;
   setStatusMessage: (msg: string) => void;
   setShowMergeConfirmation: (v: boolean) => void;
   setMergedPane: (pane: PsychePane | null) => void;
 }
 
-export default function useWorktreeActions({ panes, savePanes, setStatusMessage, setShowMergeConfirmation, setMergedPane }: Params) {
+export default function useWorktreeActions({
+  panes,
+  removePaneFromConfig,
+  setStatusMessage,
+  setShowMergeConfirmation,
+  setMergedPane,
+}: Params) {
   const showTemporary = useTemporaryStatus(setStatusMessage);
 
   const closePane = useCallback(async (pane: PsychePane) => {
@@ -39,14 +45,13 @@ export default function useWorktreeActions({ panes, savePanes, setStatusMessage,
         enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
       } catch {}
 
-      const updatedPanes = panes.filter(p => p.id !== pane.id);
-      await savePanes(updatedPanes);
+      await removePaneFromConfig(pane.id);
 
       showTemporary(`Closed pane: ${pane.slug}`);
     } catch {
       showTemporary('Failed to close pane', 2000);
     }
-  }, [panes, savePanes, showTemporary]);
+  }, [panes, removePaneFromConfig, showTemporary]);
 
   const mergeWorktree = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {

@@ -14,21 +14,38 @@ export function getProcessStartIdentity(pid: number): string | undefined {
   }
 
   try {
-    const value = execFileSync(
+    const value = normalizeProcessStartIdentity(execFileSync(
       'ps',
       ['-p', String(pid), '-o', 'lstart='],
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+        // `ps lstart` renders through the child's locale and time zone. A
+        // lease written by a process launched under a different caller locale
+        // must still identify the same live PID.
+        env: {
+          ...process.env,
+          TZ: 'UTC',
+          LC_ALL: 'C',
+          LANG: 'C',
+        },
       },
-    ).trim();
-    return value || undefined;
+    ));
+    return value;
   } catch {
     // On unsupported platforms, permission failures, and transient command
     // failures, callers must conservatively retain a live owner's lease.
     return undefined;
   }
+}
+
+export function normalizeProcessStartIdentity(value: string): string | undefined {
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .trim()
+    .replace(/\s+/g, ' ');
+  return normalized || undefined;
 }
 
 export function isProcessAlive(pid: number): boolean {
