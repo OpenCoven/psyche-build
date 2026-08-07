@@ -91,7 +91,8 @@ function getParallelPaneCreationLimit(totalAgents: number): number {
 
 function enqueueManagedWorktreePruning(
   projectRoots: string[],
-  activePanes: PsychePane[]
+  activePanes: PsychePane[],
+  configPath: string
 ): void {
   const uniqueProjectRoots = Array.from(new Set(projectRoots));
 
@@ -105,6 +106,7 @@ function enqueueManagedWorktreePruning(
       projectRoot,
       activePanes,
       maxManagedWorktrees,
+      configPath,
     });
   }
 }
@@ -213,7 +215,11 @@ export default function usePaneCreation({
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
       await savePanes(updatedPanes);
-      enqueueManagedWorktreePruning([pane.projectRoot || sessionProjectRoot], updatedPanes);
+      enqueueManagedWorktreePruning(
+        [pane.projectRoot || sessionProjectRoot],
+        updatedPanes,
+        panesFile
+      );
 
       await loadPanes();
       setStatusMessage("Pane created")
@@ -304,7 +310,8 @@ export default function usePaneCreation({
         await savePanes(updatedPanes);
         enqueueManagedWorktreePruning(
           createdPanes.map((pane) => pane.projectRoot || sessionProjectRoot),
-          updatedPanes
+          updatedPanes,
+          panesFile
         );
         await loadPanes();
       }

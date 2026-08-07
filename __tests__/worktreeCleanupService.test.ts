@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import type { PsychePane } from '../src/types.js';
@@ -129,6 +129,12 @@ describe('WorktreeCleanupService', () => {
     const worktreePath = join(projectRoot, '.psyche', 'worktrees', slug);
     mkdirSync(join(worktreePath, '.psyche'), { recursive: true });
     utimesSync(worktreePath, mtime, mtime);
+    return worktreePath;
+  }
+
+  function createReusableWorktree(root: string, name: string): string {
+    const worktreePath = join(root, name);
+    mkdirSync(join(worktreePath, '.git'), { recursive: true });
     return worktreePath;
   }
 
@@ -306,7 +312,7 @@ describe('WorktreeCleanupService', () => {
       currentProjectRoot: '/test/project',
       deleteBranch: true,
     });
-    service.cancelCleanupForWorktree('/test/project/.psyche/worktrees/react');
+    await service.cancelCleanupForWorktree('/test/project/.psyche/worktrees/react');
     await service.cleanupQueue;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -324,6 +330,98 @@ describe('WorktreeCleanupService', () => {
       'paneActions',
       'psyche-1'
     );
+  });
+
+  it('lets a reuse lease cancel cleanup before removal launches', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'reopen-me');
+    configureCleanupIdentity(worktreePath);
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    service.enqueueCleanup({
+      pane: {
+        ...createCleanupPane(),
+        worktreePath,
+      },
+      paneProjectRoot: '/test/project',
+      mainRepoPath: '/test/project',
+      configPath: '/test/project/.psyche/psyche.config.json',
+      currentProjectRoot: '/test/project',
+      deleteBranch: true,
+    });
+    const lease = await service.acquireWorktreeReuseLease(worktreePath);
+    lease.release();
+    await service.cleanupQueue;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['worktree', 'remove']),
+      expect.anything()
+    );
+  });
+
+  it('makes reuse wait for a launched cleanup and reject a removed worktree', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'removed-before-reopen');
+    configureCleanupIdentity(worktreePath);
+
+    let child!: MockChildProcess;
+    let signalRemovalLaunched!: () => void;
+    const removalLaunched = new Promise<void>((resolve) => {
+      signalRemovalLaunched = resolve;
+    });
+    spawnMock.mockImplementation((_command, args) => {
+      const gitArgs = args as string[];
+      if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
+        child = new EventEmitter() as MockChildProcess;
+        child.stderr = new EventEmitter();
+        signalRemovalLaunched();
+        return child;
+      }
+      return createSuccessfulChildProcess();
+    });
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    service.enqueueCleanup({
+      pane: {
+        ...createCleanupPane(),
+        worktreePath,
+      },
+      paneProjectRoot: '/test/project',
+      mainRepoPath: '/test/project',
+      configPath: '/test/project/.psyche/psyche.config.json',
+      currentProjectRoot: '/test/project',
+      deleteBranch: true,
+    });
+    await removalLaunched;
+
+    const reusePromise = service.acquireWorktreeReuseLease(worktreePath);
+    let reuseSettled = false;
+    void reusePromise.then(
+      () => {
+        reuseSettled = true;
+      },
+      () => {
+        reuseSettled = true;
+      }
+    );
+    await Promise.resolve();
+    expect(reuseSettled).toBe(false);
+
+    worktreeMappings.get('/test/project')?.delete(resolve(worktreePath));
+    rmSync(worktreePath, { recursive: true, force: true });
+    child.emit('close', 0);
+
+    await expect(reusePromise).rejects.toThrow('no longer available for reuse');
+    await service.cleanupQueue;
   });
 
   it('skips cleanup when the branch no longer points to its queued OID', async () => {
@@ -385,7 +483,7 @@ describe('WorktreeCleanupService', () => {
       currentProjectRoot: '/test/project',
       deleteBranch: true,
     });
-    service.cancelCleanupForWorktree(realWorktreePath);
+    await service.cancelCleanupForWorktree(realWorktreePath);
     await service.cleanupQueue;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -397,6 +495,48 @@ describe('WorktreeCleanupService', () => {
       expect.stringContaining('cleanup was canceled'),
       'paneActions',
       'psyche-1'
+    );
+  });
+
+  it('removes the validated canonical target when a queued symlink is retargeted', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const originalTarget = join(cleanupRoot, 'original-worktree');
+    const retargetedTarget = join(cleanupRoot, 'replacement-worktree');
+    const symlinkWorktreePath = join(cleanupRoot, 'worktree-alias');
+    mkdirSync(originalTarget);
+    mkdirSync(retargetedTarget);
+    symlinkSync(originalTarget, symlinkWorktreePath);
+    configureCleanupIdentity(originalTarget);
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    service.enqueueCleanup({
+      pane: {
+        ...createCleanupPane(),
+        worktreePath: symlinkWorktreePath,
+      },
+      paneProjectRoot: '/test/project',
+      mainRepoPath: '/test/project',
+      configPath: '/test/project/.psyche/psyche.config.json',
+      currentProjectRoot: '/test/project',
+      deleteBranch: true,
+    });
+    rmSync(symlinkWorktreePath);
+    symlinkSync(retargetedTarget, symlinkWorktreePath);
+    await service.cleanupQueue;
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', originalTarget, '--force'],
+      expect.objectContaining({ cwd: '/test/project' })
+    );
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', retargetedTarget, '--force'],
+      expect.anything()
     );
   });
 
@@ -458,7 +598,7 @@ describe('WorktreeCleanupService', () => {
     (WorktreeCleanupService as any).instance = undefined;
     const service = WorktreeCleanupService.getInstance();
 
-    const result = service.rollbackCreatedWorktree({
+    const result = await service.rollbackCreatedWorktree({
       worktreePath: '/test/project/.psyche/worktrees/react',
       branchName: 'react',
       branchOid: 'abc123',
@@ -483,7 +623,7 @@ describe('WorktreeCleanupService', () => {
     (WorktreeCleanupService as any).instance = undefined;
     const service = WorktreeCleanupService.getInstance();
 
-    const result = service.rollbackCreatedWorktree({
+    const result = await service.rollbackCreatedWorktree({
       worktreePath: '/test/project/.psyche/worktrees/react',
       branchName: 'react',
       branchOid: 'abc123',
@@ -532,15 +672,15 @@ describe('WorktreeCleanupService', () => {
     }));
 
     expect(gitCalls).toEqual([
-      { args: ['worktree', 'remove', older], cwd: projectRoot },
-      { args: ['worktree', 'remove', middle], cwd: projectRoot },
+      { args: ['worktree', 'remove', realpathSync.native(older)], cwd: projectRoot },
+      { args: ['worktree', 'remove', realpathSync.native(middle)], cwd: projectRoot },
     ]);
     expect(gitCalls).not.toContainEqual({
-      args: ['worktree', 'remove', active],
+      args: ['worktree', 'remove', realpathSync.native(active)],
       cwd: projectRoot,
     });
     expect(gitCalls).not.toContainEqual({
-      args: ['worktree', 'remove', newest],
+      args: ['worktree', 'remove', realpathSync.native(newest)],
       cwd: projectRoot,
     });
   });
@@ -567,8 +707,86 @@ describe('WorktreeCleanupService', () => {
 
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', old],
+      ['worktree', 'remove', realpathSync.native(old)],
       expect.anything()
+    );
+  });
+
+  it('rechecks current config before removing a delayed managed prune target', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-prune-'));
+    tempDirs.push(projectRoot);
+    const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+    createManagedWorktree(projectRoot, 'newer', new Date('2026-01-02T00:00:00Z'));
+    mkdirSync(join(older, '.git'));
+    utimesSync(older, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    const blockingLease = await service.acquireWorktreeReuseLease(older);
+
+    const prunePromise = service.runPruneManagedWorktrees({
+      projectRoot,
+      activePanes: [],
+      configPath: join(projectRoot, '.psyche', 'psyche.config.json'),
+      maxManagedWorktrees: 1,
+    });
+    currentConfig.panes = [
+      {
+        id: 'reopened-pane',
+        slug: 'older',
+        prompt: '',
+        paneId: '%4',
+        worktreePath: older,
+      },
+    ];
+    blockingLease.release();
+    await prunePromise;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', older],
+      expect.anything()
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('current config still references it'),
+      'paneActions'
+    );
+  });
+
+  it('skips a delayed managed prune when reopen advances its generation', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-prune-'));
+    tempDirs.push(projectRoot);
+    const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+    createManagedWorktree(projectRoot, 'newer', new Date('2026-01-02T00:00:00Z'));
+    mkdirSync(join(older, '.git'));
+    utimesSync(older, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    const blockingLease = await service.acquireWorktreeReuseLease(older);
+    const reopenLeasePromise = service.acquireWorktreeReuseLease(older);
+    const prunePromise = service.runPruneManagedWorktrees({
+      projectRoot,
+      activePanes: [],
+      configPath: join(projectRoot, '.psyche', 'psyche.config.json'),
+      maxManagedWorktrees: 1,
+    });
+
+    blockingLease.release();
+    const reopenLease = await reopenLeasePromise;
+    reopenLease.release();
+    await prunePromise;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', older],
+      expect.anything()
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('cleanup generation changed'),
+      'paneActions'
     );
   });
 });

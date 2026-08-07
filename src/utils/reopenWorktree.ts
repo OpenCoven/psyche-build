@@ -51,6 +51,21 @@ export interface ReopenWorktreeResult {
 export async function reopenWorktree(
   options: ReopenWorktreeOptions
 ): Promise<ReopenWorktreeResult> {
+  const reuseLease = await WorktreeCleanupService.getInstance()
+    .acquireWorktreeReuseLease(options.worktreePath);
+  try {
+    return await reopenWorktreeWithReuseLease({
+      ...options,
+      worktreePath: reuseLease.canonicalWorktreePath,
+    });
+  } finally {
+    reuseLease.release();
+  }
+}
+
+async function reopenWorktreeWithReuseLease(
+  options: ReopenWorktreeOptions
+): Promise<ReopenWorktreeResult> {
   const {
     agent: requestedAgent,
     slug,
@@ -60,7 +75,6 @@ export async function reopenWorktree(
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
   } = options;
-  WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
 
   let paneProjectName = path.basename(projectRoot);
   const settings = new SettingsManager(projectRoot).getSettings();

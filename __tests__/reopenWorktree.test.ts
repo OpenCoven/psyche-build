@@ -22,7 +22,7 @@ const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
 const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'codex']));
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
-const cancelCleanupForWorktreeMock = vi.hoisted(() => vi.fn());
+const acquireWorktreeReuseLeaseMock = vi.hoisted(() => vi.fn());
 const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
@@ -101,7 +101,7 @@ vi.mock('../src/utils/welcomePaneManager.js', () => ({
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
-      cancelCleanupForWorktree: cancelCleanupForWorktreeMock,
+      acquireWorktreeReuseLease: acquireWorktreeReuseLeaseMock,
     })),
   },
 }));
@@ -115,6 +115,10 @@ describe('reopenWorktree', () => {
       permissionMode: 'bypassPermissions',
       branchName: 'feature/reopen-me',
     });
+    acquireWorktreeReuseLeaseMock.mockImplementation(async (worktreePath: string) => ({
+      canonicalWorktreePath: worktreePath,
+      release: vi.fn(),
+    }));
   });
 
   it('uses stored agent metadata and permission mode for resume', async () => {
@@ -190,7 +194,7 @@ describe('reopenWorktree', () => {
     expect(result.pane.projectName).toBe('Renamed Repo');
   });
 
-  it('cancels pending cleanup before persisting a reopened worktree pane', async () => {
+  it('acquires a reuse lease before persisting a reopened worktree pane', async () => {
     const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
 
     await reopenWorktree({
@@ -202,43 +206,20 @@ describe('reopenWorktree', () => {
       sessionConfigPath: '/repo/.psyche/psyche.config.json',
     });
 
-    expect(cancelCleanupForWorktreeMock).toHaveBeenCalledWith(
+    expect(acquireWorktreeReuseLeaseMock).toHaveBeenCalledWith(
       '/repo/.psyche/worktrees/reopen-me'
     );
   });
 
-  it('cancels blocked cleanup before awaited reopen setup can persist the pane', async () => {
-    vi.useFakeTimers();
+  it('waits for a launched cleanup and does not edit a removed worktree', async () => {
     const worktreePath = '/repo/.psyche/worktrees/reopen-me';
-    let worktreeExists = true;
-    let cleanupCanceled = false;
-    let releaseCleanup!: () => void;
-    let releasePaneSetup!: (exists: boolean) => void;
-    let signalPaneSetupStarted!: () => void;
-    const paneSetupStarted = new Promise<void>((resolve) => {
-      signalPaneSetupStarted = resolve;
-    });
-    const paneSetup = new Promise<boolean>((resolve) => {
-      releasePaneSetup = resolve;
-    });
-    const queuedCleanup = new Promise<void>((resolve) => {
-      releaseCleanup = () => {
-        if (!cleanupCanceled) {
-          worktreeExists = false;
-        }
-        resolve();
-      };
-    });
-
-    cancelCleanupForWorktreeMock.mockImplementation(() => {
-      cleanupCanceled = true;
-    });
-    tmuxServiceMock.paneExists.mockImplementationOnce(() => {
-      signalPaneSetupStarted();
-      return paneSetup;
+    let rejectLease!: (error: Error) => void;
+    const cleanupLease = new Promise<never>((_resolve, reject) => {
+      rejectLease = reject;
     });
 
     try {
+      acquireWorktreeReuseLeaseMock.mockImplementationOnce(() => cleanupLease);
       const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
       const reopenPromise = reopenWorktree({
         slug: 'reopen-me',
@@ -249,19 +230,18 @@ describe('reopenWorktree', () => {
         sessionConfigPath: '/repo/.psyche/psyche.config.json',
       });
 
-      await paneSetupStarted;
+      await Promise.resolve();
+      expect(readWorktreeMetadataMock).not.toHaveBeenCalled();
       expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
+      expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
 
-      releaseCleanup();
-      await queuedCleanup;
-      expect(worktreeExists).toBe(true);
+      rejectLease(new Error(`Worktree is no longer available for reuse at ${worktreePath}`));
+      await expect(reopenPromise).rejects.toThrow('no longer available for reuse');
+      expect(readWorktreeMetadataMock).not.toHaveBeenCalled();
       expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
-
-      releasePaneSetup(true);
-      await vi.runAllTimersAsync();
-      await reopenPromise;
+      expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
     } finally {
-      vi.useRealTimers();
+      acquireWorktreeReuseLeaseMock.mockReset();
     }
   });
 });

@@ -78,6 +78,32 @@ export async function createPane(
   options: CreatePaneOptions,
   availableAgents: AgentName[]
 ): Promise<CreatePaneResult> {
+  if (!options.existingWorktree) {
+    return createPaneWithWorktreeReuseLease(options, availableAgents);
+  }
+
+  const reuseLease = await WorktreeCleanupService.getInstance()
+    .acquireWorktreeReuseLease(options.existingWorktree.worktreePath);
+  try {
+    return await createPaneWithWorktreeReuseLease(
+      {
+        ...options,
+        existingWorktree: {
+          ...options.existingWorktree,
+          worktreePath: reuseLease.canonicalWorktreePath,
+        },
+      },
+      availableAgents
+    );
+  } finally {
+    reuseLease.release();
+  }
+}
+
+async function createPaneWithWorktreeReuseLease(
+  options: CreatePaneOptions,
+  availableAgents: AgentName[]
+): Promise<CreatePaneResult> {
   const {
     prompt,
     existingPanes,
@@ -91,12 +117,6 @@ export async function createPane(
     sessionProjectRoot: optionsSessionProjectRoot,
   } = options;
   let { agent, projectRoot: optionsProjectRoot } = options;
-
-  if (existingWorktree) {
-    WorktreeCleanupService.getInstance().cancelCleanupForWorktree(
-      existingWorktree.worktreePath
-    );
-  }
 
   // Load settings to check for default agent and autopilot
   const { SettingsManager } = await import('./settingsManager.js');
@@ -586,7 +606,7 @@ export async function createPane(
       'paneCreation'
     );
     if (createdWorktreeRollbackJob) {
-      const rollbackResult = WorktreeCleanupService.getInstance().rollbackCreatedWorktree(
+      const rollbackResult = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree(
         createdWorktreeRollbackJob
       );
       if (!rollbackResult.success) {

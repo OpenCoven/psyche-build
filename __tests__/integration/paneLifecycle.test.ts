@@ -75,13 +75,13 @@ vi.mock('../../src/services/LogService.js', () => ({
 }));
 
 const mockEnqueueCleanup = vi.fn();
-const mockCancelCleanupForWorktree = vi.fn();
+const mockAcquireWorktreeReuseLease = vi.fn();
 const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       enqueueCleanup: mockEnqueueCleanup,
-      cancelCleanupForWorktree: mockCancelCleanupForWorktree,
+      acquireWorktreeReuseLease: mockAcquireWorktreeReuseLease,
       rollbackCreatedWorktree: mockRollbackCreatedWorktree,
     })),
   },
@@ -111,6 +111,10 @@ describe('Pane Lifecycle Integration Tests', () => {
     // Reset all mocks
     vi.clearAllMocks();
     mockEnqueueCleanup.mockReset();
+    mockAcquireWorktreeReuseLease.mockImplementation(async (worktreePath: string) => ({
+      canonicalWorktreePath: worktreePath,
+      release: vi.fn(),
+    }));
     mockRollbackCreatedWorktree.mockReturnValue({ success: true });
     mockTriggerHook.mockImplementation(() => Promise.resolve());
     mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
@@ -393,8 +397,12 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       createdWorktreePaths.add(existingWorktreePath);
       createdWorktreePaths.add(`${existingWorktreePath}/.git`);
-      mockCancelCleanupForWorktree.mockImplementation(() => {
+      mockAcquireWorktreeReuseLease.mockImplementation(async (worktreePath: string) => {
         cleanupCanceled = true;
+        return {
+          canonicalWorktreePath: worktreePath,
+          release: vi.fn(),
+        };
       });
       mockTriggerHook.mockImplementation((eventName) => {
         if (eventName === 'before_pane_create') {

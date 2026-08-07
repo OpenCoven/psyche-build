@@ -33,6 +33,7 @@ interface WorktreePruneJob {
   projectRoot: string;
   activePanes: PsychePane[];
   maxManagedWorktrees: number;
+  configPath?: string;
 }
 
 interface CommandResult {
@@ -46,10 +47,13 @@ interface GitTextResult extends CommandResult {
 
 interface WorktreeIdentity {
   repoPath: string;
-  worktreePath: string;
   canonicalWorktreePath: string;
   branchName: string;
   branchOid: string;
+}
+
+interface QueuedWorktreeIdentity extends WorktreeIdentity {
+  generation: number;
 }
 
 interface QueuedWorktreeCleanupJob {
@@ -62,7 +66,7 @@ interface QueuedWorktreeCleanupJob {
   currentProjectRoot: string;
   generation: number;
   deleteBranch: boolean;
-  worktreeTargets: WorktreeIdentity[];
+  worktreeTargets: QueuedWorktreeIdentity[];
   branchTargets: Array<Pick<WorktreeIdentity, 'repoPath' | 'branchName' | 'branchOid'>>;
 }
 
@@ -73,8 +77,13 @@ interface WorktreeRemovalTarget {
 }
 
 interface ManagedWorktreePruneTarget {
-  worktreePath: string;
+  canonicalWorktreePath: string;
   mtimeMs: number;
+}
+
+export interface WorktreeReuseLease {
+  canonicalWorktreePath: string;
+  release: () => void;
 }
 
 function canonicalizePathForCompare(value: string): string {
@@ -109,6 +118,7 @@ export class WorktreeCleanupService {
   private static instance: WorktreeCleanupService;
   private cleanupQueue: Promise<void> = Promise.resolve();
   private cleanupGenerations = new Map<string, number>();
+  private worktreeLockTails = new Map<string, Promise<void>>();
   private logger = LogService.getInstance();
 
   static getInstance(): WorktreeCleanupService {
@@ -116,6 +126,40 @@ export class WorktreeCleanupService {
       WorktreeCleanupService.instance = new WorktreeCleanupService();
     }
     return WorktreeCleanupService.instance;
+  }
+
+  async acquireWorktreeReuseLease(worktreePath: string): Promise<WorktreeReuseLease> {
+    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+    const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
+
+    try {
+      const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
+      if (!this.isReusableWorktree(canonicalWorktreePath)) {
+        throw new Error(
+          `Worktree is no longer available for reuse at ${canonicalWorktreePath}`
+        );
+      }
+
+      this.logger.debug(
+        `Canceled stale cleanup generation for ${canonicalWorktreePath} (generation ${generation})`,
+        'paneActions'
+      );
+
+      let released = false;
+      return {
+        canonicalWorktreePath,
+        release: () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          releaseLock();
+        },
+      };
+    } catch (error) {
+      releaseLock();
+      throw error;
+    }
   }
 
   enqueueCleanup(job: WorktreeCleanupJob): void {
@@ -143,92 +187,97 @@ export class WorktreeCleanupService {
       });
   }
 
-  cancelCleanupForWorktree(worktreePath: string): void {
+  async cancelCleanupForWorktree(worktreePath: string): Promise<void> {
     const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
-    const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
-    this.logger.debug(
-      `Canceled stale cleanup generation for ${canonicalWorktreePath} (generation ${generation})`,
-      'paneActions'
-    );
+    await this.withWorktreeLock(canonicalWorktreePath, async () => {
+      const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
+      this.logger.debug(
+        `Canceled stale cleanup generation for ${canonicalWorktreePath} (generation ${generation})`,
+        'paneActions'
+      );
+    });
   }
 
-  rollbackCreatedWorktree(job: CreatedWorktreeRollbackJob): WorktreeRollbackResult {
+  async rollbackCreatedWorktree(
+    job: CreatedWorktreeRollbackJob
+  ): Promise<WorktreeRollbackResult> {
     const canonicalWorktreePath = canonicalizePathForCompare(job.worktreePath);
-    const identity: WorktreeIdentity = {
-      repoPath: job.mainRepoPath,
-      worktreePath: job.worktreePath,
-      canonicalWorktreePath,
-      branchName: job.branchName,
-      branchOid: job.branchOid,
-    };
-
-    const mappedBranch = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-    if (!mappedBranch.success) {
-      return {
-        success: false,
-        error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
+    return this.withWorktreeLock(canonicalWorktreePath, async () => {
+      const identity: WorktreeIdentity = {
+        repoPath: job.mainRepoPath,
+        canonicalWorktreePath,
+        branchName: job.branchName,
+        branchOid: job.branchOid,
       };
-    }
-    if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
-      return {
-        success: false,
-        error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
-      };
-    }
 
-    const currentOid = this.getBranchOid(identity.repoPath, identity.branchName);
-    if (!currentOid.success || currentOid.output !== identity.branchOid) {
-      return {
-        success: false,
-        error: `newly created branch identity changed before rollback`,
-      };
-    }
+      const mappedBranch = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
+      if (!mappedBranch.success) {
+        return {
+          success: false,
+          error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
+        };
+      }
+      if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
+        return {
+          success: false,
+          error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
+        };
+      }
 
-    const removeResult = this.runGitTextSync(
-      ['worktree', 'remove', identity.worktreePath, '--force'],
-      identity.repoPath
-    );
-    if (!removeResult.success) {
-      return {
-        success: false,
-        error: `failed to remove newly created worktree: ${removeResult.error}`,
-      };
-    }
+      const currentOid = this.getBranchOid(identity.repoPath, identity.branchName);
+      if (!currentOid.success || currentOid.output !== identity.branchOid) {
+        return {
+          success: false,
+          error: 'newly created branch identity changed before rollback',
+        };
+      }
 
-    const afterRemoval = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-    if (!afterRemoval.success || afterRemoval.found) {
-      return {
-        success: false,
-        error: afterRemoval.success
-          ? 'newly created worktree removal could not be confirmed'
-          : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
-      };
-    }
+      const removeResult = this.runGitTextSync(
+        ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
+        identity.repoPath
+      );
+      if (!removeResult.success) {
+        return {
+          success: false,
+          error: `failed to remove newly created worktree: ${removeResult.error}`,
+        };
+      }
 
-    if (!job.deleteBranch) {
+      const afterRemoval = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
+      if (!afterRemoval.success || afterRemoval.found) {
+        return {
+          success: false,
+          error: afterRemoval.success
+            ? 'newly created worktree removal could not be confirmed'
+            : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
+        };
+      }
+
+      if (!job.deleteBranch) {
+        return { success: true };
+      }
+
+      const branchOidBeforeDelete = this.getBranchOid(identity.repoPath, identity.branchName);
+      if (!branchOidBeforeDelete.success || branchOidBeforeDelete.output !== identity.branchOid) {
+        return {
+          success: false,
+          error: 'newly created branch identity changed before rollback deletion',
+        };
+      }
+
+      const deleteResult = this.runGitTextSync(
+        ['branch', '-D', identity.branchName],
+        identity.repoPath
+      );
+      if (!deleteResult.success) {
+        return {
+          success: false,
+          error: `failed to delete newly created branch: ${deleteResult.error}`,
+        };
+      }
+
       return { success: true };
-    }
-
-    const branchOidBeforeDelete = this.getBranchOid(identity.repoPath, identity.branchName);
-    if (!branchOidBeforeDelete.success || branchOidBeforeDelete.output !== identity.branchOid) {
-      return {
-        success: false,
-        error: 'newly created branch identity changed before rollback deletion',
-      };
-    }
-
-    const deleteResult = this.runGitTextSync(
-      ['branch', '-D', identity.branchName],
-      identity.repoPath
-    );
-    if (!deleteResult.success) {
-      return {
-        success: false,
-        error: `failed to delete newly created branch: ${deleteResult.error}`,
-      };
-    }
-
-    return { success: true };
+    });
   }
 
   enqueuePruneManagedWorktrees(job: WorktreePruneJob): void {
@@ -256,90 +305,76 @@ export class WorktreeCleanupService {
       job.pane.id
     );
 
-    let allWorktreesRemoved = false;
-    if (
-      this.canRunDestructiveCleanup(job)
-      && this.haveUnchangedQueuedBranchOids(job)
-    ) {
-      allWorktreesRemoved = true;
-      for (const target of job.worktreeTargets) {
-        if (!this.canRunDestructiveCleanup(job, target)) {
-          allWorktreesRemoved = false;
-          continue;
+    const allWorktreesRemoved = await this.withWorktreeLock(
+      job.canonicalWorktreePath,
+      async () => {
+        if (
+          !this.canRunDestructiveCleanup(job)
+          || !this.haveUnchangedQueuedBranchOids(job)
+        ) {
+          return false;
         }
 
-        const removeResult = await this.runGitCommand(
-          ['worktree', 'remove', target.worktreePath, '--force'],
-          target.repoPath
-        );
+        for (const target of job.worktreeTargets) {
+          const removeTarget = () => this.removeValidatedWorktreeTarget(job, target);
+          const removed = target.canonicalWorktreePath === job.canonicalWorktreePath
+            ? await removeTarget()
+            : await this.withWorktreeLock(target.canonicalWorktreePath, removeTarget);
 
-        if (!removeResult.success) {
-          this.logger.warn(
-            `Worktree removal reported an error for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
-            'paneActions',
-            job.pane.id
-          );
-          allWorktreesRemoved = false;
-          continue;
+          // Nested worktree removal must succeed before the parent can be
+          // removed; otherwise a reused nested worktree could be deleted with
+          // its parent directory.
+          if (!removed) {
+            return false;
+          }
         }
 
-        const afterRemoval = this.getWorktreeBranch(
-          target.repoPath,
-          target.canonicalWorktreePath
-        );
-        if (!afterRemoval.success || afterRemoval.found) {
-          this.logger.warn(
-            afterRemoval.success
-              ? `Skipping branch deletion for ${job.pane.slug}: worktree removal was not confirmed for ${target.canonicalWorktreePath}`
-              : `Skipping branch deletion for ${job.pane.slug}: could not confirm worktree removal for ${target.canonicalWorktreePath}: ${afterRemoval.error}`,
-            'paneActions',
-            job.pane.id
-          );
-          allWorktreesRemoved = false;
-        }
+        return true;
       }
-    }
+    );
 
     // The hook should run after deletion is attempted, regardless of outcome.
     await triggerHook('worktree_removed', job.paneProjectRoot, job.pane);
 
     if (job.deleteBranch && allWorktreesRemoved) {
-      for (const target of job.branchTargets) {
-        if (!this.canRunDestructiveCleanup(job)) {
-          continue;
-        }
+      await this.withWorktreeLock(job.canonicalWorktreePath, async () => {
+        for (const target of job.branchTargets) {
+          if (!this.canRunDestructiveCleanup(job)) {
+            continue;
+          }
 
-        if (!this.areAllWorktreesRemoved(job)) {
-          this.logger.warn(
-            `Skipping branch deletion for ${job.pane.slug}: worktree removal is no longer confirmed`,
-            'paneActions',
-            job.pane.id
-          );
-          break;
-        }
+          if (!this.areAllWorktreesRemoved(job)) {
+            this.logger.warn(
+              `Skipping branch deletion for ${job.pane.slug}: worktree removal is no longer confirmed`,
+              'paneActions',
+              job.pane.id
+            );
+            break;
+          }
 
-        const currentOid = this.getBranchOid(target.repoPath, target.branchName);
-        if (!currentOid.success || currentOid.output !== target.branchOid) {
-          this.logger.warn(
-            `Skipping branch deletion for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
-            'paneActions',
-            job.pane.id
-          );
-          continue;
-        }
+          const currentOid = this.getBranchOid(target.repoPath, target.branchName);
+          if (!currentOid.success || currentOid.output !== target.branchOid) {
+            this.logger.warn(
+              `Skipping branch deletion for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
+              'paneActions',
+              job.pane.id
+            );
+            continue;
+          }
 
-        const deleteBranchResult = await this.runGitCommand(
-          ['branch', '-D', target.branchName],
-          target.repoPath
-        );
-        if (!deleteBranchResult.success) {
-          this.logger.warn(
-            `Branch deletion reported an error for ${job.pane.slug} in ${target.repoPath}: ${deleteBranchResult.error}`,
-            'paneActions',
-            job.pane.id
+          const deleteBranchResult = await this.runGitCommand(
+            ['branch', '-D', target.branchName],
+            target.repoPath
           );
+          if (!deleteBranchResult.success) {
+            this.logger.warn(
+              `Branch deletion reported an error for ${job.pane.slug} in ${target.repoPath}: ${deleteBranchResult.error}`,
+              'paneActions',
+              job.pane.id
+            );
+          }
         }
-      }
+      });
     }
 
     this.logger.debug(
@@ -353,6 +388,59 @@ export class WorktreeCleanupService {
     const generation = (this.cleanupGenerations.get(canonicalWorktreePath) || 0) + 1;
     this.cleanupGenerations.set(canonicalWorktreePath, generation);
     return generation;
+  }
+
+  private getCleanupGeneration(canonicalWorktreePath: string): number {
+    return this.cleanupGenerations.get(canonicalWorktreePath) || 0;
+  }
+
+  private async withWorktreeLock<T>(
+    canonicalWorktreePath: string,
+    operation: () => Promise<T> | T
+  ): Promise<T> {
+    const release = await this.acquireWorktreeLock(canonicalWorktreePath);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async acquireWorktreeLock(
+    canonicalWorktreePath: string
+  ): Promise<() => void> {
+    const previousTail = this.worktreeLockTails.get(canonicalWorktreePath)
+      || Promise.resolve();
+    let resolveCurrentTail!: () => void;
+    const currentTail = new Promise<void>((resolve) => {
+      resolveCurrentTail = resolve;
+    });
+    const queueTail = previousTail.then(() => currentTail);
+    this.worktreeLockTails.set(canonicalWorktreePath, queueTail);
+    await previousTail;
+
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      resolveCurrentTail();
+      if (this.worktreeLockTails.get(canonicalWorktreePath) === queueTail) {
+        this.worktreeLockTails.delete(canonicalWorktreePath);
+      }
+    };
+  }
+
+  private isReusableWorktree(canonicalWorktreePath: string): boolean {
+    try {
+      return (
+        statSync(canonicalWorktreePath).isDirectory()
+        && existsSync(path.join(canonicalWorktreePath, '.git'))
+      );
+    } catch {
+      return false;
+    }
   }
 
   private captureCleanupJob(
@@ -374,7 +462,7 @@ export class WorktreeCleanupService {
 
     const branchName = getPaneBranchName(job.pane);
     const worktreeTargets = this.getWorktreeRemovalTargets(job.pane, job.mainRepoPath);
-    const identities: WorktreeIdentity[] = [];
+    const identities: QueuedWorktreeIdentity[] = [];
 
     for (const target of worktreeTargets) {
       const canonicalTargetPath = canonicalizePathForCompare(target.worktreePath);
@@ -400,12 +488,15 @@ export class WorktreeCleanupService {
         return null;
       }
 
+      const targetGeneration = canonicalTargetPath === canonicalWorktreePath
+        ? generation
+        : this.incrementCleanupGeneration(canonicalTargetPath);
       identities.push({
         repoPath: target.repoPath,
-        worktreePath: target.worktreePath,
         canonicalWorktreePath: canonicalTargetPath,
         branchName,
         branchOid: branchOid.output,
+        generation: targetGeneration,
       });
     }
 
@@ -444,7 +535,7 @@ export class WorktreeCleanupService {
 
   private canRunDestructiveCleanup(
     job: QueuedWorktreeCleanupJob,
-    target?: WorktreeIdentity
+    target?: QueuedWorktreeIdentity
   ): boolean {
     if (this.cleanupGenerations.get(job.canonicalWorktreePath) !== job.generation) {
       this.logger.warn(
@@ -455,12 +546,21 @@ export class WorktreeCleanupService {
       return false;
     }
 
-    if (!this.configAllowsCleanup(job)) {
+    if (!this.configAllowsCleanup(job, target)) {
       return false;
     }
 
     if (!target) {
       return true;
+    }
+
+    if (this.getCleanupGeneration(target.canonicalWorktreePath) !== target.generation) {
+      this.logger.warn(
+        `Skipping worktree removal for ${job.pane.slug}: cleanup was canceled or superseded`,
+        'paneActions',
+        job.pane.id
+      );
+      return false;
     }
 
     const mappedBranch = this.getWorktreeBranch(target.repoPath, target.canonicalWorktreePath);
@@ -488,6 +588,46 @@ export class WorktreeCleanupService {
     return true;
   }
 
+  private async removeValidatedWorktreeTarget(
+    job: QueuedWorktreeCleanupJob,
+    target: QueuedWorktreeIdentity
+  ): Promise<boolean> {
+    if (!this.canRunDestructiveCleanup(job, target)) {
+      return false;
+    }
+
+    const removeResult = await this.runGitCommand(
+      ['worktree', 'remove', target.canonicalWorktreePath, '--force'],
+      target.repoPath
+    );
+
+    if (!removeResult.success) {
+      this.logger.warn(
+        `Worktree removal reported an error for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
+        'paneActions',
+        job.pane.id
+      );
+      return false;
+    }
+
+    const afterRemoval = this.getWorktreeBranch(
+      target.repoPath,
+      target.canonicalWorktreePath
+    );
+    if (!afterRemoval.success || afterRemoval.found) {
+      this.logger.warn(
+        afterRemoval.success
+          ? `Skipping branch deletion for ${job.pane.slug}: worktree removal was not confirmed for ${target.canonicalWorktreePath}`
+          : `Skipping branch deletion for ${job.pane.slug}: could not confirm worktree removal for ${target.canonicalWorktreePath}: ${afterRemoval.error}`,
+        'paneActions',
+        job.pane.id
+      );
+      return false;
+    }
+
+    return true;
+  }
+
   private haveUnchangedQueuedBranchOids(job: QueuedWorktreeCleanupJob): boolean {
     for (const target of job.worktreeTargets) {
       const currentOid = this.getBranchOid(target.repoPath, target.branchName);
@@ -504,7 +644,10 @@ export class WorktreeCleanupService {
     return true;
   }
 
-  private configAllowsCleanup(job: QueuedWorktreeCleanupJob): boolean {
+  private configAllowsCleanup(
+    job: QueuedWorktreeCleanupJob,
+    target?: QueuedWorktreeIdentity
+  ): boolean {
     let config: PsycheConfig;
     try {
       config = JSON.parse(readFileSync(job.configPath, 'utf-8')) as PsycheConfig;
@@ -539,12 +682,13 @@ export class WorktreeCleanupService {
       return false;
     }
 
+    const protectedWorktreePath = target?.canonicalWorktreePath || job.canonicalWorktreePath;
     if (config.panes.some((pane) => (
       typeof pane.worktreePath === 'string'
-      && canonicalizePathForCompare(pane.worktreePath) === job.canonicalWorktreePath
+      && pathsOverlap(pane.worktreePath, protectedWorktreePath)
     ))) {
       this.logger.warn(
-        `Skipping background worktree cleanup for ${job.pane.slug}: current config still references ${job.canonicalWorktreePath}`,
+        `Skipping background worktree cleanup for ${job.pane.slug}: current config still references ${protectedWorktreePath}`,
         'paneActions',
         job.pane.id
       );
@@ -643,9 +787,10 @@ export class WorktreeCleanupService {
 
     const targets = new Map<string, WorktreeRemovalTarget>();
     const addTarget = (repoPath: string, worktreePath: string, depth: number) => {
-      targets.set(`${repoPath}::${worktreePath}`, {
+      const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+      targets.set(`${repoPath}::${canonicalWorktreePath}`, {
         repoPath,
-        worktreePath,
+        worktreePath: canonicalWorktreePath,
         depth,
       });
     };
@@ -688,18 +833,76 @@ export class WorktreeCleanupService {
     );
 
     for (const target of targets) {
-      const removeResult = await this.runGitCommand(
-        ['worktree', 'remove', target.worktreePath],
-        job.projectRoot
-      );
+      const expectedGeneration = this.getCleanupGeneration(target.canonicalWorktreePath);
+      await this.withWorktreeLock(target.canonicalWorktreePath, async () => {
+        if (
+          this.getCleanupGeneration(target.canonicalWorktreePath)
+          !== expectedGeneration
+        ) {
+          this.logger.debug(
+            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
+            'paneActions'
+          );
+          return;
+        }
 
-      if (!removeResult.success) {
-        this.logger.warn(
-          `Managed worktree pruning skipped ${target.worktreePath}: ${removeResult.error}`,
-          'paneActions'
+        if (!this.configAllowsManagedPrune(job, target.canonicalWorktreePath)) {
+          return;
+        }
+
+        const removeResult = await this.runGitCommand(
+          ['worktree', 'remove', target.canonicalWorktreePath],
+          job.projectRoot
         );
-      }
+
+        if (!removeResult.success) {
+          this.logger.warn(
+            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${removeResult.error}`,
+            'paneActions'
+          );
+        }
+      });
     }
+  }
+
+  private configAllowsManagedPrune(
+    job: WorktreePruneJob,
+    canonicalWorktreePath: string
+  ): boolean {
+    const configPath = job.configPath
+      || path.join(job.projectRoot, '.psyche', 'psyche.config.json');
+    let config: PsycheConfig;
+    try {
+      config = JSON.parse(readFileSync(configPath, 'utf-8')) as PsycheConfig;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Managed worktree pruning skipped ${canonicalWorktreePath}: could not read current config ${configPath}: ${errorMessage}`,
+        'paneActions'
+      );
+      return false;
+    }
+
+    if (!Array.isArray(config.panes)) {
+      this.logger.warn(
+        `Managed worktree pruning skipped ${canonicalWorktreePath}: current config has no pane list`,
+        'paneActions'
+      );
+      return false;
+    }
+
+    if (config.panes.some((pane) => (
+      typeof pane.worktreePath === 'string'
+      && pathsOverlap(pane.worktreePath, canonicalWorktreePath)
+    ))) {
+      this.logger.debug(
+        `Managed worktree pruning skipped ${canonicalWorktreePath}: current config still references it`,
+        'paneActions'
+      );
+      return false;
+    }
+
+    return true;
   }
 
   private getManagedWorktreePruneTargets(job: WorktreePruneJob): ManagedWorktreePruneTarget[] {
@@ -726,7 +929,7 @@ export class WorktreeCleanupService {
       const worktreePath = path.join(managedRoot, entry.name);
       const stats = statSync(worktreePath);
       managedWorktrees.push({
-        worktreePath,
+        canonicalWorktreePath: canonicalizePathForCompare(worktreePath),
         mtimeMs: stats.mtimeMs,
       });
     }
@@ -736,7 +939,9 @@ export class WorktreeCleanupService {
     }
 
     const activeManagedCount = managedWorktrees.filter((worktree) =>
-      activeWorktreePaths.some((activePath) => pathsOverlap(worktree.worktreePath, activePath))
+      activeWorktreePaths.some((activePath) =>
+        pathsOverlap(worktree.canonicalWorktreePath, activePath)
+      )
     ).length;
 
     if (activeManagedCount >= job.maxManagedWorktrees) {
@@ -747,14 +952,16 @@ export class WorktreeCleanupService {
 
     return managedWorktrees
       .filter((worktree) =>
-        !activeWorktreePaths.some((activePath) => pathsOverlap(worktree.worktreePath, activePath))
+        !activeWorktreePaths.some((activePath) =>
+          pathsOverlap(worktree.canonicalWorktreePath, activePath)
+        )
       )
       .sort((left, right) => {
         if (left.mtimeMs !== right.mtimeMs) {
           return left.mtimeMs - right.mtimeMs;
         }
 
-        return left.worktreePath.localeCompare(right.worktreePath);
+        return left.canonicalWorktreePath.localeCompare(right.canonicalWorktreePath);
       })
       .slice(0, pruneCount);
   }
