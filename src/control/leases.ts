@@ -50,6 +50,7 @@ export class LaneLeaseStore {
       expiresAt: new Date(this.clock().getTime() + ttlMs).toISOString(),
       ...(taskId ? { taskId } : {}),
     };
+    Object.freeze(lease);
     this.leases.set(paneId, lease);
     return lease;
   }
