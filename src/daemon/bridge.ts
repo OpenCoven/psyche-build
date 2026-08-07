@@ -21,6 +21,7 @@ import {
 } from '../utils/agentLaunch.js';
 import { sendPromptViaTmux } from '../utils/agentPromptDispatch.js';
 import { TmuxService } from '../services/TmuxService.js';
+import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import type { PsycheConfig } from '../types.js';
 import {
@@ -985,7 +986,13 @@ export async function spawnBridgePane(
   // otherwise leak one plus its branch. Roll them back rather than leaving
   // orphans behind for the user to find later.
   try {
-    return await finishSpawn();
+    if (attaching) {
+      return await WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+        worktreePath,
+        async (canonicalWorktreePath) => finishSpawn(canonicalWorktreePath),
+      );
+    }
+    return await finishSpawn(worktreePath);
   } catch (error) {
     // Only ever roll back a worktree THIS call created. A shared worktree is
     // in use by other panes; deleting it here would destroy their work.
@@ -997,9 +1004,9 @@ export async function spawnBridgePane(
     throw error;
   }
 
-  async function finishSpawn(): Promise<BridgeSpawnResult> {
+  async function finishSpawn(paneWorktreePath: string): Promise<BridgeSpawnResult> {
   const title = request.title || slug;
-  const paneId = deps.createTmuxPane(sessionName, worktreePath, title);
+  const paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
   const now = new Date().toISOString();
   const pane: RawConfigPane = {
     id: nextBridgePaneId(),
@@ -1011,7 +1018,7 @@ export async function spawnBridgePane(
     projectRoot: scoped.projectRoot,
     projectName: path.basename(scoped.projectRoot),
     type: 'worktree',
-    worktreePath,
+    worktreePath: paneWorktreePath,
     branchName: branch,
     branch,
     agent,
@@ -1045,7 +1052,7 @@ export async function spawnBridgePane(
   return {
     id: paneId,
     pane: rawPaneToSummary(pane, scoped.projectRoot),
-    worktreePath,
+    worktreePath: paneWorktreePath,
     branch,
   };
   }

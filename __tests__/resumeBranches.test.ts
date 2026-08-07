@@ -381,6 +381,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     const rootWorktreePath = path.join(rootRepo, '.psyche', 'worktrees', 'remote-shared');
@@ -536,6 +537,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     const rootWorktreePath = path.join(rootRepo, '.psyche', 'worktrees', 'react');
@@ -660,6 +662,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     expect(createdPaths).toEqual([]);

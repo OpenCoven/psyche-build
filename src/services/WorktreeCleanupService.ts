@@ -80,6 +80,7 @@ interface ManagedWorktreePruneTarget {
   canonicalWorktreePath: string;
   mtimeMs: number;
   expectedGeneration: number;
+  blockedByActiveReuseReservation: boolean;
 }
 
 interface ManagedWorktreePruneCandidate {
@@ -87,9 +88,10 @@ interface ManagedWorktreePruneCandidate {
   mtimeMs: number;
 }
 
-export interface WorktreeReuseLease {
+export interface WorktreeReuseReservation {
   canonicalWorktreePath: string;
-  release: () => void;
+  complete: () => void;
+  cancel: () => void;
 }
 
 function canonicalizePathForCompare(value: string): string {
@@ -125,6 +127,7 @@ export class WorktreeCleanupService {
   private cleanupQueue: Promise<void> = Promise.resolve();
   private cleanupGenerations = new Map<string, number>();
   private worktreeLockTails = new Map<string, Promise<void>>();
+  private activeReuseReservations = new Map<string, number>();
   private logger = LogService.getInstance();
 
   static getInstance(): WorktreeCleanupService {
@@ -134,7 +137,28 @@ export class WorktreeCleanupService {
     return WorktreeCleanupService.instance;
   }
 
-  async acquireWorktreeReuseLease(worktreePath: string): Promise<WorktreeReuseLease> {
+  async withWorktreeReuseReservation<T>(
+    worktreePath: string,
+    operation: (canonicalWorktreePath: string) => Promise<T> | T
+  ): Promise<T> {
+    const reservation = await this.beginWorktreeReuseReservation(worktreePath);
+    let completed = false;
+
+    try {
+      const result = await operation(reservation.canonicalWorktreePath);
+      reservation.complete();
+      completed = true;
+      return result;
+    } finally {
+      if (!completed) {
+        reservation.cancel();
+      }
+    }
+  }
+
+  async beginWorktreeReuseReservation(
+    worktreePath: string
+  ): Promise<WorktreeReuseReservation> {
     const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
 
@@ -145,22 +169,31 @@ export class WorktreeCleanupService {
           `Worktree is no longer available for reuse at ${canonicalWorktreePath}`
         );
       }
+      this.addActiveReuseReservation(canonicalWorktreePath);
 
       this.logger.debug(
-        `Canceled stale cleanup generation for ${canonicalWorktreePath} (generation ${generation})`,
+        `Reserved ${canonicalWorktreePath} for reuse (generation ${generation})`,
         'paneActions'
       );
 
-      let released = false;
+      let settled = false;
+      const settle = (outcome: 'completed' | 'canceled') => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.removeActiveReuseReservation(canonicalWorktreePath);
+        releaseLock();
+        this.logger.debug(
+          `Reuse reservation ${outcome} for ${canonicalWorktreePath}`,
+          'paneActions'
+        );
+      };
+
       return {
         canonicalWorktreePath,
-        release: () => {
-          if (released) {
-            return;
-          }
-          released = true;
-          releaseLock();
-        },
+        complete: () => settle('completed'),
+        cancel: () => settle('canceled'),
       };
     } catch (error) {
       releaseLock();
@@ -175,6 +208,15 @@ export class WorktreeCleanupService {
 
     const canonicalWorktreePath = canonicalizePathForCompare(job.pane.worktreePath);
     const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
+    if (this.isWorktreeReuseReserved(canonicalWorktreePath)) {
+      this.logger.warn(
+        `Skipping background worktree cleanup for ${job.pane.slug}: worktree is actively reserved for reuse`,
+        'paneActions',
+        job.pane.id
+      );
+      return;
+    }
+
     const queuedJob = this.captureCleanupJob(job, canonicalWorktreePath, generation);
     if (!queuedJob) {
       return;
@@ -413,6 +455,31 @@ export class WorktreeCleanupService {
     return generation;
   }
 
+  private addActiveReuseReservation(canonicalWorktreePath: string): void {
+    this.activeReuseReservations.set(
+      canonicalWorktreePath,
+      (this.activeReuseReservations.get(canonicalWorktreePath) || 0) + 1
+    );
+  }
+
+  private removeActiveReuseReservation(canonicalWorktreePath: string): void {
+    const count = this.activeReuseReservations.get(canonicalWorktreePath) || 0;
+    if (count <= 1) {
+      this.activeReuseReservations.delete(canonicalWorktreePath);
+      return;
+    }
+    this.activeReuseReservations.set(canonicalWorktreePath, count - 1);
+  }
+
+  private isWorktreeReuseReserved(canonicalWorktreePath: string): boolean {
+    for (const [reservedPath, count] of this.activeReuseReservations) {
+      if (count > 0 && pathsOverlap(reservedPath, canonicalWorktreePath)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private getCleanupGeneration(canonicalWorktreePath: string): number {
     return this.cleanupGenerations.get(canonicalWorktreePath) || 0;
   }
@@ -560,6 +627,16 @@ export class WorktreeCleanupService {
     job: QueuedWorktreeCleanupJob,
     target?: QueuedWorktreeIdentity
   ): boolean {
+    const protectedWorktreePath = target?.canonicalWorktreePath || job.canonicalWorktreePath;
+    if (this.isWorktreeReuseReserved(protectedWorktreePath)) {
+      this.logger.warn(
+        `Skipping background worktree cleanup for ${job.pane.slug}: ${protectedWorktreePath} is actively reserved for reuse`,
+        'paneActions',
+        job.pane.id
+      );
+      return false;
+    }
+
     if (this.cleanupGenerations.get(job.canonicalWorktreePath) !== job.generation) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: cleanup was canceled or superseded`,
@@ -858,6 +935,17 @@ export class WorktreeCleanupService {
     for (const target of targets) {
       await this.withWorktreeLock(target.canonicalWorktreePath, async () => {
         if (
+          target.blockedByActiveReuseReservation
+          || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
+        ) {
+          this.logger.debug(
+            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: worktree is actively reserved for reuse`,
+            'paneActions'
+          );
+          return;
+        }
+
+        if (
           this.getCleanupGeneration(target.canonicalWorktreePath)
           !== target.expectedGeneration
         ) {
@@ -991,6 +1079,9 @@ export class WorktreeCleanupService {
       .map((target) => ({
         ...target,
         expectedGeneration: this.getCleanupGeneration(target.canonicalWorktreePath),
+        blockedByActiveReuseReservation: this.isWorktreeReuseReserved(
+          target.canonicalWorktreePath
+        ),
       }));
   }
 

@@ -133,6 +133,63 @@ describe('openInEditor', () => {
   });
 });
 
+describe('createNewPane', () => {
+  it('persists an existing-worktree pane through createPane before returning', async () => {
+    const reusedPane = {
+      ...pane('reused'),
+      worktreePath: `${ROOT}/.psyche/worktrees/reused`,
+    };
+    createPaneMock.mockImplementation(async (options: any) => {
+      await options.persistReusedPane(reusedPane);
+      return { pane: reusedPane, needsAgentChoice: false };
+    });
+    const h = harness();
+
+    const created = await h.api.createNewPane('Resume work', 'claude', {
+      existingWorktree: {
+        slug: 'reused',
+        worktreePath: reusedPane.worktreePath,
+        branchName: 'feature/reused',
+      },
+    });
+
+    expect(created).toBe(reusedPane);
+    expect(createPaneMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        existingWorktree: expect.objectContaining({
+          worktreePath: reusedPane.worktreePath,
+        }),
+        persistReusedPane: expect.any(Function),
+      }),
+      expect.any(Array)
+    );
+    expect(h.savePanes).toHaveBeenCalledTimes(1);
+    expect(h.savePanes).toHaveBeenCalledWith([reusedPane]);
+  });
+
+  it('does not persist a reused pane again after its reservation callback saved it', async () => {
+    const reusedPane = {
+      ...pane('reused'),
+      worktreePath: `${ROOT}/.psyche/worktrees/reused`,
+    };
+    createPaneMock.mockImplementation(async (options: any) => {
+      await options.persistReusedPane(reusedPane);
+      return { pane: reusedPane, needsAgentChoice: false };
+    });
+    const h = harness();
+
+    await h.api.createNewPane('Resume work', 'claude', {
+      existingWorktree: {
+        slug: 'reused',
+        worktreePath: reusedPane.worktreePath,
+        branchName: 'feature/reused',
+      },
+    });
+
+    expect(h.savePanes).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('createPanesForAgents', () => {
   it('creates one pane per selected agent', async () => {
     let n = 0;

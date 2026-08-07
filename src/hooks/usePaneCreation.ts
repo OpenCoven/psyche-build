@@ -3,7 +3,7 @@ import * as os from 'os';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import type { PsychePane, MergeTargetReference } from '../types.js';
-import { createPane } from '../utils/paneCreation.js';
+import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 import { type AgentName } from '../utils/agentLaunch.js';
@@ -27,6 +27,7 @@ interface Params {
 
 interface CreateNewPaneOptions {
   existingPanes?: PsychePane[];
+  existingWorktree?: CreatePaneOptions['existingWorktree'];
   slugSuffix?: string;
   slugBase?: string;
   targetProjectRoot?: string;
@@ -172,7 +173,7 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<PsychePane> => {
+  ): Promise<{ pane: PsychePane; persistedDuringReuse: boolean }> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -182,12 +183,16 @@ export default function usePaneCreation({
         existingPanes: panesForCreation,
         slugSuffix: options.slugSuffix,
         slugBase: options.slugBase,
+        existingWorktree: options.existingWorktree,
         projectRoot: options.targetProjectRoot,
         skipAgentSelection: options.skipAgentSelection,
         startPointBranch: options.startPointBranch,
         mergeTargetChain: options.mergeTargetChain,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
+        persistReusedPane: async (pane) => {
+          await savePanes([...panesForCreation, pane]);
+        },
       },
       availableAgents
     );
@@ -196,7 +201,10 @@ export default function usePaneCreation({
       throw new Error('Agent choice is required');
     }
 
-    return result.pane;
+    return {
+      pane: result.pane,
+      persistedDuringReuse: Boolean(options.existingWorktree),
+    };
   };
 
   const createNewPane = async (
@@ -210,11 +218,13 @@ export default function usePaneCreation({
       setIsCreatingPane(true)
       setStatusMessage("Creating pane...")
 
-      const pane = await createPaneInternal(prompt, agent, options);
+      const { pane, persistedDuringReuse } = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
-      await savePanes(updatedPanes);
+      if (!persistedDuringReuse) {
+        await savePanes(updatedPanes);
+      }
       enqueueManagedWorktreePruning(
         [pane.projectRoot || sessionProjectRoot],
         updatedPanes,
@@ -277,6 +287,9 @@ export default function usePaneCreation({
         basePanes: panesForCreation,
         availableAgents,
         slugBase,
+        persistReusedPane: async (_pane, panesToPersist) => {
+          await savePanes(panesToPersist);
+        },
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
 

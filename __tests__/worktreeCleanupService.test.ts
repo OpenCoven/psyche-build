@@ -332,7 +332,7 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
-  it('lets a reuse lease cancel cleanup before removal launches', async () => {
+  it('lets a reuse reservation cancel cleanup before removal launches', async () => {
     const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
     tempDirs.push(cleanupRoot);
     const worktreePath = createReusableWorktree(cleanupRoot, 'reopen-me');
@@ -353,14 +353,110 @@ describe('WorktreeCleanupService', () => {
       currentProjectRoot: '/test/project',
       deleteBranch: true,
     });
-    const lease = await service.acquireWorktreeReuseLease(worktreePath);
-    lease.release();
+    const reservation = await service.beginWorktreeReuseReservation(worktreePath);
+    reservation.cancel();
     await service.cleanupQueue;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
       expect.arrayContaining(['worktree', 'remove']),
       expect.anything()
+    );
+  });
+
+  it('keeps cleanup queued during a reuse reservation invalid after pane persistence', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'reopen-me');
+    configureCleanupIdentity(worktreePath);
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    let continuePersistence!: () => void;
+    let signalBeforePersistence!: () => void;
+    const beforePersistence = new Promise<void>((resolve) => {
+      signalBeforePersistence = resolve;
+    });
+    const persistence = new Promise<void>((resolve) => {
+      continuePersistence = resolve;
+    });
+
+    const reuse = service.withWorktreeReuseReservation(
+      worktreePath,
+      async (canonicalWorktreePath: string) => {
+        service.enqueueCleanup({
+          pane: {
+            ...createCleanupPane(),
+            worktreePath: canonicalWorktreePath,
+          },
+          paneProjectRoot: '/test/project',
+          mainRepoPath: '/test/project',
+          configPath: '/test/project/.psyche/psyche.config.json',
+          currentProjectRoot: '/test/project',
+          deleteBranch: true,
+        });
+        signalBeforePersistence();
+        await persistence;
+      }
+    );
+
+    await beforePersistence;
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['worktree', 'remove']),
+      expect.anything()
+    );
+
+    continuePersistence();
+    await reuse;
+    await service.cleanupQueue;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['worktree', 'remove']),
+      expect.anything()
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('actively reserved for reuse'),
+      'paneActions',
+      'psyche-1'
+    );
+  });
+
+  it('releases a failed reuse reservation so a later cleanup can remove an inactive worktree', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'save-failed');
+    configureCleanupIdentity(worktreePath);
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    await expect(
+      service.withWorktreeReuseReservation(worktreePath, async () => {
+        throw new Error('pane save failed');
+      })
+    ).rejects.toThrow('pane save failed');
+
+    service.enqueueCleanup({
+      pane: {
+        ...createCleanupPane(),
+        worktreePath,
+      },
+      paneProjectRoot: '/test/project',
+      mainRepoPath: '/test/project',
+      configPath: '/test/project/.psyche/psyche.config.json',
+      currentProjectRoot: '/test/project',
+      deleteBranch: true,
+    });
+    await service.cleanupQueue;
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', worktreePath, '--force'],
+      expect.objectContaining({ cwd: '/test/project' })
     );
   });
 
@@ -403,7 +499,7 @@ describe('WorktreeCleanupService', () => {
     });
     await removalLaunched;
 
-    const reusePromise = service.acquireWorktreeReuseLease(worktreePath);
+    const reusePromise = service.beginWorktreeReuseReservation(worktreePath);
     let reuseSettled = false;
     void reusePromise.then(
       () => {
@@ -723,8 +819,6 @@ describe('WorktreeCleanupService', () => {
     const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
     (WorktreeCleanupService as any).instance = undefined;
     const service = WorktreeCleanupService.getInstance() as any;
-    const blockingLease = await service.acquireWorktreeReuseLease(older);
-
     const prunePromise = service.runPruneManagedWorktrees({
       projectRoot,
       activePanes: [],
@@ -740,7 +834,6 @@ describe('WorktreeCleanupService', () => {
         worktreePath: older,
       },
     ];
-    blockingLease.release();
     await prunePromise;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -765,18 +858,20 @@ describe('WorktreeCleanupService', () => {
     const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
     (WorktreeCleanupService as any).instance = undefined;
     const service = WorktreeCleanupService.getInstance() as any;
-    const blockingLease = await service.acquireWorktreeReuseLease(older);
-    const reopenLeasePromise = service.acquireWorktreeReuseLease(older);
-    const prunePromise = service.runPruneManagedWorktrees({
+    const pruneJob = {
       projectRoot,
       activePanes: [],
       configPath: join(projectRoot, '.psyche', 'psyche.config.json'),
       maxManagedWorktrees: 1,
-    });
+    };
+    const pruneTargets = service.getManagedWorktreePruneTargets(pruneJob);
+    const blockingReservation = await service.beginWorktreeReuseReservation(older);
+    const reopenReservationPromise = service.beginWorktreeReuseReservation(older);
+    const prunePromise = service.runPruneManagedWorktrees(pruneJob, pruneTargets);
 
-    blockingLease.release();
-    const reopenLease = await reopenLeasePromise;
-    reopenLease.release();
+    blockingReservation.cancel();
+    const reopenReservation = await reopenReservationPromise;
+    reopenReservation.cancel();
     await prunePromise;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -809,9 +904,9 @@ describe('WorktreeCleanupService', () => {
       maxManagedWorktrees: 1,
     });
     const prunePromise = service.cleanupQueue;
-    const reuseLease = await service.acquireWorktreeReuseLease(older);
+    const reuseReservation = await service.beginWorktreeReuseReservation(older);
 
-    reuseLease.release();
+    reuseReservation.cancel();
     await prunePromise;
 
     expect(spawnMock).not.toHaveBeenCalledWith(
@@ -821,6 +916,59 @@ describe('WorktreeCleanupService', () => {
     );
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('cleanup generation changed'),
+      'paneActions'
+    );
+  });
+
+  it('keeps a prune queued during a reuse reservation invalid after pane persistence', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-prune-'));
+    tempDirs.push(projectRoot);
+    const older = createManagedWorktree(projectRoot, 'older', new Date('2026-01-01T00:00:00Z'));
+    createManagedWorktree(projectRoot, 'newer', new Date('2026-01-02T00:00:00Z'));
+    mkdirSync(join(older, '.git'));
+    utimesSync(older, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    let continuePersistence!: () => void;
+    let signalBeforePersistence!: () => void;
+    const beforePersistence = new Promise<void>((resolve) => {
+      signalBeforePersistence = resolve;
+    });
+    const persistence = new Promise<void>((resolve) => {
+      continuePersistence = resolve;
+    });
+
+    const reuse = service.withWorktreeReuseReservation(older, async () => {
+      service.enqueuePruneManagedWorktrees({
+        projectRoot,
+        activePanes: [],
+        configPath: join(projectRoot, '.psyche', 'psyche.config.json'),
+        maxManagedWorktrees: 1,
+      });
+      signalBeforePersistence();
+      await persistence;
+    });
+
+    await beforePersistence;
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', older],
+      expect.anything()
+    );
+
+    continuePersistence();
+    await reuse;
+    await service.cleanupQueue;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', older],
+      expect.anything()
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('actively reserved for reuse'),
       'paneActions'
     );
   });

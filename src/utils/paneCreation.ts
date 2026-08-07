@@ -41,6 +41,7 @@ export interface CreatePaneOptions {
     worktreePath: string;
     branchName: string;
   };
+  persistReusedPane?: (pane: PsychePane) => Promise<void>;
   startPointBranch?: string;
   mergeTargetChain?: MergeTargetReference[];
   projectName: string;
@@ -79,28 +80,41 @@ export async function createPane(
   availableAgents: AgentName[]
 ): Promise<CreatePaneResult> {
   if (!options.existingWorktree) {
-    return createPaneWithWorktreeReuseLease(options, availableAgents);
+    return createPaneWithReuseReservation(options, availableAgents);
   }
 
-  const reuseLease = await WorktreeCleanupService.getInstance()
-    .acquireWorktreeReuseLease(options.existingWorktree.worktreePath);
-  try {
-    return await createPaneWithWorktreeReuseLease(
-      {
-        ...options,
-        existingWorktree: {
-          ...options.existingWorktree,
-          worktreePath: reuseLease.canonicalWorktreePath,
-        },
-      },
-      availableAgents
+  if (!options.persistReusedPane) {
+    throw new Error(
+      'Reusing an existing worktree requires persistReusedPane so cleanup remains blocked through pane persistence'
     );
-  } finally {
-    reuseLease.release();
   }
+
+  const existingWorktree = options.existingWorktree;
+  const persistReusedPane = options.persistReusedPane;
+  return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+    existingWorktree.worktreePath,
+    async (canonicalWorktreePath) => {
+      const result = await createPaneWithReuseReservation(
+        {
+          ...options,
+          existingWorktree: {
+            ...existingWorktree,
+            worktreePath: canonicalWorktreePath,
+          },
+        },
+        availableAgents
+      );
+
+      if (!result.needsAgentChoice && result.pane) {
+        await persistReusedPane(result.pane);
+      }
+
+      return result;
+    }
+  );
 }
 
-async function createPaneWithWorktreeReuseLease(
+async function createPaneWithReuseReservation(
   options: CreatePaneOptions,
   availableAgents: AgentName[]
 ): Promise<CreatePaneResult> {

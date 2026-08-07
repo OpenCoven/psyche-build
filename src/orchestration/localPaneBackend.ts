@@ -13,6 +13,10 @@ export interface LocalPaneBackendOptions {
   basePanes: readonly PsychePane[];
   availableAgents: AgentName[];
   /**
+   * Persists a reused worktree pane while its cleanup reservation remains active.
+   */
+  persistReusedPane?: (pane: PsychePane, panes: PsychePane[]) => Promise<void>;
+  /**
    * Shared slug stem for multi-lane tasks, so sibling lanes read as variants
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
    */
@@ -59,6 +63,7 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     }
 
     const isTerminal = lane.mode === 'terminal';
+    const panesBeforeCurrent = [...options.basePanes, ...created];
     const result = await createPaneFn(
       {
         prompt: lane.prompt,
@@ -71,9 +76,17 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         ...(lane.mergeTargetChain ? { mergeTargetChain: lane.mergeTargetChain } : {}),
         projectName: options.projectName,
         projectRoot: lane.projectRoot,
-        existingPanes: [...options.basePanes, ...created],
+        existingPanes: panesBeforeCurrent,
         sessionProjectRoot: options.sessionProjectRoot,
         ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
+        ...(lane.existingWorktree && options.persistReusedPane
+          ? {
+            persistReusedPane: async (pane) => options.persistReusedPane!(
+              pane,
+              [...panesBeforeCurrent, pane]
+            ),
+          }
+          : {}),
       },
       options.availableAgents,
     );

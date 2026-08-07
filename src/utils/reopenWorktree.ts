@@ -38,6 +38,7 @@ export interface ReopenWorktreeOptions {
   sessionConfigPath?: string; // Shared psyche config path for this session
   sessionProjectRoot?: string; // Session root for welcome pane/layout state
   existingPanes: PsychePane[];
+  persistReopenedPane: (pane: PsychePane) => Promise<void>;
 }
 
 export interface ReopenWorktreeResult {
@@ -51,19 +52,20 @@ export interface ReopenWorktreeResult {
 export async function reopenWorktree(
   options: ReopenWorktreeOptions
 ): Promise<ReopenWorktreeResult> {
-  const reuseLease = await WorktreeCleanupService.getInstance()
-    .acquireWorktreeReuseLease(options.worktreePath);
-  try {
-    return await reopenWorktreeWithReuseLease({
+  return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
+    options.worktreePath,
+    async (canonicalWorktreePath) => {
+      const result = await reopenWorktreeWithReuseReservation({
       ...options,
-      worktreePath: reuseLease.canonicalWorktreePath,
-    });
-  } finally {
-    reuseLease.release();
-  }
+        worktreePath: canonicalWorktreePath,
+      });
+      await options.persistReopenedPane(result.pane);
+      return result;
+    }
+  );
 }
 
-async function reopenWorktreeWithReuseLease(
+async function reopenWorktreeWithReuseReservation(
   options: ReopenWorktreeOptions
 ): Promise<ReopenWorktreeResult> {
   const {

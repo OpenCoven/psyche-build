@@ -22,8 +22,9 @@ const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
 const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'codex']));
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
-const acquireWorktreeReuseLeaseMock = vi.hoisted(() => vi.fn());
+const withWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
+const persistReopenedPaneMock = vi.hoisted(() => vi.fn(async () => {}));
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -101,7 +102,7 @@ vi.mock('../src/utils/welcomePaneManager.js', () => ({
 vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
-      acquireWorktreeReuseLease: acquireWorktreeReuseLeaseMock,
+      withWorktreeReuseReservation: withWorktreeReuseReservationMock,
     })),
   },
 }));
@@ -115,10 +116,12 @@ describe('reopenWorktree', () => {
       permissionMode: 'bypassPermissions',
       branchName: 'feature/reopen-me',
     });
-    acquireWorktreeReuseLeaseMock.mockImplementation(async (worktreePath: string) => ({
-      canonicalWorktreePath: worktreePath,
-      release: vi.fn(),
-    }));
+    withWorktreeReuseReservationMock.mockImplementation(
+      async (
+        worktreePath: string,
+        operation: (canonicalWorktreePath: string) => Promise<unknown>
+      ) => operation(worktreePath)
+    );
   });
 
   it('uses stored agent metadata and permission mode for resume', async () => {
@@ -131,6 +134,7 @@ describe('reopenWorktree', () => {
       existingPanes: [],
       sessionProjectRoot: '/repo',
       sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
     });
 
     expect(tmuxServiceMock.sendShellCommand).toHaveBeenCalledWith(
@@ -167,6 +171,7 @@ describe('reopenWorktree', () => {
       ],
       sessionProjectRoot: '/repo',
       sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
     });
 
     expect(destroyWelcomePaneCoordinatedMock).toHaveBeenCalledWith('/repo');
@@ -189,12 +194,13 @@ describe('reopenWorktree', () => {
       existingPanes: [],
       sessionProjectRoot: '/repo',
       sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
     });
 
     expect(result.pane.projectName).toBe('Renamed Repo');
   });
 
-  it('acquires a reuse lease before persisting a reopened worktree pane', async () => {
+  it('persists a reopened pane inside its reuse reservation', async () => {
     const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
 
     await reopenWorktree({
@@ -204,22 +210,27 @@ describe('reopenWorktree', () => {
       existingPanes: [],
       sessionProjectRoot: '/repo',
       sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
     });
 
-    expect(acquireWorktreeReuseLeaseMock).toHaveBeenCalledWith(
-      '/repo/.psyche/worktrees/reopen-me'
+    expect(withWorktreeReuseReservationMock).toHaveBeenCalledWith(
+      '/repo/.psyche/worktrees/reopen-me',
+      expect.any(Function)
+    );
+    expect(persistReopenedPaneMock).toHaveBeenCalledWith(
+      expect.objectContaining({ worktreePath: '/repo/.psyche/worktrees/reopen-me' })
     );
   });
 
   it('waits for a launched cleanup and does not edit a removed worktree', async () => {
     const worktreePath = '/repo/.psyche/worktrees/reopen-me';
-    let rejectLease!: (error: Error) => void;
-    const cleanupLease = new Promise<never>((_resolve, reject) => {
-      rejectLease = reject;
+    let rejectReservation!: (error: Error) => void;
+    const cleanupReservation = new Promise<never>((_resolve, reject) => {
+      rejectReservation = reject;
     });
 
     try {
-      acquireWorktreeReuseLeaseMock.mockImplementationOnce(() => cleanupLease);
+      withWorktreeReuseReservationMock.mockImplementationOnce(() => cleanupReservation);
       const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
       const reopenPromise = reopenWorktree({
         slug: 'reopen-me',
@@ -228,6 +239,7 @@ describe('reopenWorktree', () => {
         existingPanes: [],
         sessionProjectRoot: '/repo',
         sessionConfigPath: '/repo/.psyche/psyche.config.json',
+        persistReopenedPane: persistReopenedPaneMock,
       });
 
       await Promise.resolve();
@@ -235,13 +247,13 @@ describe('reopenWorktree', () => {
       expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
       expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
 
-      rejectLease(new Error(`Worktree is no longer available for reuse at ${worktreePath}`));
+      rejectReservation(new Error(`Worktree is no longer available for reuse at ${worktreePath}`));
       await expect(reopenPromise).rejects.toThrow('no longer available for reuse');
       expect(readWorktreeMetadataMock).not.toHaveBeenCalled();
       expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
       expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
     } finally {
-      acquireWorktreeReuseLeaseMock.mockReset();
+      withWorktreeReuseReservationMock.mockReset();
     }
   });
 });

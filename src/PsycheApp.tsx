@@ -1341,6 +1341,9 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setIsCreatingPane(true)
       const label = candidate.path ? (candidate.slug || candidate.branchName) : candidate.branchName
       setStatusMessage(`${candidate.path ? "Reopening" : "Opening"} ${label}...`)
+      const persistReusedPane = async (pane: PsychePane) => {
+        await savePanes([...panes, pane])
+      }
 
       const result = candidate.path
         ? await reopenWorktree({
@@ -1350,6 +1353,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
+            persistReopenedPane: persistReusedPane,
           })
         : await resumeBranchWorkspace({
             agent: selectedAgent!,
@@ -1358,11 +1362,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
+            persistReusedPane,
           })
-
-      // Save the pane
-      const updatedPanes = [...panes, result.pane]
-      await savePanes(updatedPanes)
 
       await loadPanes()
 

@@ -56,6 +56,7 @@ export interface ResumeBranchWorkspaceOptions {
   existingPanes: PsychePane[];
   sessionConfigPath?: string;
   sessionProjectRoot?: string;
+  persistReusedPane: (pane: PsychePane) => Promise<void>;
 }
 
 export interface ResumableBranchScanOptions {
@@ -959,6 +960,7 @@ export async function resumeBranchWorkspace(
     existingPanes,
     sessionConfigPath,
     sessionProjectRoot,
+    persistReusedPane,
   } = options;
 
   const workspaceStates = await getWorkspaceBranchStatesAsync(projectRoot, branchName);
@@ -1003,6 +1005,7 @@ export async function resumeBranchWorkspace(
       projectRoot,
       sessionConfigPath,
       sessionProjectRoot,
+      persistReusedPane,
     },
     [agent]
   );
