@@ -1404,7 +1404,8 @@ describe('secret redaction and CLI contract', () => {
       packageManager: string;
     };
     const expectedPnpmVersion = packageJson.packageManager.replace(/^pnpm@/, '');
-    const installedPnpm = await execFileAsync('pnpm', ['--version']);
+    const pinnedPnpm = `pnpm@${expectedPnpmVersion}`;
+    const installedPnpm = await execFileAsync('corepack', [pinnedPnpm, '--version']);
     expect(installedPnpm.stdout.trim()).toBe(expectedPnpmVersion);
 
     const env = { ...process.env };
@@ -1414,8 +1415,9 @@ describe('secret redaction and CLI contract', () => {
 
     const result = await capturedError(() =>
       execFileAsync(
-        'pnpm',
+        'corepack',
         [
+          pinnedPnpm,
           'release:testflight',
           '--',
           '--bundle-id',

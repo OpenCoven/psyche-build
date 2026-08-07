@@ -172,7 +172,7 @@ describe('macOS release workflow contract', () => {
         mkdirSync(fakeBin);
         writeFileSync(
           fakeChmod,
-          `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+          `#!/bin/bash\nmode="$(/usr/bin/stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
         );
         writeFileSync(fakeSecurity, '#!/bin/bash\nexit 0\n');
         chmodSync(fakeChmod, 0o755);
@@ -290,7 +290,7 @@ describe('macOS release workflow contract', () => {
       mkdirSync(fakeBin);
       writeFileSync(
         fakeChmod,
-        `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+        `#!/bin/bash\nmode="$(/usr/bin/stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
       );
       chmodSync(fakeChmod, 0o755);
       writeFileSync(githubEnv, '');
