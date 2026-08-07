@@ -7,6 +7,7 @@ import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
 import { acquireWorktreeOperationLease } from './WorktreeOperationLease.js';
+import { mutateProjectPaneConfig } from './ProjectPaneConfig.js';
 
 export interface WorktreeCleanupJob {
   pane: PsychePane;
@@ -23,11 +24,46 @@ export interface CreatedWorktreeRollbackJob {
   branchOid: string;
   mainRepoPath: string;
   deleteBranch: boolean;
+  /**
+   * The session config that must not reference this worktree before rollback.
+   * Defaults to mainRepoPath for legacy callers.
+   */
+  configProjectRoot?: string;
+  startingOid?: string;
+  creatorNonce?: string;
 }
 
 export interface WorktreeRollbackResult {
   success: boolean;
   error?: string;
+}
+
+export interface CreatedWorktreeIdentity {
+  canonicalWorktreePath: string;
+  branchName: string;
+  startingOid: string;
+  createdOid: string;
+  creatorNonce: string;
+  mainRepoPath: string;
+  deleteBranch: boolean;
+  configProjectRoot: string;
+}
+
+export interface WorktreeCreationReservation {
+  canonicalWorktreePath: string;
+  creatorNonce: string;
+  recordCreatedWorktree: (input: {
+    branchName: string;
+    startingOid: string;
+    createdOid: string;
+    deleteBranch: boolean;
+    configProjectRoot?: string;
+  }) => CreatedWorktreeIdentity;
+  rollbackCreatedWorktree: (
+    identity: CreatedWorktreeIdentity,
+  ) => Promise<WorktreeRollbackResult>;
+  complete: () => Promise<void>;
+  cancel: () => Promise<void>;
 }
 
 interface WorktreePruneJob {
@@ -258,6 +294,69 @@ export class WorktreeCleanupService {
     });
   }
 
+  /**
+   * Reserves a planned worktree before allocation. The same lease remains held
+   * until the pane record is durable or guarded rollback has finished.
+   */
+  async beginWorktreeCreation(
+    worktreePath: string,
+    mainRepoPath: string,
+  ): Promise<WorktreeCreationReservation> {
+    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+    const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
+    let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
+
+    try {
+      operationLease = await acquireWorktreeOperationLease({
+        worktreePath: canonicalWorktreePath,
+        projectRoot: mainRepoPath,
+        operation: 'create',
+      });
+      this.incrementCleanupGeneration(canonicalWorktreePath);
+
+      let settlePromise: Promise<void> | undefined;
+      const settle = (): Promise<void> => {
+        if (!settlePromise) {
+          settlePromise = operationLease!.release().finally(releaseLock);
+        }
+        return settlePromise;
+      };
+
+      return {
+        canonicalWorktreePath,
+        creatorNonce: operationLease.nonce,
+        recordCreatedWorktree: ({
+          branchName,
+          startingOid,
+          createdOid,
+          deleteBranch,
+          configProjectRoot = mainRepoPath,
+        }) => ({
+          canonicalWorktreePath,
+          branchName,
+          startingOid,
+          createdOid,
+          creatorNonce: operationLease!.nonce,
+          mainRepoPath,
+          deleteBranch,
+          configProjectRoot,
+        }),
+        rollbackCreatedWorktree: async (identity) => {
+          return this.rollbackCreatedWorktreeWhileLeased(
+            identity,
+            operationLease!.nonce,
+          );
+        },
+        complete: settle,
+        cancel: settle,
+      };
+    } catch (error) {
+      await operationLease?.release();
+      releaseLock();
+      throw error;
+    }
+  }
+
   async rollbackCreatedWorktree(
     job: CreatedWorktreeRollbackJob
   ): Promise<WorktreeRollbackResult> {
@@ -267,82 +366,138 @@ export class WorktreeCleanupService {
       job.mainRepoPath,
       'rollback',
       async () => {
-        const identity: WorktreeIdentity = {
-          repoPath: job.mainRepoPath,
+        return this.rollbackCreatedWorktreeWhileLeased({
           canonicalWorktreePath,
           branchName: job.branchName,
-          branchOid: job.branchOid,
-        };
-
-        const mappedBranch = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-        if (!mappedBranch.success) {
-          return {
-            success: false,
-            error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
-          };
-        }
-        if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
-          return {
-            success: false,
-            error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
-          };
-        }
-
-        const currentOid = this.getBranchOid(identity.repoPath, identity.branchName);
-        if (!currentOid.success || currentOid.output !== identity.branchOid) {
-          return {
-            success: false,
-            error: 'newly created branch identity changed before rollback',
-          };
-        }
-
-        const removeResult = this.runGitTextSync(
-          ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
-          identity.repoPath
-        );
-        if (!removeResult.success) {
-          return {
-            success: false,
-            error: `failed to remove newly created worktree: ${removeResult.error}`,
-          };
-        }
-
-        const afterRemoval = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-        if (!afterRemoval.success || afterRemoval.found) {
-          return {
-            success: false,
-            error: afterRemoval.success
-              ? 'newly created worktree removal could not be confirmed'
-              : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
-          };
-        }
-
-        if (!job.deleteBranch) {
-          return { success: true };
-        }
-
-        const branchOidBeforeDelete = this.getBranchOid(identity.repoPath, identity.branchName);
-        if (!branchOidBeforeDelete.success || branchOidBeforeDelete.output !== identity.branchOid) {
-          return {
-            success: false,
-            error: 'newly created branch identity changed before rollback deletion',
-          };
-        }
-
-        const deleteResult = this.runGitTextSync(
-          ['branch', '-D', identity.branchName],
-          identity.repoPath
-        );
-        if (!deleteResult.success) {
-          return {
-            success: false,
-            error: `failed to delete newly created branch: ${deleteResult.error}`,
-          };
-        }
-
-        return { success: true };
+          startingOid: job.startingOid || job.branchOid,
+          createdOid: job.branchOid,
+          creatorNonce: job.creatorNonce || '',
+          mainRepoPath: job.mainRepoPath,
+          deleteBranch: job.deleteBranch,
+          configProjectRoot: job.configProjectRoot || job.mainRepoPath,
+        });
       }
     );
+  }
+
+  private async rollbackCreatedWorktreeWhileLeased(
+    identity: CreatedWorktreeIdentity,
+    requiredCreatorNonce?: string,
+  ): Promise<WorktreeRollbackResult> {
+    if (
+      requiredCreatorNonce !== undefined
+      && identity.creatorNonce !== requiredCreatorNonce
+    ) {
+      return {
+        success: false,
+        error: 'newly created worktree ownership nonce changed before rollback',
+      };
+    }
+
+    let stillReferenced = false;
+    try {
+      await mutateProjectPaneConfig(identity.configProjectRoot, (config) => {
+        const panes = Array.isArray(config.panes) ? config.panes : [];
+        stillReferenced = panes.some((pane) => (
+          typeof pane.worktreePath === 'string'
+          && pathsOverlap(pane.worktreePath, identity.canonicalWorktreePath)
+        ));
+      });
+    } catch (error) {
+      return {
+        success: false,
+        error: `could not read current pane config before rollback: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+
+    if (stillReferenced) {
+      return {
+        success: false,
+        error: 'newly created worktree is referenced by current pane config',
+      };
+    }
+
+    const mappedBranch = this.getWorktreeBranch(
+      identity.mainRepoPath,
+      identity.canonicalWorktreePath,
+    );
+    if (!mappedBranch.success) {
+      return {
+        success: false,
+        error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
+      };
+    }
+    if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
+      return {
+        success: false,
+        error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
+      };
+    }
+
+    const currentOid = this.getBranchOid(identity.mainRepoPath, identity.branchName);
+    if (!currentOid.success || currentOid.output !== identity.createdOid) {
+      return {
+        success: false,
+        error: 'newly created branch identity changed before rollback',
+      };
+    }
+
+    const removeResult = this.runGitTextSync(
+      ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
+      identity.mainRepoPath
+    );
+    if (!removeResult.success) {
+      return {
+        success: false,
+        error: `failed to remove newly created worktree: ${removeResult.error}`,
+      };
+    }
+
+    const afterRemoval = this.getWorktreeBranch(
+      identity.mainRepoPath,
+      identity.canonicalWorktreePath,
+    );
+    if (!afterRemoval.success || afterRemoval.found) {
+      return {
+        success: false,
+        error: afterRemoval.success
+          ? 'newly created worktree removal could not be confirmed'
+          : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
+      };
+    }
+
+    if (!identity.deleteBranch) {
+      return { success: true };
+    }
+
+    const branchOidBeforeDelete = this.getBranchOid(
+      identity.mainRepoPath,
+      identity.branchName,
+    );
+    if (
+      !branchOidBeforeDelete.success
+      || branchOidBeforeDelete.output !== identity.createdOid
+    ) {
+      return {
+        success: false,
+        error: 'newly created branch identity changed before rollback deletion',
+      };
+    }
+
+    const deleteResult = this.runGitTextSync(
+      ['branch', '-D', identity.branchName],
+      identity.mainRepoPath
+    );
+    if (!deleteResult.success) {
+      return {
+        success: false,
+        error: `failed to delete newly created branch: ${deleteResult.error}`,
+      };
+    }
+
+    return { success: true };
   }
 
   enqueuePruneManagedWorktrees(job: WorktreePruneJob): void {

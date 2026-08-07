@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdir, readFile, realpath } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { generateSiblingSlugForTargetPane } from '../utils/attachAgent.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -21,7 +20,16 @@ import {
 } from '../utils/agentLaunch.js';
 import { sendPromptViaTmux } from '../utils/agentPromptDispatch.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
+import {
+  WorktreeCleanupService,
+  type CreatedWorktreeIdentity,
+  type WorktreeCreationReservation,
+} from '../services/WorktreeCleanupService.js';
+import {
+  mutateProjectPaneConfig,
+  projectPaneConfigPath,
+  readProjectPaneConfig,
+} from '../services/ProjectPaneConfig.js';
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import type { PsycheConfig } from '../types.js';
 import {
@@ -74,6 +82,8 @@ export interface BridgeSpawnDeps {
   tmuxSessionExists: (name: string) => boolean;
   createTmuxPane: (sessionName: string, cwd: string, title?: string) => string;
   sendTmuxCommand: (paneId: string, command: string) => void;
+  /** Used only to tear down a pane when config persistence did not succeed. */
+  killTmuxPane?: (paneId: string) => void;
   /**
    * Type a prompt into a send-keys agent's TUI after it starts.
    *
@@ -167,6 +177,14 @@ interface RawConfigPane extends Record<string, unknown> {
 
 interface BridgeConfig extends Omit<Partial<PsycheConfig>, 'panes'> {
   panes?: RawConfigPane[];
+}
+
+interface BridgeCreatedWorktreeAllocation {
+  slug: string;
+  branch: string;
+  worktreePath: string;
+  reservation: WorktreeCreationReservation;
+  identity: CreatedWorktreeIdentity;
 }
 
 export function isPathInsideOrEqual(parent: string, candidate: string): boolean {
@@ -809,24 +827,15 @@ async function claimWorktree<T>(work: () => Promise<T>): Promise<T> {
  * Like the worktree claim, this only became reachable when lanes started
  * running in parallel.
  */
-let configMutation: Promise<unknown> = Promise.resolve();
-
 export async function mutateBridgeConfig<T>(
   projectRoot: string,
   mutate: (config: BridgeConfig) => T | Promise<T>,
 ): Promise<T> {
-  const previous = configMutation;
-  let release!: () => void;
-  configMutation = new Promise<void>((resolve) => { release = resolve; });
-  await previous.catch(() => undefined);
-  try {
-    const config = await readBridgeConfig(projectRoot);
-    const result = await mutate(config);
-    await writeBridgeConfig(projectRoot, config);
-    return result;
-  } finally {
-    release();
-  }
+  const mutation = await mutateProjectPaneConfig(
+    projectRoot,
+    (config) => mutate(config as BridgeConfig),
+  );
+  return mutation.result;
 }
 
 /**
@@ -963,28 +972,60 @@ export async function spawnBridgePane(
 
   const agent = normalizeAgent(request.agent);
   const attaching = request.existingWorktree !== undefined;
-  const { slug, branch, worktreePath } = attaching
+  let creationReservation: WorktreeCreationReservation | undefined;
+  let creationIdentity: CreatedWorktreeIdentity | undefined;
+  let paneId: string | undefined;
+  let panePersisted = false;
+  let siblingSlugReleased = false;
+
+  const allocated: {
+    slug: string;
+    branch: string;
+    worktreePath: string;
+  } | BridgeCreatedWorktreeAllocation = attaching
     ? await resolveSharedWorktree(scoped.projectRoot, request.existingWorktree!)
-    : await claimWorktree(async () => {
-    const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
-    const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
-    const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
-    const nextWorktreePath = path.join(worktreesRoot, nextSlug);
-    assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
+    : await claimWorktree<BridgeCreatedWorktreeAllocation>(async () => {
+      const nextSlug = await uniqueSlug(scoped.projectRoot, slugFromRequest(request));
+      const nextBranch = await resolveSpawnBranch(scoped.projectRoot, request.branch, nextSlug);
+      const worktreesRoot = await ensureGeneratedWorktreesRoot(scoped.projectRoot);
+      const nextWorktreePath = path.join(worktreesRoot, nextSlug);
+      assertGeneratedWorktreePath(scoped.projectRoot, nextWorktreePath);
 
-    createGitWorktree(
-      scoped.projectRoot,
-      nextWorktreePath,
-      nextBranch,
-      request.startPointBranch,
-    );
-    return { slug: nextSlug, branch: nextBranch, worktreePath: nextWorktreePath };
-  });
+      const reservation = await WorktreeCleanupService.getInstance()
+        .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
+      try {
+        const creation = createGitWorktree(
+          scoped.projectRoot,
+          reservation.canonicalWorktreePath,
+          nextBranch,
+          request.startPointBranch,
+        );
+        const identity = reservation.recordCreatedWorktree({
+          branchName: nextBranch,
+          startingOid: creation.startingOid,
+          createdOid: creation.createdOid,
+          deleteBranch: creation.branchCreatedByThisAttempt,
+          configProjectRoot: scoped.projectRoot,
+        });
+        return {
+          slug: nextSlug,
+          branch: nextBranch,
+          worktreePath: reservation.canonicalWorktreePath,
+          reservation,
+          identity,
+        };
+      } catch (error) {
+        await reservation.cancel();
+        throw error;
+      }
+    });
+  const { slug, branch, worktreePath } = allocated;
+    if (!attaching) {
+      const createdAllocation = allocated as BridgeCreatedWorktreeAllocation;
+      creationReservation = createdAllocation.reservation;
+      creationIdentity = createdAllocation.identity;
+    }
 
-  // Everything past the claim can fail — tmux can refuse to split, the config
-  // write can fail. A worktree already exists by then, so a failed lane would
-  // otherwise leak one plus its branch. Roll them back rather than leaving
-  // orphans behind for the user to find later.
   try {
     if (attaching) {
       return await WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
@@ -995,90 +1036,90 @@ export async function spawnBridgePane(
     }
     return await finishSpawn(worktreePath);
   } catch (error) {
-    // Only ever roll back a worktree THIS call created. A shared worktree is
-    // in use by other panes; deleting it here would destroy their work.
-    if (attaching) {
+    if (!panePersisted && paneId) {
+      try {
+        deps.killTmuxPane?.(paneId);
+      } catch {
+        // The primary failure remains the config or tmux error. A later load
+        // can recover an untracked pane if tmux refuses this best-effort kill.
+      }
+    }
+
+    if (attaching && !siblingSlugReleased) {
       releaseSiblingSlug(slug);
-    } else {
-      removeGitWorktree(scoped.projectRoot, worktreePath, branch);
+    } else if (!panePersisted && creationReservation && creationIdentity) {
+      await creationReservation.rollbackCreatedWorktree(creationIdentity);
+    }
+
+    if (creationReservation) {
+      await creationReservation.cancel();
     }
     throw error;
   }
 
   async function finishSpawn(paneWorktreePath: string): Promise<BridgeSpawnResult> {
-  const title = request.title || slug;
-  const paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
-  const now = new Date().toISOString();
-  const pane: RawConfigPane = {
-    id: nextBridgePaneId(),
-    slug,
-    title,
-    displayName: title,
-    prompt: request.prompt || '',
-    paneId,
-    projectRoot: scoped.projectRoot,
-    projectName: path.basename(scoped.projectRoot),
-    type: 'worktree',
-    worktreePath: paneWorktreePath,
-    branchName: branch,
-    branch,
-    agent,
-    agentStatus: agent ? 'working' : 'idle',
-    lastUpdated: now,
-  };
-  const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
-    config.projectName = config.projectName || path.basename(scoped.projectRoot);
-    config.projectRoot = scoped.projectRoot;
-    config.settings = config.settings || {};
-    config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
-    config.lastUpdated = now;
-    return config.settings;
-  });
-  // Persisted, so the slug is now discoverable from config itself.
-  if (attaching) releaseSiblingSlug(slug);
-
-  if (agent) {
-    const launchCommand = await buildLaunchCommand(scoped.projectRoot, slug, agent, request.prompt, settings?.permissionMode);
-    deps.sendTmuxCommand(paneId, launchCommand);
-
-    // send-keys agents were launched bare above; type the prompt into their
-    // TUI once it is up. Without this the prompt is silently dropped.
-    const prompt = request.prompt;
-    if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
-      const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
-      await sendPromptKeys({ paneId, prompt, agent });
-    }
-  }
-
-  return {
-    id: paneId,
-    pane: rawPaneToSummary(pane, scoped.projectRoot),
-    worktreePath: paneWorktreePath,
-    branch,
-  };
-  }
-}
-
-/**
- * Best-effort rollback of a worktree this spawn just created.
- *
- * Only ever called for a worktree allocated moments earlier in the same call,
- * so there is no user work to lose. Failures are swallowed: the caller is
- * already reporting a lane failure, and a cleanup error must not replace the
- * real one.
- */
-function removeGitWorktree(projectRoot: string, worktreePath: string, branch: string): void {
-  try {
-    execFileSync('git', ['-C', projectRoot, 'worktree', 'remove', '--force', worktreePath], {
-      stdio: 'ignore',
+    const title = request.title || slug;
+    paneId = deps.createTmuxPane(sessionName, paneWorktreePath, title);
+    const now = new Date().toISOString();
+    const pane: RawConfigPane = {
+      id: nextBridgePaneId(),
+      slug,
+      title,
+      displayName: title,
+      prompt: request.prompt || '',
+      paneId,
+      projectRoot: scoped.projectRoot,
+      projectName: path.basename(scoped.projectRoot),
+      type: 'worktree',
+      worktreePath: paneWorktreePath,
+      branchName: branch,
+      branch,
+      agent,
+      agentStatus: agent ? 'working' : 'idle',
+      lastUpdated: now,
+    };
+    const settings = await mutateBridgeConfig(scoped.projectRoot, (config) => {
+      config.projectName = config.projectName || path.basename(scoped.projectRoot);
+      config.projectRoot = scoped.projectRoot;
+      config.settings = config.settings || {};
+      config.panes = [...(Array.isArray(config.panes) ? config.panes : []), pane];
+      config.lastUpdated = now;
+      return config.settings;
     });
-  } catch {
-    // Already gone, or never fully created.
-  }
-  try {
-    execFileSync('git', ['-C', projectRoot, 'branch', '-D', branch], { stdio: 'ignore' });
-  } catch {
-    // Branch may not exist if the worktree add itself failed.
+    panePersisted = true;
+    if (attaching) {
+      releaseSiblingSlug(slug);
+      siblingSlugReleased = true;
+    } else if (creationReservation) {
+      await creationReservation.complete();
+      creationReservation = undefined;
+    }
+
+    if (agent) {
+      const launchCommand = await buildLaunchCommand(
+        scoped.projectRoot,
+        slug,
+        agent,
+        request.prompt,
+        settings?.permissionMode,
+      );
+      deps.sendTmuxCommand(paneId, launchCommand);
+
+      // send-keys agents were launched bare above; type the prompt into their
+      // TUI once it is up. Without this the prompt is silently dropped.
+      const prompt = request.prompt;
+      if (prompt && prompt.trim() && getPromptTransport(agent) === 'send-keys') {
+        const sendPromptKeys = deps.sendPromptKeys ?? sendPromptKeysToPane;
+        await sendPromptKeys({ paneId, prompt, agent });
+      }
+    }
+
+    return {
+      id: paneId,
+      pane: rawPaneToSummary(pane, scoped.projectRoot),
+      worktreePath: paneWorktreePath,
+      branch,
+    };
   }
 }
 
@@ -1244,6 +1285,7 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
   },
   createTmuxPane,
   sendTmuxCommand,
+  killTmuxPane,
 };
 
 /**
@@ -1258,57 +1300,11 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
  * left alone for the user to recover.
  */
 async function readBridgeConfig(projectRoot: string): Promise<BridgeConfig> {
-  const configPath = bridgeConfigPath(projectRoot);
-  let raw: string;
-  try {
-    raw = await readFile(configPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      throw bridgeError(
-        'config_unreadable',
-        `could not read ${configPath}: ${bridgeErrorMessage(error)}`,
-      );
-    }
-    return {
-      projectName: path.basename(projectRoot),
-      projectRoot,
-      panes: [],
-      settings: {},
-      lastUpdated: new Date().toISOString(),
-    };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw bridgeError(
-      'config_corrupt',
-      `${configPath} is not valid JSON and will not be overwritten: ${bridgeErrorMessage(error)}`,
-    );
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw bridgeError('config_corrupt', `${configPath} is not a JSON object`);
-  }
-  return parsed as BridgeConfig;
-}
-
-/**
- * Write the project config atomically.
- *
- * A plain `writeFile` truncates first, so a crash — or a reader arriving
- * mid-write — sees a half-written file. Since the config *is* the pane
- * registry, that is data loss, not a transient glitch. Write-then-rename
- * means a reader observes either the old file or the new one.
- */
-async function writeBridgeConfig(projectRoot: string, config: BridgeConfig): Promise<void> {
-  const configPath = bridgeConfigPath(projectRoot);
-  await mkdir(path.dirname(configPath), { recursive: true });
-  await atomicWriteJson(configPath, config);
+  return (await readProjectPaneConfig(projectRoot)) as BridgeConfig;
 }
 
 function bridgeConfigPath(projectRoot: string): string {
-  return path.join(projectRoot, '.psyche', 'psyche.config.json');
+  return projectPaneConfigPath(projectRoot);
 }
 
 function findRawPane(config: BridgeConfig, paneId: string): RawConfigPane | undefined {
@@ -1385,22 +1381,57 @@ function createGitWorktree(
   worktreePath: string,
   branch: string,
   startPointBranch?: string,
-): void {
+): {
+  startingOid: string;
+  createdOid: string;
+  branchCreatedByThisAttempt: boolean;
+} {
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
     execFileSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' });
     execFileSync('git', ['-C', projectRoot, 'worktree', 'prune'], { stdio: 'ignore' });
-    if (gitBranchExists(projectRoot, branch)) {
+    if (listGitWorktreePaths(projectRoot).has(path.resolve(worktreePath))) {
+      throw new Error(`worktree path is already registered: ${worktreePath}`);
+    }
+
+    const branchExisted = gitBranchExists(projectRoot, branch);
+    const startingOid = readGitOid(
+      projectRoot,
+      branchExisted ? `refs/heads/${branch}` : (startPointBranch || 'HEAD'),
+    );
+    if (branchExisted) {
       execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, branch], { stdio: 'pipe' });
     } else {
       const args = ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch];
       if (startPointBranch) args.push(startPointBranch);
       execFileSync('git', args, { stdio: 'pipe' });
     }
+
+    const createdOid = readGitOid(projectRoot, `refs/heads/${branch}`);
+    if (readWorktreeBranch(worktreePath) !== branch) {
+      throw new Error(`created worktree does not point at branch ${branch}`);
+    }
+    return {
+      startingOid,
+      createdOid,
+      branchCreatedByThisAttempt: !branchExisted,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw bridgeError('worktree_create_failed', `failed to create scoped worktree: ${message}`);
   }
+}
+
+function readGitOid(projectRoot: string, ref: string): string {
+  const oid = execFileSync(
+    'git',
+    ['-C', projectRoot, 'rev-parse', '--verify', ref],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).trim();
+  if (!oid) {
+    throw new Error(`could not resolve ${ref} to an object ID`);
+  }
+  return oid;
 }
 
 function gitBranchExists(projectRoot: string, branch: string): boolean {

@@ -386,6 +386,33 @@ describe('closeAction', () => {
       const cleanupJob = mockEnqueueCleanup.mock.calls.at(-1)?.[0];
       expect(cleanupJob?.deleteBranch).toBe(false);
     });
+
+    it('merges the freshly persisted panes before deciding whether cleanup is safe', async () => {
+      const sharedWorktreePath = '/test/project/.psyche/worktrees/shared';
+      const closingPane = createWorktreePane({
+        id: 'tui-close',
+        paneId: '%42',
+        worktreePath: sharedWorktreePath,
+      });
+      const daemonPane = createWorktreePane({
+        id: 'daemon-pane',
+        paneId: '%43',
+        worktreePath: sharedWorktreePath,
+      });
+      const mockContext = createMockContext([closingPane]);
+      mockContext.removePaneFromConfig = vi.fn(async () => [daemonPane]);
+
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      const result = await closePane(closingPane, mockContext);
+      await result.onSelect!('kill_and_clean');
+
+      expect(mockContext.removePaneFromConfig).toHaveBeenCalledWith('tui-close');
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
   });
 
   describe('close execution - kill_clean_branch', () => {

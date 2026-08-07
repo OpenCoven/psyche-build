@@ -14,9 +14,13 @@ import { generateSlug } from './slug.js';
 import { capturePaneContent } from './paneCapture.js';
 import { triggerHook, triggerHookSync, initializeHooksDirectory } from './hooks.js';
 import { TMUX_LAYOUT_APPLY_DELAY, TMUX_SPLIT_DELAY } from '../constants/timing.js';
-import { atomicWriteJsonSync } from './atomicWrite.js';
 import { LogService } from '../services/LogService.js';
-import { WorktreeCleanupService, type CreatedWorktreeRollbackJob } from '../services/WorktreeCleanupService.js';
+import {
+  WorktreeCleanupService,
+  type CreatedWorktreeIdentity,
+  type WorktreeCreationReservation,
+} from '../services/WorktreeCleanupService.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 import {
   appendSlugSuffix,
   launchAgentInPane,
@@ -41,6 +45,10 @@ export interface CreatePaneOptions {
     worktreePath: string;
     branchName: string;
   };
+  /**
+   * Persists a newly-created pane while its creation lease is still held.
+   */
+  persistCreatedPane?: (pane: PsychePane) => Promise<void>;
   persistReusedPane?: (pane: PsychePane) => Promise<void>;
   startPointBranch?: string;
   mergeTargetChain?: MergeTargetReference[];
@@ -55,6 +63,7 @@ export interface CreatePaneOptions {
 export interface CreatePaneResult {
   pane: PsychePane;
   needsAgentChoice: boolean;
+  persistedDuringLifecycle?: boolean;
 }
 
 async function waitForPaneReady(
@@ -69,6 +78,32 @@ async function waitForPaneReady(
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
+}
+
+async function persistPaneBeforeAgentLaunch(
+  options: CreatePaneOptions,
+  sessionProjectRoot: string,
+  pane: PsychePane,
+): Promise<void> {
+  const persist = options.existingWorktree
+    ? options.persistReusedPane
+    : options.persistCreatedPane;
+  if (persist) {
+    await persist(pane);
+    return;
+  }
+
+  await mutateProjectPaneConfig(sessionProjectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const index = panes.findIndex((candidate) => candidate.id === pane.id);
+    if (index >= 0) {
+      panes[index] = pane;
+    } else {
+      panes.push(pane);
+    }
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+  });
 }
 
 /**
@@ -90,11 +125,10 @@ export async function createPane(
   }
 
   const existingWorktree = options.existingWorktree;
-  const persistReusedPane = options.persistReusedPane;
   return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
     existingWorktree.worktreePath,
     async (canonicalWorktreePath) => {
-      const result = await createPaneWithReuseReservation(
+      return createPaneWithReuseReservation(
         {
           ...options,
           existingWorktree: {
@@ -104,12 +138,6 @@ export async function createPane(
         },
         availableAgents
       );
-
-      if (!result.needsAgentChoice && result.pane) {
-        await persistReusedPane(result.pane);
-      }
-
-      return result;
     },
     options.projectRoot
   );
@@ -227,48 +255,45 @@ async function createPaneWithReuseReservation(
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
   // Load config to get control pane info
-  const configPath = optionsSessionConfigPath
-    || path.join(sessionProjectRoot, '.psyche', 'psyche.config.json');
   let controlPaneId: string | undefined;
   let configSidebarProjects: SidebarProject[] = [];
 
   try {
-    const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: PsycheConfig = JSON.parse(configContent);
-    controlPaneId = config.controlPaneId;
-    configSidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
+    const mutation = await mutateProjectPaneConfig(
+      sessionProjectRoot,
+      async (configRecord) => {
+        const config = configRecord as unknown as PsycheConfig;
+        let persistedControlPaneId = config.controlPaneId;
+        const sidebarProjects = Array.isArray(config.sidebarProjects)
+          ? config.sidebarProjects
+          : [];
+
+        if (persistedControlPaneId) {
+          const exists = await tmuxService.paneExists(persistedControlPaneId);
+          if (!exists) {
+            LogService.getInstance().warn(
+              `Control pane ${persistedControlPaneId} no longer exists, updating to ${originalPaneId}`,
+              'paneCreation'
+            );
+            persistedControlPaneId = originalPaneId;
+          }
+        }
+        if (!persistedControlPaneId) {
+          persistedControlPaneId = originalPaneId;
+        }
+
+        config.controlPaneId = persistedControlPaneId;
+        config.controlPaneSize = SIDEBAR_WIDTH;
+        config.lastUpdated = new Date().toISOString();
+        return { persistedControlPaneId, sidebarProjects };
+      }
+    );
+    controlPaneId = mutation.result.persistedControlPaneId;
+    configSidebarProjects = mutation.result.sidebarProjects;
     paneProjectName = getSidebarProjectDisplayName(
       configSidebarProjects,
       projectRoot
     );
-
-    // Verify the control pane ID from config still exists
-    if (controlPaneId) {
-      const exists = await tmuxService.paneExists(controlPaneId);
-      if (!exists) {
-        // Pane doesn't exist anymore, use current pane and update config
-        LogService.getInstance().warn(
-          `Control pane ${controlPaneId} no longer exists, updating to ${originalPaneId}`,
-          'paneCreation'
-        );
-        controlPaneId = originalPaneId;
-        config.controlPaneId = controlPaneId;
-        config.controlPaneSize = SIDEBAR_WIDTH;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
-      }
-      // Else: Pane exists, we can use it
-    }
-
-    // If control pane ID is missing, save it
-    if (!controlPaneId) {
-      controlPaneId = originalPaneId;
-      config.controlPaneId = controlPaneId;
-      config.controlPaneSize = SIDEBAR_WIDTH;
-      config.lastUpdated = new Date().toISOString();
-
-      atomicWriteJsonSync(configPath, config);
-    }
   } catch (error) {
     // Fallback if config loading fails
     controlPaneId = originalPaneId;
@@ -316,11 +341,12 @@ async function createPaneWithReuseReservation(
       );
 
       try {
-        const configContent = fs.readFileSync(configPath, 'utf-8');
-        const config: PsycheConfig = JSON.parse(configContent);
-        config.controlPaneId = currentPaneId;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
+        await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
+          const config = configRecord as unknown as PsycheConfig;
+          config.controlPaneId = currentPaneId;
+          config.controlPaneSize = SIDEBAR_WIDTH;
+          config.lastUpdated = new Date().toISOString();
+        });
         controlPaneId = currentPaneId; // Update local variable
       } catch (configError) {
         LogService.getInstance().error(
@@ -388,7 +414,8 @@ async function createPaneWithReuseReservation(
   );
 
   // Create git worktree and cd into it
-  let createdWorktreeRollbackJob: CreatedWorktreeRollbackJob | undefined;
+  let creationReservation: WorktreeCreationReservation | undefined;
+  let createdWorktreeIdentity: CreatedWorktreeIdentity | undefined;
   let worktreeCreatedByThisAttempt = false;
   try {
     if (existingWorktree) {
@@ -400,6 +427,9 @@ async function createPaneWithReuseReservation(
       await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
       await new Promise((resolve) => setTimeout(resolve, 300));
     } else {
+      creationReservation = await WorktreeCleanupService.getInstance()
+        .beginWorktreeCreation(worktreePath, projectRoot);
+
       // IMPORTANT: Prune stale worktrees first to avoid conflicts
       // This must run synchronously from psyche, not in the pane
       try {
@@ -443,23 +473,40 @@ async function createPaneWithReuseReservation(
       const maxWorktreeAttempts = 3;
       const maxWaitTime = 5000; // 5 seconds max
       const checkInterval = 100; // Check every 100ms
-      const worktreeExistedBeforeAttempt = fs.existsSync(worktreePath);
-      let worktreeCreated = worktreeExistedBeforeAttempt;
-      let branchCreatedByThisAttempt = false;
+      if (fs.existsSync(worktreePath)) {
+        throw new Error(
+          `Planned worktree path already exists at ${worktreePath}; refusing to claim another creator's directory`
+        );
+      }
+
+      let branchExists = false;
+      try {
+        execSync(`git show-ref --verify --quiet "refs/heads/${branchName}"`, {
+          stdio: 'pipe',
+          cwd: projectRoot,
+        });
+        branchExists = true;
+      } catch {
+        // The branch will be created with the worktree.
+      }
+
+      const startingOid = execSync(
+        `git rev-parse --verify --end-of-options "${
+          branchExists ? branchName : (resolvedStartPoint || 'HEAD')
+        }"`,
+        {
+          cwd: projectRoot,
+          encoding: 'utf-8',
+          stdio: 'pipe',
+        }
+      ).trim();
+      if (!startingOid) {
+        throw new Error(`Could not resolve starting OID for ${branchName}`);
+      }
+
+      let worktreeCreated = false;
 
       for (let attempt = 1; attempt <= maxWorktreeAttempts && !worktreeCreated; attempt++) {
-        // Check if branch already exists (from a deleted worktree or a previous attempt)
-        let branchExists = false;
-        try {
-          execSync(`git show-ref --verify --quiet "refs/heads/${branchName}"`, {
-            stdio: 'pipe',
-            cwd: projectRoot,
-          });
-          branchExists = true;
-        } catch {
-          // Branch doesn't exist yet
-        }
-
         // Build worktree command:
         // - If branch exists, use it (don't create with -b)
         // - If branch doesn't exist, create it with -b, optionally from a configured base branch
@@ -479,10 +526,6 @@ async function createPaneWithReuseReservation(
         }
 
         worktreeCreated = fs.existsSync(worktreePath);
-        if (worktreeCreated && !worktreeExistedBeforeAttempt) {
-          worktreeCreatedByThisAttempt = true;
-          branchCreatedByThisAttempt = !branchExists;
-        }
         if (!worktreeCreated && attempt < maxWorktreeAttempts) {
           await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
         }
@@ -496,33 +539,35 @@ async function createPaneWithReuseReservation(
       // Give a bit more time for git to finish setting up the worktree
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      if (worktreeCreatedByThisAttempt) {
-        try {
-          const branchOid = execSync(
-            `git rev-parse --verify --end-of-options "${branchName}"`,
-            {
-              cwd: projectRoot,
-              encoding: 'utf-8',
-              stdio: 'pipe',
-            }
-          ).trim();
-          if (!branchOid) {
-            throw new Error(`Branch ${branchName} did not resolve to an OID`);
-          }
-          createdWorktreeRollbackJob = {
-            worktreePath,
-            branchName,
-            branchOid,
-            mainRepoPath: projectRoot,
-            deleteBranch: branchCreatedByThisAttempt,
-          };
-        } catch (identityError) {
-          LogService.getInstance().warn(
-            `Could not record identity for newly created worktree ${worktreePath}: ${identityError instanceof Error ? identityError.message : String(identityError)}`,
-            'paneCreation'
-          );
+      const createdOid = execSync(
+        `git rev-parse --verify --end-of-options "${branchName}"`,
+        {
+          cwd: projectRoot,
+          encoding: 'utf-8',
+          stdio: 'pipe',
         }
+      ).trim();
+      const checkedOutBranch = execSync(
+        `git -C "${worktreePath}" rev-parse --abbrev-ref HEAD`,
+        {
+          cwd: projectRoot,
+          encoding: 'utf-8',
+          stdio: 'pipe',
+        }
+      ).trim();
+      if (!createdOid || checkedOutBranch !== branchName) {
+        throw new Error(
+          `Created worktree identity does not match ${branchName} at ${worktreePath}`
+        );
       }
+      worktreeCreatedByThisAttempt = true;
+      createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
+        branchName,
+        startingOid,
+        createdOid,
+        deleteBranch: !branchExists,
+        configProjectRoot: sessionProjectRoot,
+      });
     }
 
     try {
@@ -578,6 +623,18 @@ async function createPaneWithReuseReservation(
         'paneCreation'
       );
     }
+    let rollbackError: string | undefined;
+    if (creationReservation && createdWorktreeIdentity) {
+      const rollbackResult = await creationReservation.rollbackCreatedWorktree(
+        createdWorktreeIdentity
+      );
+      if (!rollbackResult.success) {
+        rollbackError = rollbackResult.error || 'unknown rollback failure';
+      }
+    } else if (worktreeCreatedByThisAttempt) {
+      rollbackError = 'worktree identity could not be recorded';
+    }
+    await creationReservation?.cancel();
     if (controlPaneId) {
       try {
         await tmuxService.selectPane(controlPaneId);
@@ -585,7 +642,11 @@ async function createPaneWithReuseReservation(
         // best-effort focus restore
       }
     }
-    throw new Error(`Failed to create worktree for "${slug}": ${errorMsg}`);
+    throw new Error(
+      `Failed to create worktree for "${slug}": ${errorMsg}${
+        rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }`
+    );
   }
 
   // Build the pane object now so the worktree_created hook can receive full
@@ -620,9 +681,17 @@ async function createPaneWithReuseReservation(
       `worktree_created hook failed for ${slug}: ${hookError}`,
       'paneCreation'
     );
-    if (createdWorktreeRollbackJob) {
-      const rollbackResult = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree(
-        createdWorktreeRollbackJob
+    try {
+      await tmuxService.killPane(paneInfo);
+    } catch (killError) {
+      LogService.getInstance().warn(
+        `Failed to kill pane ${paneInfo} after worktree_created hook failure: ${killError}`,
+        'paneCreation'
+      );
+    }
+    if (creationReservation && createdWorktreeIdentity) {
+      const rollbackResult = await creationReservation.rollbackCreatedWorktree(
+        createdWorktreeIdentity
       );
       if (!rollbackResult.success) {
         rollbackError = rollbackResult.error || 'unknown rollback failure';
@@ -642,14 +711,7 @@ async function createPaneWithReuseReservation(
         new Error(rollbackError)
       );
     }
-    try {
-      await tmuxService.killPane(paneInfo);
-    } catch (killError) {
-      LogService.getInstance().warn(
-        `Failed to kill pane ${paneInfo} after worktree_created hook failure: ${killError}`,
-        'paneCreation'
-      );
-    }
+    await creationReservation?.cancel();
     if (controlPaneId) {
       try {
         await tmuxService.selectPane(controlPaneId);
@@ -662,6 +724,53 @@ async function createPaneWithReuseReservation(
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
       }`
     );
+  }
+
+  // A worktree is not safe to expose to an agent until the pane registry
+  // points at it. Keep the creation/reuse lease through this mutation so
+  // queued cleanup cannot observe an unreferenced active worktree.
+  try {
+    await persistPaneBeforeAgentLaunch(options, sessionProjectRoot, newPane);
+  } catch (error) {
+    const persistenceError = error instanceof Error ? error.message : String(error);
+    try {
+      await tmuxService.killPane(paneInfo);
+    } catch (killError) {
+      LogService.getInstance().warn(
+        `Failed to kill pane ${paneInfo} after pane persistence failure: ${killError}`,
+        'paneCreation'
+      );
+    }
+    let rollbackError: string | undefined;
+    if (creationReservation && createdWorktreeIdentity) {
+      const rollbackResult = await creationReservation.rollbackCreatedWorktree(
+        createdWorktreeIdentity
+      );
+      if (!rollbackResult.success) {
+        rollbackError = rollbackResult.error || 'unknown rollback failure';
+      }
+    }
+    await creationReservation?.cancel();
+    throw new Error(
+      `Failed to persist pane "${slug}" before agent launch: ${persistenceError}${
+        rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }`
+    );
+  }
+
+  if (creationReservation) {
+    try {
+      await creationReservation.complete();
+    } catch (error) {
+      // The pane is already durable, so never attempt rollback after this
+      // point. Surface the lease-release problem without exposing it to
+      // cleanup as an unreferenced worktree.
+      throw new Error(
+        `Pane "${slug}" was persisted but its creation lease could not be released: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
   }
 
   // Launch agent if specified
@@ -712,30 +821,13 @@ async function createPaneWithReuseReservation(
   // Keep focus on the new pane
   await tmuxService.selectPane(paneInfo);
 
-  // CRITICAL: Save the pane to config IMMEDIATELY before destroying welcome pane.
-  // Only needed for the first content pane — ensures loadPanes sees a pane in config
-  // before we kill the welcome pane (prevents spurious "0 panes" welcome recreation).
-  if (isFirstContentPane) {
-    try {
-      const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configContent);
-
-      // Add the new pane to the config (panesCount becomes 1)
-      config.panes = [...existingPanes, newPane];
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
-    } catch (error) {
-      // Log but don't fail - welcome pane cleanup is not critical
-    }
-  }
-
   // Always destroy the welcome pane if one exists in config.
   // We do this unconditionally because shell panes detected by detectAndAddShellPanes
   // can make existingPanes.length > 0 even when no real content panes exist yet,
   // which causes isFirstContentPane to be false and skips welcome pane destruction.
   try {
     const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    destroyWelcomePaneCoordinated(sessionProjectRoot);
+    await destroyWelcomePaneCoordinated(sessionProjectRoot);
   } catch {
     // Ignore - welcome pane cleanup is not critical
   }
@@ -753,6 +845,7 @@ async function createPaneWithReuseReservation(
   return {
     pane: newPane,
     needsAgentChoice: false,
+    persistedDuringLifecycle: true,
   };
 }
 

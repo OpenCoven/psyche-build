@@ -11,6 +11,7 @@ const readFileSyncMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const detectAllWorktreesMock = vi.hoisted(() => vi.fn());
 const acquireWorktreeOperationLeaseMock = vi.hoisted(() => vi.fn());
+const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const logger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
@@ -48,6 +49,10 @@ vi.mock('../src/services/WorktreeOperationLease.js', () => ({
   acquireWorktreeOperationLease: acquireWorktreeOperationLeaseMock,
 }));
 
+vi.mock('../src/services/ProjectPaneConfig.js', () => ({
+  mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+}));
+
 type MockChildProcess = EventEmitter & { stderr: EventEmitter | null };
 
 function createSuccessfulChildProcess(): MockChildProcess {
@@ -76,6 +81,13 @@ describe('WorktreeCleanupService', () => {
       projectRoot: '/test/project',
       panes: [],
     };
+    mutateProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      mutation: (config: typeof currentConfig) => unknown | Promise<unknown>,
+    ) => {
+      const result = await mutation(currentConfig);
+      return { config: currentConfig, result };
+    });
     readFileSyncMock.mockImplementation(() => JSON.stringify(currentConfig));
     detectAllWorktreesMock.mockReturnValue([]);
     acquireWorktreeOperationLeaseMock.mockImplementation(async ({

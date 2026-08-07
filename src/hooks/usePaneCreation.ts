@@ -173,7 +173,7 @@ export default function usePaneCreation({
     prompt: string,
     agent?: AgentName,
     options: CreateNewPaneOptions = {}
-  ): Promise<{ pane: PsychePane; persistedDuringReuse: boolean }> => {
+  ): Promise<{ pane: PsychePane; persistedDuringLifecycle: boolean }> => {
     const panesForCreation = options.existingPanes ?? panes;
     const result = await createPane(
       {
@@ -190,6 +190,9 @@ export default function usePaneCreation({
         mergeTargetChain: options.mergeTargetChain,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
+        persistCreatedPane: async (pane) => {
+          await savePanes([...panesForCreation, pane]);
+        },
         persistReusedPane: async (pane) => {
           await savePanes([...panesForCreation, pane]);
         },
@@ -203,7 +206,9 @@ export default function usePaneCreation({
 
     return {
       pane: result.pane,
-      persistedDuringReuse: Boolean(options.existingWorktree),
+      persistedDuringLifecycle: Boolean(
+        result.persistedDuringLifecycle || options.existingWorktree
+      ),
     };
   };
 
@@ -218,11 +223,11 @@ export default function usePaneCreation({
       setIsCreatingPane(true)
       setStatusMessage("Creating pane...")
 
-      const { pane, persistedDuringReuse } = await createPaneInternal(prompt, agent, options);
+      const { pane, persistedDuringLifecycle } = await createPaneInternal(prompt, agent, options);
 
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
-      if (!persistedDuringReuse) {
+      if (!persistedDuringLifecycle) {
         await savePanes(updatedPanes);
       }
       enqueueManagedWorktreePruning(
@@ -288,6 +293,9 @@ export default function usePaneCreation({
         availableAgents,
         slugBase,
         persistReusedPane: async (_pane, panesToPersist) => {
+          await savePanes(panesToPersist);
+        },
+        persistCreatedPane: async (_pane, panesToPersist) => {
           await savePanes(panesToPersist);
         },
       });

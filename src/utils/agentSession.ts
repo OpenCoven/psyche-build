@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { AgentSessionReference, PsycheConfig } from '../types.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 import { atomicWriteJson } from './atomicWrite.js';
 
 export interface CodexSessionEventData {
@@ -87,16 +88,36 @@ export async function persistPaneAgentSessionReference(
 ): Promise<void> {
   if (!panesFile) return;
 
-  const raw = await fs.readFile(panesFile, 'utf8');
-  const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
-  if (Array.isArray(parsed)) return;
+  const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+  const canonicalProjectConfigPath = path.join(
+    sessionProjectRoot,
+    '.psyche',
+    'psyche.config.json',
+  );
+  if (path.resolve(panesFile) !== path.resolve(canonicalProjectConfigPath)) {
+    // Compatibility for explicit non-project config paths used by embedding
+    // callers. The live TUI and daemon always use the locked project path.
+    const raw = await fs.readFile(panesFile, 'utf8');
+    const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
+    if (Array.isArray(parsed)) return;
+    const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
+    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
+    if (!pane) return;
+    pane.agentSession = agentSession;
+    parsed.panes = panes;
+    parsed.lastUpdated = new Date().toISOString();
+    await atomicWriteJson(panesFile, parsed);
+    return;
+  }
 
-  const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
-  const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
-  if (!pane) return;
+  await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
+    const config = configRecord as unknown as PsycheConfig;
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
+    if (!pane) return;
 
-  pane.agentSession = agentSession;
-  parsed.panes = panes;
-  parsed.lastUpdated = new Date().toISOString();
-  await atomicWriteJson(panesFile, parsed);
+    pane.agentSession = agentSession;
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+  });
 }

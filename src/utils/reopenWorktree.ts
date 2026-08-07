@@ -1,5 +1,4 @@
 import path from 'path';
-import * as fs from 'fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   ensurePaneBorderStatusForCurrentSession,
@@ -9,7 +8,6 @@ import {
 } from './tmux.js';
 import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
 import type { PsychePane, PsycheConfig } from '../types.js';
-import { atomicWriteJsonSync } from './atomicWrite.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import {
   AGENT_IDS,
@@ -29,6 +27,7 @@ import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -55,12 +54,10 @@ export async function reopenWorktree(
   return WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
     options.worktreePath,
     async (canonicalWorktreePath) => {
-      const result = await reopenWorktreeWithReuseReservation({
+      return reopenWorktreeWithReuseReservation({
       ...options,
         worktreePath: canonicalWorktreePath,
       });
-      await options.persistReopenedPane(result.pane);
-      return result;
     },
     options.projectRoot
   );
@@ -89,40 +86,41 @@ async function reopenWorktreeWithReuseReservation(
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
 
   // Load config to get control pane info
-  const configPath = optionsSessionConfigPath
-    || path.join(sessionProjectRoot, '.psyche', 'psyche.config.json');
   let controlPaneId: string | undefined;
   let configSidebarProjects: SidebarProject[] = [];
 
   try {
-    const configContent = fs.readFileSync(configPath, 'utf-8');
-    const config: PsycheConfig = JSON.parse(configContent);
-    controlPaneId = config.controlPaneId;
-    configSidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
+    const mutation = await mutateProjectPaneConfig(
+      sessionProjectRoot,
+      async (configRecord) => {
+        const config = configRecord as unknown as PsycheConfig;
+        let persistedControlPaneId = config.controlPaneId;
+        const sidebarProjects = Array.isArray(config.sidebarProjects)
+          ? config.sidebarProjects
+          : [];
+
+        if (persistedControlPaneId) {
+          const exists = await tmuxService.paneExists(persistedControlPaneId);
+          if (!exists) {
+            persistedControlPaneId = originalPaneId;
+          }
+        }
+        if (!persistedControlPaneId) {
+          persistedControlPaneId = originalPaneId;
+        }
+
+        config.controlPaneId = persistedControlPaneId;
+        config.controlPaneSize = SIDEBAR_WIDTH;
+        config.lastUpdated = new Date().toISOString();
+        return { persistedControlPaneId, sidebarProjects };
+      }
+    );
+    controlPaneId = mutation.result.persistedControlPaneId;
+    configSidebarProjects = mutation.result.sidebarProjects;
     paneProjectName = getSidebarProjectDisplayName(
       configSidebarProjects,
       projectRoot
     );
-
-    // Verify the control pane ID from config still exists
-    if (controlPaneId) {
-      const exists = await tmuxService.paneExists(controlPaneId);
-      if (!exists) {
-        controlPaneId = originalPaneId;
-        config.controlPaneId = controlPaneId;
-        config.controlPaneSize = SIDEBAR_WIDTH;
-        config.lastUpdated = new Date().toISOString();
-        atomicWriteJsonSync(configPath, config);
-      }
-    }
-
-    if (!controlPaneId) {
-      controlPaneId = originalPaneId;
-      config.controlPaneId = controlPaneId;
-      config.controlPaneSize = SIDEBAR_WIDTH;
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
-    }
   } catch {
     controlPaneId = originalPaneId;
   }
@@ -202,6 +200,41 @@ async function reopenWorktreeWithReuseReservation(
       : preferredOrder.find((candidate) => candidateAgents.includes(candidate)));
   const permissionMode = metadata?.permissionMode ?? settings.permissionMode;
   const psychePaneId = `psyche-${Date.now()}`;
+  const currentBranch = getCurrentBranch(worktreePath);
+  const newPane: PsychePane = {
+    id: psychePaneId,
+    slug,
+    displayName: metadata?.displayName,
+    branchName: (metadata?.branchName || currentBranch) !== slug
+      ? (metadata?.branchName || currentBranch)
+      : undefined,
+    prompt: '(Reopened session)',
+    paneId: paneInfo,
+    projectRoot,
+    projectName: paneProjectName,
+    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
+    worktreePath,
+    agent,
+    permissionMode,
+    autopilot: settings.enableAutopilotByDefault ?? false,
+    mergeTargetChain: metadata?.mergeTargetChain,
+  };
+
+  try {
+    await options.persistReopenedPane(newPane);
+  } catch (error) {
+    try {
+      await tmuxService.killPane(paneInfo);
+    } catch {
+      // The reuse lease remains held until this callback exits, so cleanup
+      // cannot remove the worktree while tmux teardown is attempted.
+    }
+    throw new Error(
+      `Failed to persist reopened pane before agent launch: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
 
   // Resume the agent session (or start interactive mode when no resume command is available).
   if (agent) {
@@ -236,48 +269,11 @@ async function reopenWorktreeWithReuseReservation(
   // Keep focus on the new pane
   await tmuxService.selectPane(paneInfo);
 
-  // Create the pane object
-  const currentBranch = getCurrentBranch(worktreePath);
-
-  const newPane: PsychePane = {
-    id: psychePaneId,
-    slug,
-    displayName: metadata?.displayName,
-    branchName: (metadata?.branchName || currentBranch) !== slug
-      ? (metadata?.branchName || currentBranch)
-      : undefined,
-    prompt: '(Reopened session)',
-    paneId: paneInfo,
-    projectRoot,
-    projectName: paneProjectName,
-    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
-    worktreePath,
-    agent,
-    permissionMode,
-    autopilot: settings.enableAutopilotByDefault ?? false,
-    mergeTargetChain: metadata?.mergeTargetChain,
-  };
-
-  // Pre-save pane to config before destroying welcome pane (first content pane only),
-  // so loadPanes sees a pane in config and doesn't recreate the welcome pane.
-  if (isFirstContentPane) {
-    try {
-      const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configContent);
-
-      config.panes = [...existingPanes, newPane];
-      config.lastUpdated = new Date().toISOString();
-      atomicWriteJsonSync(configPath, config);
-    } catch {
-      // Log but don't fail
-    }
-  }
-
   // Always destroy welcome pane if one exists — shell panes can make isFirstContentPane
   // false even when no real content pane exists yet.
   try {
     const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    destroyWelcomePaneCoordinated(sessionProjectRoot);
+    await destroyWelcomePaneCoordinated(sessionProjectRoot);
   } catch {
     // Ignore - welcome pane cleanup is not critical
   }

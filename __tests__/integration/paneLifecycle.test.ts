@@ -77,15 +77,22 @@ vi.mock('../../src/services/LogService.js', () => ({
 const mockEnqueueCleanup = vi.fn();
 const mockWithWorktreeReuseReservation = vi.fn();
 const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
+const mockBeginWorktreeCreation = vi.fn();
 const mockPersistReusedPane = vi.fn(async () => {});
+const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       enqueueCleanup: mockEnqueueCleanup,
       withWorktreeReuseReservation: mockWithWorktreeReuseReservation,
       rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+      beginWorktreeCreation: mockBeginWorktreeCreation,
     })),
   },
+}));
+
+vi.mock('../../src/services/ProjectPaneConfig.js', () => ({
+  mutateProjectPaneConfig: mutateProjectPaneConfigMock,
 }));
 
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
@@ -119,6 +126,27 @@ describe('Pane Lifecycle Integration Tests', () => {
       ) => operation(worktreePath)
     );
     mockRollbackCreatedWorktree.mockReturnValue({ success: true });
+    mockBeginWorktreeCreation.mockImplementation(async (worktreePath: string, projectRoot: string) => ({
+      canonicalWorktreePath: worktreePath,
+      creatorNonce: 'creation-test-nonce',
+      recordCreatedWorktree: (input: any) => ({
+        canonicalWorktreePath: worktreePath,
+        creatorNonce: 'creation-test-nonce',
+        mainRepoPath: projectRoot,
+        ...input,
+      }),
+      rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+      complete: async () => {},
+      cancel: async () => {},
+    }));
+    mutateProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      mutation: (config: Record<string, unknown>) => unknown | Promise<unknown>,
+    ) => {
+      const config = JSON.parse(fsMock.readFileSync()) as Record<string, unknown>;
+      const result = await mutation(config);
+      return { config, result };
+    });
     mockTriggerHook.mockImplementation(() => Promise.resolve());
     mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
 
@@ -220,6 +248,11 @@ describe('Pane Lifecycle Integration Tests', () => {
 
       if (cmd.includes('rev-parse --show-toplevel')) {
         return returnValue('/test');
+      }
+
+      if (cmd.includes('rev-parse --abbrev-ref HEAD')) {
+        const worktreeName = cmd.match(/\/worktrees\/([^"]+)"/)?.[1];
+        return returnValue(worktreeName || 'main');
       }
 
       if (cmd.includes('rev-parse')) {
@@ -768,6 +801,117 @@ describe('Pane Lifecycle Integration Tests', () => {
       expect(hookIdx).toBeGreaterThanOrEqual(0);
       expect(agentIdx).toBeGreaterThanOrEqual(0);
       expect(hookIdx).toBeLessThan(agentIdx);
+    });
+
+    it('kills and rolls back a created pane when persistence fails before launch', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'persist before launch',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          persistCreatedPane: async () => {
+            throw new Error('config disk unavailable');
+          },
+        },
+        ['claude']
+      )).rejects.toThrow(/Failed to persist pane/);
+
+      expect(mockRollbackCreatedWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mainRepoPath: '/test',
+          creatorNonce: 'creation-test-nonce',
+        })
+      );
+      expect(
+        getKillPaneCommands().some((cmd) => cmd.includes('%1'))
+      ).toBe(true);
+      expect(
+        getSendKeysCommands().some((cmd) => cmd.includes('claude'))
+      ).toBe(false);
+    });
+
+    it('does not let a second creator roll back the winner for the same planned worktree', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      let allowWinnerPersistence!: () => void;
+      let signalWinnerPersistence!: () => void;
+      let releaseWinnerLease!: () => void;
+      const winnerPersistence = new Promise<void>((resolve) => {
+        allowWinnerPersistence = resolve;
+      });
+      const winnerPersisting = new Promise<void>((resolve) => {
+        signalWinnerPersistence = resolve;
+      });
+      const winnerLeaseReleased = new Promise<void>((resolve) => {
+        releaseWinnerLease = resolve;
+      });
+      const reservation = (nonce: string, waitForWinner = false) => ({
+        canonicalWorktreePath: '/test/.psyche/worktrees/racing-creator',
+        creatorNonce: nonce,
+        recordCreatedWorktree: (input: any) => ({
+          canonicalWorktreePath: '/test/.psyche/worktrees/racing-creator',
+          creatorNonce: nonce,
+          mainRepoPath: '/test',
+          ...input,
+        }),
+        rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+        complete: async () => {
+          if (!waitForWinner) {
+            releaseWinnerLease();
+          }
+        },
+        cancel: async () => {
+          if (!waitForWinner) {
+            releaseWinnerLease();
+          }
+        },
+      });
+
+      mockRollbackCreatedWorktree.mockClear();
+      mockBeginWorktreeCreation
+        .mockImplementationOnce(async () => reservation('winner-nonce'))
+        .mockImplementationOnce(async () => {
+          await winnerLeaseReleased;
+          return reservation('loser-nonce', true);
+        });
+
+      const winner = createPane(
+        {
+          prompt: 'winner',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'racing-creator',
+          persistCreatedPane: async () => {
+            signalWinnerPersistence();
+            await winnerPersistence;
+          },
+        },
+        ['claude']
+      );
+      await winnerPersisting;
+
+      const loser = createPane(
+        {
+          prompt: 'loser',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'racing-creator',
+          persistCreatedPane: async () => {},
+        },
+        ['claude']
+      );
+
+      allowWinnerPersistence();
+      await winner;
+      await expect(loser).rejects.toThrow(/Planned worktree path already exists/);
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(
+        createdWorktreePaths.has('/test/.psyche/worktrees/racing-creator')
+      ).toBe(true);
     });
   });
 

@@ -7,7 +7,6 @@ import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT, TMUX_RETRY_DELAY } from '../constants/timing.js';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { buildAgentResumeOrLaunchCommand } from '../utils/agentLaunch.js';
 import { ensureGeminiFolderTrusted } from '../utils/geminiTrust.js';
@@ -22,6 +21,7 @@ import {
 } from '../utils/paneVisibility.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -388,20 +388,30 @@ export async function loadAndProcessPanes(
 
       // Save the cleaned config immediately to prevent these panes from reappearing
       try {
-        const fs = await import('fs/promises');
-        const configContent = await fs.readFile(panesFile, 'utf-8');
-        const config = JSON.parse(configContent);
-        config.panes = reboundPanes;
-        const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
-        const projectName = config.projectName || path.basename(projectRoot);
-        config.sidebarProjects = normalizeSidebarProjects(
-          config.sidebarProjects,
-          reboundPanes,
-          projectRoot,
-          projectName
+        const staleShellIds = new Set(staleShellPanes.map((pane) => pane.id));
+        const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+        const mutation = await mutateProjectPaneConfig(
+          sessionProjectRoot,
+          (configRecord) => {
+            const config = configRecord as unknown as PsycheConfig;
+            const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+            const persistedPanes = freshPanes.filter((pane) => !(
+              pane.type === 'shell' && staleShellIds.has(pane.id)
+            ));
+            const projectRoot = config.projectRoot || sessionProjectRoot;
+            const projectName = config.projectName || path.basename(projectRoot);
+            config.panes = persistedPanes;
+            config.sidebarProjects = normalizeSidebarProjects(
+              config.sidebarProjects,
+              persistedPanes,
+              projectRoot,
+              projectName
+            );
+            config.lastUpdated = new Date().toISOString();
+            return persistedPanes;
+          }
         );
-        config.lastUpdated = new Date().toISOString();
-        await atomicWriteJson(panesFile, config);
+        reboundPanes = mutation.result;
         LogService.getInstance().debug('Saved cleaned config after removing stale shell panes', 'usePaneLoading');
       } catch (saveError) {
         LogService.getInstance().debug(

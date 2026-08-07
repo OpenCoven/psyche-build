@@ -93,6 +93,12 @@ export interface ActionContext {
   sessionName: string;
   projectName: string;
   savePanes: (panes: PsychePane[]) => Promise<void>;
+  /**
+   * Removes exactly one pane from a freshly locked project config and returns
+   * the persisted pane list. Close uses this instead of replacing config with
+   * an in-memory snapshot that may be stale across processes.
+   */
+  removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;

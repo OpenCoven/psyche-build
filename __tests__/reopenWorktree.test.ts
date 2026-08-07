@@ -14,6 +14,7 @@ const tmuxServiceMock = vi.hoisted(() => ({
   sendShellCommand: vi.fn(async () => {}),
   sendTmuxKeys: vi.fn(async () => {}),
   selectPane: vi.fn(async () => {}),
+  killPane: vi.fn(async () => {}),
 }));
 
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%1'));
@@ -25,6 +26,7 @@ const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
 const withWorktreeReuseReservationMock = vi.hoisted(() => vi.fn());
 const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
 const persistReopenedPaneMock = vi.hoisted(() => vi.fn(async () => {}));
+const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -107,6 +109,10 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
   },
 }));
 
+vi.mock('../src/services/ProjectPaneConfig.js', () => ({
+  mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+}));
+
 describe('reopenWorktree', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -122,6 +128,14 @@ describe('reopenWorktree', () => {
         operation: (canonicalWorktreePath: string) => Promise<unknown>
       ) => operation(worktreePath)
     );
+    mutateProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      mutation: (config: Record<string, unknown>) => unknown | Promise<unknown>,
+    ) => {
+      const config = JSON.parse(fsMock.readFileSync()) as Record<string, unknown>;
+      const result = await mutation(config);
+      return { config, result };
+    });
   });
 
   it('uses stored agent metadata and permission mode for resume', async () => {
@@ -256,5 +270,41 @@ describe('reopenWorktree', () => {
     } finally {
       withWorktreeReuseReservationMock.mockReset();
     }
+  });
+
+  it('kills an unpersisted reopened pane before releasing its reuse reservation', async () => {
+    const order: string[] = [];
+    persistReopenedPaneMock.mockRejectedValueOnce(new Error('config unavailable'));
+    tmuxServiceMock.killPane.mockImplementationOnce(async () => {
+      order.push('pane-killed');
+    });
+    withWorktreeReuseReservationMock.mockImplementationOnce(async (
+      worktreePath: string,
+      operation: (canonicalWorktreePath: string) => Promise<unknown>,
+    ) => {
+      try {
+        return await operation(worktreePath);
+      } finally {
+        order.push('lease-released');
+      }
+    });
+
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+    await expect(reopenWorktree({
+      slug: 'reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
+      projectRoot: '/repo',
+      existingPanes: [],
+      sessionProjectRoot: '/repo',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      persistReopenedPane: persistReopenedPaneMock,
+    })).rejects.toThrow(/Failed to persist reopened pane/);
+
+    expect(tmuxServiceMock.killPane).toHaveBeenCalledWith('%1');
+    expect(order).toEqual(['pane-killed', 'lease-released']);
+    expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalledWith(
+      '%1',
+      expect.stringContaining('codex')
+    );
   });
 });

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import {
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -18,6 +19,7 @@ const logger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
+  on: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
@@ -99,7 +101,13 @@ describe('cross-process worktree lifecycle coordination', () => {
     mkdirSync(join(worktreePath, '.git'), { recursive: true });
     writeFileSync(configPath, JSON.stringify({
       projectRoot,
-      panes: [],
+      panes: [{
+        id: 'tui-close',
+        slug: 'reuse-me',
+        prompt: '',
+        paneId: '%1',
+        worktreePath,
+      }],
     }));
 
     const canonicalWorktreePath = realpathSync.native(worktreePath);
@@ -110,6 +118,10 @@ describe('cross-process worktree lifecycle coordination', () => {
 
     const { WorktreeCleanupService } = await import(
       '../src/services/WorktreeCleanupService.js'
+    );
+    const { mutateBridgeConfig } = await import('../src/daemon/bridge.js');
+    const { mutateProjectPaneConfig } = await import(
+      '../src/services/ProjectPaneConfig.js'
     );
     const daemonService = new WorktreeCleanupService();
     const tuiService = new WorktreeCleanupService() as any;
@@ -127,16 +139,18 @@ describe('cross-process worktree lifecycle coordination', () => {
       async () => {
         signalReservation();
         await persistence;
-        writeFileSync(configPath, JSON.stringify({
-          projectRoot,
-          panes: [{
-            id: 'daemon-pane',
-            slug: 'reuse-me',
-            prompt: '',
-            paneId: '%2',
-            worktreePath,
-          }],
-        }));
+        await mutateBridgeConfig(projectRoot, (config) => {
+          config.panes = [
+            ...(Array.isArray(config.panes) ? config.panes : []),
+            {
+              id: 'daemon-pane',
+              slug: 'reuse-me',
+              prompt: '',
+              paneId: '%2',
+              worktreePath,
+            },
+          ];
+        });
       },
       projectRoot,
     );
@@ -170,6 +184,11 @@ describe('cross-process worktree lifecycle coordination', () => {
 
     allowPersistence();
     await daemonReuse;
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      // Simulate a TUI closing from a stale in-memory pane list. The fresh
+      // locked config already has the daemon pane, so remove only this ID.
+      config.panes = (config.panes || []).filter((pane) => pane.id !== 'tui-close');
+    });
     await tuiService.cleanupQueue;
 
     expect(spawnMock).not.toHaveBeenCalled();
@@ -178,6 +197,9 @@ describe('cross-process worktree lifecycle coordination', () => {
       'paneActions',
       'tui-pane',
     );
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([
+      expect.objectContaining({ id: 'daemon-pane', paneId: '%2' }),
+    ]);
     expect(resolve(worktreePath)).toBe(canonicalWorktreePath);
   });
 });

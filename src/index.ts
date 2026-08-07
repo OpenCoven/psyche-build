@@ -26,7 +26,7 @@ import { SIDEBAR_WIDTH } from './utils/layoutManager.js';
 import { validateSystemRequirements, printValidationResults } from './utils/systemCheck.js';
 import { getUntrackedPanes } from './utils/shellPaneDetection.js';
 import { runFirstRunOnboardingIfNeeded } from './utils/onboarding.js';
-import { atomicWriteJson } from './utils/atomicWrite.js';
+import { mutateProjectPaneConfig } from './services/ProjectPaneConfig.js';
 import { buildDevWatchCommand, buildDevWatchRespawnCommand } from './utils/devWatchCommand.js';
 import { shouldUseQuietDevWatchExit } from './utils/devWatchExit.js';
 import {
@@ -1122,41 +1122,45 @@ class Psyche {
     }
 
     try {
-      const configRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configRaw);
-      const existingPanes = Array.isArray(config.panes) ? config.panes : [];
-      const latestConfigRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const latestConfig: PsycheConfig = JSON.parse(latestConfigRaw);
-      const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
-      const normalizedProjects = normalizeSidebarProjects(
-        latestConfig.sidebarProjects,
-        latestPanes,
+      const mutation = await mutateProjectPaneConfig(
         context.sessionProjectRoot,
-        context.sessionProjectName
+        (configRecord) => {
+          const latestConfig = configRecord as unknown as PsycheConfig;
+          const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
+          const normalizedProjects = normalizeSidebarProjects(
+            latestConfig.sidebarProjects,
+            latestPanes,
+            context.sessionProjectRoot,
+            context.sessionProjectName
+          );
+          if (hasSidebarProject(normalizedProjects, this.projectRoot)) {
+            return false;
+          }
+
+          latestConfig.sidebarProjects = addSidebarProject(normalizedProjects, {
+            projectName: this.projectName,
+            projectRoot: this.projectRoot,
+            colorTheme: getAutoSidebarProjectColorTheme(
+              normalizedProjects,
+              {
+                projectRoot: this.projectRoot,
+              },
+              (targetProjectRoot) =>
+                getSidebarProjectColorTheme(normalizedProjects, targetProjectRoot)
+                || new SettingsManager(targetProjectRoot).getSettings().colorTheme
+            ),
+            colorThemeSource: 'auto',
+          });
+          latestConfig.lastUpdated = new Date().toISOString();
+          return true;
+        }
       );
-      if (hasSidebarProject(normalizedProjects, this.projectRoot)) {
+      if (!mutation.result) {
         console.log(chalk.yellow(
           `Project '${this.projectName}' is already in session '${sessionName}'.`
         ));
         return true;
       }
-
-      latestConfig.sidebarProjects = addSidebarProject(normalizedProjects, {
-        projectName: this.projectName,
-        projectRoot: this.projectRoot,
-        colorTheme: getAutoSidebarProjectColorTheme(
-          normalizedProjects,
-          {
-            projectRoot: this.projectRoot,
-          },
-          (targetProjectRoot) =>
-            getSidebarProjectColorTheme(normalizedProjects, targetProjectRoot)
-            || new SettingsManager(targetProjectRoot).getSettings().colorTheme
-        ),
-        colorThemeSource: 'auto',
-      });
-      latestConfig.lastUpdated = new Date().toISOString();
-      await atomicWriteJson(context.sessionConfigPath, latestConfig);
 
       console.log(chalk.hex(COLORS.success)(
         `Added project '${this.projectName}' to session '${sessionName}' sidebar.`

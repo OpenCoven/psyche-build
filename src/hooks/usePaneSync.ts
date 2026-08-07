@@ -1,4 +1,3 @@
-import fs from 'fs/promises';
 import path from 'path';
 import type { PsychePane } from '../types.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
@@ -7,12 +6,12 @@ import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT } from '../constants/timing.js';
 import type { PsycheConfig } from './usePaneLoading.js';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -84,7 +83,8 @@ export async function enforcePaneTitles(
 export async function savePanesToFile(
   panesFile: string,
   panes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  previousPanes: readonly PsychePane[] = [],
 ): Promise<PsychePane[]> {
   return withWriteLock(async () => {
     let activePanes = panes;
@@ -120,35 +120,36 @@ export async function savePanesToFile(
       activePanes = panes;
     }
 
-    // Read existing config to preserve other fields
-    let config: PsycheConfig = { panes: [] };
-    try {
-      const content = await fs.readFile(panesFile, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (!Array.isArray(parsed)) {
-        config = parsed;
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    const mutation = await mutateProjectPaneConfig(
+      sessionProjectRoot,
+      (configRecord) => {
+        const config = configRecord as unknown as PsycheConfig;
+        const mergedPanes = mergePaneSnapshots(
+          Array.isArray(config.panes) ? config.panes : [],
+          previousPanes,
+          activePanes,
+        );
+        const projectRoot = config.projectRoot || sessionProjectRoot;
+        const projectName = config.projectName || path.basename(projectRoot);
+        const normalizedSidebarProjects = normalizeSidebarProjects(
+          config.sidebarProjects,
+          mergedPanes,
+          projectRoot,
+          projectName
+        );
+        config.sidebarProjects = normalizedSidebarProjects;
+        config.panes = syncPaneColorThemes(
+          mergedPanes,
+          normalizedSidebarProjects,
+          projectRoot
+        );
+        config.lastUpdated = new Date().toISOString();
+        return config.panes;
       }
-    } catch {}
-
-    // Save in config format (use atomic write to prevent race conditions)
-    const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
-    const projectName = config.projectName || path.basename(projectRoot);
-    const normalizedSidebarProjects = normalizeSidebarProjects(
-      config.sidebarProjects,
-      activePanes,
-      projectRoot,
-      projectName
     );
-    config.sidebarProjects = normalizedSidebarProjects;
-    config.panes = syncPaneColorThemes(
-      activePanes,
-      normalizedSidebarProjects,
-      projectRoot
-    );
-    config.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(panesFile, config);
 
-    return config.panes;
+    return mutation.result as PsychePane[];
   });
 }
 
@@ -263,42 +264,97 @@ export function rebindAndFilterPanes(
 export async function saveUpdatedPaneConfig(
   panesFile: string,
   activePanes: PsychePane[],
-  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>
+  withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
+  previousPanes: readonly PsychePane[] = activePanes,
 ): Promise<void> {
   await withWriteLock(async () => {
-    // Re-read config in case it changed
-    let currentConfig: PsycheConfig = { panes: [] };
-    try {
-      const content = await fs.readFile(panesFile, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (!Array.isArray(parsed)) {
-        currentConfig = parsed;
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    const mutation = await mutateProjectPaneConfig(
+      sessionProjectRoot,
+      (configRecord) => {
+        const currentConfig = configRecord as unknown as PsycheConfig;
+        const mergedPanes = mergePaneSnapshots(
+          Array.isArray(currentConfig.panes) ? currentConfig.panes : [],
+          previousPanes,
+          activePanes,
+        );
+        const projectRoot = currentConfig.projectRoot || sessionProjectRoot;
+        const projectName = currentConfig.projectName || path.basename(projectRoot);
+        const normalizedSidebarProjects = normalizeSidebarProjects(
+          currentConfig.sidebarProjects,
+          mergedPanes,
+          projectRoot,
+          projectName
+        );
+        currentConfig.sidebarProjects = normalizedSidebarProjects;
+        currentConfig.panes = syncPaneColorThemes(
+          mergedPanes,
+          normalizedSidebarProjects,
+          projectRoot
+        );
+        currentConfig.lastUpdated = new Date().toISOString();
+        return currentConfig.panes;
       }
-    } catch {}
-
-    // Update with remapped panes
-    const projectRoot = currentConfig.projectRoot || path.dirname(path.dirname(panesFile));
-    const projectName = currentConfig.projectName || path.basename(projectRoot);
-    const normalizedSidebarProjects = normalizeSidebarProjects(
-      currentConfig.sidebarProjects,
-      activePanes,
-      projectRoot,
-      projectName
     );
-    currentConfig.sidebarProjects = normalizedSidebarProjects;
-    currentConfig.panes = syncPaneColorThemes(
-      activePanes,
-      normalizedSidebarProjects,
-      projectRoot
-    );
-    currentConfig.lastUpdated = new Date().toISOString();
     LogService.getInstance().debug(
-      `Writing config with ${currentConfig.panes.length} panes`,
+      `Writing config with ${(mutation.result as PsychePane[]).length} panes`,
       'shellDetection'
     );
-    await atomicWriteJson(panesFile, currentConfig);
     LogService.getInstance().debug('Config file written successfully', 'shellDetection');
   });
+}
+
+/**
+ * Reconciles a stale UI snapshot with the config currently on disk. Only
+ * explicit local additions, removals, and changed records are applied; panes
+ * added by another process remain intact.
+ */
+export function mergePaneSnapshots(
+  freshPanes: readonly PsychePane[],
+  previousPanes: readonly PsychePane[],
+  nextPanes: readonly PsychePane[],
+): PsychePane[] {
+  const previousById = new Map(previousPanes.map((pane) => [pane.id, pane]));
+  const nextById = new Map(nextPanes.map((pane) => [pane.id, pane]));
+  const explicitlyRemoved = new Set(
+    previousPanes
+      .filter((pane) => !nextById.has(pane.id))
+      .map((pane) => pane.id)
+  );
+  const freshIds = new Set(freshPanes.map((pane) => pane.id));
+  const merged: PsychePane[] = [];
+
+  for (const freshPane of freshPanes) {
+    if (explicitlyRemoved.has(freshPane.id)) {
+      continue;
+    }
+
+    const nextPane = nextById.get(freshPane.id);
+    const previousPane = previousById.get(freshPane.id);
+    if (
+      nextPane
+      && (
+        !previousPane
+        || !paneSnapshotsEqual(previousPane, nextPane)
+      )
+    ) {
+      merged.push(nextPane);
+    } else {
+      merged.push(freshPane);
+    }
+  }
+
+  for (const nextPane of nextPanes) {
+    if (!previousById.has(nextPane.id) && !freshIds.has(nextPane.id)) {
+      merged.push(nextPane);
+    }
+  }
+
+  return merged;
+}
+
+function paneSnapshotsEqual(left: PsychePane, right: PsychePane): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**
@@ -322,21 +378,21 @@ export async function destroyWelcomePaneIfNeeded(
   if (!shouldDestroyWelcome) return;
 
   try {
-    // Load config to get welcomePaneId
-    const configContent = await fs.readFile(panesFile, 'utf-8');
-    const config = JSON.parse(configContent);
-    if (config.welcomePaneId) {
+    const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+    await mutateProjectPaneConfig(sessionProjectRoot, async (configRecord) => {
+      const config = configRecord as { welcomePaneId?: string; lastUpdated?: string };
+      if (!config.welcomePaneId) {
+        return;
+      }
       LogService.getInstance().debug(
         `Destroying welcome pane ${config.welcomePaneId} because panes were added`,
         'shellDetection'
       );
       const { destroyWelcomePane } = await import('../utils/welcomePane.js');
       await destroyWelcomePane(config.welcomePaneId);
-      // Clear welcomePaneId from config (will be saved by caller)
       config.welcomePaneId = undefined;
-      // Write the config immediately to clear welcomePaneId
-      await atomicWriteJson(panesFile, config);
-    }
+      config.lastUpdated = new Date().toISOString();
+    });
   } catch (error) {
     LogService.getInstance().debug('Failed to destroy welcome pane', 'shellDetection');
   }

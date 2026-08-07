@@ -9,6 +9,12 @@ import {
   rm,
 } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  getProcessStartIdentity,
+  isProcessAlive,
+  isSafeProcessStartIdentity,
+  type ProcessStartIdentityResolver,
+} from './ProcessIdentity.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -16,6 +22,7 @@ const LEASE_FILE_NAME = 'lease.json';
 
 export interface WorktreeOperationLeaseRecord {
   pid: number;
+  processStartIdentity?: string;
   nonce: string;
   canonicalPath: string;
   operation: string;
@@ -43,6 +50,11 @@ export interface WorktreeOperationLease {
 export interface WorktreeOperationLeaseOptions {
   pid?: number;
   isProcessAlive?: (pid: number) => boolean;
+  /**
+   * Returns a stable process-start identity for a live PID. An unavailable
+   * identity is intentionally treated as uncertain, never stale.
+   */
+  getProcessStartIdentity?: ProcessStartIdentityResolver;
   sleep?: (ms: number) => Promise<void>;
   pollIntervalMs?: number;
   timeoutMs?: number;
@@ -79,7 +91,8 @@ export async function acquireWorktreeOperationLease(
 
   const paths = await resolveLeasePaths(request);
   const pid = options.pid ?? process.pid;
-  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+  const isOwnerProcessAlive = options.isProcessAlive ?? isProcessAlive;
+  const resolveProcessStartIdentity = options.getProcessStartIdentity ?? getProcessStartIdentity;
   const sleep = options.sleep ?? defaultSleep;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -100,8 +113,12 @@ export async function acquireWorktreeOperationLease(
     throw new Error('worktree operation lease nonce contains unsupported characters');
   }
 
+  const processStartIdentity = resolveProcessStartIdentity(pid);
   const record: WorktreeOperationLeaseRecord = {
     pid,
+    ...(processStartIdentity
+      ? { processStartIdentity }
+      : {}),
     nonce,
     canonicalPath: paths.canonicalWorktreePath,
     operation: request.operation,
@@ -134,18 +151,23 @@ export async function acquireWorktreeOperationLease(
 
       const current = await readLeaseRecord(paths.lockDir);
       if (current.record) {
-        if (!isProcessAlive(current.record.pid)) {
+        if (isLeaseOwnerStale(
+          current.record,
+          isOwnerProcessAlive,
+          resolveProcessStartIdentity,
+        )) {
           const quarantined = await quarantineDeadLease(
             paths,
             current.record,
-            isProcessAlive,
+            isOwnerProcessAlive,
+            resolveProcessStartIdentity,
           );
           if (quarantined) {
             continue;
           }
           lastWaitReason = `stale lease recovery is in progress for pid ${current.record.pid}`;
         } else {
-          lastWaitReason = `lease is held by live pid ${current.record.pid}`;
+          lastWaitReason = `lease is held by live or unverifiable pid ${current.record.pid}`;
         }
       } else if (current.missing) {
         lastWaitReason = 'lease was released while waiting';
@@ -329,10 +351,11 @@ async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
 async function quarantineDeadLease(
   paths: LeasePaths,
   record: WorktreeOperationLeaseRecord,
-  isProcessAlive: (pid: number) => boolean,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
 ): Promise<boolean> {
   // Check immediately before the atomic move. A live lease is never moved.
-  if (isProcessAlive(record.pid)) {
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity)) {
     return false;
   }
 
@@ -366,6 +389,10 @@ function isLeaseRecord(value: unknown): value is WorktreeOperationLeaseRecord {
     && record.pid > 0
     && typeof record.nonce === 'string'
     && isSafeNonce(record.nonce)
+    && (
+      record.processStartIdentity === undefined
+      || isSafeProcessStartIdentity(record.processStartIdentity)
+    )
     && typeof record.canonicalPath === 'string'
     && typeof record.operation === 'string'
     && typeof record.acquiredAt === 'string'
@@ -376,15 +403,24 @@ function isSafeNonce(value: string): boolean {
   return /^[A-Za-z0-9_-]{1,128}$/.test(value);
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
+function isLeaseOwnerStale(
+  record: WorktreeOperationLeaseRecord,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
+): boolean {
+  if (!isOwnerProcessAlive(record.pid)) {
     return true;
-  } catch (error) {
-    // EPERM still proves that a process with this PID exists; treating it as
-    // dead could steal a lease owned by another user.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+
+  if (!record.processStartIdentity) {
+    return false;
+  }
+
+  const currentIdentity = resolveProcessStartIdentity(record.pid);
+  return (
+    currentIdentity !== undefined
+    && currentIdentity !== record.processStartIdentity
+  );
 }
 
 function defaultSleep(ms: number): Promise<void> {

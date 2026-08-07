@@ -133,4 +133,75 @@ describe('worktree operation lease', () => {
     await replacement.release();
     expect(existsSync(lockDir)).toBe(false);
   });
+
+  it('recovers a live reused PID when its process-start identity changed', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let firstOwnerIdentity = 'first-start';
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'create' },
+      {
+        pid: 101,
+        isProcessAlive: () => true,
+        getProcessStartIdentity: () => firstOwnerIdentity,
+        createNonce: () => 'first-owner',
+      },
+    );
+
+    firstOwnerIdentity = 'reused-pid-start';
+    const recovered = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: () => true,
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? firstOwnerIdentity : 'second-start'
+        ),
+        createNonce: () => 'recovered-owner',
+      },
+    );
+
+    const lockDir = lockDirFor(projectRoot, worktreePath);
+    const record = JSON.parse(
+      readFileSync(join(lockDir, 'lease.json'), 'utf8'),
+    ) as WorktreeOperationLeaseRecord;
+    expect(record).toMatchObject({
+      pid: 202,
+      nonce: 'recovered-owner',
+      processStartIdentity: 'second-start',
+    });
+    expect(existsSync(`${lockDir.replace(/\.lock$/, '')}.stale.first-owner`)).toBe(true);
+
+    await first.release();
+    await recovered.release();
+  });
+
+  it('does not steal a lease when a live PID has the matching start identity', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'create' },
+      {
+        pid: 101,
+        isProcessAlive: () => true,
+        getProcessStartIdentity: () => 'same-start',
+        createNonce: () => 'first-owner',
+      },
+    );
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: () => true,
+        getProcessStartIdentity: () => 'same-start',
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'second-owner',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+
+    const lockDir = lockDirFor(projectRoot, worktreePath);
+    expect(existsSync(lockDir)).toBe(true);
+    expect(existsSync(`${lockDir.replace(/\.lock$/, '')}.stale.first-owner`)).toBe(false);
+    await first.release();
+  });
 });

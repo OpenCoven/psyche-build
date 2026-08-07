@@ -19,6 +19,7 @@ import type { TrackProjectActivity } from '../types/activity.js';
 interface UseActionSystemParams {
   panes: PsychePane[];
   savePanes: (panes: PsychePane[]) => Promise<void>;
+  removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
@@ -183,6 +184,7 @@ async function handleResultWithPopups(
 export default function useActionSystem({
   panes,
   savePanes,
+  removePaneFromConfig,
   sessionName,
   projectName,
   defaultProjectRoot,
@@ -201,10 +203,20 @@ export default function useActionSystem({
     sessionName,
     projectName,
     savePanes,
+    removePaneFromConfig,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,
-  }), [panes, sessionName, projectName, savePanes, onPaneUpdate, onPaneRemove, onActionResult]);
+  }), [
+    panes,
+    sessionName,
+    projectName,
+    savePanes,
+    removePaneFromConfig,
+    onPaneUpdate,
+    onPaneRemove,
+    onActionResult,
+  ]);
 
   // Execute an action and handle the result
   const executeActionWithHandling = useCallback(async (

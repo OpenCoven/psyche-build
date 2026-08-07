@@ -232,7 +232,7 @@ async function executeCloseOption(
     try {
       let startedBackgroundCleanup = false;
 
-      const updatedPanes = context.panes.filter(p => p.id !== pane.id);
+      let updatedPanes = context.panes.filter(p => p.id !== pane.id);
 
       // Kill and verify the tmux pane before mutating pane state or deleting
       // the worktree. Sending C-c first can drop an agent back to a shell if
@@ -249,8 +249,14 @@ async function executeCloseOption(
 
       // Remove from config only after tmux confirms the pane is gone. The
       // lifecycle close marker suppresses recreation while the close is in
-      // progress.
-      await context.savePanes(updatedPanes);
+      // progress. The TUI implementation removes this exact ID from a fresh
+      // config while holding the cross-process config lock, then returns the
+      // merged pane list so a stale UI cannot erase a daemon-created pane.
+      if (context.removePaneFromConfig) {
+        updatedPanes = await context.removePaneFromConfig(pane.id);
+      } else {
+        await context.savePanes(updatedPanes);
+      }
 
       // Best-effort cleanup of any stored prompt files for this pane slug
       // (including leftovers from interrupted launches).
