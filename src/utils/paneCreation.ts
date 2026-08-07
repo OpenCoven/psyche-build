@@ -110,7 +110,8 @@ export async function createPane(
       }
 
       return result;
-    }
+    },
+    options.projectRoot
   );
 }
 

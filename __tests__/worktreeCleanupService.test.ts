@@ -10,6 +10,7 @@ const execFileSyncMock = vi.hoisted(() => vi.fn());
 const readFileSyncMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const detectAllWorktreesMock = vi.hoisted(() => vi.fn());
+const acquireWorktreeOperationLeaseMock = vi.hoisted(() => vi.fn());
 const logger = vi.hoisted(() => ({
   debug: vi.fn(),
   warn: vi.fn(),
@@ -43,6 +44,10 @@ vi.mock('../src/services/LogService.js', () => ({
   },
 }));
 
+vi.mock('../src/services/WorktreeOperationLease.js', () => ({
+  acquireWorktreeOperationLease: acquireWorktreeOperationLeaseMock,
+}));
+
 type MockChildProcess = EventEmitter & { stderr: EventEmitter | null };
 
 function createSuccessfulChildProcess(): MockChildProcess {
@@ -73,6 +78,19 @@ describe('WorktreeCleanupService', () => {
     };
     readFileSyncMock.mockImplementation(() => JSON.stringify(currentConfig));
     detectAllWorktreesMock.mockReturnValue([]);
+    acquireWorktreeOperationLeaseMock.mockImplementation(async ({
+      worktreePath,
+      projectRoot,
+    }: {
+      worktreePath: string;
+      projectRoot?: string;
+    }) => ({
+      canonicalProjectRoot: projectRoot || '/test/project',
+      canonicalWorktreePath: worktreePath,
+      lockDir: '/test/project/.psyche/runtime/worktree-locks/test.lock',
+      nonce: 'test-lease',
+      release: async () => {},
+    }));
 
     execFileSyncMock.mockImplementation((_command, args, options) => {
       const gitArgs = args as string[];

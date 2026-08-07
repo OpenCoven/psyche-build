@@ -61,7 +61,8 @@ export async function reopenWorktree(
       });
       await options.persistReopenedPane(result.pane);
       return result;
-    }
+    },
+    options.projectRoot
   );
 }
 

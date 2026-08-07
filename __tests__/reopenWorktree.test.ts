@@ -215,7 +215,8 @@ describe('reopenWorktree', () => {
 
     expect(withWorktreeReuseReservationMock).toHaveBeenCalledWith(
       '/repo/.psyche/worktrees/reopen-me',
-      expect.any(Function)
+      expect.any(Function),
+      '/repo'
     );
     expect(persistReopenedPaneMock).toHaveBeenCalledWith(
       expect.objectContaining({ worktreePath: '/repo/.psyche/worktrees/reopen-me' })

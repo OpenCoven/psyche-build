@@ -6,6 +6,7 @@ import { triggerHook } from '../utils/hooks.js';
 import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
+import { acquireWorktreeOperationLease } from './WorktreeOperationLease.js';
 
 export interface WorktreeCleanupJob {
   pane: PsychePane;
@@ -59,6 +60,7 @@ interface QueuedWorktreeIdentity extends WorktreeIdentity {
 interface QueuedWorktreeCleanupJob {
   pane: PsychePane;
   paneProjectRoot: string;
+  mainRepoPath: string;
   canonicalWorktreePath: string;
   branchName: string;
   branchOid: string;
@@ -90,8 +92,8 @@ interface ManagedWorktreePruneCandidate {
 
 export interface WorktreeReuseReservation {
   canonicalWorktreePath: string;
-  complete: () => void;
-  cancel: () => void;
+  complete: () => Promise<void>;
+  cancel: () => Promise<void>;
 }
 
 function canonicalizePathForCompare(value: string): string {
@@ -139,30 +141,38 @@ export class WorktreeCleanupService {
 
   async withWorktreeReuseReservation<T>(
     worktreePath: string,
-    operation: (canonicalWorktreePath: string) => Promise<T> | T
+    operation: (canonicalWorktreePath: string) => Promise<T> | T,
+    projectRoot?: string,
   ): Promise<T> {
-    const reservation = await this.beginWorktreeReuseReservation(worktreePath);
+    const reservation = await this.beginWorktreeReuseReservation(worktreePath, projectRoot);
     let completed = false;
 
     try {
       const result = await operation(reservation.canonicalWorktreePath);
-      reservation.complete();
+      await reservation.complete();
       completed = true;
       return result;
     } finally {
       if (!completed) {
-        reservation.cancel();
+        await reservation.cancel();
       }
     }
   }
 
   async beginWorktreeReuseReservation(
-    worktreePath: string
+    worktreePath: string,
+    projectRoot?: string,
   ): Promise<WorktreeReuseReservation> {
     const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
+    let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
 
     try {
+      operationLease = await acquireWorktreeOperationLease({
+        worktreePath: canonicalWorktreePath,
+        projectRoot,
+        operation: 'reuse',
+      });
       const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
       if (!this.isReusableWorktree(canonicalWorktreePath)) {
         throw new Error(
@@ -176,18 +186,19 @@ export class WorktreeCleanupService {
         'paneActions'
       );
 
-      let settled = false;
-      const settle = (outcome: 'completed' | 'canceled') => {
-        if (settled) {
-          return;
+      let settlePromise: Promise<void> | undefined;
+      const settle = (outcome: 'completed' | 'canceled'): Promise<void> => {
+        if (!settlePromise) {
+          this.removeActiveReuseReservation(canonicalWorktreePath);
+          releaseLock();
+          settlePromise = operationLease!.release().then(() => {
+            this.logger.debug(
+              `Reuse reservation ${outcome} for ${canonicalWorktreePath}`,
+              'paneActions'
+            );
+          });
         }
-        settled = true;
-        this.removeActiveReuseReservation(canonicalWorktreePath);
-        releaseLock();
-        this.logger.debug(
-          `Reuse reservation ${outcome} for ${canonicalWorktreePath}`,
-          'paneActions'
-        );
+        return settlePromise;
       };
 
       return {
@@ -196,6 +207,7 @@ export class WorktreeCleanupService {
         cancel: () => settle('canceled'),
       };
     } catch (error) {
+      await operationLease?.release();
       releaseLock();
       throw error;
     }
@@ -250,82 +262,87 @@ export class WorktreeCleanupService {
     job: CreatedWorktreeRollbackJob
   ): Promise<WorktreeRollbackResult> {
     const canonicalWorktreePath = canonicalizePathForCompare(job.worktreePath);
-    return this.withWorktreeLock(canonicalWorktreePath, async () => {
-      const identity: WorktreeIdentity = {
-        repoPath: job.mainRepoPath,
-        canonicalWorktreePath,
-        branchName: job.branchName,
-        branchOid: job.branchOid,
-      };
-
-      const mappedBranch = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-      if (!mappedBranch.success) {
-        return {
-          success: false,
-          error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
+    return this.withWorktreeLifecycleLock(
+      canonicalWorktreePath,
+      job.mainRepoPath,
+      'rollback',
+      async () => {
+        const identity: WorktreeIdentity = {
+          repoPath: job.mainRepoPath,
+          canonicalWorktreePath,
+          branchName: job.branchName,
+          branchOid: job.branchOid,
         };
-      }
-      if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
-        return {
-          success: false,
-          error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
-        };
-      }
 
-      const currentOid = this.getBranchOid(identity.repoPath, identity.branchName);
-      if (!currentOid.success || currentOid.output !== identity.branchOid) {
-        return {
-          success: false,
-          error: 'newly created branch identity changed before rollback',
-        };
-      }
+        const mappedBranch = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
+        if (!mappedBranch.success) {
+          return {
+            success: false,
+            error: `could not verify newly created worktree identity: ${mappedBranch.error}`,
+          };
+        }
+        if (!mappedBranch.found || mappedBranch.branchName !== identity.branchName) {
+          return {
+            success: false,
+            error: `newly created worktree identity changed before rollback (expected ${identity.branchName}, found ${mappedBranch.branchName || 'no branch'})`,
+          };
+        }
 
-      const removeResult = this.runGitTextSync(
-        ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
-        identity.repoPath
-      );
-      if (!removeResult.success) {
-        return {
-          success: false,
-          error: `failed to remove newly created worktree: ${removeResult.error}`,
-        };
-      }
+        const currentOid = this.getBranchOid(identity.repoPath, identity.branchName);
+        if (!currentOid.success || currentOid.output !== identity.branchOid) {
+          return {
+            success: false,
+            error: 'newly created branch identity changed before rollback',
+          };
+        }
 
-      const afterRemoval = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
-      if (!afterRemoval.success || afterRemoval.found) {
-        return {
-          success: false,
-          error: afterRemoval.success
-            ? 'newly created worktree removal could not be confirmed'
-            : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
-        };
-      }
+        const removeResult = this.runGitTextSync(
+          ['worktree', 'remove', identity.canonicalWorktreePath, '--force'],
+          identity.repoPath
+        );
+        if (!removeResult.success) {
+          return {
+            success: false,
+            error: `failed to remove newly created worktree: ${removeResult.error}`,
+          };
+        }
 
-      if (!job.deleteBranch) {
+        const afterRemoval = this.getWorktreeBranch(identity.repoPath, identity.canonicalWorktreePath);
+        if (!afterRemoval.success || afterRemoval.found) {
+          return {
+            success: false,
+            error: afterRemoval.success
+              ? 'newly created worktree removal could not be confirmed'
+              : `could not confirm newly created worktree removal: ${afterRemoval.error}`,
+          };
+        }
+
+        if (!job.deleteBranch) {
+          return { success: true };
+        }
+
+        const branchOidBeforeDelete = this.getBranchOid(identity.repoPath, identity.branchName);
+        if (!branchOidBeforeDelete.success || branchOidBeforeDelete.output !== identity.branchOid) {
+          return {
+            success: false,
+            error: 'newly created branch identity changed before rollback deletion',
+          };
+        }
+
+        const deleteResult = this.runGitTextSync(
+          ['branch', '-D', identity.branchName],
+          identity.repoPath
+        );
+        if (!deleteResult.success) {
+          return {
+            success: false,
+            error: `failed to delete newly created branch: ${deleteResult.error}`,
+          };
+        }
+
         return { success: true };
       }
-
-      const branchOidBeforeDelete = this.getBranchOid(identity.repoPath, identity.branchName);
-      if (!branchOidBeforeDelete.success || branchOidBeforeDelete.output !== identity.branchOid) {
-        return {
-          success: false,
-          error: 'newly created branch identity changed before rollback deletion',
-        };
-      }
-
-      const deleteResult = this.runGitTextSync(
-        ['branch', '-D', identity.branchName],
-        identity.repoPath
-      );
-      if (!deleteResult.success) {
-        return {
-          success: false,
-          error: `failed to delete newly created branch: ${deleteResult.error}`,
-        };
-      }
-
-      return { success: true };
-    });
+    );
   }
 
   enqueuePruneManagedWorktrees(job: WorktreePruneJob): void {
@@ -370,8 +387,10 @@ export class WorktreeCleanupService {
       job.pane.id
     );
 
-    const allWorktreesRemoved = await this.withWorktreeLock(
+    const allWorktreesRemoved = await this.withWorktreeLifecycleLock(
       job.canonicalWorktreePath,
+      job.mainRepoPath,
+      'cleanup',
       async () => {
         if (
           !this.canRunDestructiveCleanup(job)
@@ -384,7 +403,12 @@ export class WorktreeCleanupService {
           const removeTarget = () => this.removeValidatedWorktreeTarget(job, target);
           const removed = target.canonicalWorktreePath === job.canonicalWorktreePath
             ? await removeTarget()
-            : await this.withWorktreeLock(target.canonicalWorktreePath, removeTarget);
+            : await this.withWorktreeLifecycleLock(
+              target.canonicalWorktreePath,
+              target.repoPath,
+              'cleanup',
+              removeTarget
+            );
 
           // Nested worktree removal must succeed before the parent can be
           // removed; otherwise a reused nested worktree could be deleted with
@@ -482,6 +506,26 @@ export class WorktreeCleanupService {
 
   private getCleanupGeneration(canonicalWorktreePath: string): number {
     return this.cleanupGenerations.get(canonicalWorktreePath) || 0;
+  }
+
+  private async withWorktreeLifecycleLock<T>(
+    canonicalWorktreePath: string,
+    projectRoot: string,
+    operation: 'cleanup' | 'prune' | 'rollback',
+    callback: () => Promise<T> | T
+  ): Promise<T> {
+    return this.withWorktreeLock(canonicalWorktreePath, async () => {
+      const lease = await acquireWorktreeOperationLease({
+        worktreePath: canonicalWorktreePath,
+        projectRoot,
+        operation,
+      });
+      try {
+        return await callback();
+      } finally {
+        await lease.release();
+      }
+    });
   }
 
   private async withWorktreeLock<T>(
@@ -605,6 +649,7 @@ export class WorktreeCleanupService {
     return {
       pane: job.pane,
       paneProjectRoot: job.paneProjectRoot,
+      mainRepoPath: job.mainRepoPath,
       canonicalWorktreePath,
       branchName,
       branchOid: rootIdentity.branchOid,
@@ -933,45 +978,50 @@ export class WorktreeCleanupService {
       'paneActions'
     );
     for (const target of targets) {
-      await this.withWorktreeLock(target.canonicalWorktreePath, async () => {
-        if (
-          target.blockedByActiveReuseReservation
-          || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
-        ) {
-          this.logger.debug(
-            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: worktree is actively reserved for reuse`,
-            'paneActions'
+      await this.withWorktreeLifecycleLock(
+        target.canonicalWorktreePath,
+        job.projectRoot,
+        'prune',
+        async () => {
+          if (
+            target.blockedByActiveReuseReservation
+            || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
+          ) {
+            this.logger.debug(
+              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: worktree is actively reserved for reuse`,
+              'paneActions'
+            );
+            return;
+          }
+
+          if (
+            this.getCleanupGeneration(target.canonicalWorktreePath)
+            !== target.expectedGeneration
+          ) {
+            this.logger.debug(
+              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
+              'paneActions'
+            );
+            return;
+          }
+
+          if (!this.configAllowsManagedPrune(job, target.canonicalWorktreePath)) {
+            return;
+          }
+
+          const removeResult = await this.runGitCommand(
+            ['worktree', 'remove', target.canonicalWorktreePath],
+            job.projectRoot
           );
-          return;
-        }
 
-        if (
-          this.getCleanupGeneration(target.canonicalWorktreePath)
-          !== target.expectedGeneration
-        ) {
-          this.logger.debug(
-            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: cleanup generation changed`,
-            'paneActions'
-          );
-          return;
+          if (!removeResult.success) {
+            this.logger.warn(
+              `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${removeResult.error}`,
+              'paneActions'
+            );
+          }
         }
-
-        if (!this.configAllowsManagedPrune(job, target.canonicalWorktreePath)) {
-          return;
-        }
-
-        const removeResult = await this.runGitCommand(
-          ['worktree', 'remove', target.canonicalWorktreePath],
-          job.projectRoot
-        );
-
-        if (!removeResult.success) {
-          this.logger.warn(
-            `Managed worktree pruning skipped ${target.canonicalWorktreePath}: ${removeResult.error}`,
-            'paneActions'
-          );
-        }
-      });
+      );
     }
   }
 

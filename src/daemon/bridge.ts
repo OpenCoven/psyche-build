@@ -990,6 +990,7 @@ export async function spawnBridgePane(
       return await WorktreeCleanupService.getInstance().withWorktreeReuseReservation(
         worktreePath,
         async (canonicalWorktreePath) => finishSpawn(canonicalWorktreePath),
+        scoped.projectRoot,
       );
     }
     return await finishSpawn(worktreePath);
