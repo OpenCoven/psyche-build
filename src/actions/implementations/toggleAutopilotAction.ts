@@ -24,7 +24,7 @@ export async function toggleAutopilot(
     );
 
     // Save the updated panes
-    await context.savePanes(updatedPanes);
+    await context.savePanes(updatedPanes, context.panes);
 
     // Notify about the update
     if (context.onPaneUpdate) {

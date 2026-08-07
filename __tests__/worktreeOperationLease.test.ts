@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -63,6 +71,51 @@ describe('worktree operation lease', () => {
     await first.release();
     const second = await secondPromise;
     expect(second.canonicalWorktreePath).toBe(resolve(worktreePath));
+    await second.release();
+  });
+
+  it('shares a lease for planned paths below a symlinked ancestor', async () => {
+    const { projectRoot } = createLeaseTarget();
+    const realRoot = join(projectRoot, 'real-worktrees');
+    const symlinkRoot = join(projectRoot, 'worktrees-alias');
+    mkdirSync(realRoot);
+    symlinkSync(realRoot, symlinkRoot);
+    const realPlannedPath = join(realRoot, 'new-worktree');
+    const symlinkPlannedPath = join(symlinkRoot, 'new-worktree');
+    const canonicalPlannedPath = join(realpathSync.native(realRoot), 'new-worktree');
+
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath: realPlannedPath, operation: 'create' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        createNonce: () => 'first-owner',
+      },
+    );
+    expect(first.canonicalWorktreePath).toBe(canonicalPlannedPath);
+
+    let secondAcquired = false;
+    const secondPromise = acquireWorktreeOperationLease(
+      { projectRoot, worktreePath: symlinkPlannedPath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 101 || pid === 202,
+        pollIntervalMs: 5,
+        timeoutMs: 1_000,
+        createNonce: () => 'second-owner',
+      },
+    ).then((lease) => {
+      secondAcquired = true;
+      return lease;
+    });
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    expect(secondAcquired).toBe(false);
+
+    await first.release();
+    const second = await secondPromise;
+    expect(second.canonicalWorktreePath).toBe(canonicalPlannedPath);
+    expect(second.lockDir).toBe(first.lockDir);
     await second.release();
   });
 

@@ -9,13 +9,17 @@ export function createMockContext(
   panes: PsychePane[] = [],
   overrides?: Partial<ActionContext>
 ): ActionContext {
-  const context: ActionContext = {
+  let context!: ActionContext;
+  context = {
     panes,
     sessionName: 'test-session',
     projectName: 'test-project',
-    savePanes: async (newPanes: PsychePane[]) => {
+    savePanes: async (
+      newPanes: PsychePane[],
+      _previousPanes: readonly PsychePane[],
+    ) => {
       // Mock implementation - in real tests, you can spy on this
-      panes.splice(0, panes.length, ...newPanes);
+      context.panes = newPanes;
     },
     onPaneUpdate: undefined,
     onPaneRemove: undefined,
@@ -24,14 +28,14 @@ export function createMockContext(
 
   context.removePaneFromConfig ??= async (paneId: string) => {
     const nextPanes = context.panes.filter((pane) => pane.id !== paneId);
-    await context.savePanes(nextPanes);
+    await context.savePanes(nextPanes, context.panes);
     context.panes = nextPanes;
     return nextPanes;
   };
   context.removePanesFromConfig ??= async (paneIds: Iterable<string>) => {
     const ids = new Set(paneIds);
     const nextPanes = context.panes.filter((pane) => !ids.has(pane.id));
-    await context.savePanes(nextPanes);
+    await context.savePanes(nextPanes, context.panes);
     context.panes = nextPanes;
     return nextPanes;
   };

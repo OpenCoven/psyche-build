@@ -4,11 +4,11 @@ import {
   mkdir,
   open,
   readFile,
-  realpath,
   rename,
   rm,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
   getProcessStartIdentity,
   isProcessAlive,
@@ -212,10 +212,14 @@ export async function acquireWorktreeOperationLease(
 async function resolveLeasePaths(
   request: WorktreeOperationLeaseRequest,
 ): Promise<LeasePaths> {
-  const canonicalWorktreePath = await canonicalizePath(request.worktreePath);
+  const canonicalWorktreePath = canonicalizePathWithExistingAncestor(request.worktreePath);
   const discoveredProjectRoot = await discoverMainProjectRoot(canonicalWorktreePath);
   const canonicalProjectRoot = discoveredProjectRoot
-    ?? (request.projectRoot ? await canonicalizePath(request.projectRoot) : undefined);
+    ?? (
+      request.projectRoot
+        ? canonicalizePathWithExistingAncestor(request.projectRoot)
+        : undefined
+    );
 
   if (!canonicalProjectRoot) {
     throw new Error(
@@ -223,7 +227,7 @@ async function resolveLeasePaths(
     );
   }
 
-  const runtimeDir = await canonicalizePathWithExistingAncestor(
+  const runtimeDir = canonicalizePathWithExistingAncestor(
     path.join(canonicalProjectRoot, '.psyche', 'runtime'),
   );
   if (isPathWithin(runtimeDir, canonicalWorktreePath)) {
@@ -246,40 +250,6 @@ async function resolveLeasePaths(
   };
 }
 
-async function canonicalizePath(value: string): Promise<string> {
-  const resolved = path.resolve(value);
-  try {
-    return await realpath(resolved);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return resolved;
-    }
-    throw error;
-  }
-}
-
-async function canonicalizePathWithExistingAncestor(value: string): Promise<string> {
-  const unresolvedSegments: string[] = [];
-  let candidate = path.resolve(value);
-
-  while (true) {
-    try {
-      return path.join(await realpath(candidate), ...unresolvedSegments.reverse());
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-
-      const parent = path.dirname(candidate);
-      if (parent === candidate) {
-        return path.resolve(value);
-      }
-      unresolvedSegments.push(path.basename(candidate));
-      candidate = parent;
-    }
-  }
-}
-
 async function discoverMainProjectRoot(worktreePath: string): Promise<string | undefined> {
   let commonGitDir: string;
   try {
@@ -297,7 +267,7 @@ async function discoverMainProjectRoot(worktreePath: string): Promise<string | u
   }
 
   const root = projectRootFromCommonGitDir(commonGitDir);
-  return root ? canonicalizePath(root) : undefined;
+  return root ? canonicalizePathWithExistingAncestor(root) : undefined;
 }
 
 function projectRootFromCommonGitDir(commonGitDir: string): string | undefined {

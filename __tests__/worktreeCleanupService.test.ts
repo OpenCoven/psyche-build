@@ -627,6 +627,42 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
+  it('shares a generation key between planned symlink and real cleanup paths', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const realRoot = join(cleanupRoot, 'real-worktrees');
+    const symlinkRoot = join(cleanupRoot, 'worktrees-alias');
+    mkdirSync(realRoot);
+    symlinkSync(realRoot, symlinkRoot);
+    const realPlannedPath = join(realRoot, 'new-worktree');
+    const symlinkPlannedPath = join(symlinkRoot, 'new-worktree');
+    const canonicalPlannedPath = join(realpathSync.native(realRoot), 'new-worktree');
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    const symlinkReservation = await service.beginWorktreeCreation(
+      symlinkPlannedPath,
+      '/test/project',
+    );
+    expect(symlinkReservation.canonicalWorktreePath).toBe(canonicalPlannedPath);
+    await symlinkReservation.cancel();
+
+    await service.cancelCleanupForWorktree(realPlannedPath);
+
+    expect(service.cleanupGenerations).toEqual(
+      new Map([[canonicalPlannedPath, 2]]),
+    );
+    expect(acquireWorktreeOperationLeaseMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        worktreePath: canonicalPlannedPath,
+        operation: 'create',
+      }),
+    );
+  });
+
   it('removes the validated canonical target when a queued symlink is retargeted', async () => {
     const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
     tempDirs.push(cleanupRoot);

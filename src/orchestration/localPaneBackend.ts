@@ -15,11 +15,19 @@ export interface LocalPaneBackendOptions {
   /**
    * Persists a reused worktree pane while its cleanup reservation remains active.
    */
-  persistReusedPane?: (pane: PsychePane, panes: PsychePane[]) => Promise<void>;
+  persistReusedPane?: (
+    pane: PsychePane,
+    previousPanes: PsychePane[],
+    nextPanes: PsychePane[],
+  ) => Promise<void>;
   /**
    * Persists a newly-created pane while its creation lease remains active.
    */
-  persistCreatedPane?: (pane: PsychePane, panes: PsychePane[]) => Promise<void>;
+  persistCreatedPane?: (
+    pane: PsychePane,
+    previousPanes: PsychePane[],
+    nextPanes: PsychePane[],
+  ) => Promise<void>;
   /**
    * Shared slug stem for multi-lane tasks, so sibling lanes read as variants
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
@@ -87,7 +95,8 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
           ? {
             persistReusedPane: async (pane) => options.persistReusedPane!(
               pane,
-              [...panesBeforeCurrent, pane]
+              panesBeforeCurrent,
+              [...panesBeforeCurrent, pane],
             ),
           }
           : {}),
@@ -95,7 +104,8 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
           ? {
             persistCreatedPane: async (pane) => options.persistCreatedPane!(
               pane,
-              [...panesBeforeCurrent, pane]
+              panesBeforeCurrent,
+              [...panesBeforeCurrent, pane],
             ),
           }
           : {}),

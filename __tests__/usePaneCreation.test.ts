@@ -164,7 +164,7 @@ describe('createNewPane', () => {
       expect.any(Array)
     );
     expect(h.savePanes).toHaveBeenCalledTimes(1);
-    expect(h.savePanes).toHaveBeenCalledWith([reusedPane]);
+    expect(h.savePanes).toHaveBeenCalledWith([reusedPane], []);
   });
 
   it('does not persist a reused pane again after its reservation callback saved it', async () => {

@@ -6,7 +6,10 @@ import {
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
 } from '../src/services/ProjectPaneConfig.js';
-import { savePanesToFile } from '../src/hooks/usePaneSync.js';
+import {
+  savePanesToFile,
+  saveUpdatedPaneConfig,
+} from '../src/hooks/usePaneSync.js';
 
 const roots: string[] = [];
 
@@ -70,7 +73,7 @@ describe('project pane config mutation', () => {
     ]);
   });
 
-  it('keeps a daemon pane when a stale TUI creates and updates panes', async () => {
+  it('preserves a daemon pane while applying a stale TUI update', async () => {
     const projectRoot = createProject();
     const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
     const renderedPane = {
@@ -128,6 +131,107 @@ describe('project pane config mutation', () => {
         id: 'daemon-pane',
         daemonOnlyField: 'keep-me',
       }),
+    ]));
+  });
+
+  it('does not resurrect a pane concurrently deleted after the originating snapshot', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const originalPane = {
+      id: 'deleted-pane',
+      paneId: '%1',
+      slug: 'deleted-pane',
+      prompt: '',
+    };
+    const staleUpdate = {
+      ...originalPane,
+      displayName: 'Stale TUI rename',
+    };
+
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [originalPane];
+    });
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [];
+    });
+
+    await savePanesToFile(
+      configPath,
+      [staleUpdate] as any,
+      async (operation) => operation(),
+      [originalPane] as any,
+    );
+
+    let config = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(config.panes).toEqual([]);
+
+    // A caller whose originating snapshot reflects the deletion can explicitly
+    // add the pane again; a stale update cannot.
+    await savePanesToFile(
+      configPath,
+      [staleUpdate] as any,
+      async (operation) => operation(),
+      [],
+    );
+
+    config = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(config.panes).toEqual([
+      expect.objectContaining({
+        id: 'deleted-pane',
+        displayName: 'Stale TUI rename',
+      }),
+    ]);
+  });
+
+  it('persists periodic stale-shell removals without dropping daemon panes', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const trackedPane = {
+      id: 'tracked-pane',
+      paneId: '%1',
+      slug: 'tracked-pane',
+      prompt: '',
+    };
+    const staleShellPane = {
+      id: 'stale-shell',
+      paneId: '%2',
+      slug: 'stale-shell',
+      prompt: '',
+      type: 'shell',
+    };
+    const daemonPane = {
+      id: 'daemon-pane',
+      paneId: '%3',
+      slug: 'daemon-pane',
+      prompt: '',
+      daemonOnlyField: 'keep-me',
+    };
+    const previousPanes = [trackedPane, staleShellPane];
+
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = previousPanes;
+    });
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [...(config.panes || []), daemonPane];
+    });
+
+    await saveUpdatedPaneConfig(
+      configPath,
+      [trackedPane] as any,
+      async (operation) => operation(),
+      previousPanes as any,
+    );
+
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(config.panes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'tracked-pane' }),
+      expect.objectContaining({
+        id: 'daemon-pane',
+        daemonOnlyField: 'keep-me',
+      }),
+    ]));
+    expect(config.panes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'stale-shell' }),
     ]));
   });
 

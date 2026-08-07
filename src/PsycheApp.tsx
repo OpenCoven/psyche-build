@@ -1085,7 +1085,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       }
 
-      await savePanes([...existingPanes, shellPane])
+      await savePanes([...existingPanes, shellPane], existingPanes)
       await loadPanes()
       return shellPane
     } catch (error: any) {
@@ -1344,7 +1344,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       const label = candidate.path ? (candidate.slug || candidate.branchName) : candidate.branchName
       setStatusMessage(`${candidate.path ? "Reopening" : "Opening"} ${label}...`)
       const persistReusedPane = async (pane: PsychePane) => {
-        await savePanes([...panes, pane])
+        await savePanes([...panes, pane], panes)
       }
 
       const result = candidate.path

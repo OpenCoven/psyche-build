@@ -196,7 +196,7 @@ describe('closeAction', () => {
       await result.onSelect!('kill_only');
 
       // Verify pane was removed
-      expect(savePanesSpy).toHaveBeenCalledWith([pane2]);
+      expect(savePanesSpy).toHaveBeenCalledWith([pane2], [pane1, pane2]);
     });
 
     it('should call onPaneRemove callback with tmux pane ID', async () => {

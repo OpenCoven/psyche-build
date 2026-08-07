@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import path from 'path';
 import PQueue from 'p-queue';
-import type { PsycheConfig, PsychePane, SidebarProject } from '../types.js';
+import type { PsycheConfig, PsychePane, SavePanes, SidebarProject } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
 import {
@@ -217,12 +217,12 @@ export default function usePanes(
     }
   };
 
-  const savePanes = async (newPanes: PsychePane[]) => {
+  const savePanes: SavePanes = async (newPanes, previousPanes) => {
     const updatedPanes = await savePanesToFile(
       panesFile,
       newPanes,
       withWriteLock,
-      panesRef.current,
+      previousPanes,
     );
     panesRef.current = updatedPanes;
     setPanes(updatedPanes);

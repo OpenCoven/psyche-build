@@ -1,13 +1,13 @@
 import { execSync } from 'child_process';
 import fs from 'fs/promises';
-import type { PsychePane, ProjectSettings } from '../types.js';
+import type { PsychePane, ProjectSettings, SavePanes } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   projectSettings: ProjectSettings;
   setStatusMessage: (msg: string) => void;
   setRunningCommand: (v: boolean) => void;
@@ -69,7 +69,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       } as PsychePane;
 
       const updatedPanes = panes.map(p => p.id === pane.id ? updatedPane : p);
-      await savePanes(updatedPanes);
+      await savePanes(updatedPanes, panes);
 
       if (type === 'test') setTimeout(() => monitorTestOutput(pane.id, logFile), 2000);
       else setTimeout(() => monitorDevOutput(pane.id, logFile), 2000);
@@ -108,7 +108,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
 
       const updatedPanes = panes.map(p => p.id === paneId ? { ...p, testStatus: status, testOutput: content.slice(-5000) } : p);
-      await savePanes(updatedPanes);
+      await savePanes(updatedPanes, panes);
       if (status === 'running') setTimeout(() => monitorTestOutput(paneId, logFile), 2000);
     } catch {}
   };
@@ -128,7 +128,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
         try { execSync(`tmux list-windows -F '#{window_id}' | rg -q '${pane.devWindowId}'`, { stdio: 'pipe' }); } catch { status = 'stopped'; }
       }
       const updatedPanes = panes.map(p => p.id === paneId ? { ...p, devStatus: status, devUrl: devUrl || p.devUrl } : p);
-      await savePanes(updatedPanes);
+      await savePanes(updatedPanes, panes);
       if (status === 'running') setTimeout(() => monitorDevOutput(paneId, logFile), 2000);
     } catch {}
   };

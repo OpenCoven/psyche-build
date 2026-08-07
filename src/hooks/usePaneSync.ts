@@ -11,10 +11,7 @@ import { StateManager } from '../shared/StateManager.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
-import {
-  mutateProjectPaneConfig,
-  upsertProjectPaneConfigPanes,
-} from '../services/ProjectPaneConfig.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -87,10 +84,13 @@ export async function savePanesToFile(
   panesFile: string,
   panes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
-  _previousPanes: readonly PsychePane[] = [],
+  previousPanes: readonly PsychePane[],
 ): Promise<PsychePane[]> {
+  const originatingPanes = [...previousPanes];
+  const nextPanes = [...panes];
+
   return withWriteLock(async () => {
-    let activePanes = panes;
+    let activePanes = nextPanes;
 
     // Try to update pane IDs if they've changed (rebinding)
     try {
@@ -113,19 +113,22 @@ export async function savePanesToFile(
       // This prevents losing panes during concurrent operations
       // Note: We need to get allPaneIds to properly use rebindPaneByTitle
       const allPaneIds = Array.from(titleToId.values());
-      activePanes = panes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds));
+      activePanes = nextPanes.map(p => rebindPaneByTitle(p, titleToId, allPaneIds));
     } catch (error) {
       // If tmux command fails, keep panes as-is (prevents data loss during tmux instability)
       LogService.getInstance().debug(
         `Failed to fetch tmux panes for rebinding: ${error instanceof Error ? error.message : String(error)}`,
         'usePaneSync'
       );
-      activePanes = panes;
+      activePanes = nextPanes;
     }
 
     const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-    await upsertProjectPaneConfigPanes(sessionProjectRoot, activePanes);
-    return syncPaneConfigMetadata(sessionProjectRoot);
+    return persistPaneConfigDelta(
+      sessionProjectRoot,
+      originatingPanes,
+      activePanes,
+    );
   });
 }
 
@@ -241,12 +244,18 @@ export async function saveUpdatedPaneConfig(
   panesFile: string,
   activePanes: PsychePane[],
   withWriteLock: <T>(operation: () => Promise<T>) => Promise<T>,
-  _previousPanes: readonly PsychePane[] = activePanes,
+  previousPanes: readonly PsychePane[],
 ): Promise<void> {
+  const originatingPanes = [...previousPanes];
+  const nextPanes = [...activePanes];
+
   await withWriteLock(async () => {
     const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-    await upsertProjectPaneConfigPanes(sessionProjectRoot, activePanes);
-    const panes = await syncPaneConfigMetadata(sessionProjectRoot);
+    const panes = await persistPaneConfigDelta(
+      sessionProjectRoot,
+      originatingPanes,
+      nextPanes,
+    );
     LogService.getInstance().debug(
       `Writing config with ${panes.length} panes`,
       'shellDetection'
@@ -256,25 +265,32 @@ export async function saveUpdatedPaneConfig(
 }
 
 /**
- * Recalculates derived sidebar and color state from a freshly locked pane
- * registry. Callers must upsert or remove exact pane records before invoking
- * this helper; it intentionally receives no stale React snapshot.
+ * Applies a caller's snapshot delta to the fresh config while the project-wide
+ * lease is held. Unrelated panes written by the daemon remain untouched.
  */
-async function syncPaneConfigMetadata(projectRoot: string): Promise<PsychePane[]> {
+async function persistPaneConfigDelta(
+  projectRoot: string,
+  previousPanes: readonly PsychePane[],
+  nextPanes: readonly PsychePane[],
+): Promise<PsychePane[]> {
   const mutation = await mutateProjectPaneConfig(projectRoot, (configRecord) => {
     const config = configRecord as unknown as PsycheConfig;
-    const freshPanes = Array.isArray(config.panes) ? config.panes : [];
+    const mergedPanes = mergePaneSnapshots(
+      Array.isArray(config.panes) ? config.panes : [],
+      previousPanes,
+      nextPanes,
+    );
     const effectiveProjectRoot = config.projectRoot || projectRoot;
     const projectName = config.projectName || path.basename(effectiveProjectRoot);
     const normalizedSidebarProjects = normalizeSidebarProjects(
       config.sidebarProjects,
-      freshPanes,
+      mergedPanes,
       effectiveProjectRoot,
       projectName,
     );
     config.sidebarProjects = normalizedSidebarProjects;
     config.panes = syncPaneColorThemes(
-      freshPanes,
+      mergedPanes,
       normalizedSidebarProjects,
       effectiveProjectRoot,
     );
@@ -282,6 +298,59 @@ async function syncPaneConfigMetadata(projectRoot: string): Promise<PsychePane[]
     return config.panes;
   });
   return mutation.result as PsychePane[];
+}
+
+/**
+ * Reconciles an originating UI snapshot with the fresh registry. A pane that
+ * disappeared after the snapshot is not resurrected by a stale update; a
+ * newly added ID is the explicit re-addition case.
+ */
+export function mergePaneSnapshots(
+  freshPanes: readonly PsychePane[],
+  previousPanes: readonly PsychePane[],
+  nextPanes: readonly PsychePane[],
+): PsychePane[] {
+  const previousById = new Map(previousPanes.map((pane) => [pane.id, pane]));
+  const nextById = new Map(nextPanes.map((pane) => [pane.id, pane]));
+  const explicitlyRemoved = new Set(
+    previousPanes
+      .filter((pane) => !nextById.has(pane.id))
+      .map((pane) => pane.id),
+  );
+  const freshIds = new Set(freshPanes.map((pane) => pane.id));
+  const merged: PsychePane[] = [];
+
+  for (const freshPane of freshPanes) {
+    if (explicitlyRemoved.has(freshPane.id)) {
+      continue;
+    }
+
+    const nextPane = nextById.get(freshPane.id);
+    const previousPane = previousById.get(freshPane.id);
+    if (
+      nextPane
+      && (
+        !previousPane
+        || !paneSnapshotsEqual(previousPane, nextPane)
+      )
+    ) {
+      merged.push(nextPane);
+    } else {
+      merged.push(freshPane);
+    }
+  }
+
+  for (const nextPane of nextPanes) {
+    if (!previousById.has(nextPane.id) && !freshIds.has(nextPane.id)) {
+      merged.push(nextPane);
+    }
+  }
+
+  return merged;
+}
+
+function paneSnapshotsEqual(left: PsychePane, right: PsychePane): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**

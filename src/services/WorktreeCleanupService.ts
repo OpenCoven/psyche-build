@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import type { PsycheConfig, PsychePane } from '../types.js';
 import { triggerHook } from '../utils/hooks.js';
@@ -7,6 +7,7 @@ import { getPaneBranchName } from '../utils/git.js';
 import { detectAllWorktrees } from '../utils/worktreeDiscovery.js';
 import { LogService } from './LogService.js';
 import { acquireWorktreeOperationLease } from './WorktreeOperationLease.js';
+import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
   readProjectPaneConfigUnderLock,
 } from './ProjectPaneConfig.js';
@@ -134,22 +135,9 @@ export interface WorktreeReuseReservation {
   cancel: () => Promise<void>;
 }
 
-function canonicalizePathForCompare(value: string): string {
-  const resolvedPath = path.resolve(value);
-
-  try {
-    return realpathSync.native(resolvedPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return resolvedPath;
-    }
-    throw error;
-  }
-}
-
 function pathsOverlap(left: string, right: string): boolean {
-  const normalizedLeft = canonicalizePathForCompare(left);
-  const normalizedRight = canonicalizePathForCompare(right);
+  const normalizedLeft = canonicalizePathWithExistingAncestor(left);
+  const normalizedRight = canonicalizePathWithExistingAncestor(right);
 
   return (
     normalizedLeft === normalizedRight ||
@@ -201,7 +189,7 @@ export class WorktreeCleanupService {
     worktreePath: string,
     projectRoot?: string,
   ): Promise<WorktreeReuseReservation> {
-    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+    const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
     let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
 
@@ -256,7 +244,7 @@ export class WorktreeCleanupService {
       return;
     }
 
-    const canonicalWorktreePath = canonicalizePathForCompare(job.pane.worktreePath);
+    const canonicalWorktreePath = canonicalizePathWithExistingAncestor(job.pane.worktreePath);
     const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
     if (this.isWorktreeReuseReserved(canonicalWorktreePath)) {
       this.logger.warn(
@@ -286,7 +274,7 @@ export class WorktreeCleanupService {
   }
 
   async cancelCleanupForWorktree(worktreePath: string): Promise<void> {
-    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+    const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     await this.withWorktreeLock(canonicalWorktreePath, async () => {
       const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
       this.logger.debug(
@@ -304,7 +292,7 @@ export class WorktreeCleanupService {
     worktreePath: string,
     mainRepoPath: string,
   ): Promise<WorktreeCreationReservation> {
-    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+    const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
     const releaseLock = await this.acquireWorktreeLock(canonicalWorktreePath);
     let operationLease: Awaited<ReturnType<typeof acquireWorktreeOperationLease>> | undefined;
 
@@ -362,7 +350,7 @@ export class WorktreeCleanupService {
   async rollbackCreatedWorktree(
     job: CreatedWorktreeRollbackJob
   ): Promise<WorktreeRollbackResult> {
-    const canonicalWorktreePath = canonicalizePathForCompare(job.worktreePath);
+    const canonicalWorktreePath = canonicalizePathWithExistingAncestor(job.worktreePath);
     return this.withWorktreeLifecycleLock(
       canonicalWorktreePath,
       job.mainRepoPath,
@@ -755,7 +743,7 @@ export class WorktreeCleanupService {
     const identities: QueuedWorktreeIdentity[] = [];
 
     for (const target of worktreeTargets) {
-      const canonicalTargetPath = canonicalizePathForCompare(target.worktreePath);
+      const canonicalTargetPath = canonicalizePathWithExistingAncestor(target.worktreePath);
       const mappedBranch = this.getWorktreeBranch(target.repoPath, canonicalTargetPath);
       if (!mappedBranch.success || !mappedBranch.found || mappedBranch.branchName !== branchName) {
         this.logger.warn(
@@ -810,7 +798,7 @@ export class WorktreeCleanupService {
       branchName,
       branchOid: rootIdentity.branchOid,
       configPath: job.configPath,
-      currentProjectRoot: canonicalizePathForCompare(job.currentProjectRoot),
+      currentProjectRoot: canonicalizePathWithExistingAncestor(job.currentProjectRoot),
       generation,
       deleteBranch: job.deleteBranch,
       worktreeTargets: identities,
@@ -964,7 +952,7 @@ export class WorktreeCleanupService {
 
     if (
       config.projectRoot
-      && canonicalizePathForCompare(config.projectRoot) !== job.currentProjectRoot
+      && canonicalizePathWithExistingAncestor(config.projectRoot) !== job.currentProjectRoot
     ) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: current config project identity changed`,
@@ -1022,7 +1010,7 @@ export class WorktreeCleanupService {
     let found = false;
     for (const line of (result.output || '').split('\n')) {
       if (line.startsWith('worktree ')) {
-        currentWorktreePath = canonicalizePathForCompare(
+        currentWorktreePath = canonicalizePathWithExistingAncestor(
           line.slice('worktree '.length).trim()
         );
         found ||= currentWorktreePath === canonicalWorktreePath;
@@ -1088,7 +1076,7 @@ export class WorktreeCleanupService {
 
     const targets = new Map<string, WorktreeRemovalTarget>();
     const addTarget = (repoPath: string, worktreePath: string, depth: number) => {
-      const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
+      const canonicalWorktreePath = canonicalizePathWithExistingAncestor(worktreePath);
       targets.set(`${repoPath}::${canonicalWorktreePath}`, {
         repoPath,
         worktreePath: canonicalWorktreePath,
@@ -1226,7 +1214,7 @@ export class WorktreeCleanupService {
       return [];
     }
 
-    const canonicalProjectRoot = canonicalizePathForCompare(job.projectRoot);
+    const canonicalProjectRoot = canonicalizePathWithExistingAncestor(job.projectRoot);
     const managedRoot = path.join(canonicalProjectRoot, '.psyche', 'worktrees');
     if (!existsSync(managedRoot)) {
       return [];
@@ -1235,7 +1223,7 @@ export class WorktreeCleanupService {
     const activeWorktreePaths = job.activePanes
       .map((pane) => pane.worktreePath)
       .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .map(canonicalizePathForCompare);
+      .map(canonicalizePathWithExistingAncestor);
 
     const managedWorktrees: ManagedWorktreePruneCandidate[] = [];
 
@@ -1247,7 +1235,7 @@ export class WorktreeCleanupService {
       const worktreePath = path.join(managedRoot, entry.name);
       const stats = statSync(worktreePath);
       managedWorktrees.push({
-        canonicalWorktreePath: canonicalizePathForCompare(worktreePath),
+        canonicalWorktreePath: canonicalizePathWithExistingAncestor(worktreePath),
         mtimeMs: stats.mtimeMs,
       });
     }

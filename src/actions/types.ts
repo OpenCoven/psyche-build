@@ -6,7 +6,7 @@
  * responses, we ensure consistent behavior and UI patterns across all interfaces.
  */
 
-import type { PsychePane } from '../types.js';
+import type { PsychePane, SavePanes } from '../types.js';
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
@@ -92,7 +92,7 @@ export interface ActionContext {
   currentPaneId?: string;
   sessionName: string;
   projectName: string;
-  savePanes: (panes: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   /**
    * Removes exactly one pane from a freshly locked project config and returns
    * the persisted pane list. Close uses this instead of replacing config with

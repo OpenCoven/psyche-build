@@ -3,7 +3,7 @@ import path from "path"
 import { useInput } from "ink"
 import { runPairAction } from "../actions/implementations/pairAction.js"
 import { runDevicesAction } from "../actions/implementations/devicesAction.js"
-import type { PsychePane, SidebarProject } from "../types.js"
+import type { PsychePane, SavePanes, SidebarProject } from "../types.js"
 import type { TrackProjectActivity } from "../types/activity.js"
 import { StateManager } from "../shared/StateManager.js"
 import { TmuxService } from "../services/TmuxService.js"
@@ -174,7 +174,7 @@ interface UseInputHandlingParams {
     targetProjectRoot?: string
   ) => Promise<void>
   setDevSourceFromPane: (pane: PsychePane) => Promise<void>
-  savePanes: (panes: PsychePane[]) => Promise<void>
+  savePanes: SavePanes
   sidebarProjects: SidebarProject[]
   saveSidebarProjects: (projects: SidebarProject[]) => Promise<SidebarProject[]>
   loadPanes: () => Promise<void>
@@ -341,7 +341,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await savePanes([...panes, shellPane])
+      await savePanes([...panes, shellPane], panes)
 
       setIsCreatingPane(false)
       setStatusMessage("Terminal pane created")
@@ -407,7 +407,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       await tmuxService.sendShellCommand(newPaneId, buildCovenAttachCommand(session.id))
       await tmuxService.sendTmuxKeys(newPaneId, "Enter")
       await client.sendInput?.(session.id, buildDesktopUseQuickInput("test"))
-      await savePanes([...panes, desktopPane])
+      await savePanes([...panes, desktopPane], panes)
       await loadPanes()
 
       setStatusMessage("Desktop-use pane connected to Coven")
@@ -549,7 +549,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetProjectRoot
       )
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-      await savePanes([...panes, shellPane])
+      await savePanes([...panes, shellPane], panes)
 
       setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
       setTimeout(() => setStatusMessage(""), STATUS_MESSAGE_DURATION_SHORT)
@@ -624,7 +624,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       }
 
       await tmuxService.setPaneTitle(newPaneId, slug)
-      await savePanes([...panes, browserPane])
+      await savePanes([...panes, browserPane], panes)
       await loadPanes()
 
       setStatusMessage(`Opened file browser for ${getPaneDisplayName(selectedPane)}`)
@@ -886,7 +886,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       )
 
       persistWorktreeDisplayName(pane, nextDisplayName)
-      await savePanes(updatedPanes)
+      await savePanes(updatedPanes, panes)
       try {
         const sessionProjectRoot = StateManager.getInstance().getState().projectRoot
         await TmuxService.getInstance().setPaneTitle(
@@ -934,7 +934,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       await saveSidebarProjects(updatedProjects)
     }
     if (panesChanged) {
-      await savePanes(updatedPanes)
+      await savePanes(updatedPanes, panes)
     }
 
     setInlineRename?.(null)
@@ -1379,7 +1379,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
           : pane
       )
 
-      await savePanes(updatedPanes)
+      await savePanes(updatedPanes, panes)
       await syncWelcomePaneForPanes(
         updatedPanes,
         getPaneProjectRoot(selectedPane, projectRoot)
@@ -1448,7 +1448,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         targetPaneIds.has(pane.id) ? { ...pane, hidden } : pane
       )
 
-      await savePanes(updatedPanes)
+      await savePanes(updatedPanes, panes)
       await syncWelcomePaneForPanes(
         updatedPanes,
         getPaneProjectRoot(selectedPane, projectRoot)
@@ -1542,7 +1542,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
         return pane
       })
 
-      await savePanes(updatedPanes)
+      await savePanes(updatedPanes, panes)
       await syncWelcomePaneForPanes(updatedPanes, targetProjectRoot)
       await refreshPaneLayout()
       await loadPanes()
@@ -1703,7 +1703,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
 
       if (createdPanes.length > 0) {
         const updatedPanes = [...panes, ...createdPanes]
-        await savePanes(updatedPanes)
+        await savePanes(updatedPanes, panes)
         await loadPanes()
       }
 
@@ -2235,7 +2235,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
               projectRoot
             )
             if (syncedPanes !== panes) {
-              await savePanes(syncedPanes)
+              await savePanes(syncedPanes, panes)
             }
           }
 

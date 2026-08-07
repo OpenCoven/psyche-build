@@ -13,12 +13,12 @@ import {
   createInitialTUIState,
   type TUIActionState
 } from '../adapters/tuiActionHandler.js';
-import type { PsychePane } from '../types.js';
+import type { PsychePane, SavePanes } from '../types.js';
 import type { TrackProjectActivity } from '../types/activity.js';
 
 interface UseActionSystemParams {
   panes: PsychePane[];
-  savePanes: (panes: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
   removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
   sessionName: string;

@@ -109,7 +109,7 @@ async function createAndLaunchConflictPane(
 
     // Add the new pane to the panes list
     const updatedPanes = [...context.panes, conflictPane];
-    await context.savePanes(updatedPanes);
+    await context.savePanes(updatedPanes, context.panes);
 
     // Notify about the new pane
     if (context.onPaneUpdate) {

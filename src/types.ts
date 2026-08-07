@@ -115,6 +115,11 @@ export interface PsychePane {
   mergeTargetChain?: MergeTargetReference[];
 }
 
+export type SavePanes = (
+  nextPanes: PsychePane[],
+  previousPanes: readonly PsychePane[],
+) => Promise<void>;
+
 export interface PanePosition {
   paneId: string;
   left: number;

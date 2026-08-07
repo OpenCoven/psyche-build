@@ -2,7 +2,7 @@ import path from 'path';
 import * as os from 'os';
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import type { PsychePane, MergeTargetReference } from '../types.js';
+import type { PsychePane, MergeTargetReference, SavePanes } from '../types.js';
 import { createPane, type CreatePaneOptions } from '../utils/paneCreation.js';
 import { LogService } from '../services/LogService.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
@@ -15,7 +15,7 @@ import { SettingsManager } from '../utils/settingsManager.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   projectName: string;
   sessionProjectRoot: string;
   panesFile: string;
@@ -191,10 +191,10 @@ export default function usePaneCreation({
         sessionProjectRoot,
         sessionConfigPath: panesFile,
         persistCreatedPane: async (pane) => {
-          await savePanes([...panesForCreation, pane]);
+          await savePanes([...panesForCreation, pane], panesForCreation);
         },
         persistReusedPane: async (pane) => {
-          await savePanes([...panesForCreation, pane]);
+          await savePanes([...panesForCreation, pane], panesForCreation);
         },
       },
       availableAgents
@@ -228,7 +228,7 @@ export default function usePaneCreation({
       // Save the pane
       const updatedPanes = [...panesForCreation, pane];
       if (!persistedDuringLifecycle) {
-        await savePanes(updatedPanes);
+        await savePanes(updatedPanes, panesForCreation);
       }
       enqueueManagedWorktreePruning(
         [pane.projectRoot || sessionProjectRoot],
@@ -292,11 +292,11 @@ export default function usePaneCreation({
         basePanes: panesForCreation,
         availableAgents,
         slugBase,
-        persistReusedPane: async (_pane, panesToPersist) => {
-          await savePanes(panesToPersist);
+        persistReusedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes);
         },
-        persistCreatedPane: async (_pane, panesToPersist) => {
-          await savePanes(panesToPersist);
+        persistCreatedPane: async (_pane, previousPanes, panesToPersist) => {
+          await savePanes(panesToPersist, previousPanes);
         },
       });
       const orchestrator = new Orchestrator({ executeLane: backend.execute });
@@ -328,7 +328,7 @@ export default function usePaneCreation({
       // result still leaves usable work behind.
       if (createdPanes.length > 0) {
         const updatedPanes = [...panesForCreation, ...createdPanes];
-        await savePanes(updatedPanes);
+        await savePanes(updatedPanes, panesForCreation);
         enqueueManagedWorktreePruning(
           createdPanes.map((pane) => pane.projectRoot || sessionProjectRoot),
           updatedPanes,

@@ -152,7 +152,7 @@ describe('useInputHandling inline rename', () => {
         slug: 'thread-a',
         displayName: 'thread-a-renamed',
       }),
-    ]);
+    ], [pane()]);
 
     unmount();
     vi.restoreAllMocks();
@@ -218,6 +218,9 @@ describe('useInputHandling inline rename', () => {
         slug: 'thread-b',
         displayName: 'thread-b-renamed',
       }),
+    ], [
+      pane({ id: 'psyche-1', slug: 'thread-a', paneId: '%1' }),
+      pane({ id: 'psyche-2', slug: 'thread-b', paneId: '%2' }),
     ]);
 
     unmount();
