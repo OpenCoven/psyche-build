@@ -52,9 +52,13 @@ vi.mock('../../src/shared/StateManager.js', () => ({
 }));
 
 // Mock hooks
+const mockTriggerHook = vi.hoisted(() => vi.fn((_eventName?: string) => Promise.resolve()));
+const mockTriggerHookSync = vi.hoisted(() => vi.fn(() => Promise.resolve({ success: true })));
+const mockAtomicWriteJsonSync = vi.hoisted(() => vi.fn());
+
 vi.mock('../../src/utils/hooks.js', () => ({
-  triggerHook: vi.fn(() => Promise.resolve()),
-  triggerHookSync: vi.fn(() => Promise.resolve({ success: true })),
+  triggerHook: mockTriggerHook,
+  triggerHookSync: mockTriggerHookSync,
   initializeHooksDirectory: vi.fn(),
 }));
 
@@ -87,6 +91,10 @@ vi.mock('../../src/utils/welcomePaneManager.js', () => ({
   destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
 }));
 
+vi.mock('../../src/utils/atomicWrite.js', () => ({
+  atomicWriteJsonSync: mockAtomicWriteJsonSync,
+}));
+
 // Mock fs for reading config
 vi.mock('fs', () => ({
   default: fsMock,
@@ -104,6 +112,8 @@ describe('Pane Lifecycle Integration Tests', () => {
     vi.clearAllMocks();
     mockEnqueueCleanup.mockReset();
     mockRollbackCreatedWorktree.mockReturnValue({ success: true });
+    mockTriggerHook.mockImplementation(() => Promise.resolve());
+    mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
 
     // Create fresh test environment
     tmuxSession = createMockTmuxSession('psyche-test', 1);
@@ -355,6 +365,75 @@ describe('Pane Lifecycle Integration Tests', () => {
         expect(result.pane.branchName).toBe('feature/resume-me');
         expect(result.pane.worktreePath).toBe(existingWorktreePath);
         expect(result.pane.prompt).toBe('No initial prompt');
+      }
+    });
+
+    it('cancels blocked cleanup before awaited existing-worktree setup can persist the pane', async () => {
+      vi.useFakeTimers();
+      const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
+      let worktreeExists = true;
+      let cleanupCanceled = false;
+      let releaseCleanup!: () => void;
+      let releasePaneCreation!: () => void;
+      let signalPaneCreationStarted!: () => void;
+      const paneCreationStarted = new Promise<void>((resolve) => {
+        signalPaneCreationStarted = resolve;
+      });
+      const paneCreation = new Promise<void>((resolve) => {
+        releasePaneCreation = resolve;
+      });
+      const queuedCleanup = new Promise<void>((resolve) => {
+        releaseCleanup = () => {
+          if (!cleanupCanceled) {
+            worktreeExists = false;
+          }
+          resolve();
+        };
+      });
+
+      createdWorktreePaths.add(existingWorktreePath);
+      createdWorktreePaths.add(`${existingWorktreePath}/.git`);
+      mockCancelCleanupForWorktree.mockImplementation(() => {
+        cleanupCanceled = true;
+      });
+      mockTriggerHook.mockImplementation((eventName) => {
+        if (eventName === 'before_pane_create') {
+          signalPaneCreationStarted();
+          return paneCreation;
+        }
+        return Promise.resolve();
+      });
+
+      try {
+        const { createPane } = await import('../../src/utils/paneCreation.js');
+        const createPromise = createPane(
+          {
+            prompt: '',
+            projectName: 'test-project',
+            existingPanes: [],
+            skipAgentSelection: true,
+            existingWorktree: {
+              slug: 'resume-me',
+              worktreePath: existingWorktreePath,
+              branchName: 'feature/resume-me',
+            },
+          },
+          []
+        );
+
+        await paneCreationStarted;
+        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+
+        releaseCleanup();
+        await queuedCleanup;
+        expect(worktreeExists).toBe(true);
+        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+
+        releasePaneCreation();
+        await vi.runAllTimersAsync();
+        await createPromise;
+      } finally {
+        vi.useRealTimers();
       }
     });
 

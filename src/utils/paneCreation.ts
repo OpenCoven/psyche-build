@@ -92,6 +92,12 @@ export async function createPane(
   } = options;
   let { agent, projectRoot: optionsProjectRoot } = options;
 
+  if (existingWorktree) {
+    WorktreeCleanupService.getInstance().cancelCleanupForWorktree(
+      existingWorktree.worktreePath
+    );
+  }
+
   // Load settings to check for default agent and autopilot
   const { SettingsManager } = await import('./settingsManager.js');
 
@@ -355,7 +361,6 @@ export async function createPane(
         throw new Error(`Existing worktree not found at ${worktreePath}`);
       }
 
-      WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
       await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
       await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
       await new Promise((resolve) => setTimeout(resolve, 300));

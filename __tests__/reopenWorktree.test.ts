@@ -23,6 +23,7 @@ const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'co
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
 const cancelCleanupForWorktreeMock = vi.hoisted(() => vi.fn());
+const atomicWriteJsonSyncMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -90,7 +91,7 @@ vi.mock('../src/utils/geminiTrust.js', () => ({
 }));
 
 vi.mock('../src/utils/atomicWrite.js', () => ({
-  atomicWriteJsonSync: vi.fn(),
+  atomicWriteJsonSync: atomicWriteJsonSyncMock,
 }));
 
 vi.mock('../src/utils/welcomePaneManager.js', () => ({
@@ -204,5 +205,63 @@ describe('reopenWorktree', () => {
     expect(cancelCleanupForWorktreeMock).toHaveBeenCalledWith(
       '/repo/.psyche/worktrees/reopen-me'
     );
+  });
+
+  it('cancels blocked cleanup before awaited reopen setup can persist the pane', async () => {
+    vi.useFakeTimers();
+    const worktreePath = '/repo/.psyche/worktrees/reopen-me';
+    let worktreeExists = true;
+    let cleanupCanceled = false;
+    let releaseCleanup!: () => void;
+    let releasePaneSetup!: (exists: boolean) => void;
+    let signalPaneSetupStarted!: () => void;
+    const paneSetupStarted = new Promise<void>((resolve) => {
+      signalPaneSetupStarted = resolve;
+    });
+    const paneSetup = new Promise<boolean>((resolve) => {
+      releasePaneSetup = resolve;
+    });
+    const queuedCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = () => {
+        if (!cleanupCanceled) {
+          worktreeExists = false;
+        }
+        resolve();
+      };
+    });
+
+    cancelCleanupForWorktreeMock.mockImplementation(() => {
+      cleanupCanceled = true;
+    });
+    tmuxServiceMock.paneExists.mockImplementationOnce(() => {
+      signalPaneSetupStarted();
+      return paneSetup;
+    });
+
+    try {
+      const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+      const reopenPromise = reopenWorktree({
+        slug: 'reopen-me',
+        worktreePath,
+        projectRoot: '/repo',
+        existingPanes: [],
+        sessionProjectRoot: '/repo',
+        sessionConfigPath: '/repo/.psyche/psyche.config.json',
+      });
+
+      await paneSetupStarted;
+      expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
+
+      releaseCleanup();
+      await queuedCleanup;
+      expect(worktreeExists).toBe(true);
+      expect(atomicWriteJsonSyncMock).not.toHaveBeenCalled();
+
+      releasePaneSetup(true);
+      await vi.runAllTimersAsync();
+      await reopenPromise;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -60,6 +60,8 @@ export async function reopenWorktree(
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
   } = options;
+  WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
+
   let paneProjectName = path.basename(projectRoot);
   const settings = new SettingsManager(projectRoot).getSettings();
   const metadata = readWorktreeMetadata(worktreePath);
@@ -219,7 +221,6 @@ export async function reopenWorktree(
 
   // Create the pane object
   const currentBranch = getCurrentBranch(worktreePath);
-  WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
 
   const newPane: PsychePane = {
     id: psychePaneId,
