@@ -288,6 +288,8 @@ async function executeCloseOption(
               pane,
               paneProjectRoot,
               mainRepoPath,
+              configPath: panesFile,
+              currentProjectRoot: sessionProjectRoot,
               deleteBranch: option === 'kill_clean_branch',
             });
             startedBackgroundCleanup = true;

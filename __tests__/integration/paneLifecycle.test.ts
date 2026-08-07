@@ -71,10 +71,14 @@ vi.mock('../../src/services/LogService.js', () => ({
 }));
 
 const mockEnqueueCleanup = vi.fn();
+const mockCancelCleanupForWorktree = vi.fn();
+const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       enqueueCleanup: mockEnqueueCleanup,
+      cancelCleanupForWorktree: mockCancelCleanupForWorktree,
+      rollbackCreatedWorktree: mockRollbackCreatedWorktree,
     })),
   },
 }));
@@ -99,6 +103,7 @@ describe('Pane Lifecycle Integration Tests', () => {
     // Reset all mocks
     vi.clearAllMocks();
     mockEnqueueCleanup.mockReset();
+    mockRollbackCreatedWorktree.mockReturnValue({ success: true });
 
     // Create fresh test environment
     tmuxSession = createMockTmuxSession('psyche-test', 1);
@@ -556,6 +561,13 @@ describe('Pane Lifecycle Integration Tests', () => {
         success: false,
         error: 'dependency install failed',
       });
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('git show-ref --verify --quiet')) {
+          throw new Error('branch does not exist');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
+      });
 
       const { createPane } = await import('../../src/utils/paneCreation.js');
 
@@ -580,6 +592,45 @@ describe('Pane Lifecycle Integration Tests', () => {
       // Agent launch command must never reach the pane.
       const sendKeys = getSendKeysCommands();
       expect(sendKeys.some((cmd) => cmd.includes('claude'))).toBe(false);
+
+      expect(mockRollbackCreatedWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mainRepoPath: '/test',
+          deleteBranch: true,
+        })
+      );
+    });
+
+    it('does not roll back a reused worktree when the worktree_created hook fails', async () => {
+      const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
+      createdWorktreePaths.add(existingWorktreePath);
+      createdWorktreePaths.add(`${existingWorktreePath}/.git`);
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+        success: false,
+        error: 'dependency install failed',
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(
+        createPane(
+          {
+            prompt: 'resume work',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            existingWorktree: {
+              slug: 'resume-me',
+              worktreePath: existingWorktreePath,
+              branchName: 'feature/resume-me',
+            },
+          },
+          ['claude']
+        )
+      ).rejects.toThrow(/worktree_created hook failed/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
     });
 
     it('runs worktree_created hook before launching the agent', async () => {

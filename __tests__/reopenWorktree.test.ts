@@ -22,6 +22,7 @@ const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
 const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'codex']));
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
+const cancelCleanupForWorktreeMock = vi.hoisted(() => vi.fn());
 const readWorktreeMetadataMock = vi.hoisted(() => vi.fn(() => ({
   agent: 'codex',
   permissionMode: 'bypassPermissions',
@@ -94,6 +95,14 @@ vi.mock('../src/utils/atomicWrite.js', () => ({
 
 vi.mock('../src/utils/welcomePaneManager.js', () => ({
   destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
+}));
+
+vi.mock('../src/services/WorktreeCleanupService.js', () => ({
+  WorktreeCleanupService: {
+    getInstance: vi.fn(() => ({
+      cancelCleanupForWorktree: cancelCleanupForWorktreeMock,
+    })),
+  },
 }));
 
 describe('reopenWorktree', () => {
@@ -178,5 +187,22 @@ describe('reopenWorktree', () => {
     });
 
     expect(result.pane.projectName).toBe('Renamed Repo');
+  });
+
+  it('cancels pending cleanup before persisting a reopened worktree pane', async () => {
+    const { reopenWorktree } = await import('../src/utils/reopenWorktree.js');
+
+    await reopenWorktree({
+      slug: 'reopen-me',
+      worktreePath: '/repo/.psyche/worktrees/reopen-me',
+      projectRoot: '/repo',
+      existingPanes: [],
+      sessionProjectRoot: '/repo',
+      sessionConfigPath: '/repo/.psyche/psyche.config.json',
+    });
+
+    expect(cancelCleanupForWorktreeMock).toHaveBeenCalledWith(
+      '/repo/.psyche/worktrees/reopen-me'
+    );
   });
 });

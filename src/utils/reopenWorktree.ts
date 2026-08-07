@@ -28,6 +28,7 @@ import {
 import { resolveProjectColorTheme } from './paneColors.js';
 import { getSidebarProjectDisplayName } from './sidebarProjects.js';
 import type { SidebarProject } from '../types.js';
+import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
 
 export interface ReopenWorktreeOptions {
   agent?: AgentName;
@@ -218,6 +219,7 @@ export async function reopenWorktree(
 
   // Create the pane object
   const currentBranch = getCurrentBranch(worktreePath);
+  WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
 
   const newPane: PsychePane = {
     id: psychePaneId,

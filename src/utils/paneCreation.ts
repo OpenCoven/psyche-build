@@ -16,6 +16,7 @@ import { triggerHook, triggerHookSync, initializeHooksDirectory } from './hooks.
 import { TMUX_LAYOUT_APPLY_DELAY, TMUX_SPLIT_DELAY } from '../constants/timing.js';
 import { atomicWriteJsonSync } from './atomicWrite.js';
 import { LogService } from '../services/LogService.js';
+import { WorktreeCleanupService, type CreatedWorktreeRollbackJob } from '../services/WorktreeCleanupService.js';
 import {
   appendSlugSuffix,
   launchAgentInPane,
@@ -346,12 +347,15 @@ export async function createPane(
   );
 
   // Create git worktree and cd into it
+  let createdWorktreeRollbackJob: CreatedWorktreeRollbackJob | undefined;
+  let worktreeCreatedByThisAttempt = false;
   try {
     if (existingWorktree) {
       if (!fs.existsSync(path.join(worktreePath, '.git'))) {
         throw new Error(`Existing worktree not found at ${worktreePath}`);
       }
 
+      WorktreeCleanupService.getInstance().cancelCleanupForWorktree(worktreePath);
       await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
       await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -399,7 +403,9 @@ export async function createPane(
       const maxWorktreeAttempts = 3;
       const maxWaitTime = 5000; // 5 seconds max
       const checkInterval = 100; // Check every 100ms
-      let worktreeCreated = fs.existsSync(worktreePath);
+      const worktreeExistedBeforeAttempt = fs.existsSync(worktreePath);
+      let worktreeCreated = worktreeExistedBeforeAttempt;
+      let branchCreatedByThisAttempt = false;
 
       for (let attempt = 1; attempt <= maxWorktreeAttempts && !worktreeCreated; attempt++) {
         // Check if branch already exists (from a deleted worktree or a previous attempt)
@@ -433,6 +439,10 @@ export async function createPane(
         }
 
         worktreeCreated = fs.existsSync(worktreePath);
+        if (worktreeCreated && !worktreeExistedBeforeAttempt) {
+          worktreeCreatedByThisAttempt = true;
+          branchCreatedByThisAttempt = !branchExists;
+        }
         if (!worktreeCreated && attempt < maxWorktreeAttempts) {
           await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
         }
@@ -445,6 +455,34 @@ export async function createPane(
 
       // Give a bit more time for git to finish setting up the worktree
       await new Promise((resolve) => setTimeout(resolve, 500));
+
+      if (worktreeCreatedByThisAttempt) {
+        try {
+          const branchOid = execSync(
+            `git rev-parse --verify --end-of-options "${branchName}"`,
+            {
+              cwd: projectRoot,
+              encoding: 'utf-8',
+              stdio: 'pipe',
+            }
+          ).trim();
+          if (!branchOid) {
+            throw new Error(`Branch ${branchName} did not resolve to an OID`);
+          }
+          createdWorktreeRollbackJob = {
+            worktreePath,
+            branchName,
+            branchOid,
+            mainRepoPath: projectRoot,
+            deleteBranch: branchCreatedByThisAttempt,
+          };
+        } catch (identityError) {
+          LogService.getInstance().warn(
+            `Could not record identity for newly created worktree ${worktreePath}: ${identityError instanceof Error ? identityError.message : String(identityError)}`,
+            'paneCreation'
+          );
+        }
+      }
     }
 
     try {
@@ -537,10 +575,33 @@ export async function createPane(
   const hookResult = await triggerHookSync('worktree_created', projectRoot, newPane);
   if (!hookResult.success) {
     const hookError = hookResult.error || 'unknown error';
+    let rollbackError: string | undefined;
     LogService.getInstance().error(
       `worktree_created hook failed for ${slug}: ${hookError}`,
       'paneCreation'
     );
+    if (createdWorktreeRollbackJob) {
+      const rollbackResult = WorktreeCleanupService.getInstance().rollbackCreatedWorktree(
+        createdWorktreeRollbackJob
+      );
+      if (!rollbackResult.success) {
+        rollbackError = rollbackResult.error || 'unknown rollback failure';
+        LogService.getInstance().error(
+          `Failed to roll back newly created worktree for ${slug}: ${rollbackError}`,
+          'paneCreation',
+          newPane.id,
+          new Error(rollbackError)
+        );
+      }
+    } else if (worktreeCreatedByThisAttempt) {
+      rollbackError = 'worktree identity could not be recorded';
+      LogService.getInstance().error(
+        `Failed to roll back newly created worktree for ${slug}: ${rollbackError}`,
+        'paneCreation',
+        newPane.id,
+        new Error(rollbackError)
+      );
+    }
     try {
       await tmuxService.killPane(paneInfo);
     } catch (killError) {
@@ -556,7 +617,11 @@ export async function createPane(
         // best-effort focus restore
       }
     }
-    throw new Error(`worktree_created hook failed for "${slug}": ${hookError}`);
+    throw new Error(
+      `worktree_created hook failed for "${slug}": ${hookError}${
+        rollbackError ? `; rollback failed: ${rollbackError}` : ''
+      }`
+    );
   }
 
   // Launch agent if specified
