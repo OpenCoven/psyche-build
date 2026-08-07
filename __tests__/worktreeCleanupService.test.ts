@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import type { PsychePane } from '../src/types.js';
@@ -326,7 +326,7 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
-  it('skips branch deletion when the branch no longer points to its queued OID', async () => {
+  it('skips cleanup when the branch no longer points to its queued OID', async () => {
     configureCleanupIdentity();
 
     const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
@@ -344,10 +344,10 @@ describe('WorktreeCleanupService', () => {
     branchOids.set('/test/project', 'moved-oid');
     await service.cleanupQueue;
 
-    expect(spawnMock).toHaveBeenCalledWith(
+    expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
       ['worktree', 'remove', '/test/project/.psyche/worktrees/react', '--force'],
-      expect.objectContaining({ cwd: '/test/project' })
+      expect.anything()
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
@@ -356,6 +356,45 @@ describe('WorktreeCleanupService', () => {
     );
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('branch OID changed'),
+      'paneActions',
+      'psyche-1'
+    );
+  });
+
+  it('cancels cleanup queued through a symlink when reopening its real path', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const realWorktreePath = join(cleanupRoot, 'real-worktree');
+    const symlinkWorktreePath = join(cleanupRoot, 'worktree-alias');
+    mkdirSync(realWorktreePath);
+    symlinkSync(realWorktreePath, symlinkWorktreePath);
+    configureCleanupIdentity(realWorktreePath);
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    service.enqueueCleanup({
+      pane: {
+        ...createCleanupPane(),
+        worktreePath: symlinkWorktreePath,
+      },
+      paneProjectRoot: '/test/project',
+      mainRepoPath: '/test/project',
+      configPath: '/test/project/.psyche/psyche.config.json',
+      currentProjectRoot: '/test/project',
+      deleteBranch: true,
+    });
+    service.cancelCleanupForWorktree(realWorktreePath);
+    await service.cleanupQueue;
+
+    expect(spawnMock).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['worktree', 'remove']),
+      expect.anything()
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('cleanup was canceled'),
       'paneActions',
       'psyche-1'
     );

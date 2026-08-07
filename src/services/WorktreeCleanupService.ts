@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'fs';
 import path from 'path';
 import type { PsycheConfig, PsychePane } from '../types.js';
 import { triggerHook } from '../utils/hooks.js';
@@ -77,13 +77,22 @@ interface ManagedWorktreePruneTarget {
   mtimeMs: number;
 }
 
-function normalizePathForCompare(value: string): string {
-  return path.resolve(value);
+function canonicalizePathForCompare(value: string): string {
+  const resolvedPath = path.resolve(value);
+
+  try {
+    return realpathSync.native(resolvedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return resolvedPath;
+    }
+    throw error;
+  }
 }
 
 function pathsOverlap(left: string, right: string): boolean {
-  const normalizedLeft = normalizePathForCompare(left);
-  const normalizedRight = normalizePathForCompare(right);
+  const normalizedLeft = canonicalizePathForCompare(left);
+  const normalizedRight = canonicalizePathForCompare(right);
 
   return (
     normalizedLeft === normalizedRight ||
@@ -114,7 +123,7 @@ export class WorktreeCleanupService {
       return;
     }
 
-    const canonicalWorktreePath = normalizePathForCompare(job.pane.worktreePath);
+    const canonicalWorktreePath = canonicalizePathForCompare(job.pane.worktreePath);
     const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
     const queuedJob = this.captureCleanupJob(job, canonicalWorktreePath, generation);
     if (!queuedJob) {
@@ -135,7 +144,7 @@ export class WorktreeCleanupService {
   }
 
   cancelCleanupForWorktree(worktreePath: string): void {
-    const canonicalWorktreePath = normalizePathForCompare(worktreePath);
+    const canonicalWorktreePath = canonicalizePathForCompare(worktreePath);
     const generation = this.incrementCleanupGeneration(canonicalWorktreePath);
     this.logger.debug(
       `Canceled stale cleanup generation for ${canonicalWorktreePath} (generation ${generation})`,
@@ -144,7 +153,7 @@ export class WorktreeCleanupService {
   }
 
   rollbackCreatedWorktree(job: CreatedWorktreeRollbackJob): WorktreeRollbackResult {
-    const canonicalWorktreePath = normalizePathForCompare(job.worktreePath);
+    const canonicalWorktreePath = canonicalizePathForCompare(job.worktreePath);
     const identity: WorktreeIdentity = {
       repoPath: job.mainRepoPath,
       worktreePath: job.worktreePath,
@@ -247,41 +256,47 @@ export class WorktreeCleanupService {
       job.pane.id
     );
 
-    let allWorktreesRemoved = true;
-    for (const target of job.worktreeTargets) {
-      if (!this.canRunDestructiveCleanup(job, target)) {
-        allWorktreesRemoved = false;
-        continue;
-      }
+    let allWorktreesRemoved = false;
+    if (
+      this.canRunDestructiveCleanup(job)
+      && this.haveUnchangedQueuedBranchOids(job)
+    ) {
+      allWorktreesRemoved = true;
+      for (const target of job.worktreeTargets) {
+        if (!this.canRunDestructiveCleanup(job, target)) {
+          allWorktreesRemoved = false;
+          continue;
+        }
 
-      const removeResult = await this.runGitCommand(
-        ['worktree', 'remove', target.worktreePath, '--force'],
-        target.repoPath
-      );
-
-      if (!removeResult.success) {
-        this.logger.warn(
-          `Worktree removal reported an error for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
-          'paneActions',
-          job.pane.id
+        const removeResult = await this.runGitCommand(
+          ['worktree', 'remove', target.worktreePath, '--force'],
+          target.repoPath
         );
-        allWorktreesRemoved = false;
-        continue;
-      }
 
-      const afterRemoval = this.getWorktreeBranch(
-        target.repoPath,
-        target.canonicalWorktreePath
-      );
-      if (!afterRemoval.success || afterRemoval.found) {
-        this.logger.warn(
-          afterRemoval.success
-            ? `Skipping branch deletion for ${job.pane.slug}: worktree removal was not confirmed for ${target.canonicalWorktreePath}`
-            : `Skipping branch deletion for ${job.pane.slug}: could not confirm worktree removal for ${target.canonicalWorktreePath}: ${afterRemoval.error}`,
-          'paneActions',
-          job.pane.id
+        if (!removeResult.success) {
+          this.logger.warn(
+            `Worktree removal reported an error for ${job.pane.slug} in ${target.repoPath}: ${removeResult.error}`,
+            'paneActions',
+            job.pane.id
+          );
+          allWorktreesRemoved = false;
+          continue;
+        }
+
+        const afterRemoval = this.getWorktreeBranch(
+          target.repoPath,
+          target.canonicalWorktreePath
         );
-        allWorktreesRemoved = false;
+        if (!afterRemoval.success || afterRemoval.found) {
+          this.logger.warn(
+            afterRemoval.success
+              ? `Skipping branch deletion for ${job.pane.slug}: worktree removal was not confirmed for ${target.canonicalWorktreePath}`
+              : `Skipping branch deletion for ${job.pane.slug}: could not confirm worktree removal for ${target.canonicalWorktreePath}: ${afterRemoval.error}`,
+            'paneActions',
+            job.pane.id
+          );
+          allWorktreesRemoved = false;
+        }
       }
     }
 
@@ -362,7 +377,7 @@ export class WorktreeCleanupService {
     const identities: WorktreeIdentity[] = [];
 
     for (const target of worktreeTargets) {
-      const canonicalTargetPath = normalizePathForCompare(target.worktreePath);
+      const canonicalTargetPath = canonicalizePathForCompare(target.worktreePath);
       const mappedBranch = this.getWorktreeBranch(target.repoPath, canonicalTargetPath);
       if (!mappedBranch.success || !mappedBranch.found || mappedBranch.branchName !== branchName) {
         this.logger.warn(
@@ -413,7 +428,7 @@ export class WorktreeCleanupService {
       branchName,
       branchOid: rootIdentity.branchOid,
       configPath: job.configPath,
-      currentProjectRoot: normalizePathForCompare(job.currentProjectRoot),
+      currentProjectRoot: canonicalizePathForCompare(job.currentProjectRoot),
       generation,
       deleteBranch: job.deleteBranch,
       worktreeTargets: identities,
@@ -460,6 +475,32 @@ export class WorktreeCleanupService {
       return false;
     }
 
+    const currentOid = this.getBranchOid(target.repoPath, target.branchName);
+    if (!currentOid.success || currentOid.output !== target.branchOid) {
+      this.logger.warn(
+        `Skipping worktree removal for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
+        'paneActions',
+        job.pane.id
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  private haveUnchangedQueuedBranchOids(job: QueuedWorktreeCleanupJob): boolean {
+    for (const target of job.worktreeTargets) {
+      const currentOid = this.getBranchOid(target.repoPath, target.branchName);
+      if (!currentOid.success || currentOid.output !== target.branchOid) {
+        this.logger.warn(
+          `Skipping background worktree cleanup for ${job.pane.slug}: branch OID changed for ${target.branchName} in ${target.repoPath}`,
+          'paneActions',
+          job.pane.id
+        );
+        return false;
+      }
+    }
+
     return true;
   }
 
@@ -477,7 +518,10 @@ export class WorktreeCleanupService {
       return false;
     }
 
-    if (config.projectRoot && normalizePathForCompare(config.projectRoot) !== job.currentProjectRoot) {
+    if (
+      config.projectRoot
+      && canonicalizePathForCompare(config.projectRoot) !== job.currentProjectRoot
+    ) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: current config project identity changed`,
         'paneActions',
@@ -497,7 +541,7 @@ export class WorktreeCleanupService {
 
     if (config.panes.some((pane) => (
       typeof pane.worktreePath === 'string'
-      && normalizePathForCompare(pane.worktreePath) === job.canonicalWorktreePath
+      && canonicalizePathForCompare(pane.worktreePath) === job.canonicalWorktreePath
     ))) {
       this.logger.warn(
         `Skipping background worktree cleanup for ${job.pane.slug}: current config still references ${job.canonicalWorktreePath}`,
@@ -533,7 +577,9 @@ export class WorktreeCleanupService {
     let found = false;
     for (const line of (result.output || '').split('\n')) {
       if (line.startsWith('worktree ')) {
-        currentWorktreePath = normalizePathForCompare(line.slice('worktree '.length).trim());
+        currentWorktreePath = canonicalizePathForCompare(
+          line.slice('worktree '.length).trim()
+        );
         found ||= currentWorktreePath === canonicalWorktreePath;
         continue;
       }
