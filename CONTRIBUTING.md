@@ -114,6 +114,7 @@ Run the complete reproducible local validation suite with the pnpm version pinne
 ```bash
 corepack pnpm@10.14.0 test
 corepack pnpm@10.14.0 typecheck
+corepack pnpm@10.14.0 clean
 corepack pnpm@10.14.0 build
 corepack pnpm@10.14.0 smoke
 corepack pnpm@10.14.0 smoke:pack
