@@ -571,6 +571,63 @@ describe('WorktreeCleanupService', () => {
     );
   });
 
+  it('uses unrefed backoff timers for persistent retained settlement failures', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'retained-backoff');
+    const operationRelease = vi.fn(async () => {
+      throw new Error('persistent release failure');
+    });
+    acquireWorktreeOperationLeaseMock.mockResolvedValueOnce({
+      canonicalProjectRoot: cleanupRoot,
+      canonicalWorktreePath: worktreePath,
+      lockDir: join(cleanupRoot, '.psyche/runtime/worktree.lock'),
+      nonce: 'operation-generation',
+      release: operationRelease,
+    });
+    acquireProjectWorktreeLifecycleLeaseMock.mockResolvedValueOnce({
+      canonicalProjectRoot: cleanupRoot,
+      lockDir: join(cleanupRoot, '.psyche/runtime/project.lock'),
+      nonce: 'project-generation',
+      release: vi.fn(async () => {}),
+    });
+    const timeoutHandles: NodeJS.Timeout[] = [];
+    const originalSetTimeout = global.setTimeout;
+    const timeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      const handle = originalSetTimeout(callback, delay, ...args);
+      if ((delay || 0) >= 50) timeoutHandles.push(handle);
+      return handle;
+    }) as typeof setTimeout);
+    try {
+      const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+      (WorktreeCleanupService as any).instance = undefined;
+      const reservation = await WorktreeCleanupService.getInstance()
+        .beginWorktreeReuseReservation(worktreePath, cleanupRoot);
+      const markerPath = join(cleanupRoot, '.psyche', 'runtime', 'backoff-marker.json');
+      mkdirSync(join(cleanupRoot, '.psyche', 'runtime'), { recursive: true });
+      writeFileSync(markerPath, '{}');
+      const retained = reservation.retain() as unknown as {
+        associateRecoveryMarker: (marker: { path: string; generation: string }) => void;
+      };
+      retained.associateRecoveryMarker({
+        path: markerPath,
+        generation: 'incident-generation',
+      });
+      rmSync(markerPath);
+
+      await new Promise((resolveWait) => originalSetTimeout(resolveWait, 260));
+      expect(operationRelease.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(timeoutHandles.length).toBeGreaterThan(0);
+      expect(timeoutHandles.every((handle) => !handle.hasRef())).toBe(true);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it('keeps cleanup queued during a reuse reservation invalid after pane persistence', async () => {
     const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
     tempDirs.push(cleanupRoot);

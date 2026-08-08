@@ -145,6 +145,7 @@ async function compensateAllocatedPaneFailure<T extends PsychePane>(
     tmuxService,
     paneId,
     allocationIdentity,
+    pane === undefined,
   );
   if (teardown.presence === 'absent') {
     throw new Error(
@@ -178,6 +179,7 @@ async function teardownAllocation<T extends PsychePane>(
   tmuxService: Pick<TmuxService, 'getServerIdentity' | 'paneExists' | 'killPane'>,
   paneId: string,
   allocationIdentity: TmuxServerIdentity,
+  generationMismatchIsUncertain: boolean,
 ): Promise<VerifiedPaneTeardownResult> {
   const currentIdentity = getTmuxServerIdentity(options, tmuxService, paneId);
   if (!currentIdentity) {
@@ -187,7 +189,12 @@ async function teardownAllocation<T extends PsychePane>(
     };
   }
   if (!sameTmuxServerIdentity(allocationIdentity, currentIdentity)) {
-    return { presence: 'absent' };
+    return generationMismatchIsUncertain
+      ? {
+        presence: 'unknown',
+        error: 'tmux generation changed before allocation ownership was bound',
+      }
+      : { presence: 'absent' };
   }
   if (options.tearDown) {
     return options.tearDown(paneId, allocationIdentity);

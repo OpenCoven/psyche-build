@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../src/types.js';
 import { createTransactionalPane } from '../src/utils/transactionalPaneCreation.js';
 
@@ -8,6 +10,13 @@ const generation = {
   socketPath: '/tmux.sock',
   sessionId: '$test',
 };
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 describe('transactional pane creation', () => {
   it.each([
@@ -116,6 +125,37 @@ describe('transactional pane creation', () => {
 
     expect(createPane).not.toHaveBeenCalled();
     expect(tearDown).toHaveBeenCalledWith('%42', generation);
+  });
+
+  it('retains durable recovery when generation changes before allocation ownership is bound', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-transaction-generation-'));
+    roots.push(projectRoot);
+    const replacementGeneration = {
+      ...generation,
+      pid: 5252,
+      processStartIdentity: 'replacement-start',
+      sessionId: '$replacement',
+    };
+    const getTmuxServerIdentity = vi.fn()
+      .mockReturnValueOnce(generation)
+      .mockReturnValue(replacementGeneration);
+    const retain = vi.fn();
+    const tearDown = vi.fn(async () => ({ presence: 'absent' as const }));
+
+    await expect(createTransactionalPane({
+      projectRoot,
+      sessionProjectRoot: projectRoot,
+      operation: 'terminal-pane',
+      allocate: () => '%42',
+      getTmuxServerIdentity,
+      createPane: vi.fn(),
+      persist: vi.fn(),
+      tearDown,
+      reservation: { retain },
+    })).rejects.toThrow(/wrote recovery marker/);
+
+    expect(retain).toHaveBeenCalledOnce();
+    expect(tearDown).not.toHaveBeenCalled();
   });
 
   it('compensates an allocated split when pane record construction fails', async () => {

@@ -316,21 +316,25 @@ export class WorktreeCleanupService {
             associateRecoveryMarker: (marker) => {
               void waitForRecoveryMarkerAcknowledgement(marker.path)
                 .then(async () => {
+                  let retryAttempt = 0;
                   while (true) {
                     try {
                       retained = false;
                       await settle('recovery acknowledged', true);
                       return;
                     } catch (error) {
+                      retryAttempt += 1;
                       retained = true;
                       settlePromise = undefined;
-                      this.logger.error(
-                        `Failed to settle retained reuse reservation after recovery acknowledgement: ${
-                          error instanceof Error ? error.message : String(error)
-                        }`,
-                        'paneActions',
-                      );
-                      await new Promise((resolve) => setTimeout(resolve, 50));
+                      if (shouldLogSettlementRetry(retryAttempt)) {
+                        this.logger.error(
+                          `Failed to settle retained reuse reservation after recovery acknowledgement: ${
+                            error instanceof Error ? error.message : String(error)
+                          }`,
+                          'paneActions',
+                        );
+                      }
+                      await waitForSettlementRetry(retryAttempt);
                     }
                   }
                 })
@@ -467,21 +471,25 @@ export class WorktreeCleanupService {
             associateRecoveryMarker: (marker) => {
               void waitForRecoveryMarkerAcknowledgement(marker.path)
                 .then(async () => {
+                  let retryAttempt = 0;
                   while (true) {
                     try {
                       retained = false;
                       await settle(true);
                       return;
                     } catch (error) {
+                      retryAttempt += 1;
                       retained = true;
                       settlePromise = undefined;
-                      this.logger.error(
-                        `Failed to settle retained creation reservation after recovery acknowledgement: ${
-                          error instanceof Error ? error.message : String(error)
-                        }`,
-                        'paneActions',
-                      );
-                      await new Promise((resolve) => setTimeout(resolve, 50));
+                      if (shouldLogSettlementRetry(retryAttempt)) {
+                        this.logger.error(
+                          `Failed to settle retained creation reservation after recovery acknowledgement: ${
+                            error instanceof Error ? error.message : String(error)
+                          }`,
+                          'paneActions',
+                        );
+                      }
+                      await waitForSettlementRetry(retryAttempt);
                     }
                   }
                 })
@@ -1790,4 +1798,16 @@ async function waitForRecoveryMarkerAcknowledgement(
       timeout.unref?.();
     });
   }
+}
+
+async function waitForSettlementRetry(attempt: number): Promise<void> {
+  const delay = Math.min(50 * (2 ** Math.min(attempt - 1, 7)), 5_000);
+  await new Promise((resolve) => {
+    const timeout = setTimeout(resolve, delay);
+    timeout.unref?.();
+  });
+}
+
+function shouldLogSettlementRetry(attempt: number): boolean {
+  return attempt <= 3 || (attempt & (attempt - 1)) === 0;
 }
