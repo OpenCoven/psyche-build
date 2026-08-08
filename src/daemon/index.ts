@@ -562,7 +562,7 @@ export class Connection {
             state: msg.capability.state,
             attempt: msg.capability.attempt,
           },
-          { actorKind: 'compatibility', idempotencyKey: `v0:coven.capability:${randomUUID()}` },
+          { actorKind: 'compatibility', idempotencyKey: msg.capability.idempotencyKey && msg.capability.idempotencyKey.length > 0 ? `v0:coven.capability:${msg.capability.idempotencyKey}` : `v0:coven.capability:${randomUUID()}` },
         ));
         if (outcome.status !== 'succeeded') {
           this.sendControlError(msg.requestId, 'coven_capability_execution_failed', outcome);

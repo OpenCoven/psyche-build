@@ -3,6 +3,14 @@ import type { PsychePane } from '../types.js';
 
 export type DesktopUseQuickAction = 'screenshot' | 'inspect' | 'permissions' | 'approve' | 'deny' | 'test';
 
+const DESKTOP_USE_QUICK_ACTIONS: ReadonlySet<DesktopUseQuickAction> = new Set([
+  'screenshot', 'inspect', 'permissions', 'approve', 'deny', 'test',
+]);
+
+export function isDesktopUseQuickAction(value: unknown): value is DesktopUseQuickAction {
+  return typeof value === 'string' && DESKTOP_USE_QUICK_ACTIONS.has(value as DesktopUseQuickAction);
+}
+
 export interface DesktopUseActionSnapshot {
   id: string;
   label: string;

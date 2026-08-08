@@ -354,11 +354,14 @@ describe('daemon coven adapter translation', () => {
       capability: {
         taskId: 'task-1', capability: 'planning', prompt: 'Plan it',
         title: 'Planner', state: { step: 1 }, attempt: 2, traceId: 'trace-1',
+        idempotencyKey: 'idem-1',
       },
     });
 
     const execs = runtime.submitted.filter((c) => c.kind === 'coven.capability.execute');
     expect(execs).toHaveLength(1);
+    // A client-supplied idempotency key must be threaded so retries dedupe.
+    expect(execs[0].idempotencyKey).toContain('idem-1');
     // The additive fields carried from the v0 request must survive translation.
     expect(execs[0].payload).toMatchObject({
       sessionId: 'sess-2', capability: 'planning', prompt: 'Plan it', taskId: 'task-1',

@@ -1,6 +1,6 @@
 import type { TmuxControl } from '../services/tmuxControl.js';
 import { decodeBase64Payload } from '../utils/base64.js';
-import { buildDesktopUseQuickInput, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
+import { buildDesktopUseQuickInput, isDesktopUseQuickAction, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
 import type { ControlHandlers } from '../control/runtime.js';
 import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
@@ -129,12 +129,16 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
     },
 
     async runCovenDesktopAction(payload) {
+      if (!isDesktopUseQuickAction(payload.action)) {
+        throw Object.assign(
+          new Error(`unsupported coven desktop action: ${payload.action}`),
+          { code: 'invalid_desktop_action' },
+        );
+      }
+      const action: DesktopUseQuickAction = payload.action;
       const client = covenClientFactory();
-      await client.sendInput?.(
-        payload.sessionId,
-        buildDesktopUseQuickInput(payload.action as DesktopUseQuickAction),
-      );
-      return { sessionId: payload.sessionId, action: payload.action, accepted: true };
+      await client.sendInput?.(payload.sessionId, buildDesktopUseQuickInput(action));
+      return { sessionId: payload.sessionId, action, accepted: true };
     },
 
     async executeCovenCapability(payload) {
