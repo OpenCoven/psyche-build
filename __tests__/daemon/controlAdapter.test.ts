@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Connection, type ConnectionDeps } from '../../src/daemon/index.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
-import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
 import type { CommandOutcome, ControlCommand } from '../../src/control/types.js';
 
 /**
@@ -79,7 +78,6 @@ function buildConnection(
     serverVersion: 'test',
     authedViaHeader: true,
     tmux,
-    capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     controlRuntime,
     ownerEpoch: 1,
   };
@@ -272,6 +270,106 @@ describe('daemon control adapter translation', () => {
   });
 });
 
+describe('daemon coven adapter translation', () => {
+  it('translates a coven session launch into a canonical coven.session.launch', async () => {
+    const root = await projectWithPanes([]);
+    const session = {
+      id: 'sess-1', projectRoot: root, harness: 'codex', title: 'Fix', status: 'running',
+      createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:01Z',
+    };
+    const runtime = spyRuntime((command) =>
+      command.kind === 'coven.session.launch'
+        ? { status: 'succeeded', value: session }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, {
+      type: 'coven.sessions.launch',
+      requestId: 'cl',
+      launch: { harness: 'codex', prompt: 'Fix the bug', cwd: root, title: 'Fix' },
+    });
+
+    const launches = runtime.submitted.filter((c) => c.kind === 'coven.session.launch');
+    expect(launches).toHaveLength(1);
+    expect(launches[0].actor.kind).toBe('compatibility');
+    expect(launches[0].payload).toMatchObject({ harness: 'codex', prompt: 'Fix the bug', cwd: root, title: 'Fix' });
+    expect(ws.sent.find((m) => m.type === 'coven.sessions.launch.result')).toMatchObject({
+      requestId: 'cl',
+      session,
+    });
+  });
+
+  it('translates a coven session open into a canonical coven.session.open', async () => {
+    const root = await projectWithPanes([]);
+    const opened = { id: '%7', pane: { id: '%7', cwd: root, title: 'coven' }, session: { id: 'sess-9' } };
+    const runtime = spyRuntime((command) =>
+      command.kind === 'coven.session.open'
+        ? { status: 'succeeded', value: opened }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, { type: 'coven.sessions.open', requestId: 'co', id: 'sess-9' });
+
+    const opens = runtime.submitted.filter((c) => c.kind === 'coven.session.open');
+    expect(opens).toHaveLength(1);
+    expect(opens[0].payload).toMatchObject({ sessionId: 'sess-9' });
+    expect(ws.sent.find((m) => m.type === 'coven.sessions.open.result')).toMatchObject({
+      requestId: 'co', id: '%7', session: { id: 'sess-9' },
+    });
+  });
+
+  it('translates a coven desktop action into a canonical coven.desktop.action', async () => {
+    const root = await projectWithPanes([]);
+    const runtime = spyRuntime();
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, {
+      type: 'coven.desktop.action', requestId: 'cd', sessionId: 'sess-3', action: 'screenshot',
+    });
+
+    const actions = runtime.submitted.filter((c) => c.kind === 'coven.desktop.action');
+    expect(actions).toHaveLength(1);
+    expect(actions[0].payload).toMatchObject({ sessionId: 'sess-3', action: 'screenshot' });
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: 'coven.desktop.action.result', requestId: 'cd', sessionId: 'sess-3', action: 'screenshot', accepted: true,
+    });
+  });
+
+  it('translates a coven capability execution carrying the full v0 request', async () => {
+    const root = await projectWithPanes([]);
+    const execution = { output: { harness: 'codex' }, trace: { taskId: 'task-1' } };
+    const runtime = spyRuntime((command) =>
+      command.kind === 'coven.capability.execute'
+        ? { status: 'succeeded', value: { sessionId: 'sess-2', execution } }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, {
+      type: 'coven.capabilities.execute',
+      requestId: 'cc',
+      sessionId: 'sess-2',
+      capability: {
+        taskId: 'task-1', capability: 'planning', prompt: 'Plan it',
+        title: 'Planner', state: { step: 1 }, attempt: 2, traceId: 'trace-1',
+      },
+    });
+
+    const execs = runtime.submitted.filter((c) => c.kind === 'coven.capability.execute');
+    expect(execs).toHaveLength(1);
+    // The additive fields carried from the v0 request must survive translation.
+    expect(execs[0].payload).toMatchObject({
+      sessionId: 'sess-2', capability: 'planning', prompt: 'Plan it', taskId: 'task-1',
+      traceId: 'trace-1', title: 'Planner', state: { step: 1 }, attempt: 2,
+    });
+    expect(ws.sent.find((m) => m.type === 'coven.capabilities.execute.result')).toMatchObject({
+      requestId: 'cc', sessionId: 'sess-2', execution,
+    });
+  });
+});
+
 describe('daemon pane-mutation source boundary', () => {
   it('never reaches the forbidden pane-mutation effects directly', async () => {
     const indexPath = fileURLToPath(new URL('../../src/daemon/index.ts', import.meta.url));
@@ -279,5 +377,17 @@ describe('daemon pane-mutation source boundary', () => {
     const forbidden =
       /this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(/;
     expect(source).not.toMatch(forbidden);
+  });
+
+  it('never performs coven session mutations directly in dispatch', async () => {
+    const indexPath = fileURLToPath(new URL('../../src/daemon/index.ts', import.meta.url));
+    const source = await readFile(indexPath, 'utf8');
+    // Mutations are routed through the runtime; the daemon must not call the
+    // coven mutation effects or the capability router directly.
+    const forbidden =
+      /launchProjectCovenSession\(|openProjectCovenSession\(|routeProjectCovenSessionCapability\(|buildDesktopUseQuickInput\(|this\.deps\.capabilityRouter/;
+    expect(source).not.toMatch(forbidden);
+    // Read-only coven ops stay direct and must remain reachable.
+    expect(source).toMatch(/listProjectCovenSessions\(/);
   });
 });

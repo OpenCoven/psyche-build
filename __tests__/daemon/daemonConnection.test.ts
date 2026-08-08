@@ -103,6 +103,7 @@ async function buildConnection(
         projectRoot,
         sessionName: 'psyche-test',
         spawnPane: opts.spawnPane,
+        capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
       }),
       journal: createMemoryJournal(),
     }));
@@ -112,7 +113,6 @@ async function buildConnection(
     serverVersion: 'test',
     authedViaHeader: opts.authed ?? true,
     tmux,
-    capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     workspaceProvider: opts.workspaceProvider,
     controlRuntime,
     ownerEpoch,

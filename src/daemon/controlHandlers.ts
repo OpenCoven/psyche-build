@@ -1,10 +1,20 @@
 import type { TmuxControl } from '../services/tmuxControl.js';
 import { decodeBase64Payload } from '../utils/base64.js';
+import { buildDesktopUseQuickInput, type DesktopUseQuickAction } from '../utils/covenDesktopUse.js';
 import type { ControlHandlers } from '../control/runtime.js';
+import type { AgenticCapabilityRouter } from '../orchestration/capabilityRouter.js';
 import {
   spawnBridgePane,
+  createCovenClient,
+  launchProjectCovenSession,
+  openProjectCovenSession,
+  routeProjectCovenSessionCapability,
+  defaultSpawnDeps,
   type BridgeSpawnRequest,
   type BridgeSpawnResult,
+  type BridgeSpawnDeps,
+  type CovenClient,
+  type ProjectCovenCapabilityRequest,
 } from './bridge.js';
 
 export interface DaemonControlHandlerDeps {
@@ -17,6 +27,12 @@ export interface DaemonControlHandlerDeps {
     sessionName: string,
     request: BridgeSpawnRequest,
   ) => Promise<BridgeSpawnResult>;
+  /** Router used to execute Coven session capabilities. */
+  capabilityRouter: AgenticCapabilityRouter;
+  /** Coven client factory; defaults to the real bridge client. */
+  createCovenClient?: () => CovenClient;
+  /** Spawn deps used when opening a Coven session pane; defaults to the real bridge deps. */
+  covenSpawnDeps?: BridgeSpawnDeps;
 }
 
 function notSupported(kind: string): () => Promise<never> {
@@ -32,13 +48,17 @@ function notSupported(kind: string): () => Promise<never> {
  *
  * This is the single module that reaches the real pane-mutation effects
  * (`tmux.sendKeysHex`, `resizePane`, `selectPane`, `killPane`, and
- * `spawnBridgePane`) on behalf of the runtime. `Connection.dispatch` no longer
+ * `spawnBridgePane`) and the Coven session mutations (`launchProjectCovenSession`,
+ * `openProjectCovenSession`, `routeProjectCovenSessionCapability`, and desktop
+ * quick actions) on behalf of the runtime. `Connection.dispatch` no longer
  * touches those effects directly; it submits commands to the runtime, and the
  * runtime drives these handlers. Commands the daemon does not yet translate
  * reject with `command_not_supported` rather than silently succeeding.
  */
 export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): ControlHandlers {
   const spawn = deps.spawnPane ?? spawnBridgePane;
+  const covenClientFactory = deps.createCovenClient ?? createCovenClient;
+  const covenSpawnDeps = deps.covenSpawnDeps ?? defaultSpawnDeps;
 
   return {
     async spawnPane(payload): Promise<BridgeSpawnResult> {
@@ -84,9 +104,59 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
     updatePaneOption: notSupported('pane.option.update'),
     updatePaneMeta: notSupported('pane.meta.update'),
     launchRitual: notSupported('ritual.launch'),
-    launchCovenSession: notSupported('coven.session.launch'),
-    openCovenSession: notSupported('coven.session.open'),
-    runCovenDesktopAction: notSupported('coven.desktop.action'),
-    executeCovenCapability: notSupported('coven.capability.execute'),
+
+    async launchCovenSession(payload) {
+      return launchProjectCovenSession(
+        deps.projectRoot,
+        {
+          harness: payload.harness,
+          prompt: payload.prompt,
+          cwd: payload.cwd,
+          title: payload.title,
+        },
+        covenClientFactory(),
+      );
+    },
+
+    async openCovenSession(payload) {
+      return openProjectCovenSession(
+        deps.projectRoot,
+        deps.sessionName,
+        payload.sessionId,
+        covenClientFactory(),
+        covenSpawnDeps,
+      );
+    },
+
+    async runCovenDesktopAction(payload) {
+      const client = covenClientFactory();
+      await client.sendInput?.(
+        payload.sessionId,
+        buildDesktopUseQuickInput(payload.action as DesktopUseQuickAction),
+      );
+      return { sessionId: payload.sessionId, action: payload.action, accepted: true };
+    },
+
+    async executeCovenCapability(payload) {
+      const request: ProjectCovenCapabilityRequest = {
+        taskId: payload.taskId,
+        traceId: payload.traceId,
+        capability: payload.capability,
+        provider: payload.provider,
+        prompt: payload.prompt,
+        title: payload.title,
+        state: payload.state,
+        attempt: payload.attempt,
+        idempotencyKey: payload.idempotencyKey,
+      };
+      const execution = await routeProjectCovenSessionCapability(
+        deps.projectRoot,
+        payload.sessionId,
+        request,
+        deps.capabilityRouter,
+        covenClientFactory(),
+      );
+      return { sessionId: payload.sessionId, execution };
+    },
   };
 }

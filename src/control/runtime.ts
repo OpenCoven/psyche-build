@@ -8,7 +8,7 @@ import type {
   PromptEnvelope,
 } from './types.js';
 
-type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
+export type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
 
 export interface ControlHandlers {
   executeOrchestration(payload: Payload<'orchestration.execute'>): Promise<unknown>;

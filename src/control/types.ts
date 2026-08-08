@@ -107,6 +107,14 @@ export type ControlCommand =
       taskId: string;
       traceId?: string;
       idempotencyKey?: string;
+      /**
+       * Optional fields carried through from the v0 `CovenCapabilityRequest` so
+       * the compatibility adapter loses nothing when routing capability
+       * execution through the runtime.
+       */
+      title?: string;
+      state?: Readonly<Record<string, unknown>>;
+      attempt?: number;
     }>;
 
 export type ControlCommandInput =
