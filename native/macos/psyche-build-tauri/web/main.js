@@ -3799,6 +3799,112 @@
     }
   }
 
+  function migrateProjectRoot(project, previousRoot, canonicalRoot) {
+    project.root = canonicalRoot;
+    if (project.selectedWorktreePath === previousRoot) {
+      project.selectedWorktreePath = canonicalRoot;
+    }
+    project.worktrees = (project.worktrees || []).map(function (worktree) {
+      if (!worktree || worktree.path !== previousRoot) return worktree;
+      return Object.assign({}, worktree, { path: canonicalRoot });
+    });
+    var browsers = project.browsersByWorktree || {};
+    if (previousRoot !== canonicalRoot && browsers[previousRoot]) {
+      var migratedBrowser = browsers[previousRoot];
+      if (!browsers[canonicalRoot]) {
+        browsers[canonicalRoot] = migratedBrowser;
+      } else if (browsers[canonicalRoot] !== migratedBrowser) {
+        var existingBrowser = browsers[canonicalRoot];
+        var existingTabIds = {};
+        (existingBrowser.tabs || []).forEach(function (tab) { existingTabIds[tab.id] = true; });
+        (migratedBrowser.tabs || []).forEach(function (tab) {
+          if (!existingTabIds[tab.id]) existingBrowser.tabs.push(tab);
+        });
+        if (!existingBrowser.activeTabId) existingBrowser.activeTabId = migratedBrowser.activeTabId;
+      }
+      delete browsers[previousRoot];
+    }
+    project.browsersByWorktree = browsers;
+    return project;
+  }
+
+  function mergeRestoredProject(target, incoming, preferIncoming) {
+    var root = target.root;
+    var targetBrowsers = target.browsersByWorktree || {};
+    var incomingBrowsers = incoming.browsersByWorktree || {};
+    var targetBrowser = targetBrowsers[root];
+    var incomingBrowser = incomingBrowsers[root];
+    if (!targetBrowser && incomingBrowser) {
+      targetBrowsers[root] = incomingBrowser;
+    } else if (targetBrowser && incomingBrowser && targetBrowser !== incomingBrowser) {
+      var tabIds = {};
+      (targetBrowser.tabs || []).forEach(function (tab) { tabIds[tab.id] = true; });
+      (incomingBrowser.tabs || []).forEach(function (tab) {
+        if (!tabIds[tab.id]) targetBrowser.tabs.push(tab);
+      });
+      if (preferIncoming && incomingBrowser.activeTabId) {
+        targetBrowser.activeTabId = incomingBrowser.activeTabId;
+      }
+    }
+    target.browsersByWorktree = targetBrowsers;
+
+    var worktreesByPath = {};
+    (target.worktrees || []).forEach(function (worktree) {
+      if (worktree && worktree.path) worktreesByPath[worktree.path] = worktree;
+    });
+    (incoming.worktrees || []).forEach(function (worktree) {
+      if (worktree && worktree.path && !worktreesByPath[worktree.path]) {
+        target.worktrees.push(worktree);
+        worktreesByPath[worktree.path] = worktree;
+      }
+    });
+    if (preferIncoming) {
+      target.selectedWorktreePath = incoming.selectedWorktreePath;
+      target.layout = incoming.layout;
+      target.name = incoming.name;
+    }
+    return target;
+  }
+
+  async function restoreSavedProjects(savedProjects, savedActiveProjectId, limit) {
+    var normalized = await Promise.all(savedProjects.map(async function (savedProject) {
+      var project = sanitizeSavedProject(savedProject);
+      if (!project) return null;
+      var previousRoot = project.root;
+      var canonicalRoot = await canonicalProjectPath(previousRoot);
+      if (!canonicalRoot) return null;
+      return {
+        project: migrateProjectRoot(project, previousRoot, canonicalRoot),
+        sourceId: savedProject.id || project.id,
+      };
+    }));
+    var projects = [];
+    var projectsByRoot = {};
+    var usedIds = {};
+    var activeProjectId = null;
+    var activeSourceClaimed = false;
+    normalized.filter(Boolean).forEach(function (entry) {
+      var isActiveSource = !activeSourceClaimed && entry.sourceId === savedActiveProjectId;
+      if (isActiveSource) activeSourceClaimed = true;
+      var existing = projectsByRoot[entry.project.root];
+      if (existing) {
+        mergeRestoredProject(existing, entry.project, isActiveSource);
+        if (isActiveSource) activeProjectId = existing.id;
+        return;
+      }
+      while (usedIds[entry.project.id]) entry.project.id = makeProjectId();
+      usedIds[entry.project.id] = true;
+      projectsByRoot[entry.project.root] = entry.project;
+      projects.push(entry.project);
+      if (isActiveSource) activeProjectId = entry.project.id;
+    });
+    projects = projects.slice(0, limit);
+    if (!projects.some(function (candidate) { return candidate.id === activeProjectId; })) {
+      activeProjectId = projects[0] ? projects[0].id : null;
+    }
+    return { projects: projects, activeProjectId: activeProjectId };
+  }
+
   async function addProject(rootPath) {
     if (!rootPath) return null;
     rootPath = await canonicalProjectPath(rootPath);
@@ -3955,19 +4061,13 @@
     var project = null;
     if (saved && saved.projects.length) {
       isRestoringWorkspace = true;
-      state.projects = (await Promise.all(saved.projects.map(async function (savedProject) {
-        var restoredProject = sanitizeSavedProject(savedProject);
-        if (!restoredProject) return null;
-        var previousRoot = restoredProject.root;
-        var canonicalRoot = await canonicalProjectPath(previousRoot);
-        if (!canonicalRoot) return null;
-        restoredProject.root = canonicalRoot;
-        if (restoredProject.selectedWorktreePath === previousRoot) {
-          restoredProject.selectedWorktreePath = canonicalRoot;
-        }
-        return restoredProject;
-      }))).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
-      state.activeProjectId = saved.activeProjectId && state.projects.some(function (p) { return p.id === saved.activeProjectId; }) ? saved.activeProjectId : (state.projects[0] && state.projects[0].id);
+      var restored = await restoreSavedProjects(
+        saved.projects,
+        saved.activeProjectId,
+        Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
+      );
+      state.projects = restored.projects;
+      state.activeProjectId = restored.activeProjectId;
       project = activeProject();
       if (project) restoreProjectLayout(project);
       isRestoringWorkspace = false;
