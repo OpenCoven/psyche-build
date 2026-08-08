@@ -49,7 +49,7 @@ describe('Tauri Coven launch project scope', () => {
       libRs.indexOf('#[tauri::command]', libRs.indexOf('fn pty_start') + 1),
     );
     expect(ptyStart).toContain('prepare_pty_start(&options)');
-    expect(ptyStart).toContain('resolved_cwd.spawn_path()');
+    expect(ptyStart).toContain('resolved_cwd.configure_command_cwd(&mut cmd)');
     const prepareStart = libRs.slice(
       libRs.indexOf('fn prepare_pty_start'),
       libRs.indexOf('#[tauri::command]', libRs.indexOf('fn prepare_pty_start')),
@@ -142,19 +142,79 @@ describe('Tauri Coven launch project scope', () => {
     };
     const project = {
       root: '/alias/repo',
-      selectedWorktreePath: '/alias/repo',
-      worktrees: [{ path: '/alias/repo', collapsed: true }, { path: '/linked', collapsed: false }],
-      browsersByWorktree: { '/alias/repo': browser },
+      selectedWorktreePath: '/alias/repo/packages/app',
+      worktrees: [
+        { path: '/alias/repo', collapsed: true },
+        { path: '/alias/repo/packages/app', collapsed: false },
+        { path: '/linked', collapsed: false },
+      ],
+      browsersByWorktree: {
+        '/alias/repo': browser,
+        '/alias/repo/packages/app': { tabs: [{ id: 'nested-tab' }], activeTabId: 'nested-tab' },
+        '/linked': { tabs: [{ id: 'linked-tab' }], activeTabId: 'linked-tab' },
+      },
     };
 
     migrateProjectRoot(project, '/alias/repo', '/real/repo');
 
     expect(project.root).toBe('/real/repo');
-    expect(project.selectedWorktreePath).toBe('/real/repo');
+    expect(project.selectedWorktreePath).toBe('/real/repo/packages/app');
     expect(project.worktrees).toEqual([
       { path: '/real/repo', collapsed: true },
+      { path: '/real/repo/packages/app', collapsed: false },
       { path: '/linked', collapsed: false },
     ]);
-    expect(project.browsersByWorktree).toEqual({ '/real/repo': browser });
+    expect(project.browsersByWorktree).toEqual({
+      '/real/repo': browser,
+      '/real/repo/packages/app': { tabs: [{ id: 'nested-tab' }], activeTabId: 'nested-tab' },
+      '/linked': { tabs: [{ id: 'linked-tab' }], activeTabId: 'linked-tab' },
+    });
+  });
+
+  it('merges every browser and worktree key with the active source winning collisions', () => {
+    const mergeRestoredProject = compileFunction<(
+      target: Record<string, any>, incoming: Record<string, any>, preferIncoming: boolean,
+    ) => Record<string, any>>(functionSource('mergeRestoredProject'), {});
+    const target = {
+      root: '/real/repo', selectedWorktreePath: '/real/repo', layout: { mode: 'terminal' },
+      worktrees: [
+        { path: '/real/repo/nested', collapsed: false },
+        { path: '/external', collapsed: false },
+      ],
+      browsersByWorktree: {
+        '/real/repo/nested': { tabs: [{ id: 'same', title: 'old' }], activeTabId: 'same' },
+        '/external': { tabs: [{ id: 'external-old' }], activeTabId: 'external-old' },
+      },
+    };
+    const incoming = {
+      root: '/real/repo', selectedWorktreePath: '/external', layout: { mode: 'browser' },
+      worktrees: [
+        { path: '/real/repo/nested', collapsed: true },
+        { path: '/incoming-external', collapsed: true },
+      ],
+      browsersByWorktree: {
+        '/real/repo/nested': {
+          tabs: [{ id: 'same', title: 'active' }, { id: 'new' }], activeTabId: 'new',
+        },
+        '/incoming-external': { tabs: [{ id: 'incoming-tab' }], activeTabId: 'incoming-tab' },
+      },
+    };
+
+    mergeRestoredProject(target, incoming, true);
+
+    expect(target.selectedWorktreePath).toBe('/external');
+    expect(target.layout).toEqual({ mode: 'browser' });
+    expect(target.worktrees).toEqual([
+      { path: '/real/repo/nested', collapsed: true },
+      { path: '/external', collapsed: false },
+      { path: '/incoming-external', collapsed: true },
+    ]);
+    expect(target.browsersByWorktree).toEqual({
+      '/real/repo/nested': {
+        tabs: [{ id: 'same', title: 'active' }, { id: 'new' }], activeTabId: 'new',
+      },
+      '/external': { tabs: [{ id: 'external-old' }], activeTabId: 'external-old' },
+      '/incoming-external': { tabs: [{ id: 'incoming-tab' }], activeTabId: 'incoming-tab' },
+    });
   });
 });

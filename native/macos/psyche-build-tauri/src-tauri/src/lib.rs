@@ -110,9 +110,37 @@ struct OpenedPtyCwd {
 }
 
 impl OpenedPtyCwd {
-    fn spawn_path(&self) -> &Path {
-        &self.spawn_path
+    fn configure_command_cwd(&self, command: &mut CommandBuilder) -> Result<(), String> {
+        #[cfg(unix)]
+        if !locator_matches_open_directory(&self.spawn_path, &self._directory) {
+            return Err(format!(
+                "stable PTY cwd locator is unavailable: {}",
+                self.spawn_path.display()
+            ));
+        }
+        #[cfg(not(unix))]
+        if !self.spawn_path.is_dir() {
+            return Err(format!(
+                "stable PTY cwd locator is unavailable: {}",
+                self.spawn_path.display()
+            ));
+        }
+        command.cwd(&self.spawn_path);
+        Ok(())
     }
+}
+
+#[cfg(unix)]
+fn locator_matches_open_directory(locator: &Path, directory: &std::fs::File) -> bool {
+    let Ok(locator_metadata) = locator.metadata() else {
+        return false;
+    };
+    let Ok(directory_metadata) = directory.metadata() else {
+        return false;
+    };
+    locator_metadata.is_dir()
+        && locator_metadata.dev() == directory_metadata.dev()
+        && locator_metadata.ino() == directory_metadata.ino()
 }
 
 fn validate_opened_pty_cwd(
@@ -187,9 +215,20 @@ fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, S
         return Err(format!("PTY cwd is not a directory: {}", cwd));
     }
     #[cfg(target_os = "macos")]
-    let spawn_path = PathBuf::from(format!("/.vol/{}/{}", metadata.dev(), metadata.ino()));
+    let locator_candidates = vec![PathBuf::from(format!(
+        "/.vol/{}/{}",
+        metadata.dev(),
+        metadata.ino()
+    ))];
     #[cfg(not(target_os = "macos"))]
-    let spawn_path = PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()));
+    let locator_candidates = vec![
+        PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())),
+        PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd())),
+    ];
+    let spawn_path = locator_candidates
+        .into_iter()
+        .find(|locator| locator_matches_open_directory(locator, &directory))
+        .ok_or_else(|| format!("stable PTY cwd locator is unavailable for '{}'", cwd))?;
     let canonical_path = directory_path_from_handle(&directory, cwd)?;
     Ok(OpenedPtyCwd {
         _directory: directory,
@@ -340,7 +379,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let args = options.args.unwrap_or_else(|| vec!["-l".to_string()]);
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
-    cmd.cwd(resolved_cwd.spawn_path());
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
     // Build a sane child environment. When the .app is launched from
     // Finder/Dock, launchd hands us a stripped PATH that lacks
     // /opt/homebrew/bin, so psyche can't find tmux/git/gh/etc. Augment PATH
@@ -2195,15 +2234,53 @@ mod workspace_panel_tests {
         std::fs::rename(&original, &moved).unwrap();
         symlink(&outside, &original).unwrap();
 
-        let output = std::process::Command::new("/bin/pwd")
-            .arg("-P")
-            .current_dir(opened.spawn_path())
-            .output()
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .unwrap();
-        assert!(output.status.success());
-        let actual = String::from_utf8(output.stdout).unwrap();
+        let mut command = CommandBuilder::new("/bin/pwd");
+        command.arg("-P");
+        opened.configure_command_cwd(&mut command).unwrap();
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(opened);
+        drop(pair.slave);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            reader.read_to_string(&mut output).unwrap();
+            sender.send(output).unwrap();
+        });
+        let writer = pair.master.take_writer().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(writer);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "portable-pty child failed: {status}");
+        drop(pair.master);
+        let actual = receiver.recv().unwrap();
         assert_eq!(actual.trim(), path_text(&moved.canonicalize().unwrap()));
         assert_ne!(actual.trim(), path_text(&outside.canonicalize().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_unavailable_pty_cwd_locator_before_command_construction() {
+        let tree = TempTree::new("pty-cwd-locator");
+        let project = tree.root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut opened =
+            open_pty_cwd_with_worktrees(path_text(&project), path_text(&project), &[]).unwrap();
+        opened.spawn_path = tree.root.join("unavailable-locator");
+        let mut command = CommandBuilder::new("/bin/pwd");
+
+        let error = opened.configure_command_cwd(&mut command).unwrap_err();
+
+        assert!(error.contains("stable PTY cwd locator is unavailable"));
+        assert!(command.get_cwd().is_none());
     }
 
     #[test]

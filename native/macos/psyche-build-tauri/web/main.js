@@ -3800,62 +3800,97 @@
   }
 
   function migrateProjectRoot(project, previousRoot, canonicalRoot) {
-    project.root = canonicalRoot;
-    if (project.selectedWorktreePath === previousRoot) {
-      project.selectedWorktreePath = canonicalRoot;
+    function remapPath(path) {
+      if (path === previousRoot) return canonicalRoot;
+      if (path && path.indexOf(previousRoot + "/") === 0) {
+        return canonicalRoot + path.slice(previousRoot.length);
+      }
+      return path;
     }
+    function mergeBrowser(target, incoming, preferIncoming) {
+      var tabs = (target.tabs || []).slice();
+      var indices = {};
+      tabs.forEach(function (tab, index) { indices[tab.id] = index; });
+      (incoming.tabs || []).forEach(function (tab) {
+        if (indices[tab.id] === undefined) {
+          indices[tab.id] = tabs.length;
+          tabs.push(tab);
+        } else if (preferIncoming) {
+          tabs[indices[tab.id]] = tab;
+        }
+      });
+      target.tabs = tabs;
+      if (preferIncoming && incoming.activeTabId) target.activeTabId = incoming.activeTabId;
+      else if (!target.activeTabId) target.activeTabId = incoming.activeTabId;
+      return target;
+    }
+    var previousSelectedWorktreePath = project.selectedWorktreePath;
+    project.root = canonicalRoot;
+    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
     project.worktrees = (project.worktrees || []).map(function (worktree) {
-      if (!worktree || worktree.path !== previousRoot) return worktree;
-      return Object.assign({}, worktree, { path: canonicalRoot });
+      if (!worktree) return worktree;
+      return Object.assign({}, worktree, { path: remapPath(worktree.path) });
     });
     var browsers = project.browsersByWorktree || {};
-    if (previousRoot !== canonicalRoot && browsers[previousRoot]) {
-      var migratedBrowser = browsers[previousRoot];
-      if (!browsers[canonicalRoot]) {
-        browsers[canonicalRoot] = migratedBrowser;
-      } else if (browsers[canonicalRoot] !== migratedBrowser) {
-        var existingBrowser = browsers[canonicalRoot];
-        var existingTabIds = {};
-        (existingBrowser.tabs || []).forEach(function (tab) { existingTabIds[tab.id] = true; });
-        (migratedBrowser.tabs || []).forEach(function (tab) {
-          if (!existingTabIds[tab.id]) existingBrowser.tabs.push(tab);
-        });
-        if (!existingBrowser.activeTabId) existingBrowser.activeTabId = migratedBrowser.activeTabId;
-      }
-      delete browsers[previousRoot];
-    }
-    project.browsersByWorktree = browsers;
+    var migratedBrowsers = {};
+    Object.keys(browsers).forEach(function (workspaceRoot) {
+      var migratedRoot = remapPath(workspaceRoot);
+      var browser = browsers[workspaceRoot];
+      if (!migratedBrowsers[migratedRoot]) migratedBrowsers[migratedRoot] = browser;
+      else mergeBrowser(
+        migratedBrowsers[migratedRoot],
+        browser,
+        workspaceRoot === previousSelectedWorktreePath
+      );
+    });
+    project.browsersByWorktree = migratedBrowsers;
     return project;
   }
 
   function mergeRestoredProject(target, incoming, preferIncoming) {
-    var root = target.root;
-    var targetBrowsers = target.browsersByWorktree || {};
-    var incomingBrowsers = incoming.browsersByWorktree || {};
-    var targetBrowser = targetBrowsers[root];
-    var incomingBrowser = incomingBrowsers[root];
-    if (!targetBrowser && incomingBrowser) {
-      targetBrowsers[root] = incomingBrowser;
-    } else if (targetBrowser && incomingBrowser && targetBrowser !== incomingBrowser) {
-      var tabIds = {};
-      (targetBrowser.tabs || []).forEach(function (tab) { tabIds[tab.id] = true; });
+    function mergeBrowser(targetBrowser, incomingBrowser) {
+      var tabs = (targetBrowser.tabs || []).slice();
+      var tabIndices = {};
+      tabs.forEach(function (tab, index) { tabIndices[tab.id] = index; });
       (incomingBrowser.tabs || []).forEach(function (tab) {
-        if (!tabIds[tab.id]) targetBrowser.tabs.push(tab);
+        if (tabIndices[tab.id] === undefined) {
+          tabIndices[tab.id] = tabs.length;
+          tabs.push(tab);
+        } else if (preferIncoming) {
+          tabs[tabIndices[tab.id]] = tab;
+        }
       });
+      targetBrowser.tabs = tabs;
       if (preferIncoming && incomingBrowser.activeTabId) {
         targetBrowser.activeTabId = incomingBrowser.activeTabId;
+      } else if (!targetBrowser.activeTabId) {
+        targetBrowser.activeTabId = incomingBrowser.activeTabId;
       }
+      return targetBrowser;
     }
+    var targetBrowsers = target.browsersByWorktree || {};
+    var incomingBrowsers = incoming.browsersByWorktree || {};
+    Object.keys(incomingBrowsers).forEach(function (workspaceRoot) {
+      if (!targetBrowsers[workspaceRoot]) targetBrowsers[workspaceRoot] = incomingBrowsers[workspaceRoot];
+      else if (targetBrowsers[workspaceRoot] !== incomingBrowsers[workspaceRoot]) {
+        mergeBrowser(targetBrowsers[workspaceRoot], incomingBrowsers[workspaceRoot]);
+      }
+    });
     target.browsersByWorktree = targetBrowsers;
 
     var worktreesByPath = {};
-    (target.worktrees || []).forEach(function (worktree) {
-      if (worktree && worktree.path) worktreesByPath[worktree.path] = worktree;
+    target.worktrees = target.worktrees || [];
+    target.worktrees.forEach(function (worktree, index) {
+      if (worktree && worktree.path) worktreesByPath[worktree.path] = index;
     });
     (incoming.worktrees || []).forEach(function (worktree) {
-      if (worktree && worktree.path && !worktreesByPath[worktree.path]) {
+      if (!worktree || !worktree.path) return;
+      var existingIndex = worktreesByPath[worktree.path];
+      if (existingIndex === undefined) {
+        worktreesByPath[worktree.path] = target.worktrees.length;
         target.worktrees.push(worktree);
-        worktreesByPath[worktree.path] = worktree;
+      } else if (preferIncoming) {
+        target.worktrees[existingIndex] = worktree;
       }
     });
     if (preferIncoming) {
