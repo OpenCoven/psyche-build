@@ -484,7 +484,7 @@ function hasUnsafeUrlUserinfoOrAuthority(remoteUrl: string): boolean {
   }
 
   const authority = rawParts.authority;
-  if (authority.includes('*')) {
+  if (authority.includes('*') || authority.includes('%') || hasUnsafeUnicodeTextCharacter(authority)) {
     return true;
   }
 
@@ -624,6 +624,10 @@ function isNetworkScheme(scheme: string): boolean {
 }
 
 function canonicalizeDiagnosticHost(rawHost: string): string | null {
+  if (rawHost.includes('%') || hasUnsafeUnicodeTextCharacter(rawHost)) {
+    return null;
+  }
+
   const withoutPort = rawHost.startsWith('[')
     ? rawHost
     : rawHost.replace(/:\d+$/u, '');

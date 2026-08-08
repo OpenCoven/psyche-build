@@ -515,6 +515,42 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
+  it('redacts diagnostic-only remotes with unsafe Unicode authorities across protocols', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const httpLiteral = 'http://ghe\u200b.example.test/private/repo.git';
+    const httpEncoded = 'http://ghe%E2%80%8B.example.test/private/repo.git';
+    const httpControl = 'http://ghe\u0085.example.test/private/repo.git';
+    const sshLiteral = 'ssh://git@ghe\u2060.example.test/private/repo.git';
+    const scpLiteral = 'git@ghe\ufeff.example.test:private/repo.git';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+      'git\0remote': { stdout: 'http-control\nhttp-encoded\nhttp-literal\nscp-literal\nssh-literal\n' },
+      'git\0remote\0get-url\0--\0http-control': { stdout: `${httpControl}\n` },
+      'git\0remote\0get-url\0--\0http-encoded': { stdout: `${httpEncoded}\n` },
+      'git\0remote\0get-url\0--\0http-literal': { stdout: `${httpLiteral}\n` },
+      'git\0remote\0get-url\0--\0scp-literal': { stdout: `${scpLiteral}\n` },
+      'git\0remote\0get-url\0--\0ssh-literal': { stdout: `${sshLiteral}\n` },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+    const serialized = JSON.stringify(context);
+
+    expect(context.rawRemotes).toEqual([
+      { name: 'http-control', url: '<redacted-remote-url>' },
+      { name: 'http-encoded', url: '<redacted-remote-url>' },
+      { name: 'http-literal', url: '<redacted-remote-url>' },
+      { name: 'scp-literal', url: '<redacted-remote-url>' },
+      { name: 'ssh-literal', url: '<redacted-remote-url>' },
+    ]);
+    expect(context.remotes).toEqual([]);
+    expect(serialized).not.toContain(httpLiteral);
+    expect(serialized).not.toContain(httpEncoded);
+    expect(serialized).not.toContain(httpControl);
+    expect(serialized).not.toContain(sshLiteral);
+    expect(serialized).not.toContain(scpLiteral);
+  });
+
   it('keeps valid GitHub SCP diagnostics path-free without exposing repository segments', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const scpSecretPath = 'git@github.com:group/S3CR3T_VALUE.git';

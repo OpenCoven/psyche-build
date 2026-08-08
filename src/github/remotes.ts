@@ -223,7 +223,12 @@ function extractRawUrlParts(rawUrl: string): { authority: string; path: string }
 }
 
 function parseAuthority(rawAuthority: string): ParsedAuthority | null {
-  if (!rawAuthority || rawAuthority.includes('%') || AUTHORITY_WHITESPACE_OR_CONTROL.test(rawAuthority)) {
+  if (
+    !rawAuthority
+    || rawAuthority.includes('%')
+    || AUTHORITY_WHITESPACE_OR_CONTROL.test(rawAuthority)
+    || hasUnsafeUnicodeTextCharacter(rawAuthority)
+  ) {
     return null;
   }
 
@@ -256,7 +261,11 @@ function parseAuthority(rawAuthority: string): ParsedAuthority | null {
 }
 
 function parseHostAndPort(hostAndPort: string): { host: string; port: string | null } | null {
-  if (!hostAndPort || AUTHORITY_WHITESPACE_OR_CONTROL.test(hostAndPort)) {
+  if (
+    !hostAndPort
+    || AUTHORITY_WHITESPACE_OR_CONTROL.test(hostAndPort)
+    || hasUnsafeUnicodeTextCharacter(hostAndPort)
+  ) {
     return null;
   }
 
@@ -322,6 +331,7 @@ function canonicalizeScpHost(rawHost: string): string | null {
     || rawHost.includes(']')
     || rawHost.includes('\\')
     || AUTHORITY_WHITESPACE_OR_CONTROL.test(rawHost)
+    || hasUnsafeUnicodeTextCharacter(rawHost)
   ) {
     return null;
   }
@@ -447,7 +457,7 @@ function hasInvalidDecodedPathContent(value: string): boolean {
 }
 
 function isValidGitHubOwner(owner: string): boolean {
-  return !hasUnsafeUnicodeTextCharacter(owner) && GITHUB_OWNER_PATTERN.test(owner);
+  return !hasUnsafeUnicodeTextCharacter(owner) && !owner.includes('--') && GITHUB_OWNER_PATTERN.test(owner);
 }
 
 function isValidGitHubRepositoryName(name: string): boolean {
