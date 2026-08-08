@@ -3790,7 +3790,18 @@
   // 12. Boot
   // ============================================================
 
+  async function canonicalProjectPath(rootPath) {
+    try {
+      return await invoke("canonical_project_path", { root: rootPath });
+    } catch (error) {
+      setStatus("Project path is unavailable: " + String(error), "error");
+      return null;
+    }
+  }
+
   async function addProject(rootPath) {
+    if (!rootPath) return null;
+    rootPath = await canonicalProjectPath(rootPath);
     if (!rootPath) return null;
     var existing = state.projects.find(function (p) { return p.root === rootPath; });
     if (existing) return (await setActiveProject(existing.id)) ? existing : null;
@@ -3944,7 +3955,18 @@
     var project = null;
     if (saved && saved.projects.length) {
       isRestoringWorkspace = true;
-      state.projects = saved.projects.map(sanitizeSavedProject).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
+      state.projects = (await Promise.all(saved.projects.map(async function (savedProject) {
+        var restoredProject = sanitizeSavedProject(savedProject);
+        if (!restoredProject) return null;
+        var previousRoot = restoredProject.root;
+        var canonicalRoot = await canonicalProjectPath(previousRoot);
+        if (!canonicalRoot) return null;
+        restoredProject.root = canonicalRoot;
+        if (restoredProject.selectedWorktreePath === previousRoot) {
+          restoredProject.selectedWorktreePath = canonicalRoot;
+        }
+        return restoredProject;
+      }))).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
       state.activeProjectId = saved.activeProjectId && state.projects.some(function (p) { return p.id === saved.activeProjectId; }) ? saved.activeProjectId : (state.projects[0] && state.projects[0].id);
       project = activeProject();
       if (project) restoreProjectLayout(project);

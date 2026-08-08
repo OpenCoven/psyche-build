@@ -82,12 +82,95 @@ impl Drop for PendingPtyStart {
 pub struct StartOptions {
     pub thread_id: String,
     pub project_root: Option<String>,
+    pub cwd: Option<String>,
+    pub launch_kind: Option<String>,
+    pub coven_session_id: Option<String>,
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     /// Extra environment variables on top of the inherited environment.
     pub env: Option<HashMap<String, String>>,
+}
+
+fn resolve_pty_cwd_with_worktrees(
+    project_root: &str,
+    cwd: &str,
+    linked_worktrees: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let requested = Path::new(cwd);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    };
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    if !canonical_candidate.is_dir() {
+        return Err(format!("PTY cwd is not a directory: {}", cwd));
+    }
+    if canonical_candidate.starts_with(&canonical_root) {
+        return Ok(canonical_candidate);
+    }
+
+    for worktree in linked_worktrees {
+        let canonical_worktree = match worktree.canonicalize() {
+            Ok(path) if path.is_dir() => path,
+            _ => continue,
+        };
+        if canonical_candidate.starts_with(canonical_worktree) {
+            return Ok(canonical_candidate);
+        }
+    }
+
+    Err(format!(
+        "PTY cwd is outside the project and its linked worktrees: {}",
+        cwd
+    ))
+}
+
+fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let root = project_root
+        .to_str()
+        .ok_or_else(|| "project root is not valid UTF-8".to_string())?;
+    let raw = run_git(root, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_git_worktrees(&raw)
+        .into_iter()
+        .filter(|worktree| !worktree.bare && !worktree.prunable && !worktree.missing)
+        .filter_map(|worktree| {
+            let canonical = Path::new(&worktree.path).canonicalize().ok()?;
+            canonical.is_dir().then_some(canonical)
+        })
+        .collect())
+}
+
+fn resolve_pty_cwd(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let requested = Path::new(cwd);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    };
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    if !canonical_candidate.is_dir() {
+        return Err(format!("PTY cwd is not a directory: {}", cwd));
+    }
+    if canonical_candidate.starts_with(&canonical_root) {
+        return Ok(canonical_candidate);
+    }
+
+    let linked_worktrees = linked_worktree_roots(&canonical_root)?;
+    resolve_pty_cwd_with_worktrees(project_root, cwd, &linked_worktrees)
+}
+
+#[tauri::command]
+fn canonical_project_path(root: String) -> Result<String, String> {
+    canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,6 +194,12 @@ pub struct BrowserPageLoadEvent {
 
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
+    let project_root = options
+        .project_root
+        .as_deref()
+        .ok_or_else(|| "projectRoot is required".to_string())?;
+    let cwd = options.cwd.as_deref().unwrap_or(project_root);
+    let resolved_cwd = resolve_pty_cwd(project_root, cwd)?;
     let thread_id = options.thread_id.clone();
     let pending_start = PendingPtyStart::reserve(&thread_id)?;
 
@@ -128,9 +217,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let args = options.args.unwrap_or_else(|| vec!["-l".to_string()]);
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
-    if let Some(root) = &options.project_root {
-        cmd.cwd(root);
-    }
+    cmd.cwd(resolved_cwd);
     // Build a sane child environment. When the .app is launched from
     // Finder/Dock, launchd hands us a stripped PATH that lacks
     // /opt/homebrew/bin, so psyche can't find tmux/git/gh/etc. Augment PATH
@@ -1804,6 +1891,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            canonical_project_path,
             pty_write,
             pty_resize,
             pty_stop,
@@ -1880,6 +1968,89 @@ mod workspace_panel_tests {
 
     fn path_text(path: &Path) -> &str {
         path.to_str().expect("test paths must be UTF-8")
+    }
+
+    #[test]
+    fn resolves_pty_cwd_inside_project_or_verified_linked_worktree() {
+        let tree = TempTree::new("pty-cwd-contained");
+        let project = tree.root.join("project");
+        let nested = project.join("packages").join("app");
+        let linked = tree.root.join("linked-review");
+        let linked_nested = linked.join("crates").join("native");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&project, &["commit", "--allow-empty", "-qm", "baseline"]);
+        run_test_git(
+            &project,
+            &["worktree", "add", "-q", "-b", "review", path_text(&linked)],
+        );
+        std::fs::create_dir_all(&linked_nested).unwrap();
+
+        assert_eq!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&nested), &[]).unwrap(),
+            nested.canonicalize().unwrap(),
+        );
+        assert_eq!(
+            resolve_pty_cwd_with_worktrees(
+                path_text(&project),
+                path_text(&linked_nested),
+                &[linked.canonicalize().unwrap()],
+            )
+            .unwrap(),
+            linked_nested.canonicalize().unwrap(),
+        );
+        assert_eq!(
+            resolve_pty_cwd(path_text(&project), path_text(&linked_nested)).unwrap(),
+            linked_nested.canonicalize().unwrap(),
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_missing_and_file_pty_cwds() {
+        let tree = TempTree::new("pty-cwd-rejected");
+        let project = tree.root.join("project");
+        let sibling = tree.root.join("sibling");
+        let file = project.join("README.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(&file, "not a directory\n").unwrap();
+
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&sibling), &[]).is_err()
+        );
+        assert!(resolve_pty_cwd(path_text(&project), path_text(&sibling)).is_err());
+        assert!(resolve_pty_cwd_with_worktrees(
+            path_text(&project),
+            path_text(&project.join("missing")),
+            &[],
+        )
+        .is_err());
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&file), &[]).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_pty_cwd_symlinks_that_escape_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("pty-cwd-symlink");
+        let project = tree.root.join("project");
+        let outside = tree.root.join("outside");
+        let link = project.join("escape");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&link), &[]).is_err()
+        );
     }
 
     fn run_test_git(root: &Path, args: &[&str]) {
