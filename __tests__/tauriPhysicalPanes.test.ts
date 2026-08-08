@@ -48,7 +48,187 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+class FakeEventTarget {
+  className = '';
+  dataset: Record<string, string> = {};
+  tabIndex = -1;
+  parentElement: { getBoundingClientRect: () => Record<string, number> } | null = null;
+  attributes = new Map<string, string>();
+  listeners = new Map<string, Set<(event: Record<string, unknown>) => void>>();
+
+  setAttribute(name: string, value: string) {
+    this.attributes.set(name, value);
+  }
+
+  addEventListener(name: string, listener: (event: Record<string, unknown>) => void) {
+    const listeners = this.listeners.get(name) || new Set();
+    listeners.add(listener);
+    this.listeners.set(name, listeners);
+  }
+
+  removeEventListener(name: string, listener: (event: Record<string, unknown>) => void) {
+    this.listeners.get(name)?.delete(listener);
+  }
+
+  dispatch(name: string, event: Record<string, unknown>) {
+    this.listeners.get(name)?.forEach((listener) => listener(event));
+  }
+}
+
 describe('Tauri physical terminal panes', () => {
+  it('makes pane dividers accessible and resizable by pointer and keyboard', () => {
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const updates: Array<[string, number]> = [];
+    const createPaneDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      updateActiveSplit: (splitId: string, ratio: number) => updates.push([splitId, ratio]),
+    });
+
+    createPaneDivider({ id: 'split-a' }, 0.42);
+    expect(divider.className).toBe('terminal-pane-divider');
+    expect(divider.dataset.splitId).toBe('split-a');
+    expect(divider.tabIndex).toBe(0);
+    expect(Object.fromEntries(divider.attributes)).toMatchObject({
+      role: 'separator',
+      'aria-orientation': 'horizontal',
+      'aria-valuemin': '0',
+      'aria-valuemax': '100',
+      'aria-valuenow': '42',
+    });
+
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ top: 100, height: 200 }),
+    };
+    let prevented = 0;
+    divider.dispatch('pointerdown', { preventDefault: () => { prevented += 1; } });
+    divider.parentElement = null;
+    windowTarget.dispatch('pointermove', { clientY: 250 });
+    expect(prevented).toBe(1);
+    expect(updates).toEqual([['split-a', 0.75]]);
+    windowTarget.dispatch('pointercancel', {});
+    expect(windowTarget.listeners.get('pointermove')?.size).toBe(0);
+    expect(windowTarget.listeners.get('pointerup')?.size).toBe(0);
+    expect(windowTarget.listeners.get('pointercancel')?.size).toBe(0);
+
+    divider.dispatch('keydown', {
+      key: 'ArrowUp', shiftKey: false, preventDefault: () => { prevented += 1; },
+    });
+    divider.dispatch('keydown', {
+      key: 'ArrowDown', shiftKey: true, preventDefault: () => { prevented += 1; },
+    });
+    divider.dispatch('keydown', {
+      key: 'Home', shiftKey: false, preventDefault: () => { prevented += 1; },
+    });
+    expect(updates.slice(1)).toEqual([
+      ['split-a', 0.38],
+      ['split-a', 0.43],
+    ]);
+    expect(prevented).toBe(3);
+  });
+
+  it('ignores pointer resizing when the split has no measurable height', () => {
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const updates: number[] = [];
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ top: 20, height: 0 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      updateActiveSplit: (_splitId: string, ratio: number) => updates.push(ratio),
+    });
+    createPaneDivider({ id: 'split-zero' }, 0.5);
+    divider.dispatch('pointerdown', { preventDefault: () => undefined });
+    windowTarget.dispatch('pointermove', { clientY: 40 });
+    windowTarget.dispatch('pointerup', {});
+    expect(updates).toEqual([]);
+    expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(0);
+  });
+
+  it('resizes only the active layout without changing its focused leaf', () => {
+    const leafA = PsychePanes.createLeaf('leaf-a', 'thread-a');
+    const leafB = PsychePanes.createLeaf('leaf-b', 'thread-b');
+    const layout = {
+      root: PsychePanes.insertBelow(leafA, 'leaf-a', leafB, 'split-a'),
+      focusedLeafId: 'leaf-b',
+    };
+    let renders = 0;
+    const updateActiveSplit = compileFunction<(splitId: string, ratio: number) => void>(
+      functionSource('updateActiveSplit'),
+      {
+        activePaneLayout: () => layout,
+        PsychePanes,
+        renderPaneWorkspace: () => { renders += 1; },
+      },
+    );
+    updateActiveSplit('split-a', 0.7);
+    expect(layout.root).toMatchObject({ id: 'split-a', ratio: 0.7 });
+    expect(layout.focusedLeafId).toBe('leaf-b');
+    expect(renders).toBe(1);
+  });
+
+  it('coalesces visible pane fitting to one animation frame and fits every leaf', () => {
+    expect(mainJs).toMatch(/var visiblePaneFitFrame = 0;/);
+    expect(mainJs).not.toMatch(/fitActiveTerm/);
+    let queued: (() => void) | null = null;
+    let fitVisibleCalls = 0;
+    const scheduleFactory = Function(
+      'requestAnimationFrame',
+      'fitVisiblePanes',
+      `"use strict"; var visiblePaneFitFrame = 0; return ${functionSource('scheduleVisiblePaneFit')};`,
+    ) as (
+      raf: (callback: () => void) => number,
+      fitVisiblePanes: () => void,
+    ) => () => void;
+    const scheduleVisiblePaneFit = scheduleFactory(
+      (callback) => { queued = callback; return 17; },
+      () => { fitVisibleCalls += 1; },
+    );
+    scheduleVisiblePaneFit();
+    scheduleVisiblePaneFit();
+    expect(queued).not.toBeNull();
+    (queued as unknown as () => void)();
+    expect(fitVisibleCalls).toBe(1);
+
+    const fits: string[] = [];
+    const warnings: unknown[][] = [];
+    const fitVisiblePanes = compileFunction<() => void>(functionSource('fitVisiblePanes'), {
+      visiblePaneFitFrame: 17,
+      terminalHost: { hidden: false },
+      activePaneLayout: () => ({ root: { type: 'leaf' } }),
+      PsychePanes: {
+        layoutRects: () => ({
+          leaves: [
+            { threadId: 'thread-a' },
+            { threadId: 'thread-b' },
+            { threadId: 'thread-c' },
+          ],
+        }),
+      },
+      measuredTerminalHost: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+      PANE_MINIMUMS: { width: 320, height: 120, separator: 6 },
+      findThread: (id: string) => ({
+        fit: {
+          fit: () => {
+            fits.push(id);
+            if (id === 'thread-b') throw new Error('fit failed');
+          },
+        },
+      }),
+      console: { warn: (...args: unknown[]) => warnings.push(args) },
+    });
+    fitVisiblePanes();
+    expect(fits).toEqual(['thread-a', 'thread-b', 'thread-c']);
+    expect(warnings).toHaveLength(1);
+  });
+
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
     expect(mainJs).toMatch(/var paneCounter = 0;/);

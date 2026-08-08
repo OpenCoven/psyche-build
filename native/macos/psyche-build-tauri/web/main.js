@@ -76,6 +76,7 @@
   };
   var paneLayouts = new Map();
   var paneCounter = 0;
+  var visiblePaneFitFrame = 0;
   var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
 
   function handleVisibilityChange() {
@@ -1048,9 +1049,43 @@
     divider.dataset.splitId = node.id;
     divider.setAttribute("role", "separator");
     divider.setAttribute("aria-orientation", "horizontal");
+    divider.setAttribute("aria-valuemin", "0");
+    divider.setAttribute("aria-valuemax", "100");
     divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
     divider.tabIndex = 0;
+    divider.addEventListener("pointerdown", function (event) {
+      event.preventDefault();
+      var parent = divider.parentElement;
+      var rect = parent && parent.getBoundingClientRect();
+      if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0) {
+        return;
+      }
+      function onPointerMove(moveEvent) {
+        updateActiveSplit(node.id, (moveEvent.clientY - rect.top) / rect.height);
+      }
+      function stopPointerResize() {
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", stopPointerResize);
+        window.removeEventListener("pointercancel", stopPointerResize);
+      }
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", stopPointerResize);
+      window.addEventListener("pointercancel", stopPointerResize);
+    });
+    divider.addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      var step = event.shiftKey ? 0.01 : 0.04;
+      updateActiveSplit(node.id, ratio + (event.key === "ArrowUp" ? -step : step));
+    });
     return divider;
+  }
+
+  function updateActiveSplit(splitId, ratio) {
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) return;
+    layout.root = PsychePanes.resizeSplit(layout.root, splitId, ratio);
+    renderPaneWorkspace();
   }
 
   function renderPaneNode(node, splitRatios) {
@@ -1318,21 +1353,26 @@
     if (event.key === "Escape") closeSessionContextMenu();
   });
 
-  function scheduleVisiblePaneFit() {
-    requestAnimationFrame(function () {
-      var layout = activePaneLayout();
-      if (!layout || !layout.root) return;
-      var projected = PsychePanes.layoutRects(
-        layout.root,
-        measuredTerminalHost(),
-        PANE_MINIMUMS
-      );
-      projected.leaves.forEach(function (leaf) {
-        var thread = findThread(leaf.threadId);
-        if (!thread || !thread.fit) return;
-        try { thread.fit.fit(); } catch (_) {}
-      });
+  function fitVisiblePanes() {
+    visiblePaneFitFrame = 0;
+    if (!terminalHost || terminalHost.hidden) return;
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) return;
+    var projected = PsychePanes.layoutRects(
+      layout.root,
+      measuredTerminalHost(),
+      PANE_MINIMUMS
+    );
+    projected.leaves.forEach(function (leaf) {
+      var thread = findThread(leaf.threadId);
+      if (!thread || !thread.fit) return;
+      try { thread.fit.fit(); } catch (err) { console.warn("terminal pane fit failed", err); }
     });
+  }
+
+  function scheduleVisiblePaneFit() {
+    if (visiblePaneFitFrame) return;
+    visiblePaneFitFrame = requestAnimationFrame(fitVisiblePanes);
   }
   window.addEventListener("resize", function () {
     scheduleVisiblePaneFit();
