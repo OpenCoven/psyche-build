@@ -57,7 +57,7 @@ export async function readRepositoryContext(
     const normalized = normalizeGitHubRemote(remoteName, remoteUrl);
     rawRemotes.push({
       name: remoteName,
-      url: normalized?.repository.url ?? sanitizeDiagnosticRemoteUrl(remoteUrl),
+      url: summarizeDiagnosticRemoteUrl(remoteUrl, normalized),
     });
 
     if (normalized) {
@@ -253,11 +253,46 @@ function sanitizeDiagnosticRemoteUrl(remoteUrl: string): string {
     remoteUrl.includes('?')
     || remoteUrl.includes('#')
     || looksCredentialBearing(remoteUrl)
+    || looksLikeUnsupportedScp(remoteUrl)
   ) {
     return REDACTED_REMOTE_URL;
   }
 
   return remoteUrl;
+}
+
+function summarizeDiagnosticRemoteUrl(
+  remoteUrl: string,
+  normalized: GitHubRemote | null,
+): string {
+  if (isNestedHelperRemote(remoteUrl) || isExplicitlySecretBearing(remoteUrl)) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  if (normalized) {
+    const normalizedSummary = summarizeNormalizedRemoteUrl(remoteUrl, normalized.repository.host);
+    if (normalizedSummary !== null) {
+      return normalizedSummary;
+    }
+  }
+
+  return sanitizeDiagnosticRemoteUrl(remoteUrl);
+}
+
+function summarizeNormalizedRemoteUrl(remoteUrl: string, canonicalHost: string): string | null {
+  if (remoteUrl.toLowerCase().startsWith('https://')) {
+    return `https://${canonicalHost}/<redacted-path>`;
+  }
+
+  if (remoteUrl.toLowerCase().startsWith('ssh://')) {
+    return `ssh://git@${canonicalHost}/<redacted-path>`;
+  }
+
+  if (remoteUrl.startsWith('git@')) {
+    return `git@${canonicalHost}:<redacted-path>`;
+  }
+
+  return null;
 }
 
 function sanitizeScpDiagnostic(remoteUrl: string): string | null {
@@ -351,6 +386,10 @@ function sanitizeNetworkSchemeDiagnostic(remoteUrl: string): string | null {
     return REDACTED_REMOTE_URL;
   }
 
+  if (scheme === 'ssh') {
+    return `ssh://git@${canonicalHost}/<redacted-path>`;
+  }
+
   return `${scheme}://${canonicalHost}/<redacted-path>`;
 }
 
@@ -401,6 +440,35 @@ function looksCredentialBearing(remoteUrl: string): boolean {
     || (/^[^/\s@]+@[^/\s:]+:/u.test(remoteUrl) && !remoteUrl.startsWith('git@'))
     || (/^[^/\s@]+@[^/\s@]+/u.test(remoteUrl) && !remoteUrl.startsWith('git@'))
   );
+}
+
+function looksLikeUnsupportedScp(remoteUrl: string): boolean {
+  if (remoteUrl.includes('://')) {
+    return false;
+  }
+
+  if (remoteUrl.startsWith('git@')) {
+    return true;
+  }
+
+  const colonIndex = remoteUrl.indexOf(':');
+  if (colonIndex <= 0 || colonIndex === remoteUrl.length - 1) {
+    return false;
+  }
+
+  const prefix = remoteUrl.slice(0, colonIndex);
+  if (
+    prefix.includes('/')
+    || prefix.includes('\\')
+    || prefix.includes('?')
+    || prefix.includes('#')
+    || ASCII_EDGE_WHITESPACE.test(prefix)
+    || !prefix.includes('.')
+  ) {
+    return false;
+  }
+
+  return canonicalizeDiagnosticHost(prefix) !== null;
 }
 
 function isExplicitlySecretBearing(remoteUrl: string): boolean {
