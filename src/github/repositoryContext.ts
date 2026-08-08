@@ -261,9 +261,19 @@ function isValidGitScpDiagnostic(remoteUrl: string): boolean {
 }
 
 function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):/iu.exec(remoteUrl);
+  if (!schemeMatch) {
+    return null;
+  }
+
+  const scheme = schemeMatch[1].toLowerCase();
+  if (!remoteUrl.startsWith(`${scheme}://`)) {
+    return isNetworkScheme(scheme) && remoteUrl.includes('@') ? REDACTED_REMOTE_URL : null;
+  }
+
   const rawParts = extractSchemeUrlParts(remoteUrl);
   if (rawParts === null) {
-    return null;
+    return isNetworkScheme(scheme) && remoteUrl.includes('@') ? REDACTED_REMOTE_URL : null;
   }
 
   let url: URL;
@@ -310,7 +320,17 @@ function extractSchemeUrlParts(remoteUrl: string): { authority: string; suffix: 
 }
 
 function looksCredentialBearing(remoteUrl: string): boolean {
-  return remoteUrl.startsWith('*') || (/^[^/@\s][^/\s]*@/u.test(remoteUrl) && !remoteUrl.startsWith('git@'));
+  return (
+    remoteUrl.startsWith('*')
+    || /^[^/\s@]+:[^/\s@]+@/u.test(remoteUrl)
+    || /^[^/\s@]+@[^/\s@:]+@/u.test(remoteUrl)
+    || (/^[^/\s@]+@[^/\s:]+:/u.test(remoteUrl) && !remoteUrl.startsWith('git@'))
+    || (/^[^/\s@]+@[^/\s@]+/u.test(remoteUrl) && !remoteUrl.startsWith('git@'))
+  );
+}
+
+function isNetworkScheme(scheme: string): boolean {
+  return scheme === 'http' || scheme === 'https' || scheme === 'ssh' || scheme === 'git';
 }
 
 function orderNamedEntries<T extends { name: string }>(

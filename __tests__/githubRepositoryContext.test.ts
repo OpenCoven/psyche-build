@@ -311,13 +311,19 @@ describe('readRepositoryContext', () => {
 
   it('sanitizes credential-bearing raw diagnostics without leaking secrets', async () => {
     const worktreePath = '/repo/.worktrees/pr';
+    const malformedSchemeSecret = `https:/${'user:secret@'}github.com/o/r`;
+    const malformedScpSecret = `git@${'token@'}github.com:o/r`;
+    const safeFileUrl = 'file:///Users/a@b/My Repo';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
-      'git\0remote': { stdout: 'masked\nauth\norigin\n' },
+      'git\0remote': { stdout: 'masked\nauth\norigin\nscheme-bypass\nscp-bypass\nfile-safe\n' },
       'git\0remote\0get-url\0--\0masked': { stdout: '******github.com/o/r.git\n' },
-      'git\0remote\0get-url\0--\0auth': { stdout: 'https://token:secret@github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0auth': { stdout: `https://${'token:secret@'}github.com/OpenCoven/psyche-build.git\n` },
       'git\0remote\0get-url\0--\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0scheme-bypass': { stdout: `${malformedSchemeSecret}\n` },
+      'git\0remote\0get-url\0--\0scp-bypass': { stdout: `${malformedScpSecret}\n` },
+      'git\0remote\0get-url\0--\0file-safe': { stdout: `${safeFileUrl}\n` },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -326,7 +332,10 @@ describe('readRepositoryContext', () => {
     expect(context.rawRemotes).toEqual([
       { name: 'origin', url: 'git@github.com:OpenCoven/psyche-build.git' },
       { name: 'auth', url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: 'file-safe', url: safeFileUrl },
       { name: 'masked', url: '<redacted-remote-url>' },
+      { name: 'scheme-bypass', url: '<redacted-remote-url>' },
+      { name: 'scp-bypass', url: '<redacted-remote-url>' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -343,6 +352,8 @@ describe('readRepositoryContext', () => {
     expect(serialized).not.toContain('token');
     expect(serialized).not.toContain('secret');
     expect(serialized).not.toContain('******github.com/o/r.git');
+    expect(serialized).not.toContain(malformedSchemeSecret);
+    expect(serialized).not.toContain(malformedScpSecret);
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {
