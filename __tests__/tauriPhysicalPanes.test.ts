@@ -41,6 +41,13 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 describe('Tauri physical terminal panes', () => {
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
@@ -71,6 +78,8 @@ describe('Tauri physical terminal panes', () => {
     expect(mountTerminal).toMatch(/className = "terminal-pane"/);
     expect(mountTerminal).toMatch(/pane\.dataset\.threadId = thread\.id/);
     expect(mountTerminal).toMatch(/className = "terminal-pane-header"/);
+    expect(mountTerminal).toMatch(/title\.id = "terminal-pane-title-" \+ thread\.id/);
+    expect(mountTerminal).toMatch(/pane\.setAttribute\("aria-labelledby", title\.id\)/);
     expect(mountTerminal).toMatch(/className = "terminal-pane-body"/);
     expect(mountTerminal).toMatch(/className = "term-instance"/);
     expect(mountTerminal).toMatch(/title = "Stop and close terminal"/);
@@ -166,6 +175,7 @@ describe('Tauri physical terminal panes', () => {
         setStatus: () => undefined,
         commitPanePlacement: () => { paneCommitted += 1; },
         findProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
         state,
         renderPaneWorkspace: () => undefined,
         refreshSidebar: () => undefined,
@@ -226,5 +236,248 @@ describe('Tauri physical terminal panes', () => {
 
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "running";[\s\S]*syncThreadPaneMetadata\(thread\)/);
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "exited";[\s\S]*syncThreadPaneMetadata\(thread\)/);
+    expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
+  });
+
+  it('guards contextual terminal creation behind dirty-file navigation', async () => {
+    const terminalHost = { hidden: true };
+    let spawned = 0;
+    let focused = 0;
+    const prepareAccepted = compileFunction<() => Promise<boolean>>(
+      functionSource('prepareDefaultThreadCreation'),
+      {
+        showTerminalView: async () => { terminalHost.hidden = false; return true; },
+      },
+    );
+    const acceptedCreate = compileFunction<() => Promise<boolean | null>>(
+      functionSource('createContextualTab'),
+      {
+        currentLayout: () => 'split',
+        markActiveSurface: () => undefined,
+        activeSurface: 'terminal',
+        prepareDefaultThreadCreation: prepareAccepted,
+        openBlankBrowserTab: () => undefined,
+        spawnDefaultThread: () => {
+          expect(terminalHost.hidden).toBe(false);
+          spawned += 1;
+          focused += 1;
+        },
+      },
+    );
+    await expect(acceptedCreate()).resolves.toBe(true);
+    expect(spawned).toBe(1);
+    expect(focused).toBe(1);
+
+    terminalHost.hidden = true;
+    const canceledCreate = compileFunction<() => Promise<boolean | null>>(
+      functionSource('createContextualTab'),
+      {
+        currentLayout: () => 'split',
+        markActiveSurface: () => undefined,
+        activeSurface: 'terminal',
+        prepareDefaultThreadCreation: async () => false,
+        openBlankBrowserTab: () => undefined,
+        spawnDefaultThread: () => { spawned += 1; },
+      },
+    );
+    await expect(canceledCreate()).resolves.toBeNull();
+    expect(terminalHost.hidden).toBe(true);
+    expect(spawned).toBe(1);
+    expect(focused).toBe(1);
+  });
+
+  it('cancels a queued PTY start when the thread closes before animation frame', () => {
+    const project = { id: 'project', root: '/repo' };
+    const state = { threads: [] as Array<Record<string, unknown>>, activeThreadId: null as string | null };
+    const pendingDataBuffers = new Map([['thread-a', [new Uint8Array([1])]]]);
+    let frame: (() => void) | null = null;
+    let starts = 0;
+    const isLiveThread = (thread: Record<string, unknown>) =>
+      state.threads.includes(thread) && thread.closing !== true;
+    const createThread = compileFunction<(options: Record<string, unknown>) => Record<string, unknown>>(
+      functionSource('createThread'),
+      {
+        makeThreadId: () => 'thread-a',
+        activeProject: () => project,
+        activeWorkspaceRoot: () => project.root,
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: (thread: Record<string, unknown>) => {
+          thread.fit = { fit: () => undefined };
+          thread.term = { dispose: () => undefined };
+        },
+        focusThread: () => undefined,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        isLiveThread,
+        spawnPty: () => { starts += 1; },
+      },
+    );
+    const thread = createThread({ project, command: '/bin/zsh' });
+    pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
+    const closeThread = compileFunction<(id: string) => void>(functionSource('closeThread'), {
+      findThread: () => thread,
+      detachThreadPane: () => null,
+      pendingDataBuffers,
+      invoke: async () => undefined,
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+    closeThread('thread-a');
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    expect(starts).toBe(0);
+    expect(state.threads).toEqual([]);
+    expect(thread.closing).toBe(true);
+    expect(pendingDataBuffers.has('thread-a')).toBe(false);
+  });
+
+  it('stops a remotely started PTY when close wins the in-flight start race', async () => {
+    const start = deferred<void>();
+    const project = { id: 'project' };
+    const thread = {
+      id: 'thread-a', projectId: project.id, worktreePath: '/repo',
+      command: '/bin/zsh', args: [], env: {}, status: 'starting', spawning: true,
+      closing: false, startInFlight: false, term: null, fit: null,
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const pendingDataBuffers = new Map([[thread.id, [new Uint8Array([1])]]]);
+    let stopCalls = 0;
+    const invoke = (command: string) => {
+      if (command === 'pty_start') return start.promise;
+      if (command === 'pty_stop') stopCalls += 1;
+      return Promise.resolve();
+    };
+    const isLiveThread = (candidate: typeof thread) =>
+      state.threads.includes(candidate) && !candidate.closing;
+    const spawnPty = compileFunction<(value: typeof thread, root: string) => Promise<boolean>>(
+      functionSource('spawnPty'),
+      {
+        invoke,
+        isLiveThread,
+        pendingDataBuffers,
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => project,
+        setStatus: () => undefined,
+      },
+    );
+    const starting = spawnPty(thread, '/repo');
+    expect(thread.startInFlight).toBe(true);
+    const closeThread = compileFunction<(id: string) => void>(functionSource('closeThread'), {
+      findThread: () => thread,
+      detachThreadPane: () => null,
+      pendingDataBuffers,
+      invoke,
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+    closeThread(thread.id);
+    start.resolve();
+    await expect(starting).resolves.toBe(false);
+    expect(stopCalls).toBeGreaterThanOrEqual(2);
+    expect(thread.status).toBe('starting');
+    expect(thread.startInFlight).toBe(false);
+    expect(state.threads).toEqual([]);
+    expect(pendingDataBuffers.has(thread.id)).toBe(false);
+  });
+
+  it('guards inactive-project hidden-session reopen behind dirty-file cancellation', async () => {
+    const state = { activeProjectId: 'active-project' };
+    const project = { id: 'inactive-project', selectedWorktreePath: '/old' };
+    let projectSwitches = 0;
+    let reopenCalls = 0;
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => false,
+      state,
+      setActiveProject: async () => { projectSwitches += 1; return true; },
+      activatePaneLayoutFocus: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+    });
+    const reopenThreadsForWorkspace = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<number>>(functionSource('reopenThreadsForWorkspace'), {
+      activateProjectWorktree,
+      reopenThreads: () => { reopenCalls += 1; return 1; },
+      state,
+      focusThread: async () => true,
+    });
+
+    await expect(reopenThreadsForWorkspace(project, '/target')).resolves.toBe(0);
+    expect(state.activeProjectId).toBe('active-project');
+    expect(project.selectedWorktreePath).toBe('/old');
+    expect({ projectSwitches, reopenCalls }).toEqual({ projectSwitches: 0, reopenCalls: 0 });
+  });
+
+  it('activates an inactive project worktree before reopening its hidden sessions', async () => {
+    const state = { activeProjectId: 'active-project' };
+    const project = { id: 'inactive-project', selectedWorktreePath: '/old' };
+    const calls: string[] = [];
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => { calls.push('terminal'); return true; },
+      state,
+      setActiveProject: async (id: string) => {
+        calls.push(`project:${id}`);
+        state.activeProjectId = id;
+        return true;
+      },
+      activatePaneLayoutFocus: () => { calls.push('focus'); },
+      renderPaneWorkspace: () => { calls.push('panes'); },
+      renderPanel: () => { calls.push('panel'); },
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => { calls.push('skills'); },
+      refreshSidebar: () => { calls.push('sidebar'); },
+      syncProjectBrowser: () => { calls.push('browser'); },
+      saveWorkspaceSoon: () => { calls.push('save'); },
+    });
+    let reopened = 0;
+    const reopenThreadsForWorkspace = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<number>>(functionSource('reopenThreadsForWorkspace'), {
+      activateProjectWorktree,
+      reopenThreads: (projectId: string, path: string) => {
+        expect({ projectId, path }).toEqual({ projectId: project.id, path: '/target' });
+        reopened += 1;
+        (state as { activeProjectId: string; activeThreadId?: string }).activeThreadId = 'hidden-thread';
+        return 2;
+      },
+      state,
+      focusThread: async (id: string) => { calls.push(`focus:${id}`); return true; },
+    });
+
+    await expect(reopenThreadsForWorkspace(project, '/target')).resolves.toBe(2);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(project.selectedWorktreePath).toBe('/target');
+    expect(reopened).toBe(1);
+    expect(calls).toEqual([
+      'terminal', `project:${project.id}`, 'panes', 'panel',
+      'skills', 'sidebar', 'browser', 'save', 'focus:hidden-thread',
+    ]);
   });
 });

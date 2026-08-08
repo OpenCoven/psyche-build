@@ -141,6 +141,26 @@
     if (thread) project.lastActiveThreadId = thread.id;
     renderPaneWorkspace();
   }
+  async function activateProjectWorktree(project, worktreePath) {
+    if (!project || !(await showTerminalView())) return false;
+    var previousWorktreePath = project.selectedWorktreePath;
+    project.selectedWorktreePath = worktreePath;
+    if (project.id !== state.activeProjectId) {
+      if (!(await setActiveProject(project.id))) {
+        project.selectedWorktreePath = previousWorktreePath;
+        return false;
+      }
+    } else {
+      activatePaneLayoutFocus(project, worktreePath);
+    }
+    renderPaneWorkspace();
+    renderPanel(currentPanel());
+    loadAgentSkills();
+    refreshSidebar();
+    syncProjectBrowser();
+    saveWorkspaceSoon();
+    return true;
+  }
   function measuredTerminalHost() {
     var rect = terminalHost.getBoundingClientRect();
     var styles = window.getComputedStyle(terminalHost);
@@ -645,7 +665,8 @@
     if (!payload.thread_id || !payload.bytes) return;
     var bytes = new Uint8Array(payload.bytes);
     var thread = findThread(payload.thread_id);
-    if (thread && thread.term) {
+    if (!thread || thread.closing) return;
+    if (thread.term) {
       thread.term.write(bytes);
     } else {
       var arr = pendingDataBuffers.get(payload.thread_id) || [];
@@ -658,6 +679,7 @@
     var payload = event.payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread) return;
+    thread.ptyStarted = false;
     thread.status = "exited";
     syncThreadPaneMetadata(thread);
     if (thread.term) {
@@ -685,6 +707,9 @@
   function makeThreadId() {
     threadCounter += 1;
     return "t" + Date.now().toString(36) + "-" + threadCounter;
+  }
+  function isLiveThread(thread) {
+    return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
   }
 
   function createThread(opts) {
@@ -714,6 +739,9 @@
       fit: null,
       host: null,
       pane: null,
+      closing: false,
+      startInFlight: false,
+      ptyStarted: false,
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
@@ -725,6 +753,7 @@
     // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
     // the wrong size and leave artifacts.
     requestAnimationFrame(function () {
+      if (!isLiveThread(thread)) return;
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
       spawnPty(thread, thread.worktreePath);
     });
@@ -732,7 +761,9 @@
   }
 
   function spawnPty(thread, projectRoot) {
-    invoke("pty_start", {
+    if (!isLiveThread(thread)) return Promise.resolve(false);
+    thread.startInFlight = true;
+    return invoke("pty_start", {
       options: {
         threadId: thread.id,
         thread_id: thread.id,
@@ -745,6 +776,15 @@
         env: thread.env,
       },
     }).then(function () {
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) {
+        pendingDataBuffers.delete(thread.id);
+        return invoke("pty_stop", {
+          threadId: thread.id,
+          thread_id: thread.id,
+        }).catch(function () {}).then(function () { return false; });
+      }
+      thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
       syncThreadPaneMetadata(thread);
@@ -759,11 +799,18 @@
         for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
         pendingDataBuffers.delete(thread.id);
       }
+      return true;
     }).catch(function (err) {
+      thread.startInFlight = false;
+      if (!isLiveThread(thread)) {
+        pendingDataBuffers.delete(thread.id);
+        return false;
+      }
       thread.status = "exited";
       thread.spawning = false;
       var msg = String(err);
       if (msg.indexOf("already running") !== -1) {
+        thread.ptyStarted = true;
         thread.status = "running";
       } else {
         if (thread.term) {
@@ -776,6 +823,7 @@
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
+      return false;
     });
   }
 
@@ -893,7 +941,9 @@
     header.className = "terminal-pane-header";
     var title = document.createElement("span");
     title.className = "terminal-pane-title";
+    title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
+    pane.setAttribute("aria-labelledby", title.id);
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
     status.textContent = thread.status;
@@ -1122,8 +1172,12 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread) return;
+    thread.closing = true;
+    pendingDataBuffers.delete(id);
     var nextThreadId = detachThreadPane(thread);
-    invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
+    if (thread.ptyStarted || thread.startInFlight) {
+      invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
+    }
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -1164,6 +1218,9 @@
   function reopenThread(id) {
     var thread = findThread(id);
     if (!thread || !thread.hidden) return false;
+    var project = findProject(thread.projectId);
+    if (state.activeProjectId !== thread.projectId || !project ||
+        activeWorkspaceRoot(project) !== thread.worktreePath) return false;
     var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
     if (!placement) {
       setStatus("Not enough space to reopen this terminal pane", "warn");
@@ -1171,12 +1228,7 @@
     }
     thread.hidden = false;
     commitPanePlacement(placement);
-    var project = findProject(thread.projectId);
-    if (project) {
-      state.activeProjectId = project.id;
-      project.selectedWorktreePath = thread.worktreePath;
-      project.lastActiveThreadId = thread.id;
-    }
+    project.lastActiveThreadId = thread.id;
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
     refreshSidebar();
@@ -1192,6 +1244,13 @@
         reopened += 1;
       }
     }
+    return reopened;
+  }
+
+  async function reopenThreadsForWorkspace(project, worktreePath) {
+    if (!(await activateProjectWorktree(project, worktreePath))) return 0;
+    var reopened = reopenThreads(project.id, worktreePath);
+    if (reopened && state.activeThreadId) await focusThread(state.activeThreadId);
     return reopened;
   }
 
@@ -1510,23 +1569,8 @@
         worktreeHead.disabled = Boolean(worktree.virtual);
         worktreeHead.addEventListener("click", async function () {
           if (worktree.virtual) return;
-          if (project.id !== state.activeProjectId) {
-            var previousWorktreePath = project.selectedWorktreePath;
-            project.selectedWorktreePath = worktree.path;
-            if (!(await setActiveProject(project.id))) {
-              project.selectedWorktreePath = previousWorktreePath;
-              return;
-            }
-          } else {
-            activatePaneLayoutFocus(project, worktree.path);
-          }
+          if (!(await activateProjectWorktree(project, worktree.path))) return;
           worktree.collapsed = false;
-          renderPaneWorkspace();
-          renderPanel(currentPanel());
-          loadAgentSkills();
-          refreshSidebar();
-          syncProjectBrowser();
-          saveWorkspaceSoon();
         });
         worktreeHead.addEventListener("dblclick", function (event) {
           if (worktree.virtual) return;
@@ -1559,19 +1603,15 @@
             var actions = [{
               label: "Open Psyche Terminal",
               run: async function () {
-                project.selectedWorktreePath = worktree.path;
-                if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
-                renderPaneWorkspace();
+                if (!(await activateProjectWorktree(project, worktree.path))) return;
                 ensureProjectPsyche(project);
-                refreshSidebar();
-                saveWorkspaceSoon();
               },
             }];
             if (hiddenThreads.length > 0) {
               actions.push({
                 label: "Show " + hiddenThreads.length + " hidden session" +
                   (hiddenThreads.length === 1 ? "" : "s"),
-                run: function () { reopenThreads(project.id, worktree.path); },
+                run: async function () { await reopenThreadsForWorkspace(project, worktree.path); },
               });
             }
             openSessionContextMenu(event, actions);
@@ -3171,10 +3211,16 @@
   // 11. Keyboard shortcuts
   // ============================================================
 
-  function createContextualTab() {
+  async function prepareDefaultThreadCreation() {
+    return showTerminalView();
+  }
+
+  async function createContextualTab() {
     if (currentLayout() === "browser") markActiveSurface("browser");
     else if (currentLayout() === "terminal") markActiveSurface("terminal");
+    if (activeSurface !== "browser" && !(await prepareDefaultThreadCreation())) return null;
     if (activeSurface === "browser") openBlankBrowserTab(); else spawnDefaultThread();
+    return true;
   }
 
   document.addEventListener("keydown", async function (e) {
@@ -3186,7 +3232,7 @@
     }
     // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
     if (String(e.key).toLowerCase() === "t") {
-      createContextualTab();
+      await createContextualTab();
       e.preventDefault(); return;
     }
     // ⌘O opens a new project (folder picker → addProject → psyche).
@@ -3228,7 +3274,7 @@
     var el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   }
-  onRailClick("rail-new-tab", function () { createContextualTab(); });
+  onRailClick("rail-new-tab", async function () { await createContextualTab(); });
   onRailClick("rail-open-project", function () { openProjectPicker(); });
   onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
 
