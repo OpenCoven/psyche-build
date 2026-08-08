@@ -592,6 +592,7 @@ describe('Tauri physical terminal panes', () => {
     const pendingDataBuffers = new Map([['thread-a', [new Uint8Array([1])]]]);
     let frame: (() => void) | null = null;
     let starts = 0;
+    let stops = 0;
     const isLiveThread = (thread: Record<string, unknown>) =>
       state.threads.includes(thread) && thread.closing !== true;
     const createThread = compileFunction<(options: Record<string, unknown>) => Record<string, unknown>>(
@@ -618,11 +619,11 @@ describe('Tauri physical terminal panes', () => {
     );
     const thread = createThread({ project, command: '/bin/zsh' });
     pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
-    const closeThread = compileFunction<(id: string) => void>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers,
-      invoke: async () => undefined,
+      stopThreadPty: () => { stops += 1; return Promise.resolve(true); },
       state,
       renderPaneWorkspace: () => undefined,
       setProjectStatus: () => undefined,
@@ -631,10 +632,11 @@ describe('Tauri physical terminal panes', () => {
       refreshTabs: () => undefined,
       focusThread: () => undefined,
     });
-    closeThread('thread-a');
+    expect(closeThread('thread-a')).toBe(true);
     expect(frame).not.toBeNull();
     (frame as unknown as () => void)();
     expect(starts).toBe(0);
+    expect(stops).toBe(1);
     expect(state.threads).toEqual([]);
     expect(thread.closing).toBe(true);
     expect(pendingDataBuffers.has('thread-a')).toBe(false);

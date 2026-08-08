@@ -795,8 +795,8 @@
       thread_id: thread.id,
     }).then(function () {
       return true;
-    }).catch(function () {
-      thread.stopRequested = false;
+    }).catch(function (err) {
+      console.warn("[pty_stop] failed for " + thread.id + ": " + String(err));
       return false;
     });
   }
@@ -1343,7 +1343,7 @@
     thread.closing = true;
     pendingDataBuffers.delete(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.ptyStarted) stopThreadPty(thread);
+    if (!thread.startInFlight) stopThreadPty(thread);
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }

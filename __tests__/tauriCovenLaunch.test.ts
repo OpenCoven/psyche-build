@@ -843,6 +843,53 @@ describe('native Coven launch routing', () => {
     expect(state.threads).toEqual([]);
   });
 
+  it.each(['failed', 'exited'])('issues one guarded stop when closing a retained %s pane', (status) => {
+    const thread = {
+      id: 'thread-1', projectId: 'project', worktreePath: '/repo', status,
+      spawning: false, closing: false, closeStarted: false, startInFlight: false,
+      stopRequested: false, ptyStarted: false, term: null,
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    let stopCalls = 0;
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      findThread: () => thread,
+      detachThreadPane: () => null,
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => { stopCalls += 1; return Promise.resolve(true); },
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => ({ id: 'project' }),
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+
+    expect(closeThread(thread.id)).toBe(true);
+    expect(stopCalls).toBe(1);
+    expect(state.threads).toEqual([]);
+  });
+
+  it('keeps a rejected PTY stop guarded and reports the failure once', async () => {
+    const warnings: string[] = [];
+    const thread = { id: 'thread-1', stopRequested: false };
+    let stopCalls = 0;
+    const stopThreadPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('stopThreadPty'), {
+        invoke: async () => { stopCalls += 1; throw new Error('stop unavailable'); },
+        console: { warn: (message: string) => { warnings.push(message); } },
+      },
+    );
+
+    await expect(stopThreadPty(thread)).resolves.toBe(false);
+    await expect(stopThreadPty(thread)).resolves.toBe(false);
+    expect(stopCalls).toBe(1);
+    expect(thread.stopRequested).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('thread-1');
+    expect(warnings[0]).toContain('stop unavailable');
+  });
+
   it('stops once when close wins a start and ignores late lifecycle callbacks', async () => {
     let resolveStart: (() => void) | null = null;
     let stopCalls = 0;
