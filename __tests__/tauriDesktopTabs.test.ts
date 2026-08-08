@@ -18,7 +18,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(mainJs).toMatch(/markActiveSurface\(\s*"terminal"\s*\)/);
     expect(mainJs).toMatch(/markActiveSurface\(\s*"browser"\s*\)/);
     expect(mainJs).toMatch(
-      /if\s*\(\s*activeSurface\s*===\s*"browser"\s*\)\s*openBlankBrowserTab\(\);\s*else\s*spawnDefaultThread\(\);/
+      /if\s*\(\s*activeSurface\s*===\s*"browser"\s*\)[\s\S]*openBlankBrowserTab\(\);[\s\S]*return\s*\(await spawnCovenThread\(\)\)\s*\?\s*true\s*:\s*null;/
     );
   });
 

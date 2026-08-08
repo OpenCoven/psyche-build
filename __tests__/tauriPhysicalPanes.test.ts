@@ -357,7 +357,7 @@ describe('Tauri physical terminal panes', () => {
 
   it('reserves geometry before mutating the thread list', () => {
     const createThread = functionSource('createThread');
-    expect(createThread).toMatch(/opts\.worktreePath \|\| opts\.projectRoot \|\|\s*\(project && activeWorkspaceRoot\(project\)\)/);
+    expect(createThread).toMatch(/opts\.worktreePath \|\| launch\.cwd \|\| launch\.projectRoot/);
     expect(createThread.indexOf('preparePanePlacement(')).toBeGreaterThan(-1);
     expect(createThread.indexOf('preparePanePlacement(')).toBeLessThan(
       createThread.indexOf('state.threads.push(thread)'),
@@ -475,47 +475,29 @@ describe('Tauri physical terminal panes', () => {
     });
   });
 
-  it('reopens a hidden matching Psyche thread instead of spawning another PTY', () => {
+  it('does not deduplicate a hidden Coven thread when ensuring a workspace', async () => {
     const project = { id: 'project', worktrees: [{ path: '/repo' }] };
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
-      kind: 'psyche', status: 'running', hidden: true, pane: { id: 'pane-a' },
+      kind: 'coven-chat', status: 'running', hidden: true, pane: { id: 'pane-a' },
     };
-    const originalPane = thread.pane;
-    const state = { threads: [thread], activeProjectId: project.id, activeThreadId: null as string | null };
-    let paneCommitted = 0;
+    const state = { threads: [thread] };
     let focused = 0;
     let spawned = 0;
-    const reopenThread = compileFunction<(id: string) => boolean>(
-      functionSource('reopenThread'),
-      {
-        findThread: () => thread,
-        preparePanePlacement: () => ({ key: 'project\0/repo', value: { root: {}, focusedLeafId: 'a' } }),
-        setStatus: () => undefined,
-        commitPanePlacement: () => { paneCommitted += 1; },
-        findProject: () => project,
-        activeWorkspaceRoot: () => '/repo',
-        state,
-        renderPaneWorkspace: () => undefined,
-        refreshSidebar: () => undefined,
-      },
-    );
-    const ensureProjectPsyche = compileFunction<(value: typeof project) => typeof thread>(
-      functionSource('ensureProjectPsyche'),
+    const replacement = { ...thread, id: 'thread-b', hidden: false };
+    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<typeof replacement>>(
+      functionSource('ensureProjectCoven'),
       {
         selectedWorktree: () => project.worktrees[0],
         state,
-        reopenThread,
-        focusThread: () => { focused += 1; },
-        spawnDefaultThreadIn: () => { spawned += 1; return null; },
+        focusThread: async () => { focused += 1; },
+        spawnCovenThread: async () => { spawned += 1; return replacement; },
       },
     );
 
-    expect(ensureProjectPsyche(project)).toBe(thread);
-    expect(thread.hidden).toBe(false);
-    expect(thread.pane).toBe(originalPane);
-    expect(state.activeThreadId).toBe(thread.id);
-    expect({ paneCommitted, focused, spawned }).toEqual({ paneCommitted: 1, focused: 0, spawned: 0 });
+    await expect(ensureProjectCoven(project)).resolves.toBe(replacement);
+    expect(thread.hidden).toBe(true);
+    expect({ focused, spawned }).toEqual({ focused: 0, spawned: 1 });
   });
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
@@ -562,24 +544,19 @@ describe('Tauri physical terminal panes', () => {
     const terminalHost = { hidden: true };
     let spawned = 0;
     let focused = 0;
-    const prepareAccepted = compileFunction<() => Promise<boolean>>(
-      functionSource('prepareDefaultThreadCreation'),
-      {
-        showTerminalView: async () => { terminalHost.hidden = false; return true; },
-      },
-    );
     const acceptedCreate = compileFunction<() => Promise<boolean | null>>(
       functionSource('createContextualTab'),
       {
         currentLayout: () => 'split',
         markActiveSurface: () => undefined,
         activeSurface: 'terminal',
-        prepareDefaultThreadCreation: prepareAccepted,
         openBlankBrowserTab: () => undefined,
-        spawnDefaultThread: () => {
+        spawnCovenThread: async () => {
+          terminalHost.hidden = false;
           expect(terminalHost.hidden).toBe(false);
           spawned += 1;
           focused += 1;
+          return { kind: 'coven-chat' };
         },
       },
     );
@@ -594,9 +571,8 @@ describe('Tauri physical terminal panes', () => {
         currentLayout: () => 'split',
         markActiveSurface: () => undefined,
         activeSurface: 'terminal',
-        prepareDefaultThreadCreation: async () => false,
         openBlankBrowserTab: () => undefined,
-        spawnDefaultThread: () => { spawned += 1; },
+        spawnCovenThread: async () => null,
       },
     );
     await expect(canceledCreate()).resolves.toBeNull();
@@ -664,7 +640,11 @@ describe('Tauri physical terminal panes', () => {
     const project = { id: 'project' };
     const thread = {
       id: 'thread-a', projectId: project.id, worktreePath: '/repo',
-      command: '/bin/zsh', args: [], env: {}, status: 'starting', spawning: true,
+      launch: {
+        command: '/bin/zsh', args: [], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: null, covenSessionId: null,
+      },
+      status: 'starting', spawning: true,
       closing: false, startInFlight: false, term: null, fit: null,
     };
     const state = { threads: [thread], activeThreadId: thread.id };
@@ -677,7 +657,7 @@ describe('Tauri physical terminal panes', () => {
     };
     const isLiveThread = (candidate: typeof thread) =>
       state.threads.includes(candidate) && !candidate.closing;
-    const spawnPty = compileFunction<(value: typeof thread, root: string) => Promise<boolean>>(
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'),
       {
         invoke,
@@ -692,7 +672,7 @@ describe('Tauri physical terminal panes', () => {
         setStatus: () => undefined,
       },
     );
-    const starting = spawnPty(thread, '/repo');
+    const starting = spawnPty(thread);
     expect(thread.startInFlight).toBe(true);
     const closeThread = compileFunction<(id: string) => void>(functionSource('closeThread'), {
       findThread: () => thread,
@@ -846,18 +826,15 @@ describe('Tauri physical terminal panes', () => {
     const runNewThreadCommand = compileFunction<() => Promise<{ kind: string } | null>>(
       functionSource('runNewThreadCommand'),
       {
-        prepareDefaultThreadCreation: async () => {
+        spawnCovenThread: async () => {
           terminalHost.hidden = false;
-          return true;
-        },
-        spawnDefaultThread: () => {
           expect(terminalHost.hidden).toBe(false);
           spawned += 1;
-          return { kind: 'shell' };
+          return { kind: 'coven-chat' };
         },
       },
     );
-    await expect(runNewThreadCommand()).resolves.toEqual({ kind: 'shell' });
+    await expect(runNewThreadCommand()).resolves.toEqual({ kind: 'coven-chat' });
     expect(spawned).toBe(1);
     expect(mainJs).toMatch(/cmd: "\/new-thread"[\s\S]*?run: runNewThreadCommand/);
   });
@@ -867,8 +844,7 @@ describe('Tauri physical terminal panes', () => {
     const runNewThreadCommand = compileFunction<() => Promise<null>>(
       functionSource('runNewThreadCommand'),
       {
-        prepareDefaultThreadCreation: async () => false,
-        spawnDefaultThread: () => { spawned += 1; return { kind: 'wrong' }; },
+        spawnCovenThread: async () => null,
       },
     );
     await expect(runNewThreadCommand()).resolves.toBeNull();

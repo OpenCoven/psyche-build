@@ -250,8 +250,8 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      ensureProjectPsyche(project);
-      setStatus("no pane — launching psyche…", "");
+      var covenThread = await ensureProjectCoven(project);
+      if (covenThread) setStatus("no pane — launching Coven…", "");
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -715,7 +715,26 @@
   function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
-    var worktreePath = opts.worktreePath || opts.projectRoot ||
+    var sourceLaunch = opts.launch || {
+      command: opts.command,
+      args: opts.args || [],
+      env: opts.env || {},
+      projectRoot: opts.projectRoot || (project && project.root),
+      cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
+      launchKind: opts.launchKind || null,
+      covenSessionId: opts.covenSessionId || null,
+    };
+    var launch = {
+      command: sourceLaunch.command,
+      args: Array.isArray(sourceLaunch.args) ? sourceLaunch.args.slice() : [],
+      env: Object.assign({}, sourceLaunch.env || {}),
+      projectRoot: sourceLaunch.projectRoot || (project && project.root) || null,
+      cwd: sourceLaunch.cwd || opts.worktreePath || sourceLaunch.projectRoot ||
+        (project && activeWorkspaceRoot(project)) || null,
+      launchKind: sourceLaunch.launchKind || null,
+      covenSessionId: sourceLaunch.covenSessionId || null,
+    };
+    var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
     var projectId = project ? project.id : null;
     var placement = preparePanePlacement(id, projectId, worktreePath);
@@ -729,10 +748,7 @@
       worktreePath: worktreePath,
       name: opts.name || "thread " + (state.threads.length + 1),
       kind: opts.kind || "shell",
-      command: opts.command,
-      args: opts.args || [],
-      env: opts.env || {},
-      covenSessionId: opts.covenSessionId || null,
+      launch: launch,
       status: "starting",
       spawning: true,
       term: null,
@@ -755,25 +771,31 @@
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
-      spawnPty(thread, thread.worktreePath);
+      spawnPty(thread);
     });
     return thread;
   }
 
-  function spawnPty(thread, projectRoot) {
+  function spawnPty(thread) {
     if (!isLiveThread(thread)) return Promise.resolve(false);
+    var launch = thread.launch;
     thread.startInFlight = true;
     return invoke("pty_start", {
       options: {
         threadId: thread.id,
         thread_id: thread.id,
-        projectRoot: projectRoot || null,
-        project_root: projectRoot || null,
-        command: thread.command,
-        args: thread.args,
+        projectRoot: launch.projectRoot,
+        project_root: launch.projectRoot,
+        cwd: launch.cwd,
+        launchKind: launch.launchKind,
+        launch_kind: launch.launchKind,
+        covenSessionId: launch.covenSessionId,
+        coven_session_id: launch.covenSessionId,
+        command: launch.command,
+        args: launch.args,
         cols: thread.term ? thread.term.cols : 120,
         rows: thread.term ? thread.term.rows : 40,
-        env: thread.env,
+        env: launch.env,
       },
     }).then(function () {
       thread.startInFlight = false;
@@ -1334,11 +1356,8 @@
       project: findProject(thread.projectId),
       name: thread.name + " copy",
       kind: thread.kind,
-      command: thread.command,
-      args: Array.isArray(thread.args) ? thread.args.slice() : [],
-      env: Object.assign({}, thread.env || {}),
-      projectRoot: thread.worktreePath,
-      covenSessionId: thread.covenSessionId,
+      worktreePath: thread.worktreePath,
+      launch: thread.launch,
     });
   }
 
@@ -1680,10 +1699,10 @@
         if (!worktree.virtual) {
           worktreeHead.addEventListener("contextmenu", function (event) {
             var actions = [{
-              label: "Open Psyche Terminal",
+              label: "Open Coven Terminal",
               run: async function () {
                 if (!(await activateProjectWorktree(project, worktree.path))) return;
-                ensureProjectPsyche(project);
+                await ensureProjectCoven(project);
               },
             }];
             if (hiddenThreads.length > 0) {
@@ -1934,10 +1953,9 @@
   // 8. Tab strip render
   // ============================================================
 
-  // Tabs == projects. Each project tab spawns psyche on add (`spawnDefaultThreadIn`)
-  // and clicking the tab restores the project's last-active thread. Threads
-  // themselves are managed inside the embedded psyche/tmux UI — they aren't
-  // surfaced as separate tabs at the shell level.
+  // Tabs == projects. Opening a project launches or focuses its Coven pane.
+  // and clicking the tab restores the project's last-active physical pane.
+  // Threads remain project/worktree-scoped and are managed in the sessions rail.
   // ---- File tabs (main area) ----
 
   var fileViewEl = document.getElementById("file-view");
@@ -2580,8 +2598,12 @@
   }
 
   async function runNewThreadCommand() {
+    return spawnCovenThread();
+  }
+
+  async function runNewShellCommand() {
     if (!(await prepareDefaultThreadCreation())) return null;
-    return spawnDefaultThread();
+    return spawnShellThread();
   }
 
   async function runNewPsycheCommand() {
@@ -2592,8 +2614,13 @@
   var commands = [
     {
       cmd: "/new-thread",
-      desc: "Spawn a new shell thread",
+      desc: "Spawn a new Coven chat thread",
       run: runNewThreadCommand,
+    },
+    {
+      cmd: "/new-shell",
+      desc: "Spawn a plain login shell",
+      run: runNewShellCommand,
     },
     {
       cmd: "/new-psyche",
@@ -3314,9 +3341,11 @@
   async function createContextualTab() {
     if (currentLayout() === "browser") markActiveSurface("browser");
     else if (currentLayout() === "terminal") markActiveSurface("terminal");
-    if (activeSurface !== "browser" && !(await prepareDefaultThreadCreation())) return null;
-    if (activeSurface === "browser") openBlankBrowserTab(); else spawnDefaultThread();
-    return true;
+    if (activeSurface === "browser") {
+      openBlankBrowserTab();
+      return true;
+    }
+    return (await spawnCovenThread()) ? true : null;
   }
 
   document.addEventListener("keydown", async function (e) {
@@ -3331,7 +3360,7 @@
       await createContextualTab();
       e.preventDefault(); return;
     }
-    // ⌘O opens a new project (folder picker → addProject → psyche).
+    // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active file tab; with none open it closes the project.
     if (e.key === "w") {
@@ -3979,7 +4008,7 @@
       if (!selected || typeof selected !== "string") return; // user cancelled
       var project = await addProject(selected);
       if (project) {
-        ensureProjectPsyche(project);
+        await ensureProjectCoven(project);
         setProjectStatus(project, "ok");
       }
     } catch (err) {
@@ -3987,49 +4016,55 @@
     }
   }
 
-  function ensureProjectPsyche(project) {
+  function covenChatLaunch(project) {
+    var worktree = selectedWorktree(project);
+    return {
+      command: state.env.coven_path,
+      args: ["chat"],
+      env: {},
+      projectRoot: project.root,
+      cwd: worktree.path,
+      kind: "coven-chat",
+      launchKind: "coven-chat",
+      covenSessionId: null,
+    };
+  }
+
+  async function spawnCovenThread(project) {
+    project = project || activeProject();
+    if (!project || !project.root) return null;
+    if (!state.env || !state.env.coven_path) {
+      setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+      return null;
+    }
+    if (!(await showTerminalView())) return null;
+    await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+    var launch = covenChatLaunch(project);
+    return createThread({
+      project: project,
+      worktreePath: launch.cwd,
+      name: "Coven",
+      kind: "coven-chat",
+      launch: launch,
+    });
+  }
+
+  async function ensureProjectCoven(project) {
     if (!project) return null;
     var worktree = selectedWorktree(project);
-    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.worktreePath === worktree.path && t.kind === "psyche" && t.status !== "exited"; });
+    var existing = state.threads.find(function (t) {
+      return t.projectId === project.id && t.worktreePath === worktree.path &&
+        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+    });
     if (existing) {
-      if (existing.hidden) reopenThread(existing.id);
-      else focusThread(existing.id);
+      await focusThread(existing.id);
       return existing;
     }
-    return spawnDefaultThreadIn(project);
+    return spawnCovenThread(project);
   }
 
-  function spawnDefaultThreadIn(project) {
-    var worktree = selectedWorktree(project);
-    if (state.env && state.env.psyche_entry && state.env.node_path) {
-      var shell = (state.env.default_shell) || "/bin/zsh";
-      var quoted = function (s) {
-        return "'" + String(s).replace(/'/g, "'\\''") + "'";
-      };
-      var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
-      createThread({
-        project: project,
-        name: "psyche",
-        kind: "psyche",
-        command: shell,
-        args: ["-l", "-c", cmd],
-        projectRoot: worktree.path,
-        env: tauriPsycheEnv(),
-      });
-    } else {
-      createThread({
-        project: project,
-        name: "shell",
-        kind: "shell",
-        command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
-        args: ["-l"],
-        projectRoot: worktree.path,
-      });
-    }
-  }
-
-  function spawnDefaultThread() {
-    var project = activeProject();
+  function spawnShellThread(project) {
+    project = project || activeProject();
     var worktree = selectedWorktree(project);
     return createThread({
       project: project,
@@ -4037,7 +4072,9 @@
       kind: "shell",
       command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
       args: ["-l"],
-      projectRoot: worktree && worktree.path,
+      projectRoot: project && project.root,
+      cwd: worktree && worktree.path,
+      worktreePath: worktree && worktree.path,
     });
   }
 
@@ -4058,12 +4095,17 @@
       return "'" + String(s).replace(/'/g, "'\\''") + "'";
     };
     var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
+    var project = activeProject();
+    var worktree = selectedWorktree(project);
     return createThread({
+      project: project,
       name: "psyche",
       kind: "psyche",
       command: shell,
       args: ["-l", "-c", cmd],
-      projectRoot: state.env.repo_root,
+      projectRoot: project && project.root,
+      cwd: worktree && worktree.path,
+      worktreePath: worktree && worktree.path,
       env: tauriPsycheEnv(),
     });
   }
@@ -4112,7 +4154,7 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      ensureProjectPsyche(project);
+      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);

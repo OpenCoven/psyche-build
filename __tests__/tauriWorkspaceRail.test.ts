@@ -53,7 +53,8 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(sessionModel).toMatch(/session\?\.worktreePath/);
     expect(sessionModel).toMatch(/owningWorktree\(worktrees, cwd\)/);
     expect(mainJs).toMatch(/function\s+selectedWorktree\(project\)/);
-    expect(mainJs).toMatch(/projectRoot:\s*worktree\.path/);
+    expect(mainJs).toMatch(/projectRoot:\s*project\s*&&\s*project\.root/);
+    expect(mainJs).toMatch(/cwd:\s*worktree\s*&&\s*worktree\.path/);
     expect(styles).toMatch(/\.session-worktree-head\s*\{/);
     expect(styles).toMatch(/\.session-worktree-group\s*\{/);
   });
@@ -92,7 +93,7 @@ describe('Tauri project/worktree/pane rail', () => {
       'worktreeGroup.appendChild(worktreeHead);',
     );
     const worktreeContextMenu = renderSessionList.slice(contextMenuStart, contextMenuEnd);
-    expect(worktreeContextMenu).toContain('label: "Open Psyche Terminal"');
+    expect(worktreeContextMenu).toContain('label: "Open Coven Terminal"');
     expect(worktreeContextMenu).toContain(
       'await activateProjectWorktree(project, worktree.path)',
     );
@@ -114,7 +115,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('label: "Hide"');
     expect(mainJs).toContain('label: "Interrupt"');
     expect(mainJs).toContain('label: "Stop and close"');
-    expect(mainJs).toContain('label: "Open Psyche Terminal"');
+    expect(mainJs).toContain('label: "Open Coven Terminal"');
     expect(mainJs).toContain('" hidden session"');
     expect(styles).toMatch(/\.session-context-menu\s*\{/);
     expect(styles).toMatch(/\.session-context-item\.danger\s*\{/);
