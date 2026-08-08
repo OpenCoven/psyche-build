@@ -155,7 +155,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       && tokensMatch(token, header.slice('Bearer '.length));
     const conn = new Connection(ws, {
       token,
-      projectRoot,
+      projectRoot: canonicalProjectRoot,
       serverVersion,
       authedViaHeader,
       tmux,
