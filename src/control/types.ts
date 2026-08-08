@@ -40,6 +40,16 @@ export type ControlCommand =
       title?: string;
       prompt?: string;
       branch?: string;
+      /** Existing branch or ref from which to create the generated pane branch. */
+      startPointBranch?: string;
+      /**
+       * Attach to a worktree that already exists instead of creating one, so
+       * several agents share a branch and files. Carried through from the v0
+       * spawn request so the compatibility adapter loses no functionality.
+       */
+      existingWorktree?: { slug: string; worktreePath: string; branchName: string };
+      /** Originating v0 request id, preserved for downstream correlation. */
+      requestId?: string;
     }>
   | CommandBase<'pane.prompt', PromptEnvelope>
   | CommandBase<'pane.interrupt', {
