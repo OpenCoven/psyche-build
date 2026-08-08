@@ -189,7 +189,7 @@ fn parse_explicit_port(value: &str) -> Result<u16, String> {
     Ok(port)
 }
 
-fn is_safe_session_id(id: &str) -> bool {
+pub(crate) fn is_safe_session_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id
             .bytes()

@@ -75,6 +75,7 @@
     agentSkills: [],
   };
   var paneLayouts = new Map();
+  var covenEnsureFlights = new Map();
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
   var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
@@ -250,8 +251,8 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      ensureProjectPsyche(project);
-      setStatus("no pane — launching psyche…", "");
+      var covenThread = await ensureProjectCoven(project);
+      if (covenThread) setStatus("no pane — launching Coven…", "");
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -458,7 +459,7 @@
   function setProjectStatus(project, level) {
     project = project || activeProject();
     var statusLevel = level || "ok";
-    if (statusLevel === "ok") setStatus("psyche is ready", "ok");
+    if (statusLevel === "ok") setStatus("Coven is ready", "ok");
     else if (statusLevel === "") setStatus(project ? project.name : "ready", "");
     else setStatus(project ? project.name : "ready", statusLevel);
   }
@@ -675,11 +676,16 @@
     }
   }).catch(function () {});
 
-  listen("pty:exit", function (event) {
-    var payload = event.payload || {};
+  function handlePtyExit(payload) {
+    payload = payload || {};
     var thread = findThread(payload.thread_id);
-    if (!thread) return;
+    if (!thread || thread.closing || thread.closeStarted) return false;
     thread.ptyStarted = false;
+    if (thread.startInFlight) {
+      thread.exitDuringStart = true;
+    }
+    thread.stopRequested = false;
+    thread.spawning = false;
     thread.status = "exited";
     syncThreadPaneMetadata(thread);
     if (thread.term) {
@@ -690,6 +696,11 @@
     if (state.activeThreadId === thread.id) {
       setProjectStatus(findProject(thread.projectId), "warn");
     }
+    return true;
+  }
+
+  listen("pty:exit", function (event) {
+    handlePtyExit(event.payload || {});
   }).catch(function () {});
 
   function findThread(id) {
@@ -715,7 +726,26 @@
   function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
-    var worktreePath = opts.worktreePath || opts.projectRoot ||
+    var sourceLaunch = opts.launch || {
+      command: opts.command,
+      args: opts.args || [],
+      env: opts.env || {},
+      projectRoot: opts.projectRoot || (project && project.root),
+      cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
+      launchKind: opts.launchKind || null,
+      covenSessionId: opts.covenSessionId || null,
+    };
+    var launch = {
+      command: sourceLaunch.command,
+      args: Array.isArray(sourceLaunch.args) ? sourceLaunch.args.slice() : [],
+      env: Object.assign({}, sourceLaunch.env || {}),
+      projectRoot: sourceLaunch.projectRoot || (project && project.root) || null,
+      cwd: sourceLaunch.cwd || opts.worktreePath || sourceLaunch.projectRoot ||
+        (project && activeWorkspaceRoot(project)) || null,
+      launchKind: sourceLaunch.launchKind || null,
+      covenSessionId: sourceLaunch.covenSessionId || null,
+    };
+    var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
     var projectId = project ? project.id : null;
     var placement = preparePanePlacement(id, projectId, worktreePath);
@@ -729,10 +759,7 @@
       worktreePath: worktreePath,
       name: opts.name || "thread " + (state.threads.length + 1),
       kind: opts.kind || "shell",
-      command: opts.command,
-      args: opts.args || [],
-      env: opts.env || {},
-      covenSessionId: opts.covenSessionId || null,
+      launch: launch,
       status: "starting",
       spawning: true,
       term: null,
@@ -740,7 +767,10 @@
       host: null,
       pane: null,
       closing: false,
+      closeStarted: false,
       startInFlight: false,
+      exitDuringStart: false,
+      stopRequested: false,
       ptyStarted: false,
     };
     commitPanePlacement(placement);
@@ -755,34 +785,71 @@
     requestAnimationFrame(function () {
       if (!isLiveThread(thread)) return;
       try { if (thread.fit) thread.fit.fit(); } catch (_) {}
-      spawnPty(thread, thread.worktreePath);
+      spawnPty(thread);
     });
     return thread;
   }
 
-  function spawnPty(thread, projectRoot) {
-    if (!isLiveThread(thread)) return Promise.resolve(false);
+  function stopThreadPty(thread) {
+    if (!thread || thread.stopRequested) return Promise.resolve(false);
+    thread.stopRequested = true;
+    return invoke("pty_stop", {
+      threadId: thread.id,
+      thread_id: thread.id,
+    }).then(function () {
+      return true;
+    }).catch(function (err) {
+      console.warn("[pty_stop] failed for " + thread.id + ": " + String(err));
+      return false;
+    });
+  }
+
+  function spawnPty(thread) {
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        thread.ptyStarted || thread.status === "running") {
+      return Promise.resolve(false);
+    }
+    var launch = thread.launch;
+    thread.stopRequested = false;
+    thread.exitDuringStart = false;
     thread.startInFlight = true;
+    thread.status = "starting";
+    thread.spawning = true;
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
     return invoke("pty_start", {
       options: {
         threadId: thread.id,
         thread_id: thread.id,
-        projectRoot: projectRoot || null,
-        project_root: projectRoot || null,
-        command: thread.command,
-        args: thread.args,
+        projectRoot: launch.projectRoot,
+        project_root: launch.projectRoot,
+        cwd: launch.cwd,
+        launchKind: launch.launchKind,
+        launch_kind: launch.launchKind,
+        covenSessionId: launch.covenSessionId,
+        coven_session_id: launch.covenSessionId,
+        command: launch.command,
+        args: launch.args,
         cols: thread.term ? thread.term.cols : 120,
         rows: thread.term ? thread.term.rows : 40,
-        env: thread.env,
+        env: launch.env,
       },
     }).then(function () {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
         pendingDataBuffers.delete(thread.id);
-        return invoke("pty_stop", {
-          threadId: thread.id,
-          thread_id: thread.id,
-        }).catch(function () {}).then(function () { return false; });
+        return stopThreadPty(thread).then(function () { return false; });
+      }
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.ptyStarted = false;
+        thread.status = "exited";
+        thread.spawning = false;
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        return false;
       }
       thread.ptyStarted = true;
       thread.status = "running";
@@ -802,17 +869,41 @@
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
+      var msg = String(err);
       if (!isLiveThread(thread)) {
         pendingDataBuffers.delete(thread.id);
+        if (msg.indexOf("already running") !== -1) {
+          thread.ptyStarted = true;
+          return stopThreadPty(thread).then(function () { return false; });
+        }
         return false;
       }
-      thread.status = "exited";
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.ptyStarted = false;
+        thread.status = "exited";
+        thread.spawning = false;
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        return false;
+      }
       thread.spawning = false;
-      var msg = String(err);
       if (msg.indexOf("already running") !== -1) {
         thread.ptyStarted = true;
         thread.status = "running";
+        thread.stopRequested = false;
+        if (state.activeThreadId === thread.id) {
+          setProjectStatus(findProject(thread.projectId), "ok");
+        }
+        var pending = pendingDataBuffers.get(thread.id);
+        if (pending && thread.term) {
+          for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
+          pendingDataBuffers.delete(thread.id);
+        }
       } else {
+        thread.ptyStarted = false;
+        thread.status = "failed";
         if (thread.term) {
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
@@ -823,8 +914,17 @@
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
-      return false;
+      return thread.status === "running";
     });
+  }
+
+  function retryThread(id) {
+    var thread = findThread(id);
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        (thread.status !== "failed" && thread.status !== "exited")) {
+      return Promise.resolve(false);
+    }
+    return spawnPty(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -947,6 +1047,16 @@
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
     status.textContent = thread.status;
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "terminal-pane-retry";
+    retry.title = "Retry terminal";
+    retry.setAttribute("aria-label", "Retry " + thread.name);
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function (event) {
+      event.stopPropagation();
+      retryThread(thread.id);
+    });
     var close = document.createElement("button");
     close.type = "button";
     close.className = "terminal-pane-close";
@@ -959,6 +1069,7 @@
     });
     header.appendChild(title);
     header.appendChild(status);
+    header.appendChild(retry);
     header.appendChild(close);
     var body = document.createElement("div");
     body.className = "terminal-pane-body";
@@ -969,12 +1080,13 @@
     pane.appendChild(header);
     pane.appendChild(body);
     pane.addEventListener("pointerdown", function (event) {
-      handlePanePointerDown(thread, body, close, event);
+      handlePanePointerDown(thread, body, retry, close, event);
     });
     thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneStatus = status;
+    thread.paneRetry = retry;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
     renderPaneWorkspace();
@@ -1042,9 +1154,10 @@
     thread.fit = fit;
   }
 
-  function handlePanePointerDown(thread, body, close, event) {
+  function handlePanePointerDown(thread, body, retry, close, event) {
     var target = event.target;
-    if ((body && body.contains(target)) || (close && close.contains(target))) return;
+    if ((body && body.contains(target)) || (retry && retry.contains(target)) ||
+        (close && close.contains(target))) return;
     if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
@@ -1217,6 +1330,11 @@
     if (!thread) return;
     if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
     if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
+    if (thread.paneRetry) {
+      thread.paneRetry.hidden = thread.startInFlight ||
+        (thread.status !== "failed" && thread.status !== "exited");
+      thread.paneRetry.setAttribute("aria-label", "Retry " + thread.name);
+    }
     if (thread.paneClose) {
       thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
     }
@@ -1245,13 +1363,12 @@
 
   function closeThread(id, options) {
     var thread = findThread(id);
-    if (!thread) return;
+    if (!thread || thread.closeStarted) return false;
+    thread.closeStarted = true;
     thread.closing = true;
     pendingDataBuffers.delete(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.ptyStarted || thread.startInFlight) {
-      invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
-    }
+    if (!thread.startInFlight) stopThreadPty(thread);
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -1272,6 +1389,7 @@
     }
     refreshSidebar();
     refreshTabs();
+    return true;
   }
 
   function hideThread(id) {
@@ -1334,11 +1452,8 @@
       project: findProject(thread.projectId),
       name: thread.name + " copy",
       kind: thread.kind,
-      command: thread.command,
-      args: Array.isArray(thread.args) ? thread.args.slice() : [],
-      env: Object.assign({}, thread.env || {}),
-      projectRoot: thread.worktreePath,
-      covenSessionId: thread.covenSessionId,
+      worktreePath: thread.worktreePath,
+      launch: thread.launch,
     });
   }
 
@@ -1680,10 +1795,10 @@
         if (!worktree.virtual) {
           worktreeHead.addEventListener("contextmenu", function (event) {
             var actions = [{
-              label: "Open Psyche Terminal",
+              label: "Open Coven Terminal",
               run: async function () {
                 if (!(await activateProjectWorktree(project, worktree.path))) return;
-                ensureProjectPsyche(project);
+                await ensureProjectCoven(project);
               },
             }];
             if (hiddenThreads.length > 0) {
@@ -1871,7 +1986,7 @@
     if (layout && layout.root) return;
     var empty = document.createElement("div");
     empty.className = "terminal-empty";
-    empty.textContent = activeProject() ? "No terminal pane yet — opening Psyche…" : "Drop/open a project to begin";
+    empty.textContent = activeProject() ? "No terminal pane yet — opening Coven…" : "Drop/open a project to begin";
     terminalHost.appendChild(empty);
   }
 
@@ -1934,10 +2049,9 @@
   // 8. Tab strip render
   // ============================================================
 
-  // Tabs == projects. Each project tab spawns psyche on add (`spawnDefaultThreadIn`)
-  // and clicking the tab restores the project's last-active thread. Threads
-  // themselves are managed inside the embedded psyche/tmux UI — they aren't
-  // surfaced as separate tabs at the shell level.
+  // Tabs == projects. Opening a project launches or focuses its Coven pane.
+  // and clicking the tab restores the project's last-active physical pane.
+  // Threads remain project/worktree-scoped and are managed in the sessions rail.
   // ---- File tabs (main area) ----
 
   var fileViewEl = document.getElementById("file-view");
@@ -2580,8 +2694,12 @@
   }
 
   async function runNewThreadCommand() {
+    return spawnCovenThread();
+  }
+
+  async function runNewShellCommand() {
     if (!(await prepareDefaultThreadCreation())) return null;
-    return spawnDefaultThread();
+    return spawnShellThread();
   }
 
   async function runNewPsycheCommand() {
@@ -2592,8 +2710,13 @@
   var commands = [
     {
       cmd: "/new-thread",
-      desc: "Spawn a new shell thread",
+      desc: "Spawn a new Coven chat thread",
       run: runNewThreadCommand,
+    },
+    {
+      cmd: "/new-shell",
+      desc: "Spawn a plain login shell",
+      run: runNewShellCommand,
     },
     {
       cmd: "/new-psyche",
@@ -3314,9 +3437,11 @@
   async function createContextualTab() {
     if (currentLayout() === "browser") markActiveSurface("browser");
     else if (currentLayout() === "terminal") markActiveSurface("terminal");
-    if (activeSurface !== "browser" && !(await prepareDefaultThreadCreation())) return null;
-    if (activeSurface === "browser") openBlankBrowserTab(); else spawnDefaultThread();
-    return true;
+    if (activeSurface === "browser") {
+      openBlankBrowserTab();
+      return true;
+    }
+    return (await spawnCovenThread()) ? true : null;
   }
 
   document.addEventListener("keydown", async function (e) {
@@ -3331,7 +3456,7 @@
       await createContextualTab();
       e.preventDefault(); return;
     }
-    // ⌘O opens a new project (folder picker → addProject → psyche).
+    // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active file tab; with none open it closes the project.
     if (e.key === "w") {
@@ -3790,7 +3915,159 @@
   // 12. Boot
   // ============================================================
 
+  async function canonicalProjectPath(rootPath) {
+    try {
+      return await invoke("canonical_project_path", { root: rootPath });
+    } catch (error) {
+      setStatus("Project path is unavailable: " + String(error), "error");
+      return null;
+    }
+  }
+
+  function migrateProjectRoot(project, previousRoot, canonicalRoot) {
+    function remapPath(path) {
+      if (path === previousRoot) return canonicalRoot;
+      if (path && path.indexOf(previousRoot + "/") === 0) {
+        return canonicalRoot + path.slice(previousRoot.length);
+      }
+      return path;
+    }
+    function mergeBrowser(target, incoming, preferIncoming) {
+      var tabs = (target.tabs || []).slice();
+      var indices = {};
+      tabs.forEach(function (tab, index) { indices[tab.id] = index; });
+      (incoming.tabs || []).forEach(function (tab) {
+        if (indices[tab.id] === undefined) {
+          indices[tab.id] = tabs.length;
+          tabs.push(tab);
+        } else if (preferIncoming) {
+          tabs[indices[tab.id]] = tab;
+        }
+      });
+      target.tabs = tabs;
+      if (preferIncoming && incoming.activeTabId) target.activeTabId = incoming.activeTabId;
+      else if (!target.activeTabId) target.activeTabId = incoming.activeTabId;
+      return target;
+    }
+    var previousSelectedWorktreePath = project.selectedWorktreePath;
+    project.root = canonicalRoot;
+    project.selectedWorktreePath = remapPath(project.selectedWorktreePath);
+    project.worktrees = (project.worktrees || []).map(function (worktree) {
+      if (!worktree) return worktree;
+      return Object.assign({}, worktree, { path: remapPath(worktree.path) });
+    });
+    var browsers = project.browsersByWorktree || {};
+    var migratedBrowsers = {};
+    Object.keys(browsers).forEach(function (workspaceRoot) {
+      var migratedRoot = remapPath(workspaceRoot);
+      var browser = browsers[workspaceRoot];
+      if (!migratedBrowsers[migratedRoot]) migratedBrowsers[migratedRoot] = browser;
+      else mergeBrowser(
+        migratedBrowsers[migratedRoot],
+        browser,
+        workspaceRoot === previousSelectedWorktreePath
+      );
+    });
+    project.browsersByWorktree = migratedBrowsers;
+    return project;
+  }
+
+  function mergeRestoredProject(target, incoming, preferIncoming) {
+    function mergeBrowser(targetBrowser, incomingBrowser) {
+      var tabs = (targetBrowser.tabs || []).slice();
+      var tabIndices = {};
+      tabs.forEach(function (tab, index) { tabIndices[tab.id] = index; });
+      (incomingBrowser.tabs || []).forEach(function (tab) {
+        if (tabIndices[tab.id] === undefined) {
+          tabIndices[tab.id] = tabs.length;
+          tabs.push(tab);
+        } else if (preferIncoming) {
+          tabs[tabIndices[tab.id]] = tab;
+        }
+      });
+      targetBrowser.tabs = tabs;
+      if (preferIncoming && incomingBrowser.activeTabId) {
+        targetBrowser.activeTabId = incomingBrowser.activeTabId;
+      } else if (!targetBrowser.activeTabId) {
+        targetBrowser.activeTabId = incomingBrowser.activeTabId;
+      }
+      return targetBrowser;
+    }
+    var targetBrowsers = target.browsersByWorktree || {};
+    var incomingBrowsers = incoming.browsersByWorktree || {};
+    Object.keys(incomingBrowsers).forEach(function (workspaceRoot) {
+      if (!targetBrowsers[workspaceRoot]) targetBrowsers[workspaceRoot] = incomingBrowsers[workspaceRoot];
+      else if (targetBrowsers[workspaceRoot] !== incomingBrowsers[workspaceRoot]) {
+        mergeBrowser(targetBrowsers[workspaceRoot], incomingBrowsers[workspaceRoot]);
+      }
+    });
+    target.browsersByWorktree = targetBrowsers;
+
+    var worktreesByPath = {};
+    target.worktrees = target.worktrees || [];
+    target.worktrees.forEach(function (worktree, index) {
+      if (worktree && worktree.path) worktreesByPath[worktree.path] = index;
+    });
+    (incoming.worktrees || []).forEach(function (worktree) {
+      if (!worktree || !worktree.path) return;
+      var existingIndex = worktreesByPath[worktree.path];
+      if (existingIndex === undefined) {
+        worktreesByPath[worktree.path] = target.worktrees.length;
+        target.worktrees.push(worktree);
+      } else if (preferIncoming) {
+        target.worktrees[existingIndex] = worktree;
+      }
+    });
+    if (preferIncoming) {
+      target.selectedWorktreePath = incoming.selectedWorktreePath;
+      target.layout = incoming.layout;
+      target.name = incoming.name;
+    }
+    return target;
+  }
+
+  async function restoreSavedProjects(savedProjects, savedActiveProjectId, limit) {
+    var normalized = await Promise.all(savedProjects.map(async function (savedProject) {
+      var project = sanitizeSavedProject(savedProject);
+      if (!project) return null;
+      var previousRoot = project.root;
+      var canonicalRoot = await canonicalProjectPath(previousRoot);
+      if (!canonicalRoot) return null;
+      return {
+        project: migrateProjectRoot(project, previousRoot, canonicalRoot),
+        sourceId: savedProject.id || project.id,
+      };
+    }));
+    var projects = [];
+    var projectsByRoot = {};
+    var usedIds = {};
+    var activeProjectId = null;
+    var activeSourceClaimed = false;
+    normalized.filter(Boolean).forEach(function (entry) {
+      var isActiveSource = !activeSourceClaimed && entry.sourceId === savedActiveProjectId;
+      if (isActiveSource) activeSourceClaimed = true;
+      var existing = projectsByRoot[entry.project.root];
+      if (existing) {
+        mergeRestoredProject(existing, entry.project, isActiveSource);
+        if (isActiveSource) activeProjectId = existing.id;
+        return;
+      }
+      while (usedIds[entry.project.id]) entry.project.id = makeProjectId();
+      usedIds[entry.project.id] = true;
+      projectsByRoot[entry.project.root] = entry.project;
+      projects.push(entry.project);
+      if (isActiveSource) activeProjectId = entry.project.id;
+    });
+    projects = projects.slice(0, limit);
+    if (!projects.some(function (candidate) { return candidate.id === activeProjectId; })) {
+      activeProjectId = projects[0] ? projects[0].id : null;
+    }
+    return { projects: projects, activeProjectId: activeProjectId };
+  }
+
   async function addProject(rootPath) {
+    if (!rootPath) return null;
+    rootPath = await canonicalProjectPath(rootPath);
     if (!rootPath) return null;
     var existing = state.projects.find(function (p) { return p.root === rootPath; });
     if (existing) return (await setActiveProject(existing.id)) ? existing : null;
@@ -3827,57 +4104,88 @@
       if (!selected || typeof selected !== "string") return; // user cancelled
       var project = await addProject(selected);
       if (project) {
-        ensureProjectPsyche(project);
-        setProjectStatus(project, "ok");
+        var covenThread = await ensureProjectCoven(project);
+        if (covenThread) setProjectStatus(project, "ok");
       }
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
   }
 
-  function ensureProjectPsyche(project) {
-    if (!project) return null;
+  function covenChatLaunch(project, worktreePath) {
+    var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
+    return {
+      command: state.env.coven_path,
+      args: ["chat"],
+      env: {},
+      projectRoot: project.root,
+      cwd: worktree.path,
+      kind: "coven-chat",
+      launchKind: "coven-chat",
+      covenSessionId: null,
+    };
+  }
+
+  async function spawnCovenThread(project, expectedWorktreePath) {
+    project = project || activeProject();
+    if (!project || !project.root) return null;
+    if (!state.env || !state.env.coven_path) {
+      setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+      return null;
+    }
+    var intendedProjectId = project.id;
+    var intendedProjectRoot = project.root;
+    var intendedWorktree = selectedWorktree(project);
+    var intendedWorktreePath = expectedWorktreePath || (intendedWorktree && intendedWorktree.path);
+    if (!intendedWorktreePath) return null;
+    if (!(await showTerminalView())) return null;
+    await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+    var currentProject = activeProject();
+    var currentWorktree = selectedWorktree(currentProject);
+    if (!currentProject || currentProject.id !== intendedProjectId ||
+        !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
+    var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    return createThread({
+      project: currentProject,
+      worktreePath: launch.cwd,
+      name: "Coven",
+      kind: "coven-chat",
+      launch: launch,
+    });
+  }
+
+  function ensureProjectCoven(project) {
+    if (!project) return Promise.resolve(null);
     var worktree = selectedWorktree(project);
-    var existing = state.threads.find(function (t) { return t.projectId === project.id && t.worktreePath === worktree.path && t.kind === "psyche" && t.status !== "exited"; });
+    if (!worktree || !worktree.path) return Promise.resolve(null);
+    var existing = state.threads.find(function (t) {
+      return t.projectId === project.id && t.worktreePath === worktree.path &&
+        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+    });
     if (existing) {
-      if (existing.hidden) reopenThread(existing.id);
-      else focusThread(existing.id);
-      return existing;
+      return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
     }
-    return spawnDefaultThreadIn(project);
+    var flightKey = String(project.id || "") + "\u0000" + String(worktree.path || "");
+    var existingFlight = covenEnsureFlights.get(flightKey);
+    if (existingFlight) return existingFlight;
+    var flight = spawnCovenThread(project, worktree.path);
+    var coordinatedFlight = flight.then(function (result) {
+      if (covenEnsureFlights.get(flightKey) === coordinatedFlight) {
+        covenEnsureFlights.delete(flightKey);
+      }
+      return result;
+    }, function (error) {
+      if (covenEnsureFlights.get(flightKey) === coordinatedFlight) {
+        covenEnsureFlights.delete(flightKey);
+      }
+      throw error;
+    });
+    covenEnsureFlights.set(flightKey, coordinatedFlight);
+    return coordinatedFlight;
   }
 
-  function spawnDefaultThreadIn(project) {
-    var worktree = selectedWorktree(project);
-    if (state.env && state.env.psyche_entry && state.env.node_path) {
-      var shell = (state.env.default_shell) || "/bin/zsh";
-      var quoted = function (s) {
-        return "'" + String(s).replace(/'/g, "'\\''") + "'";
-      };
-      var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
-      createThread({
-        project: project,
-        name: "psyche",
-        kind: "psyche",
-        command: shell,
-        args: ["-l", "-c", cmd],
-        projectRoot: worktree.path,
-        env: tauriPsycheEnv(),
-      });
-    } else {
-      createThread({
-        project: project,
-        name: "shell",
-        kind: "shell",
-        command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
-        args: ["-l"],
-        projectRoot: worktree.path,
-      });
-    }
-  }
-
-  function spawnDefaultThread() {
-    var project = activeProject();
+  function spawnShellThread(project) {
+    project = project || activeProject();
     var worktree = selectedWorktree(project);
     return createThread({
       project: project,
@@ -3885,7 +4193,9 @@
       kind: "shell",
       command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
       args: ["-l"],
-      projectRoot: worktree && worktree.path,
+      projectRoot: project && project.root,
+      cwd: worktree && worktree.path,
+      worktreePath: worktree && worktree.path,
     });
   }
 
@@ -3906,12 +4216,17 @@
       return "'" + String(s).replace(/'/g, "'\\''") + "'";
     };
     var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
+    var project = activeProject();
+    var worktree = selectedWorktree(project);
     return createThread({
+      project: project,
       name: "psyche",
       kind: "psyche",
       command: shell,
       args: ["-l", "-c", cmd],
-      projectRoot: state.env.repo_root,
+      projectRoot: project && project.root,
+      cwd: worktree && worktree.path,
+      worktreePath: worktree && worktree.path,
       env: tauriPsycheEnv(),
     });
   }
@@ -3944,8 +4259,13 @@
     var project = null;
     if (saved && saved.projects.length) {
       isRestoringWorkspace = true;
-      state.projects = saved.projects.map(sanitizeSavedProject).filter(Boolean).slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
-      state.activeProjectId = saved.activeProjectId && state.projects.some(function (p) { return p.id === saved.activeProjectId; }) ? saved.activeProjectId : (state.projects[0] && state.projects[0].id);
+      var restored = await restoreSavedProjects(
+        saved.projects,
+        saved.activeProjectId,
+        Math.min(settings.maxProjects, HARD_MAX_PROJECTS)
+      );
+      state.projects = restored.projects;
+      state.activeProjectId = restored.activeProjectId;
       project = activeProject();
       if (project) restoreProjectLayout(project);
       isRestoringWorkspace = false;
@@ -3955,7 +4275,7 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      ensureProjectPsyche(project);
+      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);
