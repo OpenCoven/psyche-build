@@ -208,6 +208,14 @@ export class Connection {
   private authed: boolean;
   private workspaceSequence = 0;
   private activeStreams = new Map<StreamId, { paneId: string }>();
+
+  /**
+   * Cached human lease per interactive stream. Keeping the takeover result lets
+   * repeated keystrokes reuse the same lease revision instead of re-preempting
+   * the pane on every character; `nonce` rotates the takeover idempotency key
+   * only when we must re-acquire after being preempted.
+   */
+  private streamLease = new Map<StreamId, { revision: number; nonce: number }>();
   private idempotentSpawns = new Map<string, {
     fingerprint: string;
     result: Promise<BridgeSpawnResult>;
@@ -277,6 +285,7 @@ export class Connection {
         this.authTimer = null;
       }
       this.activeStreams.clear();
+      this.streamLease.clear();
       this.releaseOutputHandler();
     });
   }
@@ -413,7 +422,14 @@ export class Connection {
     fallbackCode: string,
     outcome: CommandOutcome,
   ): void {
-    const code = outcome.status !== 'succeeded' && outcome.code ? outcome.code : fallbackCode;
+    // The runtime reports `command_failed` for handler errors that carry no
+    // code of their own (e.g. a raw tmux failure). Those map back to the v0
+    // per-operation code so clients keep seeing the same wire codes as before.
+    const specificCode =
+      outcome.status !== 'succeeded' && outcome.code && outcome.code !== 'command_failed'
+        ? outcome.code
+        : undefined;
+    const code = specificCode ?? fallbackCode;
     const message = outcome.status !== 'succeeded' && outcome.message
       ? outcome.message
       : 'control command failed';
@@ -624,6 +640,7 @@ export class Connection {
       }
       case 'panes.detach': {
         if (this.activeStreams.delete(msg.streamId)) {
+          this.streamLease.delete(msg.streamId);
           this.releaseOutputHandler();
         }
         this.send({ type: 'ack', requestId: msg.requestId, ok: true });
@@ -675,24 +692,49 @@ export class Connection {
           return;
         }
         // Interactive v0 input is a human takeover followed by human input.
-        // The takeover uses a stable per-stream idempotency key so repeated
-        // keystrokes reuse the same lease revision instead of re-preempting
-        // the pane; each input uses a fresh key so no keystroke is deduped.
-        const takeover = await this.submitControl(this.buildCommand(
-          'pane.takeover',
-          { paneId: stream.paneId },
-          { actorKind: 'human', idempotencyKey: `v0:takeover:${this.actorId}:${msg.streamId}` },
-        ));
-        if (takeover.status !== 'succeeded') {
-          this.sendControlError(msg.requestId, 'send_keys_failed', takeover);
-          return;
-        }
-        const leaseRevision = readLeaseRevision(takeover);
-        const input = await this.submitControl(this.buildCommand(
+        // We cache the lease per stream so repeated keystrokes reuse the same
+        // revision instead of re-preempting the pane on every character. If a
+        // keystroke fails because the pane was preempted (stale revision), we
+        // re-acquire once with a fresh takeover and retry, preserving v0's
+        // "last writer can always type" behavior.
+        const acquire = async (fresh: boolean): Promise<CommandOutcome | null> => {
+          if (!fresh && this.streamLease.has(msg.streamId)) return null;
+          const prior = this.streamLease.get(msg.streamId);
+          const nonce = fresh ? (prior?.nonce ?? 0) + 1 : (prior?.nonce ?? 1);
+          const takeover = await this.submitControl(this.buildCommand(
+            'pane.takeover',
+            { paneId: stream.paneId },
+            { actorKind: 'human', idempotencyKey: `v0:takeover:${this.actorId}:${msg.streamId}:${nonce}` },
+          ));
+          if (takeover.status === 'succeeded') {
+            this.streamLease.set(msg.streamId, { revision: readLeaseRevision(takeover), nonce });
+          }
+          return takeover;
+        };
+        const sendInput = () => this.submitControl(this.buildCommand(
           'pane.input',
-          { paneId: stream.paneId, dataBase64: msg.data, leaseRevision },
+          {
+            paneId: stream.paneId,
+            dataBase64: msg.data,
+            leaseRevision: this.streamLease.get(msg.streamId)?.revision ?? 0,
+          },
           { actorKind: 'human', idempotencyKey: randomUUID() },
         ));
+
+        const initialTakeover = await acquire(false);
+        if (initialTakeover && initialTakeover.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'send_keys_failed', initialTakeover);
+          return;
+        }
+        let input = await sendInput();
+        if (input.status !== 'succeeded' && isStaleLeaseOutcome(input)) {
+          const retakeover = await acquire(true);
+          if (retakeover && retakeover.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'send_keys_failed', retakeover);
+            return;
+          }
+          input = await sendInput();
+        }
         if (input.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
         } else {
@@ -733,6 +775,7 @@ export class Connection {
           for (const [sid, s] of this.activeStreams) {
             if (s.paneId !== paneId) continue;
             this.activeStreams.delete(sid);
+            this.streamLease.delete(sid);
             this.send({ type: 'panes.stream.exit', streamId: sid, reason: 'killed' });
           }
           this.releaseOutputHandler();
@@ -901,6 +944,16 @@ function readLeaseRevision(outcome: CommandOutcome): number {
   if (outcome.status !== 'succeeded') return 0;
   const value = outcome.value as { revision?: number; leaseRevision?: number } | undefined;
   return value?.revision ?? value?.leaseRevision ?? 0;
+}
+
+/** True when an input failed because our cached human lease is stale. */
+function isStaleLeaseOutcome(outcome: CommandOutcome): boolean {
+  if (outcome.status === 'succeeded') return false;
+  return (
+    outcome.code === 'lease_revision_mismatch' ||
+    outcome.code === 'lane_conflict' ||
+    outcome.code === 'lease_expired'
+  );
 }
 
 function batchLaneIdempotencyKey(batchKey: string, index: number): string {

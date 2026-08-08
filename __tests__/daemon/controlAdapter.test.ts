@@ -139,7 +139,7 @@ describe('daemon control adapter translation', () => {
     expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', ok: true });
   });
 
-  it('reuses a stable takeover idempotency key across repeated keystrokes', async () => {
+  it('reuses a cached lease across keystrokes without re-taking the pane', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
     const runtime = spyRuntime((command) =>
       command.kind === 'pane.takeover'
@@ -161,10 +161,60 @@ describe('daemon control adapter translation', () => {
 
     const takeovers = runtime.submitted.filter((c) => c.kind === 'pane.takeover');
     const inputs = runtime.submitted.filter((c) => c.kind === 'pane.input');
-    expect(takeovers).toHaveLength(2);
-    expect(takeovers[0].idempotencyKey).toBe(takeovers[1].idempotencyKey);
+    // One takeover acquires the lease; the second keystroke reuses the cache.
+    expect(takeovers).toHaveLength(1);
+    expect(inputs).toHaveLength(2);
     // Each keystroke must carry a distinct key so none is deduped.
     expect(inputs[0].idempotencyKey).not.toBe(inputs[1].idempotencyKey);
+    for (const input of inputs) {
+      expect(input.payload).toMatchObject({ leaseRevision: 1 });
+    }
+  });
+
+  it('re-acquires the lease and retries when a keystroke hits a stale revision', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    let revision = 1;
+    let failNextInput = false;
+    const runtime = spyRuntime((command) => {
+      if (command.kind === 'pane.takeover') {
+        return { status: 'succeeded', value: { actorId: 'human', revision } };
+      }
+      if (command.kind === 'pane.input') {
+        if (failNextInput) {
+          failNextInput = false;
+          // Simulate another actor having preempted the pane: our cached
+          // revision is now stale.
+          revision = 5;
+          return { status: 'failed', code: 'lease_revision_mismatch', message: 'lease revision mismatch' };
+        }
+        return { status: 'succeeded' };
+      }
+      return { status: 'succeeded' };
+    });
+    const { ws } = buildConnection(root, runtime);
+    const streamId = await attachStream(ws, '%3');
+
+    // First keystroke acquires revision 1.
+    await request(ws, {
+      type: 'panes.input', requestId: 'first', streamId,
+      data: Buffer.from('x').toString('base64'),
+    });
+    runtime.submitted.length = 0;
+
+    // Next keystroke is rejected as stale, forcing a fresh takeover + retry.
+    failNextInput = true;
+    await request(ws, {
+      type: 'panes.input', requestId: 'second', streamId,
+      data: Buffer.from('y').toString('base64'),
+    });
+
+    const takeovers = runtime.submitted.filter((c) => c.kind === 'pane.takeover');
+    const inputs = runtime.submitted.filter((c) => c.kind === 'pane.input');
+    // Exactly one re-takeover with a rotated key, then a successful retry.
+    expect(takeovers).toHaveLength(1);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[1].payload).toMatchObject({ leaseRevision: 5 });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', ok: true });
   });
 
   it('translates resize into a canonical pane.resize', async () => {
