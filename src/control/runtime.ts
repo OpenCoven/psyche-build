@@ -1,6 +1,12 @@
 import { LaneLeaseStore } from './leases.js';
 import { PromptDispatcher } from './promptDispatch.js';
-import type { CommandOutcome, ControlCommand, PromptEnvelope } from './types.js';
+import type {
+  CommandOutcome,
+  CommandRecord,
+  ControlCommand,
+  ControlSnapshot,
+  PromptEnvelope,
+} from './types.js';
 
 type Payload<K extends ControlCommand['kind']> = Extract<ControlCommand, { kind: K }>['payload'];
 
@@ -71,11 +77,26 @@ const TERMINAL_EVENT_KINDS = new Set([
   'command.rejected',
 ]);
 
+/**
+ * Cap on retained command envelopes for `snapshot()`.
+ *
+ * A long-running owner drives high-volume pane I/O, and some command payloads
+ * (`pane.input` data, `pane.prompt` text) are large. Retaining every envelope
+ * forever would grow without bound, so the map keeps only the most recent
+ * transactions; the durable record of what happened is the journal.
+ */
+const MAX_COMMAND_RECORDS = 1000;
+
 export class ControlRuntime {
   public readonly leases = new LaneLeaseStore();
 
   private readonly outcomesByIdempotencyKey = new Map<string, CommandOutcome>();
   private readonly pendingByIdempotencyKey = new Map<string, Promise<CommandOutcome>>();
+  private readonly commandRecords = new Map<string, {
+    command: ControlCommand;
+    outcome?: CommandOutcome;
+    sequence: number;
+  }>();
   private readonly paneBarrierGenerations = new Map<string, number>();
   private readonly paneQueues = new Map<string, PaneQueueState>();
   private readonly promptDispatcher: PromptDispatcher;
@@ -115,6 +136,43 @@ export class ControlRuntime {
 
   events(): RuntimeEvent[] {
     return this.journal.read(0);
+  }
+
+  /**
+   * A point-in-time view of the runtime for read-only clients.
+   *
+   * `commands` only contains transactions this process has observed since it
+   * became owner. After a restart the journal is replayed for outcome
+   * deduplication, but the full command envelopes are not rehydrated, so the
+   * map is scoped to the current owner epoch's activity.
+   */
+  snapshot(): ControlSnapshot {
+    const events = this.journal.read(0);
+    const sequence = events.length > 0 ? events[events.length - 1].sequence : 0;
+    const commands: Record<string, CommandRecord> = {};
+    for (const [id, record] of this.commandRecords) {
+      if (record.outcome) {
+        commands[id] = { command: record.command, outcome: record.outcome, sequence: record.sequence };
+      }
+    }
+    return {
+      ownerEpoch: this.ownerEpoch,
+      sequence,
+      commands,
+      leases: this.leases.snapshot(),
+    };
+  }
+
+  readEvents(afterSequence: number, limit?: number): {
+    events: RuntimeEvent[];
+    nextSequence: number;
+    gap: boolean;
+  } {
+    const events = this.journal.read(afterSequence, limit);
+    const nextSequence = events.length > 0
+      ? events[events.length - 1].sequence
+      : afterSequence;
+    return { events, nextSequence, gap: false };
   }
 
   blockPaneQueue(paneId: string): () => void {
@@ -363,22 +421,44 @@ export class ControlRuntime {
   }
 
   private async appendRequested(command: ControlCommand): Promise<RuntimeEvent> {
-    return this.journal.append('command.requested', {
+    const event = await this.journal.append('command.requested', {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
       kind: command.kind,
       ownerEpoch: command.ownerEpoch,
     });
+    this.retainCommandRecord(command.id, { command, sequence: event.sequence });
+    return event;
   }
 
   private async appendTerminal(command: ControlCommand, outcome: CommandOutcome): Promise<CommandOutcome> {
-    await this.journal.append(terminalKindForOutcome(outcome), {
+    const event = await this.journal.append(terminalKindForOutcome(outcome), {
       commandId: command.id,
       idempotencyKey: command.idempotencyKey,
       ...payloadForOutcome(outcome),
     });
     this.outcomesByIdempotencyKey.set(command.idempotencyKey, outcome);
+    const record = this.commandRecords.get(command.id);
+    if (record) {
+      record.outcome = outcome;
+      record.sequence = event.sequence;
+    } else {
+      this.retainCommandRecord(command.id, { command, outcome, sequence: event.sequence });
+    }
     return outcome;
+  }
+
+  private retainCommandRecord(
+    id: string,
+    record: { command: ControlCommand; outcome?: CommandOutcome; sequence: number },
+  ): void {
+    this.commandRecords.delete(id);
+    this.commandRecords.set(id, record);
+    while (this.commandRecords.size > MAX_COMMAND_RECORDS) {
+      const oldest = this.commandRecords.keys().next().value;
+      if (oldest === undefined) break;
+      this.commandRecords.delete(oldest);
+    }
   }
 
   private reduceOutcomes(events: RuntimeEvent[]): void {
