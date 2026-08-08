@@ -492,6 +492,7 @@ describe('Tauri physical terminal panes', () => {
         state,
         focusThread: async () => { focused += 1; },
         spawnCovenThread: async () => { spawned += 1; return replacement; },
+        covenEnsureFlights: new Map(),
       },
     );
 

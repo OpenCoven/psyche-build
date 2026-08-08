@@ -358,6 +358,7 @@ describe('native Coven launch routing', () => {
       {
         state: { env: { coven_path: '/bin/coven' } },
         activeProject: () => project,
+        selectedWorktree: () => ({ path: '/repo' }),
         setStatus: () => undefined,
         showTerminalView: async () => { order.push('show'); return true; },
         requestAnimationFrame: (callback: () => void) => { order.push('frame'); callback(); },
@@ -369,6 +370,231 @@ describe('native Coven launch routing', () => {
     const thread = await spawnCovenThread(project);
     expect(order).toEqual(['show', 'frame', 'create']);
     expect(thread).toMatchObject({ project, kind: 'coven-chat', name: 'Coven' });
+  });
+
+  it('coalesces concurrent automatic ensures through one animation-frame launch', async () => {
+    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
+    const state = {
+      env: { coven_path: '/bin/coven' },
+      threads: [] as Array<Record<string, unknown>>,
+    };
+    const frames: Array<() => void> = [];
+    let creates = 0;
+    const spawnCovenThread = compileFunction<(value: typeof project, path?: string) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnCovenThread'),
+      {
+        state,
+        activeProject: () => project,
+        selectedWorktree: () => ({ path: project.selectedWorktreePath }),
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        requestAnimationFrame: (callback: () => void) => { frames.push(callback); },
+        covenChatLaunch: (_value: typeof project, path: string) => ({
+          command: '/bin/coven', args: ['chat'], cwd: path,
+        }),
+        createThread: (options: Record<string, unknown>) => {
+          creates += 1;
+          return options;
+        },
+      },
+    );
+    const covenEnsureFlights = new Map<string, Promise<Record<string, unknown> | null>>();
+    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<Record<string, unknown> | null>>(
+      functionSource('ensureProjectCoven'),
+      {
+        selectedWorktree: () => ({ path: project.selectedWorktreePath }),
+        state,
+        focusThread: async () => undefined,
+        spawnCovenThread,
+        covenEnsureFlights,
+      },
+    );
+
+    const first = ensureProjectCoven(project);
+    const second = ensureProjectCoven(project);
+    expect(first).toBe(second);
+    await Promise.resolve();
+    expect(frames).toHaveLength(1);
+    frames[0]();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult).toBe(secondResult);
+    expect(creates).toBe(1);
+    expect(covenEnsureFlights.size).toBe(0);
+  });
+
+  it('cleans a rejected automatic ensure so the workspace can retry', async () => {
+    const project = { id: 'project', root: '/repo' };
+    const covenEnsureFlights = new Map<string, Promise<unknown>>();
+    let attempts = 0;
+    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<unknown>>(
+      functionSource('ensureProjectCoven'),
+      {
+        selectedWorktree: () => ({ path: '/repo/wt' }),
+        state: { threads: [] },
+        focusThread: async () => undefined,
+        spawnCovenThread: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('launch failed');
+          return { id: 'retry' };
+        },
+        covenEnsureFlights,
+      },
+    );
+
+    const rejected = ensureProjectCoven(project);
+    expect(covenEnsureFlights.size).toBe(1);
+    await expect(rejected).rejects.toThrow('launch failed');
+    expect(covenEnsureFlights.size).toBe(0);
+    await expect(ensureProjectCoven(project)).resolves.toEqual({ id: 'retry' });
+    expect(attempts).toBe(2);
+  });
+
+  it('drops a launch when the active project changes during the frame wait', async () => {
+    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
+    let active = project;
+    let frame: (() => void) | null = null;
+    let creates = 0;
+    const spawnCovenThread = compileFunction<(value: typeof project) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnCovenThread'),
+      {
+        state: { env: { coven_path: '/bin/coven' } },
+        activeProject: () => active,
+        selectedWorktree: (value: typeof project) => ({ path: value.selectedWorktreePath }),
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        covenChatLaunch: () => ({ command: '/bin/coven', args: ['chat'] }),
+        createThread: () => { creates += 1; return {}; },
+      },
+    );
+
+    const pending = spawnCovenThread(project);
+    await Promise.resolve();
+    active = { id: 'other', root: '/other', selectedWorktreePath: '/other' };
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    await expect(pending).resolves.toBeNull();
+    expect(creates).toBe(0);
+  });
+
+  it('drops a launch when the selected worktree changes during the frame wait', async () => {
+    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/one' };
+    let frame: (() => void) | null = null;
+    let creates = 0;
+    const spawnCovenThread = compileFunction<(value: typeof project) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnCovenThread'),
+      {
+        state: { env: { coven_path: '/bin/coven' } },
+        activeProject: () => project,
+        selectedWorktree: (value: typeof project) => ({ path: value.selectedWorktreePath }),
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        covenChatLaunch: () => ({ command: '/bin/coven', args: ['chat'] }),
+        createThread: () => { creates += 1; return {}; },
+      },
+    );
+
+    const pending = spawnCovenThread(project);
+    await Promise.resolve();
+    project.selectedWorktreePath = '/repo/two';
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    await expect(pending).resolves.toBeNull();
+    expect(creates).toBe(0);
+  });
+
+  it('does not overwrite picker or activation errors when Coven creation returns null', async () => {
+    const project = { id: 'project', root: '/repo', name: 'repo' };
+    const pickerStatuses: string[] = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        dialogOpen: async () => '/repo',
+        state: { env: { home: '/home' } },
+        addProject: async () => project,
+        ensureProjectCoven: async () => null,
+        setProjectStatus: () => { pickerStatuses.push('ok'); },
+        writeToActive: () => undefined,
+      },
+    );
+    await openProjectPicker();
+    expect(pickerStatuses).toEqual([]);
+
+    const activationStatuses: string[] = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'),
+      {
+        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
+        showTerminalView: async () => true,
+        findProject: () => project,
+        restoreProjectLayout: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: () => '/repo',
+        focusThread: async () => true,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        ensureProjectCoven: async () => null,
+        setStatus: (text: string) => { activationStatuses.push(text); },
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+    await setActiveProject(project.id);
+    expect(activationStatuses).toEqual([]);
+  });
+
+  it('marks picker and activation ready only after Coven creation succeeds', async () => {
+    const project = { id: 'project', root: '/repo', name: 'repo' };
+    const pickerStatuses: string[] = [];
+    const openProjectPicker = compileFunction<() => Promise<void>>(
+      functionSource('openProjectPicker'),
+      {
+        dialogOpen: async () => '/repo',
+        state: { env: { home: '/home' } },
+        addProject: async () => project,
+        ensureProjectCoven: async () => ({ id: 'coven' }),
+        setProjectStatus: (_value: unknown, status: string) => { pickerStatuses.push(status); },
+        writeToActive: () => undefined,
+      },
+    );
+    await openProjectPicker();
+    expect(pickerStatuses).toEqual(['ok']);
+
+    const activationStatuses: string[] = [];
+    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('setActiveProject'),
+      {
+        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
+        showTerminalView: async () => true,
+        findProject: () => project,
+        restoreProjectLayout: () => undefined,
+        loadAgentSkills: () => undefined,
+        activeWorkspaceRoot: () => '/repo',
+        focusThread: async () => true,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        syncProjectBrowser: () => undefined,
+        ensureProjectCoven: async () => ({ id: 'coven' }),
+        setStatus: (text: string) => { activationStatuses.push(text); },
+        saveWorkspaceSoon: () => undefined,
+      },
+    );
+    await setActiveProject(project.id);
+    expect(activationStatuses).toEqual(['no pane — launching Coven…']);
+
+    const ready: string[] = [];
+    const setProjectStatus = compileFunction<(value: typeof project, level: string) => void>(
+      functionSource('setProjectStatus'),
+      {
+        activeProject: () => project,
+        setStatus: (text: string) => { ready.push(text); },
+      },
+    );
+    setProjectStatus(project, 'ok');
+    expect(ready).toEqual(['Coven is ready']);
   });
 
   it('deduplicates only a visible live Coven chat in the exact workspace', async () => {
@@ -392,6 +618,7 @@ describe('native Coven launch routing', () => {
         state,
         focusThread: async (id: string) => { focused = id; },
         spawnCovenThread: async () => { spawned += 1; return matching; },
+        covenEnsureFlights: new Map(),
       },
     );
     await expect(ensureProjectCoven(project)).resolves.toBe(matching);

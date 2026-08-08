@@ -75,6 +75,7 @@
     agentSkills: [],
   };
   var paneLayouts = new Map();
+  var covenEnsureFlights = new Map();
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
   var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
@@ -458,7 +459,7 @@
   function setProjectStatus(project, level) {
     project = project || activeProject();
     var statusLevel = level || "ok";
-    if (statusLevel === "ok") setStatus("psyche is ready", "ok");
+    if (statusLevel === "ok") setStatus("Coven is ready", "ok");
     else if (statusLevel === "") setStatus(project ? project.name : "ready", "");
     else setStatus(project ? project.name : "ready", statusLevel);
   }
@@ -4008,16 +4009,16 @@
       if (!selected || typeof selected !== "string") return; // user cancelled
       var project = await addProject(selected);
       if (project) {
-        await ensureProjectCoven(project);
-        setProjectStatus(project, "ok");
+        var covenThread = await ensureProjectCoven(project);
+        if (covenThread) setProjectStatus(project, "ok");
       }
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
   }
 
-  function covenChatLaunch(project) {
-    var worktree = selectedWorktree(project);
+  function covenChatLaunch(project, worktreePath) {
+    var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
     return {
       command: state.env.coven_path,
       args: ["chat"],
@@ -4030,16 +4031,25 @@
     };
   }
 
-  async function spawnCovenThread(project) {
+  async function spawnCovenThread(project, expectedWorktreePath) {
     project = project || activeProject();
     if (!project || !project.root) return null;
     if (!state.env || !state.env.coven_path) {
       setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
       return null;
     }
+    var intendedProjectId = project.id;
+    var intendedProjectRoot = project.root;
+    var intendedWorktree = selectedWorktree(project);
+    var intendedWorktreePath = expectedWorktreePath || (intendedWorktree && intendedWorktree.path);
+    if (!intendedWorktreePath) return null;
     if (!(await showTerminalView())) return null;
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
-    var launch = covenChatLaunch(project);
+    var currentProject = activeProject();
+    var currentWorktree = selectedWorktree(project);
+    if (!currentProject || currentProject.id !== intendedProjectId ||
+        !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
+    var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     return createThread({
       project: project,
       worktreePath: launch.cwd,
@@ -4049,18 +4059,34 @@
     });
   }
 
-  async function ensureProjectCoven(project) {
-    if (!project) return null;
+  function ensureProjectCoven(project) {
+    if (!project) return Promise.resolve(null);
     var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
         t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
     });
     if (existing) {
-      await focusThread(existing.id);
-      return existing;
+      return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
     }
-    return spawnCovenThread(project);
+    var flightKey = String(project.id || "") + "\u0000" + String(worktree.path || "");
+    var existingFlight = covenEnsureFlights.get(flightKey);
+    if (existingFlight) return existingFlight;
+    var flight = spawnCovenThread(project, worktree.path);
+    var coordinatedFlight = flight.then(function (result) {
+      if (covenEnsureFlights.get(flightKey) === coordinatedFlight) {
+        covenEnsureFlights.delete(flightKey);
+      }
+      return result;
+    }, function (error) {
+      if (covenEnsureFlights.get(flightKey) === coordinatedFlight) {
+        covenEnsureFlights.delete(flightKey);
+      }
+      throw error;
+    });
+    covenEnsureFlights.set(flightKey, coordinatedFlight);
+    return coordinatedFlight;
   }
 
   function spawnShellThread(project) {
