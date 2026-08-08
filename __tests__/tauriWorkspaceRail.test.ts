@@ -11,6 +11,21 @@ const sessionModel = readFileSync(
   'utf8',
 );
 
+function functionSource(source: string, name: string) {
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const syncStart = source.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
 describe('Tauri project/worktree/pane rail', () => {
   it('discovers canonical Git worktrees through a read-only native command', () => {
     expect(tauri).toMatch(/fn\s+git_worktrees\(root:\s*String\)\s*->\s*Result<Vec<GitWorktree>/);
@@ -49,7 +64,38 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/workspaceRoot\s*\|\|\s*activeWorkspaceRoot\(project\)/);
     expect(mainJs).toMatch(/saved\.browsersByWorktree/);
     expect(mainJs).toMatch(/saved\.browser/);
-    expect(mainJs).toMatch(/project\.selectedWorktreePath\s*=\s*worktree\.path;[\s\S]*?syncProjectBrowser\(\)/);
+
+    const activateWorktree = functionSource(mainJs, 'activateProjectWorktree');
+    const selection = activateWorktree.indexOf('project.selectedWorktreePath = worktreePath;');
+    expect(selection).toBeGreaterThan(-1);
+    for (const sync of [
+      'renderPaneWorkspace();',
+      'renderPanel(currentPanel());',
+      'refreshSidebar();',
+      'syncProjectBrowser();',
+      'saveWorkspaceSoon();',
+    ]) {
+      expect(activateWorktree.indexOf(sync)).toBeGreaterThan(selection);
+    }
+
+    const renderSessionList = functionSource(mainJs, 'renderSessionList');
+    const clickStart = renderSessionList.indexOf('worktreeHead.addEventListener("click"');
+    const clickEnd = renderSessionList.indexOf('worktreeHead.addEventListener("dblclick"');
+    expect(renderSessionList.slice(clickStart, clickEnd)).toContain(
+      'await activateProjectWorktree(project, worktree.path)',
+    );
+
+    const contextMenuStart = renderSessionList.indexOf(
+      'worktreeHead.addEventListener("contextmenu"',
+    );
+    const contextMenuEnd = renderSessionList.indexOf(
+      'worktreeGroup.appendChild(worktreeHead);',
+    );
+    const worktreeContextMenu = renderSessionList.slice(contextMenuStart, contextMenuEnd);
+    expect(worktreeContextMenu).toContain('label: "Open Psyche Terminal"');
+    expect(worktreeContextMenu).toContain(
+      'await activateProjectWorktree(project, worktree.path)',
+    );
   });
 
   it('supports keyboard traversal, collapse controls, and attention badges', () => {

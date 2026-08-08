@@ -15,6 +15,10 @@ const sessionsBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/sessions.bundle.js'),
   'utf8'
 );
+const panesBundle = readFileSync(
+  join(repoRoot, 'native/macos/psyche-build-tauri/web/panes.bundle.js'),
+  'utf8'
+);
 const tauriLib = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8'
@@ -72,7 +76,7 @@ describe('Tauri workspace panels', () => {
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
     expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js'
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js'
     );
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
@@ -82,14 +86,19 @@ describe('Tauri workspace panels', () => {
   it('loads the Coven session bundle between the editor and application scripts', () => {
     const editorScript = '<script src="./editor.bundle.js" defer></script>';
     const sessionsScript = '<script src="./sessions.bundle.js" defer></script>';
+    const panesScript = '<script src="./panes.bundle.js" defer></script>';
     const mainScript = '<script src="./main.js" defer></script>';
 
     expect(indexHtml).toContain(editorScript);
     expect(indexHtml).toContain(sessionsScript);
+    expect(indexHtml).toContain(panesScript);
     expect(indexHtml).toContain(mainScript);
     expect(indexHtml.indexOf(editorScript)).toBeLessThan(indexHtml.indexOf(sessionsScript));
-    expect(indexHtml.indexOf(sessionsScript)).toBeLessThan(indexHtml.indexOf(mainScript));
+    expect(indexHtml.indexOf(sessionsScript)).toBeLessThan(indexHtml.indexOf(panesScript));
+    expect(indexHtml.indexOf(panesScript)).toBeLessThan(indexHtml.indexOf(mainScript));
     expect(sessionsBundle.length).toBeGreaterThan(0);
     expect(sessionsBundle).toContain('PsycheSessions');
+    expect(panesBundle.length).toBeGreaterThan(0);
+    expect(panesBundle).toContain('PsychePanes');
   });
 });
