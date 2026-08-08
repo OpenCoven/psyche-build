@@ -509,7 +509,9 @@ describe('readRepositoryContext', () => {
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
       'git\0remote': {
         stdout: 'relative\nabsolute\nwindows\nsafe-file\nhosted-file\nuserinfo-file\nliteral-traversal\n'
-          + 'encoded-dot\nencoded-dotdot\nmixed-dotdot\nencoded-newline\nencoded-tab\nencoded-backslash\nmalformed-file\n',
+          + 'encoded-dot\nencoded-dotdot\nmixed-dotdot\nencoded-hash\nencoded-question\nencoded-percent\n'
+          + 'encoded-double-encoded-slash\nencoded-newline\nencoded-tab\nencoded-backslash\nmalformed-file\n'
+          + 'unc-empty-authority\nunc-extra-slash\n',
       },
       'git\0remote\0get-url\0--\0relative': { stdout: '../private/repo\n' },
       'git\0remote\0get-url\0--\0absolute': { stdout: '/Users/name/private/repo\n' },
@@ -521,10 +523,16 @@ describe('readRepositoryContext', () => {
       'git\0remote\0get-url\0--\0encoded-dot': { stdout: 'file:///Users/%2e/name\n' },
       'git\0remote\0get-url\0--\0encoded-dotdot': { stdout: 'file:///Users/%2E%2E/secret\n' },
       'git\0remote\0get-url\0--\0mixed-dotdot': { stdout: 'file:///Users/%2e./secret\n' },
+      'git\0remote\0get-url\0--\0encoded-hash': { stdout: 'file:///Users/name/My%23Repo\n' },
+      'git\0remote\0get-url\0--\0encoded-question': { stdout: 'file:///Users/name/My%3FRepo\n' },
+      'git\0remote\0get-url\0--\0encoded-percent': { stdout: 'file:///Users/name/My%25Repo\n' },
+      'git\0remote\0get-url\0--\0encoded-double-encoded-slash': { stdout: 'file:///Users/name/My%252FRepo\n' },
       'git\0remote\0get-url\0--\0encoded-newline': { stdout: 'file:///Users/name/My%0ARepo\n' },
       'git\0remote\0get-url\0--\0encoded-tab': { stdout: 'file:///Users/name/My%09Repo\n' },
       'git\0remote\0get-url\0--\0encoded-backslash': { stdout: 'file:///Users/name/My%5CRepo\n' },
       'git\0remote\0get-url\0--\0malformed-file': { stdout: 'file:///Users/name/My%ZZRepo\n' },
+      'git\0remote\0get-url\0--\0unc-empty-authority': { stdout: 'file:////server/share/private-repo\n' },
+      'git\0remote\0get-url\0--\0unc-extra-slash': { stdout: 'file://///server/share/private-repo\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -535,7 +543,11 @@ describe('readRepositoryContext', () => {
       { name: 'encoded-backslash', url: '<redacted-remote-url>' },
       { name: 'encoded-dot', url: '<redacted-remote-url>' },
       { name: 'encoded-dotdot', url: '<redacted-remote-url>' },
+      { name: 'encoded-double-encoded-slash', url: 'file:///Users/name/My%252FRepo' },
+      { name: 'encoded-hash', url: 'file:///Users/name/My%23Repo' },
       { name: 'encoded-newline', url: '<redacted-remote-url>' },
+      { name: 'encoded-percent', url: 'file:///Users/name/My%25Repo' },
+      { name: 'encoded-question', url: 'file:///Users/name/My%3FRepo' },
       { name: 'encoded-tab', url: '<redacted-remote-url>' },
       { name: 'hosted-file', url: '<redacted-remote-url>' },
       { name: 'literal-traversal', url: '<redacted-remote-url>' },
@@ -543,6 +555,8 @@ describe('readRepositoryContext', () => {
       { name: 'mixed-dotdot', url: '<redacted-remote-url>' },
       { name: 'relative', url: '<redacted-remote-url>' },
       { name: 'safe-file', url: 'file:///Users/name/My Repo' },
+      { name: 'unc-empty-authority', url: '<redacted-remote-url>' },
+      { name: 'unc-extra-slash', url: '<redacted-remote-url>' },
       { name: 'userinfo-file', url: '<redacted-remote-url>' },
       { name: 'windows', url: '<redacted-remote-url>' },
     ]);
@@ -550,6 +564,10 @@ describe('readRepositoryContext', () => {
     expect(rawDiagnosticUrls).not.toContain('private-repo');
     expect(rawDiagnosticUrls).not.toContain('/../secret');
     expect(rawDiagnosticUrls).not.toContain('%2E%2E');
+    expect(rawDiagnosticUrls).not.toContain('/server/share');
+    expect(rawDiagnosticUrls).not.toContain('My#Repo');
+    expect(rawDiagnosticUrls).not.toContain('My?Repo');
+    expect(rawDiagnosticUrls).not.toContain('My%2FRepo');
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {

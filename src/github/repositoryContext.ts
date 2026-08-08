@@ -343,11 +343,7 @@ function sanitizeFileDiagnostic(remoteUrl: string): string | null {
     return REDACTED_REMOTE_URL;
   }
 
-  try {
-    return `file://${serializeSafeFilePath(rawPath)}`;
-  } catch {
-    return REDACTED_REMOTE_URL;
-  }
+  return `file://${serializeSafeFilePath(rawPath)}`;
 }
 
 function sanitizeNetworkSchemeDiagnostic(remoteUrl: string): string | null {
@@ -492,7 +488,7 @@ function hasUnsafeUrlUserinfoOrAuthority(remoteUrl: string): boolean {
 }
 
 function isSafeRawFilePath(rawPath: string): boolean {
-  if (!rawPath.startsWith('/')) {
+  if (!rawPath.startsWith('/') || rawPath.startsWith('//')) {
     return false;
   }
 
@@ -532,14 +528,7 @@ function isSafeRawFileSegment(rawSegment: string): boolean {
 }
 
 function serializeSafeFilePath(rawPath: string): string {
-  const rawSegments = rawPath.split('/');
-  return rawSegments.map((segment, index) => {
-    if (index === 0) {
-      return '';
-    }
-
-    return decodeURIComponent(segment);
-  }).join('/');
+  return rawPath;
 }
 
 function hasAtOutsideAuthority(value: string, scheme: string): boolean {
