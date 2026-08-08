@@ -162,6 +162,17 @@ describe('normalizeGitHubRemote', () => {
         url: 'https://ghe.example.test/OpenCoven/psyche-build',
       },
     });
+
+    expect(normalizeGitHubRemote('double-git', 'https://ghe.example.test/OpenCoven/psyche-build.git.git')).toEqual({
+      name: 'double-git',
+      rawUrl: 'https://ghe.example.test/OpenCoven/psyche-build.git.git',
+      repository: {
+        host: 'ghe.example.test',
+        owner: 'OpenCoven',
+        name: 'psyche-build.git',
+        url: 'https://ghe.example.test/OpenCoven/psyche-build.git',
+      },
+    });
   });
 
   it('canonicalizes IDN authorities for gh hostnames across HTTPS, ssh, and SCP remotes', () => {
@@ -221,7 +232,6 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'https://ghe.example.test/Open%2Fcoven/psyche-build.git'],
       ['origin', 'https://ghe.example.test/OpenCoven/psyche%2Fbuild.git'],
       ['origin', 'https://ghe.example.test/OpenCoven/psyche%5Cbuild.git'],
-      ['origin', 'https://ghe.example.test/OpenCoven/psyche-build%2Egit%2Egit'],
       ['origin', 'https://ghe.example.test/Open%ZZoven/psyche-build.git'],
       ['origin', 'https://ghe.example.test/OpenCoven/psyche-build%ZZ.git'],
       ['origin', '******github.com/OpenCoven/psyche-build.git'],
@@ -267,7 +277,6 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'https://github.com/OpenCoven'],
       ['origin', 'https://github.com/OpenCoven/psyche-build/issues'],
       ['origin', 'https://github.com/OpenCoven/.git'],
-      ['origin', 'https://github.com/OpenCoven/psyche-build.git.git'],
       ['origin', 'https://github.com/OpenCoven/../psyche-build'],
       ['origin', 'ssh://other@ghe.example.test/OpenCoven/psyche-build.git'],
       ['origin', `ssh://${'git:pw@'}ghe.example.test/OpenCoven/psyche-build.git`],

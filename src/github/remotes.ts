@@ -434,7 +434,7 @@ function decodeRepositorySegment(rawSegment: string, stripGitSuffix: boolean): s
     return decoded;
   }
 
-  if (decoded === '.git' || decoded.endsWith('.git.git')) {
+  if (decoded === '.git') {
     return null;
   }
 

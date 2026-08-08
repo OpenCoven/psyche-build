@@ -258,14 +258,18 @@ function sanitizeDiagnosticRemoteUrl(remoteUrl: string): string {
     return REDACTED_REMOTE_URL;
   }
 
-  return remoteUrl;
+  return REDACTED_REMOTE_URL;
 }
 
 function summarizeDiagnosticRemoteUrl(
   remoteUrl: string,
   normalized: GitHubRemote | null,
 ): string {
-  if (isNestedHelperRemote(remoteUrl) || isExplicitlySecretBearing(remoteUrl)) {
+  if (
+    isNestedHelperRemote(remoteUrl)
+    || isExplicitlySecretBearing(remoteUrl)
+    || hasUnsafeUrlUserinfoOrAuthority(remoteUrl)
+  ) {
     return REDACTED_REMOTE_URL;
   }
 
@@ -330,7 +334,12 @@ function sanitizeFileDiagnostic(remoteUrl: string): string | null {
   }
 
   try {
-    return `file://${url.host}${decodeURI(url.pathname)}`;
+    const decodedPath = decodeURI(url.pathname);
+    if (decodedPath.includes('\\') || ASCII_CONTROL.test(decodedPath)) {
+      return REDACTED_REMOTE_URL;
+    }
+
+    return `file://${url.host}${decodedPath}`;
   } catch {
     return REDACTED_REMOTE_URL;
   }
@@ -345,6 +354,10 @@ function sanitizeNetworkSchemeDiagnostic(remoteUrl: string): string | null {
   const scheme = schemeMatch[1].toLowerCase();
   if (!isNetworkScheme(scheme)) {
     return null;
+  }
+
+  if (hasUnsafeUrlUserinfoOrAuthority(remoteUrl)) {
+    return REDACTED_REMOTE_URL;
   }
 
   if (!remoteUrl.startsWith(`${scheme}://`)) {
@@ -418,6 +431,43 @@ function serializeSanitizedUrl(url: URL): string {
   sanitized.username = '';
   sanitized.password = '';
   return `${sanitized.protocol}//${sanitized.host}${sanitized.pathname}${sanitized.search}${sanitized.hash}`;
+}
+
+function hasUnsafeUrlUserinfoOrAuthority(remoteUrl: string): boolean {
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):/iu.exec(remoteUrl);
+  if (!schemeMatch) {
+    return false;
+  }
+
+  const scheme = schemeMatch[1].toLowerCase();
+  if (!isNetworkScheme(scheme) || !remoteUrl.startsWith(`${scheme}://`)) {
+    return false;
+  }
+
+  const rawParts = extractSchemeUrlParts(remoteUrl);
+  if (rawParts === null) {
+    return false;
+  }
+
+  const authority = rawParts.authority;
+  if (authority.includes('*')) {
+    return true;
+  }
+
+  const atIndex = authority.indexOf('@');
+  if (atIndex < 0) {
+    return false;
+  }
+
+  if (scheme !== 'ssh') {
+    return true;
+  }
+
+  if (atIndex !== authority.lastIndexOf('@')) {
+    return true;
+  }
+
+  return authority.slice(0, atIndex) !== 'git';
 }
 
 function hasAtOutsideAuthority(value: string, scheme: string): boolean {
@@ -498,7 +548,22 @@ function canonicalizeDiagnosticHost(rawHost: string): string | null {
 
   try {
     const url = new URL(`https://${withoutPort}/`);
-    return url.hostname.toLowerCase().replace(/\.$/u, '') || null;
+    const hostname = url.hostname.toLowerCase().replace(/\.$/u, '');
+    if (!hostname || !/^[a-z0-9.-]+$/u.test(hostname)) {
+      return null;
+    }
+
+    const labels = hostname.split('.');
+    if (labels.some((label) =>
+      label.length < 1
+      || label.length > 63
+      || label.startsWith('-')
+      || label.endsWith('-')
+    )) {
+      return null;
+    }
+
+    return hostname;
   } catch {
     return null;
   }

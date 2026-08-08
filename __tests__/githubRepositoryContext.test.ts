@@ -320,6 +320,9 @@ describe('readRepositoryContext', () => {
     const scpSummaryUrl = 'git@gitlab.example.test:group/nested/repo.git';
     const querySecretUrl = 'https://gitlab.example.test/group/repo.git?access_token=ghp_S3CR3T_VALUE';
     const malformedScpSecret = `git@${'token@'}github.com:o/r`;
+    const maskedUserinfoUrl = 'https://******github.com/OpenCoven/psyche-build.git';
+    const usernameOnlyUrl = 'https://user@github.com/OpenCoven/psyche-build.git';
+    const usernamePasswordUrl = 'https://user:pass@github.com/OpenCoven/psyche-build.git';
     const unsupportedScpLike = 'gitlab.example.test:group/S3CR3T_VALUE.git';
     const malformedHostlessScp = 'git@github.com/group/S3CR3T_VALUE.git';
     const safeFileUrl = 'file:///Users/a@b/My Repo?download=1#frag';
@@ -329,7 +332,7 @@ describe('readRepositoryContext', () => {
       'git\0remote': {
         stdout: 'masked\nauth\norigin\nscheme-bypass\nparsed-bypass\nssh-path-bypass\ngit-path-bypass\n'
           + 'scp-bypass\nfile-safe\ngitlab-summary\nscp-summary\nnested-helper\nquery-secret\n'
-          + 'unsupported-scp-like\nmalformed-hostless-scp\n',
+          + 'unsupported-scp-like\nmalformed-hostless-scp\nmasked-userinfo\nusername-only\nusername-password\n',
       },
       'git\0remote\0get-url\0--\0masked': { stdout: '******github.com/o/r.git\n' },
       'git\0remote\0get-url\0--\0auth': { stdout: `https://${'token:secret@'}github.com/OpenCoven/psyche-build.git\n` },
@@ -346,6 +349,9 @@ describe('readRepositoryContext', () => {
       'git\0remote\0get-url\0--\0query-secret': { stdout: `${querySecretUrl}\n` },
       'git\0remote\0get-url\0--\0unsupported-scp-like': { stdout: `${unsupportedScpLike}\n` },
       'git\0remote\0get-url\0--\0malformed-hostless-scp': { stdout: `${malformedHostlessScp}\n` },
+      'git\0remote\0get-url\0--\0masked-userinfo': { stdout: `${maskedUserinfoUrl}\n` },
+      'git\0remote\0get-url\0--\0username-only': { stdout: `${usernameOnlyUrl}\n` },
+      'git\0remote\0get-url\0--\0username-password': { stdout: `${usernamePasswordUrl}\n` },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -354,12 +360,13 @@ describe('readRepositoryContext', () => {
 
     expect(context.rawRemotes).toEqual([
       { name: 'origin', url: 'git@github.com:<redacted-path>' },
-      { name: 'auth', url: 'https://github.com/<redacted-path>' },
+      { name: 'auth', url: '<redacted-remote-url>' },
       { name: 'file-safe', url: 'file:///Users/a@b/My Repo' },
       { name: 'git-path-bypass', url: '<redacted-remote-url>' },
       { name: 'gitlab-summary', url: 'http://gitlab.example.test/<redacted-path>' },
       { name: 'malformed-hostless-scp', url: '<redacted-remote-url>' },
       { name: 'masked', url: '<redacted-remote-url>' },
+      { name: 'masked-userinfo', url: '<redacted-remote-url>' },
       { name: 'nested-helper', url: '<redacted-remote-url>' },
       { name: 'parsed-bypass', url: '<redacted-remote-url>' },
       { name: 'query-secret', url: '<redacted-remote-url>' },
@@ -368,6 +375,8 @@ describe('readRepositoryContext', () => {
       { name: 'scp-summary', url: 'git@gitlab.example.test:<redacted-path>' },
       { name: 'ssh-path-bypass', url: '<redacted-remote-url>' },
       { name: 'unsupported-scp-like', url: '<redacted-remote-url>' },
+      { name: 'username-only', url: '<redacted-remote-url>' },
+      { name: 'username-password', url: '<redacted-remote-url>' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -393,6 +402,9 @@ describe('readRepositoryContext', () => {
     expect(serialized).not.toContain(querySecretUrl);
     expect(serialized).not.toContain(scpSummaryUrl);
     expect(serialized).not.toContain(malformedScpSecret);
+    expect(serialized).not.toContain(maskedUserinfoUrl);
+    expect(serialized).not.toContain(usernameOnlyUrl);
+    expect(serialized).not.toContain(usernamePasswordUrl);
     expect(serialized).not.toContain(unsupportedScpLike);
     expect(serialized).not.toContain(malformedHostlessScp);
     expect(rawDiagnosticUrls).not.toContain('group');
@@ -476,6 +488,39 @@ describe('readRepositoryContext', () => {
     ]);
     expect(context.rawRemotes[0]?.url).not.toContain('group');
     expect(context.rawRemotes[0]?.url).not.toContain('S3CR3T_VALUE');
+  });
+
+  it('redacts unsupported plain path remotes and unsafe file URL escapes', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+      'git\0remote': {
+        stdout: 'relative\nabsolute\nwindows\nsafe-file\nencoded-newline\nencoded-tab\nencoded-backslash\nmalformed-file\n',
+      },
+      'git\0remote\0get-url\0--\0relative': { stdout: '../private/repo\n' },
+      'git\0remote\0get-url\0--\0absolute': { stdout: '/Users/name/private/repo\n' },
+      'git\0remote\0get-url\0--\0windows': { stdout: 'C:\\private\\repo\n' },
+      'git\0remote\0get-url\0--\0safe-file': { stdout: 'file:///Users/name/My Repo?download=1#frag\n' },
+      'git\0remote\0get-url\0--\0encoded-newline': { stdout: 'file:///Users/name/My%0ARepo\n' },
+      'git\0remote\0get-url\0--\0encoded-tab': { stdout: 'file:///Users/name/My%09Repo\n' },
+      'git\0remote\0get-url\0--\0encoded-backslash': { stdout: 'file:///Users/name/My%5CRepo\n' },
+      'git\0remote\0get-url\0--\0malformed-file': { stdout: 'file:///Users/name/My%ZZRepo\n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+
+    expect(context.rawRemotes).toEqual([
+      { name: 'absolute', url: '<redacted-remote-url>' },
+      { name: 'encoded-backslash', url: '<redacted-remote-url>' },
+      { name: 'encoded-newline', url: '<redacted-remote-url>' },
+      { name: 'encoded-tab', url: '<redacted-remote-url>' },
+      { name: 'malformed-file', url: '<redacted-remote-url>' },
+      { name: 'relative', url: '<redacted-remote-url>' },
+      { name: 'safe-file', url: 'file:///Users/name/My Repo' },
+      { name: 'windows', url: '<redacted-remote-url>' },
+    ]);
+    expect(context.remotes).toEqual([]);
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {
