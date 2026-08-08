@@ -30,6 +30,7 @@ export interface RepositoryContext {
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
 const ASCII_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
 const ASCII_EDGE_WHITESPACE = /^[\u0009-\u000d\u0020]|[\u0009-\u000d\u0020]$/u;
+const UNSAFE_FILE_DIAGNOSTIC_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const REDACTED_REMOTE_URL = '<redacted-remote-url>';
 const REPOSITORY_CONTEXT_ERROR = 'unable to read Git repository context';
 
@@ -519,7 +520,7 @@ function isSafeRawFileSegment(rawSegment: string): boolean {
     || decoded === '..'
     || decoded.includes('/')
     || decoded.includes('\\')
-    || ASCII_CONTROL.test(decoded)
+    || hasUnsafeFileDiagnosticCharacter(decoded)
   ) {
     return false;
   }
@@ -529,6 +530,10 @@ function isSafeRawFileSegment(rawSegment: string): boolean {
 
 function serializeSafeFilePath(rawPath: string): string {
   return rawPath;
+}
+
+function hasUnsafeFileDiagnosticCharacter(value: string): boolean {
+  return UNSAFE_FILE_DIAGNOSTIC_CHARACTER.test(value);
 }
 
 function hasAtOutsideAuthority(value: string, scheme: string): boolean {

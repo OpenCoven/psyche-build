@@ -570,6 +570,57 @@ describe('readRepositoryContext', () => {
     expect(rawDiagnosticUrls).not.toContain('My%2FRepo');
   });
 
+  it('redacts file diagnostics with unsafe Unicode literal or encoded characters', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const literalNelUrl = 'file:///Users/name/Bad\u0085Repo';
+    const literalLineSeparatorUrl = 'file:///Users/name/Bad\u2028Repo';
+    const literalParagraphSeparatorUrl = 'file:///Users/name/Bad\u2029Repo';
+    const encodedNelUrl = 'file:///Users/name/Bad%C2%85Repo';
+    const encodedLineSeparatorUrl = 'file:///Users/name/Bad%E2%80%A8Repo';
+    const encodedParagraphSeparatorUrl = 'file:///Users/name/Bad%E2%80%A9Repo';
+    const safeUnicodeUrl = 'file:///Users/name/Résumé Repo';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+      'git\0remote': {
+        stdout: 'encoded-line-separator\nencoded-nel\nencoded-paragraph-separator\nliteral-line-separator\n'
+          + 'literal-nel\nliteral-paragraph-separator\nsafe-unicode\n',
+      },
+      'git\0remote\0get-url\0--\0literal-nel': { stdout: `${literalNelUrl}\n` },
+      'git\0remote\0get-url\0--\0literal-line-separator': { stdout: `${literalLineSeparatorUrl}\n` },
+      'git\0remote\0get-url\0--\0literal-paragraph-separator': { stdout: `${literalParagraphSeparatorUrl}\n` },
+      'git\0remote\0get-url\0--\0encoded-nel': { stdout: `${encodedNelUrl}\n` },
+      'git\0remote\0get-url\0--\0encoded-line-separator': { stdout: `${encodedLineSeparatorUrl}\n` },
+      'git\0remote\0get-url\0--\0encoded-paragraph-separator': { stdout: `${encodedParagraphSeparatorUrl}\n` },
+      'git\0remote\0get-url\0--\0safe-unicode': { stdout: `${safeUnicodeUrl}\n` },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+    const serialized = JSON.stringify(context);
+    const rawDiagnosticUrls = context.rawRemotes.map((remote) => remote.url).join('\n');
+
+    expect(context.rawRemotes).toEqual([
+      { name: 'encoded-line-separator', url: '<redacted-remote-url>' },
+      { name: 'encoded-nel', url: '<redacted-remote-url>' },
+      { name: 'encoded-paragraph-separator', url: '<redacted-remote-url>' },
+      { name: 'literal-line-separator', url: '<redacted-remote-url>' },
+      { name: 'literal-nel', url: '<redacted-remote-url>' },
+      { name: 'literal-paragraph-separator', url: '<redacted-remote-url>' },
+      { name: 'safe-unicode', url: 'file:///Users/name/Résumé Repo' },
+    ]);
+    expect(context.remotes).toEqual([]);
+    expect(rawDiagnosticUrls).not.toMatch(/[\u0085\u2028\u2029]/u);
+    expect(rawDiagnosticUrls).not.toContain('%C2%85');
+    expect(rawDiagnosticUrls).not.toContain('%E2%80%A8');
+    expect(rawDiagnosticUrls).not.toContain('%E2%80%A9');
+    expect(serialized).not.toContain(literalNelUrl);
+    expect(serialized).not.toContain(literalLineSeparatorUrl);
+    expect(serialized).not.toContain(literalParagraphSeparatorUrl);
+    expect(serialized).not.toContain(encodedNelUrl);
+    expect(serialized).not.toContain(encodedLineSeparatorUrl);
+    expect(serialized).not.toContain(encodedParagraphSeparatorUrl);
+  });
+
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
