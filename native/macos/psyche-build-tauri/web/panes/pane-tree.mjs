@@ -73,11 +73,20 @@ export function removeLeaf(root, targetLeafId) {
   };
 }
 
+function nonNegativeFinite(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function clampedRatio(value) {
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.min(1, Math.max(0, value));
+}
+
 function minimumHeight(root, minimums) {
-  if (root.type === "leaf") return minimums.height;
+  if (root.type === "leaf") return nonNegativeFinite(minimums.height);
   return (
     minimumHeight(root.first, minimums) +
-    minimums.separator +
+    nonNegativeFinite(minimums.separator) +
     minimumHeight(root.second, minimums)
   );
 }
@@ -108,40 +117,48 @@ export function layoutRects(root, rect, minimums) {
   const splits = [];
 
   function visit(node, x, y, nodeWidth, nodeHeight) {
+    const safeWidth = nonNegativeFinite(nodeWidth);
+    const safeHeight = nonNegativeFinite(nodeHeight);
     if (node.type === "leaf") {
       leaves.push({
         leafId: node.id,
         threadId: node.threadId,
         x,
         y,
-        width: nodeWidth,
-        height: nodeHeight,
+        width: safeWidth,
+        height: safeHeight,
       });
       return;
     }
 
-    const availableHeight = nodeHeight - minimums.separator;
+    const separatorHeight = Math.min(
+      safeHeight,
+      nonNegativeFinite(minimums.separator),
+    );
+    const availableHeight = safeHeight - separatorHeight;
     const minimumFirst = minimumHeight(node.first, minimums);
     const maximumFirst =
       availableHeight - minimumHeight(node.second, minimums);
-    const requestedFirst = Math.round(availableHeight * node.ratio);
-    const firstHeight = Math.min(
-      maximumFirst,
-      Math.max(minimumFirst, requestedFirst),
+    const requestedFirst = Math.round(
+      availableHeight * clampedRatio(node.ratio),
     );
-    const secondY = y + firstHeight + minimums.separator;
+    const firstHeight =
+      maximumFirst >= minimumFirst
+        ? Math.min(maximumFirst, Math.max(minimumFirst, requestedFirst))
+        : requestedFirst;
+    const secondY = y + firstHeight + separatorHeight;
     const secondHeight = availableHeight - firstHeight;
 
     splits.push({
       splitId: node.id,
       x,
       y: y + firstHeight,
-      width: nodeWidth,
-      height: minimums.separator,
-      ratio: firstHeight / availableHeight,
+      width: safeWidth,
+      height: separatorHeight,
+      ratio: availableHeight > 0 ? firstHeight / availableHeight : 0,
     });
-    visit(node.first, x, y, nodeWidth, firstHeight);
-    visit(node.second, x, secondY, nodeWidth, secondHeight);
+    visit(node.first, x, y, safeWidth, firstHeight);
+    visit(node.second, x, secondY, safeWidth, secondHeight);
   }
 
   if (root) visit(root, rect.x, rect.y, rect.width, rect.height);

@@ -246,4 +246,82 @@ describe('Tauri physical pane tree', () => {
       ],
     });
   });
+
+  test.each([
+    {
+      height: 245,
+      firstHeight: 215,
+      separatorHeight: 6,
+      secondHeight: 24,
+      ratio: 215 / 239,
+    },
+    {
+      height: 100,
+      firstHeight: 85,
+      separatorHeight: 6,
+      secondHeight: 9,
+      ratio: 85 / 94,
+    },
+    { height: 4, firstHeight: 0, separatorHeight: 4, secondHeight: 0, ratio: 0 },
+  ])(
+    'keeps undersized $height px layouts finite and inside their rect',
+    ({ height, firstHeight, separatorHeight, secondHeight, ratio }) => {
+      const tree = panes.resizeSplit(
+        panes.insertBelow(
+          panes.createLeaf('leaf-a', 'thread-a'),
+          'leaf-a',
+          panes.createLeaf('leaf-b', 'thread-b'),
+          'split-1',
+        ),
+        'split-1',
+        0.9,
+      );
+      const rect = { x: 10, y: 20, width: 800, height };
+      const result = panes.layoutRects(tree, rect, minimums);
+
+      expect(result).toEqual({
+        leaves: [
+          {
+            leafId: 'leaf-a',
+            threadId: 'thread-a',
+            x: 10,
+            y: 20,
+            width: 800,
+            height: firstHeight,
+          },
+          {
+            leafId: 'leaf-b',
+            threadId: 'thread-b',
+            x: 10,
+            y: 20 + firstHeight + separatorHeight,
+            width: 800,
+            height: secondHeight,
+          },
+        ],
+        splits: [
+          {
+            splitId: 'split-1',
+            x: 10,
+            y: 20 + firstHeight,
+            width: 800,
+            height: separatorHeight,
+            ratio,
+          },
+        ],
+      });
+
+      for (const geometry of [...result.leaves, ...result.splits]) {
+        expect(Number.isFinite(geometry.width)).toBe(true);
+        expect(Number.isFinite(geometry.height)).toBe(true);
+        expect(geometry.width).toBeGreaterThanOrEqual(0);
+        expect(geometry.height).toBeGreaterThanOrEqual(0);
+        expect(geometry.y + geometry.height).toBeLessThanOrEqual(
+          rect.y + rect.height,
+        );
+      }
+      expect(Number.isFinite(result.splits[0].ratio)).toBe(true);
+      expect(result.splits[0].ratio).toBeGreaterThanOrEqual(0);
+      expect(result.splits[0].ratio).toBeLessThanOrEqual(1);
+    },
+  );
 });
