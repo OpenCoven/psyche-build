@@ -1193,7 +1193,10 @@ fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        metadata.mode() & 0o111 != 0
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
     }
     #[cfg(not(unix))]
     {
@@ -1202,12 +1205,9 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn executable_in_dir(binary: &str, dir: &Path) -> Option<String> {
-    let candidate = dir.join(binary);
-    if is_executable_file(&candidate) {
-        return candidate
-            .canonicalize()
-            .ok()
-            .map(|canonical| canonical.to_string_lossy().to_string());
+    let canonical = dir.join(binary).canonicalize().ok()?;
+    if is_executable_file(&canonical) {
+        return Some(canonical.to_string_lossy().to_string());
     }
     None
 }
@@ -2250,18 +2250,34 @@ mod workspace_panel_tests {
 
     #[cfg(unix)]
     #[test]
-    fn path_resolution_skips_non_executables_and_rejects_directories() {
+    fn path_resolution_requires_effective_execute_access_and_rejects_directories() {
         let tree = TempTree::new("coven-path-executable");
         let non_executable = tree.root.join("non-executable");
+        let group_only = tree.root.join("group-only");
+        let other_only = tree.root.join("other-only");
         let directory = tree.root.join("directory");
         let executable = tree.root.join("executable");
-        for dir in [&non_executable, &directory, &executable] {
+        for dir in [
+            &non_executable,
+            &group_only,
+            &other_only,
+            &directory,
+            &executable,
+        ] {
             std::fs::create_dir_all(dir).unwrap();
         }
         write_test_executable(&non_executable.join("coven"), 0o600);
+        write_test_executable(&group_only.join("coven"), 0o010);
+        write_test_executable(&other_only.join("coven"), 0o001);
         std::fs::create_dir_all(directory.join("coven")).unwrap();
-        write_test_executable(&executable.join("coven"), 0o010);
-        let path = std::env::join_paths([&non_executable, &directory, &executable]).unwrap();
+        write_test_executable(&executable.join("coven"), 0o700);
+        let effective_uid = unsafe { libc::geteuid() };
+        let mut search_dirs = vec![&non_executable];
+        if effective_uid != 0 {
+            search_dirs.extend([&group_only, &other_only]);
+        }
+        search_dirs.extend([&directory, &executable]);
+        let path = std::env::join_paths(search_dirs).unwrap();
 
         assert_eq!(
             which_on_path_with("coven", &path),
@@ -2269,6 +2285,14 @@ mod workspace_panel_tests {
         );
         assert!(!is_executable_file(&non_executable.join("coven")));
         assert!(!is_executable_file(&directory.join("coven")));
+        if effective_uid == 0 {
+            // POSIX grants root X_OK when any execute bit is set.
+            assert!(is_executable_file(&group_only.join("coven")));
+            assert!(is_executable_file(&other_only.join("coven")));
+        } else {
+            assert!(!is_executable_file(&group_only.join("coven")));
+            assert!(!is_executable_file(&other_only.join("coven")));
+        }
     }
 
     fn launch_options(
