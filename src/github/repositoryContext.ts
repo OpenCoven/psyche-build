@@ -293,7 +293,7 @@ function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
   }
 
   if (rawParts.authority.includes('@') || url.username || url.password) {
-    return `${url.protocol}//${url.host}${rawParts.suffix}`;
+    return serializeSanitizedUrl(url);
   }
 
   return remoteUrl;
@@ -317,6 +317,13 @@ function extractSchemeUrlParts(remoteUrl: string): { authority: string; suffix: 
     authority: remoteUrl.slice(schemeIndex + 3, pathStart),
     suffix: remoteUrl.slice(pathStart),
   };
+}
+
+function serializeSanitizedUrl(url: URL): string {
+  const sanitized = new URL(url.toString());
+  sanitized.username = '';
+  sanitized.password = '';
+  return `${sanitized.protocol}//${sanitized.host}${sanitized.pathname}${sanitized.search}${sanitized.hash}`;
 }
 
 function looksCredentialBearing(remoteUrl: string): boolean {
