@@ -477,6 +477,34 @@ describe('native Coven launch routing', () => {
     expect(creates).toBe(0);
   });
 
+  it('drops a launch when the active project is rehydrated onto another worktree', async () => {
+    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/one' };
+    let active = project;
+    let frame: (() => void) | null = null;
+    let creates = 0;
+    const spawnCovenThread = compileFunction<(value: typeof project) => Promise<Record<string, unknown> | null>>(
+      functionSource('spawnCovenThread'),
+      {
+        state: { env: { coven_path: '/bin/coven' } },
+        activeProject: () => active,
+        selectedWorktree: (value: typeof project) => ({ path: value.selectedWorktreePath }),
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        requestAnimationFrame: (callback: () => void) => { frame = callback; },
+        covenChatLaunch: () => ({ command: '/bin/coven', args: ['chat'] }),
+        createThread: () => { creates += 1; return {}; },
+      },
+    );
+
+    const pending = spawnCovenThread(project);
+    await Promise.resolve();
+    active = { id: project.id, root: project.root, selectedWorktreePath: '/repo/two' };
+    expect(frame).not.toBeNull();
+    (frame as unknown as () => void)();
+    await expect(pending).resolves.toBeNull();
+    expect(creates).toBe(0);
+  });
+
   it('drops a launch when the selected worktree changes during the frame wait', async () => {
     const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/one' };
     let frame: (() => void) | null = null;

@@ -4141,12 +4141,12 @@
     if (!(await showTerminalView())) return null;
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
     var currentProject = activeProject();
-    var currentWorktree = selectedWorktree(project);
+    var currentWorktree = selectedWorktree(currentProject);
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
     return createThread({
-      project: project,
+      project: currentProject,
       worktreePath: launch.cwd,
       name: "Coven",
       kind: "coven-chat",
