@@ -145,6 +145,10 @@ function parseSshAuthority(authority: string): string | null {
   }
 
   const parsed = parseHostAndPort(hostPart);
+  if (parsed?.port && parsed.hostname === 'github.com') {
+    return null;
+  }
+
   return parsed?.host ?? null;
 }
 

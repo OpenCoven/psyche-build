@@ -207,6 +207,22 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
+  it('skips malformed get-url output with leading or trailing whitespace instead of trimming it into validity', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: 'origin\n' },
+      'git\0remote': { stdout: 'origin\nupstream\n' },
+      'git\0remote\0get-url\0origin': { stdout: ' git@github.com:OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git \n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+
+    expect(context.rawRemotes).toEqual([]);
+    expect(context.remotes).toEqual([]);
+  });
+
   it('throws a fixed error when required git reads fail or return malformed branch output', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const branchFailure = createRunner({

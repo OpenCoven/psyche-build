@@ -152,12 +152,7 @@ async function readRemoteUrl(
       return null;
     }
 
-    const remoteUrl = result.stdout.trim();
-    if (!remoteUrl || ASCII_CONTROL.test(remoteUrl)) {
-      return null;
-    }
-
-    return remoteUrl;
+    return parseRemoteUrlOutput(result.stdout);
   } catch {
     return null;
   }
@@ -182,6 +177,27 @@ async function runRequiredGitCommand(
 
 function isValidRemoteName(name: string): boolean {
   return name.length > 0 && name === name.trim() && !ASCII_CONTROL.test(name);
+}
+
+function parseRemoteUrlOutput(stdout: string): string | null {
+  const remoteUrl = stripSingleTrailingLineTerminator(stdout);
+  if (!remoteUrl || remoteUrl !== remoteUrl.trim() || ASCII_CONTROL.test(remoteUrl)) {
+    return null;
+  }
+
+  return remoteUrl;
+}
+
+function stripSingleTrailingLineTerminator(value: string): string {
+  if (value.endsWith('\r\n')) {
+    return value.slice(0, -2);
+  }
+
+  if (value.endsWith('\n')) {
+    return value.slice(0, -1);
+  }
+
+  return value;
 }
 
 function orderNamedEntries<T extends { name: string }>(

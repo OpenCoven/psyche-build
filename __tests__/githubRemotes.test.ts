@@ -130,6 +130,8 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'git@github\\com:OpenCoven/psyche-build.git'],
       ['origin', 'git@[2001:db8::1]:OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven'],
+      ['origin', 'ssh://git@github.com:22/OpenCoven/psyche-build.git'],
+      ['origin', 'ssh://git@github.com:2222/OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open%20Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche build.git'],
