@@ -115,6 +115,32 @@ describe('GitHub domain validation', () => {
     });
   });
 
+  it('normalizes empty review decisions to null and rejects other unexpected strings', () => {
+    const noDecision = parsePullRequestOverview(
+      createOverviewValue({
+        reviewDecision: '',
+      }),
+      repository,
+      null,
+      [],
+      [],
+      '2026-08-06T18:01:00Z',
+    );
+
+    expect(noDecision.reviewDecision).toBeNull();
+
+    expect(() => parsePullRequestOverview(
+      createOverviewValue({
+        reviewDecision: 'COMMENTED',
+      }),
+      repository,
+      null,
+      [],
+      [],
+      '2026-08-06T18:01:00Z',
+    )).toThrowError(new Error('invalid pull request overview'));
+  });
+
   it('rejects malformed provider values instead of partially rendering them', () => {
     expect(() => parsePullRequestOverview(
       {

@@ -235,7 +235,7 @@ export function parsePullRequestOverview(
         getOwnDataProperty(record, 'reviewRequests', invalidPullRequestOverview),
       ),
       viewerPermissions: parsedPermissions,
-      reviewDecision: parseNullableEnumValue(
+      reviewDecision: parseNullableEnumValueOrEmptyString(
         getOwnDataProperty(record, 'reviewDecision', invalidPullRequestOverview),
         REVIEW_DECISIONS,
         invalidPullRequestOverview,
@@ -405,6 +405,17 @@ function parseNullableEnumValue<const T extends readonly string[]>(
     return null;
   }
   return requireEnumValue(value, allowed, onError);
+}
+
+function parseNullableEnumValueOrEmptyString<const T extends readonly string[]>(
+  value: unknown,
+  allowed: T,
+  onError: ErrorFactory,
+): T[number] | null {
+  if (value === '') {
+    return null;
+  }
+  return parseNullableEnumValue(value, allowed, onError);
 }
 
 function parseNullableNonEmptyString(value: unknown, onError: ErrorFactory): string | null {
