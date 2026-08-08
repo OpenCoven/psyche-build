@@ -197,7 +197,15 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.log(`\npsyche daemon shutting down (${signal})`);
     tmux.stop();
     wss.close();
-    void Promise.allSettled([controlServer.close(), host.close()])
+    // Close the control socket before releasing the owner fence. host.close()
+    // frees the fence, so if it ran concurrently a successor daemon could win
+    // the fence and try to bind the same endpoint while this control server is
+    // still tearing down its listener/socket file. Sequential teardown (reverse
+    // of mount order) closes and unlinks the socket first, then frees the fence.
+    void controlServer.close()
+      .catch(() => undefined)
+      .then(() => host.close())
+      .catch(() => undefined)
       .finally(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

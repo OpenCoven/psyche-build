@@ -38,20 +38,26 @@ async function startMountedDaemon(): Promise<{
   endpoint: string;
   operatorToken: string;
   recordedKeys: string[];
+  recordedResizes: Array<{ paneId: string; cols: number; rows: number }>;
   launched: Array<{ harness: string; prompt: string }>;
 }> {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'psyche-mount-proj-'));
   tempRoots.push(projectRoot);
   const canonicalRoot = await canonicalizeProjectRoot(projectRoot);
 
-  // Recording tmux: capture sendKeysHex so we can assert the pane mutation
-  // reached the effect boundary.
+  // Recording tmux: capture the effect-boundary calls so a mutation driven
+  // through the mounted socket can be asserted to reach real tmux. The resize
+  // test asserts against recordedResizes; recordedKeys is captured for parity
+  // with the sendKeysHex boundary.
   const recordedKeys: string[] = [];
+  const recordedResizes: Array<{ paneId: string; cols: number; rows: number }> = [];
   const tmux = new TmuxControl('psyche-mount-test');
   vi.spyOn(tmux, 'sendKeysHex').mockImplementation((_paneId: string, data: Buffer) => {
     recordedKeys.push(data.toString('hex'));
   });
-  vi.spyOn(tmux, 'resizePane').mockImplementation(() => {});
+  vi.spyOn(tmux, 'resizePane').mockImplementation((paneId: string, cols: unknown, rows: unknown) => {
+    recordedResizes.push({ paneId, cols: Number(cols), rows: Number(rows) });
+  });
 
   // Stub coven client: launchSession returns a summary scoped INSIDE the
   // project root (the bridge enforces scope via realpath).
@@ -104,6 +110,7 @@ async function startMountedDaemon(): Promise<{
     endpoint,
     operatorToken: await credentials.operatorToken(),
     recordedKeys,
+    recordedResizes,
     launched,
   };
 }
@@ -132,6 +139,7 @@ describe('mounted control socket end-to-end', () => {
     );
 
     expect(outcome.status).toBe('succeeded');
+    expect(daemon.recordedResizes).toEqual([{ paneId: '%1', cols: 100, rows: 40 }]);
   });
 
   it('drives a coven session launch and returns a typed summary', async () => {
@@ -163,6 +171,8 @@ describe('mounted control socket end-to-end', () => {
 
   it('refuses a client presenting a bogus token', async () => {
     const daemon = await startMountedDaemon();
+    // The rejection must be the server-side auth failure, not a transport error;
+    // ControlClient surfaces hello errors as "<code>: <message>".
     await expect(
       ControlClient.connect({
         projectRoot: daemon.projectRoot,
@@ -170,6 +180,6 @@ describe('mounted control socket end-to-end', () => {
         token: 'not-the-real-token',
         clientName: 'intruder',
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('unauthorized: invalid control token');
   });
 });
