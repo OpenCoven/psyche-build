@@ -127,6 +127,49 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
+  it('preserves non-ASCII branch and remote names exactly when reading Git output', async () => {
+    const nbsp = '\u00a0';
+    const branch = `feat${nbsp}pr`;
+    const remoteName = `origi${nbsp}n`;
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner, calls } = createRunner({
+      'git\0branch\0--show-current': { stdout: `${branch}\n` },
+      [`git\0config\0branch.${branch}.remote`]: { stdout: `${remoteName}\r\n` },
+      'git\0remote': { stdout: `${remoteName}\r\n` },
+      [`git\0remote\0get-url\0${remoteName}`]: { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+
+    expect(context.branch).toBe(branch);
+    expect(context.upstreamRemote).toBe(remoteName);
+    expect(context.rawRemotes).toEqual([
+      { name: remoteName, url: 'https://github.com/OpenCoven/psyche-build.git' },
+    ]);
+    expect(calls).toEqual([
+      {
+        command: 'git',
+        args: ['branch', '--show-current'],
+        options: { cwd: worktreePath },
+      },
+      {
+        command: 'git',
+        args: ['config', `branch.${branch}.remote`],
+        options: { cwd: worktreePath, allowFailure: true },
+      },
+      {
+        command: 'git',
+        args: ['remote'],
+        options: { cwd: worktreePath },
+      },
+      {
+        command: 'git',
+        args: ['remote', 'get-url', remoteName],
+        options: { cwd: worktreePath, allowFailure: true },
+      },
+    ]);
+  });
+
   it('treats detached HEAD as branchless and never queries branch config', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner, calls } = createRunner({
@@ -179,12 +222,13 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
-  it('preserves explicit enterprise HTTPS ports in normalized repository refs', async () => {
+  it('canonicalizes repository identity while preserving enterprise HTTPS web ports and ignoring SSH transport ports', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'upstream\n' },
-      'git\0remote': { stdout: 'upstream\n' },
+      'git\0remote': { stdout: 'origin\nupstream\n' },
+      'git\0remote\0get-url\0origin': { stdout: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit\n' },
       'git\0remote\0get-url\0upstream': { stdout: 'https://ghe.example.test:443/OpenCoven/psyche-build.git\n' },
     });
 
@@ -192,6 +236,7 @@ describe('readRepositoryContext', () => {
 
     expect(context.rawRemotes).toEqual([
       { name: 'upstream', url: 'https://ghe.example.test:443/OpenCoven/psyche-build.git' },
+      { name: 'origin', url: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -204,10 +249,20 @@ describe('readRepositoryContext', () => {
           url: 'https://ghe.example.test:443/OpenCoven/psyche-build',
         },
       },
+      {
+        name: 'origin',
+        rawUrl: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit',
+        repository: {
+          host: 'ghe.example.test',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://ghe.example.test/OpenCoven/psyche-build',
+        },
+      },
     ]);
   });
 
-  it('skips malformed get-url output with leading or trailing whitespace instead of trimming it into validity', async () => {
+  it('skips malformed get-url output with ASCII padding instead of trimming it into validity', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
@@ -221,6 +276,19 @@ describe('readRepositoryContext', () => {
 
     expect(context.rawRemotes).toEqual([]);
     expect(context.remotes).toEqual([]);
+  });
+
+  it('rejects ASCII-padded required Git names instead of trimming them', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+      'git\0remote': { stdout: 'origin \n' },
+    });
+
+    await expect(readRepositoryContext(worktreePath, runner)).rejects.toThrowError(
+      new Error('unable to read Git repository context'),
+    );
   });
 
   it('throws a fixed error when required git reads fail or return malformed branch output', async () => {

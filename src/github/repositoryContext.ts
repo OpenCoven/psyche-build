@@ -1,4 +1,9 @@
-import { normalizeGitHubRemote, orderGitHubRemotes, type GitHubRemote } from './remotes.js';
+import {
+  compareText,
+  normalizeGitHubRemote,
+  orderGitHubRemotes,
+  type GitHubRemote,
+} from './remotes.js';
 
 export interface ReadOnlyCommandRunner {
   run(
@@ -21,7 +26,7 @@ export interface RepositoryContext {
   remotes: readonly GitHubRemote[];
 }
 
-const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
+const ASCII_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
 const REPOSITORY_CONTEXT_ERROR = 'unable to read Git repository context';
 
 export async function readRepositoryContext(
@@ -71,14 +76,10 @@ async function readCurrentBranch(
   runner: ReadOnlyCommandRunner,
 ): Promise<string | null> {
   const stdout = await runRequiredGitCommand(worktreePath, runner, ['branch', '--show-current']);
-  const branch = stdout.trim();
+  const branch = parseRequiredValue(stdout);
 
-  if (!branch) {
+  if (branch === null) {
     return null;
-  }
-
-  if (ASCII_CONTROL.test(branch)) {
-    throw new Error(REPOSITORY_CONTEXT_ERROR);
   }
 
   return branch;
@@ -92,19 +93,18 @@ async function readRemoteNames(
   const remoteNames: string[] = [];
   const seen = new Set<string>();
 
-  for (const line of stdout.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed) {
+  for (const line of splitGitOutputLines(stdout)) {
+    if (!line) {
       continue;
     }
 
-    if (!isValidRemoteName(trimmed)) {
+    if (!isValidRemoteName(line)) {
       throw new Error(REPOSITORY_CONTEXT_ERROR);
     }
 
-    if (!seen.has(trimmed)) {
-      seen.add(trimmed);
-      remoteNames.push(trimmed);
+    if (!seen.has(line)) {
+      seen.add(line);
+      remoteNames.push(line);
     }
   }
 
@@ -126,12 +126,8 @@ async function readBranchRemote(
       return null;
     }
 
-    const remoteName = result.stdout.trim();
-    if (!remoteName || !isValidRemoteName(remoteName)) {
-      return null;
-    }
-
-    return remoteName;
+    const remoteName = parseOptionalValue(result.stdout);
+    return remoteName && isValidRemoteName(remoteName) ? remoteName : null;
   } catch {
     return null;
   }
@@ -176,16 +172,37 @@ async function runRequiredGitCommand(
 }
 
 function isValidRemoteName(name: string): boolean {
-  return name.length > 0 && name === name.trim() && !ASCII_CONTROL.test(name);
+  return name.length > 0 && !ASCII_WHITESPACE_OR_CONTROL.test(name);
 }
 
-function parseRemoteUrlOutput(stdout: string): string | null {
-  const remoteUrl = stripSingleTrailingLineTerminator(stdout);
-  if (!remoteUrl || remoteUrl !== remoteUrl.trim() || ASCII_CONTROL.test(remoteUrl)) {
+function parseRequiredValue(stdout: string): string | null {
+  const value = stripSingleTrailingLineTerminator(stdout);
+  if (!value) {
     return null;
   }
 
-  return remoteUrl;
+  if (ASCII_WHITESPACE_OR_CONTROL.test(value)) {
+    throw new Error(REPOSITORY_CONTEXT_ERROR);
+  }
+
+  return value;
+}
+
+function parseOptionalValue(stdout: string): string | null {
+  const value = stripSingleTrailingLineTerminator(stdout);
+  if (!value || ASCII_WHITESPACE_OR_CONTROL.test(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function parseRemoteUrlOutput(stdout: string): string | null {
+  return parseOptionalValue(stdout);
+}
+
+function splitGitOutputLines(stdout: string): string[] {
+  return stdout.split('\n').map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line));
 }
 
 function stripSingleTrailingLineTerminator(value: string): string {
@@ -221,7 +238,7 @@ function orderNamedEntries<T extends { name: string }>(
       return priorityDiff;
     }
 
-    return left.name.localeCompare(right.name);
+    return compareText(left.name, right.name);
   });
 }
 
