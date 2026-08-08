@@ -39,6 +39,33 @@ export interface ControlServerOptions {
   credentials: ControlCredentialStore;
 }
 
+/** Cap a single newline-delimited frame so a peer cannot exhaust host memory. */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
+/** Every command kind the runtime knows how to execute. */
+const KNOWN_COMMAND_KINDS: ReadonlySet<ControlCommand['kind']> = new Set([
+  'orchestration.execute',
+  'pane.spawn',
+  'pane.prompt',
+  'pane.interrupt',
+  'pane.delegate',
+  'pane.takeover',
+  'pane.input',
+  'pane.terminal.open',
+  'pane.resize',
+  'pane.focus',
+  'pane.kill',
+  'pane.respawn',
+  'pane.conflict.open',
+  'pane.option.update',
+  'pane.meta.update',
+  'ritual.launch',
+  'coven.session.launch',
+  'coven.session.open',
+  'coven.desktop.action',
+  'coven.capability.execute',
+]);
+
 function actorKindForPrincipal(kind: ControlPrincipal['kind']): ControlActorKind {
   switch (kind) {
     case 'operator':
@@ -246,19 +273,26 @@ export class ControlServer {
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
       buffer += chunk;
+      if (buffer.length > MAX_FRAME_BYTES && buffer.indexOf('\n') < 0) {
+        fail('frame_too_large', 'control frame exceeds maximum size');
+        buffer = '';
+        return;
+      }
       let newline = buffer.indexOf('\n');
       while (newline >= 0) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
         if (line.trim().length === 0) continue;
-        void this.handleLine(line, write, fail, {
+        this.handleLine(line, write, fail, {
           getPrincipal: () => principal,
           setPrincipal: (value, id) => {
             principal = value;
             clientId = id;
           },
           getClientId: () => clientId,
+        }).catch((error) => {
+          fail('internal', error instanceof Error ? error.message : 'internal error');
         });
       }
     });
@@ -320,6 +354,20 @@ export class ControlServer {
         });
         return;
       case 'command.submit': {
+        if (!KNOWN_COMMAND_KINDS.has(request.command.kind)) {
+          write({
+            version: 1,
+            type: 'command.result',
+            requestId: request.requestId,
+            commandId: request.command.id,
+            outcome: {
+              status: 'rejected',
+              code: 'bad_request',
+              message: `unknown command kind: ${String(request.command.kind)}`,
+            },
+          });
+          return;
+        }
         const outcome = await this.authority.submitAs(
           principal,
           request.command,

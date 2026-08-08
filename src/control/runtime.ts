@@ -452,6 +452,7 @@ export class ControlRuntime {
     id: string,
     record: { command: ControlCommand; outcome?: CommandOutcome; sequence: number },
   ): void {
+    this.commandRecords.delete(id);
     this.commandRecords.set(id, record);
     while (this.commandRecords.size > MAX_COMMAND_RECORDS) {
       const oldest = this.commandRecords.keys().next().value;

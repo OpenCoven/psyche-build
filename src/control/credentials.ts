@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalizeProjectRoot } from './projectIdentity.js';
 
@@ -83,6 +83,13 @@ export async function createControlCredentialStore(options: {
     try {
       const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<StoredCredentials>;
       if (typeof parsed.operatorToken === 'string' && typeof parsed.agentToken === 'string') {
+        // Best-effort re-assert 0600 in case an older version or external edit
+        // left the token file with looser permissions.
+        try {
+          await chmod(filePath, 0o600);
+        } catch {
+          // Non-fatal: on platforms without POSIX modes this is a no-op.
+        }
         cache = { operatorToken: parsed.operatorToken, agentToken: parsed.agentToken };
         return cache;
       }

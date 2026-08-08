@@ -167,8 +167,24 @@ export class ControlClient {
     if (this.closed) return;
     this.closed = true;
     await new Promise<void>((resolve) => {
-      this.socket.end(() => resolve());
-      this.socket.destroy();
+      if (this.socket.destroyed) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.socket.destroy();
+        done();
+      }, 1000);
+      timer.unref?.();
+      this.socket.once('close', done);
+      this.socket.end();
     });
   }
 

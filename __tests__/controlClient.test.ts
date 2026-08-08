@@ -176,4 +176,35 @@ describe('ControlClient over the socket transport', () => {
     await rejection;
     release?.();
   });
+
+  it('rejects an unknown command kind as bad_request without reaching the runtime', async () => {
+    const harness = await startHarness();
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'test-operator',
+    });
+    cleanups.push(() => client.close());
+
+    const bogus = {
+      ...inputCommand('cmd-bogus'),
+      kind: 'pane.nonexistent',
+    } as unknown as Parameters<ControlClient['submit']>[0];
+    const outcome = await client.submit(bogus);
+    expect(outcome).toMatchObject({ status: 'rejected', code: 'bad_request' });
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it('closes cleanly and resolves close() even after the socket is gone', async () => {
+    const harness = await startHarness();
+    const client = await ControlClient.connect({
+      projectRoot: harness.projectRoot,
+      endpoint: harness.endpoint,
+      token: harness.operatorToken,
+      clientName: 'test-operator',
+    });
+    await expect(client.close()).resolves.toBeUndefined();
+    await expect(client.close()).resolves.toBeUndefined();
+  });
 });
