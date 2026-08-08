@@ -26,6 +26,7 @@ export type CovenDiscoveryState = {
   message: string | null;
   requestId: number;
   refreshedAt: number | null;
+  stale: boolean;
 };
 
 export function isSafeCovenSessionId(id: unknown): id is string;

@@ -204,11 +204,13 @@ describe('Tauri Coven session model', () => {
 
   test('creates an idle discovery state and only shows first-request loading', () => {
     const initial = model.createCovenDiscoveryState();
+    const stale: boolean = initial.stale;
 
     expect(initial).toEqual({
       phase: 'idle', sessionsByProject: new Map(), message: null, requestId: 0, refreshedAt: null,
       stale: false,
     });
+    expect(stale).toBe(false);
     const first = model.beginCovenRequest(initial);
     expect(first).toEqual({
       requestId: 1,
@@ -218,12 +220,12 @@ describe('Tauri Coven session model', () => {
 
     const refreshed = model.beginCovenRequest({
       phase: 'ready', sessionsByProject: new Map([['/alpha', [{ id: 'live' }]]]),
-      message: 'still here', requestId: 3, refreshedAt: 10,
+      message: 'still here', requestId: 3, refreshedAt: 10, stale: false,
     });
     expect(refreshed.requestId).toBe(4);
     expect(refreshed.state).toEqual({
       phase: 'ready', sessionsByProject: new Map([['/alpha', [{ id: 'live' }]]]),
-      message: 'still here', requestId: 4, refreshedAt: 10,
+      message: 'still here', requestId: 4, refreshedAt: 10, stale: false,
     });
   });
 
