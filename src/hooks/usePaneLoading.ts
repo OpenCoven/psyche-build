@@ -2,7 +2,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { PsychePane, SidebarProject } from '../types.js';
 import { splitPane } from '../utils/tmux.js';
-import { rebindPaneByTitle } from '../utils/paneRebinding.js';
+import {
+  paneTmuxIdentityIsCurrent,
+  rebindPaneByTitle,
+} from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
@@ -543,7 +546,7 @@ export async function recreateKilledWorktreePanes(
   // Filter out panes that are being intentionally closed
   const worktreePanesToRecreate = panes.filter(pane => {
     // Pane must be missing from tmux and have a worktree path
-    if (allPaneIds.includes(pane.paneId) || !pane.worktreePath) {
+    if (paneTmuxIdentityIsCurrent(pane, allPaneIds) || !pane.worktreePath) {
       return false;
     }
 
@@ -653,7 +656,7 @@ export async function loadAndProcessPanes(
   // 3. "Invalid layout" errors when applying layouts with stale pane IDs
   if (isInitialLoad && allPaneIds.length > 0) {
     const staleShellPanes = reboundPanes.filter(
-      p => p.type === 'shell' && !allPaneIds.includes(p.paneId)
+      p => p.type === 'shell' && !paneTmuxIdentityIsCurrent(p, allPaneIds)
     );
 
     if (staleShellPanes.length > 0) {
@@ -662,7 +665,7 @@ export async function loadAndProcessPanes(
         'usePaneLoading'
       );
       reboundPanes = reboundPanes.filter(
-        p => !(p.type === 'shell' && !allPaneIds.includes(p.paneId))
+        p => !(p.type === 'shell' && !paneTmuxIdentityIsCurrent(p, allPaneIds))
       );
 
       // Save the cleaned config immediately to prevent these panes from reappearing
@@ -704,7 +707,7 @@ export async function loadAndProcessPanes(
   // Only attempt to recreate missing panes on initial load (only worktree panes, not shell)
   const missingPanes = (allPaneIds.length > 0 && reboundPanes.length > 0 && isInitialLoad)
     ? reboundPanes.filter(pane =>
-        !allPaneIds.includes(pane.paneId) && pane.type !== 'shell'
+        !paneTmuxIdentityIsCurrent(pane, allPaneIds) && pane.type !== 'shell'
       )
     : [];
 

@@ -1,6 +1,14 @@
 import { EventEmitter } from 'events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, utimesSync } from 'fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import type { PsychePane } from '../src/types.js';
@@ -83,6 +91,7 @@ describe('WorktreeCleanupService', () => {
   let worktreeRemoveError: Error | undefined;
   let liveTmuxPanePaths: string;
   let liveTmuxQueryError: Error | undefined;
+  let branchAdvanceBeforeDelete: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -93,6 +102,7 @@ describe('WorktreeCleanupService', () => {
     worktreeRemoveError = undefined;
     liveTmuxPanePaths = '';
     liveTmuxQueryError = undefined;
+    branchAdvanceBeforeDelete = undefined;
     currentConfig = {
       projectRoot: '/test/project',
       panes: [],
@@ -195,6 +205,21 @@ describe('WorktreeCleanupService', () => {
           worktreeMappings.get(cwd)?.delete(resolve(gitArgs[2]));
         }
         if (gitArgs[0] === 'branch' && gitArgs[1] === '-D') {
+          if (branchAdvanceBeforeDelete) {
+            branchOids.set(cwd, branchAdvanceBeforeDelete);
+          }
+          branchOids.delete(cwd);
+        }
+        if (gitArgs[0] === 'update-ref' && gitArgs[1] === '-d') {
+          if (branchAdvanceBeforeDelete) {
+            branchOids.set(cwd, branchAdvanceBeforeDelete);
+          }
+          const expectedOid = gitArgs[3];
+          if (branchOids.get(cwd) !== expectedOid) {
+            child.stderr?.emit('data', 'cannot lock ref: is at a different OID');
+            child.emit('close', 1);
+            return;
+          }
           branchOids.delete(cwd);
         }
         child.emit('close', 0);
@@ -366,15 +391,15 @@ describe('WorktreeCleanupService', () => {
 
     expect(gitCalls).toEqual(expect.arrayContaining([
       {
-        args: ['branch', '-D', 'react'],
+        args: ['update-ref', '-d', 'refs/heads/react', 'abc123'],
         cwd: '/test/project',
       },
       {
-        args: ['branch', '-D', 'react'],
+        args: ['update-ref', '-d', 'refs/heads/react', 'abc123'],
         cwd: '/test/project/docs-ui',
       },
       {
-        args: ['branch', '-D', 'react'],
+        args: ['update-ref', '-d', 'refs/heads/react', 'abc123'],
         cwd: '/test/project/theme-schemas',
       },
     ]));
@@ -407,7 +432,7 @@ describe('WorktreeCleanupService', () => {
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      expect.arrayContaining(['branch', '-D']),
+      expect.arrayContaining(['update-ref', '-d']),
       expect.anything()
     );
     expect(logger.warn).toHaveBeenCalledWith(
@@ -438,6 +463,7 @@ describe('WorktreeCleanupService', () => {
       currentProjectRoot: '/test/project',
       deleteBranch: true,
     });
+
     const reservation = await service.beginWorktreeReuseReservation(worktreePath);
     reservation.cancel();
     await service.cleanupQueue;
@@ -447,6 +473,55 @@ describe('WorktreeCleanupService', () => {
       expect.arrayContaining(['worktree', 'remove']),
       expect.anything()
     );
+  });
+
+  it('settles a retained reuse reservation when its exact recovery marker is acknowledged', async () => {
+    const cleanupRoot = mkdtempSync(join(process.cwd(), '.psyche-cleanup-test-'));
+    tempDirs.push(cleanupRoot);
+    const worktreePath = createReusableWorktree(cleanupRoot, 'retained');
+    const operationRelease = vi.fn(async () => {});
+    const projectRelease = vi.fn(async () => {});
+    acquireWorktreeOperationLeaseMock.mockResolvedValueOnce({
+      canonicalProjectRoot: cleanupRoot,
+      canonicalWorktreePath: worktreePath,
+      lockDir: join(cleanupRoot, '.psyche/runtime/worktree.lock'),
+      nonce: 'operation-generation',
+      release: operationRelease,
+    });
+    acquireProjectWorktreeLifecycleLeaseMock.mockResolvedValueOnce({
+      canonicalProjectRoot: cleanupRoot,
+      lockDir: join(cleanupRoot, '.psyche/runtime/project.lock'),
+      nonce: 'project-generation',
+      release: projectRelease,
+    });
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const reservation = await WorktreeCleanupService.getInstance()
+      .beginWorktreeReuseReservation(worktreePath, cleanupRoot);
+    const markerPath = join(cleanupRoot, '.psyche', 'runtime', 'marker-generation.json');
+    mkdirSync(join(cleanupRoot, '.psyche', 'runtime'), { recursive: true });
+    writeFileSync(markerPath, '{}');
+
+    const retained = reservation.retain() as unknown as {
+      associateRecoveryMarker: (marker: { path: string; generation: string }) => void;
+    };
+    expect(retained).toEqual(expect.objectContaining({
+      associateRecoveryMarker: expect.any(Function),
+    }));
+    retained.associateRecoveryMarker({
+      path: markerPath,
+      generation: 'incident-generation',
+    });
+    await reservation.cancel();
+    expect(operationRelease).not.toHaveBeenCalled();
+
+    rmSync(markerPath);
+    const deadline = Date.now() + 1_000;
+    while (!operationRelease.mock.calls.length && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    expect(operationRelease).toHaveBeenCalledOnce();
+    expect(projectRelease).toHaveBeenCalledOnce();
   });
 
   it('keeps cleanup queued during a reuse reservation invalid after pane persistence', async () => {
@@ -630,7 +705,7 @@ describe('WorktreeCleanupService', () => {
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['branch', '-D', 'react'],
+      ['update-ref', '-d', 'refs/heads/react', 'abc123'],
       expect.anything()
     );
     expect(logger.warn).toHaveBeenCalledWith(
@@ -870,7 +945,7 @@ describe('WorktreeCleanupService', () => {
     );
     expect(spawnMock).toHaveBeenCalledWith(
       'git',
-      ['branch', '-D', 'react'],
+      ['update-ref', '-d', 'refs/heads/react', 'abc123'],
       expect.objectContaining({ cwd: '/test/project' })
     );
   });
@@ -947,6 +1022,36 @@ describe('WorktreeCleanupService', () => {
       )
     ).toBe(false);
     expect(branchOids.has('/test/project')).toBe(false);
+  });
+
+  it('preserves a rollback branch that advances after validation but before deletion', async () => {
+    configureCleanupIdentity();
+    branchAdvanceBeforeDelete = 'advanced-oid';
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+
+    const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+      worktreePath: '/test/project/.psyche/worktrees/react',
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(branchOids.get('/test/project')).toBe('advanced-oid');
+  });
+
+  it('preserves a cleanup branch that advances after validation but before deletion', async () => {
+    configureCleanupIdentity();
+    branchAdvanceBeforeDelete = 'advanced-oid';
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+
+    await enqueueAndWait(service);
+
+    expect(branchOids.get('/test/project')).toBe('advanced-oid');
   });
 
   it('tracks destructive Git children in both filesystem leases until close', async () => {
@@ -1157,7 +1262,7 @@ describe('WorktreeCleanupService', () => {
     );
     expect(spawnMock).not.toHaveBeenCalledWith(
       'git',
-      ['branch', '-D', 'react'],
+      ['update-ref', '-d', 'refs/heads/react', 'abc123'],
       expect.anything(),
     );
     expect(worktreeMappings.get('/test/project')?.get(

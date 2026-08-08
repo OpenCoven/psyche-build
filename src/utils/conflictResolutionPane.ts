@@ -7,6 +7,11 @@
 import type { PsychePane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
+  assertTmuxGenerationUnchanged,
+  captureTmuxGeneration,
+  tearDownGenerationBoundPane,
+} from './TmuxGenerationGuard.js';
+import {
   enforceControlPaneSize,
   ensurePaneBorderStatusForCurrentSession,
   splitPane,
@@ -126,9 +131,13 @@ async function createConflictResolutionPaneWithReservation(
 
   // Create new pane. From this point onward, every fallible operation is
   // guarded by exact persistence or verified teardown/recovery.
+  const allocationGeneration = captureTmuxGeneration(
+    tmuxService,
+    'conflict pane allocation',
+  );
   const paneInfo = splitPane();
   const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
+  const tmuxServerIdentity = allocationGeneration;
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
@@ -143,11 +152,11 @@ async function createConflictResolutionPaneWithReservation(
   };
 
   try {
-    if (!tmuxServerIdentity) {
-      throw new Error(
-        `Could not capture tmux server generation for conflict pane ${paneInfo}`,
-      );
-    }
+    assertTmuxGenerationUnchanged(
+      tmuxService,
+      allocationGeneration,
+      'conflict pane allocation',
+    );
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (!(await tmuxService.paneExists(paneInfo))) {
       throw new Error(`newly split conflict pane ${paneInfo} is not present`);
@@ -157,7 +166,11 @@ async function createConflictResolutionPaneWithReservation(
     await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
     await options.persistConflictPane(newPane);
   } catch (error) {
-    const teardown = await tearDownConflictPane(tmuxService, paneInfo);
+    const teardown = await tearDownGenerationBoundPane(
+      tmuxService,
+      paneInfo,
+      allocationGeneration,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainPaneRecovery({
@@ -300,7 +313,11 @@ async function createConflictResolutionPaneWithReservation(
         options.sessionProjectRoot,
         [{ id: newPane.id, paneId: newPane.paneId }],
         async () => {
-          teardown = await tearDownConflictPane(tmuxService, paneInfo);
+          teardown = await tearDownGenerationBoundPane(
+            tmuxService,
+            paneInfo,
+            tmuxServerIdentity,
+          );
           if (!teardown || teardown.presence !== 'absent') {
             throw new Error(
               `could not confirm conflict pane ${paneInfo} is closed (${

@@ -4,6 +4,11 @@ import { execSync } from 'child_process';
 import type { PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
+  assertTmuxGenerationUnchanged,
+  captureTmuxGeneration,
+  tearDownGenerationBoundPane,
+} from './TmuxGenerationGuard.js';
+import {
   ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
   getTerminalDimensions,
@@ -142,7 +147,15 @@ async function persistPaneBeforeAgentLaunch(
 async function terminatePaneForRollback(
   tmuxService: TmuxService,
   paneId: string,
+  allocationGeneration?: import('../services/TmuxServerIdentity.js').TmuxServerIdentity,
 ): Promise<VerifiedPaneTeardownResult> {
+  if (allocationGeneration) {
+    return tearDownGenerationBoundPane(
+      tmuxService,
+      paneId,
+      allocationGeneration,
+    );
+  }
   return tearDownPaneWithVerification({
     probe: () => probePanePresence(tmuxService, paneId),
     kill: () => tmuxService.killPane(paneId),
@@ -416,6 +429,10 @@ async function createPaneWithReuseReservation(
   let worktreeCreatedByThisAttempt = false;
   let rollbackOwnershipLostReason: string | undefined;
 
+  const allocationGeneration = captureTmuxGeneration(
+    tmuxService,
+    'pane allocation',
+  );
   // Self-healing: Try to create pane, if it fails due to stale controlPaneId, fix and retry
   try {
     if (isFirstContentPane) {
@@ -474,7 +491,7 @@ async function createPaneWithReuseReservation(
     }
   }
 
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
+  const tmuxServerIdentity = allocationGeneration;
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
@@ -497,8 +514,18 @@ async function createPaneWithReuseReservation(
   // failure must either leave an exact durable record or prove the pane is
   // gone. Construct the identity before touching any fallible post-split
   // operation so uncertain teardown has something precise to retain.
-  if (!tmuxServerIdentity) {
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+  try {
+    assertTmuxGenerationUnchanged(
+      tmuxService,
+      allocationGeneration,
+      'pane allocation',
+    );
+  } catch (error) {
+    const teardown = await tearDownGenerationBoundPane(
+      tmuxService,
+      paneInfo,
+      allocationGeneration,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainPaneRecovery({
@@ -506,7 +533,7 @@ async function createPaneWithReuseReservation(
         sessionProjectRoot,
         pane: newPane,
         operation: 'pane-creation-generation',
-        reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
+        reason: `${error instanceof Error ? error.message : String(error)}; pane teardown is ${teardown.presence}`,
         reservation: options.reuseReservation,
         persistConfigRecovery: async () => ({
           durable: false,
@@ -515,11 +542,11 @@ async function createPaneWithReuseReservation(
       });
     if (recovery?.retained) {
       throw new PaneLifecycleReservationRetainedError(
-        `Could not capture tmux server generation for pane "${slug}"; ${recovery.message}`,
+        `Could not verify tmux server generation for pane "${slug}"; ${recovery.message}`,
       );
     }
     throw new Error(
-      `Could not capture tmux server generation for pane "${slug}"${
+      `Could not verify tmux server generation for pane "${slug}"${
         recovery ? `; ${recovery.message}` : ''
       }`,
     );
@@ -545,7 +572,11 @@ async function createPaneWithReuseReservation(
       await tmuxService.refreshClient();
     }
   } catch (error) {
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const teardown = await terminatePaneForRollback(
+      tmuxService,
+      paneInfo,
+      tmuxServerIdentity,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainPaneRecovery({
@@ -621,7 +652,11 @@ async function createPaneWithReuseReservation(
       PSYCHE_TMUX_PANE_ID: paneInfo,
     });
   } catch (error) {
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const teardown = await terminatePaneForRollback(
+      tmuxService,
+      paneInfo,
+      tmuxServerIdentity,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainRecoveryAfterUncertainTeardown(
@@ -867,7 +902,11 @@ async function createPaneWithReuseReservation(
       undefined,
       error instanceof Error ? error : undefined
     );
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const teardown = await terminatePaneForRollback(
+      tmuxService,
+      paneInfo,
+      tmuxServerIdentity,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainRecoveryAfterUncertainTeardown(
@@ -938,7 +977,11 @@ async function createPaneWithReuseReservation(
       `worktree_created hook failed for ${slug}: ${hookError}`,
       'paneCreation'
     );
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const teardown = await terminatePaneForRollback(
+      tmuxService,
+      paneInfo,
+      tmuxServerIdentity,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainRecoveryAfterUncertainTeardown(
@@ -1016,7 +1059,11 @@ async function createPaneWithReuseReservation(
     await persistPaneBeforeAgentLaunch(options, sessionProjectRoot, newPane);
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
-    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const teardown = await terminatePaneForRollback(
+      tmuxService,
+      paneInfo,
+      tmuxServerIdentity,
+    );
     const recovery = teardown.presence === 'absent'
       ? undefined
       : await retainRecoveryAfterUncertainTeardown(

@@ -1,6 +1,9 @@
 import path from 'path';
 import type { PsychePane } from '../types.js';
-import { rebindPaneByTitle } from '../utils/paneRebinding.js';
+import {
+  paneTmuxIdentityIsCurrent,
+  rebindPaneByTitle,
+} from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
@@ -12,6 +15,7 @@ import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
+import { sameTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 
 /**
  * Enforces that tmux pane titles match the encoded config title for each pane.
@@ -172,7 +176,7 @@ export function rebindAndFilterPanes(
   // Filter out dead shell panes, keep worktree panes
   const activePanes = reboundPanes.filter(pane => {
     // If we have tmux data and this pane is not found
-    if (allPaneIds.length > 0 && !allPaneIds.includes(pane.paneId)) {
+    if (allPaneIds.length > 0 && !paneTmuxIdentityIsCurrent(pane, allPaneIds)) {
       // CRITICAL: Check if pane is being intentionally closed
       // If so, remove it from tracking (don't recreate, don't keep)
       if (lifecycleManager.isClosing(pane.id) || lifecycleManager.isClosing(pane.paneId)) {
@@ -224,12 +228,16 @@ export function rebindAndFilterPanes(
 
   // Track if shell panes were removed (for saving to config)
   const shellPanesRemoved = loadedPanes.some(p =>
-    p.type === 'shell' && allPaneIds.length > 0 && !allPaneIds.includes(p.paneId)
+    p.type === 'shell'
+    && allPaneIds.length > 0
+    && !paneTmuxIdentityIsCurrent(p, allPaneIds)
   );
 
   if (shellPanesRemoved) {
     LogService.getInstance().info(
-      `Removed ${loadedPanes.filter(p => p.type === 'shell' && !allPaneIds.includes(p.paneId)).length} stale shell pane(s) from config`,
+      `Removed ${loadedPanes.filter((p) => (
+        p.type === 'shell' && !paneTmuxIdentityIsCurrent(p, allPaneIds)
+      )).length} stale shell pane(s) from config`,
       'shellDetection'
     );
   }
@@ -315,30 +323,33 @@ export function mergePaneSnapshots(
   const explicitlyRemoved = new Set(
     previousPanes
       .filter((pane) => !nextById.has(pane.id))
-      .map((pane) => pane.id),
+      .map((pane) => paneLifecycleIdentityKey(pane)),
   );
   const freshIds = new Set(freshPanes.map((pane) => pane.id));
   const merged: PsychePane[] = [];
 
   for (const freshPane of freshPanes) {
-    if (explicitlyRemoved.has(freshPane.id)) {
+    const previousPane = previousById.get(freshPane.id);
+    if (
+      previousPane
+      && explicitlyRemoved.has(paneLifecycleIdentityKey(freshPane))
+      && samePaneLifecycleIdentity(previousPane, freshPane)
+    ) {
       continue;
     }
 
     const nextPane = nextById.get(freshPane.id);
-    const previousPane = previousById.get(freshPane.id);
-    if (nextPane && previousPane) {
+    if (
+      nextPane
+      && previousPane
+      && samePaneLifecycleIdentity(previousPane, freshPane)
+    ) {
       const delta = getPanePropertyDelta(previousPane, nextPane);
       merged.push(
         delta
           ? applyPanePropertyDelta(freshPane, delta)
           : freshPane
       );
-    } else if (nextPane && !previousPane) {
-      // A pane newly introduced by this caller has no originating record from
-      // which to derive a property-level intent, so it remains an explicit
-      // full-record addition.
-      merged.push(nextPane);
     } else {
       merged.push(freshPane);
     }
@@ -351,6 +362,30 @@ export function mergePaneSnapshots(
   }
 
   return merged;
+}
+
+function samePaneLifecycleIdentity(
+  left: PsychePane,
+  right: PsychePane,
+): boolean {
+  if (left.id !== right.id || left.paneId !== right.paneId) {
+    return false;
+  }
+  if (!left.tmuxServerIdentity || !right.tmuxServerIdentity) {
+    return left.tmuxServerIdentity === right.tmuxServerIdentity;
+  }
+  return sameTmuxServerIdentity(
+    left.tmuxServerIdentity,
+    right.tmuxServerIdentity,
+  );
+}
+
+function paneLifecycleIdentityKey(pane: PsychePane): string {
+  return `${pane.id}\0${pane.paneId}\0${
+    pane.tmuxServerIdentity
+      ? JSON.stringify(pane.tmuxServerIdentity)
+      : 'legacy'
+  }`;
 }
 
 interface PanePropertyDelta {

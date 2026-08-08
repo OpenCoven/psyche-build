@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
   readdirSync,
@@ -10,11 +10,12 @@ import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 
 const RECOVERY_DIRECTORY_NAME = 'worktree-recovery';
-const RECOVERY_MARKER_VERSION = 1;
+const RECOVERY_MARKER_VERSION = 2;
 
 export interface WorktreeRecoveryMarker {
   version: number;
   id: string;
+  generation?: string;
   projectRoot: string;
   worktreePath: string;
   pane: {
@@ -54,10 +55,12 @@ export async function writeWorktreeRecoveryMarker(
 ): Promise<{ marker: WorktreeRecoveryMarker; path: string }> {
   const projectRoot = canonicalizePathWithExistingAncestor(request.projectRoot);
   const worktreePath = canonicalizePathWithExistingAncestor(request.worktreePath);
-  const id = recoveryMarkerId(projectRoot, worktreePath, request.pane);
+  const generation = randomUUID();
+  const id = recoveryMarkerId(projectRoot, worktreePath, request.pane, generation);
   const marker: WorktreeRecoveryMarker = {
     version: RECOVERY_MARKER_VERSION,
     id,
+    generation,
     projectRoot,
     worktreePath,
     pane: {
@@ -209,9 +212,10 @@ function recoveryMarkerId(
   projectRoot: string,
   worktreePath: string,
   pane: { id: string; paneId: string },
+  generation: string,
 ): string {
   return createHash('sha256')
-    .update(`${projectRoot}\0${worktreePath}\0${pane.id}\0${pane.paneId}`)
+    .update(`${projectRoot}\0${worktreePath}\0${pane.id}\0${pane.paneId}\0${generation}`)
     .digest('hex');
 }
 
@@ -221,9 +225,16 @@ function isWorktreeRecoveryMarker(value: unknown): value is WorktreeRecoveryMark
   }
   const marker = value as Partial<WorktreeRecoveryMarker>;
   return (
-    marker.version === RECOVERY_MARKER_VERSION
+    (marker.version === 1 || marker.version === RECOVERY_MARKER_VERSION)
     && typeof marker.id === 'string'
     && /^[a-f0-9]{64}$/.test(marker.id)
+    && (
+      marker.version === 1
+      || (
+        typeof marker.generation === 'string'
+        && /^[0-9a-f-]{36}$/i.test(marker.generation)
+      )
+    )
     && typeof marker.projectRoot === 'string'
     && typeof marker.worktreePath === 'string'
     && typeof marker.pane?.id === 'string'

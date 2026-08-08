@@ -791,6 +791,14 @@ async function quarantineDeadLease(
     return false;
   }
 
+  const claim = await claimActiveLeaseRecord(paths.lockDir, record.nonce, 'stale-claim');
+  if (!claim) {
+    return false;
+  }
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity, now())) {
+    await restoreActiveLeaseRecordClaim(paths.lockDir, claim.path);
+    return false;
+  }
 
   // Keeping the nonce-specific quarantine directory prevents a delayed stale
   // contender from ever renaming a later live lease into this old quarantine.
@@ -804,6 +812,9 @@ async function quarantineDeadLease(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      if (code !== 'ENOENT') {
+        await restoreActiveLeaseRecordClaim(paths.lockDir, claim.path);
+      }
       return false;
     }
     throw error;
@@ -822,6 +833,15 @@ async function quarantineProjectLifecycleLease(
     return false;
   }
 
+  const claim = await claimActiveLeaseRecord(paths.lockDir, record.nonce, 'stale-claim');
+  if (!claim) {
+    return false;
+  }
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity, now())) {
+    await restoreActiveLeaseRecordClaim(paths.lockDir, claim.path);
+    return false;
+  }
+
   const quarantineDir = path.join(
     paths.runtimeDir,
     `${PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME}.stale.${record.nonce}`,
@@ -832,6 +852,9 @@ async function quarantineProjectLifecycleLease(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      if (code !== 'ENOENT') {
+        await restoreActiveLeaseRecordClaim(paths.lockDir, claim.path);
+      }
       return false;
     }
     throw error;
@@ -1264,12 +1287,19 @@ async function finalizeOwnedLeaseRelease(
   lockDir: string,
   nonce: string,
 ): Promise<void> {
+  const claim = await claimActiveLeaseRecord(lockDir, nonce, 'release-claim');
+  if (!claim) {
+    return;
+  }
   const releasedDir = `${lockDir}.released.${nonce}`;
   try {
     await rename(lockDir, releasedDir);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      if (code !== 'ENOENT') {
+        await restoreActiveLeaseRecordClaim(lockDir, claim.path);
+      }
       return;
     }
     throw error;
@@ -1285,6 +1315,53 @@ async function finalizeOwnedLeaseRelease(
   } catch {
     // The lease was released by the atomic rename. A leftover tombstone is
     // not an active lock and can be removed by later runtime maintenance.
+  }
+}
+
+async function claimActiveLeaseRecord(
+  lockDir: string,
+  nonce: string,
+  purpose: string,
+): Promise<{ path: string; record: WorktreeOperationLeaseRecord } | undefined> {
+  const recordPath = path.join(lockDir, LEASE_FILE_NAME);
+  const claimPath = path.join(
+    lockDir,
+    `${LEASE_FILE_NAME}.${purpose}.${nonce}.${randomUUID()}`,
+  );
+  try {
+    await rename(recordPath, claimPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EEXIST' || code === 'ENOTEMPTY') {
+      return undefined;
+    }
+    throw error;
+  }
+
+  let record: WorktreeOperationLeaseRecord | undefined;
+  try {
+    const parsed = JSON.parse(await readFile(claimPath, 'utf8')) as unknown;
+    record = isLeaseRecord(parsed) ? parsed : undefined;
+  } catch {
+    record = undefined;
+  }
+  if (!record || record.nonce !== nonce) {
+    await restoreActiveLeaseRecordClaim(lockDir, claimPath);
+    return undefined;
+  }
+  return { path: claimPath, record };
+}
+
+async function restoreActiveLeaseRecordClaim(
+  lockDir: string,
+  claimPath: string,
+): Promise<void> {
+  try {
+    await rename(claimPath, path.join(lockDir, LEASE_FILE_NAME));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
   }
 }
 

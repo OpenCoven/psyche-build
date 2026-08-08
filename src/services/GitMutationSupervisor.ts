@@ -21,6 +21,7 @@ export interface GitMutationSupervisorRequest {
   args: string[];
   mutationNonce: string;
   leases: PendingGitMutationLeaseRef[];
+  maxStderrBytes?: number;
 }
 
 export interface GitMutationSupervisorResult {
@@ -35,6 +36,7 @@ export interface RunGitMutationWithSupervisorOptions {
   pendingTimeoutMs?: number;
   mutationNonce?: string;
   now?: () => Date;
+  maxStderrBytes?: number;
   forkProcess?: (
     modulePath: string,
     args: readonly string[],
@@ -120,6 +122,7 @@ export async function runGitMutationWithSupervisor(
     args: [...options.args],
     mutationNonce,
     leases: leases.map(({ lockDir, leaseNonce }) => ({ lockDir, leaseNonce })),
+    ...(options.maxStderrBytes ? { maxStderrBytes: options.maxStderrBytes } : {}),
   };
 
   return new Promise<GitMutationSupervisorResult>((resolve, reject) => {

@@ -11,8 +11,10 @@ import type {
   GitMutationSupervisorRequest,
   GitMutationSupervisorResult,
 } from './GitMutationSupervisor.js';
+import { BoundedOutputBuffer } from '../utils/BoundedOutputBuffer.js';
 
 const TERMINATION_WAIT_MS = 2_000;
+const DEFAULT_MAX_STDERR_BYTES = 1_024 * 1_024;
 
 type SupervisorMessage = GitMutationSupervisorRequest;
 
@@ -37,7 +39,7 @@ interface ActiveGitProcess {
 }
 
 process.once('message', (message: SupervisorMessage) => {
-  void supervise(message)
+  void superviseGitMutation(message)
     .then((result) => report({ type: 'result', result }, true))
     .catch((error) => report({
       type: 'result',
@@ -45,39 +47,70 @@ process.once('message', (message: SupervisorMessage) => {
     }, true));
 });
 
-async function supervise(
+interface SupervisorDependencies {
+  isParentConnected?: () => boolean;
+  claimPendingGitMutationLease?: typeof claimPendingGitMutationLease;
+  clearPendingGitMutationLease?: typeof clearPendingGitMutationLease;
+  startStoppedGit?: typeof startStoppedGit;
+  installTerminationHandlers?: typeof installTerminationHandlers;
+  report?: typeof report;
+}
+
+export async function superviseGitMutation(
   request: GitMutationSupervisorRequest,
+  dependencies: SupervisorDependencies = {},
 ): Promise<GitMutationSupervisorResult> {
   validateRequest(request);
 
   const claimed: ClaimedLease[] = [];
+  let activeGit: ActiveGitProcess | undefined;
+  let parentLost = !(dependencies.isParentConnected ?? (() => process.connected !== false))();
+  const stopHandlers = (
+    dependencies.installTerminationHandlers ?? installTerminationHandlers
+  )(
+    () => activeGit,
+    request,
+    claimed,
+    () => {
+      parentLost = true;
+    },
+  );
+  const assertParentConnected = () => {
+    if (
+      parentLost
+      || !(dependencies.isParentConnected ?? (() => process.connected !== false))()
+    ) {
+      throw new Error('Git mutation supervisor lost its parent IPC channel');
+    }
+  };
+
   try {
+    assertParentConnected();
     for (const lease of request.leases) {
-      const supervisor = await claimPendingGitMutationLease(lease, {
+      const supervisor = await (
+        dependencies.claimPendingGitMutationLease ?? claimPendingGitMutationLease
+      )(lease, {
         mutationNonce: request.mutationNonce,
       });
       claimed.push({ lease, supervisor });
+      assertParentConnected();
     }
   } catch (error) {
     await Promise.allSettled(claimed.map(({ lease, supervisor }) => (
-      clearPendingGitMutationLease(lease, {
+      (dependencies.clearPendingGitMutationLease ?? clearPendingGitMutationLease)(lease, {
         mutationNonce: request.mutationNonce,
         supervisor,
       })
     )));
+    stopHandlers();
     throw error;
   }
 
-  report({ type: 'claimed' });
-  let activeGit: ActiveGitProcess | undefined;
-  const stopHandlers = installTerminationHandlers(
-    () => activeGit,
-    request,
-    claimed,
-  );
+  assertParentConnected();
+  (dependencies.report ?? report)({ type: 'claimed' });
 
   try {
-    activeGit = await startStoppedGit(
+    activeGit = await (dependencies.startStoppedGit ?? startStoppedGit)(
       request,
       claimed,
       (active) => {
@@ -152,11 +185,13 @@ async function startStoppedGit(
       stdio: ['ignore', 'ignore', 'pipe'],
     });
 
-  let stderr = '';
+  const stderr = new BoundedOutputBuffer(
+    request.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES,
+  );
   let closed = false;
   let closeError: Error | undefined;
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr += chunk.toString();
+    stderr.append(chunk);
   });
   const close = new Promise<GitMutationSupervisorResult>((resolve, reject) => {
     child.once('error', (error) => {
@@ -173,7 +208,7 @@ async function startStoppedGit(
         reject(closeError);
         return;
       }
-      resolve({ exitCode, stderr: stderr.trim() });
+      resolve({ exitCode, stderr: stderr.toString().trim() });
     });
   });
 
@@ -280,6 +315,7 @@ function installTerminationHandlers(
   active: () => ActiveGitProcess | undefined,
   request: GitMutationSupervisorRequest,
   claimed: readonly ClaimedLease[],
+  onParentLoss: () => void = () => {},
 ): () => void {
   let stopping: Promise<void> | undefined;
   const stop = (reason: string) => {
@@ -301,7 +337,10 @@ function installTerminationHandlers(
     ['SIGTERM', () => stop('Git mutation supervisor received SIGTERM')],
     ['SIGHUP', () => stop('Git mutation supervisor received SIGHUP')],
   ]);
-  const disconnectHandler = () => stop('Git mutation supervisor lost its parent IPC channel');
+  const disconnectHandler = () => {
+    onParentLoss();
+    stop('Git mutation supervisor lost its parent IPC channel');
+  };
   for (const [signal, handler] of signalHandlers) {
     process.once(signal, handler);
   }
@@ -368,6 +407,13 @@ function validateRequest(value: SupervisorMessage): void {
     || !Array.isArray(value.args)
     || value.args.some((arg) => typeof arg !== 'string')
     || typeof value.mutationNonce !== 'string'
+    || (
+      value.maxStderrBytes !== undefined
+      && (
+        !Number.isFinite(value.maxStderrBytes)
+        || value.maxStderrBytes <= 32
+      )
+    )
     || !Array.isArray(value.leases)
     || value.leases.length === 0
     || value.leases.some((lease) => (

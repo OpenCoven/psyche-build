@@ -1,8 +1,15 @@
 import { spawn } from 'node:child_process';
+import { BoundedOutputBuffer } from './BoundedOutputBuffer.js';
+
+const DEFAULT_MAX_STDERR_BYTES = 1_024 * 1_024;
 
 export interface GitProcessResult {
   exitCode: number | null;
   stderr: string;
+}
+
+export interface GitProcessOptions {
+  maxStderrBytes?: number;
 }
 
 /**
@@ -12,6 +19,7 @@ export interface GitProcessResult {
 export function runGitProcess(
   args: readonly string[],
   cwd: string,
+  options: GitProcessOptions = {},
 ): Promise<GitProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', [...args], {
@@ -19,13 +27,15 @@ export function runGitProcess(
       shell: false,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
-    let stderr = '';
+    const stderr = new BoundedOutputBuffer(
+      options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES,
+    );
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+      stderr.append(chunk);
     });
     child.once('error', reject);
     child.once('close', (exitCode) => {
-      resolve({ exitCode, stderr: stderr.trim() });
+      resolve({ exitCode, stderr: stderr.toString().trim() });
     });
   });
 }

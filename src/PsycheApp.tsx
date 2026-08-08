@@ -1689,9 +1689,14 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       // Pane was removed unexpectedly (e.g., user killed tmux pane manually)
       // Remove this exact record from a fresh locked registry. A stale UI
       // snapshot must never imply that a concurrently added daemon pane died.
-      void removePaneFromConfig(paneId).catch(() => undefined)
-
       const removedPane = panes.find((p) => p.id === paneId)
+      if (removedPane) {
+        void removePaneIdentitiesFromConfig([{
+          id: removedPane.id,
+          paneId: removedPane.paneId,
+          tmuxServerIdentity: removedPane.tmuxServerIdentity,
+        }]).catch(() => undefined)
+      }
       if (
         isDevMode &&
         removedPane?.worktreePath &&

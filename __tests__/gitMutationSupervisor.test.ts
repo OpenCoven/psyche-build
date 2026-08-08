@@ -212,4 +212,36 @@ describe('GitMutationSupervisor', () => {
     await lease.release();
     expect(existsSync(lease.lockDir)).toBe(false);
   });
+
+  it('bounds supervised Git stderr while preserving its useful tail', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-git-supervisor-test-'));
+    roots.push(projectRoot);
+    execFileSync('git', ['init', '--quiet'], { cwd: projectRoot });
+    const worktreePath = join(projectRoot, '.psyche', 'worktrees', 'feature');
+    const lease = await acquireWorktreeOperationLease({
+      projectRoot,
+      worktreePath,
+      operation: 'create',
+    });
+
+    const result = await runGitMutationWithSupervisor({
+      cwd: projectRoot,
+      args: [
+        '-c',
+        `alias.noisy=!node -e "process.stderr.write('x'.repeat(1024) + 'TAIL_MARKER')"`,
+        'noisy',
+      ],
+      leases: [{
+        lockDir: lease.lockDir,
+        leaseNonce: lease.nonce,
+        preparePendingGitMutation: lease.preparePendingGitMutation,
+      }],
+      maxStderrBytes: 96,
+    } as never);
+
+    expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(96);
+    expect(result.stderr).toContain('stderr truncated');
+    expect(result.stderr).toContain('TAIL_MARKER');
+    await lease.release();
+  });
 });

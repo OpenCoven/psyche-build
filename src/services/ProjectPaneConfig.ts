@@ -82,6 +82,7 @@ export interface ProjectPaneConfigTransaction {
 export interface ProjectPaneConfigPaneIdentity {
   id: string;
   paneId: string;
+  tmuxServerIdentity?: TmuxServerIdentity;
 }
 
 export type ProjectPaneConfigIdentityRemovalGuard = (
@@ -666,6 +667,10 @@ export async function compareAndRemoveProjectPaneConfigPaneIdentities(
       || !identity.id
       || typeof identity.paneId !== 'string'
       || !identity.paneId
+      || (
+        identity.tmuxServerIdentity !== undefined
+        && !isTmuxServerIdentity(identity.tmuxServerIdentity)
+      )
       || expectedById.has(identity.id)
     ) {
       throw new Error('Pane identity removal requires unique non-empty IDs and pane IDs');
@@ -858,9 +863,13 @@ function paneRecordIdentity(
     return undefined;
   }
   const paneId = asRecord(value).paneId;
+  const tmuxServerIdentity = tmuxServerIdentityOf(
+    asRecord(value).tmuxServerIdentity,
+  );
   return {
     id,
     paneId: typeof paneId === 'string' && paneId.length > 0 ? paneId : id,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
   };
 }
 
@@ -869,7 +878,20 @@ function hasPaneRecordIdentity(
   expected: ProjectPaneConfigPaneIdentity,
 ): boolean {
   const identity = paneRecordIdentity(value);
-  return identity?.id === expected.id && identity.paneId === expected.paneId;
+  return (
+    identity?.id === expected.id
+    && identity.paneId === expected.paneId
+    && (
+      !expected.tmuxServerIdentity
+      || Boolean(
+        identity.tmuxServerIdentity
+        && sameTmuxServerIdentity(
+          identity.tmuxServerIdentity,
+          expected.tmuxServerIdentity,
+        )
+      )
+    )
+  );
 }
 
 function assertUniquePaneIds(

@@ -3,13 +3,16 @@ import {
   writeWorktreeRecoveryMarker,
 } from '../services/WorktreeRecoveryMarker.js';
 import type {
+  RetainedWorktreeReservation,
+} from '../services/WorktreeCleanupService.js';
+import type {
   TmuxPanePresence,
   VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import { paneRecoveryInstructions } from './paneTeardown.js';
 
 export interface RetainableWorktreeReservation {
-  retain: () => void;
+  retain: () => RetainedWorktreeReservation | void;
 }
 
 export interface PaneRecoveryPersistenceResult {
@@ -70,7 +73,7 @@ export async function retainPaneRecovery(
 
   // Retain before writing the marker so even marker I/O failure cannot turn an
   // uncertain live pane into an automatically reusable/deletable worktree.
-  options.reservation?.retain();
+  const retainedReservation = options.reservation?.retain();
   try {
     const marker = await writeWorktreeRecoveryMarker({
       projectRoot: options.projectRoot,
@@ -81,6 +84,10 @@ export async function retainPaneRecovery(
       },
       operation: options.operation,
       reason: `${options.reason}; ${configRecovery.message}`,
+    });
+    retainedReservation?.associateRecoveryMarker?.({
+      path: marker.path,
+      generation: marker.marker.generation,
     });
     return {
       durable: true,

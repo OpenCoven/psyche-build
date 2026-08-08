@@ -26,6 +26,7 @@ import {
 } from '../../utils/paneTeardown.js';
 import {
   getCurrentTmuxServerIdentity,
+  sameTmuxServerIdentity,
   type TmuxServerIdentity,
 } from '../../services/TmuxServerIdentity.js';
 import {
@@ -82,8 +83,9 @@ function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
 async function tearDownOwnedPane(
   pane: PsychePane,
   panes: readonly PsychePane[],
-  currentGeneration: TmuxServerIdentity | undefined,
+  getCurrentGeneration: () => TmuxServerIdentity | undefined,
 ) {
+  const currentGeneration = getCurrentGeneration();
   const assessment = assessTmuxTeardownOwnership(
     pane as PsychePane & Record<string, unknown>,
     panes as Array<PsychePane & Record<string, unknown>>,
@@ -123,15 +125,41 @@ async function tearDownOwnedPane(
   }
   return tearDownFullPaneWithVerification({
     target: assessment.target,
-    probePane: (paneId) => probeTmuxPanePresence(paneId),
+    probePane: (paneId) => {
+      const generation = getCurrentGeneration();
+      if (!generation || !currentGeneration) return 'unknown';
+      if (!sameTmuxServerIdentity(generation, currentGeneration)) return 'absent';
+      return probeTmuxPanePresence(paneId);
+    },
     killPane: (paneId) => {
+      const generation = getCurrentGeneration();
+      if (
+        !generation
+        || !currentGeneration
+        || !sameTmuxServerIdentity(generation, currentGeneration)
+      ) {
+        return;
+      }
       execSync(`tmux kill-pane -t '${paneId}'`, {
         stdio: 'pipe',
         timeout: 5000,
       });
     },
-    probeWindow: probeTmuxWindowPresence,
+    probeWindow: (windowId) => {
+      const generation = getCurrentGeneration();
+      if (!generation || !currentGeneration) return 'unknown';
+      if (!sameTmuxServerIdentity(generation, currentGeneration)) return 'absent';
+      return probeTmuxWindowPresence(windowId);
+    },
     killWindow: (windowId) => {
+      const generation = getCurrentGeneration();
+      if (
+        !generation
+        || !currentGeneration
+        || !sameTmuxServerIdentity(generation, currentGeneration)
+      ) {
+        return;
+      }
       execSync(`tmux kill-window -t '${windowId}'`, {
         stdio: 'pipe',
         timeout: 5000,
@@ -304,7 +332,10 @@ async function executeCloseOption(
             const teardown = await tearDownOwnedPane(
               current,
               (_panes || []) as PsychePane[],
-              context.getTmuxServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+              () => (
+                context.getTmuxServerIdentity?.()
+                ?? getCurrentTmuxServerIdentity()
+              ),
             );
             if (teardown.presence !== 'absent') {
               const message = teardown.presence === 'unknown'

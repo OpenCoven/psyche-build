@@ -301,6 +301,33 @@ describe('attachAgentToWorktree', () => {
     ]);
   });
 
+  it('compensates without persisting when tmux generation changes during allocation', async () => {
+    const originalGeneration = {
+      pid: 4242,
+      processStartIdentity: 'original-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const replacementGeneration = {
+      pid: 5252,
+      processStartIdentity: 'replacement-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$2',
+    };
+    tmuxServiceMock.getServerIdentity
+      .mockReset()
+      .mockReturnValueOnce(originalGeneration)
+      .mockReturnValue(replacementGeneration);
+    tmuxServiceMock.killPane.mockImplementationOnce(async () => {
+      paneAlive = false;
+    });
+
+    await expect(attach()).rejects.toThrow(/generation changed during attached pane allocation/i);
+
+    expect(upsertProjectPaneConfigPanesMock).not.toHaveBeenCalled();
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+  });
+
   it('removes the exact persisted record inside the setup transaction after setup fails', async () => {
     const persistedSnapshots: PsychePane[][] = [];
     upsertProjectPaneConfigPanesMock.mockImplementation(async (

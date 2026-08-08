@@ -81,7 +81,7 @@ export interface WorktreeCreationReservation {
    * Makes complete/cancel intentionally non-destructive for an uncertain
    * lifecycle. A recovery marker must later be acknowledged by an operator.
    */
-  retain: () => void;
+  retain: () => RetainedWorktreeReservation | void;
   recordCreatedWorktree: (input: {
     branchName: string;
     startingOid: string;
@@ -179,9 +179,16 @@ export interface WorktreeReuseReservation {
    * Prevents any later automatic complete/cancel path from releasing this
    * reservation after a possibly-live pane could not be made durable.
    */
-  retain: () => void;
+  retain: () => RetainedWorktreeReservation | void;
   complete: () => Promise<void>;
   cancel: () => Promise<void>;
+}
+
+export interface RetainedWorktreeReservation {
+  associateRecoveryMarker: (marker: {
+    path: string;
+    generation?: string;
+  }) => void;
 }
 
 /**
@@ -274,8 +281,12 @@ export class WorktreeCleanupService {
 
       let settlePromise: Promise<void> | undefined;
       let retained = false;
-      const settle = (outcome: 'completed' | 'canceled'): Promise<void> => {
-        if (retained) {
+      let retainedHandle: RetainedWorktreeReservation | undefined;
+      const settle = (
+        outcome: 'completed' | 'canceled' | 'recovery acknowledged',
+        force = false,
+      ): Promise<void> => {
+        if (retained && !force) {
           return Promise.resolve();
         }
         if (!settlePromise) {
@@ -301,6 +312,16 @@ export class WorktreeCleanupService {
             `Retained reuse reservation for operator recovery at ${canonicalWorktreePath}`,
             'paneActions',
           );
+          retainedHandle ??= {
+            associateRecoveryMarker: (marker) => {
+              void waitForRecoveryMarkerAcknowledgement(marker.path)
+                .then(() => {
+                  retained = false;
+                  return settle('recovery acknowledged', true);
+                });
+            },
+          };
+          return retainedHandle;
         },
         complete: () => settle('completed'),
         cancel: () => settle('canceled'),
@@ -397,8 +418,9 @@ export class WorktreeCleanupService {
 
       let settlePromise: Promise<void> | undefined;
       let retained = false;
-      const settle = (): Promise<void> => {
-        if (retained) {
+      let retainedHandle: RetainedWorktreeReservation | undefined;
+      const settle = (force = false): Promise<void> => {
+        if (retained && !force) {
           return Promise.resolve();
         }
         if (!settlePromise) {
@@ -418,6 +440,16 @@ export class WorktreeCleanupService {
             `Retained creation reservation for operator recovery at ${canonicalWorktreePath}`,
             'paneActions',
           );
+          retainedHandle ??= {
+            associateRecoveryMarker: (marker) => {
+              void waitForRecoveryMarkerAcknowledgement(marker.path)
+                .then(() => {
+                  retained = false;
+                  return settle(true);
+                });
+            },
+          };
+          return retainedHandle;
         },
         recordCreatedWorktree: ({
           branchName,
@@ -465,8 +497,8 @@ export class WorktreeCleanupService {
             preparePendingGitMutation: lease.preparePendingGitMutation,
           })),
         }),
-        complete: settle,
-        cancel: settle,
+        complete: () => settle(),
+        cancel: () => settle(),
       };
     } catch (error) {
       await operationLease?.release();
@@ -474,6 +506,7 @@ export class WorktreeCleanupService {
       await ownedProjectLifecycleLease?.release();
       throw error;
     }
+
   }
 
   async rollbackCreatedWorktree(
@@ -644,7 +677,12 @@ export class WorktreeCleanupService {
     }
 
     const deleteResult = await this.runGitCommand(
-      ['branch', '-D', identity.branchName],
+      [
+        'update-ref',
+        '-d',
+        `refs/heads/${identity.branchName}`,
+        identity.createdOid,
+      ],
       identity.mainRepoPath,
       mutationLeases,
     );
@@ -780,7 +818,12 @@ export class WorktreeCleanupService {
               }
 
               const deleteBranchResult = await this.runGitCommand(
-                ['branch', '-D', target.branchName],
+                [
+                  'update-ref',
+                  '-d',
+                  `refs/heads/${target.branchName}`,
+                  target.branchOid,
+                ],
                 target.repoPath,
                 [projectLifecycleLease, worktreeLease],
               );
@@ -1688,6 +1731,17 @@ export class WorktreeCleanupService {
             `git ${args.join(' ')} failed with exit code ${code ?? 'unknown'}`,
         });
       });
+    });
+  }
+}
+
+async function waitForRecoveryMarkerAcknowledgement(
+  markerPath: string,
+): Promise<void> {
+  while (existsSync(markerPath)) {
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 50);
+      timeout.unref?.();
     });
   }
 }

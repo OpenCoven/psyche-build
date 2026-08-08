@@ -75,6 +75,38 @@ describe('project pane config mutation', () => {
     expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([]);
   });
 
+  it('does not remove a same-ID replacement from another tmux generation', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const oldGeneration = {
+      pid: 111,
+      processStartIdentity: 'old-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const replacement = {
+      id: 'psyche-exact',
+      paneId: '%1',
+      slug: 'replacement',
+      tmuxServerIdentity: {
+        pid: 222,
+        processStartIdentity: 'new-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$2',
+      },
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [replacement];
+    });
+
+    await expect(removeProjectPaneConfigPaneIdentities(projectRoot, [{
+      id: 'psyche-exact',
+      paneId: '%1',
+      tmuxServerIdentity: oldGeneration,
+    }])).rejects.toThrow(/identity conflict/);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([replacement]);
+  });
+
   it('rebinds a restored pane to its new tmux generation without inheriting stale background resources', async () => {
     const projectRoot = createProject();
     const oldGeneration = {

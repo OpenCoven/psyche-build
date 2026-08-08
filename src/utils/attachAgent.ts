@@ -12,6 +12,11 @@ import type { AgentName } from './agentLaunch.js';
 import { launchAgentInPane } from './agentLaunch.js';
 import { autoApproveTrustPrompt } from './paneCreation.js';
 import { TmuxService } from '../services/TmuxService.js';
+import {
+  assertTmuxGenerationUnchanged,
+  captureTmuxGeneration,
+  tearDownGenerationBoundPane,
+} from './TmuxGenerationGuard.js';
 import { splitPane, getTerminalDimensions } from './tmux.js';
 import { recalculateAndApplyLayout } from './layoutManager.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
@@ -172,6 +177,10 @@ async function attachAgentToReservedWorktree(
       }
 
       let attachedRecordPersisted = false;
+      const allocationGeneration = captureTmuxGeneration(
+        tmuxService,
+        'attached pane allocation',
+      );
       try {
         const panesForLayout = freshPanes.length > 0
           ? freshPanes
@@ -182,7 +191,7 @@ async function attachAgentToReservedWorktree(
           throw new Error('tmux returned no pane ID');
         }
 
-        const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
+        const tmuxServerIdentity = allocationGeneration;
         newPane = {
           id: psychePaneId,
           slug,
@@ -203,6 +212,11 @@ async function attachAgentToReservedWorktree(
             `Could not capture tmux server generation for attached pane ${paneInfo}`,
           );
         }
+        assertTmuxGenerationUnchanged(
+          tmuxService,
+          allocationGeneration,
+          'attached pane allocation',
+        );
 
         // The exact record and generation are durable before this pane
         // receives a title, layout mutation, cwd, or agent command.
@@ -247,7 +261,13 @@ async function attachAgentToReservedWorktree(
         return newPane;
       } catch (error) {
         const teardown = paneInfo
-          ? await killAttachedPane(tmuxService, paneInfo, slug, 'setup or persistence failure')
+          ? await killAttachedPane(
+            tmuxService,
+            paneInfo,
+            slug,
+            'setup or persistence failure',
+            allocationGeneration,
+          )
           : undefined;
         let failedRecordCleanup: string | undefined;
         if (
@@ -413,11 +433,14 @@ async function killAttachedPane(
   paneId: string,
   slug: string,
   reason: string,
+  allocationGeneration?: import('../services/TmuxServerIdentity.js').TmuxServerIdentity,
 ): Promise<VerifiedPaneTeardownResult> {
-  const result = await tearDownPaneWithVerification({
-    probe: () => probeAttachedPanePresence(tmuxService, paneId),
-    kill: () => tmuxService.killPane(paneId),
-  });
+  const result = allocationGeneration
+    ? await tearDownGenerationBoundPane(tmuxService, paneId, allocationGeneration)
+    : await tearDownPaneWithVerification({
+      probe: () => probeAttachedPanePresence(tmuxService, paneId),
+      kill: () => tmuxService.killPane(paneId),
+    });
   if (result.presence !== 'absent') {
     LogService.getInstance().warn(
       `Could not confirm attached pane ${paneId} is gone for ${slug} after ${reason}`,
@@ -449,6 +472,7 @@ async function removeFailedAttachedPane(
           paneId,
           pane.slug,
           'agent launch failure',
+          pane.tmuxServerIdentity,
         );
         if (teardown.presence !== 'absent') {
           throw new Error(

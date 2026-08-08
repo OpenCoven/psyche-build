@@ -1,6 +1,22 @@
-import { readdir, readFile } from 'node:fs/promises';
+import {
+  readdir as fsReaddir,
+  readFile as fsReadFile,
+} from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
+const readFile = (filePath: string, encoding: BufferEncoding) => (
+  fsReadFile(path.resolve(repositoryRoot, filePath), encoding)
+);
+const readdir = (
+  directory: string,
+  options: { withFileTypes: true },
+) => fsReaddir(path.resolve(repositoryRoot, directory), options);
 
 const releaseDocs = [
   'README.md',

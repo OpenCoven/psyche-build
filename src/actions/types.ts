@@ -88,6 +88,7 @@ export interface ActionResult {
 export interface PaneLifecycleIdentity {
   id: string;
   paneId: string;
+  tmuxServerIdentity?: TmuxServerIdentity;
 }
 
 /**

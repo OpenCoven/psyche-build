@@ -115,6 +115,7 @@ import {
   type DesktopUseQuickAction,
 } from "../utils/covenDesktopUse.js"
 import { createTransactionalPane } from "../utils/transactionalPaneCreation.js"
+import { withWorktreePaneCreationReservation } from "../utils/worktreePaneCreationReservation.js"
 
 // Type for the action system returned by useActionSystem hook
 interface ActionSystem {
@@ -557,35 +558,40 @@ export function useInputHandling(params: UseInputHandlingParams) {
       setStatusMessage(`Opening terminal in ${getPaneDisplayName(selectedPane)}...`)
 
       const tmuxService = TmuxService.getInstance()
-      await createTransactionalPane({
+      await withWorktreePaneCreationReservation({
+        worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
-        sessionProjectRoot: projectRoot,
-        operation: "worktree-terminal-pane",
-        tmuxService,
-        allocate: () => tmuxService.splitPane({ cwd: selectedPane.worktreePath }),
-        createPane: async ({ paneId, tmuxServerIdentity }) => {
-          const pane = await createShellPane(
-            paneId,
-            getNextPsycheId(panes),
-            undefined,
-            { tmuxServerIdentity, setPaneTitle: false },
-          )
-          pane.projectRoot = targetProjectRoot
-          pane.projectName = getSidebarProjectDisplayName(
-            sidebarProjects,
-            targetProjectRoot,
-          )
-          pane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-          return pane
-        },
-        persist: (pane) => savePanes([...panes, pane], panes),
-        activate: async (pane) => {
-          try {
-            await tmuxService.setPaneTitle(pane.paneId, pane.slug)
-          } catch {
-            // The durable record remains available for later title repair.
-          }
-        },
+        operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
+          projectRoot: targetProjectRoot,
+          sessionProjectRoot: projectRoot,
+          operation: "worktree-terminal-pane",
+          tmuxService,
+          reservation,
+          allocate: () => tmuxService.splitPane({ cwd: canonicalWorktreePath }),
+          createPane: async ({ paneId, tmuxServerIdentity }) => {
+            const pane = await createShellPane(
+              paneId,
+              getNextPsycheId(panes),
+              undefined,
+              { tmuxServerIdentity, setPaneTitle: false },
+            )
+            pane.projectRoot = targetProjectRoot
+            pane.projectName = getSidebarProjectDisplayName(
+              sidebarProjects,
+              targetProjectRoot,
+            )
+            pane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
+            return pane
+          },
+          persist: (pane) => savePanes([...panes, pane], panes),
+          activate: async (pane) => {
+            try {
+              await tmuxService.setPaneTitle(pane.paneId, pane.slug)
+            } catch {
+              // The durable record remains available for later title repair.
+            }
+          },
+        }),
       })
 
       setStatusMessage(`Opened terminal in ${getPaneDisplayName(selectedPane)}`)
@@ -640,35 +646,40 @@ export function useInputHandling(params: UseInputHandlingParams) {
         suffix += 1
       }
 
-      await createTransactionalPane({
+      await withWorktreePaneCreationReservation({
+        worktreePath: selectedPane.worktreePath,
         projectRoot: targetProjectRoot,
-        sessionProjectRoot: projectRoot,
-        operation: "file-browser-pane",
-        tmuxService,
-        // Do not pass a command to split-window: the browser must not start
-        // until its exact record and generation are durable.
-        allocate: () => tmuxService.splitPane({
-          cwd: selectedPane.worktreePath,
-        }),
-        createPane: ({ paneId, tmuxServerIdentity }) => ({
-          id: createPsychePaneId(),
-          slug,
-          prompt: "",
-          paneId,
-          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+        operation: (canonicalWorktreePath, reservation) => createTransactionalPane({
           projectRoot: targetProjectRoot,
-          projectName: targetProjectName,
-          colorTheme: resolveProjectColorTheme(targetProjectRoot, sidebarProjects),
-          type: "shell",
-          shellType: "fb",
-          browserPath: selectedPane.worktreePath,
+          sessionProjectRoot: projectRoot,
+          operation: "file-browser-pane",
+          tmuxService,
+          reservation,
+          // Do not pass a command to split-window: the browser must not start
+          // until its exact record and generation are durable.
+          allocate: () => tmuxService.splitPane({
+            cwd: canonicalWorktreePath,
+          }),
+          createPane: ({ paneId, tmuxServerIdentity }) => ({
+            id: createPsychePaneId(),
+            slug,
+            prompt: "",
+            paneId,
+            ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+            projectRoot: targetProjectRoot,
+            projectName: targetProjectName,
+            colorTheme: resolveProjectColorTheme(targetProjectRoot, sidebarProjects),
+            type: "shell",
+            shellType: "fb",
+            browserPath: canonicalWorktreePath,
+          }),
+          persist: (pane) => savePanes([...panes, pane], panes),
+          activate: async (pane) => {
+            await tmuxService.setPaneTitle(pane.paneId, slug)
+            await tmuxService.sendShellCommand(pane.paneId, buildFilesOnlyCommand())
+            await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
+          },
         }),
-        persist: (pane) => savePanes([...panes, pane], panes),
-        activate: async (pane) => {
-          await tmuxService.setPaneTitle(pane.paneId, slug)
-          await tmuxService.sendShellCommand(pane.paneId, buildFilesOnlyCommand())
-          await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
-        },
       })
       await loadPanes()
 

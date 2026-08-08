@@ -8,10 +8,10 @@ import { describe, expect, it } from 'vitest';
  * an explicit ownership decision during review.
  */
 const allocationSites = [
-  ['worktree pane creation', 'src/utils/paneCreation.ts', 'getServerIdentity?.(paneInfo)'],
-  ['attached agent pane', 'src/utils/attachAgent.ts', 'getServerIdentity?.(paneInfo)'],
-  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', 'getServerIdentity?.(paneInfo)'],
-  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', 'getServerIdentity?.(paneInfo)'],
+  ['worktree pane creation', 'src/utils/paneCreation.ts', "captureTmuxGeneration(\n    tmuxService,\n    'pane allocation'"],
+  ['attached agent pane', 'src/utils/attachAgent.ts', "captureTmuxGeneration(\n        tmuxService,\n        'attached pane allocation'"],
+  ['reopened worktree pane', 'src/utils/reopenWorktree.ts', "captureTmuxGeneration(\n    tmuxService,\n    'reopened pane allocation'"],
+  ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', "captureTmuxGeneration(\n    tmuxService,\n    'conflict pane allocation'"],
   ['startup restoration pane', 'src/hooks/usePaneLoading.ts', 'getServerIdentity?.(newPaneId)'],
   ['detected shell pane', 'src/utils/shellPaneDetection.ts', 'getServerIdentity?.(paneId)'],
   ['background test/dev window', 'src/hooks/usePaneRunner.ts', 'getTmuxServerIdentity: () => tmuxService.getServerIdentity?.()'],

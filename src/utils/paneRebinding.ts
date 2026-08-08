@@ -23,13 +23,14 @@ export function rebindPaneByTitle(
   titleToIdMap: Map<string, string>,
   allPaneIds: string[]
 ): PsychePane {
-  // If pane ID exists in tmux, keep using it (even if title changed)
-  if (allPaneIds.length > 0 && allPaneIds.includes(pane.paneId)) {
+  const existingIdIsCurrent = paneTmuxIdentityIsCurrent(pane, allPaneIds);
+  // A tmux ID is reusable only within its recorded server generation.
+  if (existingIdIsCurrent) {
     return pane; // Pane still exists, no rebinding needed
   }
 
   // Pane ID missing - try to find it by title match
-  if (allPaneIds.length > 0 && !allPaneIds.includes(pane.paneId)) {
+  if (allPaneIds.length > 0 && !existingIdIsCurrent) {
     const sessionProjectRoot = StateManager.getInstance().getState().projectRoot;
     const titleCandidates = getPaneTitleCandidates(
       pane,
@@ -47,6 +48,13 @@ export function rebindPaneByTitle(
           // A title match without a server generation is not an ownership
           // proof. Keep the old record instead of rebinding it to a reused ID.
           return pane;
+        }
+        if (
+          remappedId === pane.paneId
+          && pane.tmuxServerIdentity
+          && !sameTmuxServerIdentity(pane.tmuxServerIdentity, tmuxServerIdentity)
+        ) {
+          continue;
         }
         const rebound: PsychePane = {
           ...pane,
@@ -75,4 +83,18 @@ export function rebindPaneByTitle(
   }
 
   return pane;
+}
+
+export function paneTmuxIdentityIsCurrent(
+  pane: PsychePane,
+  allPaneIds: readonly string[],
+): boolean {
+  if (!allPaneIds.includes(pane.paneId) || !pane.tmuxServerIdentity) {
+    return false;
+  }
+  const current = getCurrentTmuxServerIdentity(pane.paneId);
+  return Boolean(
+    current
+    && sameTmuxServerIdentity(pane.tmuxServerIdentity, current)
+  );
 }

@@ -316,6 +316,32 @@ describe('closeAction', () => {
       expect(context.panes).toEqual([]);
     });
 
+    it('does not kill a reused pane when tmux generation changes immediately before teardown', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      let reads = 0;
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => {
+          reads += 1;
+          return reads === 1 ? currentServerGeneration : oldServerGeneration;
+        },
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '%42\n' : Buffer.from('')
+      ));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
     it('never kills a live unversioned legacy pane record', async () => {
       const pane = createWorktreePane({
         paneId: '%42',

@@ -1,6 +1,11 @@
 import path from 'path';
 import { TmuxService } from '../services/TmuxService.js';
 import {
+  assertTmuxGenerationUnchanged,
+  captureTmuxGeneration,
+  tearDownGenerationBoundPane,
+} from './TmuxGenerationGuard.js';
+import {
   ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
   getTerminalDimensions,
@@ -198,6 +203,10 @@ async function reopenWorktreeWithReuseReservation(
   const currentBranch = getCurrentBranch(worktreePath);
 
   let paneInfo: string;
+  const allocationGeneration = captureTmuxGeneration(
+    tmuxService,
+    'reopened pane allocation',
+  );
 
   if (isFirstContentPane) {
     paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
@@ -208,7 +217,7 @@ async function reopenWorktreeWithReuseReservation(
     paneInfo = splitPane({ targetPane });
   }
 
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
+  const tmuxServerIdentity = allocationGeneration;
   const newPane: PsychePane = {
     id: psychePaneId,
     slug,
@@ -230,11 +239,11 @@ async function reopenWorktreeWithReuseReservation(
   };
 
   try {
-    if (!tmuxServerIdentity) {
-      throw new Error(
-        `Could not capture tmux server generation for reopened pane ${paneInfo}`,
-      );
-    }
+    assertTmuxGenerationUnchanged(
+      tmuxService,
+      allocationGeneration,
+      'reopened pane allocation',
+    );
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (!(await tmuxService.paneExists(paneInfo))) {
       throw new Error(`newly split pane ${paneInfo} is not present`);
@@ -259,7 +268,11 @@ async function reopenWorktreeWithReuseReservation(
     await options.persistReopenedPane(newPane);
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
-    const teardown = await tearDownReopenedPane(tmuxService, paneInfo);
+    const teardown = await tearDownGenerationBoundPane(
+      tmuxService,
+      paneInfo,
+      allocationGeneration,
+    );
     if (teardown.presence !== 'absent') {
       const recovery = await retainPaneRecovery({
         projectRoot,
