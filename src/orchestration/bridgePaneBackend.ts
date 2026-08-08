@@ -1,5 +1,8 @@
-import type { BridgeSpawnRequest, BridgeSpawnResult } from '../daemon/bridge.js';
-import { spawnBridgePane } from '../daemon/bridge.js';
+import {
+  defaultSpawnPane,
+  type BridgeSpawnRequest,
+  type BridgeSpawnResult,
+} from '../control/resources/panes.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 
@@ -29,7 +32,7 @@ export interface BridgePaneBackend {
  */
 export function createBridgePaneBackend(options: BridgePaneBackendOptions): BridgePaneBackend {
   const spawnPane = options.spawnPane
-    ?? ((projectRoot, sessionName, request) => spawnBridgePane(projectRoot, sessionName, request));
+    ?? ((projectRoot, sessionName, request) => defaultSpawnPane(projectRoot, sessionName, request));
   const spawned = new Map<string, BridgeSpawnResult>();
 
   const execute: LaneBackend = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
