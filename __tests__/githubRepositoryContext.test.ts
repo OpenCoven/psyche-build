@@ -71,8 +71,8 @@ describe('readRepositoryContext', () => {
       branch: 'feat/pr',
       upstreamRemote: 'upstream',
       rawRemotes: [
-        { name: 'upstream', url: 'https://github.com/OpenCoven/psyche-build.git' },
-        { name: 'origin', url: 'git@github.com:OpenCoven/psyche-build.git' },
+        { name: 'upstream', url: 'https://github.com/OpenCoven/psyche-build' },
+        { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build' },
       ],
       remotes: [
         {
@@ -145,8 +145,8 @@ describe('readRepositoryContext', () => {
     expect(context.branch).toBe(branch);
     expect(context.upstreamRemote).toBe(remoteName);
     expect(context.rawRemotes).toEqual([
-      { name: remoteName, url: 'https://github.com/OpenCoven/psyche-build.git' },
-      { name: 'origin', url: 'https://github.com/OpenCoven/origin-repo.git' },
+      { name: remoteName, url: 'https://github.com/OpenCoven/psyche-build' },
+      { name: 'origin', url: 'https://github.com/OpenCoven/origin-repo' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -212,7 +212,7 @@ describe('readRepositoryContext', () => {
     expect(context.branch).toBeNull();
     expect(context.upstreamRemote).toBeNull();
     expectRawRemotes(context.rawRemotes, [
-      { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build' },
     ]);
     expect(calls.map((call) => call.args.join(' '))).toEqual([
       'branch --show-current',
@@ -237,7 +237,7 @@ describe('readRepositoryContext', () => {
     expect(context.branch).toBe('feat/pr');
     expect(context.upstreamRemote).toBeNull();
     expectRawRemotes(context.rawRemotes, [
-      { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build' },
       { name: 'mirror', url: 'file:///Users/buns/My Repo' },
     ]);
     expect(context.remotes.map((remote) => remote.name)).toEqual(['origin']);
@@ -264,8 +264,8 @@ describe('readRepositoryContext', () => {
     const context = await readRepositoryContext(worktreePath, runner);
 
     expect(context.rawRemotes).toEqual([
-      { name: 'upstream', url: 'https://ghe.example.test:443/OpenCoven/psyche-build.git' },
-      { name: 'origin', url: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit' },
+      { name: 'upstream', url: 'https://ghe.example.test/OpenCoven/psyche-build' },
+      { name: 'origin', url: 'https://ghe.example.test/OpenCoven/psyche-build' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -315,12 +315,19 @@ describe('readRepositoryContext', () => {
     const parsedSchemeSecret = `https:///${'user:secret@'}github.com/o/r`;
     const parsedSshPathSecret = `ssh:///${'user:secret@'}github.com/OpenCoven/psyche-build.git`;
     const parsedGitPathSecret = `git:///${'user:secret@'}github.com/OpenCoven/psyche-build.git`;
+    const nestedHelperSecret = `hg::https://${'token:secret@'}ghe.example.test/OpenCoven/psyche-build.git`;
+    const gitlabSummaryUrl = 'http://gitlab.example.test/group/repo.git';
+    const scpSummaryUrl = 'git@gitlab.example.test:group/nested/repo.git';
+    const querySecretUrl = 'https://gitlab.example.test/group/repo.git?access_token=ghp_S3CR3T_VALUE';
     const malformedScpSecret = `git@${'token@'}github.com:o/r`;
-    const safeFileUrl = 'file:///Users/a@b/My Repo';
+    const safeFileUrl = 'file:///Users/a@b/My Repo?download=1#frag';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
-      'git\0remote': { stdout: 'masked\nauth\norigin\nscheme-bypass\nparsed-bypass\nssh-path-bypass\ngit-path-bypass\nscp-bypass\nfile-safe\n' },
+      'git\0remote': {
+        stdout: 'masked\nauth\norigin\nscheme-bypass\nparsed-bypass\nssh-path-bypass\ngit-path-bypass\n'
+          + 'scp-bypass\nfile-safe\ngitlab-summary\nscp-summary\nnested-helper\nquery-secret\n',
+      },
       'git\0remote\0get-url\0--\0masked': { stdout: '******github.com/o/r.git\n' },
       'git\0remote\0get-url\0--\0auth': { stdout: `https://${'token:secret@'}github.com/OpenCoven/psyche-build.git\n` },
       'git\0remote\0get-url\0--\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
@@ -330,20 +337,28 @@ describe('readRepositoryContext', () => {
       'git\0remote\0get-url\0--\0git-path-bypass': { stdout: `${parsedGitPathSecret}\n` },
       'git\0remote\0get-url\0--\0scp-bypass': { stdout: `${malformedScpSecret}\n` },
       'git\0remote\0get-url\0--\0file-safe': { stdout: `${safeFileUrl}\n` },
+      'git\0remote\0get-url\0--\0gitlab-summary': { stdout: `${gitlabSummaryUrl}\n` },
+      'git\0remote\0get-url\0--\0scp-summary': { stdout: `${scpSummaryUrl}\n` },
+      'git\0remote\0get-url\0--\0nested-helper': { stdout: `${nestedHelperSecret}\n` },
+      'git\0remote\0get-url\0--\0query-secret': { stdout: `${querySecretUrl}\n` },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
     const serialized = JSON.stringify(context);
 
     expect(context.rawRemotes).toEqual([
-      { name: 'origin', url: 'git@github.com:OpenCoven/psyche-build.git' },
-      { name: 'auth', url: 'https://github.com/OpenCoven/psyche-build.git' },
-      { name: 'file-safe', url: safeFileUrl },
+      { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build' },
+      { name: 'auth', url: 'https://github.com/<redacted-path>' },
+      { name: 'file-safe', url: 'file:///Users/a@b/My Repo' },
       { name: 'git-path-bypass', url: '<redacted-remote-url>' },
+      { name: 'gitlab-summary', url: 'http://gitlab.example.test/<redacted-path>' },
       { name: 'masked', url: '<redacted-remote-url>' },
+      { name: 'nested-helper', url: '<redacted-remote-url>' },
       { name: 'parsed-bypass', url: '<redacted-remote-url>' },
+      { name: 'query-secret', url: '<redacted-remote-url>' },
       { name: 'scheme-bypass', url: '<redacted-remote-url>' },
       { name: 'scp-bypass', url: '<redacted-remote-url>' },
+      { name: 'scp-summary', url: 'git@gitlab.example.test:<redacted-path>' },
       { name: 'ssh-path-bypass', url: '<redacted-remote-url>' },
     ]);
     expect(context.remotes).toEqual([
@@ -358,16 +373,18 @@ describe('readRepositoryContext', () => {
         },
       },
     ]);
-    expect(serialized).not.toContain('token');
-    expect(serialized).not.toContain('secret');
+    expect(serialized).not.toContain('token:secret');
+    expect(serialized).not.toContain('user:secret@');
     expect(serialized).not.toContain('******github.com/o/r.git');
+    expect(serialized).not.toContain('ghp_S3CR3T_VALUE');
     expect(serialized).not.toContain(malformedSchemeSecret);
     expect(serialized).not.toContain(parsedSchemeSecret);
     expect(serialized).not.toContain(parsedSshPathSecret);
     expect(serialized).not.toContain(parsedGitPathSecret);
+    expect(serialized).not.toContain(nestedHelperSecret);
+    expect(serialized).not.toContain(querySecretUrl);
+    expect(serialized).not.toContain(scpSummaryUrl);
     expect(serialized).not.toContain(malformedScpSecret);
-    expect(serialized).not.toContain('user');
-    expect(serialized).not.toContain('secret');
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {
@@ -395,7 +412,7 @@ describe('readRepositoryContext', () => {
     const context = await readRepositoryContext(worktreePath, runner);
 
     expect(context.rawRemotes).toEqual([
-      { name: '-foo', url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: '-foo', url: 'https://github.com/OpenCoven/psyche-build' },
     ]);
     expect(context.remotes).toEqual([
       {

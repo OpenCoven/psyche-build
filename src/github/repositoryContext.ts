@@ -27,11 +27,6 @@ export interface RepositoryContext {
   remotes: readonly GitHubRemote[];
 }
 
-interface ParsedRemoteUrl {
-  diagnosticUrl: string;
-  normalizedUrl: string;
-}
-
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
 const ASCII_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
 const ASCII_EDGE_WHITESPACE = /^[\u0009-\u000d\u0020]|[\u0009-\u000d\u0020]$/u;
@@ -59,9 +54,12 @@ export async function readRepositoryContext(
       continue;
     }
 
-    rawRemotes.push({ name: remoteName, url: remoteUrl.diagnosticUrl });
+    const normalized = normalizeGitHubRemote(remoteName, remoteUrl);
+    rawRemotes.push({
+      name: remoteName,
+      url: normalized?.repository.url ?? sanitizeDiagnosticRemoteUrl(remoteUrl),
+    });
 
-    const normalized = normalizeGitHubRemote(remoteName, remoteUrl.normalizedUrl);
     if (normalized) {
       normalizedRemotes.push(normalized);
     }
@@ -146,7 +144,7 @@ async function readRemoteUrl(
   worktreePath: string,
   remoteName: string,
   runner: ReadOnlyCommandRunner,
-): Promise<ParsedRemoteUrl | null> {
+): Promise<string | null> {
   try {
     const result = await runner.run('git', ['remote', 'get-url', '--', remoteName], {
       cwd: worktreePath,
@@ -157,15 +155,7 @@ async function readRemoteUrl(
       return null;
     }
 
-    const normalizedUrl = parseRemoteUrlOutput(result.stdout);
-    if (normalizedUrl === null) {
-      return null;
-    }
-
-    return {
-      diagnosticUrl: sanitizeDiagnosticRemoteUrl(normalizedUrl),
-      normalizedUrl,
-    };
+    return parseRemoteUrlOutput(result.stdout);
   } catch {
     return null;
   }
@@ -240,76 +230,128 @@ function stripSingleTrailingLineTerminator(value: string): string {
 }
 
 function sanitizeDiagnosticRemoteUrl(remoteUrl: string): string {
-  if (isValidGitScpDiagnostic(remoteUrl)) {
-    return remoteUrl;
+  if (isNestedHelperRemote(remoteUrl) || isExplicitlySecretBearing(remoteUrl)) {
+    return REDACTED_REMOTE_URL;
   }
 
-  const sanitizedSchemeUrl = sanitizeSchemeRemoteUrl(remoteUrl);
+  const scpDiagnostic = sanitizeScpDiagnostic(remoteUrl);
+  if (scpDiagnostic !== null) {
+    return scpDiagnostic;
+  }
+
+  const sanitizedFileUrl = sanitizeFileDiagnostic(remoteUrl);
+  if (sanitizedFileUrl !== null) {
+    return sanitizedFileUrl;
+  }
+
+  const sanitizedSchemeUrl = sanitizeNetworkSchemeDiagnostic(remoteUrl);
   if (sanitizedSchemeUrl !== null) {
     return sanitizedSchemeUrl;
   }
 
-  if (looksCredentialBearing(remoteUrl)) {
+  if (
+    remoteUrl.includes('?')
+    || remoteUrl.includes('#')
+    || looksCredentialBearing(remoteUrl)
+  ) {
     return REDACTED_REMOTE_URL;
   }
 
   return remoteUrl;
 }
 
-function isValidGitScpDiagnostic(remoteUrl: string): boolean {
-  return /^git@[^:/\\@[\]\s?#]+:[^?#]+$/u.test(remoteUrl);
+function sanitizeScpDiagnostic(remoteUrl: string): string | null {
+  const match = /^git@([^:/\\@[\]\s?#]+):([^?#]+)$/u.exec(remoteUrl);
+  if (!match) {
+    return /^[^/\s@]+@[^/\s:]+:/u.test(remoteUrl) ? REDACTED_REMOTE_URL : null;
+  }
+
+  const canonicalHost = canonicalizeDiagnosticHost(match[1]);
+  if (!canonicalHost) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  return `git@${canonicalHost}:<redacted-path>`;
 }
 
-function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
-  const schemeMatch = /^([a-z][a-z0-9+.-]*):/iu.exec(remoteUrl);
-  if (!schemeMatch) {
+function sanitizeFileDiagnostic(remoteUrl: string): string | null {
+  if (!remoteUrl.toLowerCase().startsWith('file:')) {
     return null;
   }
 
-  const scheme = schemeMatch[1].toLowerCase();
-  if (!remoteUrl.startsWith(`${scheme}://`)) {
-    return isNetworkScheme(scheme) && remoteUrl.includes('@') ? REDACTED_REMOTE_URL : null;
-  }
-
-  const rawParts = extractSchemeUrlParts(remoteUrl);
-  if (rawParts === null) {
-    return isNetworkScheme(scheme) && remoteUrl.includes('@') ? REDACTED_REMOTE_URL : null;
+  if (!remoteUrl.startsWith('file://')) {
+    return REDACTED_REMOTE_URL;
   }
 
   let url: URL;
   try {
     url = new URL(remoteUrl);
   } catch {
-    return rawParts.authority.includes('@') ? REDACTED_REMOTE_URL : null;
+    return REDACTED_REMOTE_URL;
   }
 
-  if (
-    isNetworkScheme(scheme)
-    && remoteUrl.includes('@')
-    && !rawParts.authority.includes('@')
-  ) {
+  if (url.protocol !== 'file:' || url.username || url.password) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  try {
+    return `file://${url.host}${decodeURI(url.pathname)}`;
+  } catch {
+    return REDACTED_REMOTE_URL;
+  }
+}
+
+function sanitizeNetworkSchemeDiagnostic(remoteUrl: string): string | null {
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):/iu.exec(remoteUrl);
+  if (!schemeMatch) {
+    return null;
+  }
+
+  const scheme = schemeMatch[1].toLowerCase();
+  if (!isNetworkScheme(scheme)) {
+    return null;
+  }
+
+  if (!remoteUrl.startsWith(`${scheme}://`)) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  const rawParts = extractSchemeUrlParts(remoteUrl);
+  if (rawParts === null) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(remoteUrl);
+  } catch {
+    return REDACTED_REMOTE_URL;
+  }
+
+  const canonicalHost = canonicalizeDiagnosticHost(rawParts.authority.includes('@')
+    ? rawParts.authority.slice(rawParts.authority.lastIndexOf('@') + 1)
+    : rawParts.authority);
+
+  if (!canonicalHost || !url.host) {
     return REDACTED_REMOTE_URL;
   }
 
   if (
-    url.protocol === 'ssh:'
-    && rawParts.authority.startsWith('git@')
-    && !url.password
-    && rawParts.authority.indexOf('@') === rawParts.authority.lastIndexOf('@')
+    remoteUrl.includes('@')
+    && (
+      !rawParts.authority.includes('@')
+      || hasAtOutsideAuthority(remoteUrl, scheme)
+      || hasAtOutsideAuthority(serializeSanitizedUrl(url), scheme)
+    )
   ) {
-    return remoteUrl;
-  }
-
-  if (rawParts.authority.includes('@') || url.username || url.password) {
-    const sanitized = serializeSanitizedUrl(url);
-    return hasCredentialLikeAtOutsideAuthority(sanitized, scheme) ? REDACTED_REMOTE_URL : sanitized;
-  }
-
-  if (isNetworkScheme(scheme) && hasCredentialLikeAtOutsideAuthority(remoteUrl, scheme)) {
     return REDACTED_REMOTE_URL;
   }
 
-  return remoteUrl;
+  if (remoteUrl.includes('?') || remoteUrl.includes('#') || isExplicitlySecretBearing(remoteUrl)) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  return `${scheme}://${canonicalHost}/<redacted-path>`;
 }
 
 function extractSchemeUrlParts(remoteUrl: string): { authority: string; suffix: string } | null {
@@ -339,11 +381,7 @@ function serializeSanitizedUrl(url: URL): string {
   return `${sanitized.protocol}//${sanitized.host}${sanitized.pathname}${sanitized.search}${sanitized.hash}`;
 }
 
-function hasCredentialLikeAtOutsideAuthority(value: string, scheme: string): boolean {
-  if (!isNetworkScheme(scheme)) {
-    return false;
-  }
-
+function hasAtOutsideAuthority(value: string, scheme: string): boolean {
   const schemePrefix = `${scheme}://`;
   if (!value.startsWith(schemePrefix)) {
     return value.includes('@');
@@ -365,8 +403,37 @@ function looksCredentialBearing(remoteUrl: string): boolean {
   );
 }
 
+function isExplicitlySecretBearing(remoteUrl: string): boolean {
+  const normalized = remoteUrl.toLowerCase();
+  return (
+    normalized.includes('access_token')
+    || normalized.includes('token=')
+    || normalized.includes('password=')
+    || normalized.includes('secret=')
+    || normalized.includes('key=')
+    || /gh[pousr]_[a-z0-9_]+/iu.test(remoteUrl)
+  );
+}
+
+function isNestedHelperRemote(remoteUrl: string): boolean {
+  return /^[a-z][a-z0-9+.-]*::/iu.test(remoteUrl);
+}
+
 function isNetworkScheme(scheme: string): boolean {
   return scheme === 'http' || scheme === 'https' || scheme === 'ssh' || scheme === 'git';
+}
+
+function canonicalizeDiagnosticHost(rawHost: string): string | null {
+  const withoutPort = rawHost.startsWith('[')
+    ? rawHost
+    : rawHost.replace(/:\d+$/u, '');
+
+  try {
+    const url = new URL(`https://${withoutPort}/`);
+    return url.hostname.toLowerCase().replace(/\.$/u, '') || null;
+  } catch {
+    return null;
+  }
 }
 
 function orderNamedEntries<T extends { name: string }>(
