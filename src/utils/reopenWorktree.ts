@@ -272,6 +272,7 @@ async function reopenWorktreeWithReuseReservation(
       tmuxService,
       paneInfo,
       allocationGeneration,
+      { generationMismatch: 'unknown' },
     );
     if (teardown.presence !== 'absent') {
       const recovery = await retainPaneRecovery({

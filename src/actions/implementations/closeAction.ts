@@ -319,7 +319,13 @@ async function executeCloseOption(
       }
       try {
         updatedPanes = await context.removePaneIdentitiesFromConfig(
-          [{ id: pane.id, paneId: pane.paneId }],
+          [{
+            id: pane.id,
+            paneId: pane.paneId,
+            ...(pane.tmuxServerIdentity
+              ? { tmuxServerIdentity: pane.tmuxServerIdentity }
+              : {}),
+          }],
           async (_panes, exactPanes) => {
             // ProjectPaneConfig always supplies this fresh record. The
             // snapshot fallback preserves legacy ActionContext adapters that

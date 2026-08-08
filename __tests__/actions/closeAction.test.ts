@@ -10,7 +10,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { closePane } from '../../src/actions/implementations/closeAction.js';
 import type { PsychePane } from '../../src/types.js';
-import { createMockPane, createShellPane, createWorktreePane } from '../fixtures/mockPanes.js';
+import {
+  createMockPane,
+  createShellPane,
+  createWorktreePane,
+  mockTmuxServerIdentity,
+} from '../fixtures/mockPanes.js';
 import { createMockContext } from '../fixtures/mockContext.js';
 import { expectChoice, expectSuccess, expectError } from '../helpers/actionAssertions.js';
 
@@ -406,6 +411,34 @@ describe('closeAction', () => {
       expect(vi.mocked(execSync).mock.calls.some(([command]) =>
         typeof command === 'string' && command.includes('kill-pane')
       )).toBe(false);
+    });
+
+    it('includes the tmux generation in exact close removal', async () => {
+      const pane = createWorktreePane({
+        id: 'psyche-generation',
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      const removePaneIdentitiesFromConfig = vi.fn(async (identities) => {
+        expect(Array.from(identities)).toEqual([{
+          id: pane.id,
+          paneId: pane.paneId,
+          tmuxServerIdentity: currentServerGeneration,
+        }]);
+        return [];
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+        removePaneIdentitiesFromConfig,
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(removePaneIdentitiesFromConfig).toHaveBeenCalledOnce();
     });
 
     it('verified-kills owned test and dev windows before removing the pane record', async () => {
@@ -845,7 +878,11 @@ describe('closeAction', () => {
       await result.onSelect!('kill_and_clean');
 
       expect(mockContext.removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
-        [{ id: 'tui-close', paneId: '%42' }],
+        [{
+          id: 'tui-close',
+          paneId: '%42',
+          tmuxServerIdentity: mockTmuxServerIdentity,
+        }],
         expect.any(Function),
       );
       expect(mockEnqueueCleanup).not.toHaveBeenCalled();

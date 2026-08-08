@@ -267,6 +267,7 @@ async function attachAgentToReservedWorktree(
             slug,
             'setup or persistence failure',
             allocationGeneration,
+            true,
           )
           : undefined;
         let failedRecordCleanup: string | undefined;
@@ -434,9 +435,17 @@ async function killAttachedPane(
   slug: string,
   reason: string,
   allocationGeneration?: import('../services/TmuxServerIdentity.js').TmuxServerIdentity,
+  generationMismatchIsUncertain = false,
 ): Promise<VerifiedPaneTeardownResult> {
   const result = allocationGeneration
-    ? await tearDownGenerationBoundPane(tmuxService, paneId, allocationGeneration)
+    ? await tearDownGenerationBoundPane(
+      tmuxService,
+      paneId,
+      allocationGeneration,
+      generationMismatchIsUncertain
+        ? { generationMismatch: 'unknown' }
+        : {},
+    )
     : await tearDownPaneWithVerification({
       probe: () => probeAttachedPanePresence(tmuxService, paneId),
       kill: () => tmuxService.killPane(paneId),

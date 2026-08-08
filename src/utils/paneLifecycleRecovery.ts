@@ -1,6 +1,7 @@
 import type { PsychePane } from '../types.js';
 import {
   writeWorktreeRecoveryMarker,
+  type WorktreeRecoveryMarkerRequest,
 } from '../services/WorktreeRecoveryMarker.js';
 import type {
   RetainedWorktreeReservation,
@@ -13,6 +14,19 @@ import { paneRecoveryInstructions } from './paneTeardown.js';
 
 export interface RetainableWorktreeReservation {
   retain: () => RetainedWorktreeReservation | void;
+}
+
+export async function retainReservationWithRecoveryMarker(
+  reservation: RetainableWorktreeReservation,
+  request: WorktreeRecoveryMarkerRequest,
+) {
+  const retainedReservation = reservation.retain();
+  const written = await writeWorktreeRecoveryMarker(request);
+  retainedReservation?.associateRecoveryMarker?.({
+    path: written.path,
+    generation: written.marker.generation,
+  });
+  return written;
 }
 
 export interface PaneRecoveryPersistenceResult {

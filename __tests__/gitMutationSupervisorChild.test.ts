@@ -56,4 +56,44 @@ describe('GitMutationSupervisorChild', () => {
     await expect(supervision).rejects.toThrow(/lost its parent/i);
     expect(startGit).not.toHaveBeenCalled();
   });
+
+  it('refuses to spawn Git when the parent disconnects after claimed is reported', async () => {
+    const { superviseGitMutation } = await import(
+      '../src/services/GitMutationSupervisorChild.js'
+    );
+    let connected = true;
+    let loseParent!: () => void;
+    const startGit = vi.fn();
+
+    const supervision = superviseGitMutation({
+      cwd: process.cwd(),
+      args: ['status'],
+      mutationNonce: 'mutation',
+      leases: [{ lockDir: '/lease', leaseNonce: 'lease' }],
+    }, {
+      isParentConnected: () => connected,
+      installTerminationHandlers: (
+        _active,
+        _request,
+        _claimed,
+        onParentLoss,
+      ) => {
+        loseParent = onParentLoss ?? (() => {});
+        return () => {};
+      },
+      claimPendingGitMutationLease: vi.fn(async () => ({
+        pid: 303,
+        processStartIdentity: 'supervisor-start',
+      })),
+      clearPendingGitMutationLease: vi.fn(async () => {}),
+      startStoppedGit: startGit,
+      report: vi.fn(() => {
+        connected = false;
+        loseParent();
+      }),
+    });
+
+    await expect(supervision).rejects.toThrow(/lost its parent/i);
+    expect(startGit).not.toHaveBeenCalled();
+  });
 });

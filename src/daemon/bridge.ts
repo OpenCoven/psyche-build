@@ -51,6 +51,10 @@ import {
   assessTmuxTeardownOwnership,
 } from '../services/TmuxResourceOwnership.js';
 import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
+import {
+  retainReservationWithRecoveryMarker,
+  type RetainableWorktreeReservation,
+} from '../utils/paneLifecycleRecovery.js';
 import { createPsychePaneId } from '../utils/paneIdentity.js';
 import { runGitProcess } from '../utils/gitProcess.js';
 import type { PsycheConfig, PsychePane } from '../types.js';
@@ -1308,7 +1312,10 @@ export async function spawnBridgePane(
       let settled = false;
       let retained = false;
       try {
-        const result = await finishSpawn(reservation.canonicalWorktreePath);
+        const result = await finishSpawn(
+          reservation.canonicalWorktreePath,
+          reservation,
+        );
         await reservation.complete();
         settled = true;
         return result;
@@ -1324,7 +1331,7 @@ export async function spawnBridgePane(
         }
       }
     }
-    return await finishSpawn(worktreePath);
+    return await finishSpawn(worktreePath, creationReservation);
   } catch (error) {
     let rollbackFailure: string | undefined;
     let ownershipRecovery: string | undefined;
@@ -1372,7 +1379,10 @@ export async function spawnBridgePane(
     throw error;
   }
 
-  async function finishSpawn(paneWorktreePath: string): Promise<BridgeSpawnResult> {
+  async function finishSpawn(
+    paneWorktreePath: string,
+    recoveryReservation?: RetainableWorktreeReservation,
+  ): Promise<BridgeSpawnResult> {
     const transaction = await transactProjectPaneConfig(
       scoped.projectRoot,
       async ({ config, persist }) => {
@@ -1421,16 +1431,21 @@ export async function spawnBridgePane(
           const teardown = await tearDownBridgeTmuxPane(deps, paneId);
           if (teardown.presence !== 'absent') {
             rollbackBlockedByUnconfirmedPane = true;
-            creationReservation?.retain();
             let recovery = 'could not write a recovery marker';
             try {
-              const marker = await writeWorktreeRecoveryMarker({
+              if (!recoveryReservation) {
+                throw new Error('no worktree reservation is available for recovery');
+              }
+              const marker = await retainReservationWithRecoveryMarker(
+                recoveryReservation,
+                {
                 projectRoot: scoped.projectRoot,
                 worktreePath: effectiveWorktreePath,
                 pane: { id: psychePaneId, paneId },
                 operation: 'bridge-pane-generation',
                 reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
-              });
+                },
+              );
               recovery = `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
             } catch (error) {
               recovery = `could not write recovery marker: ${bridgeErrorMessage(error)}`;

@@ -37,6 +37,9 @@ export async function tearDownGenerationBoundPane(
   >,
   paneId: string,
   expected: TmuxServerIdentity,
+  options: {
+    generationMismatch?: 'absent' | 'unknown';
+  } = {},
 ): Promise<VerifiedPaneTeardownResult> {
   const current = tmuxService.getServerIdentity?.();
   if (!current) {
@@ -46,7 +49,12 @@ export async function tearDownGenerationBoundPane(
     };
   }
   if (!sameTmuxServerIdentity(current, expected)) {
-    return { presence: 'absent' };
+    return {
+      presence: options.generationMismatch ?? 'absent',
+      ...(options.generationMismatch === 'unknown'
+        ? { error: 'tmux generation changed before allocation ownership was bound' }
+        : {}),
+    };
   }
   return tearDownPaneWithVerification({
     probe: async () => {

@@ -108,6 +108,7 @@ export async function superviseGitMutation(
 
   assertParentConnected();
   (dependencies.report ?? report)({ type: 'claimed' });
+  assertParentConnected();
 
   try {
     activeGit = await (dependencies.startStoppedGit ?? startStoppedGit)(
@@ -117,6 +118,7 @@ export async function superviseGitMutation(
         activeGit = active;
       },
     );
+    assertParentConnected();
     activeGit.continue();
     const result = await activeGit.close;
     if (activeGit.terminationReason) {

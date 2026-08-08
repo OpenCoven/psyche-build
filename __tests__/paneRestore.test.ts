@@ -120,6 +120,7 @@ describe('pane restoration', () => {
       complete,
       cancel,
     });
+
     replaceProjectPaneConfigPaneIdentityMock.mockRejectedValue(
       new Error('config disk unavailable'),
     );
@@ -140,6 +141,37 @@ describe('pane restoration', () => {
     expect(complete).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
     expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('includes the recorded generation in the restore identity CAS', async () => {
+    const oldGeneration = {
+      pid: 111,
+      processStartIdentity: 'old-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+
+    await recreateMissingPanes([{
+      id: 'psyche-generation',
+      slug: 'feature',
+      prompt: '',
+      paneId: '%2',
+      tmuxServerIdentity: oldGeneration,
+      worktreePath: '/repo/.psyche/worktrees/feature',
+      projectRoot: '/repo',
+      agent: 'codex',
+    }], '/repo/.psyche/psyche.config.json');
+
+    expect(replaceProjectPaneConfigPaneIdentityMock).toHaveBeenCalledWith(
+      '/repo',
+      {
+        id: 'psyche-generation',
+        paneId: '%2',
+        tmuxServerIdentity: oldGeneration,
+      },
+      expect.any(Object),
+    );
   });
 
   it('does not retain old-generation background IDs in the restored in-memory pane', async () => {

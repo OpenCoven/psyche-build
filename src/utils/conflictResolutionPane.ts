@@ -170,6 +170,7 @@ async function createConflictResolutionPaneWithReservation(
       tmuxService,
       paneInfo,
       allocationGeneration,
+      { generationMismatch: 'unknown' },
     );
     const recovery = teardown.presence === 'absent'
       ? undefined

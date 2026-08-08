@@ -31,6 +31,7 @@ import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import {
   mutateProjectPaneConfig,
   projectPaneConfigPath,
+  removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
 } from '../services/ProjectPaneConfig.js';
 import { WorktreeCleanupService } from '../services/WorktreeCleanupService.js';
@@ -307,6 +308,9 @@ async function restoreMissingPaneWithLease(
   const expected = {
     id: missingPane.id,
     paneId: missingPane.paneId,
+    ...(missingPane.tmuxServerIdentity
+      ? { tmuxServerIdentity: missingPane.tmuxServerIdentity }
+      : {}),
   };
   const reservation = await WorktreeCleanupService.getInstance().beginWorktreeReuseReservation(
     missingPane.worktreePath,
@@ -628,6 +632,22 @@ export async function recreateKilledWorktreePanes(
   return updatedPanes;
 }
 
+export async function removeStaleShellPaneRecords(
+  projectRoot: string,
+  stalePanes: readonly PsychePane[],
+): Promise<void> {
+  await removeProjectPaneConfigPaneIdentities(
+    projectRoot,
+    stalePanes.map((pane) => ({
+      id: pane.id,
+      paneId: pane.paneId,
+      ...(pane.tmuxServerIdentity
+        ? { tmuxServerIdentity: pane.tmuxServerIdentity }
+        : {}),
+    })),
+  );
+}
+
 /**
  * Loads panes from config file, rebinds IDs, and recreates missing panes
  * Returns the loaded and processed panes along with tmux state
@@ -670,16 +690,13 @@ export async function loadAndProcessPanes(
 
       // Save the cleaned config immediately to prevent these panes from reappearing
       try {
-        const staleShellIds = new Set(staleShellPanes.map((pane) => pane.id));
         const sessionProjectRoot = path.dirname(path.dirname(panesFile));
+        await removeStaleShellPaneRecords(sessionProjectRoot, staleShellPanes);
         const mutation = await mutateProjectPaneConfig(
           sessionProjectRoot,
           (configRecord) => {
             const config = configRecord as unknown as PsycheConfig;
-            const freshPanes = Array.isArray(config.panes) ? config.panes : [];
-            const persistedPanes = freshPanes.filter((pane) => !(
-              pane.type === 'shell' && staleShellIds.has(pane.id)
-            ));
+            const persistedPanes = Array.isArray(config.panes) ? config.panes : [];
             const projectRoot = config.projectRoot || sessionProjectRoot;
             const projectName = config.projectName || path.basename(projectRoot);
             config.panes = persistedPanes;

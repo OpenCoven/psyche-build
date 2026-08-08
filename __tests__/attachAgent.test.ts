@@ -301,7 +301,7 @@ describe('attachAgentToWorktree', () => {
     ]);
   });
 
-  it('compensates without persisting when tmux generation changes during allocation', async () => {
+  it('records recovery without killing when tmux generation changes during allocation', async () => {
     const originalGeneration = {
       pid: 4242,
       processStartIdentity: 'original-start',
@@ -324,7 +324,15 @@ describe('attachAgentToWorktree', () => {
 
     await expect(attach()).rejects.toThrow(/generation changed during attached pane allocation/i);
 
-    expect(upsertProjectPaneConfigPanesMock).not.toHaveBeenCalled();
+    expect(upsertProjectPaneConfigPanesMock).toHaveBeenCalledWith(
+      '/session',
+      expect.arrayContaining([
+        expect.objectContaining({
+          paneId: '%2',
+          tmuxServerIdentity: originalGeneration,
+        }),
+      ]),
+    );
     expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
   });
 
