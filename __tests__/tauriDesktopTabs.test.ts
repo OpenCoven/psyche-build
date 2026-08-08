@@ -98,4 +98,10 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).toMatch(/\.browser-tab\s*\{[\s\S]*?min-width:\s*34px;[\s\S]*?flex:\s*1 1 118px;/);
     expect(stylesCss).toMatch(/\.browser-tab-title\s*\{[\s\S]*?min-width:\s*0;/);
   });
+
+  it('keeps terminal tabs horizontally scrollable without vertical overflow', () => {
+    expect(stylesCss).toMatch(
+      /\.tab-strip\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;/
+    );
+  });
 });

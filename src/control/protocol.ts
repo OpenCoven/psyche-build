@@ -94,7 +94,7 @@ export function encodeControlMessage(message: ControlRequest | ControlResponse):
 }
 
 export function decodeControlRequest(raw: string): ControlRequest {
-  const value = JSON.parse(raw) as Partial<ControlRequest>;
+  const value = JSON.parse(raw) as Record<string, unknown>;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('invalid control request envelope');
   }
@@ -104,11 +104,51 @@ export function decodeControlRequest(raw: string): ControlRequest {
   if (typeof value.type !== 'string' || typeof value.requestId !== 'string') {
     throw new Error('invalid control request envelope');
   }
-  if (value.type === 'command.submit') {
-    const command = (value as { command?: Partial<ControlCommandInput> }).command;
-    if (!command || typeof command.id !== 'string' || typeof command.kind !== 'string') {
-      throw new Error('invalid command.submit payload');
+
+  switch (value.type) {
+    case 'hello':
+      if (
+        typeof value.token !== 'string'
+        || typeof value.clientName !== 'string'
+        || typeof value.projectRoot !== 'string'
+      ) {
+        throw new Error('invalid hello request');
+      }
+      break;
+    case 'command.submit': {
+      const command = value.command;
+      if (
+        !isPlainObject(command)
+        || !isPlainObject(command.payload)
+        || typeof command.id !== 'string'
+        || typeof command.idempotencyKey !== 'string'
+        || typeof command.kind !== 'string'
+        || typeof command.projectRoot !== 'string'
+        || typeof command.createdAt !== 'string'
+      ) {
+        throw new Error('invalid command.submit payload');
+      }
+      break;
     }
+    case 'state.get':
+      break;
+    case 'events.read':
+      if (
+        typeof value.afterSequence !== 'number'
+        || !Number.isInteger(value.afterSequence)
+        || value.afterSequence < 0
+        || ('limit' in value && typeof value.limit !== 'number')
+      ) {
+        throw new Error('invalid events.read request');
+      }
+      break;
+    default:
+      throw new Error('unsupported control request type');
   }
+
   return value as ControlRequest;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

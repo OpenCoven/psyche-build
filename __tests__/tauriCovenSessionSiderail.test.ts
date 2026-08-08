@@ -263,6 +263,7 @@ type LocalThread = {
   needsAttention?: boolean;
   status?: string;
   spawning?: boolean;
+  hidden?: boolean;
   covenSessionId?: string | null;
   worktreePath?: string;
   kind?: string;
@@ -399,7 +400,7 @@ function textOf(elements: FakeElement[]) {
 }
 
 describe('Tauri Coven session project rail', () => {
-  it('renders only local threads in input order while preserving open project headers', () => {
+  it('renders local threads in input order without empty project headers', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -421,7 +422,7 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(2);
+    expect(groups).toHaveLength(1);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-subsection-label')))
       .toEqual(['Psyche']);
     expect(groups[0].querySelectorAll('.session-row').map((row) => row.dataset.threadId))
@@ -431,7 +432,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.textContent).not.toContain('Beta daemon');
   });
 
-  it('does not let a daemon-only project change the normal empty worktree presentation', () => {
+  it('does not render a daemon-only project as an empty worktree', () => {
     const renderer = createRenderer({
       sessions: [{ id: 'daemon', projectRoot: '/alpha', title: 'Remote', status: 'running' }],
     });
@@ -440,12 +441,13 @@ describe('Tauri Coven session project rail', () => {
 
     expect(renderer.sessionListEl.querySelector('.session-coven-row')).toBeNull();
     expect(renderer.sessionListEl.textContent).not.toContain('Remote');
-    expect(renderer.sessionListEl.querySelector('.session-worktree-empty')?.textContent)
-      .toBe('No panes — select and press ⌘T');
+    expect(renderer.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No matching projects, worktrees, or panes.');
     expect(renderer.openCovenSession).not.toHaveBeenCalled();
   });
 
-  it('keeps local worktree ownership and attention independent of daemon sessions', () => {
+  it('hides selected empty worktrees while preserving populated worktree ownership and attention', () => {
     const renderer = createRenderer({
       projects: [{
         id: 'alpha', name: 'Alpha', root: '/alpha', selectedWorktreePath: '/alpha',
@@ -464,16 +466,75 @@ describe('Tauri Coven session project rail', () => {
     });
 
     renderer.render();
-
     const worktrees = renderer.sessionListEl.querySelectorAll('.session-worktree-group');
-    expect(worktrees).toHaveLength(2);
-    expect(worktrees[0].querySelectorAll('.session-row')).toHaveLength(0);
-    expect(worktrees[1].querySelector('.session-row')?.dataset.threadId).toBe('local-feature');
+    expect(worktrees).toHaveLength(1);
+    expect(worktrees[0].querySelector('.session-row')?.dataset.threadId).toBe('local-feature');
     const badges = renderer.sessionListEl.querySelectorAll('.session-attention-badge');
     expect(textOf(badges)).toEqual(['1', '1']);
     expect(badges[0].getAttribute('aria-label')).toBe('1 sessions need attention');
     expect(badges[1].getAttribute('aria-label'))
       .toBe('1 sessions need attention in this worktree');
+  });
+
+  it('omits a project when its only worktree session is hidden', () => {
+    const renderer = createRenderer({
+      projects: [
+        {
+          id: 'alpha', name: 'Alpha', root: '/alpha',
+          worktrees: [
+            { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+          ],
+        },
+        {
+          id: 'beta', name: 'Beta', root: '/beta',
+          worktrees: [
+            { path: '/beta', branch: 'main', is_main: true, dirty: false, missing: false },
+          ],
+        },
+      ],
+      threads: [
+        {
+          id: 'hidden-alpha', projectId: 'alpha', name: 'Hidden Alpha',
+          status: 'running', worktreePath: '/alpha', hidden: true,
+        },
+        {
+          id: 'visible-beta', projectId: 'beta', name: 'Visible Beta',
+          status: 'running', worktreePath: '/beta',
+        },
+      ],
+    });
+
+    renderer.render();
+
+    const groups = renderer.sessionListEl.querySelectorAll('.session-group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].textContent).toContain('Beta');
+    expect(renderer.sessionListEl.textContent).not.toContain('Alpha');
+    expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
+      .toBe('visible-beta');
+  });
+
+  it('keeps unresolved sessions visible because their fallback group is populated', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'orphan', projectId: 'alpha', name: 'Orphan session',
+        status: 'running', worktreePath: '/removed/worktree',
+      }],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-worktree-head')?.title)
+      .toBe('Sessions with no available worktree');
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('orphan');
   });
 
   it('searches only local thread metadata', () => {
@@ -493,6 +554,29 @@ describe('Tauri Coven session project rail', () => {
     renderer.setFilter('review');
     renderer.render();
     expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('local');
+  });
+
+  it('does not reveal an empty worktree when its branch matches the search', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [
+          { path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false },
+          { path: '/alpha-feature', branch: 'feature', is_main: false, dirty: false, missing: false },
+        ],
+      }],
+      threads: [{
+        id: 'feature', projectId: 'alpha', name: 'Feature work',
+        status: 'running', worktreePath: '/alpha-feature',
+      }],
+    });
+
+    renderer.setFilter('main');
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions match “main”');
   });
 
   it('uses sibling local controls and preserves activation, keyboard rename, close, and empty behavior', async () => {
@@ -542,8 +626,9 @@ describe('Tauri Coven session project rail', () => {
 
     const empty = createRenderer();
     empty.render();
-    expect(empty.sessionListEl.querySelector('.session-worktree-empty')?.textContent)
-      .toBe('No panes — select and press ⌘T');
+    expect(empty.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
+    expect(empty.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No matching projects, worktrees, or panes.');
   });
 
   it('mounts the real local rename input beside controls and restores activation after settle', async () => {

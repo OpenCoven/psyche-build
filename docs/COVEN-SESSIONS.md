@@ -1,6 +1,6 @@
 # Coven session visibility
 
-psyche treats Coven as an optional local runtime. psyche stays useful on its own, and when a local Coven daemon is available it can show, launch, and attach Coven-managed sessions beside normal psyche panes.
+psyche treats Coven as an optional local runtime. psyche stays useful on its own, and its CLI/bridge can show, launch, and attach Coven-managed sessions beside normal psyche panes when a local Coven daemon is available.
 
 ## Demo loop
 
@@ -111,7 +111,7 @@ or:
 
 Required fields for psyche visibility are `id` and `projectRoot`/`project_root`. Everything else is optional and rendered opportunistically.
 
-## Current UI behavior
+## Current CLI UI behavior
 
 - Sessions are filtered to the active psyche project roots before rendering.
 - Sessions whose project roots cannot be verified are hidden.
@@ -121,15 +121,19 @@ Required fields for psyche visibility are `id` and `projectRoot`/`project_root`.
 - Desktop-use panes launch through the daemon API and attach with `coven attach <session-id>`.
 - Socket/daemon failures are reported as action-oriented messages, such as starting Coven with `coven daemon start`.
 
+## macOS app behavior
+
+The macOS Tauri rail deliberately renders app-origin local threads only. It
+does not poll for, render, or attach daemon-discovered Coven sessions. The
+bounded native adapter remains available for compatibility and future
+host-authoritative integration, but a daemon session must not appear in the
+macOS rail without a new approved product design and lifecycle contract.
+
 ## Known gaps
 
 - Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. psyche therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
 - The same local binary does not expose `coven --version`; use `coven --help` to confirm command availability for now.
 
-## Known gaps
-
-- Verified on 2026-05-14: the locally installed Coven binary at `~/.cargo/bin/coven` supports `coven sessions --all`, `--manage`, and `--plain`, but does not currently support `coven sessions --json` or `coven sessions --json --all`. psyche therefore treats this CLI shape as unavailable until Coven restores or publishes the JSON contract above.
-- The same local binary does not expose `coven --version`; use `coven --help` to confirm command availability for now.
-
-Future slices can add per-session selection, summon/archive controls, and live event timelines without changing this adapter boundary.
+Future CLI/bridge slices can add per-session selection, summon/archive controls,
+and live event timelines without changing this adapter boundary.
 See [psyche + Coven demo loop](COVEN-DEMO-LOOP.md) for the end-to-end demo path and the [OpenCoven public roadmap](https://github.com/OpenCoven/coven/blob/main/docs/ROADMAP.md) for the upstream milestone.
