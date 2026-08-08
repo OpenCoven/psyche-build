@@ -284,6 +284,14 @@ function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
   }
 
   if (
+    isNetworkScheme(scheme)
+    && remoteUrl.includes('@')
+    && !rawParts.authority.includes('@')
+  ) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  if (
     url.protocol === 'ssh:'
     && rawParts.authority.startsWith('git@')
     && !url.password
@@ -293,7 +301,12 @@ function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
   }
 
   if (rawParts.authority.includes('@') || url.username || url.password) {
-    return serializeSanitizedUrl(url);
+    const sanitized = serializeSanitizedUrl(url);
+    return hasCredentialLikeAtOutsideAuthority(sanitized, scheme) ? REDACTED_REMOTE_URL : sanitized;
+  }
+
+  if (isNetworkScheme(scheme) && hasCredentialLikeAtOutsideAuthority(remoteUrl, scheme)) {
+    return REDACTED_REMOTE_URL;
   }
 
   return remoteUrl;
@@ -324,6 +337,22 @@ function serializeSanitizedUrl(url: URL): string {
   sanitized.username = '';
   sanitized.password = '';
   return `${sanitized.protocol}//${sanitized.host}${sanitized.pathname}${sanitized.search}${sanitized.hash}`;
+}
+
+function hasCredentialLikeAtOutsideAuthority(value: string, scheme: string): boolean {
+  if (!isNetworkScheme(scheme)) {
+    return false;
+  }
+
+  const schemePrefix = `${scheme}://`;
+  if (!value.startsWith(schemePrefix)) {
+    return value.includes('@');
+  }
+
+  const remainder = value.slice(schemePrefix.length);
+  const slashIndex = remainder.search(/[/?#]/u);
+  const suffix = slashIndex < 0 ? '' : remainder.slice(slashIndex);
+  return suffix.includes('@');
 }
 
 function looksCredentialBearing(remoteUrl: string): boolean {

@@ -313,17 +313,21 @@ describe('readRepositoryContext', () => {
     const worktreePath = '/repo/.worktrees/pr';
     const malformedSchemeSecret = `https:/${'user:secret@'}github.com/o/r`;
     const parsedSchemeSecret = `https:///${'user:secret@'}github.com/o/r`;
+    const parsedSshPathSecret = `ssh:///${'user:secret@'}github.com/OpenCoven/psyche-build.git`;
+    const parsedGitPathSecret = `git:///${'user:secret@'}github.com/OpenCoven/psyche-build.git`;
     const malformedScpSecret = `git@${'token@'}github.com:o/r`;
     const safeFileUrl = 'file:///Users/a@b/My Repo';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
-      'git\0remote': { stdout: 'masked\nauth\norigin\nscheme-bypass\nparsed-bypass\nscp-bypass\nfile-safe\n' },
+      'git\0remote': { stdout: 'masked\nauth\norigin\nscheme-bypass\nparsed-bypass\nssh-path-bypass\ngit-path-bypass\nscp-bypass\nfile-safe\n' },
       'git\0remote\0get-url\0--\0masked': { stdout: '******github.com/o/r.git\n' },
       'git\0remote\0get-url\0--\0auth': { stdout: `https://${'token:secret@'}github.com/OpenCoven/psyche-build.git\n` },
       'git\0remote\0get-url\0--\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
       'git\0remote\0get-url\0--\0scheme-bypass': { stdout: `${malformedSchemeSecret}\n` },
       'git\0remote\0get-url\0--\0parsed-bypass': { stdout: `${parsedSchemeSecret}\n` },
+      'git\0remote\0get-url\0--\0ssh-path-bypass': { stdout: `${parsedSshPathSecret}\n` },
+      'git\0remote\0get-url\0--\0git-path-bypass': { stdout: `${parsedGitPathSecret}\n` },
       'git\0remote\0get-url\0--\0scp-bypass': { stdout: `${malformedScpSecret}\n` },
       'git\0remote\0get-url\0--\0file-safe': { stdout: `${safeFileUrl}\n` },
     });
@@ -335,10 +339,12 @@ describe('readRepositoryContext', () => {
       { name: 'origin', url: 'git@github.com:OpenCoven/psyche-build.git' },
       { name: 'auth', url: 'https://github.com/OpenCoven/psyche-build.git' },
       { name: 'file-safe', url: safeFileUrl },
+      { name: 'git-path-bypass', url: '<redacted-remote-url>' },
       { name: 'masked', url: '<redacted-remote-url>' },
-      { name: 'parsed-bypass', url: 'https://github.com/o/r' },
+      { name: 'parsed-bypass', url: '<redacted-remote-url>' },
       { name: 'scheme-bypass', url: '<redacted-remote-url>' },
       { name: 'scp-bypass', url: '<redacted-remote-url>' },
+      { name: 'ssh-path-bypass', url: '<redacted-remote-url>' },
     ]);
     expect(context.remotes).toEqual([
       {
@@ -357,6 +363,8 @@ describe('readRepositoryContext', () => {
     expect(serialized).not.toContain('******github.com/o/r.git');
     expect(serialized).not.toContain(malformedSchemeSecret);
     expect(serialized).not.toContain(parsedSchemeSecret);
+    expect(serialized).not.toContain(parsedSshPathSecret);
+    expect(serialized).not.toContain(parsedGitPathSecret);
     expect(serialized).not.toContain(malformedScpSecret);
     expect(serialized).not.toContain('user');
     expect(serialized).not.toContain('secret');
