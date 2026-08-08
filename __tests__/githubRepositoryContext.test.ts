@@ -179,6 +179,34 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
+  it('preserves explicit enterprise HTTPS ports in normalized repository refs', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: 'upstream\n' },
+      'git\0remote': { stdout: 'upstream\n' },
+      'git\0remote\0get-url\0upstream': { stdout: 'https://ghe.example.test:443/OpenCoven/psyche-build.git\n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+
+    expect(context.rawRemotes).toEqual([
+      { name: 'upstream', url: 'https://ghe.example.test:443/OpenCoven/psyche-build.git' },
+    ]);
+    expect(context.remotes).toEqual([
+      {
+        name: 'upstream',
+        rawUrl: 'https://ghe.example.test:443/OpenCoven/psyche-build.git',
+        repository: {
+          host: 'ghe.example.test:443',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://ghe.example.test:443/OpenCoven/psyche-build',
+        },
+      },
+    ]);
+  });
+
   it('throws a fixed error when required git reads fail or return malformed branch output', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const branchFailure = createRunner({

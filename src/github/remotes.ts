@@ -7,6 +7,7 @@ export interface GitHubRemote {
 }
 
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
+const WHITESPACE = /\s/u;
 
 export function normalizeGitHubRemote(name: string, rawUrl: string): GitHubRemote | null {
   const normalizedName = normalizeRemoteName(name);
@@ -57,24 +58,14 @@ function isValidRawUrl(rawUrl: string): boolean {
 }
 
 function parseHttpsRemote(rawUrl: string): GitHubRepositoryRef | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
+  const match = /^https:\/\/([^/?#]+)(\/[^?#]*)$/iu.exec(rawUrl);
+  if (!match) {
     return null;
   }
 
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    return null;
-  }
-
-  const host = parsed.host.toLowerCase();
-  if (!host || (parsed.port && parsed.hostname.toLowerCase() === 'github.com')) {
-    return null;
-  }
-
-  const rawPath = extractRawPath(rawUrl);
-  if (!rawPath) {
+  const [, authority, rawPath] = match;
+  const host = parseHttpsAuthority(authority);
+  if (!host) {
     return null;
   }
 
@@ -86,19 +77,32 @@ function parseHttpsRemote(rawUrl: string): GitHubRepositoryRef | null {
   return buildRepositoryRef(host, repositoryPath.owner, repositoryPath.name);
 }
 
+function parseHttpsAuthority(authority: string): string | null {
+  if (!authority || authority.includes('@')) {
+    return null;
+  }
+
+  const parsed = parseHostAndPort(authority);
+  if (!parsed) {
+    return null;
+  }
+
+  if (parsed.port && parsed.hostname === 'github.com') {
+    return null;
+  }
+
+  return parsed.host;
+}
+
 function parseScpLikeSshRemote(rawUrl: string): GitHubRepositoryRef | null {
-  const match = /^([^@]+)@([^:/?#\s[\]]+):([^?#]+)$/.exec(rawUrl);
+  const match = /^git@([^:/\\@[\]\s]+):([^?#]+)$/u.exec(rawUrl);
   if (!match) {
     return null;
   }
 
-  const [, username, rawHost, rawPath] = match;
-  if (username !== 'git') {
-    return null;
-  }
-
-  const host = rawHost.toLowerCase();
-  if (!host) {
+  const [, rawHost, rawPath] = match;
+  const parsed = parseHostAndPort(rawHost);
+  if (!parsed || parsed.port) {
     return null;
   }
 
@@ -107,34 +111,18 @@ function parseScpLikeSshRemote(rawUrl: string): GitHubRepositoryRef | null {
     return null;
   }
 
-  return buildRepositoryRef(host, repositoryPath.owner, repositoryPath.name);
+  return buildRepositoryRef(parsed.host, repositoryPath.owner, repositoryPath.name);
 }
 
 function parseSshRemote(rawUrl: string): GitHubRepositoryRef | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
+  const match = /^ssh:\/\/([^/?#]+)(\/[^?#]*)$/iu.exec(rawUrl);
+  if (!match) {
     return null;
   }
 
-  if (
-    parsed.protocol !== 'ssh:'
-    || parsed.username !== 'git'
-    || parsed.password
-    || parsed.search
-    || parsed.hash
-  ) {
-    return null;
-  }
-
-  const host = parsed.host.toLowerCase();
-  if (!host || (parsed.port && parsed.hostname.toLowerCase() === 'github.com')) {
-    return null;
-  }
-
-  const rawPath = extractRawPath(rawUrl);
-  if (!rawPath) {
+  const [, authority, rawPath] = match;
+  const host = parseSshAuthority(authority);
+  if (!host) {
     return null;
   }
 
@@ -146,18 +134,41 @@ function parseSshRemote(rawUrl: string): GitHubRepositoryRef | null {
   return buildRepositoryRef(host, repositoryPath.owner, repositoryPath.name);
 }
 
-function extractRawPath(rawUrl: string): string | null {
-  const protocolIndex = rawUrl.indexOf('//');
-  if (protocolIndex < 0) {
+function parseSshAuthority(authority: string): string | null {
+  if (!authority.startsWith('git@')) {
     return null;
   }
 
-  const pathStart = rawUrl.indexOf('/', protocolIndex + 2);
-  if (pathStart < 0) {
+  const hostPart = authority.slice(4);
+  if (!hostPart || hostPart.includes('@')) {
     return null;
   }
 
-  return rawUrl.slice(pathStart);
+  const parsed = parseHostAndPort(hostPart);
+  return parsed?.host ?? null;
+}
+
+function parseHostAndPort(value: string): { host: string; hostname: string; port: string | null } | null {
+  if (!value || ASCII_CONTROL.test(value) || WHITESPACE.test(value)) {
+    return null;
+  }
+
+  const match = /^([^:/\\@[\]\s?#]+)(?::([0-9]+))?$/u.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  const [, rawHostname, rawPort] = match;
+  const hostname = rawHostname.toLowerCase();
+  if (!hostname) {
+    return null;
+  }
+
+  return {
+    host: rawPort ? `${hostname}:${rawPort}` : hostname,
+    hostname,
+    port: rawPort ?? null,
+  };
 }
 
 function parseRepositoryPath(rawPath: string): { owner: string; name: string } | null {
@@ -218,7 +229,13 @@ function decodePathSegment(rawSegment: string): string | null {
     return null;
   }
 
-  if (!decoded || decoded.includes('/') || decoded.includes('\\')) {
+  if (
+    !decoded
+    || decoded.includes('/')
+    || decoded.includes('\\')
+    || ASCII_CONTROL.test(decoded)
+    || WHITESPACE.test(decoded)
+  ) {
     return null;
   }
 

@@ -72,6 +72,28 @@ describe('normalizeGitHubRemote', () => {
         url: 'https://ghe.example.test:2222/OpenCoven/psyche-build',
       },
     });
+
+    expect(normalizeGitHubRemote('enterprise-https-443', 'https://ghe.example.test:443/OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-https-443',
+      rawUrl: 'https://ghe.example.test:443/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test:443',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test:443/OpenCoven/psyche-build',
+      },
+    });
+
+    expect(normalizeGitHubRemote('enterprise-https-8443', 'https://GHE.Example.Test:8443/OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-https-8443',
+      rawUrl: 'https://GHE.Example.Test:8443/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test:8443',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test:8443/OpenCoven/psyche-build',
+      },
+    });
   });
 
   it('rejects unsupported or malformed remote names and URLs', () => {
@@ -81,16 +103,37 @@ describe('normalizeGitHubRemote', () => {
       ['ori\ngin', 'https://github.com/OpenCoven/psyche-build.git'],
       ['origin', ' https://github.com/OpenCoven/psyche-build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git '],
+      ['origin', 'https://github.com/Open Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open%20Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open%09Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open%0ACoven/psyche-build.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche build.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche%20build.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche%09build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git#frag'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git?view=1'],
-      ['origin', 'https://user:pass@github.com/OpenCoven/psyche-build.git'],
+      ['origin', `https://${'user:pw@'}github.com/OpenCoven/psyche-build.git`],
+      ['origin', 'https://github.com:443/OpenCoven/psyche-build.git'],
+      ['origin', 'https://github.com:8443/OpenCoven/psyche-build.git'],
+      ['origin', '******github.com/OpenCoven/psyche-build.git'],
       ['origin', 'http://github.com/OpenCoven/psyche-build.git'],
       ['origin', 'git://github.com/OpenCoven/psyche-build.git'],
       ['origin', 'file:///Users/buns/repo'],
       ['origin', '/Users/buns/repo'],
       ['origin', '../repo'],
       ['origin', 'git@github.com:OpenCoven'],
+      ['origin', 'git@github.com:Open Coven/psyche-build.git'],
+      ['origin', 'git@github.com:Open%20Coven/psyche-build.git'],
+      ['origin', 'git@github.com:OpenCoven/psyche build.git'],
+      ['origin', 'git@github.com:OpenCoven/psyche%20build.git'],
+      ['origin', 'git@evil@github.com:OpenCoven/psyche-build.git'],
+      ['origin', 'git@github\\com:OpenCoven/psyche-build.git'],
+      ['origin', 'git@[2001:db8::1]:OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven'],
+      ['origin', 'ssh://git@ghe.example.test/Open Coven/psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/Open%20Coven/psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche build.git'],
+      ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche%20build.git'],
       ['origin', 'https://github.com/OpenCoven'],
       ['origin', 'https://github.com/OpenCoven/psyche-build/issues'],
       ['origin', 'https://github.com/OpenCoven/.git'],
@@ -100,6 +143,7 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'https://github.com/OpenCoven/psyche%5Cbuild'],
       ['origin', 'git@github.com:OpenCoven/psyche-build.git?view=1'],
       ['origin', 'ssh://other@ghe.example.test/OpenCoven/psyche-build.git'],
+      ['origin', `ssh://${'git:pw@'}ghe.example.test/OpenCoven/psyche-build.git`],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche-build.git#frag'],
     ];
 
