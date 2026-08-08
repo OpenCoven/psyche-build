@@ -132,13 +132,19 @@ export default function usePaneRunner({
         createWindow: async () => {
           const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
           const paneId = await tmuxService.getWindowPaneId(windowId);
-          return { windowId, paneId };
+          const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+          return {
+            windowId,
+            paneId,
+            ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+          };
         },
         sendCommand: (resource) => tmuxService.sendKeys(
           resource.paneId,
           `'${fullCommand.replace(/'/g, "'\\''")}' Enter`,
         ),
         tearDownResource,
+        getTmuxServerIdentity: () => tmuxService.getServerIdentity?.(),
         retainUncertainRecovery,
       });
       await refreshPanes?.();

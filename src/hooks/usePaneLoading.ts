@@ -69,8 +69,18 @@ export function migrateBackgroundPaneResources(pane: PsychePane): PsychePane {
         : {}
     ),
     ...(
+      !pane.testTmuxServerIdentity && testRecovery?.tmuxServerIdentity
+        ? { testTmuxServerIdentity: testRecovery.tmuxServerIdentity }
+        : {}
+    ),
+    ...(
       !pane.devPaneId && devRecovery?.paneId
         ? { devPaneId: devRecovery.paneId }
+        : {}
+    ),
+    ...(
+      !pane.devTmuxServerIdentity && devRecovery?.tmuxServerIdentity
+        ? { devTmuxServerIdentity: devRecovery.tmuxServerIdentity }
         : {}
     ),
   };
@@ -300,9 +310,11 @@ async function restoreMissingPaneWithLease(
   try {
     const worktreePath = reservation.canonicalWorktreePath;
     const newPaneId = splitPane({ cwd: worktreePath });
+    const tmuxServerIdentity = tmuxService.getServerIdentity?.();
     const reboundPane: PsychePane = {
       ...missingPane,
       paneId: newPaneId,
+      ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
       worktreePath,
     };
 

@@ -23,6 +23,13 @@ import {
   tearDownFullPaneWithVerification,
   type TmuxPanePresence,
 } from '../../utils/paneTeardown.js';
+import {
+  getCurrentTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../../services/TmuxServerIdentity.js';
+import {
+  assessTmuxTeardownOwnership,
+} from '../../services/TmuxResourceOwnership.js';
 
 function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
   try {
@@ -71,7 +78,37 @@ function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
   }
 }
 
-async function tearDownOwnedPane(pane: PsychePane) {
+async function tearDownOwnedPane(
+  pane: PsychePane,
+  panes: readonly PsychePane[],
+  currentGeneration: TmuxServerIdentity | undefined,
+) {
+  const ownership = assessTmuxTeardownOwnership(
+    pane as PsychePane & Record<string, unknown>,
+    panes as Array<PsychePane & Record<string, unknown>>,
+    currentGeneration,
+  );
+  if (ownership === 'stale-generation') {
+    // The exact config-CAS that invoked this callback removes only this old
+    // record. A reused ID in the new server must never receive a kill command.
+    return {
+      presence: 'absent' as const,
+      pane: { presence: 'absent' as const },
+      backgroundPanes: new Map(),
+      windows: new Map(),
+    };
+  }
+  if (ownership === 'unverified-generation' || ownership === 'ambiguous') {
+    return {
+      presence: 'unknown' as const,
+      error: ownership === 'ambiguous'
+        ? 'tmux resource ownership is ambiguous in the current server generation'
+        : 'current tmux server generation could not be verified',
+      pane: { presence: 'unknown' as const },
+      backgroundPanes: new Map(),
+      windows: new Map(),
+    };
+  }
   return tearDownFullPaneWithVerification({
     target: pane,
     probePane: (paneId) => probeTmuxPanePresence(paneId),
@@ -252,7 +289,11 @@ async function executeCloseOption(
             // The config lease has already revalidated this exact identity.
             // Read its current background pane/window fields here rather than
             // tearing down a stale UI snapshot after a concurrent update.
-            const teardown = await tearDownOwnedPane(current);
+            const teardown = await tearDownOwnedPane(
+              current,
+              (_panes || []) as PsychePane[],
+              context.getTmuxServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+            );
             if (teardown.presence !== 'absent') {
               const message = teardown.presence === 'unknown'
                 ? `Could not confirm pane "${paneName}" and all owned background windows closed; pane record and worktree were preserved. ${

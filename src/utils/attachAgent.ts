@@ -181,12 +181,14 @@ async function attachAgentToReservedWorktree(
           throw new Error('tmux returned no pane ID');
         }
 
+        const tmuxServerIdentity = tmuxService.getServerIdentity?.();
         newPane = {
           id: psychePaneId,
           slug,
           branchName: targetPane.branchName,
           prompt: prompt || 'No initial prompt',
           paneId: paneInfo,
+          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
           projectRoot,
           projectName: targetPane.projectName,
           colorTheme: targetPane.colorTheme || resolveProjectColorTheme(projectRoot, []),

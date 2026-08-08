@@ -54,6 +54,13 @@ export interface PendingGitMutation {
   supervisorPid?: number;
   supervisorProcessStartIdentity?: string;
   claimedAt?: string;
+  /**
+   * A supervisor that could not confirm its detached Git process group exited
+   * leaves this durable diagnostic behind. The pending claim remains live
+   * until normal stale-owner recovery can prove every process is gone.
+   */
+  terminationUnconfirmedAt?: string;
+  terminationFailure?: string;
 }
 
 export interface PendingGitMutationRequest {
@@ -311,7 +318,12 @@ export async function acquireWorktreeOperationLease(
       now,
     ),
     release: async () => {
-      await releaseOwnedLease(paths.lockDir, nonce);
+      await releaseOwnedLease(
+        paths.lockDir,
+        nonce,
+        isOwnerProcessAlive,
+        resolveProcessStartIdentity,
+      );
     },
   };
 }
@@ -442,7 +454,12 @@ export async function acquireProjectWorktreeLifecycleLease(
       now,
     ),
     release: async () => {
-      await releaseOwnedLease(paths.lockDir, nonce);
+      await releaseOwnedLease(
+        paths.lockDir,
+        nonce,
+        isOwnerProcessAlive,
+        resolveProcessStartIdentity,
+      );
     },
   };
 }
@@ -897,9 +914,129 @@ export async function claimPendingGitMutationLease(
     };
   });
 
-  const child = { pid, processStartIdentity };
+  return { pid, processStartIdentity };
+}
+
+export interface TrackPendingGitMutationChildLeaseRequest {
+  mutationNonce: string;
+  supervisor: LeaseChildProcess;
+  pid: number;
+  processStartIdentity?: string;
+}
+
+/**
+ * Records the actual detached Git process while it is stopped before its
+ * first instruction can run. The supervisor remains in pendingMutation; the
+ * nonce-addressed child record intentionally names Git, not its supervisor,
+ * so a supervisor crash cannot make a live hook-bearing Git command stale.
+ */
+export async function trackPendingGitMutationChildLease(
+  lease: PendingGitMutationLeaseRef,
+  request: TrackPendingGitMutationChildLeaseRequest,
+): Promise<LeaseChildProcess> {
+  if (!isSafeNonce(request.mutationNonce)) {
+    throw new Error('Pending Git mutation nonce contains unsupported characters');
+  }
+  if (
+    !Number.isInteger(request.pid)
+    || request.pid <= 0
+    || !isSafeProcessStartIdentity(request.supervisor.processStartIdentity)
+  ) {
+    throw new Error('Cannot track pending Git mutation without valid process identities');
+  }
+
+  const processStartIdentity = request.processStartIdentity
+    ?? getProcessStartIdentity(request.pid);
+  if (!isSafeProcessStartIdentity(processStartIdentity)) {
+    throw new Error(
+      `Cannot track destructive Git child ${request.pid}: process-start identity is unavailable`,
+    );
+  }
+
+  await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
+    const pending = record.pendingMutation;
+    if (
+      !pending
+      || pending.nonce !== request.mutationNonce
+      || pending.supervisorPid !== request.supervisor.pid
+      || pending.supervisorProcessStartIdentity !== request.supervisor.processStartIdentity
+    ) {
+      throw new Error('Pending Git mutation no longer belongs to this supervisor');
+    }
+    return record;
+  });
+
+  const child = { pid: request.pid, processStartIdentity };
   await replaceChildLeaseRecord(lease.lockDir, lease.leaseNonce, child);
   return child;
+}
+
+/**
+ * Removes only the exact Git child companion record after its close event.
+ * An old supervisor cannot erase a replacement lease or another child.
+ */
+export async function clearPendingGitMutationChildLease(
+  lease: PendingGitMutationLeaseRef,
+  child: LeaseChildProcess,
+): Promise<void> {
+  const current = await readLeaseRecord(lease.lockDir);
+  if (
+    !current.record
+    || current.record.nonce !== lease.leaseNonce
+    || current.record.childPid !== child.pid
+    || current.record.childProcessStartIdentity !== child.processStartIdentity
+  ) {
+    return;
+  }
+  await rm(childLeaseRecordPath(lease.lockDir, lease.leaseNonce), { force: true });
+}
+
+export interface RetainPendingGitMutationLeaseRequest {
+  mutationNonce: string;
+  supervisor: LeaseChildProcess;
+  reason: string;
+  now?: () => Date;
+}
+
+/**
+ * Marks a failed detached-group termination without clearing ownership. This
+ * gives operators a durable explanation while normal liveness recovery still
+ * waits for the actual Git PID to disappear.
+ */
+export async function retainPendingGitMutationLease(
+  lease: PendingGitMutationLeaseRef,
+  request: RetainPendingGitMutationLeaseRequest,
+): Promise<void> {
+  if (!isSafeNonce(request.mutationNonce)) {
+    return;
+  }
+  const reason = request.reason.replace(/[\r\n\0]/g, ' ').slice(0, 1_024);
+  const now = request.now ?? (() => new Date());
+  try {
+    await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
+      const pending = record.pendingMutation;
+      if (
+        !pending
+        || pending.nonce !== request.mutationNonce
+        || pending.supervisorPid !== request.supervisor.pid
+        || pending.supervisorProcessStartIdentity !== request.supervisor.processStartIdentity
+      ) {
+        return record;
+      }
+      return {
+        ...record,
+        pendingMutation: {
+          ...pending,
+          terminationUnconfirmedAt: now().toISOString(),
+          terminationFailure: reason || 'Could not confirm Git process group termination',
+        },
+      };
+    });
+  } catch (error) {
+    if (!isLeaseOwnershipGoneError(error)) {
+      throw error;
+    }
+  }
 }
 
 export interface ClearPendingGitMutationLeaseRequest {
@@ -920,7 +1057,6 @@ export async function clearPendingGitMutationLease(
     return;
   }
 
-  let cleared = false;
   try {
     await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
       const pending = record.pendingMutation;
@@ -940,7 +1076,6 @@ export async function clearPendingGitMutationLease(
       ) {
         return record;
       }
-      cleared = true;
       const next = { ...record };
       delete next.pendingMutation;
       return next;
@@ -952,21 +1087,6 @@ export async function clearPendingGitMutationLease(
     return;
   }
 
-  if (
-    cleared
-    && request.supervisor
-  ) {
-    const current = await readLeaseRecord(lease.lockDir);
-    if (
-      current.record
-      && current.record.nonce === lease.leaseNonce
-      && current.record.childPid === request.supervisor.pid
-      && current.record.childProcessStartIdentity
-        === request.supervisor.processStartIdentity
-    ) {
-      await rm(childLeaseRecordPath(lease.lockDir, lease.leaseNonce), { force: true });
-    }
-  }
 }
 
 /**
@@ -1014,9 +1134,22 @@ async function replaceChildLeaseRecord(
 async function releaseOwnedLease(
   lockDir: string,
   nonce: string,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
 ): Promise<void> {
   const current = await readLeaseRecord(lockDir);
   if (!current.record || current.record.nonce !== nonce) {
+    return;
+  }
+  if (hasLiveOrUnverifiableMutation(
+    current.record,
+    isOwnerProcessAlive,
+    resolveProcessStartIdentity,
+    new Date(),
+  )) {
+    // A caller may reach its finally block after an IPC failure while the
+    // detached Git group still runs. Do not turn a normal release attempt
+    // into authorization to steal that mutation's lease.
     return;
   }
 
@@ -1105,6 +1238,18 @@ function isPendingGitMutation(value: unknown): value is PendingGitMutation {
       pending.claimedAt === undefined
       || typeof pending.claimedAt === 'string'
     )
+    && (
+      pending.terminationUnconfirmedAt === undefined
+      || typeof pending.terminationUnconfirmedAt === 'string'
+    )
+    && (
+      pending.terminationFailure === undefined
+      || (
+        typeof pending.terminationFailure === 'string'
+        && pending.terminationFailure.length <= 1_024
+        && !/[\r\n\0]/.test(pending.terminationFailure)
+      )
+    )
   );
 }
 
@@ -1138,15 +1283,18 @@ function isLeaseOwnerStale(
     // A process may die after persisting pendingMutation but before fork has
     // created the supervisor. Until the declared deadline this is an
     // intentionally unstealable launch window.
-    if (isFutureOrPresentTimestamp(pending.deadline, now)) {
+    const claimedSupervisor = (
+      pending.supervisorPid !== undefined
+      && pending.supervisorProcessStartIdentity !== undefined
+    );
+    if (!claimedSupervisor && isFutureOrPresentTimestamp(pending.deadline, now)) {
       return false;
     }
     if (
-      pending.supervisorPid !== undefined
-      && pending.supervisorProcessStartIdentity !== undefined
+      claimedSupervisor
       && !isProcessIdentityStale(
-        pending.supervisorPid,
-        pending.supervisorProcessStartIdentity,
+        pending.supervisorPid!,
+        pending.supervisorProcessStartIdentity!,
         isOwnerProcessAlive,
         resolveProcessStartIdentity,
       )
@@ -1176,6 +1324,46 @@ function isLeaseOwnerStale(
     record.childProcessStartIdentity,
     isOwnerProcessAlive,
     resolveProcessStartIdentity,
+  );
+}
+
+function hasLiveOrUnverifiableMutation(
+  record: WorktreeOperationLeaseRecord,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
+  now: Date,
+): boolean {
+  const pending = record.pendingMutation;
+  if (pending) {
+    const claimedSupervisor = (
+      pending.supervisorPid !== undefined
+      && pending.supervisorProcessStartIdentity !== undefined
+    );
+    if (!claimedSupervisor && isFutureOrPresentTimestamp(pending.deadline, now)) {
+      return true;
+    }
+    if (
+      claimedSupervisor
+      && !isProcessIdentityStale(
+        pending.supervisorPid!,
+        pending.supervisorProcessStartIdentity!,
+        isOwnerProcessAlive,
+        resolveProcessStartIdentity,
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return (
+    record.childPid !== undefined
+    && record.childProcessStartIdentity !== undefined
+    && !isProcessIdentityStale(
+      record.childPid,
+      record.childProcessStartIdentity,
+      isOwnerProcessAlive,
+      resolveProcessStartIdentity,
+    )
   );
 }
 

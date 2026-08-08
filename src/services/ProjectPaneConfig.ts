@@ -16,6 +16,7 @@ import {
   isSafeProcessStartIdentity,
   type ProcessStartIdentityResolver,
 } from './ProcessIdentity.js';
+import { findTmuxResourceConflict } from './TmuxResourceOwnership.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -787,6 +788,20 @@ function assertUniquePaneIds(
       );
     }
     seen.add(id);
+  }
+
+  const tmuxConflict = findTmuxResourceConflict(
+    panes as readonly (Pick<PsychePane, 'id'> & Record<string, unknown>)[],
+  );
+  if (tmuxConflict) {
+    throw new ProjectPaneConfigError(
+      'config_corrupt',
+      `${configPath} contains duplicate tmux ${tmuxConflict.resource.kind} ID "${
+        tmuxConflict.resource.id
+      }" owned by panes "${tmuxConflict.firstOwnerId}" and "${
+        tmuxConflict.secondOwnerId
+      }" in the same server generation`,
+    );
   }
 }
 

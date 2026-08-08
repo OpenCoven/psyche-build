@@ -208,6 +208,7 @@ async function reopenWorktreeWithReuseReservation(
     paneInfo = splitPane({ targetPane });
   }
 
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
   const newPane: PsychePane = {
     id: psychePaneId,
     slug,
@@ -217,6 +218,7 @@ async function reopenWorktreeWithReuseReservation(
       : undefined,
     prompt: '(Reopened session)',
     paneId: paneInfo,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
     projectRoot,
     projectName: paneProjectName,
     colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),

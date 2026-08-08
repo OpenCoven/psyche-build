@@ -59,6 +59,19 @@ afterEach(() => {
 });
 
 describe('killBridgePane', () => {
+  const oldServerGeneration = {
+    pid: 111,
+    processStartIdentity: 'Thu Aug  7 19:00:00 2026',
+    socketPath: '/tmp/tmux-501/default',
+    sessionId: '$1',
+  };
+  const currentServerGeneration = {
+    pid: 222,
+    processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+    socketPath: '/tmp/tmux-501/default',
+    sessionId: '$1',
+  };
+
   it('kills the tmux pane and removes the config record', async () => {
     writeConfig([pane()]);
     const d = deps();
@@ -67,6 +80,42 @@ describe('killBridgePane', () => {
 
     expect(d.killTmuxPane).toHaveBeenCalledWith('%3');
     expect(result).toMatchObject({ id: 'psyche-1', paneId: '%3', killed: true });
+    expect(readConfig().panes).toEqual([]);
+  });
+
+  it('removes a restarted-server record without killing its reused IDs', async () => {
+    writeConfig([pane({
+      tmuxServerIdentity: oldServerGeneration,
+      testPaneId: '%4',
+      testWindowId: '@7',
+      testTmuxServerIdentity: oldServerGeneration,
+    })]);
+    const d = {
+      tmuxPaneExists: vi.fn(() => true),
+      killTmuxPane: vi.fn(),
+      probeTmuxWindow: vi.fn(() => 'present' as const),
+      killTmuxWindow: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
+    };
+
+    const result = await killBridgePane(projectRoot, '%3', d);
+
+    expect(result.killed).toBe(false);
+    expect(d.killTmuxPane).not.toHaveBeenCalled();
+    expect(d.killTmuxWindow).not.toHaveBeenCalled();
+    expect(readConfig().panes).toEqual([]);
+  });
+
+  it('tears down a uniquely owned pane in the same tmux server generation', async () => {
+    writeConfig([pane({ tmuxServerIdentity: currentServerGeneration })]);
+    const d = {
+      ...deps(),
+      getTmuxServerIdentity: () => currentServerGeneration,
+    };
+
+    await killBridgePane(projectRoot, '%3', d);
+
+    expect(d.killTmuxPane).toHaveBeenCalledWith('%3');
     expect(readConfig().panes).toEqual([]);
   });
 

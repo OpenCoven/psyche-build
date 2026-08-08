@@ -7,6 +7,7 @@
  */
 
 import type { PsychePane, SavePanes } from '../types.js';
+import type { TmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
@@ -95,6 +96,8 @@ export interface PaneLifecycleIdentity {
 export interface ActionContext {
   panes: PsychePane[];
   currentPaneId?: string;
+  /** Optional lifecycle seam; production captures the live tmux generation. */
+  getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
   sessionName: string;
   projectName: string;
   savePanes: SavePanes;

@@ -128,11 +128,13 @@ async function createConflictResolutionPaneWithReservation(
   // guarded by exact persistence or verified teardown/recovery.
   const paneInfo = splitPane();
   const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
     prompt,
     paneId: paneInfo,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
     projectRoot: targetRepoPath,
     projectName,
     colorTheme: resolveProjectColorTheme(targetRepoPath, []),

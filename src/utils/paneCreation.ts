@@ -474,6 +474,7 @@ async function createPaneWithReuseReservation(
     }
   }
 
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
@@ -481,6 +482,7 @@ async function createPaneWithReuseReservation(
     branchName: branchName !== slug ? branchName : undefined,
     prompt: prompt || 'No initial prompt',
     paneId: paneInfo,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
     projectRoot,
     projectName: paneProjectName,
     colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),

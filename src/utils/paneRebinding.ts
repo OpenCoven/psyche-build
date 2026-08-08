@@ -2,6 +2,7 @@ import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { getPaneTitleCandidates } from './paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
+import { getCurrentTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 
 /**
  * Attempts to rebind a pane whose ID has changed by matching on its stable tmux title.
@@ -38,7 +39,12 @@ export function rebindPaneByTitle(
   //           `Rebound pane ${pane.id} from ${pane.paneId} to ${remappedId} (matched by title: ${candidate})`,
   //           'shellDetection'
   //         );
-        return { ...pane, paneId: remappedId };
+        const tmuxServerIdentity = getCurrentTmuxServerIdentity();
+        return {
+          ...pane,
+          paneId: remappedId,
+          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+        };
       }
     }
   }

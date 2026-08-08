@@ -1,7 +1,10 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   claimPendingGitMutationLease,
+  clearPendingGitMutationChildLease,
   clearPendingGitMutationLease,
+  retainPendingGitMutationLease,
+  trackPendingGitMutationChildLease,
   type LeaseChildProcess,
 } from './WorktreeOperationLease.js';
 import type {
@@ -9,7 +12,29 @@ import type {
   GitMutationSupervisorResult,
 } from './GitMutationSupervisor.js';
 
+const TERMINATION_WAIT_MS = 2_000;
+
 type SupervisorMessage = GitMutationSupervisorRequest;
+
+interface ClaimedLease {
+  lease: GitMutationSupervisorRequest['leases'][number];
+  supervisor: LeaseChildProcess;
+}
+
+interface TrackedGitLease extends ClaimedLease {
+  git: LeaseChildProcess;
+}
+
+interface ActiveGitProcess {
+  readonly child: ChildProcess;
+  readonly tracked: TrackedGitLease[];
+  readonly close: Promise<GitMutationSupervisorResult>;
+  continued: boolean;
+  terminationReason?: string;
+  hasClosed: () => boolean;
+  terminate: () => Promise<boolean>;
+  continue: () => void;
+}
 
 process.once('message', (message: SupervisorMessage) => {
   void supervise(message)
@@ -25,10 +50,7 @@ async function supervise(
 ): Promise<GitMutationSupervisorResult> {
   validateRequest(request);
 
-  const claimed: Array<{
-    lease: GitMutationSupervisorRequest['leases'][number];
-    supervisor: LeaseChildProcess;
-  }> = [];
+  const claimed: ClaimedLease[] = [];
   try {
     for (const lease of request.leases) {
       const supervisor = await claimPendingGitMutationLease(lease, {
@@ -47,42 +69,296 @@ async function supervise(
   }
 
   report({ type: 'claimed' });
-  let result: GitMutationSupervisorResult;
+  let activeGit: ActiveGitProcess | undefined;
+  const stopHandlers = installTerminationHandlers(
+    () => activeGit,
+    request,
+    claimed,
+  );
+
   try {
-    result = await runGit(request.cwd, request.args);
+    activeGit = await startStoppedGit(
+      request,
+      claimed,
+      (active) => {
+        activeGit = active;
+      },
+    );
+    activeGit.continue();
+    const result = await activeGit.close;
+    if (activeGit.terminationReason) {
+      throw new Error(activeGit.terminationReason);
+    }
+    return result;
   } finally {
-    // This is intentionally after the Git close event. Git waits for normal
-    // hooks, so the supervisor retains durable ownership for the full command
-    // lifetime rather than only through the parent's spawn call.
-    await Promise.all(claimed.map(({ lease, supervisor }) => (
-      clearPendingGitMutationLease(lease, {
-        mutationNonce: request.mutationNonce,
-        supervisor,
-      })
-    )));
+    stopHandlers();
+    if (activeGit?.hasClosed()) {
+      await Promise.allSettled(activeGit.tracked.map(({ lease, git }) => (
+        clearPendingGitMutationChildLease(lease, git)
+      )));
+      await Promise.allSettled(claimed.map(({ lease, supervisor }) => (
+        clearPendingGitMutationLease(lease, {
+          mutationNonce: request.mutationNonce,
+          supervisor,
+        })
+      )));
+    } else if (activeGit) {
+      await retainUnconfirmedTermination(
+        request,
+        claimed,
+        activeGit.terminationReason || 'Git process group did not exit before supervisor shutdown',
+      );
+    } else {
+      // No Git PID was ever handed off, so this is the ordinary claimed-helper
+      // setup failure path rather than an uncertain destructive operation.
+      await Promise.allSettled(claimed.map(({ lease, supervisor }) => (
+        clearPendingGitMutationLease(lease, {
+          mutationNonce: request.mutationNonce,
+          supervisor,
+        })
+      )));
+    }
   }
-  return result!;
 }
 
-function runGit(
-  cwd: string,
-  args: readonly string[],
-): Promise<GitMutationSupervisorResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', [...args], {
-      cwd,
+/**
+ * A POSIX gate stops itself before exec'ing Git. `exec` preserves the process
+ * PID and start time, so the PID written while stopped is the actual Git PID.
+ * This closes the spawn-to-hook race that a parent-side SIGSTOP cannot close.
+ */
+async function startStoppedGit(
+  request: GitMutationSupervisorRequest,
+  claimed: readonly ClaimedLease[],
+  onStarted: (active: ActiveGitProcess) => void,
+): Promise<ActiveGitProcess> {
+  const unix = process.platform !== 'win32';
+  const child = unix
+    ? spawn('/bin/sh', [
+      '-c',
+      'kill -STOP "$$"; exec "$@"',
+      '--',
+      'git',
+      ...request.args,
+    ], {
+      cwd: request.cwd,
+      detached: true,
+      shell: false,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    : spawn('git', [...request.args], {
+      cwd: request.cwd,
+      detached: false,
       shell: false,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
-    let stderr = '';
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+
+  let stderr = '';
+  let closed = false;
+  let closeError: Error | undefined;
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    stderr += chunk.toString();
+  });
+  const close = new Promise<GitMutationSupervisorResult>((resolve, reject) => {
+    child.once('error', (error) => {
+      closeError = error;
+      if (closed) {
+        return;
+      }
+      // spawn failures may not emit close on every platform.
+      reject(error);
     });
-    child.once('error', reject);
     child.once('close', (exitCode) => {
+      closed = true;
+      if (closeError) {
+        reject(closeError);
+        return;
+      }
       resolve({ exitCode, stderr: stderr.trim() });
     });
   });
+
+  const pid = child.pid;
+  if (!pid || !Number.isInteger(pid) || pid <= 0) {
+    try {
+      await close;
+    } catch {
+      // The useful error is below: a process with no PID can never be owned.
+    }
+    throw new Error('Git supervisor could not obtain a Git child PID');
+  }
+
+  let continued = false;
+  const active: ActiveGitProcess = {
+    child,
+    tracked: [],
+    close,
+    continued,
+    hasClosed: () => closed,
+    continue: () => {
+      if (closed || continued) {
+        return;
+      }
+      if (unix) {
+        process.kill(-pid, 'SIGCONT');
+      } else {
+        child.kill('SIGCONT');
+      }
+      continued = true;
+      active.continued = true;
+    },
+    terminate: async () => {
+      if (closed) {
+        return true;
+      }
+
+      if (!continued) {
+        // The gate has not exec'ed Git yet. SIGKILL is deliverable to a
+        // stopped process and guarantees no hook can run after a failed
+        // ownership registration.
+        signalGitProcessGroup(child, unix, 'SIGKILL');
+        return waitForClose(active, TERMINATION_WAIT_MS);
+      }
+
+      signalGitProcessGroup(child, unix, 'SIGTERM');
+      if (await waitForClose(active, TERMINATION_WAIT_MS)) {
+        return true;
+      }
+      signalGitProcessGroup(child, unix, 'SIGKILL');
+      return waitForClose(active, TERMINATION_WAIT_MS);
+    },
+  };
+  onStarted(active);
+
+  try {
+    for (const claim of claimed) {
+      const git = await trackGitChildWithRetry(claim, request.mutationNonce, pid);
+      active.tracked.push({ ...claim, git });
+    }
+    return active;
+  } catch (error) {
+    const terminated = await active.terminate();
+    if (!terminated) {
+      await retainUnconfirmedTermination(
+        request,
+        claimed,
+        `Git ownership registration failed and its process group could not be confirmed stopped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    throw error;
+  }
+}
+
+async function trackGitChildWithRetry(
+  claim: ClaimedLease,
+  mutationNonce: string,
+  pid: number,
+): Promise<LeaseChildProcess> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      return await trackPendingGitMutationChildLease(claim.lease, {
+        mutationNonce,
+        supervisor: claim.supervisor,
+        pid,
+      });
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes('process-start identity is unavailable') || attempt === 19) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Could not persist Git child ownership');
+}
+
+function installTerminationHandlers(
+  active: () => ActiveGitProcess | undefined,
+  request: GitMutationSupervisorRequest,
+  claimed: readonly ClaimedLease[],
+): () => void {
+  let stopping: Promise<void> | undefined;
+  const stop = (reason: string) => {
+    stopping ??= (async () => {
+      const git = active();
+      if (!git) {
+        return;
+      }
+      git.terminationReason = reason;
+      const terminated = await git.terminate();
+      if (!terminated) {
+        await retainUnconfirmedTermination(request, claimed, reason);
+      }
+    })();
+    void stopping;
+  };
+  const signalHandlers = new Map<NodeJS.Signals, () => void>([
+    ['SIGINT', () => stop('Git mutation supervisor received SIGINT')],
+    ['SIGTERM', () => stop('Git mutation supervisor received SIGTERM')],
+    ['SIGHUP', () => stop('Git mutation supervisor received SIGHUP')],
+  ]);
+  const disconnectHandler = () => stop('Git mutation supervisor lost its parent IPC channel');
+  for (const [signal, handler] of signalHandlers) {
+    process.once(signal, handler);
+  }
+  process.once('disconnect', disconnectHandler);
+
+  return () => {
+    for (const [signal, handler] of signalHandlers) {
+      process.removeListener(signal, handler);
+    }
+    process.removeListener('disconnect', disconnectHandler);
+  };
+}
+
+async function retainUnconfirmedTermination(
+  request: GitMutationSupervisorRequest,
+  claimed: readonly ClaimedLease[],
+  reason: string,
+): Promise<void> {
+  await Promise.allSettled(claimed.map(({ lease, supervisor }) => (
+    retainPendingGitMutationLease(lease, {
+      mutationNonce: request.mutationNonce,
+      supervisor,
+      reason,
+    })
+  )));
+}
+
+function signalGitProcessGroup(
+  child: ChildProcess,
+  unix: boolean,
+  signal: NodeJS.Signals,
+): void {
+  const pid = child.pid;
+  try {
+    if (unix && pid) {
+      process.kill(-pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    // The close probe below decides whether this was an already-dead process
+    // or a termination we could not confirm.
+  }
+}
+
+async function waitForClose(
+  active: ActiveGitProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (active.hasClosed()) {
+    return true;
+  }
+  await Promise.race([
+    active.close.catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+  return active.hasClosed();
 }
 
 function validateRequest(value: SupervisorMessage): void {

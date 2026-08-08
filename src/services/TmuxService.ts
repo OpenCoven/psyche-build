@@ -4,6 +4,10 @@ import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import type { TmuxPanePresence } from '../utils/paneTeardown.js';
+import {
+  parseTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from './TmuxServerIdentity.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -319,6 +323,27 @@ export class TmuxService {
       RetryStrategy.IDEMPOTENT,
       'getCurrentPaneId'
     );
+  }
+
+  /**
+   * Captures the current tmux server generation for durable resource records.
+   * Callers treat an unavailable identity as unverified rather than using a
+   * pane ID alone for destructive teardown.
+   */
+  getServerIdentity(target?: string): TmuxServerIdentity | undefined {
+    try {
+      const targetArg = target
+        ? ` -t '${target.replace(/'/g, "'\\''")}'`
+        : '';
+      return parseTmuxServerIdentity(
+        this.execute(
+          `tmux display-message${targetArg} -p "#{pid}\t#{socket_path}\t#{session_id}"`,
+          { silent: true, timeout: 1_000 },
+        ),
+      );
+    } catch {
+      return undefined;
+    }
   }
 
   /**

@@ -182,6 +182,71 @@ describe('closeAction', () => {
   });
 
   describe('close execution - kill_only', () => {
+    const oldServerGeneration = {
+      pid: 111,
+      processStartIdentity: 'Thu Aug  7 19:00:00 2026',
+      socketPath: '/tmp/tmux-501/default',
+      sessionId: '$1',
+    };
+    const currentServerGeneration = {
+      pid: 222,
+      processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+      socketPath: '/tmp/tmux-501/default',
+      sessionId: '$1',
+    };
+
+    it('removes an old-server record without killing a reused pane ID', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: oldServerGeneration,
+        testPaneId: '%43',
+        testWindowId: '@7',
+        testTmuxServerIdentity: oldServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from('%42\n%43\n'));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(context.panes).toEqual([]);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane') || String(command).includes('kill-window')
+      )).toBe(false);
+    });
+
+    it('tears down a uniquely owned pane in the same tmux server generation', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      let alive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return alive ? '%42\n' : '';
+        if (command.includes('kill-pane')) {
+          alive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      expect(vi.mocked(execSync)).toHaveBeenCalledWith(
+        expect.stringContaining("tmux kill-pane -t '%42'"),
+        expect.anything(),
+      );
+    });
+
     it('aborts before teardown and refreshes UI when the exact pane identity was rebound', async () => {
       const pane = createWorktreePane({ id: 'psyche-identity', paneId: '%42' });
       const refreshPanes = vi.fn(async () => {});

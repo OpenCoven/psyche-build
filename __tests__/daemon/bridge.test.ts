@@ -941,6 +941,12 @@ describe('daemon bridge pane helpers', () => {
     });
 
     const commands: string[] = [];
+    const tmuxServerIdentity = {
+      pid: 4242,
+      processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+      socketPath: '/tmp/tmux-501/default',
+      sessionId: '$1',
+    };
     const result = await spawnBridgePane(root, 'psyche-demo', {
       requestId: 'req-3',
       cwd: root,
@@ -955,6 +961,7 @@ describe('daemon bridge pane helpers', () => {
         return '%42';
       },
       sendTmuxCommand: (_paneId, command) => commands.push(command),
+      getTmuxServerIdentity: () => tmuxServerIdentity,
     });
 
     expect(result).toMatchObject({
@@ -978,6 +985,7 @@ describe('daemon bridge pane helpers', () => {
         {
           id: expect.stringMatching(/^psyche-/),
           paneId: '%42',
+          tmuxServerIdentity,
           slug: 'fix-bug',
           title: 'Fix bug',
           worktreePath: path.join(root, '.psyche', 'worktrees', 'fix-bug'),

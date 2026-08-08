@@ -40,6 +40,11 @@ export interface RunGitMutationWithSupervisorOptions {
     args: readonly string[],
     options: Parameters<typeof fork>[2],
   ) => ChildProcess;
+  /**
+   * Lifecycle test seam. The real process is exposed only after fork succeeds;
+   * callers must never use it to decide lease ownership.
+   */
+  onSupervisorSpawn?: (child: ChildProcess) => void;
 }
 
 interface GitMutationSupervisorMessage {
@@ -102,6 +107,7 @@ export async function runGitMutationWithSupervisor(
       // Source mode explicitly supplies only the tsx loader below.
       execArgv: script.execArgv ?? [],
     });
+    options.onSupervisorSpawn?.(child);
   } catch (error) {
     await Promise.allSettled(leases.map((lease) => (
       clearUnclaimedPendingGitMutationLease(lease, mutationNonce)

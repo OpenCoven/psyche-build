@@ -10,8 +10,10 @@ import {
 } from '../../src/daemon/bridge.js';
 
 let root: string;
+let nextMockPaneId = 9;
 
 beforeEach(() => {
+  nextMockPaneId = 9;
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-spawn-transport-')));
   execSync('git init', { cwd: root, stdio: 'ignore' });
   execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', {
@@ -29,7 +31,7 @@ function harness() {
   const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
   const deps: BridgeSpawnDeps = {
     tmuxSessionExists: () => true,
-    createTmuxPane: () => '%9',
+    createTmuxPane: () => `%${nextMockPaneId++}`,
     sendTmuxCommand: (_paneId: string, command: string) => {
       commands.push(command);
     },

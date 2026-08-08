@@ -40,10 +40,17 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
+import {
+  getCurrentTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
+import {
+  assessTmuxTeardownOwnership,
+} from '../services/TmuxResourceOwnership.js';
 import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import { createPsychePaneId } from '../utils/paneIdentity.js';
 import { runGitProcess } from '../utils/gitProcess.js';
-import type { PsycheConfig } from '../types.js';
+import type { PsycheConfig, PsychePane } from '../types.js';
 import {
   isAgenticCapability,
   type AgenticCapabilityRouter,
@@ -105,6 +112,8 @@ export interface BridgeSpawnDeps {
    * back its worktree or removes its pane record.
    */
   probeTmuxPane?: (paneId: string) => TmuxPanePresence;
+  /** Captures the generation that allocated a just-created tmux pane. */
+  getTmuxServerIdentity?: (target?: string) => TmuxServerIdentity | undefined;
   /**
    * Type a prompt into a send-keys agent's TUI after it starts.
    *
@@ -1376,6 +1385,9 @@ export async function spawnBridgePane(
           ? `${request.title || paneSlug} [${paneSlug}]`
           : request.title || paneSlug;
         paneId = deps.createTmuxPane(sessionName, effectiveWorktreePath, title);
+        const tmuxServerIdentity = (
+          deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
+        )(sessionName);
         const now = new Date().toISOString();
         const pane: RawConfigPane = {
           id: nextBridgePaneId(),
@@ -1384,6 +1396,7 @@ export async function spawnBridgePane(
           displayName: title,
           prompt: request.prompt || '',
           paneId,
+          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
           projectRoot: scoped.projectRoot,
           projectName: path.basename(scoped.projectRoot),
           type: 'worktree',
@@ -1505,6 +1518,8 @@ export interface BridgeKillDeps {
   /** Tri-state probe used for detached background windows. */
   probeTmuxWindow?: (windowId: string) => TmuxPanePresence;
   killTmuxWindow?: (windowId: string) => void;
+  /** Captures the current server generation under the config lock. */
+  getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
   /**
    * Optional lifecycle seam after the initial non-destructive probe and
    * before the locked identity check.
@@ -1528,6 +1543,7 @@ export const defaultKillDeps: BridgeKillDeps = {
   killTmuxPane,
   probeTmuxWindow: probeTmuxWindowPresence,
   killTmuxWindow,
+  getTmuxServerIdentity: getCurrentTmuxServerIdentity,
 };
 
 /**
@@ -1596,6 +1612,20 @@ export async function killBridgePane(
         );
       }
 
+      const ownership = assessTmuxTeardownOwnership(
+        current as PsychePane & Record<string, unknown>,
+        panes as Array<PsychePane & Record<string, unknown>>,
+        (deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity)(),
+      );
+      if (ownership === 'unverified-generation' || ownership === 'ambiguous') {
+        throw bridgeError(
+          ownership === 'ambiguous' ? 'pane_ownership_ambiguous' : 'tmux_generation_unverified',
+          `could not prove unique current-server ownership for tmux pane ${
+            expectedIdentity.paneId
+          }; retained pane record without killing a possibly-reused ID`,
+        );
+      }
+
       // Re-probe only after the locked exact-identity check. The pre-lock
       // result is deliberately not trusted for a kill or deregistration.
       const currentPresence = probeBridgeTmuxPane(deps, expectedIdentity.paneId);
@@ -1611,35 +1641,37 @@ export async function killBridgePane(
         );
       }
 
-      const teardown = await tearDownFullPaneWithVerification({
-        target: {
-          paneId: expectedIdentity.paneId,
-          testPaneId: current.testPaneId,
-          testWindowId: current.testWindowId,
-          devPaneId: current.devPaneId,
-          devWindowId: current.devWindowId,
-        },
-        probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
-        killPane: (targetPaneId) => deps.killTmuxPane(targetPaneId),
-        probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
-        killWindow: (windowId) => (
-          (deps.killTmuxWindow ?? killTmuxWindow)(windowId)
-        ),
-      });
-      if (teardown.presence !== 'absent') {
-        throw bridgeError(
-          teardown.error
-            ? 'pane_kill_failed'
-            : teardown.presence === 'unknown'
-            ? 'pane_probe_unknown'
-            : 'pane_kill_unconfirmed',
-          `could not confirm tmux pane ${expectedIdentity.paneId} and all owned background resources are absent; retained pane record. ${
-            paneRecoveryInstructions(
-              expectedIdentity.paneId,
-              projectPaneConfigPath(scoped.projectRoot),
-            )
-          }${teardown.error ? ` (${teardown.error})` : ''}`,
-        );
+      if (ownership !== 'stale-generation') {
+        const teardown = await tearDownFullPaneWithVerification({
+          target: {
+            paneId: expectedIdentity.paneId,
+            testPaneId: current.testPaneId,
+            testWindowId: current.testWindowId,
+            devPaneId: current.devPaneId,
+            devWindowId: current.devWindowId,
+          },
+          probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
+          killPane: (targetPaneId) => deps.killTmuxPane(targetPaneId),
+          probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
+          killWindow: (windowId) => (
+            (deps.killTmuxWindow ?? killTmuxWindow)(windowId)
+          ),
+        });
+        if (teardown.presence !== 'absent') {
+          throw bridgeError(
+            teardown.error
+              ? 'pane_kill_failed'
+              : teardown.presence === 'unknown'
+              ? 'pane_probe_unknown'
+              : 'pane_kill_unconfirmed',
+            `could not confirm tmux pane ${expectedIdentity.paneId} and all owned background resources are absent; retained pane record. ${
+              paneRecoveryInstructions(
+                expectedIdentity.paneId,
+                projectPaneConfigPath(scoped.projectRoot),
+              )
+            }${teardown.error ? ` (${teardown.error})` : ''}`,
+          );
+        }
       }
 
       // Remove only the exact record that was locked above. Matching either
@@ -1650,7 +1682,10 @@ export async function killBridgePane(
       ));
       currentConfig.lastUpdated = new Date().toISOString();
       await persist();
-      return { pane: current, killed: currentPresence === 'present' };
+      return {
+        pane: current,
+        killed: ownership !== 'stale-generation' && currentPresence === 'present',
+      };
     },
   );
   const { pane, killed } = mutation.result;
@@ -1814,6 +1849,7 @@ export const defaultSpawnDeps: BridgeSpawnDeps = {
   sendTmuxCommand,
   killTmuxPane,
   probeTmuxPane: probeTmuxPanePresence,
+  getTmuxServerIdentity: getCurrentTmuxServerIdentity,
 };
 
 /**

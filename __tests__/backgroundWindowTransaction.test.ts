@@ -9,6 +9,12 @@ import {
 import { migrateBackgroundPaneResources } from '../src/hooks/usePaneLoading.js';
 
 const roots: string[] = [];
+const serverGeneration = {
+  pid: 4242,
+  processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+  socketPath: '/tmp/tmux-501/default',
+  sessionId: '$1',
+};
 
 function pane(overrides: Partial<PsychePane> = {}): PsychePane {
   return {
@@ -76,6 +82,7 @@ describe('background window transaction', () => {
           paneId: current.paneId,
           testWindowId: '@7',
           testPaneId: '%7',
+          testTmuxServerIdentity: serverGeneration,
           testStatus: 'running',
         }),
       ]);
@@ -87,7 +94,11 @@ describe('background window transaction', () => {
       pane: current,
       createWindow: async () => {
         order.push('create');
-        return { windowId: '@7', paneId: '%7' };
+        return {
+          windowId: '@7',
+          paneId: '%7',
+          tmuxServerIdentity: serverGeneration,
+        };
       },
       sendCommand,
       tearDownResource: async () => ({ presence: 'absent' }),
@@ -95,7 +106,11 @@ describe('background window transaction', () => {
 
     expect(order).toEqual(['create', 'send']);
     expect(result).toMatchObject({ windowId: '@7', paneId: '%7' });
-    expect(sendCommand).toHaveBeenCalledWith({ windowId: '@7', paneId: '%7' });
+    expect(sendCommand).toHaveBeenCalledWith({
+      windowId: '@7',
+      paneId: '%7',
+      tmuxServerIdentity: serverGeneration,
+    });
   });
 
   it('tears down the new resource and never sends when the pane was rebound', async () => {
@@ -139,6 +154,41 @@ describe('background window transaction', () => {
     expect(tearDownResource).toHaveBeenCalledWith({ windowId: '@8', paneId: '%8' });
     expect(readPanes(projectRoot)).toEqual([
       expect.objectContaining({ devWindowId: '@old', devPaneId: '%old' }),
+    ]);
+  });
+
+  it('rejects a duplicate pane/window claim from another live record in the same server generation', async () => {
+    const current = pane();
+    const other = pane({
+      id: 'psyche-2',
+      paneId: '%2',
+      testWindowId: '@7',
+      testPaneId: '%7',
+      testTmuxServerIdentity: serverGeneration,
+    });
+    const projectRoot = projectWithPanes([current, other]);
+    const sendCommand = vi.fn();
+    const tearDownResource = vi.fn(async () => ({ presence: 'absent' as const }));
+
+    await expect(startBackgroundWindowTransaction({
+      type: 'test',
+      projectRoot,
+      pane: current,
+      createWindow: async () => ({
+        windowId: '@7',
+        paneId: '%7',
+        tmuxServerIdentity: serverGeneration,
+      }),
+      sendCommand,
+      tearDownResource,
+      getTmuxServerIdentity: () => serverGeneration,
+    })).rejects.toThrow(/already owned/i);
+
+    expect(sendCommand).not.toHaveBeenCalled();
+    expect(tearDownResource).toHaveBeenCalledOnce();
+    expect(readPanes(projectRoot)).toEqual([
+      expect.objectContaining({ id: 'psyche-1' }),
+      expect.objectContaining({ id: 'psyche-2', testPaneId: '%7' }),
     ]);
   });
 

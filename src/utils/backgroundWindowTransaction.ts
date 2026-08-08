@@ -1,8 +1,16 @@
 import type { PsychePane } from '../types.js';
 import {
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
+import {
   readProjectPaneConfig,
   transactProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
+import {
+  assertTmuxResourcesAvailable,
+  type TmuxResource,
+} from '../services/TmuxResourceOwnership.js';
 import type {
   VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
@@ -12,6 +20,8 @@ export type BackgroundWindowType = 'test' | 'dev';
 export interface BackgroundWindowResource {
   windowId: string;
   paneId: string;
+  /** The tmux generation that allocated this detached pane/window pair. */
+  tmuxServerIdentity?: TmuxServerIdentity;
 }
 
 export interface BackgroundWindowTransactionOptions {
@@ -27,6 +37,8 @@ export interface BackgroundWindowTransactionOptions {
   tearDownResource: (
     resource: BackgroundWindowResource,
   ) => Promise<VerifiedPaneTeardownResult>;
+  /** Read immediately before teardown; absent means destructive work is unsafe. */
+  getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
   /**
    * Used only when config persistence cannot retain an uncertain resource.
    * Callers write a worktree recovery marker from this callback.
@@ -81,6 +93,11 @@ export async function startBackgroundWindowTransaction(
             `Pane "${options.pane.id}" already owns a ${options.type} background resource`,
           );
         }
+        assertTmuxResourcesAvailable(
+          panes as Array<PsychePane & Record<string, unknown>>,
+          current.id,
+          backgroundResourceClaims(options.type, resource),
+        );
 
         const claimed = withBackgroundWindow(current, options.type, resource);
         panes[index] = claimed;
@@ -112,7 +129,7 @@ export async function startBackgroundWindowTransaction(
     );
     claimedPane = transaction.result;
   } catch (error) {
-    const teardown = await options.tearDownResource(resource);
+    const teardown = await tearDownResourceForGeneration(options, resource);
     let cleanup: string | undefined;
     if (teardown.presence === 'absent') {
       try {
@@ -146,7 +163,7 @@ export async function startBackgroundWindowTransaction(
   try {
     await options.sendCommand(resource);
   } catch (error) {
-    const teardown = await options.tearDownResource(resource);
+    const teardown = await tearDownResourceForGeneration(options, resource);
     if (teardown.presence === 'absent') {
       try {
         await clearExactBackgroundClaim(
@@ -245,6 +262,14 @@ export function withBackgroundWindow(
     ...pane,
     [type === 'test' ? 'testWindowId' : 'devWindowId']: resource.windowId,
     [type === 'test' ? 'testPaneId' : 'devPaneId']: resource.paneId,
+    ...(
+      resource.tmuxServerIdentity
+        ? {
+          [type === 'test' ? 'testTmuxServerIdentity' : 'devTmuxServerIdentity']:
+            resource.tmuxServerIdentity,
+        }
+        : {}
+    ),
     [type === 'test' ? 'testStatus' : 'devStatus']: 'running',
   };
   if (recoveries.length > 0) {
@@ -263,11 +288,13 @@ export function withoutBackgroundWindow(
   if (type === 'test') {
     delete next.testWindowId;
     delete next.testPaneId;
+    delete next.testTmuxServerIdentity;
     delete next.testStatus;
     delete next.testOutput;
   } else {
     delete next.devWindowId;
     delete next.devPaneId;
+    delete next.devTmuxServerIdentity;
     delete next.devStatus;
     delete next.devUrl;
   }
@@ -351,6 +378,9 @@ async function retainBackgroundRecovery(
             type: options.type,
             windowId: resource.windowId,
             paneId: resource.paneId,
+            ...(resource.tmuxServerIdentity
+              ? { tmuxServerIdentity: resource.tmuxServerIdentity }
+              : {}),
             reason,
           },
         ],
@@ -396,6 +426,9 @@ function withBackgroundWindowRecovery(
         type,
         windowId: resource.windowId,
         paneId: resource.paneId,
+        ...(resource.tmuxServerIdentity
+          ? { tmuxServerIdentity: resource.tmuxServerIdentity }
+          : {}),
         reason,
       },
     ],
@@ -448,6 +481,51 @@ function assertBackgroundResource(
   if (!resource || !resource.windowId || !resource.paneId) {
     throw new Error('Background window creation did not return stable window and pane IDs');
   }
+}
+
+function backgroundResourceClaims(
+  type: BackgroundWindowType,
+  resource: BackgroundWindowResource,
+): TmuxResource[] {
+  return [
+    {
+      kind: 'window',
+      id: resource.windowId,
+      ...(resource.tmuxServerIdentity
+        ? { generation: resource.tmuxServerIdentity }
+        : {}),
+      field: type === 'test' ? 'testWindowId' : 'devWindowId',
+    },
+    {
+      kind: 'pane',
+      id: resource.paneId,
+      ...(resource.tmuxServerIdentity
+        ? { generation: resource.tmuxServerIdentity }
+        : {}),
+      field: type === 'test' ? 'testPaneId' : 'devPaneId',
+    },
+  ];
+}
+
+async function tearDownResourceForGeneration(
+  options: BackgroundWindowTransactionOptions,
+  resource: BackgroundWindowResource,
+): Promise<VerifiedPaneTeardownResult> {
+  if (resource.tmuxServerIdentity) {
+    const current = options.getTmuxServerIdentity?.();
+    if (!current) {
+      return {
+        presence: 'unknown',
+        error: 'current tmux server generation could not be verified',
+      };
+    }
+    if (!sameTmuxServerIdentity(resource.tmuxServerIdentity, current)) {
+      // The caller's exact config CAS will remove this old-generation claim;
+      // a reused pane/window ID in the new server is intentionally untouched.
+      return { presence: 'absent' };
+    }
+  }
+  return options.tearDownResource(resource);
 }
 
 function transactionError(

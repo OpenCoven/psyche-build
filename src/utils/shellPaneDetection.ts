@@ -211,6 +211,7 @@ async function detectPaneProjectInfo(
  */
 export async function createShellPane(paneId: string, nextId: number, existingTitle?: string): Promise<PsychePane> {
   const tmuxService = TmuxService.getInstance();
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
   const shellType = await detectShellType(paneId);
   const paneProjectInfo = await detectPaneProjectInfo(paneId);
 
@@ -235,6 +236,7 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
     slug,
     prompt: '', // No prompt for manually created panes
     paneId,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
     projectRoot: paneProjectInfo.projectRoot,
     projectName: paneProjectInfo.projectName,
     cwdReference: paneProjectInfo.cwdReference,
