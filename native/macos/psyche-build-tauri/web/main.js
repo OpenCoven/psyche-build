@@ -76,12 +76,20 @@
   };
   var paneLayouts = new Map();
   var covenEnsureFlights = new Map();
+  var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenPollTimer = null;
+  var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
   var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") saveWorkspaceNow();
+    if (document.visibilityState === "hidden") {
+      saveWorkspaceNow();
+      stopCovenPolling();
+    } else {
+      startCovenPolling();
+    }
   }
 
   /**
@@ -194,6 +202,61 @@
   function commitPanePlacement(placement) {
     paneLayouts.set(placement.key, placement.value);
   }
+  function covenDiscoveryRoots() {
+    var roots = [];
+    state.projects.forEach(function (project) {
+      [project.root].concat(
+        (project.worktrees || [])
+          .filter(function (worktree) {
+            return !worktree.missing && !worktree.prunable && !worktree.bare;
+          })
+          .map(function (worktree) { return worktree.path; })
+      ).forEach(function (root) {
+        if (root && roots.indexOf(root) === -1) roots.push(root);
+      });
+    });
+    return roots;
+  }
+  function covenSessionsForProject(project) {
+    var roots = [project.root].concat(
+      (project.worktrees || []).map(function (worktree) { return worktree.path; })
+    );
+    return roots.reduce(function (sessions, root) {
+      return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
+    }, []);
+  }
+  async function refreshCovenSessions() {
+    var roots = covenDiscoveryRoots();
+    var started = PsycheSessions.beginCovenRequest(covenDiscovery);
+    covenDiscovery = started.state;
+    renderSessionList();
+    try {
+      var response = await invoke("coven_sessions", { projectRoots: roots });
+      covenDiscovery = PsycheSessions.applyCovenResponse(
+        covenDiscovery,
+        started.requestId,
+        response
+      );
+    } catch (_) {
+      covenDiscovery = PsycheSessions.applyCovenResponse(
+        covenDiscovery,
+        started.requestId,
+        { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
+      );
+    }
+    renderSessionList();
+    return covenDiscovery;
+  }
+  function stopCovenPolling() {
+    if (covenPollTimer) clearInterval(covenPollTimer);
+    covenPollTimer = null;
+  }
+  function startCovenPolling() {
+    stopCovenPolling();
+    if (document.visibilityState === "hidden" || state.projects.length === 0) return;
+    refreshCovenSessions();
+    covenPollTimer = setInterval(refreshCovenSessions, COVEN_POLL_MS);
+  }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
     if (state.env && state.env.native_workspace_v2 === false) {
@@ -202,6 +265,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      refreshCovenSessions();
       return Promise.resolve(project.worktrees);
     }
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
@@ -210,6 +274,7 @@
       project.selectedWorktreePath = selected ? selected.path : project.root;
       refreshSidebar();
       saveWorkspaceSoon();
+      refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
       project.worktrees = mergeWorktreePresentationState(project, [{
@@ -217,6 +282,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      refreshCovenSessions();
       return project.worktrees;
     });
   }
@@ -860,6 +926,7 @@
       if (state.activeThreadId === thread.id) {
         setProjectStatus(findProject(thread.projectId), "ok");
       }
+      if (launch.launchKind === "coven-chat") refreshCovenSessions();
       // Flush any data that arrived before the xterm was mounted.
       var pending = pendingDataBuffers.get(thread.id);
       if (pending && thread.term) {
@@ -896,6 +963,7 @@
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
+        if (launch.launchKind === "coven-chat") refreshCovenSessions();
         var pending = pendingDataBuffers.get(thread.id);
         if (pending && thread.term) {
           for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
@@ -2005,6 +2073,7 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -2020,6 +2089,7 @@
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
+    startCovenPolling();
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
@@ -4083,6 +4153,7 @@
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
+    startCovenPolling();
     return project;
   }
 
@@ -4281,6 +4352,7 @@
       restoreProjectLayout(project);
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
+    startCovenPolling();
   }
 
   invoke("app_environment")

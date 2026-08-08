@@ -893,18 +893,19 @@ fn normalize_session(
     let canonical_project_root = Path::new(project_root).canonicalize().ok()?;
     let requested_project_root = requested_roots.get(&canonical_project_root)?;
 
-    let cwd = optional_string(fields, "cwd", "cwd")?;
-    let cwd = cwd.and_then(|cwd| {
-        Path::new(&cwd)
-            .canonicalize()
-            .ok()
-            .filter(|canonical_cwd| {
-                requested_roots
-                    .keys()
-                    .any(|requested_root| canonical_cwd.starts_with(requested_root))
-            })
-            .map(|_| cwd)
-    });
+    let cwd = match optional_string(fields, "cwd", "cwd")? {
+        Some(cwd) => {
+            let canonical_cwd = Path::new(&cwd).canonicalize().ok()?;
+            if !requested_roots
+                .keys()
+                .any(|requested_root| canonical_cwd.starts_with(requested_root))
+            {
+                return None;
+            }
+            Some(cwd)
+        }
+        None => None,
+    };
 
     Some(CovenSessionSummary {
         id: id.to_string(),
@@ -1686,7 +1687,13 @@ mod tests {
         ]);
 
         let sessions = normalize_sessions(payload, &requested).unwrap();
-        assert_eq!(sessions.len(), 3);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["inside", "linked"],
+        );
         assert_eq!(
             sessions[0].cwd.as_deref(),
             Some(inside.to_string_lossy().as_ref())
@@ -1695,7 +1702,6 @@ mod tests {
             sessions[1].cwd.as_deref(),
             Some(linked_worktree.to_string_lossy().as_ref())
         );
-        assert_eq!(sessions[2].cwd, None);
     }
 
     #[test]

@@ -71,15 +71,33 @@ function functionSource(source: string, name: string) {
 }
 
 describe('macOS Coven session lifecycle boundary', () => {
-  it('keeps the native discovery adapter while removing web discovery and attachment', () => {
-    expect(mainJs).not.toContain('invoke("coven_sessions"');
-    expect(mainJs).not.toContain('refreshCovenSessions');
-    expect(mainJs).not.toContain('startCovenPolling');
-    expect(mainJs).not.toContain('openCovenSession');
-    expect(mainJs).not.toContain('args: ["attach"');
-    expect(mainJs).not.toContain('"Attach"');
-    expect(nativeLib).toContain('coven_sessions,');
-    expect(sessionModel).toContain('export function createCovenDiscoveryState');
+  it('discovers every project and available worktree root in one bounded request', () => {
+    const refresh = functionSource(mainJs, 'refreshCovenSessions');
+    expect(refresh).toContain('covenDiscoveryRoots()');
+    expect(refresh).toContain('invoke("coven_sessions"');
+    expect(refresh).toContain('projectRoots: roots');
+    expect(refresh).toContain('PsycheSessions.beginCovenRequest');
+    expect(refresh).toContain('PsycheSessions.applyCovenResponse');
+  });
+
+  it('polls only with visible open projects and invalidates on project removal', () => {
+    expect(mainJs).toContain('var COVEN_POLL_MS = 5000;');
+    expect(functionSource(mainJs, 'startCovenPolling')).toContain(
+      'document.visibilityState === "hidden" || state.projects.length === 0'
+    );
+    expect(functionSource(mainJs, 'handleVisibilityChange')).toMatch(
+      /hidden[\s\S]*saveWorkspaceNow\(\)[\s\S]*stopCovenPolling\(\)/
+    );
+    expect(functionSource(mainJs, 'handleVisibilityChange')).toMatch(
+      /else[\s\S]*startCovenPolling\(\)/
+    );
+    expect(functionSource(mainJs, 'removeProject')).toContain(
+      'PsycheSessions.invalidateCovenRequests'
+    );
+  });
+
+  it('keeps remote records outside local thread state', () => {
+    expect(functionSource(mainJs, 'refreshCovenSessions')).not.toContain('state.threads');
   });
 
   it('retains stored local Coven identity when creating threads', () => {
@@ -88,12 +106,9 @@ describe('macOS Coven session lifecycle boundary', () => {
     );
   });
 
-  it('only saves the workspace when visibility becomes hidden', () => {
-    const visibilityChange = functionSource(mainJs, 'handleVisibilityChange');
-    expect(visibilityChange).toContain(
-      'if (document.visibilityState === "hidden") saveWorkspaceNow();'
-    );
-    expect(visibilityChange).not.toMatch(/Coven|Polling/);
+  it('retains native discovery and the session model adapter', () => {
+    expect(nativeLib).toContain('coven_sessions,');
+    expect(sessionModel).toContain('export function createCovenDiscoveryState');
     expect(mainJs).toContain(
       'document.addEventListener("visibilitychange", handleVisibilityChange);'
     );
