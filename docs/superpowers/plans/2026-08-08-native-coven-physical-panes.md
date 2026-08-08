@@ -573,7 +573,17 @@ function activePaneLayout() {
 
 function measuredTerminalHost() {
   var rect = terminalHost.getBoundingClientRect();
-  return { x: 0, y: 0, width: rect.width, height: rect.height };
+  var style = window.getComputedStyle(terminalHost);
+  var horizontalInset = parseFloat(style.paddingLeft || "0")
+    + parseFloat(style.paddingRight || "0");
+  var verticalInset = parseFloat(style.paddingTop || "0")
+    + parseFloat(style.paddingBottom || "0");
+  return {
+    x: 0,
+    y: 0,
+    width: Math.max(0, rect.width - horizontalInset),
+    height: Math.max(0, rect.height - verticalInset),
+  };
 }
 
 function preparePanePlacement(threadId, projectId, worktreePath) {
@@ -678,11 +688,12 @@ function renderPaneNode(node, projectedRatios) {
   split.dataset.splitId = node.id;
   var first = document.createElement("div");
   first.className = "terminal-pane-branch";
-  first.style.flexBasis = (ratio * 100) + "%";
+  first.style.flexGrow = String(ratio);
   first.appendChild(renderPaneNode(node.first, projectedRatios));
   var divider = createPaneDivider(node, ratio);
   var second = document.createElement("div");
   second.className = "terminal-pane-branch";
+  second.style.flexGrow = String(1 - ratio);
   second.appendChild(renderPaneNode(node.second, projectedRatios));
   split.appendChild(first);
   split.appendChild(divider);
@@ -1137,6 +1148,7 @@ cd .worktrees/native-coven-launch
 **Files:**
 
 - Modify: `native/macos/psyche-build-tauri/src-tauri/src/lib.rs`
+- Modify: `native/macos/psyche-build-tauri/web/main.js`
 - Create: `__tests__/tauriCovenLaunch.test.ts`
 
 - [ ] **Step 1: Add failing Rust tests for contained and linked worktrees**
@@ -1225,6 +1237,34 @@ fn rejects_pty_cwd_symlink_escape() {
 }
 ```
 
+Create `__tests__/tauriCovenLaunch.test.ts`:
+
+```ts
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const root = process.cwd();
+const mainJs = readFileSync(
+  join(root, 'native/macos/psyche-build-tauri/web/main.js'),
+  'utf8',
+);
+const nativeLib = readFileSync(
+  join(root, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
+  'utf8',
+);
+
+describe('native Coven launch contract', () => {
+  it('canonicalizes project identity before webview deduplication', () => {
+    expect(nativeLib).toMatch(/fn\s+canonical_project_path\(/);
+    expect(mainJs).toContain('invoke("canonical_project_path"');
+    expect(mainJs).toMatch(
+      /rootPath = await canonicalProjectPath\(rootPath\)[\s\S]*state\.projects\.find/
+    );
+  });
+});
+```
+
 - [ ] **Step 2: Verify the Rust tests fail**
 
 Run:
@@ -1232,9 +1272,12 @@ Run:
 ```bash
 cd native/macos/psyche-build-tauri/src-tauri
 cargo test --locked workspace_panel_tests::resolves_pty_cwd_inside_project_or_verified_linked_worktree
+cd ../../../..
+pnpm vitest --run __tests__/tauriCovenLaunch.test.ts
 ```
 
-Expected: FAIL because `resolve_pty_cwd_with_worktrees` does not exist.
+Expected: FAIL because the Rust cwd validator and canonical project command do
+not exist.
 
 - [ ] **Step 3: Add explicit scope/cwd fields and validators**
 
@@ -1300,6 +1343,11 @@ fn resolve_pty_cwd(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
     let linked = linked_worktree_roots(&root)?;
     resolve_pty_cwd_with_worktrees(project_root, cwd, &linked)
 }
+
+#[tauri::command]
+fn canonical_project_path(root: String) -> Result<String, String> {
+    Ok(canonical_project_root(&root)?.to_string_lossy().into_owned())
+}
 ```
 
 In `pty_start`, require both values and replace `cmd.cwd(root)` with:
@@ -1315,6 +1363,49 @@ cmd.cwd(&resolved_cwd);
 ```
 
 Do not accept arbitrary external cwd when Git discovery fails.
+Register `canonical_project_path` in `tauri::generate_handler!`. In `main.js`,
+canonicalize before project deduplication:
+
+```js
+async function canonicalProjectPath(rootPath) {
+  try {
+    return await invoke("canonical_project_path", { root: rootPath });
+  } catch (error) {
+    setStatus("Project path is unavailable: " + String(error), "error");
+    return null;
+  }
+}
+```
+
+Immediately after `addProject`'s initial `if (!rootPath) return null;`, insert:
+
+```js
+rootPath = await canonicalProjectPath(rootPath);
+if (!rootPath) return null;
+```
+
+During saved-workspace restoration, replace the synchronous project map with:
+
+```js
+var restoredProjects = await Promise.all(saved.projects.map(async function (rawProject) {
+  var project = sanitizeSavedProject(rawProject);
+  if (!project) return null;
+  var previousRoot = project.root;
+  var canonicalRoot = await canonicalProjectPath(previousRoot);
+  if (!canonicalRoot) return null;
+  project.root = canonicalRoot;
+  if (project.selectedWorktreePath === previousRoot) {
+    project.selectedWorktreePath = canonicalRoot;
+  }
+  return project;
+}));
+state.projects = restoredProjects
+  .filter(Boolean)
+  .slice(0, Math.min(settings.maxProjects, HARD_MAX_PROJECTS));
+```
+
+This keeps every in-memory `project.root` canonical before discovery or
+attachment identity is computed.
 
 - [ ] **Step 4: Run Rust tests**
 
@@ -1324,6 +1415,8 @@ cargo fmt --check
 cargo test --locked workspace_panel_tests::resolves_pty_cwd_inside_project_or_verified_linked_worktree
 cargo test --locked workspace_panel_tests::rejects_unrelated_sibling_and_missing_pty_cwd
 cargo test --locked workspace_panel_tests::rejects_pty_cwd_symlink_escape
+cd ../../../..
+pnpm vitest --run __tests__/tauriCovenLaunch.test.ts
 ```
 
 Expected: PASS.
@@ -1332,6 +1425,8 @@ Expected: PASS.
 
 ```bash
 git add native/macos/psyche-build-tauri/src-tauri/src/lib.rs
+git add native/macos/psyche-build-tauri/web/main.js
+git add __tests__/tauriCovenLaunch.test.ts
 git diff --cached --check
 git commit -m "feat(macos): validate PTY project scope and cwd"
 ```
@@ -1347,45 +1442,29 @@ git commit -m "feat(macos): validate PTY project scope and cwd"
 
 - [ ] **Step 1: Write failing executable and attach-contract tests**
 
-Create `__tests__/tauriCovenLaunch.test.ts`:
+Append these cases to the existing `native Coven launch contract` describe:
 
 ```ts
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+it('exposes an executable absolute Coven path', () => {
+  expect(nativeLib).toMatch(/pub\s+coven_path:\s*Option<String>/);
+  expect(nativeLib).toMatch(/let\s+coven_path\s*=\s*which_on_path\("coven"\)/);
+  expect(nativeLib).toMatch(/fn\s+is_executable_file\(/);
+  expect(nativeLib).toMatch(/fn\s+which_on_path_with\(/);
+});
 
-const root = process.cwd();
-const mainJs = readFileSync(
-  join(root, 'native/macos/psyche-build-tauri/web/main.js'),
-  'utf8',
-);
-const nativeLib = readFileSync(
-  join(root, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
-  'utf8',
-);
+it('validates exact Coven launch shapes at the Rust boundary', () => {
+  expect(nativeLib).toMatch(/fn\s+validate_coven_launch\(/);
+  expect(nativeLib).toContain('"coven-chat"');
+  expect(nativeLib).toContain('"coven-attach"');
+  expect(nativeLib).toContain('is_safe_coven_session_id');
+});
 
-describe('native Coven launch contract', () => {
-  it('exposes an executable absolute Coven path', () => {
-    expect(nativeLib).toMatch(/pub\s+coven_path:\s*Option<String>/);
-    expect(nativeLib).toMatch(/let\s+coven_path\s*=\s*which_on_path\("coven"\)/);
-    expect(nativeLib).toMatch(/fn\s+is_executable_file\(/);
-    expect(nativeLib).toMatch(/fn\s+which_on_path_with\(/);
-  });
-
-  it('validates exact Coven launch shapes at the Rust boundary', () => {
-    expect(nativeLib).toMatch(/fn\s+validate_coven_launch\(/);
-    expect(nativeLib).toContain('"coven-chat"');
-    expect(nativeLib).toContain('"coven-attach"');
-    expect(nativeLib).toContain('is_safe_coven_session_id');
-  });
-
-  it('creates chat launch descriptors with no tmux environment', () => {
-    expect(mainJs).toMatch(/function\s+covenChatLaunch\(project,\s*worktree\)/);
-    expect(mainJs).toContain('command: state.env.coven_path');
-    expect(mainJs).toContain('args: ["chat"]');
-    expect(mainJs).toContain('launchKind: "coven-chat"');
-    expect(mainJs).not.toMatch(/function\s+covenChatLaunch[\s\S]*TMUX_TMPDIR/);
-  });
+it('creates chat launch descriptors with no tmux environment', () => {
+  expect(mainJs).toMatch(/function\s+covenChatLaunch\(project,\s*worktree\)/);
+  expect(mainJs).toContain('command: state.env.coven_path');
+  expect(mainJs).toContain('args: ["chat"]');
+  expect(mainJs).toContain('launchKind: "coven-chat"');
+  expect(mainJs).not.toMatch(/function\s+covenChatLaunch[\s\S]*TMUX_TMPDIR/);
 });
 ```
 
@@ -1707,17 +1786,25 @@ function covenChatLaunch(project, worktree) {
   };
 }
 
-function spawnCovenThread(project) {
+function waitForTerminalLayout() {
+  return new Promise(function (resolve) {
+    requestAnimationFrame(function () { resolve(); });
+  });
+}
+
+async function spawnCovenThread(project) {
   project = project || activeProject();
   if (!project || !state.env || !state.env.coven_path) {
     setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
     return null;
   }
+  if (!(await showTerminalView())) return null;
+  await waitForTerminalLayout();
   var worktree = selectedWorktree(project);
   return createThread(covenChatLaunch(project, worktree));
 }
 
-function ensureProjectCoven(project) {
+async function ensureProjectCoven(project) {
   if (!project) return null;
   var worktree = selectedWorktree(project);
   var existing = state.threads.find(function (thread) {
@@ -1728,7 +1815,7 @@ function ensureProjectCoven(project) {
       && thread.status !== "exited";
   });
   if (existing) {
-    focusThread(existing.id);
+    await focusThread(existing.id);
     return existing;
   }
   return spawnCovenThread(project);
@@ -1754,6 +1841,10 @@ Replace `ensureProjectPsyche` call sites with `ensureProjectCoven`. Replace
 `spawnDefaultThread` with `spawnCovenThread`. Keep `spawnPsycheThread`
 unchanged except that it passes `projectRoot: project.root`,
 `cwd: worktree.path`, and `worktreePath: worktree.path` as distinct values.
+Await `ensureProjectCoven(project)` from the already-async
+`setActiveProject`, project-picker, worktree action, and `boot` call sites so
+terminal layout has settled before feasibility is measured. Rename the
+worktree action from `Open Psyche Terminal` to `Open Coven Terminal`.
 
 Change the command entries:
 
@@ -1813,7 +1904,9 @@ Append:
 it('guards PTY start, retry, and close transitions', () => {
   expect(mainJs).toContain('startInFlight: false');
   expect(mainJs).toContain('closeStarted: false');
+  expect(mainJs).toContain('stopRequested: false');
   expect(mainJs).toMatch(/function\s+retryThread\(id\)/);
+  expect(mainJs).toMatch(/function\s+stopThreadPty\(thread\)/);
   expect(mainJs).toMatch(/if\s*\(\s*thread\.startInFlight\s*\)\s*return/);
   expect(mainJs).toMatch(/if\s*\(\s*thread\.closeStarted\s*\)\s*return/);
   expect(mainJs).toMatch(/thread\.status\s*!==\s*"exited"\s*&&\s*thread\.status\s*!==\s*"failed"/);
@@ -1842,6 +1935,7 @@ Initialize:
 ```js
 startInFlight: false,
 closeStarted: false,
+stopRequested: false,
 status: "starting",
 ```
 
@@ -1856,6 +1950,10 @@ function spawnPty(thread) {
   updatePaneChrome(thread);
   invoke("pty_start", { options: ptyStartOptions(thread) }).then(function () {
     thread.startInFlight = false;
+    if (thread.closeStarted) {
+      stopThreadPty(thread);
+      return;
+    }
     thread.status = "running";
     var pending = pendingDataBuffers.get(thread.id);
     if (pending && thread.term) {
@@ -1869,9 +1967,21 @@ function spawnPty(thread) {
     }
   }).catch(function (error) {
     thread.startInFlight = false;
+    if (thread.closeStarted) return;
     thread.status = "failed";
     if (thread.term) {
       thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + String(error) + "\r\n");
+    }
+
+    function stopThreadPty(thread) {
+      if (!thread || thread.stopRequested) return;
+      thread.stopRequested = true;
+      invoke("pty_stop", {
+        threadId: thread.id,
+        thread_id: thread.id,
+      }).catch(function (error) {
+        console.warn("[panes] PTY stop failed", thread.id, error);
+      });
     }
     refreshSidebar();
     updatePaneChrome(thread);
@@ -1900,9 +2010,7 @@ function closeThread(id, options) {
   thread.closeStarted = true;
   pendingDataBuffers.delete(id);
   var nextThreadId = detachThreadPane(thread);
-  invoke("pty_stop", { threadId: id, thread_id: id }).catch(function (error) {
-    console.warn("[panes] PTY stop failed", id, error);
-  });
+  if (!thread.startInFlight) stopThreadPty(thread);
 
   if (thread.term && thread.term.dispose) {
     try {
@@ -2283,10 +2391,28 @@ function startCovenPolling() {
 }
 ```
 
-Update `handleVisibilityChange`: hidden saves/stops; visible starts. Refresh
-after boot, project add/remove, worktree refresh, and successful Coven start.
-Invalidate request identity before project removal so a late response is
-ignored.
+Replace `handleVisibilityChange` with:
+
+```js
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    saveWorkspaceNow();
+    stopCovenPolling();
+  } else {
+    startCovenPolling();
+  }
+}
+```
+
+Call `startCovenPolling()` after boot and project addition, and
+`refreshCovenSessions()` after worktree refresh and successful Coven start.
+Before removing a project, run:
+
+```js
+covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
+```
+
+This invalidates request identity so a late response is ignored.
 
 Change cwd normalization so an explicitly supplied missing or out-of-scope cwd
 drops the record instead of silently rewriting it to `None`:
@@ -2428,11 +2554,67 @@ Render `Psyche` before local rows and `Coven` before daemon rows. Each daemon
 button uses `className = "session-coven-row"`,
 `dataset.sessionId = session.id`, title/status/harness text, and calls
 `openCovenSession(project, session)`. If an attachment thread exists, label the
-action `Focus attachment`; otherwise label it `Attach`.
+action `Focus attachment`; otherwise label it `Attach`. Use:
+
+```js
+function createCovenSessionRow(project, session) {
+  var presentation = PsycheSessions.statusPresentation(session.status);
+  var attached = state.threads.some(function (thread) {
+    return thread.projectId === project.id
+      && thread.covenSessionId === session.id
+      && !thread.closeStarted;
+  });
+  var row = document.createElement("button");
+  row.type = "button";
+  row.className = "session-coven-row";
+  row.dataset.sessionId = session.id;
+  row.title = attached ? "Focus attachment" : "Attach";
+  var title = document.createElement("span");
+  title.className = "session-coven-title";
+  title.textContent = session.title || session.id;
+  var meta = document.createElement("span");
+  meta.className = "session-coven-meta coven-tone-" + presentation.tone;
+  meta.textContent = [session.harness, presentation.label].filter(Boolean).join(" · ");
+  row.appendChild(title);
+  row.appendChild(meta);
+  if (presentation.label === "waiting") {
+    var badge = document.createElement("span");
+    badge.className = "session-attention-badge";
+    badge.textContent = "!";
+    badge.title = "Waiting for input";
+    row.appendChild(badge);
+  }
+  row.addEventListener("click", function () {
+    openCovenSession(project, session);
+  });
+  return row;
+}
+```
 
 Render one `.session-inline-state` for loading/error/incompatible/unavailable.
 When `covenDiscovery.stale` is true, retain rows and append `— showing last
-confirmed sessions`.
+confirmed sessions`. Add:
+
+```js
+function covenToneClass(phase) {
+  if (phase === "error" || phase === "incompatible") return "coven-tone-danger";
+  if (phase === "unavailable") return "coven-tone-warn";
+  return "coven-tone-muted";
+}
+
+function covenInlineState(discovery) {
+  if (!discovery || discovery.phase === "ready") return null;
+  var message = discovery.phase === "loading"
+    ? "Loading Coven sessions"
+    : (discovery.message || "Coven sessions unavailable");
+  if (discovery.stale) message += " — showing last confirmed sessions";
+  return { message: message, className: covenToneClass(discovery.phase) };
+}
+```
+
+For each project, append `createCovenSessionRow(project, session)` for its Coven
+rows and append at most one inline-state element from
+`covenInlineState(covenDiscovery)`.
 
 - [ ] **Step 4: Restore scoped styles**
 
@@ -2454,6 +2636,14 @@ Add only the selectors used by the renderer:
   background: var(--surface-2);
   color: var(--text);
 }
+.session-coven-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-coven-meta { flex: 0 0 auto; }
 .session-inline-state {
   padding: 4px 10px 6px 28px;
   color: var(--muted);
@@ -2462,6 +2652,7 @@ Add only the selectors used by the renderer:
 .coven-tone-ok { color: var(--ok); }
 .coven-tone-warn { color: var(--warning); }
 .coven-tone-danger { color: var(--error); }
+.coven-tone-neutral,
 .coven-tone-muted { color: var(--muted); }
 ```
 
@@ -2574,9 +2765,11 @@ function openCovenSession(project, session) {
   });
   if (existing) {
     return Promise.resolve().then(async function () {
+      if (!(await showTerminalView())) return null;
       if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
         return null;
       }
+      await waitForTerminalLayout();
       if (existing.hidden && !reopenThread(existing.id)) return null;
       await focusThread(existing.id);
       return existing;
@@ -2587,9 +2780,11 @@ function openCovenSession(project, session) {
   if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
 
   var opening = Promise.resolve().then(async function () {
+    if (!(await showTerminalView())) return null;
     if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
       return null;
     }
+    await waitForTerminalLayout();
     var worktree = (project.worktrees || []).find(function (candidate) {
       return session.cwd && (
         session.cwd === candidate.path
