@@ -72,7 +72,8 @@ async function listActiveDocFiles(directory = '.'): Promise<string[]> {
     if (entry.isDirectory()) {
       if (
         historicalDocDirectories.has(filePath) ||
-        generatedOrDependencyDirectories.has(entry.name)
+        generatedOrDependencyDirectories.has(entry.name) ||
+        entry.name.startsWith('.psyche-')
       ) {
         continue;
       }
