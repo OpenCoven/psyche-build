@@ -60,8 +60,8 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'upstream\n' },
       'git\0remote': { stdout: 'origin\nupstream\n' },
-      'git\0remote\0get-url\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
-      'git\0remote\0get-url\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -116,12 +116,12 @@ describe('readRepositoryContext', () => {
       },
       {
         command: 'git',
-        args: ['remote', 'get-url', 'origin'],
+        args: ['remote', 'get-url', '--', 'origin'],
         options: { cwd: worktreePath, allowFailure: true },
       },
       {
         command: 'git',
-        args: ['remote', 'get-url', 'upstream'],
+        args: ['remote', 'get-url', '--', 'upstream'],
         options: { cwd: worktreePath, allowFailure: true },
       },
     ]);
@@ -136,8 +136,8 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: `${branch}\n` },
       [`git\0config\0branch.${branch}.remote`]: { stdout: `${remoteName}\r\n` },
       'git\0remote': { stdout: `origin\n${remoteName}\r\n` },
-      'git\0remote\0get-url\0origin': { stdout: 'https://github.com/OpenCoven/origin-repo.git\n' },
-      [`git\0remote\0get-url\0${remoteName}`]: { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'https://github.com/OpenCoven/origin-repo.git\n' },
+      [`git\0remote\0get-url\0--\0${remoteName}`]: { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -188,12 +188,12 @@ describe('readRepositoryContext', () => {
       },
       {
         command: 'git',
-        args: ['remote', 'get-url', 'origin'],
+        args: ['remote', 'get-url', '--', 'origin'],
         options: { cwd: worktreePath, allowFailure: true },
       },
       {
         command: 'git',
-        args: ['remote', 'get-url', remoteName],
+        args: ['remote', 'get-url', '--', remoteName],
         options: { cwd: worktreePath, allowFailure: true },
       },
     ]);
@@ -204,7 +204,7 @@ describe('readRepositoryContext', () => {
     const { runner, calls } = createRunner({
       'git\0branch\0--show-current': { stdout: '\n' },
       'git\0remote': { stdout: 'origin\n' },
-      'git\0remote\0get-url\0origin': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -217,7 +217,7 @@ describe('readRepositoryContext', () => {
     expect(calls.map((call) => call.args.join(' '))).toEqual([
       'branch --show-current',
       'remote',
-      'remote get-url origin',
+      'remote get-url -- origin',
     ]);
   });
 
@@ -227,9 +227,9 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
       'git\0remote': { stdout: 'mirror\norigin\nbroken\norigin\n' },
-      'git\0remote\0get-url\0mirror': { stdout: 'file:///Users/buns/mirror\n' },
-      'git\0remote\0get-url\0origin': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
-      'git\0remote\0get-url\0broken': { stdout: '', exitCode: 2 },
+      'git\0remote\0get-url\0--\0mirror': { stdout: 'file:///Users/buns/mirror\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0broken': { stdout: '', exitCode: 2 },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -245,9 +245,9 @@ describe('readRepositoryContext', () => {
       'branch --show-current',
       'config branch.feat/pr.remote',
       'remote',
-      'remote get-url mirror',
-      'remote get-url origin',
-      'remote get-url broken',
+      'remote get-url -- mirror',
+      'remote get-url -- origin',
+      'remote get-url -- broken',
     ]);
   });
 
@@ -257,8 +257,8 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'upstream\n' },
       'git\0remote': { stdout: 'origin\nupstream\n' },
-      'git\0remote\0get-url\0origin': { stdout: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit\n' },
-      'git\0remote\0get-url\0upstream': { stdout: 'https://ghe.example.test:443/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit\n' },
+      'git\0remote\0get-url\0--\0upstream': { stdout: 'https://ghe.example.test:443/OpenCoven/psyche-build.git\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -297,8 +297,8 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'origin\n' },
       'git\0remote': { stdout: 'origin\nupstream\n' },
-      'git\0remote\0get-url\0origin': { stdout: ' git@github.com:OpenCoven/psyche-build.git\n' },
-      'git\0remote\0get-url\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git \n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: ' git@github.com:OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git \n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
@@ -318,6 +318,56 @@ describe('readRepositoryContext', () => {
     await expect(readRepositoryContext(worktreePath, runner)).rejects.toThrowError(
       new Error('unable to read Git repository context'),
     );
+  });
+
+  it('uses an option terminator when reading option-like remote names', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner, calls } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '-foo\n' },
+      'git\0remote': { stdout: '-foo\n' },
+      'git\0remote\0get-url\0--\0-foo': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+
+    expect(context.rawRemotes).toEqual([
+      { name: '-foo', url: 'https://github.com/OpenCoven/psyche-build.git' },
+    ]);
+    expect(context.remotes).toEqual([
+      {
+        name: '-foo',
+        rawUrl: 'https://github.com/OpenCoven/psyche-build.git',
+        repository: {
+          host: 'github.com',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://github.com/OpenCoven/psyche-build',
+        },
+      },
+    ]);
+    expect(calls).toEqual([
+      {
+        command: 'git',
+        args: ['branch', '--show-current'],
+        options: { cwd: worktreePath },
+      },
+      {
+        command: 'git',
+        args: ['config', 'branch.feat/pr.remote'],
+        options: { cwd: worktreePath, allowFailure: true },
+      },
+      {
+        command: 'git',
+        args: ['remote'],
+        options: { cwd: worktreePath },
+      },
+      {
+        command: 'git',
+        args: ['remote', 'get-url', '--', '-foo'],
+        options: { cwd: worktreePath, allowFailure: true },
+      },
+    ]);
   });
 
   it('throws a fixed error when required git reads fail or return malformed branch output', async () => {

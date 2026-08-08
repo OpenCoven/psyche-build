@@ -140,7 +140,7 @@ async function readRemoteUrl(
   runner: ReadOnlyCommandRunner,
 ): Promise<string | null> {
   try {
-    const result = await runner.run('git', ['remote', 'get-url', remoteName], {
+    const result = await runner.run('git', ['remote', 'get-url', '--', remoteName], {
       cwd: worktreePath,
       allowFailure: true,
     });
