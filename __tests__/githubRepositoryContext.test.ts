@@ -251,7 +251,7 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
-  it('canonicalizes repository identity while preserving enterprise HTTPS web ports and ignoring SSH transport ports', async () => {
+  it('canonicalizes repository identity for gh hostnames while ignoring transport and default web ports', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
@@ -272,10 +272,10 @@ describe('readRepositoryContext', () => {
         name: 'upstream',
         rawUrl: 'https://ghe.example.test:443/OpenCoven/psyche-build.git',
         repository: {
-          host: 'ghe.example.test:443',
+          host: 'ghe.example.test',
           owner: 'OpenCoven',
           name: 'psyche-build',
-          url: 'https://ghe.example.test:443/OpenCoven/psyche-build',
+          url: 'https://ghe.example.test/OpenCoven/psyche-build',
         },
       },
       {

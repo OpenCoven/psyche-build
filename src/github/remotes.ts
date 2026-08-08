@@ -87,8 +87,7 @@ function parseHttpsRemote(rawUrl: string): GitHubRepositoryRef | null {
   }
 
   const hostname = normalizeCanonicalHostname(parsed.url.hostname);
-  const host = buildWebIdentityHost(hostname, parsed.authority.explicitPort);
-  if (!host || (parsed.authority.explicitPort !== null && hostname === 'github.com')) {
+  if (!isGitHubCliHostname(hostname)) {
     return null;
   }
 
@@ -97,7 +96,11 @@ function parseHttpsRemote(rawUrl: string): GitHubRepositoryRef | null {
     return null;
   }
 
-  return buildRepositoryRef(host, repositoryPath.owner, repositoryPath.name);
+  if (parsed.authority.explicitPort !== null && parsed.authority.explicitPort !== '443') {
+    return null;
+  }
+
+  return buildRepositoryRef(hostname, repositoryPath.owner, repositoryPath.name);
 }
 
 function parseScpLikeSshRemote(rawUrl: string): GitHubRepositoryRef | null {
@@ -135,13 +138,29 @@ function parseSshRemote(rawUrl: string): GitHubRepositoryRef | null {
   }
 
   const hostname = normalizeCanonicalHostname(parsed.url.hostname);
-  if (!hostname || (parsed.authority.explicitPort !== null && hostname === 'github.com')) {
+  if (!isGitHubCliHostname(hostname)) {
     return null;
   }
 
   const repositoryPath = parseRepositoryPath(parsed.url.pathname);
   if (!repositoryPath) {
     return null;
+  }
+
+  if (hostname === 'github.com') {
+    if (parsed.authority.explicitPort !== null && parsed.authority.explicitPort !== '22') {
+      return null;
+    }
+
+    return buildRepositoryRef('github.com', repositoryPath.owner, repositoryPath.name);
+  }
+
+  if (hostname === 'ssh.github.com') {
+    if (parsed.authority.explicitPort !== '443') {
+      return null;
+    }
+
+    return buildRepositoryRef('github.com', repositoryPath.owner, repositoryPath.name);
   }
 
   return buildRepositoryRef(hostname, repositoryPath.owner, repositoryPath.name);
@@ -308,7 +327,12 @@ function canonicalizeScpHost(rawHost: string): string | null {
     return null;
   }
 
-  return normalizeCanonicalHostname(url.hostname);
+  const hostname = normalizeCanonicalHostname(url.hostname);
+  if (!isGitHubCliHostname(hostname) || hostname === 'ssh.github.com') {
+    return null;
+  }
+
+  return hostname;
 }
 
 function isCanonicalPort(rawPort: string): boolean {
@@ -320,16 +344,12 @@ function isCanonicalPort(rawPort: string): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
-function buildWebIdentityHost(hostname: string, explicitPort: string | null): string | null {
-  if (!hostname) {
-    return null;
-  }
-
-  return explicitPort === null ? hostname : `${hostname}:${explicitPort}`;
-}
-
 function normalizeCanonicalHostname(hostname: string): string {
   return hostname.toLowerCase();
+}
+
+function isGitHubCliHostname(hostname: string): boolean {
+  return hostname.length > 0 && !hostname.startsWith('[') && !hostname.includes(':');
 }
 
 function parseRepositoryPath(rawPath: string): { owner: string; name: string } | null {
