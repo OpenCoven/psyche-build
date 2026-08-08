@@ -681,7 +681,9 @@
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
     thread.ptyStarted = false;
-    thread.startInFlight = false;
+    if (thread.startInFlight) {
+      thread.exitDuringStart = true;
+    }
     thread.stopRequested = false;
     thread.spawning = false;
     thread.status = "exited";
@@ -767,6 +769,7 @@
       closing: false,
       closeStarted: false,
       startInFlight: false,
+      exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
     };
@@ -808,6 +811,7 @@
     }
     var launch = thread.launch;
     thread.stopRequested = false;
+    thread.exitDuringStart = false;
     thread.startInFlight = true;
     thread.status = "starting";
     thread.spawning = true;
@@ -837,6 +841,16 @@
         pendingDataBuffers.delete(thread.id);
         return stopThreadPty(thread).then(function () { return false; });
       }
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.ptyStarted = false;
+        thread.status = "exited";
+        thread.spawning = false;
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
+        return false;
+      }
       thread.ptyStarted = true;
       thread.status = "running";
       thread.spawning = false;
@@ -862,6 +876,16 @@
           thread.ptyStarted = true;
           return stopThreadPty(thread).then(function () { return false; });
         }
+        return false;
+      }
+      if (thread.exitDuringStart) {
+        thread.exitDuringStart = false;
+        thread.ptyStarted = false;
+        thread.status = "exited";
+        thread.spawning = false;
+        syncThreadPaneMetadata(thread);
+        refreshSidebar();
+        refreshTabs();
         return false;
       }
       thread.spawning = false;
@@ -1307,7 +1331,8 @@
     if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
     if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
     if (thread.paneRetry) {
-      thread.paneRetry.hidden = thread.status !== "failed" && thread.status !== "exited";
+      thread.paneRetry.hidden = thread.startInFlight ||
+        (thread.status !== "failed" && thread.status !== "exited");
       thread.paneRetry.setAttribute("aria-label", "Retry " + thread.name);
     }
     if (thread.paneClose) {

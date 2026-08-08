@@ -960,6 +960,84 @@ describe('native Coven launch routing', () => {
     expect(state.threads).toEqual([]);
   });
 
+  it.each(['resolve', 'already-running'])(
+    'does not resurrect an exited PTY when its start later settles via %s',
+    async (settlement) => {
+      let resolveStart: (() => void) | null = null;
+      let rejectStart: ((error: Error) => void) | null = null;
+      let starts = 0;
+      const thread = {
+        id: 'thread-1', projectId: 'project', status: 'starting', spawning: true,
+        closing: false, closeStarted: false, startInFlight: false, exitDuringStart: false,
+        stopRequested: false, ptyStarted: false, launch: {
+          command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+          launchKind: 'coven-chat', covenSessionId: null,
+        }, term: { cols: 120, rows: 40, write: () => undefined },
+      };
+      const state = { threads: [thread], activeThreadId: thread.id };
+      const isLiveThread = (value: typeof thread) => state.threads.includes(value) && !value.closing;
+      const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+        functionSource('spawnPty'), {
+          invoke: () => {
+            starts += 1;
+            return new Promise<void>((resolve, reject) => {
+              resolveStart = resolve;
+              rejectStart = reject;
+            });
+          },
+          isLiveThread,
+          pendingDataBuffers: new Map(),
+          syncThreadPaneMetadata: () => undefined,
+          refreshSidebar: () => undefined,
+          refreshTabs: () => undefined,
+          state,
+          setProjectStatus: () => undefined,
+          findProject: () => ({ id: 'project' }),
+          setStatus: () => undefined,
+          stopThreadPty: () => Promise.resolve(false),
+        },
+      );
+      const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+        functionSource('retryThread'), {
+          findThread: () => thread,
+          isLiveThread,
+          spawnPty,
+        },
+      );
+      const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+        functionSource('handlePtyExit'), {
+          findThread: () => thread,
+          syncThreadPaneMetadata: () => undefined,
+          refreshSidebar: () => undefined,
+          refreshTabs: () => undefined,
+          state,
+          setProjectStatus: () => undefined,
+          findProject: () => ({ id: 'project' }),
+        },
+      );
+
+      const starting = spawnPty(thread);
+      expect(thread.startInFlight).toBe(true);
+      expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+      expect(thread.status).toBe('exited');
+      expect(thread.startInFlight).toBe(true);
+      await expect(retryThread(thread.id)).resolves.toBe(false);
+      expect(starts).toBe(1);
+
+      if (settlement === 'resolve') {
+        (resolveStart as unknown as () => void)();
+      } else {
+        (rejectStart as unknown as (error: Error) => void)(new Error('PTY already running for thread'));
+      }
+      await expect(starting).resolves.toBe(false);
+      expect(thread.startInFlight).toBe(false);
+      expect(thread.status).toBe('exited');
+      expect(thread.ptyStarted).toBe(false);
+      expect(thread.exitDuringStart).toBe(false);
+      expect(starts).toBe(1);
+    },
+  );
+
   it('shows one retry control only for failed and exited panes', () => {
     const retry = { hidden: false, setAttribute: () => undefined };
     const attributes = new Map<string, string>();
@@ -980,6 +1058,10 @@ describe('native Coven launch routing', () => {
     syncThreadPaneMetadata(thread);
     expect(retry.hidden).toBe(true);
     thread.status = 'exited';
+    (thread as typeof thread & { startInFlight: boolean }).startInFlight = true;
+    syncThreadPaneMetadata(thread);
+    expect(retry.hidden).toBe(true);
+    (thread as typeof thread & { startInFlight: boolean }).startInFlight = false;
     syncThreadPaneMetadata(thread);
     expect(retry.hidden).toBe(false);
     expect(attributes.get('aria-label')).toBe('Stop and close Coven');
