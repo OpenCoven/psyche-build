@@ -2500,16 +2500,26 @@
     return "Psyche";
   }
 
+  async function runNewThreadCommand() {
+    if (!(await prepareDefaultThreadCreation())) return null;
+    return spawnDefaultThread();
+  }
+
+  async function runNewPsycheCommand() {
+    if (!(await prepareDefaultThreadCreation())) return null;
+    return spawnPsycheThread();
+  }
+
   var commands = [
     {
       cmd: "/new-thread",
       desc: "Spawn a new shell thread",
-      run: function () { spawnDefaultThread(); },
+      run: runNewThreadCommand,
     },
     {
       cmd: "/new-psyche",
       desc: "Spawn a thread running the psyche TUI",
-      run: function () { spawnPsycheThread(); },
+      run: runNewPsycheCommand,
     },
     {
       cmd: "/close",
@@ -2713,7 +2723,14 @@
     var rest = space === -1 ? "" : trimmed.slice(space + 1).trim();
     var match = commands.find(function (c) { return c.cmd === head; });
     if (match) {
-      try { match.run(rest); }
+      try {
+        var commandResult = match.run(rest);
+        if (commandResult && typeof commandResult.catch === "function") {
+          commandResult.catch(function (e) {
+            writeToActive("\r\n[/" + head + " failed: " + e + "]\r\n");
+          });
+        }
+      }
       catch (e) { writeToActive("\r\n[/" + head + " failed: " + e + "]\r\n"); }
       return;
     }

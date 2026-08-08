@@ -480,4 +480,74 @@ describe('Tauri physical terminal panes', () => {
       'skills', 'sidebar', 'browser', 'save', 'focus:hidden-thread',
     ]);
   });
+
+  it('accepts guarded /new-thread creation only after revealing the terminal', async () => {
+    const terminalHost = { hidden: true };
+    let spawned = 0;
+    const runNewThreadCommand = compileFunction<() => Promise<{ kind: string } | null>>(
+      functionSource('runNewThreadCommand'),
+      {
+        prepareDefaultThreadCreation: async () => {
+          terminalHost.hidden = false;
+          return true;
+        },
+        spawnDefaultThread: () => {
+          expect(terminalHost.hidden).toBe(false);
+          spawned += 1;
+          return { kind: 'shell' };
+        },
+      },
+    );
+    await expect(runNewThreadCommand()).resolves.toEqual({ kind: 'shell' });
+    expect(spawned).toBe(1);
+    expect(mainJs).toMatch(/cmd: "\/new-thread"[\s\S]*?run: runNewThreadCommand/);
+  });
+
+  it('cancels /new-thread without creating a thread or PTY', async () => {
+    let spawned = 0;
+    const runNewThreadCommand = compileFunction<() => Promise<null>>(
+      functionSource('runNewThreadCommand'),
+      {
+        prepareDefaultThreadCreation: async () => false,
+        spawnDefaultThread: () => { spawned += 1; return { kind: 'wrong' }; },
+      },
+    );
+    await expect(runNewThreadCommand()).resolves.toBeNull();
+    expect(spawned).toBe(0);
+  });
+
+  it('accepts guarded /new-psyche creation with its distinct spawn path', async () => {
+    const terminalHost = { hidden: true };
+    let spawned = 0;
+    const runNewPsycheCommand = compileFunction<() => Promise<{ kind: string } | null>>(
+      functionSource('runNewPsycheCommand'),
+      {
+        prepareDefaultThreadCreation: async () => {
+          terminalHost.hidden = false;
+          return true;
+        },
+        spawnPsycheThread: () => {
+          expect(terminalHost.hidden).toBe(false);
+          spawned += 1;
+          return { kind: 'psyche' };
+        },
+      },
+    );
+    await expect(runNewPsycheCommand()).resolves.toEqual({ kind: 'psyche' });
+    expect(spawned).toBe(1);
+    expect(mainJs).toMatch(/cmd: "\/new-psyche"[\s\S]*?run: runNewPsycheCommand/);
+  });
+
+  it('cancels /new-psyche without creating a thread or PTY', async () => {
+    let spawned = 0;
+    const runNewPsycheCommand = compileFunction<() => Promise<null>>(
+      functionSource('runNewPsycheCommand'),
+      {
+        prepareDefaultThreadCreation: async () => false,
+        spawnPsycheThread: () => { spawned += 1; return { kind: 'wrong' }; },
+      },
+    );
+    await expect(runNewPsycheCommand()).resolves.toBeNull();
+    expect(spawned).toBe(0);
+  });
 });
