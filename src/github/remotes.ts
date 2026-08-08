@@ -149,23 +149,8 @@ function parseSshRemote(rawUrl: string): GitHubRepositoryRef | null {
     return null;
   }
 
-  if (hostname === 'github.com') {
-    if (parsed.authority.explicitPort !== null && parsed.authority.explicitPort !== '22') {
-      return null;
-    }
-
-    return buildRepositoryRef('github.com', repositoryPath.owner, repositoryPath.name);
-  }
-
-  if (hostname === 'ssh.github.com') {
-    if (parsed.authority.explicitPort !== '443') {
-      return null;
-    }
-
-    return buildRepositoryRef('github.com', repositoryPath.owner, repositoryPath.name);
-  }
-
-  return buildRepositoryRef(hostname, repositoryPath.owner, repositoryPath.name);
+  const identityHost = hostname === 'ssh.github.com' ? 'github.com' : hostname;
+  return buildRepositoryRef(identityHost, repositoryPath.owner, repositoryPath.name);
 }
 
 function parseUrlRemote(rawUrl: string, protocol: 'https:' | 'ssh:'): ParsedUrlRemote | null {

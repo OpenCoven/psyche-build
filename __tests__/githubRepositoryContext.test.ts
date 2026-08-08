@@ -251,31 +251,33 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
-  it('canonicalizes repository identity for gh hostnames while ignoring transport and default web ports', async () => {
+  it('canonicalizes repository identity for gh hostnames while ignoring SSH transport ports', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'upstream\n' },
-      'git\0remote': { stdout: 'origin\nupstream\n' },
+      'git\0remote': { stdout: 'github-port\norigin\nupstream\n' },
+      'git\0remote\0get-url\0--\0github-port': { stdout: 'ssh://git@github.com:2022/OpenCoven/psyche-build.git\n' },
       'git\0remote\0get-url\0--\0origin': { stdout: 'ssh://git@ghe.example.test:2222/Open%43oven/psyche%2Dbuild%2Egit\n' },
-      'git\0remote\0get-url\0--\0upstream': { stdout: 'https://ghe.example.test:443/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0upstream': { stdout: 'ssh://git@ssh.github.com:2023/OpenCoven/psyche-build.git\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
 
     expect(context.rawRemotes).toEqual([
-      { name: 'upstream', url: 'https://ghe.example.test/<redacted-path>' },
+      { name: 'upstream', url: 'ssh://git@github.com/<redacted-path>' },
       { name: 'origin', url: 'ssh://git@ghe.example.test/<redacted-path>' },
+      { name: 'github-port', url: 'ssh://git@github.com/<redacted-path>' },
     ]);
     expect(context.remotes).toEqual([
       {
         name: 'upstream',
-        rawUrl: 'https://ghe.example.test:443/OpenCoven/psyche-build.git',
+        rawUrl: 'ssh://git@ssh.github.com:2023/OpenCoven/psyche-build.git',
         repository: {
-          host: 'ghe.example.test',
+          host: 'github.com',
           owner: 'OpenCoven',
           name: 'psyche-build',
-          url: 'https://ghe.example.test/OpenCoven/psyche-build',
+          url: 'https://github.com/OpenCoven/psyche-build',
         },
       },
       {
@@ -286,6 +288,16 @@ describe('readRepositoryContext', () => {
           owner: 'OpenCoven',
           name: 'psyche-build',
           url: 'https://ghe.example.test/OpenCoven/psyche-build',
+        },
+      },
+      {
+        name: 'github-port',
+        rawUrl: 'ssh://git@github.com:2022/OpenCoven/psyche-build.git',
+        repository: {
+          host: 'github.com',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://github.com/OpenCoven/psyche-build',
         },
       },
     ]);
@@ -496,12 +508,19 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
       'git\0remote': {
-        stdout: 'relative\nabsolute\nwindows\nsafe-file\nencoded-newline\nencoded-tab\nencoded-backslash\nmalformed-file\n',
+        stdout: 'relative\nabsolute\nwindows\nsafe-file\nhosted-file\nuserinfo-file\nliteral-traversal\n'
+          + 'encoded-dot\nencoded-dotdot\nmixed-dotdot\nencoded-newline\nencoded-tab\nencoded-backslash\nmalformed-file\n',
       },
       'git\0remote\0get-url\0--\0relative': { stdout: '../private/repo\n' },
       'git\0remote\0get-url\0--\0absolute': { stdout: '/Users/name/private/repo\n' },
       'git\0remote\0get-url\0--\0windows': { stdout: 'C:\\private\\repo\n' },
       'git\0remote\0get-url\0--\0safe-file': { stdout: 'file:///Users/name/My Repo?download=1#frag\n' },
+      'git\0remote\0get-url\0--\0hosted-file': { stdout: 'file://server/share/private-repo\n' },
+      'git\0remote\0get-url\0--\0userinfo-file': { stdout: 'file://user@server/share/private-repo\n' },
+      'git\0remote\0get-url\0--\0literal-traversal': { stdout: 'file:///Users/name/../secret\n' },
+      'git\0remote\0get-url\0--\0encoded-dot': { stdout: 'file:///Users/%2e/name\n' },
+      'git\0remote\0get-url\0--\0encoded-dotdot': { stdout: 'file:///Users/%2E%2E/secret\n' },
+      'git\0remote\0get-url\0--\0mixed-dotdot': { stdout: 'file:///Users/%2e./secret\n' },
       'git\0remote\0get-url\0--\0encoded-newline': { stdout: 'file:///Users/name/My%0ARepo\n' },
       'git\0remote\0get-url\0--\0encoded-tab': { stdout: 'file:///Users/name/My%09Repo\n' },
       'git\0remote\0get-url\0--\0encoded-backslash': { stdout: 'file:///Users/name/My%5CRepo\n' },
@@ -509,18 +528,28 @@ describe('readRepositoryContext', () => {
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
+    const rawDiagnosticUrls = context.rawRemotes.map((remote) => remote.url).join('\n');
 
     expect(context.rawRemotes).toEqual([
       { name: 'absolute', url: '<redacted-remote-url>' },
       { name: 'encoded-backslash', url: '<redacted-remote-url>' },
+      { name: 'encoded-dot', url: '<redacted-remote-url>' },
+      { name: 'encoded-dotdot', url: '<redacted-remote-url>' },
       { name: 'encoded-newline', url: '<redacted-remote-url>' },
       { name: 'encoded-tab', url: '<redacted-remote-url>' },
+      { name: 'hosted-file', url: '<redacted-remote-url>' },
+      { name: 'literal-traversal', url: '<redacted-remote-url>' },
       { name: 'malformed-file', url: '<redacted-remote-url>' },
+      { name: 'mixed-dotdot', url: '<redacted-remote-url>' },
       { name: 'relative', url: '<redacted-remote-url>' },
       { name: 'safe-file', url: 'file:///Users/name/My Repo' },
+      { name: 'userinfo-file', url: '<redacted-remote-url>' },
       { name: 'windows', url: '<redacted-remote-url>' },
     ]);
     expect(context.remotes).toEqual([]);
+    expect(rawDiagnosticUrls).not.toContain('private-repo');
+    expect(rawDiagnosticUrls).not.toContain('/../secret');
+    expect(rawDiagnosticUrls).not.toContain('%2E%2E');
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {

@@ -322,6 +322,16 @@ function sanitizeFileDiagnostic(remoteUrl: string): string | null {
     return REDACTED_REMOTE_URL;
   }
 
+  const rawParts = extractSchemeUrlParts(remoteUrl);
+  if (rawParts === null || rawParts.authority !== '') {
+    return REDACTED_REMOTE_URL;
+  }
+
+  const rawPath = extractRawPathFromSchemeSuffix(rawParts.suffix);
+  if (!rawPath || !isSafeRawFilePath(rawPath)) {
+    return REDACTED_REMOTE_URL;
+  }
+
   let url: URL;
   try {
     url = new URL(remoteUrl);
@@ -329,17 +339,12 @@ function sanitizeFileDiagnostic(remoteUrl: string): string | null {
     return REDACTED_REMOTE_URL;
   }
 
-  if (url.protocol !== 'file:' || url.username || url.password) {
+  if (url.protocol !== 'file:' || url.username || url.password || url.host) {
     return REDACTED_REMOTE_URL;
   }
 
   try {
-    const decodedPath = decodeURI(url.pathname);
-    if (decodedPath.includes('\\') || ASCII_CONTROL.test(decodedPath)) {
-      return REDACTED_REMOTE_URL;
-    }
-
-    return `file://${url.host}${decodedPath}`;
+    return `file://${serializeSafeFilePath(rawPath)}`;
   } catch {
     return REDACTED_REMOTE_URL;
   }
@@ -426,6 +431,22 @@ function extractSchemeUrlParts(remoteUrl: string): { authority: string; suffix: 
   };
 }
 
+function extractRawPathFromSchemeSuffix(suffix: string): string | null {
+  const queryIndex = suffix.indexOf('?');
+  const fragmentIndex = suffix.indexOf('#');
+  let pathEnd = suffix.length;
+
+  if (queryIndex >= 0) {
+    pathEnd = queryIndex;
+  }
+
+  if (fragmentIndex >= 0 && fragmentIndex < pathEnd) {
+    pathEnd = fragmentIndex;
+  }
+
+  return suffix.slice(0, pathEnd);
+}
+
 function serializeSanitizedUrl(url: URL): string {
   const sanitized = new URL(url.toString());
   sanitized.username = '';
@@ -468,6 +489,57 @@ function hasUnsafeUrlUserinfoOrAuthority(remoteUrl: string): boolean {
   }
 
   return authority.slice(0, atIndex) !== 'git';
+}
+
+function isSafeRawFilePath(rawPath: string): boolean {
+  if (!rawPath.startsWith('/')) {
+    return false;
+  }
+
+  const rawSegments = rawPath.split('/').slice(1);
+  for (const rawSegment of rawSegments) {
+    if (!isSafeRawFileSegment(rawSegment)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isSafeRawFileSegment(rawSegment: string): boolean {
+  if (rawSegment === '.' || rawSegment === '..') {
+    return false;
+  }
+
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawSegment);
+  } catch {
+    return false;
+  }
+
+  if (
+    decoded === '.'
+    || decoded === '..'
+    || decoded.includes('/')
+    || decoded.includes('\\')
+    || ASCII_CONTROL.test(decoded)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function serializeSafeFilePath(rawPath: string): string {
+  const rawSegments = rawPath.split('/');
+  return rawSegments.map((segment, index) => {
+    if (index === 0) {
+      return '';
+    }
+
+    return decodeURIComponent(segment);
+  }).join('/');
 }
 
 function hasAtOutsideAuthority(value: string, scheme: string): boolean {
