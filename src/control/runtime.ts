@@ -528,9 +528,13 @@ function succeededOutcome(value: unknown): CommandOutcome {
 }
 
 function failedOutcome(error: unknown): CommandOutcome {
+  const code =
+    error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : 'command_failed';
   return {
     status: 'failed',
-    code: 'command_failed',
+    code,
     message: error instanceof Error ? error.message : String(error),
   };
 }

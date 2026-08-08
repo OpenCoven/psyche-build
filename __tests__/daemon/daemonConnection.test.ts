@@ -12,6 +12,8 @@ import {
 } from '../../src/daemon/index.js';
 import { TmuxControl } from '../../src/services/tmuxControl.js';
 import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
+import { ControlRuntime } from '../../src/control/runtime.js';
+import { createDaemonControlHandlers } from '../../src/daemon/controlHandlers.js';
 import type { BridgeSpawnRequest } from '../../src/daemon/bridge.js';
 
 /**
@@ -71,17 +73,39 @@ class RecordingTmux extends TmuxControl {
   override sendKeysHex(paneId: string): void { this.calls.push({ op: 'input', paneId }); }
 }
 
-function buildConnection(
+async function buildConnection(
   projectRoot: string,
   opts: {
     authed?: boolean;
     tmux?: TmuxControl;
     workspaceProvider?: ConnectionDeps['workspaceProvider'];
-    spawnPane?: ConnectionDeps['spawnPane'];
+    spawnPane?: (
+      projectRoot: string,
+      sessionName: string,
+      request: BridgeSpawnRequest,
+    ) => Promise<import('../../src/daemon/bridge.js').BridgeSpawnResult>;
+    controlRuntime?: ConnectionDeps['controlRuntime'];
   } = {},
 ) {
   const ws = new FakeSocket();
   const tmux = opts.tmux ?? new RecordingTmux('psyche-test');
+  const ownerEpoch = 1;
+  // Wire a real runtime backed by the same recording tmux so existing
+  // `tmux.calls` assertions still observe effects, now routed through the
+  // canonical control path. Tests that need to observe the submitted commands
+  // directly can inject a spying `controlRuntime`.
+  const controlRuntime =
+    opts.controlRuntime ??
+    (await ControlRuntime.create({
+      ownerEpoch,
+      handlers: createDaemonControlHandlers({
+        tmux,
+        projectRoot,
+        sessionName: 'psyche-test',
+        spawnPane: opts.spawnPane,
+      }),
+      journal: createMemoryJournal(),
+    }));
   const deps: ConnectionDeps = {
     token: TOKEN,
     projectRoot,
@@ -90,7 +114,8 @@ function buildConnection(
     tmux,
     capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
     workspaceProvider: opts.workspaceProvider,
-    spawnPane: opts.spawnPane,
+    controlRuntime,
+    ownerEpoch,
   };
   const conn = new Connection(ws as any, deps);
   conn.bind();
@@ -101,6 +126,23 @@ function buildConnection(
     ws.sent.length = 0;
   }
   return { ws, tmux: tmux as RecordingTmux, conn };
+}
+
+function createMemoryJournal() {
+  const events: Array<{ sequence: number; kind: string; payload: Record<string, unknown> }> = [];
+  return {
+    append: vi.fn(async (kind: string, payload: Record<string, unknown>) => {
+      const event = { sequence: events.length + 1, kind, payload };
+      events.push(event);
+      return event;
+    }),
+    read: () => [...events],
+    findByIdempotencyKey: (key: string) =>
+      [...events].reverse().find((event) => event.payload.idempotencyKey === key),
+    recoverNonterminalCommands: vi.fn(
+      async (): Promise<Array<{ sequence: number; kind: string; payload: Record<string, unknown> }>> => [],
+    ),
+  };
 }
 
 async function waitFor(predicate: () => boolean, label: string, timeoutMs = 5000): Promise<void> {
@@ -145,7 +187,7 @@ describe('daemon token comparison', () => {
 describe('daemon connection authentication', () => {
   it('refuses every request before hello and closes the socket', async () => {
     const root = await projectWithPanes([]);
-    const { ws } = buildConnection(root, { authed: false });
+    const { ws } = await buildConnection(root, { authed: false });
 
     await request(ws, { type: 'panes.list', requestId: 'r1' });
 
@@ -157,7 +199,7 @@ describe('daemon connection authentication', () => {
 
   it('rejects a wrong token', async () => {
     const root = await projectWithPanes([]);
-    const { ws } = buildConnection(root, { authed: false });
+    const { ws } = await buildConnection(root, { authed: false });
 
     await request(ws, { type: 'hello', token: 'b'.repeat(64) });
 
@@ -167,7 +209,7 @@ describe('daemon connection authentication', () => {
 
   it('welcomes a correct token', async () => {
     const root = await projectWithPanes([]);
-    const { ws } = buildConnection(root, { authed: false });
+    const { ws } = await buildConnection(root, { authed: false });
 
     await request(ws, { type: 'hello', token: TOKEN });
 
@@ -179,7 +221,7 @@ describe('daemon connection authentication', () => {
     vi.useFakeTimers();
     try {
       const root = await projectWithPanes([]);
-      const { ws } = buildConnection(root, { authed: false });
+      const { ws } = await buildConnection(root, { authed: false });
 
       vi.advanceTimersByTime(AUTH_DEADLINE_MS + 1);
 
@@ -194,7 +236,7 @@ describe('daemon connection authentication', () => {
     vi.useFakeTimers();
     try {
       const root = await projectWithPanes([]);
-      const { ws } = buildConnection(root, { authed: false });
+      const { ws } = await buildConnection(root, { authed: false });
 
       ws.deliver({ type: 'hello', token: TOKEN });
       await vi.advanceTimersByTimeAsync(AUTH_DEADLINE_MS + 1);
@@ -214,7 +256,7 @@ describe('daemon connection project scoping', () => {
 
   it('will not kill a pane this project does not own', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.kill', requestId: 'r1', id: FOREIGN_PANE });
 
@@ -224,7 +266,7 @@ describe('daemon connection project scoping', () => {
 
   it('will not attach to a pane this project does not own', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: FOREIGN_PANE });
 
@@ -234,7 +276,7 @@ describe('daemon connection project scoping', () => {
 
   it('will not focus a pane this project does not own', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.focus', requestId: 'r1', id: FOREIGN_PANE });
 
@@ -244,7 +286,7 @@ describe('daemon connection project scoping', () => {
 
   it('still serves panes the project registered, resolving psyche ids to tmux ids', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.focus', requestId: 'r1', id: 'psyche-1' });
 
@@ -255,7 +297,7 @@ describe('daemon connection project scoping', () => {
   it('refuses a config pane whose id is not a usable tmux target', async () => {
     // Config is a plain file on disk, and a pane id becomes tmux command text.
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: "%3'\nrun-shell 'id'" }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.kill', requestId: 'r1', id: 'psyche-1' });
 
@@ -280,7 +322,7 @@ describe('daemon workspace projection', () => {
       }],
     };
     const workspaceProvider = vi.fn(async () => workspace);
-    const { ws } = buildConnection(root, { workspaceProvider });
+    const { ws } = await buildConnection(root, { workspaceProvider });
 
     await request(ws, { type: 'workspace.snapshot', requestId: 'workspace-1' });
 
@@ -306,7 +348,7 @@ describe('daemon workspace projection', () => {
         attentionCount: 0,
       }],
     };
-    const { ws } = buildConnection(root, {
+    const { ws } = await buildConnection(root, {
       workspaceProvider: vi.fn(async () => workspace),
     });
 
@@ -335,7 +377,7 @@ describe('daemon lane creation', () => {
       branch: 'lane',
     }));
     const workspaceProvider = vi.fn(async () => ({ revision: 1, projects: [] }));
-    const { ws } = buildConnection(root, { spawnPane, workspaceProvider });
+    const { ws } = await buildConnection(root, { spawnPane, workspaceProvider });
 
     await request(ws, {
       type: 'panes.spawn', requestId: 'first', idempotencyKey: 'lane-1', cwd: root,
@@ -372,7 +414,7 @@ describe('daemon lane creation', () => {
         branch: launch.title ?? 'lane',
       };
     });
-    const { ws } = buildConnection(root, {
+    const { ws } = await buildConnection(root, {
       spawnPane,
       workspaceProvider: vi.fn(async () => ({ revision: 2, projects: [] })),
     });
@@ -403,7 +445,7 @@ describe('daemon lane creation', () => {
   it('rejects unbounded batches and unsafe idempotency keys before spawning', async () => {
     const root = await projectWithPanes([]);
     const spawnPane = vi.fn();
-    const { ws } = buildConnection(root, { spawnPane });
+    const { ws } = await buildConnection(root, { spawnPane });
 
     await request(ws, {
       type: 'panes.spawnMany', requestId: 'empty', idempotencyKey: 'batch', launches: [],
@@ -426,7 +468,7 @@ describe('daemon connection resilience', () => {
     // Regression: `panes.attach` with no `id` threw out of the async dispatch
     // chain. Nothing caught it, so one frame killed the daemon.
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws } = buildConnection(root);
+    const { ws } = await buildConnection(root);
 
     await request(ws, { type: 'panes.attach', requestId: 'r1' });
 
@@ -441,7 +483,7 @@ describe('daemon connection resilience', () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
     const tmux = new RecordingTmux('psyche-test');
     tmux.on = () => { throw new Error('emitter exploded'); };
-    const { ws } = buildConnection(root, { tmux });
+    const { ws } = await buildConnection(root, { tmux });
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
 
@@ -452,7 +494,7 @@ describe('daemon connection resilience', () => {
     // Regression: this was a try/catch, which never fired — Buffer.from with
     // 'base64' skips characters outside the alphabet instead of throwing.
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
     const streamId = ws.sent.find((m) => m.type === 'panes.attach.result').streamId;
@@ -479,7 +521,7 @@ describe('daemon connection resilience', () => {
 
   it('rejects invalid JSON without closing an authenticated connection', async () => {
     const root = await projectWithPanes([]);
-    const { ws } = buildConnection(root);
+    const { ws } = await buildConnection(root);
 
     ws.emit('message', Buffer.from('{not json', 'utf8'), false);
     await waitFor(() => ws.sent.length > 0, 'bad_json reply');
@@ -494,7 +536,7 @@ describe('daemon connection resilience', () => {
       paneId: `%${i}`,
     }));
     const root = await projectWithPanes(panes);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     for (const pane of panes) {
       await request(ws, { type: 'panes.attach', requestId: pane.id, id: pane.paneId });
@@ -513,7 +555,7 @@ describe('daemon connection resilience', () => {
       { id: 'psyche-1', paneId: '%3' },
       { id: 'psyche-2', paneId: '%4' },
     ]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     expect(tmux.listenerCount('output')).toBe(0);
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
@@ -526,7 +568,7 @@ describe('daemon connection resilience', () => {
 
   it('releases the listener once the last stream detaches', async () => {
     const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
     const streamId = ws.sent.find((m) => m.type === 'panes.attach.result').streamId;
@@ -541,7 +583,7 @@ describe('daemon connection resilience', () => {
       { id: 'psyche-1', paneId: '%3' },
       { id: 'psyche-2', paneId: '%4' },
     ]);
-    const { ws, tmux } = buildConnection(root);
+    const { ws, tmux } = await buildConnection(root);
 
     await request(ws, { type: 'panes.attach', requestId: 'r1', id: '%3' });
     await request(ws, { type: 'panes.attach', requestId: 'r2', id: '%4' });

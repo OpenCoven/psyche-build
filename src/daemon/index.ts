@@ -32,9 +32,12 @@ import {
   routeProjectCovenSessionCapability,
   readPaneStatus,
   resolveConfiguredPaneId,
-  spawnBridgePane,
   tmuxPaneExists,
 } from './bridge.js';
+import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
+import { createHostControlPlane } from '../control/host.js';
+import { createDaemonControlHandlers } from './controlHandlers.js';
+import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
   createCovenNativeCapabilityStrategy,
@@ -106,6 +109,17 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.error(`[tmux-control] ${msg.trim()}`);
   });
 
+  // The runtime is the single authority for pane mutations. Acquire the
+  // project owner fence before accepting any connection; a failed acquire must
+  // fail startup loudly rather than fall back to unfenced mutation.
+  const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const controlHandlers = createDaemonControlHandlers({
+    tmux,
+    projectRoot: canonicalProjectRoot,
+    sessionName,
+  });
+  const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
+
   const wss = new WebSocketServer({
     host: '127.0.0.1',
     port,
@@ -146,6 +160,8 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       authedViaHeader,
       tmux,
       capabilityRouter,
+      controlRuntime: host.runtime,
+      ownerEpoch: host.epoch,
     });
     conn.bind();
   });
@@ -155,7 +171,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.log(`\npsyche daemon shutting down (${signal})`);
     tmux.stop();
     wss.close();
-    process.exit(0);
+    void host.close().catch(() => undefined).finally(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -168,12 +184,18 @@ export interface ConnectionDeps {
   authedViaHeader: boolean;
   tmux: TmuxControl;
   capabilityRouter: AgenticCapabilityRouter;
+  /**
+   * The single authority for pane mutations.
+   *
+   * `Connection.dispatch` translates v0 protocol messages into canonical
+   * control commands and submits them here instead of driving tmux or the
+   * bridge spawn directly. The runtime revalidates leases and owner epoch and
+   * journals every transaction.
+   */
+  controlRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> };
+  /** Current owner epoch, stamped onto every translated command. */
+  ownerEpoch: number;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
-  spawnPane?: (
-    projectRoot: string,
-    sessionName: string,
-    request: BridgeSpawnRequest,
-  ) => Promise<BridgeSpawnResult>;
 }
 
 /**
@@ -201,6 +223,9 @@ export class Connection {
    * keeps the registration count at one and makes detach cleanup exact.
    */
   private outputHandler: ((paneId: string, data: Buffer) => void) | null = null;
+
+  /** Stable identity for every command this connection translates. */
+  private readonly actorId = randomUUID();
 
   constructor(
     private ws: WebSocket,
@@ -354,6 +379,47 @@ export class Connection {
    * psyche, but it is a plain JSON file on disk, and a pane id is about to
    * become tmux command text.
    */
+  /**
+   * Build a canonical control command from a translated v0 request.
+   *
+   * The connection never trusts client-supplied actor or epoch fields: it
+   * stamps its own connection actor, the current owner epoch, and the project
+   * root. The runtime revalidates leases and epoch before any effect runs.
+   */
+  private buildCommand<K extends ControlCommand['kind']>(
+    kind: K,
+    payload: Extract<ControlCommand, { kind: K }>['payload'],
+    opts: { actorKind: ControlActorKind; idempotencyKey: string },
+  ): ControlCommand {
+    return {
+      id: randomUUID(),
+      idempotencyKey: opts.idempotencyKey,
+      kind,
+      projectRoot: this.deps.projectRoot,
+      actor: { id: this.actorId, kind: opts.actorKind, clientId: this.actorId },
+      ownerEpoch: this.deps.ownerEpoch,
+      createdAt: new Date().toISOString(),
+      payload,
+    } as ControlCommand;
+  }
+
+  private submitControl(command: ControlCommand): Promise<CommandOutcome> {
+    return this.deps.controlRuntime.submit(command);
+  }
+
+  /** Send the v0 error frame for a non-successful control outcome. */
+  private sendControlError(
+    requestId: string | undefined,
+    fallbackCode: string,
+    outcome: CommandOutcome,
+  ): void {
+    const code = outcome.status !== 'succeeded' && outcome.code ? outcome.code : fallbackCode;
+    const message = outcome.status !== 'succeeded' && outcome.message
+      ? outcome.message
+      : 'control command failed';
+    this.send({ type: 'error', requestId, code, message });
+  }
+
   private async resolveScopedPaneId(paneId: unknown): Promise<string> {
     if (typeof paneId !== 'string' || !paneId) {
       throw bridgeErrorLike('missing_pane', 'pane id required');
@@ -545,11 +611,13 @@ export class Connection {
         }
 
         if (msg.cols && msg.rows) {
-          try {
-            this.deps.tmux.resizePane(paneId, msg.cols, msg.rows);
-          } catch {
+          await this.submitControl(this.buildCommand(
+            'pane.resize',
+            { paneId, cols: msg.cols, rows: msg.rows },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          )).catch(() => {
             // best-effort; resize errors shouldn't kill the attach
-          }
+          });
         }
 
         return;
@@ -583,11 +651,15 @@ export class Connection {
           });
           return;
         }
-        try {
-          this.deps.tmux.selectPane(paneId);
+        const outcome = await this.submitControl(this.buildCommand(
+          'pane.focus',
+          { paneId },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (outcome.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'focus_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'focus_failed', outcome);
         }
         return;
       }
@@ -597,20 +669,34 @@ export class Connection {
           this.send({ type: 'error', requestId: msg.requestId, code: 'no_stream', message: 'unknown streamId' });
           return;
         }
-        // `data` is base64 to preserve arbitrary bytes. This used to be a
-        // try/catch, which never fired: Buffer.from(..., 'base64') skips
-        // characters outside the alphabet instead of throwing, so a malformed
-        // payload was silently mangled and typed into the user's terminal.
         const bytes = decodeBase64Payload(msg.data);
         if (!bytes) {
           this.send({ type: 'error', requestId: msg.requestId, code: 'bad_base64', message: 'input must be base64' });
           return;
         }
-        try {
-          this.deps.tmux.sendKeysHex(stream.paneId, bytes);
+        // Interactive v0 input is a human takeover followed by human input.
+        // The takeover uses a stable per-stream idempotency key so repeated
+        // keystrokes reuse the same lease revision instead of re-preempting
+        // the pane; each input uses a fresh key so no keystroke is deduped.
+        const takeover = await this.submitControl(this.buildCommand(
+          'pane.takeover',
+          { paneId: stream.paneId },
+          { actorKind: 'human', idempotencyKey: `v0:takeover:${this.actorId}:${msg.streamId}` },
+        ));
+        if (takeover.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'send_keys_failed', takeover);
+          return;
+        }
+        const leaseRevision = readLeaseRevision(takeover);
+        const input = await this.submitControl(this.buildCommand(
+          'pane.input',
+          { paneId: stream.paneId, dataBase64: msg.data, leaseRevision },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (input.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'send_keys_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'send_keys_failed', input);
         }
         return;
       }
@@ -620,18 +706,30 @@ export class Connection {
           this.send({ type: 'error', requestId: msg.requestId, code: 'no_stream', message: 'unknown streamId' });
           return;
         }
-        try {
-          this.deps.tmux.resizePane(stream.paneId, msg.cols, msg.rows);
+        const outcome = await this.submitControl(this.buildCommand(
+          'pane.resize',
+          { paneId: stream.paneId, cols: msg.cols, rows: msg.rows },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (outcome.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'resize_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'resize_failed', outcome);
         }
         return;
       }
       case 'panes.kill': {
         try {
           const paneId = await this.resolveScopedPaneId(msg.id);
-          this.deps.tmux.killPane(paneId);
+          const outcome = await this.submitControl(this.buildCommand(
+            'pane.kill',
+            { paneId },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          ));
+          if (outcome.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'kill_failed', outcome);
+            return;
+          }
           for (const [sid, s] of this.activeStreams) {
             if (s.paneId !== paneId) continue;
             this.activeStreams.delete(sid);
@@ -729,13 +827,32 @@ export class Connection {
     }
   }
 
+  private submitSpawn(request: BridgeSpawnRequest): Promise<BridgeSpawnResult> {
+    return this.submitControl(this.buildCommand(
+      'pane.spawn',
+      {
+        cwd: request.cwd,
+        agent: request.agent,
+        title: request.title,
+        prompt: request.prompt,
+        branch: request.branch,
+        startPointBranch: request.startPointBranch,
+        existingWorktree: request.existingWorktree,
+        requestId: request.requestId,
+      },
+      { actorKind: 'compatibility', idempotencyKey: `v0:spawn:${randomUUID()}` },
+    )).then((outcome) => {
+      if (outcome.status === 'succeeded') return outcome.value as BridgeSpawnResult;
+      throw Object.assign(new Error(outcome.message), { code: outcome.code });
+    });
+  }
+
   private spawnPane(
     request: BridgeSpawnRequest,
     idempotencyKey?: string,
   ): Promise<{ result: BridgeSpawnResult; replayed: boolean }> {
-    const spawn = this.deps.spawnPane ?? spawnBridgePane;
     if (idempotencyKey === undefined) {
-      return spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request)
+      return this.submitSpawn(request)
         .then((result) => ({ result, replayed: false }));
     }
     if (!validIdempotencyKey(idempotencyKey)) {
@@ -765,7 +882,7 @@ export class Connection {
       return existing.result.then((result) => ({ result, replayed: true }));
     }
 
-    const result = spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request);
+    const result = this.submitSpawn(request);
     this.idempotentSpawns.set(idempotencyKey, { fingerprint, result });
     if (this.idempotentSpawns.size > MAX_IDEMPOTENT_SPAWNS) {
       const oldest = this.idempotentSpawns.keys().next().value;
@@ -777,6 +894,13 @@ export class Connection {
 
 function validIdempotencyKey(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+}
+
+/** Read the lease revision a successful takeover reports. */
+function readLeaseRevision(outcome: CommandOutcome): number {
+  if (outcome.status !== 'succeeded') return 0;
+  const value = outcome.value as { revision?: number; leaseRevision?: number } | undefined;
+  return value?.revision ?? value?.leaseRevision ?? 0;
 }
 
 function batchLaneIdempotencyKey(batchKey: string, index: number): string {

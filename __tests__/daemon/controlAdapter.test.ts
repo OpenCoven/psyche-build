@@ -1,0 +1,233 @@
+import { EventEmitter } from 'node:events';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Connection, type ConnectionDeps } from '../../src/daemon/index.js';
+import { TmuxControl } from '../../src/services/tmuxControl.js';
+import { AgenticCapabilityRouter } from '../../src/orchestration/capabilityRouter.js';
+import type { CommandOutcome, ControlCommand } from '../../src/control/types.js';
+
+/**
+ * The daemon is no longer allowed to mutate panes directly: every v0 pane
+ * mutation must be translated into a canonical control command submitted to the
+ * runtime. These tests pin the translation shape and the mechanical
+ * source-boundary that keeps the effect surface in one place.
+ */
+
+const TOKEN = 'a'.repeat(64);
+
+let tempRoots: string[] = [];
+
+async function projectWithPanes(panes: unknown[]): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), 'psyche-control-adapter-'));
+  tempRoots.push(root);
+  await mkdir(path.join(root, '.psyche'), { recursive: true });
+  await writeFile(
+    path.join(root, '.psyche', 'psyche.config.json'),
+    JSON.stringify({ panes }, null, 2),
+  );
+  return root;
+}
+
+afterEach(async () => {
+  await Promise.all(tempRoots.map((root) => rm(root, { recursive: true, force: true })));
+  tempRoots = [];
+});
+
+class FakeSocket extends EventEmitter {
+  readonly sent: any[] = [];
+  readonly binary: Buffer[] = [];
+  send(data: string | Buffer): void {
+    if (typeof data === 'string') this.sent.push(JSON.parse(data));
+    else this.binary.push(data);
+  }
+  close(): void {}
+  deliver(msg: unknown): void {
+    this.emit('message', Buffer.from(JSON.stringify(msg), 'utf8'), false);
+  }
+}
+
+/**
+ * A control runtime whose only job is to record the commands the daemon submits
+ * and hand back a caller-controlled outcome per command kind.
+ */
+function spyRuntime(
+  outcomeFor: (command: ControlCommand) => CommandOutcome = () => ({ status: 'succeeded' }),
+) {
+  const submitted: ControlCommand[] = [];
+  const submit = vi.fn(async (command: ControlCommand): Promise<CommandOutcome> => {
+    submitted.push(command);
+    return outcomeFor(command);
+  });
+  return { submitted, submit } satisfies {
+    submitted: ControlCommand[];
+    submit: ConnectionDeps['controlRuntime']['submit'];
+  };
+}
+
+function buildConnection(
+  projectRoot: string,
+  controlRuntime: ConnectionDeps['controlRuntime'],
+) {
+  const ws = new FakeSocket();
+  const tmux = new TmuxControl('psyche-test');
+  const deps: ConnectionDeps = {
+    token: TOKEN,
+    projectRoot,
+    serverVersion: 'test',
+    authedViaHeader: true,
+    tmux,
+    capabilityRouter: new AgenticCapabilityRouter({ strategies: [] }),
+    controlRuntime,
+    ownerEpoch: 1,
+  };
+  const conn = new Connection(ws as any, deps);
+  conn.bind();
+  ws.sent.length = 0; // drop the welcome frame
+  return { ws, conn };
+}
+
+async function request(ws: FakeSocket, msg: any, label = 'reply'): Promise<void> {
+  const before = ws.sent.length;
+  ws.deliver(msg);
+  const deadline = Date.now() + 5000;
+  while (ws.sent.length === before) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+async function attachStream(ws: FakeSocket, paneId: string): Promise<string> {
+  await request(ws, { type: 'panes.attach', requestId: `attach-${paneId}`, id: paneId });
+  const result = ws.sent.find((m) => m.type === 'panes.attach.result');
+  if (!result) throw new Error('no attach result');
+  return result.streamId as string;
+}
+
+describe('daemon control adapter translation', () => {
+  it('translates interactive input into a human takeover then input', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime((command) =>
+      command.kind === 'pane.takeover'
+        ? { status: 'succeeded', value: { actorId: 'human', revision: 7 } }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+
+    const streamId = await attachStream(ws, '%3');
+    runtime.submitted.length = 0;
+
+    await request(ws, {
+      type: 'panes.input',
+      requestId: 'in-1',
+      streamId,
+      data: Buffer.from('ls\r').toString('base64'),
+    });
+
+    expect(runtime.submitted.map((c) => c.kind)).toEqual(['pane.takeover', 'pane.input']);
+    const [takeover, input] = runtime.submitted;
+    expect(takeover.actor.kind).toBe('human');
+    expect(takeover.payload).toMatchObject({ paneId: '%3' });
+    expect(input.actor.kind).toBe('human');
+    expect(input.payload).toMatchObject({
+      paneId: '%3',
+      dataBase64: Buffer.from('ls\r').toString('base64'),
+      leaseRevision: 7,
+    });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', ok: true });
+  });
+
+  it('reuses a stable takeover idempotency key across repeated keystrokes', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime((command) =>
+      command.kind === 'pane.takeover'
+        ? { status: 'succeeded', value: { actorId: 'human', revision: 1 } }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+    const streamId = await attachStream(ws, '%3');
+    runtime.submitted.length = 0;
+
+    await request(ws, {
+      type: 'panes.input', requestId: 'a', streamId,
+      data: Buffer.from('a').toString('base64'),
+    });
+    await request(ws, {
+      type: 'panes.input', requestId: 'b', streamId,
+      data: Buffer.from('b').toString('base64'),
+    });
+
+    const takeovers = runtime.submitted.filter((c) => c.kind === 'pane.takeover');
+    const inputs = runtime.submitted.filter((c) => c.kind === 'pane.input');
+    expect(takeovers).toHaveLength(2);
+    expect(takeovers[0].idempotencyKey).toBe(takeovers[1].idempotencyKey);
+    // Each keystroke must carry a distinct key so none is deduped.
+    expect(inputs[0].idempotencyKey).not.toBe(inputs[1].idempotencyKey);
+  });
+
+  it('translates resize into a canonical pane.resize', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime();
+    const { ws } = buildConnection(root, runtime);
+    const streamId = await attachStream(ws, '%3');
+    runtime.submitted.length = 0;
+
+    await request(ws, { type: 'panes.resize', requestId: 'rz', streamId, cols: 120, rows: 40 });
+
+    expect(runtime.submitted).toHaveLength(1);
+    expect(runtime.submitted[0].kind).toBe('pane.resize');
+    expect(runtime.submitted[0].payload).toMatchObject({ paneId: '%3', cols: 120, rows: 40 });
+  });
+
+  it('translates kill into a canonical pane.kill', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime();
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, { type: 'panes.kill', requestId: 'k', id: '%3' });
+
+    const kills = runtime.submitted.filter((c) => c.kind === 'pane.kill');
+    expect(kills).toHaveLength(1);
+    expect(kills[0].payload).toMatchObject({ paneId: '%3' });
+  });
+
+  it('translates spawn into a compatibility pane.spawn carrying the v0 request', async () => {
+    const root = await projectWithPanes([]);
+    const runtime = spyRuntime((command) =>
+      command.kind === 'pane.spawn'
+        ? {
+            status: 'succeeded',
+            value: {
+              id: '%9',
+              pane: { id: '%9', cwd: root, title: 'lane' },
+              worktreePath: `${root}/.psyche/worktrees/lane`,
+              branch: 'lane',
+            },
+          }
+        : { status: 'succeeded' },
+    );
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, {
+      type: 'panes.spawn', requestId: 'sp', idempotencyKey: 'lane-1', cwd: root, title: 'lane',
+    });
+
+    const spawns = runtime.submitted.filter((c) => c.kind === 'pane.spawn');
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].actor.kind).toBe('compatibility');
+    expect(spawns[0].payload).toMatchObject({ cwd: root, title: 'lane' });
+    expect(ws.sent[0]).toMatchObject({ type: 'panes.spawn.result', requestId: 'sp', id: '%9' });
+  });
+});
+
+describe('daemon pane-mutation source boundary', () => {
+  it('never reaches the forbidden pane-mutation effects directly', async () => {
+    const indexPath = fileURLToPath(new URL('../../src/daemon/index.ts', import.meta.url));
+    const source = await readFile(indexPath, 'utf8');
+    const forbidden =
+      /this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(/;
+    expect(source).not.toMatch(forbidden);
+  });
+});
