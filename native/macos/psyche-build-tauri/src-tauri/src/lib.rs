@@ -22,6 +22,7 @@ use tauri::{
 mod coven_sessions;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
+use coven_sessions::is_safe_session_id;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -336,6 +337,57 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
+fn validate_coven_launch_with(
+    options: &StartOptions,
+    resolved_coven: Option<&str>,
+) -> Result<(), String> {
+    let Some(launch_kind) = options.launch_kind.as_deref() else {
+        return Ok(());
+    };
+    if !matches!(launch_kind, "coven-chat" | "coven-attach") {
+        return Err(format!("unsupported launch kind: {launch_kind}"));
+    }
+
+    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
+    if options.command.as_deref() != Some(resolved_coven) {
+        return Err("Coven launch command does not match the resolved executable".to_string());
+    }
+
+    match launch_kind {
+        "coven-chat" => {
+            if options.coven_session_id.is_some() {
+                return Err("coven-chat does not accept a session id".to_string());
+            }
+            match options.args.as_deref() {
+                Some([verb]) if verb == "chat" => Ok(()),
+                _ => Err("coven-chat requires exactly one 'chat' argument".to_string()),
+            }
+        }
+        "coven-attach" => {
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-attach requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-attach session id is unsafe".to_string());
+            }
+            match options.args.as_deref() {
+                Some([verb, argument]) if verb == "attach" && argument == session_id => Ok(()),
+                _ => Err(
+                    "coven-attach requires exactly 'attach' and the validated session id"
+                        .to_string(),
+                ),
+            }
+        }
+        _ => unreachable!("launch kind was checked above"),
+    }
+}
+
+fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
+    let resolved_coven = which_on_path("coven");
+    validate_coven_launch_with(options, resolved_coven.as_deref())
+}
+
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
@@ -364,6 +416,7 @@ pub struct BrowserPageLoadEvent {
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
     let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
+    validate_coven_launch(&options)?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -713,6 +766,7 @@ pub struct AppEnvironment {
     pub repo_root: Option<String>,
     pub psyche_entry: Option<String>,
     pub node_path: Option<String>,
+    pub coven_path: Option<String>,
     pub default_shell: String,
     pub native_workspace_v2: bool,
 }
@@ -741,6 +795,7 @@ fn app_environment() -> AppEnvironment {
     // launching `node` from there should work even if PATH munging in spawn
     // misses common Homebrew paths.
     let node_path = which_on_path("node");
+    let coven_path = which_on_path("coven");
 
     // Heuristic: if the binary is being run from a built .app inside a
     // worktree, the worktree root is a couple of levels up from the .app.
@@ -759,6 +814,7 @@ fn app_environment() -> AppEnvironment {
         repo_root,
         psyche_entry,
         node_path,
+        coven_path,
         default_shell,
         native_workspace_v2,
     }
@@ -1128,11 +1184,43 @@ fn parse_nvm_node_version(name: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn executable_in_dir(binary: &str, dir: &Path) -> Option<String> {
+    let candidate = dir.join(binary);
+    if is_executable_file(&candidate) {
+        return candidate
+            .canonicalize()
+            .ok()
+            .map(|canonical| canonical.to_string_lossy().to_string());
+    }
+    None
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn which_on_path_with(binary: &str, path: &std::ffi::OsStr) -> Option<String> {
+    std::env::split_paths(path).find_map(|dir| executable_in_dir(binary, &dir))
+}
+
 fn which_on_path(binary: &str) -> Option<String> {
     for dir in std::env::split_paths(augmented_path()) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().to_string());
+        if let Some(executable) = executable_in_dir(binary, &dir) {
+            return Some(executable);
         }
     }
     None
@@ -2100,6 +2188,8 @@ pub fn run() {
 #[cfg(test)]
 mod workspace_panel_tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempTree {
@@ -2131,6 +2221,152 @@ mod workspace_panel_tests {
 
     fn path_text(path: &Path) -> &str {
         path.to_str().expect("test paths must be UTF-8")
+    }
+
+    #[cfg(unix)]
+    fn write_test_executable(path: &Path, mode: u32) {
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_the_first_executable_on_path_to_its_canonical_path() {
+        let tree = TempTree::new("coven-path-order");
+        let first = tree.root.join("first");
+        let second = tree.root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        write_test_executable(&first.join("real-coven"), 0o700);
+        symlink(first.join("real-coven"), first.join("coven")).unwrap();
+        write_test_executable(&second.join("coven"), 0o700);
+        let path = std::env::join_paths([&first, &second]).unwrap();
+
+        assert_eq!(
+            which_on_path_with("coven", &path),
+            Some(path_text(&first.join("real-coven").canonicalize().unwrap()).to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_resolution_skips_non_executables_and_rejects_directories() {
+        let tree = TempTree::new("coven-path-executable");
+        let non_executable = tree.root.join("non-executable");
+        let directory = tree.root.join("directory");
+        let executable = tree.root.join("executable");
+        for dir in [&non_executable, &directory, &executable] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        write_test_executable(&non_executable.join("coven"), 0o600);
+        std::fs::create_dir_all(directory.join("coven")).unwrap();
+        write_test_executable(&executable.join("coven"), 0o010);
+        let path = std::env::join_paths([&non_executable, &directory, &executable]).unwrap();
+
+        assert_eq!(
+            which_on_path_with("coven", &path),
+            Some(path_text(&executable.join("coven").canonicalize().unwrap()).to_string())
+        );
+        assert!(!is_executable_file(&non_executable.join("coven")));
+        assert!(!is_executable_file(&directory.join("coven")));
+    }
+
+    fn launch_options(
+        launch_kind: Option<&str>,
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+    ) -> StartOptions {
+        StartOptions {
+            thread_id: "launch-validation".to_string(),
+            project_root: Some("/project".to_string()),
+            cwd: None,
+            launch_kind: launch_kind.map(str::to_string),
+            coven_session_id: session_id.map(str::to_string),
+            command: command.map(str::to_string),
+            args: args.map(|values| values.iter().map(|value| (*value).to_string()).collect()),
+            cols: None,
+            rows: None,
+            env: None,
+        }
+    }
+
+    #[test]
+    fn accepts_exact_native_coven_chat_and_attach_launches() {
+        let coven = "/canonical/bin/coven";
+        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let attach = launch_options(
+            Some("coven-attach"),
+            Some("release:fix_01.a-b"),
+            Some(coven),
+            Some(&["attach", "release:fix_01.a-b"]),
+        );
+
+        assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
+        assert_eq!(validate_coven_launch_with(&attach, Some(coven)), Ok(()));
+    }
+
+    #[test]
+    fn preserves_legacy_launches_without_a_launch_kind() {
+        let legacy = launch_options(None, Some("ignored"), Some("/bin/zsh"), Some(&["-l"]));
+        assert_eq!(validate_coven_launch_with(&legacy, None), Ok(()));
+    }
+
+    #[test]
+    fn rejects_malformed_or_unresolved_native_coven_launches() {
+        let coven = "/canonical/bin/coven";
+        let invalid = [
+            launch_options(Some("coven-chat"), None, Some(coven), None),
+            launch_options(
+                Some("coven-chat"),
+                None,
+                Some(coven),
+                Some(&["chat", "extra"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("unexpected"),
+                Some(coven),
+                Some(&["chat"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                None,
+                Some("/wrong/coven"),
+                Some(&["chat"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                None,
+                Some(coven),
+                Some(&["attach", "safe"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("../unsafe"),
+                Some(coven),
+                Some(&["attach", "../unsafe"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach", "other"]),
+            ),
+            launch_options(Some("unknown"), None, Some(coven), Some(&["chat"])),
+        ];
+
+        for options in invalid {
+            assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
+        }
+        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        assert!(validate_coven_launch_with(&chat, None).is_err());
     }
 
     #[test]

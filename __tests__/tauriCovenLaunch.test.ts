@@ -43,12 +43,22 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toMatch(/pub cwd:\s*Option<String>/);
     expect(libRs).toMatch(/pub launch_kind:\s*Option<String>/);
     expect(libRs).toMatch(/pub coven_session_id:\s*Option<String>/);
+    expect(libRs).toMatch(/pub coven_path:\s*Option<String>/);
+    expect(libRs).toMatch(/fn validate_coven_launch_with\s*\(/);
+    expect(libRs).toMatch(/fn validate_coven_launch\s*\(/);
 
     const ptyStart = libRs.slice(
       libRs.indexOf('fn pty_start'),
       libRs.indexOf('#[tauri::command]', libRs.indexOf('fn pty_start') + 1),
     );
     expect(ptyStart).toContain('prepare_pty_start(&options)');
+    expect(ptyStart).toContain('validate_coven_launch(&options)');
+    expect(ptyStart.indexOf('prepare_pty_start(&options)')).toBeLessThan(
+      ptyStart.indexOf('validate_coven_launch(&options)'),
+    );
+    expect(ptyStart.indexOf('validate_coven_launch(&options)')).toBeLessThan(
+      ptyStart.indexOf('.openpty('),
+    );
     expect(ptyStart).toContain('resolved_cwd.configure_command_cwd(&mut cmd)');
     const prepareStart = libRs.slice(
       libRs.indexOf('fn prepare_pty_start'),
