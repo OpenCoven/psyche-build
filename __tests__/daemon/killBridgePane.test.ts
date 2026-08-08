@@ -299,10 +299,13 @@ describe('killBridgePane', () => {
 
   it('fetches fresh exact resource fields and tears down background panes before windows', async () => {
     writeConfig([pane({
+      tmuxServerIdentity: currentServerGeneration,
       testPaneId: '%old-test',
       testWindowId: '@old-test',
+      testTmuxServerIdentity: currentServerGeneration,
       devPaneId: '%old-dev',
       devWindowId: '@old-dev',
+      devTmuxServerIdentity: currentServerGeneration,
     })]);
     const order: string[] = [];
     const livePanes = new Set(['%3', '%fresh-test', '%fresh-dev']);
@@ -326,10 +329,13 @@ describe('killBridgePane', () => {
       getTmuxServerIdentity: () => currentServerGeneration,
       afterInitialProbe: () => {
         writeConfig([pane({
+          tmuxServerIdentity: currentServerGeneration,
           testPaneId: '%fresh-test',
           testWindowId: '@fresh-test',
+          testTmuxServerIdentity: currentServerGeneration,
           devPaneId: '%fresh-dev',
           devWindowId: '@fresh-dev',
+          devTmuxServerIdentity: currentServerGeneration,
         })]);
       },
     };

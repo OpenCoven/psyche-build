@@ -195,4 +195,46 @@ describe('pane restoration', () => {
     expect(pane).not.toHaveProperty('devWindowId');
     expect(pane).not.toHaveProperty('backgroundWindowRecoveries');
   });
+
+  it('does not kill a reused pane ID after tmux restarts during restoration rollback', async () => {
+    const cancel = vi.fn(async () => {});
+    beginWorktreeReuseReservationMock.mockResolvedValueOnce({
+      canonicalWorktreePath: '/repo/.psyche/worktrees/feature-codex',
+      complete: vi.fn(async () => {}),
+      cancel,
+    });
+    replaceProjectPaneConfigPaneIdentityMock.mockRejectedValue(
+      new Error('config disk unavailable'),
+    );
+    const allocationGeneration = {
+      pid: 4242,
+      processStartIdentity: 'allocation-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const restartedGeneration = {
+      pid: 5252,
+      processStartIdentity: 'replacement-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$2',
+    };
+    tmuxServiceMock.getServerIdentity
+      .mockReset()
+      .mockReturnValueOnce(allocationGeneration)
+      .mockReturnValue(restartedGeneration);
+
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+    await recreateMissingPanes([{
+      id: 'psyche-1',
+      slug: 'feature-codex',
+      prompt: 'fix the failing tests',
+      paneId: '%2',
+      worktreePath: '/repo/.psyche/worktrees/feature-codex',
+      projectRoot: '/repo',
+      agent: 'codex',
+    }], '/repo/.psyche/psyche.config.json');
+
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
 });

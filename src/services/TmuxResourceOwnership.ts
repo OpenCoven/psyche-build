@@ -4,6 +4,7 @@ import {
   sameTmuxServerIdentity,
   type TmuxServerIdentity,
 } from './TmuxServerIdentity.js';
+import type { FullPaneTeardownTarget } from '../utils/paneTeardown.js';
 
 export type TmuxResourceKind = 'pane' | 'window';
 
@@ -20,6 +21,11 @@ export type TmuxTeardownOwnership =
   | 'stale-generation'
   | 'unverified-generation'
   | 'ambiguous';
+
+export interface TmuxTeardownAssessment {
+  ownership: TmuxTeardownOwnership;
+  target: FullPaneTeardownTarget;
+}
 
 type PaneRecord = Pick<PsychePane, 'id'> & Record<string, unknown>;
 
@@ -42,28 +48,28 @@ export function tmuxResourcesForPane(pane: PaneRecord): TmuxResource[] {
     resources,
     'pane',
     pane.testPaneId,
-    tmuxGeneration(pane.testTmuxServerIdentity) ?? primaryGeneration,
+    tmuxGeneration(pane.testTmuxServerIdentity),
     'testPaneId',
   );
   addResource(
     resources,
     'window',
     pane.testWindowId,
-    tmuxGeneration(pane.testTmuxServerIdentity) ?? primaryGeneration,
+    tmuxGeneration(pane.testTmuxServerIdentity),
     'testWindowId',
   );
   addResource(
     resources,
     'pane',
     pane.devPaneId,
-    tmuxGeneration(pane.devTmuxServerIdentity) ?? primaryGeneration,
+    tmuxGeneration(pane.devTmuxServerIdentity),
     'devPaneId',
   );
   addResource(
     resources,
     'window',
     pane.devWindowId,
-    tmuxGeneration(pane.devTmuxServerIdentity) ?? primaryGeneration,
+    tmuxGeneration(pane.devTmuxServerIdentity),
     'devWindowId',
   );
 
@@ -73,7 +79,7 @@ export function tmuxResourcesForPane(pane: PaneRecord): TmuxResource[] {
         continue;
       }
       const record = recovery as Record<string, unknown>;
-      const generation = tmuxGeneration(record.tmuxServerIdentity) ?? primaryGeneration;
+      const generation = tmuxGeneration(record.tmuxServerIdentity);
       addResource(
         resources,
         'window',
@@ -175,7 +181,7 @@ export function assessTmuxTeardownOwnership(
   pane: PaneRecord,
   allPanes: readonly PaneRecord[],
   currentGeneration: TmuxServerIdentity | undefined,
-): TmuxTeardownOwnership {
+): TmuxTeardownAssessment {
   const resources = tmuxResourcesForPane(pane);
   const generations = resources.map((resource) => resource.generation);
   // Any resource without a generation is a legacy identity. A record with a
@@ -183,24 +189,27 @@ export function assessTmuxTeardownOwnership(
   // unversioned primary/background ID could have been reused by another
   // server. Callers may remove it only after a non-destructive absence probe.
   if (generations.some((generation) => !generation)) {
-    return 'legacy';
+    return {
+      ownership: 'legacy',
+      target: fullPaneTarget(pane),
+    };
   }
   if (!currentGeneration) {
-    return 'unverified-generation';
-  }
-  if (
-    generations.some((generation) => (
-      !generation || !sameTmuxServerIdentity(generation, currentGeneration)
-    ))
-  ) {
-    return 'stale-generation';
+    return {
+      ownership: 'unverified-generation',
+      target: {},
+    };
   }
 
+  const currentResources = resources.filter((resource) => (
+    resource.generation
+    && sameTmuxServerIdentity(resource.generation, currentGeneration)
+  ));
   for (const candidate of allPanes) {
     if (!candidate || candidate === pane || candidate.id === pane.id) {
       continue;
     }
-    for (const owned of resources) {
+    for (const owned of currentResources) {
       for (const competing of tmuxResourcesForPane(candidate)) {
         if (owned.kind !== competing.kind || owned.id !== competing.id) {
           continue;
@@ -209,12 +218,69 @@ export function assessTmuxTeardownOwnership(
           !competing.generation
           || sameTmuxServerIdentity(competing.generation, currentGeneration)
         ) {
-          return 'ambiguous';
+          return {
+            ownership: 'ambiguous',
+            target: {},
+          };
         }
       }
     }
   }
-  return 'verified';
+  if (currentResources.length === 0) {
+    return {
+      ownership: 'stale-generation',
+      target: {},
+    };
+  }
+  return {
+    ownership: 'verified',
+    target: teardownTargetForResources(currentResources),
+  };
+}
+
+function fullPaneTarget(pane: PaneRecord): FullPaneTeardownTarget {
+  const target: FullPaneTeardownTarget = {};
+  for (const resource of tmuxResourcesForPane(pane)) {
+    addResourceToTarget(target, resource);
+  }
+  return target;
+}
+
+function teardownTargetForResources(
+  resources: readonly TmuxResource[],
+): FullPaneTeardownTarget {
+  const target: FullPaneTeardownTarget = {};
+  for (const resource of resources) {
+    addResourceToTarget(target, resource);
+  }
+  return target;
+}
+
+function addResourceToTarget(
+  target: FullPaneTeardownTarget,
+  resource: TmuxResource,
+): void {
+  if (
+    resource.field === 'paneId'
+    || resource.field === 'testPaneId'
+    || resource.field === 'testWindowId'
+    || resource.field === 'devPaneId'
+    || resource.field === 'devWindowId'
+  ) {
+    target[resource.field] = resource.id;
+    return;
+  }
+  if (resource.kind === 'pane') {
+    target.additionalPaneIds = [
+      ...(target.additionalPaneIds || []),
+      resource.id,
+    ];
+  } else {
+    target.additionalWindowIds = [
+      ...(target.additionalWindowIds || []),
+      resource.id,
+    ];
+  }
 }
 
 function addResource(

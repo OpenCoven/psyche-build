@@ -5,6 +5,10 @@ import { splitPane } from '../utils/tmux.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
+import {
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
 import { TMUX_COMMAND_TIMEOUT, TMUX_RETRY_DELAY } from '../constants/timing.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
@@ -318,7 +322,11 @@ async function restoreMissingPaneWithLease(
         paneId: newPaneId,
         worktreePath,
       };
-      const teardown = await tearDownRestoredPane(tmuxService, newPaneId);
+      const teardown = await tearDownRestoredPane(
+        tmuxService,
+        newPaneId,
+        tmuxServerIdentity,
+      );
       if (teardown.presence === 'absent') {
         throw new Error(
           `Could not capture tmux server generation for restored pane ${missingPane.id}`,
@@ -374,7 +382,11 @@ async function restoreMissingPaneWithLease(
       Object.assign(missingPane, replacement.result as PsychePane);
     } catch (error) {
       const persistenceError = error instanceof Error ? error.message : String(error);
-      const teardown = await tearDownRestoredPane(tmuxService, newPaneId);
+      const teardown = await tearDownRestoredPane(
+        tmuxService,
+        newPaneId,
+        tmuxServerIdentity,
+      );
       if (teardown.presence === 'absent') {
         throw new Error(
           `Failed to persist restored pane ${missingPane.id}: ${persistenceError}`,
@@ -419,10 +431,51 @@ async function restoreMissingPaneWithLease(
 async function tearDownRestoredPane(
   tmuxService: TmuxService,
   paneId: string,
+  allocationIdentity: TmuxServerIdentity | undefined,
 ) {
+  if (!allocationIdentity) {
+    return {
+      presence: 'unknown' as const,
+      error: 'restored pane allocation has no tmux server generation',
+    };
+  }
+
+  const currentIdentity = tmuxService.getServerIdentity?.();
+  if (!currentIdentity) {
+    return {
+      presence: 'unknown' as const,
+      error: 'current tmux server generation could not be verified',
+    };
+  }
+  if (!sameTmuxServerIdentity(allocationIdentity, currentIdentity)) {
+    // The resource was allocated by a previous server. A reused pane ID in
+    // the replacement server must not receive a kill command.
+    return { presence: 'absent' as const };
+  }
+
   return tearDownPaneWithVerification({
-    probe: () => probeRestoredPanePresence(tmuxService, paneId),
-    kill: () => tmuxService.killPane(paneId),
+    probe: async () => {
+      const identity = tmuxService.getServerIdentity?.();
+      if (!identity) {
+        return 'unknown';
+      }
+      if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+        return 'absent';
+      }
+      return probeRestoredPanePresence(tmuxService, paneId);
+    },
+    kill: async () => {
+      // Revalidate immediately before the destructive command. The initial
+      // probe may have raced a tmux restart that reused this pane ID.
+      const identity = tmuxService.getServerIdentity?.();
+      if (!identity) {
+        throw new Error('current tmux server generation could not be verified');
+      }
+      if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+        return;
+      }
+      await tmuxService.killPane(paneId);
+    },
   });
 }
 

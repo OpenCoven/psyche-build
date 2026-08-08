@@ -20,6 +20,7 @@ const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LEASE_FILE_NAME = 'lease.json';
 const CHILD_LEASE_FILE_PREFIX = 'child.';
+const RELEASE_REQUESTED_MARKER_FILE_PREFIX = 'release-requested.';
 
 export interface WorktreeOperationLeaseRecord {
   pid: number;
@@ -36,9 +37,10 @@ export interface WorktreeOperationLeaseRecord {
   operation: string;
   acquiredAt: string;
   /**
-   * The owner called release while a tracked destructive mutation was still
-   * live. Once every tracked mutation identity is gone, the original owner
-   * must no longer keep this exact lease from being reclaimed.
+   * Legacy serialized form of the deferred-release state. New leases keep
+   * this state in the nonce-bound release-requested marker; readLeaseRecord
+   * projects that marker here so stale-owner logic remains compatible with
+   * old lease.json files.
    */
   releaseRequested?: boolean;
   /**
@@ -47,6 +49,50 @@ export interface WorktreeOperationLeaseRecord {
    * window, and a claimed supervisor remains independently verifiable.
    */
   pendingMutation?: PendingGitMutation;
+}
+
+function releaseRequestedMarkerPath(lockDir: string, nonce: string): string {
+  return path.join(lockDir, `${RELEASE_REQUESTED_MARKER_FILE_PREFIX}${nonce}`);
+}
+
+/**
+ * Deferred release is a one-way state transition. It intentionally does not
+ * share lease.json's read/replace path with pending-child cleanup, so a child
+ * completion cannot erase the owner's release request.
+ */
+async function markReleaseRequested(
+  lockDir: string,
+  nonce: string,
+): Promise<void> {
+  const markerPath = releaseRequestedMarkerPath(lockDir, nonce);
+  let handle;
+  try {
+    handle = await open(markerPath, 'wx');
+    await handle.sync();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw error;
+    }
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function hasReleaseRequestedMarker(
+  lockDir: string,
+  nonce: string,
+): Promise<boolean> {
+  try {
+    await readFile(releaseRequestedMarkerPath(lockDir, nonce), 'utf8');
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    // A marker that cannot be verified must not authorize taking a lease from
+    // a still-live owner. The next contender will retry after the I/O fault.
+    return false;
+  }
 }
 
 export interface LeaseChildProcess {
@@ -610,6 +656,10 @@ async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
     if (!isLeaseRecord(parsed)) {
       return { record: undefined, missing: false };
     }
+    const releaseRequested = await hasReleaseRequestedMarker(
+      lockDir,
+      parsed.nonce,
+    );
     const child = await readChildLeaseRecord(lockDir, parsed.nonce);
     if (child.invalid) {
       // A child file that cannot be verified is intentionally a live/unknown
@@ -620,10 +670,14 @@ async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
       record: child.child
         ? {
           ...parsed,
+          ...(releaseRequested ? { releaseRequested: true } : {}),
           childPid: child.child.pid,
           childProcessStartIdentity: child.child.processStartIdentity,
         }
-        : parsed,
+        : {
+          ...parsed,
+          ...(releaseRequested ? { releaseRequested: true } : {}),
+        },
       missing: false,
     };
   } catch (error) {
@@ -665,6 +719,7 @@ async function updateOwnedLeaseRecord(
   lockDir: string,
   nonce: string,
   mutation: (record: WorktreeOperationLeaseRecord) => WorktreeOperationLeaseRecord,
+  beforeReplace?: () => Promise<void> | void,
 ): Promise<void> {
   const current = await readRawLeaseRecord(lockDir);
   if (!current.record || current.record.nonce !== nonce) {
@@ -682,6 +737,7 @@ async function updateOwnedLeaseRecord(
     `${LEASE_FILE_NAME}.${nonce}.${randomUUID()}.update`,
   );
   try {
+    await beforeReplace?.();
     await writeLeaseRecord(temporaryPath, next);
     await rename(temporaryPath, recordPath);
   } finally {
@@ -822,6 +878,7 @@ function createLeaseProcessTracker(
         return;
       }
       await rm(childLeaseRecordPath(lockDir, nonce), { force: true });
+      await releaseDeferredLeaseIfIdle(lockDir, nonce);
     },
     preparePendingGitMutation: async (
       request: PendingGitMutationRequest,
@@ -995,6 +1052,7 @@ export async function clearPendingGitMutationChildLease(
     return;
   }
   await rm(childLeaseRecordPath(lease.lockDir, lease.leaseNonce), { force: true });
+  await releaseDeferredLeaseIfIdle(lease.lockDir, lease.leaseNonce);
 }
 
 export interface RetainPendingGitMutationLeaseRequest {
@@ -1048,6 +1106,11 @@ export async function retainPendingGitMutationLease(
 export interface ClearPendingGitMutationLeaseRequest {
   mutationNonce: string;
   supervisor?: LeaseChildProcess;
+  /**
+   * Allows callers coordinating a record update to wait after the old record
+   * was read but before its replacement is committed.
+   */
+  beforeReplace?: () => Promise<void> | void;
 }
 
 /**
@@ -1064,28 +1127,33 @@ export async function clearPendingGitMutationLease(
   }
 
   try {
-    await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
-      const pending = record.pendingMutation;
-      if (!pending || pending.nonce !== request.mutationNonce) {
-        return record;
-      }
-      if (!request.supervisor && pending.supervisorPid !== undefined) {
-        return record;
-      }
-      if (
-        request.supervisor
-        && (
-          pending.supervisorPid !== request.supervisor.pid
-          || pending.supervisorProcessStartIdentity
-            !== request.supervisor.processStartIdentity
-        )
-      ) {
-        return record;
-      }
-      const next = { ...record };
-      delete next.pendingMutation;
-      return next;
-    });
+    await updateOwnedLeaseRecord(
+      lease.lockDir,
+      lease.leaseNonce,
+      (record) => {
+        const pending = record.pendingMutation;
+        if (!pending || pending.nonce !== request.mutationNonce) {
+          return record;
+        }
+        if (!request.supervisor && pending.supervisorPid !== undefined) {
+          return record;
+        }
+        if (
+          request.supervisor
+          && (
+            pending.supervisorPid !== request.supervisor.pid
+            || pending.supervisorProcessStartIdentity
+              !== request.supervisor.processStartIdentity
+          )
+        ) {
+          return record;
+        }
+        const next = { ...record };
+        delete next.pendingMutation;
+        return next;
+      },
+      request.beforeReplace,
+    );
   } catch (error) {
     if (!isLeaseOwnershipGoneError(error)) {
       throw error;
@@ -1093,6 +1161,7 @@ export async function clearPendingGitMutationLease(
     return;
   }
 
+  await releaseDeferredLeaseIfIdle(lease.lockDir, lease.leaseNonce);
 }
 
 /**
@@ -1156,15 +1225,13 @@ async function releaseOwnedLease(
     // A caller may reach its finally block after an IPC failure while the
     // detached Git group still runs. Do not turn a normal release attempt
     // into authorization to steal that mutation's lease.
-    // The companion child record outlives this caller. Persisting the request
-    // changes stale recovery from "wait for the application owner" to "wait
-    // only for the tracked mutation identities", so one release call is
-    // sufficient when that child exits later.
+    // The companion child record outlives this caller. This separate,
+    // nonce-bound marker changes stale recovery from "wait for the application
+    // owner" to "wait only for the tracked mutation identities". It is never
+    // cleared by a lease-record update, so one release call is sufficient when
+    // a pending child exits later.
     try {
-      await updateOwnedLeaseRecord(lockDir, nonce, (record) => ({
-        ...record,
-        releaseRequested: true,
-      }));
+      await markReleaseRequested(lockDir, nonce);
     } catch (error) {
       if (!isLeaseOwnershipGoneError(error)) {
         throw error;
@@ -1173,6 +1240,30 @@ async function releaseOwnedLease(
     return;
   }
 
+  await finalizeOwnedLeaseRelease(lockDir, nonce);
+}
+
+async function releaseDeferredLeaseIfIdle(
+  lockDir: string,
+  nonce: string,
+): Promise<void> {
+  const current = await readLeaseRecord(lockDir);
+  if (
+    !current.record
+    || current.record.nonce !== nonce
+    || !current.record.releaseRequested
+    || current.record.pendingMutation
+    || current.record.childPid
+  ) {
+    return;
+  }
+  await finalizeOwnedLeaseRelease(lockDir, nonce);
+}
+
+async function finalizeOwnedLeaseRelease(
+  lockDir: string,
+  nonce: string,
+): Promise<void> {
   const releasedDir = `${lockDir}.released.${nonce}`;
   try {
     await rename(lockDir, releasedDir);

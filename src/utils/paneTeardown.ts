@@ -19,11 +19,13 @@ export interface VerifiedPaneTeardownOptions {
 }
 
 export interface FullPaneTeardownTarget {
-  paneId: string;
+  paneId?: string;
   testWindowId?: string;
   testPaneId?: string;
   devWindowId?: string;
   devPaneId?: string;
+  additionalPaneIds?: readonly string[];
+  additionalWindowIds?: readonly string[];
 }
 
 export interface FullPaneTeardownOptions {
@@ -95,7 +97,11 @@ export async function tearDownFullPaneWithVerification(
 ): Promise<FullPaneTeardownResult> {
   const backgroundPanes = new Map<string, VerifiedPaneTeardownResult>();
   const backgroundPaneIds = Array.from(new Set(
-    [options.target.testPaneId, options.target.devPaneId].filter(
+    [
+      options.target.testPaneId,
+      options.target.devPaneId,
+      ...(options.target.additionalPaneIds || []),
+    ].filter(
       (paneId): paneId is string => Boolean(paneId) && paneId !== options.target.paneId,
     ),
   ));
@@ -126,7 +132,11 @@ export async function tearDownFullPaneWithVerification(
 
   const windows = new Map<string, VerifiedPaneTeardownResult>();
   const windowIds = Array.from(new Set(
-    [options.target.testWindowId, options.target.devWindowId].filter(
+    [
+      options.target.testWindowId,
+      options.target.devWindowId,
+      ...(options.target.additionalWindowIds || []),
+    ].filter(
       (windowId): windowId is string => Boolean(windowId),
     ),
   ));
@@ -152,12 +162,14 @@ export async function tearDownFullPaneWithVerification(
     };
   }
 
-  const pane = await tearDownPaneWithVerification({
-    probe: () => options.probePane(options.target.paneId),
-    kill: () => options.killPane(options.target.paneId),
-    verifyDelaysMs: options.verifyDelaysMs,
-    sleep: options.sleep,
-  });
+  const pane = options.target.paneId
+    ? await tearDownPaneWithVerification({
+      probe: () => options.probePane(options.target.paneId!),
+      kill: () => options.killPane(options.target.paneId!),
+      verifyDelaysMs: options.verifyDelaysMs,
+      sleep: options.sleep,
+    })
+    : { presence: 'absent' as const };
   const outcomes = [...backgroundPanes.values(), ...windows.values(), pane];
   const presence = outcomes.some((outcome) => outcome.presence === 'unknown')
     ? 'unknown'
@@ -186,7 +198,11 @@ export async function verifyFullPaneAbsent(
 ): Promise<FullPaneTeardownResult> {
   const backgroundPanes = new Map<string, VerifiedPaneTeardownResult>();
   const backgroundPaneIds = Array.from(new Set(
-    [options.target.testPaneId, options.target.devPaneId].filter(
+    [
+      options.target.testPaneId,
+      options.target.devPaneId,
+      ...(options.target.additionalPaneIds || []),
+    ].filter(
       (paneId): paneId is string => Boolean(paneId) && paneId !== options.target.paneId,
     ),
   ));
@@ -198,7 +214,11 @@ export async function verifyFullPaneAbsent(
 
   const windows = new Map<string, VerifiedPaneTeardownResult>();
   const windowIds = Array.from(new Set(
-    [options.target.testWindowId, options.target.devWindowId].filter(
+    [
+      options.target.testWindowId,
+      options.target.devWindowId,
+      ...(options.target.additionalWindowIds || []),
+    ].filter(
       (windowId): windowId is string => Boolean(windowId),
     ),
   ));
@@ -208,9 +228,11 @@ export async function verifyFullPaneAbsent(
     });
   }
 
-  const pane = {
-    presence: await probePanePresence(() => options.probePane(options.target.paneId)),
-  };
+  const pane = options.target.paneId
+    ? {
+      presence: await probePanePresence(() => options.probePane(options.target.paneId!)),
+    }
+    : { presence: 'absent' as const };
   const outcomes = [...backgroundPanes.values(), ...windows.values(), pane];
   const presence = outcomes.some((outcome) => outcome.presence === 'unknown')
     ? 'unknown'

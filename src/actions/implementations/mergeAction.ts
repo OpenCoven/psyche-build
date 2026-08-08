@@ -141,61 +141,12 @@ async function executeSingleRootMerge(
   );
   let activeContext = context;
 
-  // Kill every sibling with a verified tri-state teardown before touching any
-  // records. A timeout/unknown result can still be a live process using this
-  // worktree, so merging must stop and retain every sibling record.
+  // The exact-record guard runs while the project config lease is held. It
+  // fetches each sibling from that fresh registry and tears down every current
+  // resource before compareAndRemove removes any record. This prevents a
+  // concurrent dev/test claim from being added after a stale UI snapshot was
+  // torn down but before record removal.
   const closeSiblings = async (): Promise<ActionResult | undefined> => {
-    const tmuxService = TmuxService.getInstance();
-    for (const sibling of siblingPanes) {
-      const ownership = assessTmuxTeardownOwnership(
-        sibling as PsychePane & Record<string, unknown>,
-        activeContext.panes as Array<PsychePane & Record<string, unknown>>,
-        tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
-      );
-      const teardown = ownership === 'legacy'
-        ? await verifyFullPaneAbsent({
-          target: sibling,
-          probePane: (paneId) => tmuxService.probePanePresence(paneId),
-          probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
-        })
-        : ownership === 'stale-generation'
-          ? {
-            presence: 'absent' as const,
-            error: undefined,
-            pane: { presence: 'absent' as const },
-            backgroundPanes: new Map(),
-            windows: new Map(),
-          }
-          : ownership === 'unverified-generation' || ownership === 'ambiguous'
-            ? {
-              presence: 'unknown' as const,
-              error: undefined,
-              pane: { presence: 'unknown' as const },
-              backgroundPanes: new Map(),
-              windows: new Map(),
-            }
-            : await tearDownFullPaneWithVerification({
-        target: sibling,
-        probePane: (paneId) => tmuxService.probePanePresence(paneId),
-        killPane: (paneId) => tmuxService.killPane(paneId),
-        probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
-        killWindow: (windowId) => tmuxService.killWindow(windowId),
-            });
-      if (teardown.presence !== 'absent') {
-        const detail = teardown.error ? `: ${teardown.error}` : '';
-        LogService.getInstance().warn(
-          `Aborted merge of ${paneName}: sibling ${sibling.paneId} is ${teardown.presence} after teardown${detail}`,
-          'mergeAction',
-          sibling.id,
-        );
-        return {
-          type: 'error',
-          title: 'Sibling Pane Could Not Be Closed',
-          message: `Merge aborted because sibling "${getPaneDisplayName(sibling)}" is ${teardown.presence} after teardown. Its pane record and worktree were retained.`,
-          dismissable: true,
-        };
-      }
-    }
     if (!activeContext.removePaneIdentitiesFromConfig) {
       return {
         type: 'error',
@@ -204,14 +155,100 @@ async function executeSingleRootMerge(
         dismissable: true,
       };
     }
-    // The fresh locked registry must still hold every exact sibling identity.
-    // An ID-only removal could erase a replacement that rebound after teardown.
-    const withoutSiblings = await activeContext.removePaneIdentitiesFromConfig(
-      siblingPanes.map((sibling) => ({
-        id: sibling.id,
-        paneId: sibling.paneId,
-      })),
-    );
+    const tmuxService = TmuxService.getInstance();
+    let failedSibling: PsychePane | undefined;
+    let failedPresence: 'present' | 'unknown' | undefined;
+    let failedDetail: string | undefined;
+    let withoutSiblings: PsychePane[];
+    try {
+      withoutSiblings = await activeContext.removePaneIdentitiesFromConfig(
+        siblingPanes.map((sibling) => ({
+          id: sibling.id,
+          paneId: sibling.paneId,
+        })),
+        async (freshPanes, exactPanes) => {
+          const fresh = (exactPanes || []).map((pane) => pane as PsychePane);
+          for (const sibling of siblingPanes) {
+            const current = fresh.find((candidate) => (
+              candidate.id === sibling.id && candidate.paneId === sibling.paneId
+            ));
+            if (!current) {
+              throw new Error(
+                `fresh sibling record "${sibling.id}" is missing or rebound`,
+              );
+            }
+
+            const assessment = assessTmuxTeardownOwnership(
+              current as PsychePane & Record<string, unknown>,
+              (freshPanes || []) as Array<PsychePane & Record<string, unknown>>,
+              tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+            );
+            const { ownership } = assessment;
+            const teardown = ownership === 'legacy'
+              ? await verifyFullPaneAbsent({
+                target: assessment.target,
+                probePane: (paneId) => tmuxService.probePanePresence(paneId),
+                probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+              })
+              : ownership === 'stale-generation'
+                ? {
+                  presence: 'absent' as const,
+                  error: undefined,
+                  pane: { presence: 'absent' as const },
+                  backgroundPanes: new Map(),
+                  windows: new Map(),
+                }
+                : ownership === 'unverified-generation' || ownership === 'ambiguous'
+                  ? {
+                    presence: 'unknown' as const,
+                    error: undefined,
+                    pane: { presence: 'unknown' as const },
+                    backgroundPanes: new Map(),
+                    windows: new Map(),
+                  }
+                  : await tearDownFullPaneWithVerification({
+                    target: assessment.target,
+                    probePane: (paneId) => tmuxService.probePanePresence(paneId),
+                    killPane: (paneId) => tmuxService.killPane(paneId),
+                    probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+                    killWindow: (windowId) => tmuxService.killWindow(windowId),
+                  });
+            if (teardown.presence !== 'absent') {
+              failedSibling = current;
+              failedPresence = teardown.presence;
+              failedDetail = teardown.error;
+              throw new Error(
+                `sibling ${current.paneId} is ${teardown.presence} after teardown${
+                  teardown.error ? `: ${teardown.error}` : ''
+                }`,
+              );
+            }
+          }
+        },
+      );
+    } catch (error) {
+      const sibling = failedSibling;
+      const detail = failedDetail ? `: ${failedDetail}` : '';
+      LogService.getInstance().warn(
+        `Aborted merge of ${paneName}: ${
+          sibling
+            ? `sibling ${sibling.paneId} is ${failedPresence} after teardown${detail}`
+            : `sibling identity changed before teardown: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+        }`,
+        'mergeAction',
+        sibling?.id,
+      );
+      return {
+        type: 'error',
+        title: 'Sibling Pane Could Not Be Closed',
+        message: sibling
+          ? `Merge aborted because sibling "${getPaneDisplayName(sibling)}" is ${failedPresence} after teardown. Its pane record and worktree were retained.`
+          : `Merge aborted because sibling ownership changed before its fresh record could be safely torn down. Its pane record and worktree were retained.`,
+        dismissable: true,
+      };
+    }
     activeContext = {
       ...activeContext,
       panes: withoutSiblings,

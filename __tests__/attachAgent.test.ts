@@ -301,6 +301,36 @@ describe('attachAgentToWorktree', () => {
     ]);
   });
 
+  it('removes the exact persisted record inside the setup transaction after setup fails', async () => {
+    const persistedSnapshots: PsychePane[][] = [];
+    upsertProjectPaneConfigPanesMock.mockImplementation(async (
+      _projectRoot: string,
+      panes: PsychePane[],
+    ) => {
+      persistedSnapshots.push(panes.map((pane) => ({ ...pane })));
+      order.push(`persisted-${persistedSnapshots.length}`);
+    });
+    tmuxServiceMock.sendShellCommand.mockRejectedValueOnce(
+      new Error('attached pane cwd setup failed'),
+    );
+    tmuxServiceMock.killPane.mockImplementationOnce(async () => {
+      order.push('pane-killed');
+      paneAlive = false;
+    });
+
+    await expect(attach()).rejects.toThrow(/Failed to prepare attached pane/);
+
+    expect(launchAgentInPaneMock).not.toHaveBeenCalled();
+    expect(persistedSnapshots).toHaveLength(2);
+    expect(persistedSnapshots[0]).toHaveLength(2);
+    expect(persistedSnapshots[1]).toEqual([
+      expect.objectContaining({ id: 'psyche-source', paneId: '%source' }),
+    ]);
+    expect(order.indexOf('pane-killed')).toBeLessThan(order.indexOf('persisted-2'));
+    expect(order.indexOf('persisted-2')).toBeLessThan(order.indexOf('lease-released'));
+    expect(compareAndRemoveProjectPaneConfigPaneIdentitiesMock).not.toHaveBeenCalled();
+  });
+
   it('removes the exact persisted record after a launch failure and kills its pane', async () => {
     upsertProjectPaneConfigPanesMock.mockImplementationOnce(async () => {
       order.push('persisted');

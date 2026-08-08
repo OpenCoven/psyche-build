@@ -171,6 +171,7 @@ async function attachAgentToReservedWorktree(
         controlPaneId = originalPaneId;
       }
 
+      let attachedRecordPersisted = false;
       try {
         const panesForLayout = freshPanes.length > 0
           ? freshPanes
@@ -210,6 +211,7 @@ async function attachAgentToReservedWorktree(
         config.panes = [...freshPanes, newPane];
         config.lastUpdated = new Date().toISOString();
         await persist();
+        attachedRecordPersisted = true;
 
         const start = Date.now();
         while ((Date.now() - start) < 600) {
@@ -247,6 +249,28 @@ async function attachAgentToReservedWorktree(
         const teardown = paneInfo
           ? await killAttachedPane(tmuxService, paneInfo, slug, 'setup or persistence failure')
           : undefined;
+        let failedRecordCleanup: string | undefined;
+        if (
+          teardown?.presence === 'absent'
+          && attachedRecordPersisted
+          && newPane
+        ) {
+          try {
+            const currentPanes = Array.isArray(config.panes)
+              ? config.panes as PsychePane[]
+              : [];
+            config.panes = currentPanes.filter((candidate) => !(
+              candidate.id === newPane!.id
+              && candidate.paneId === newPane!.paneId
+            ));
+            config.lastUpdated = new Date().toISOString();
+            await persist();
+          } catch (cleanupError) {
+            failedRecordCleanup = `; failed to remove exact persisted record ${
+              newPane.id
+            }: ${errorMessage(cleanupError)}`;
+          }
+        }
         const recovery = teardown && teardown.presence !== 'absent' && newPane
           ? await retainPaneRecovery({
             projectRoot,
@@ -277,11 +301,15 @@ async function attachAgentToReservedWorktree(
           : '';
         if (recovery?.retained) {
           throw new PaneLifecycleReservationRetainedError(
-            `Failed to prepare attached pane "${slug}": ${errorMessage(error)}${recoveryMessage}`,
+            `Failed to prepare attached pane "${slug}": ${
+              errorMessage(error)
+            }${recoveryMessage}${failedRecordCleanup || ''}`,
           );
         }
         throw new Error(
-          `Failed to prepare attached pane "${slug}": ${errorMessage(error)}${recoveryMessage}`,
+          `Failed to prepare attached pane "${slug}": ${
+            errorMessage(error)
+          }${recoveryMessage}${failedRecordCleanup || ''}`,
         );
       }
     },

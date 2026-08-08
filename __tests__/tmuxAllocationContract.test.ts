@@ -14,7 +14,7 @@ const allocationSites = [
   ['conflict resolution pane', 'src/utils/conflictResolutionPane.ts', 'getServerIdentity?.(paneInfo)'],
   ['startup restoration pane', 'src/hooks/usePaneLoading.ts', 'getServerIdentity?.(newPaneId)'],
   ['detected shell pane', 'src/utils/shellPaneDetection.ts', 'getServerIdentity?.(paneId)'],
-  ['background test/dev window', 'src/hooks/usePaneRunner.ts', 'getServerIdentity?.(windowId)'],
+  ['background test/dev window', 'src/hooks/usePaneRunner.ts', 'getTmuxServerIdentity: () => tmuxService.getServerIdentity?.()'],
   ['terminal input flow', 'src/hooks/useInputHandling.ts', 'operation: "terminal-pane"'],
   ['desktop-use input flow', 'src/hooks/useInputHandling.ts', 'operation: "desktop-use-pane"'],
   ['browser input flow', 'src/hooks/useInputHandling.ts', 'operation: "file-browser-pane"'],

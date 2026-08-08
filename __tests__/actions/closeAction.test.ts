@@ -247,12 +247,83 @@ describe('closeAction', () => {
       );
     });
 
+    it('does not inherit a rebound primary generation for legacy background IDs', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testPaneId: '%legacy-test',
+        testWindowId: '@legacy-test',
+        testTmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return '%42\n%legacy-test\n';
+        if (command.includes('list-windows')) return '@legacy-test\n';
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'worktree cleanup was not started');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane') || String(command).includes('kill-window')
+      )).toBe(false);
+      expect(context.panes).toEqual([pane]);
+    });
+
+    it('kills a current primary pane without targeting its stale background generation', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testPaneId: '%old-test',
+        testWindowId: '@old-test',
+        testTmuxServerIdentity: oldServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      let primaryAlive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          return primaryAlive ? '%42\n%old-test\n' : '%old-test\n';
+        }
+        if (command.includes('list-windows')) return '@old-test\n';
+        if (command.includes("kill-pane -t '%42'")) {
+          primaryAlive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync)).toHaveBeenCalledWith(
+        expect.stringContaining("tmux kill-pane -t '%42'"),
+        expect.anything(),
+      );
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('%old-test') && String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('@old-test') && String(command).includes('kill-window')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
     it('never kills a live unversioned legacy pane record', async () => {
       const pane = createWorktreePane({
         paneId: '%42',
         tmuxServerIdentity: undefined,
       });
-      const context = createMockContext([pane]);
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
       vi.mocked(execSync).mockImplementation((command: string) => (
         command.includes('list-panes') ? '%42\n' : Buffer.from('')
       ));
@@ -272,7 +343,9 @@ describe('closeAction', () => {
         paneId: '%42',
         tmuxServerIdentity: undefined,
       });
-      const context = createMockContext([pane]);
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
       vi.mocked(execSync).mockImplementation((command: string) => (
         command.includes('list-panes') ? '' : Buffer.from('')
       ));
@@ -312,10 +385,15 @@ describe('closeAction', () => {
     it('verified-kills owned test and dev windows before removing the pane record', async () => {
       const pane = createWorktreePane({
         paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
         testWindowId: '@7',
+        testTmuxServerIdentity: currentServerGeneration,
         devWindowId: '@8',
+        devTmuxServerIdentity: currentServerGeneration,
       });
-      const context = createMockContext([pane]);
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
       const liveWindows = new Set(['@7', '@8']);
       let paneAlive = true;
       vi.mocked(execSync).mockImplementation((command: string) => {
@@ -352,10 +430,13 @@ describe('closeAction', () => {
     it('uses fresh locked background pane/window fields rather than stale UI fields', async () => {
       const stalePane = createWorktreePane({
         paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
         testPaneId: '%stale-test',
         testWindowId: '@stale-test',
+        testTmuxServerIdentity: currentServerGeneration,
         devPaneId: '%stale-dev',
         devWindowId: '@stale-dev',
+        devTmuxServerIdentity: currentServerGeneration,
       });
       const freshPane = {
         ...stalePane,
@@ -378,6 +459,7 @@ describe('closeAction', () => {
       });
       const context = createMockContext([stalePane], {
         removePaneIdentitiesFromConfig,
+        getTmuxServerIdentity: () => currentServerGeneration,
       });
       vi.mocked(execSync).mockImplementation((command: string) => {
         if (command.includes('list-panes')) return [...livePanes].join('\n');

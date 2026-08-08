@@ -49,14 +49,15 @@ export default function useWorktreeActions({
   const closePane = useCallback(async (pane: PsychePane) => {
     try {
       const tmuxService = TmuxService.getInstance();
-      const ownership = assessTmuxTeardownOwnership(
+      const assessment = assessTmuxTeardownOwnership(
         pane as PsychePane & Record<string, unknown>,
         panes as Array<PsychePane & Record<string, unknown>>,
         tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
       );
+      const { ownership } = assessment;
       const teardown = ownership === 'legacy'
         ? await verifyFullPaneAbsent({
-          target: pane,
+          target: assessment.target,
           probePane: (paneId) => tmuxService.probePanePresence(paneId),
           probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
         })
@@ -75,7 +76,7 @@ export default function useWorktreeActions({
               windows: new Map(),
             }
             : await tearDownFullPaneWithVerification({
-        target: pane,
+        target: assessment.target,
         probePane: (paneId) => tmuxService.probePanePresence(paneId),
         killPane: (paneId) => tmuxService.killPane(paneId),
         probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),

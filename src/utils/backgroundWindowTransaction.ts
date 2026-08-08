@@ -12,6 +12,7 @@ import {
   assertTmuxResourcesAvailable,
   type TmuxResource,
 } from '../services/TmuxResourceOwnership.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import type {
   VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
@@ -32,14 +33,23 @@ export interface BackgroundWindowTransactionOptions {
    * The identity the UI actually selected. Claiming is an exact CAS: a
    * rebind cannot receive a command intended for this stale pane.
    */
-  pane: Pick<PsychePane, 'id' | 'paneId'>;
-  createWindow: () => Promise<BackgroundWindowResource>;
+  pane: Pick<PsychePane, 'id' | 'paneId' | 'worktreePath'>;
+  /** Allocates the detached window and returns its tmux window ID. */
+  allocateWindow: () => Promise<string>;
+  /** Resolves the first pane in an already allocated detached window. */
+  getWindowPaneId: (windowId: string) => Promise<string>;
   sendCommand: (resource: BackgroundWindowResource) => Promise<void>;
   tearDownResource: (
     resource: BackgroundWindowResource,
+    allocationIdentity: TmuxServerIdentity,
+  ) => Promise<VerifiedPaneTeardownResult>;
+  /** Teardown for a window whose pane lookup or resource construction failed. */
+  tearDownAllocatedWindow: (
+    windowId: string,
+    allocationIdentity: TmuxServerIdentity,
   ) => Promise<VerifiedPaneTeardownResult>;
   /** Read immediately before teardown; absent means destructive work is unsafe. */
-  getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
+  getTmuxServerIdentity: () => TmuxServerIdentity | undefined;
   /**
    * Used only when config persistence cannot retain an uncertain resource.
    * Callers write a worktree recovery marker from this callback.
@@ -54,6 +64,30 @@ export interface BackgroundWindowTransactionResult {
   windowId: string;
   paneId: string;
   pane: PsychePane;
+}
+
+export interface ExpectedBackgroundWindow {
+  windowId: string;
+  paneId?: string;
+  tmuxServerIdentity: TmuxServerIdentity;
+}
+
+export interface JoinBackgroundWindowTransactionOptions {
+  type: BackgroundWindowType;
+  projectRoot: string;
+  pane: Pick<PsychePane, 'id' | 'paneId' | 'worktreePath'>;
+  expectedWindow: ExpectedBackgroundWindow;
+  getWindowPaneId: (windowId: string) => Promise<string>;
+  joinPane: (windowId: string) => Promise<void>;
+  tearDownJoinedPane: (
+    paneId: string,
+    allocationIdentity: TmuxServerIdentity,
+  ) => Promise<VerifiedPaneTeardownResult>;
+  getTmuxServerIdentity: () => TmuxServerIdentity | undefined;
+  retainUncertainRecovery?: (
+    pane: PsychePane,
+    reason: string,
+  ) => Promise<string | undefined>;
 }
 
 class BackgroundClaimError extends Error {
@@ -71,8 +105,7 @@ class BackgroundClaimError extends Error {
 export async function startBackgroundWindowTransaction(
   options: BackgroundWindowTransactionOptions,
 ): Promise<BackgroundWindowTransactionResult> {
-  const resource = await options.createWindow();
-  assertBackgroundResource(resource);
+  const resource = await allocateBackgroundWindow(options);
   let claimedPane: PsychePane | undefined;
 
   try {
@@ -206,49 +239,180 @@ export async function startBackgroundWindowTransaction(
 }
 
 /**
+ * Establishes a compensation boundary at the exact moment tmux reports a
+ * window ID. A failed generation recapture or getWindowPaneId call therefore
+ * cannot strand an untracked detached window.
+ */
+async function allocateBackgroundWindow(
+  options: BackgroundWindowTransactionOptions,
+): Promise<BackgroundWindowResource> {
+  const allocationIdentity = readTmuxServerIdentity(options);
+  if (!allocationIdentity) {
+    throw new Error(
+      `Could not capture tmux server generation before ${options.type} window allocation`,
+    );
+  }
+
+  let allocatedWindowId: string | undefined;
+  try {
+    allocatedWindowId = await options.allocateWindow();
+    if (!allocatedWindowId) {
+      throw new Error(
+        `${options.type} window allocation did not return a tmux window ID`,
+      );
+    }
+    const identityAfterWindowAllocation = readTmuxServerIdentity(options);
+    if (!identityAfterWindowAllocation) {
+      throw new Error(
+        `Could not recapture tmux server generation after ${options.type} window allocation`,
+      );
+    }
+    if (!sameTmuxServerIdentity(allocationIdentity, identityAfterWindowAllocation)) {
+      throw new Error(
+        `tmux server generation changed during ${options.type} window allocation`,
+      );
+    }
+    const paneId = await options.getWindowPaneId(allocatedWindowId);
+    const resource: BackgroundWindowResource = {
+      windowId: allocatedWindowId,
+      paneId,
+      tmuxServerIdentity: allocationIdentity,
+    };
+    assertBackgroundResource(resource);
+    const currentIdentity = readTmuxServerIdentity(options);
+    if (!currentIdentity) {
+      throw new Error(
+        `Could not recapture tmux server generation after ${options.type} window allocation`,
+      );
+    }
+    if (!sameTmuxServerIdentity(allocationIdentity, currentIdentity)) {
+      throw new Error(
+        `tmux server generation changed during ${options.type} window allocation`,
+      );
+    }
+    return resource;
+  } catch (error) {
+    if (!allocatedWindowId) {
+      throw error;
+    }
+
+    const teardown = await tearDownAllocatedWindowForGeneration(
+      options,
+      allocatedWindowId,
+      allocationIdentity,
+    );
+    const reason = `Could not construct ${options.type} background resource ${
+      allocatedWindowId
+    }: ${errorMessage(error)}; teardown is ${teardown.presence}`;
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await retainUncertainBackgroundRecovery(
+        options,
+        { ...options.pane, slug: '', prompt: '' },
+        reason,
+      );
+    throw transactionError(
+      `Could not create ${options.type} background resource ${allocatedWindowId}: ${
+        errorMessage(error)
+      }`,
+      teardown,
+      recovery,
+    );
+  }
+}
+
+/**
  * Persists the pane ID after join-pane. tmux preserves pane IDs on join, but
  * this exact CAS makes a legacy/missing field durable without allowing a
  * concurrently rebound pane to be updated.
  */
-export async function retainBackgroundWindowPaneId(
-  projectRoot: string,
-  pane: Pick<PsychePane, 'id' | 'paneId'>,
-  type: BackgroundWindowType,
-  paneId: string,
+export async function joinBackgroundWindowTransaction(
+  options: JoinBackgroundWindowTransactionOptions,
 ): Promise<PsychePane> {
-  if (!paneId) {
-    throw new Error(`Cannot retain an empty ${type} background pane ID`);
+  let joinedPaneId: string | undefined;
+  let joinAttempted = false;
+  try {
+    const transaction = await transactProjectPaneConfig(
+      options.projectRoot,
+      async ({ config, persist }) => {
+        const panes = Array.isArray(config.panes)
+          ? [...config.panes] as PsychePane[]
+          : [];
+        const index = panes.findIndex((candidate) => candidate.id === options.pane.id);
+        const current = index >= 0 ? panes[index] : undefined;
+        if (
+          !current
+          || !hasExactPaneIdentity(current, options.pane)
+          || !hasExpectedBackgroundWindow(
+            current,
+            options.type,
+            options.expectedWindow,
+          )
+        ) {
+          throw new BackgroundClaimError(
+            `Pane "${options.pane.id}" is missing, rebound, or replaced before its ${options.type} window could be joined`,
+          );
+        }
+        assertCurrentTmuxGeneration(
+          options.getTmuxServerIdentity,
+          options.expectedWindow.tmuxServerIdentity,
+          `before joining ${options.type} window ${options.expectedWindow.windowId}`,
+        );
+
+        joinedPaneId = await options.getWindowPaneId(options.expectedWindow.windowId);
+        if (!joinedPaneId) {
+          throw new Error(`Cannot join an empty ${options.type} background pane ID`);
+        }
+        joinAttempted = true;
+        await options.joinPane(options.expectedWindow.windowId);
+        assertCurrentTmuxGeneration(
+          options.getTmuxServerIdentity,
+          options.expectedWindow.tmuxServerIdentity,
+          `after joining ${options.type} window ${options.expectedWindow.windowId}`,
+        );
+
+        const next = withBackgroundWindowPaneId(current, options.type, joinedPaneId);
+        panes[index] = next;
+        config.panes = panes;
+        config.lastUpdated = new Date().toISOString();
+        await persist();
+        return next;
+      },
+    );
+    return transaction.result;
+  } catch (error) {
+    if (!joinAttempted || !joinedPaneId) {
+      throw error;
+    }
+
+    const teardown = await tearDownJoinedPaneForGeneration(
+      options,
+      joinedPaneId,
+    );
+    let recovery: string | undefined;
+    if (teardown.presence === 'absent') {
+      try {
+        await clearExpectedBackgroundClaim(options);
+      } catch (cleanupError) {
+        recovery = `could not clear the exact failed background claim: ${
+          errorMessage(cleanupError)
+        }`;
+      }
+    } else {
+      recovery = await retainJoinedBackgroundRecovery(
+        options,
+        joinedPaneId,
+        `Could not persist joined ${options.type} pane ${joinedPaneId}; teardown is ${teardown.presence}`,
+      );
+    }
+    throw transactionError(
+      `Could not persist joined ${options.type} pane ${joinedPaneId}: ${
+        errorMessage(error)
+      }`,
+      teardown,
+      recovery,
+    );
   }
-
-  const transaction = await transactProjectPaneConfig(
-    projectRoot,
-    async ({ config, persist }) => {
-      const panes = Array.isArray(config.panes)
-        ? [...config.panes] as PsychePane[]
-        : [];
-      const index = panes.findIndex((candidate) => candidate.id === pane.id);
-      const current = index >= 0 ? panes[index] : undefined;
-      if (!current || !hasExactPaneIdentity(current, pane)) {
-        throw new BackgroundClaimError(
-          `Pane "${pane.id}" is missing or rebound before its ${type} pane ID could be retained`,
-        );
-      }
-      const windowId = backgroundWindowId(current, type);
-      if (!windowId) {
-        throw new BackgroundClaimError(
-          `Pane "${pane.id}" no longer owns a ${type} background window`,
-        );
-      }
-
-      const next = withBackgroundWindowPaneId(current, type, paneId);
-      panes[index] = next;
-      config.panes = panes;
-      config.lastUpdated = new Date().toISOString();
-      await persist();
-      return next;
-    },
-  );
-  return transaction.result;
 }
 
 export function withBackgroundWindow(
@@ -402,11 +566,35 @@ async function retainBackgroundRecovery(
       resource,
       reason,
     );
-    const marker = await options.retainUncertainRecovery?.(
+    const marker = await retainUncertainBackgroundRecovery(
+      options,
       fallbackPane,
       `${reason}: ${errorMessage(error)}`,
     );
-    return marker || `could not persist recovery fields: ${errorMessage(error)}`;
+    return marker;
+  }
+}
+
+async function retainUncertainBackgroundRecovery(
+  options: BackgroundWindowTransactionOptions,
+  pane: PsychePane,
+  reason: string,
+): Promise<string> {
+  const customRecovery = await options.retainUncertainRecovery?.(pane, reason);
+  if (customRecovery) {
+    return customRecovery;
+  }
+  try {
+    const marker = await writeWorktreeRecoveryMarker({
+      projectRoot: options.projectRoot,
+      worktreePath: pane.worktreePath || options.projectRoot,
+      pane: { id: pane.id, paneId: pane.paneId },
+      operation: `background-${options.type}-allocation`,
+      reason,
+    });
+    return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+  } catch (error) {
+    return `could not write recovery marker: ${errorMessage(error)}`;
   }
 }
 
@@ -448,6 +636,25 @@ function hasExactBackgroundResource(
   return (
     backgroundWindowId(pane, type) === resource.windowId
     && backgroundPaneId(pane, type) === resource.paneId
+  );
+}
+
+function hasExpectedBackgroundWindow(
+  pane: PsychePane,
+  type: BackgroundWindowType,
+  expected: ExpectedBackgroundWindow,
+): boolean {
+  const generation = type === 'test'
+    ? pane.testTmuxServerIdentity
+    : pane.devTmuxServerIdentity;
+  return (
+    backgroundWindowId(pane, type) === expected.windowId
+    && (
+      expected.paneId === undefined
+      || backgroundPaneId(pane, type) === expected.paneId
+    )
+    && isTmuxServerIdentity(generation)
+    && sameTmuxServerIdentity(generation, expected.tmuxServerIdentity)
   );
 }
 
@@ -520,7 +727,7 @@ async function tearDownResourceForGeneration(
   resource: BackgroundWindowResource,
 ): Promise<VerifiedPaneTeardownResult> {
   if (resource.tmuxServerIdentity) {
-    const current = options.getTmuxServerIdentity?.();
+    const current = readTmuxServerIdentity(options);
     if (!current) {
       return {
         presence: 'unknown',
@@ -533,7 +740,179 @@ async function tearDownResourceForGeneration(
       return { presence: 'absent' };
     }
   }
-  return options.tearDownResource(resource);
+  return options.tearDownResource(resource, resource.tmuxServerIdentity);
+}
+
+async function tearDownAllocatedWindowForGeneration(
+  options: BackgroundWindowTransactionOptions,
+  windowId: string,
+  allocationIdentity: TmuxServerIdentity,
+): Promise<VerifiedPaneTeardownResult> {
+  const current = readTmuxServerIdentity(options);
+  if (!current) {
+    return {
+      presence: 'unknown',
+      error: 'current tmux server generation could not be verified',
+    };
+  }
+  if (!sameTmuxServerIdentity(allocationIdentity, current)) {
+    return { presence: 'absent' };
+  }
+  return options.tearDownAllocatedWindow(windowId, allocationIdentity);
+}
+
+async function tearDownJoinedPaneForGeneration(
+  options: JoinBackgroundWindowTransactionOptions,
+  paneId: string,
+): Promise<VerifiedPaneTeardownResult> {
+  const current = readTmuxIdentity(options.getTmuxServerIdentity);
+  if (!current) {
+    return {
+      presence: 'unknown',
+      error: 'current tmux server generation could not be verified',
+    };
+  }
+  if (!sameTmuxServerIdentity(
+    options.expectedWindow.tmuxServerIdentity,
+    current,
+  )) {
+    return { presence: 'absent' };
+  }
+  return options.tearDownJoinedPane(
+    paneId,
+    options.expectedWindow.tmuxServerIdentity,
+  );
+}
+
+async function clearExpectedBackgroundClaim(
+  options: JoinBackgroundWindowTransactionOptions,
+): Promise<void> {
+  await transactProjectPaneConfig(options.projectRoot, async ({ config, persist }) => {
+    const panes = Array.isArray(config.panes)
+      ? [...config.panes] as PsychePane[]
+      : [];
+    const index = panes.findIndex((pane) => pane.id === options.pane.id);
+    const current = index >= 0 ? panes[index] : undefined;
+    if (
+      !current
+      || !hasExactPaneIdentity(current, options.pane)
+      || !hasExpectedBackgroundWindow(
+        current,
+        options.type,
+        options.expectedWindow,
+      )
+    ) {
+      return;
+    }
+    panes[index] = withoutBackgroundWindow(current, options.type);
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+    await persist();
+  });
+}
+
+async function retainJoinedBackgroundRecovery(
+  options: JoinBackgroundWindowTransactionOptions,
+  paneId: string,
+  reason: string,
+): Promise<string> {
+  const resource: BackgroundWindowResource = {
+    windowId: options.expectedWindow.windowId,
+    paneId,
+    tmuxServerIdentity: options.expectedWindow.tmuxServerIdentity,
+  };
+  try {
+    await transactProjectPaneConfig(options.projectRoot, async ({ config, persist }) => {
+      const panes = Array.isArray(config.panes)
+        ? [...config.panes] as PsychePane[]
+        : [];
+      const index = panes.findIndex((pane) => pane.id === options.pane.id);
+      const current = index >= 0 ? panes[index] : undefined;
+      if (
+        !current
+        || !hasExactPaneIdentity(current, options.pane)
+        || !hasExpectedBackgroundWindow(
+          current,
+          options.type,
+          options.expectedWindow,
+        )
+      ) {
+        throw new BackgroundClaimError(
+          `Could not retain recovery fields for joined ${options.type} pane ${paneId}`,
+        );
+      }
+      panes[index] = withBackgroundWindowRecovery(
+        withBackgroundWindow(current, options.type, resource),
+        options.type,
+        resource,
+        reason,
+      );
+      config.panes = panes;
+      config.lastUpdated = new Date().toISOString();
+      await persist();
+    });
+    return `retained durable recovery fields for joined ${options.type} pane ${paneId}`;
+  } catch (error) {
+    const fallbackPane = withBackgroundWindowRecovery(
+      withBackgroundWindow(
+        { ...options.pane, slug: '', prompt: '' },
+        options.type,
+        resource,
+      ),
+      options.type,
+      resource,
+      reason,
+    );
+    const customRecovery = await options.retainUncertainRecovery?.(
+      fallbackPane,
+      `${reason}: ${errorMessage(error)}`,
+    );
+    if (customRecovery) {
+      return customRecovery;
+    }
+    try {
+      const marker = await writeWorktreeRecoveryMarker({
+        projectRoot: options.projectRoot,
+        worktreePath: options.pane.worktreePath || options.projectRoot,
+        pane: { id: options.pane.id, paneId: options.pane.paneId },
+        operation: `background-${options.type}-join`,
+        reason: `${reason}: ${errorMessage(error)}`,
+      });
+      return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+    } catch (markerError) {
+      return `could not write recovery marker: ${errorMessage(markerError)}`;
+    }
+  }
+}
+
+function assertCurrentTmuxGeneration(
+  readIdentity: () => TmuxServerIdentity | undefined,
+  expected: TmuxServerIdentity,
+  phase: string,
+): void {
+  const current = readTmuxIdentity(readIdentity);
+  if (!current) {
+    throw new Error(`Current tmux server generation could not be verified ${phase}`);
+  }
+  if (!sameTmuxServerIdentity(current, expected)) {
+    throw new Error(`Tmux server generation changed ${phase}`);
+  }
+}
+
+function readTmuxIdentity(
+  readIdentity: () => TmuxServerIdentity | undefined,
+): TmuxServerIdentity | undefined {
+  try {
+    return readIdentity();
+  } catch {
+    return undefined;
+  }
+}
+
+function readTmuxServerIdentity(
+  options: BackgroundWindowTransactionOptions,
+): TmuxServerIdentity | undefined {
+  return readTmuxIdentity(options.getTmuxServerIdentity);
 }
 
 function transactionError(

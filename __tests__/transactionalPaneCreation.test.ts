@@ -85,4 +85,55 @@ describe('transactional pane creation', () => {
 
     expect(persistRecovery).toHaveBeenCalledOnce();
   });
+
+  it('compensates an allocated split when its post-allocation generation capture fails', async () => {
+    const getTmuxServerIdentity = vi.fn()
+      .mockReturnValueOnce(generation)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(generation);
+    const tearDown = vi.fn(async () => ({ presence: 'absent' as const }));
+    const createPane = vi.fn(({
+      paneId,
+      tmuxServerIdentity,
+    }): PsychePane => ({
+      id: 'psyche-terminal',
+      slug: 'terminal',
+      prompt: '',
+      paneId,
+      tmuxServerIdentity,
+    }));
+
+    await expect(createTransactionalPane({
+      projectRoot: '/project',
+      sessionProjectRoot: '/session',
+      operation: 'terminal-pane',
+      allocate: () => '%42',
+      getTmuxServerIdentity,
+      createPane,
+      persist: vi.fn(),
+      tearDown,
+    })).rejects.toThrow(/could not capture the tmux server generation after allocation/);
+
+    expect(createPane).not.toHaveBeenCalled();
+    expect(tearDown).toHaveBeenCalledWith('%42', generation);
+  });
+
+  it('compensates an allocated split when pane record construction fails', async () => {
+    const tearDown = vi.fn(async () => ({ presence: 'absent' as const }));
+
+    await expect(createTransactionalPane({
+      projectRoot: '/project',
+      sessionProjectRoot: '/session',
+      operation: 'terminal-pane',
+      allocate: () => '%42',
+      getTmuxServerIdentity: () => generation,
+      createPane: () => {
+        throw new Error('pane record construction failed');
+      },
+      persist: vi.fn(),
+      tearDown,
+    })).rejects.toThrow(/pane record construction failed/);
+
+    expect(tearDown).toHaveBeenCalledWith('%42', generation);
+  });
 });

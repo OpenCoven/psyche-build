@@ -84,11 +84,12 @@ async function tearDownOwnedPane(
   panes: readonly PsychePane[],
   currentGeneration: TmuxServerIdentity | undefined,
 ) {
-  const ownership = assessTmuxTeardownOwnership(
+  const assessment = assessTmuxTeardownOwnership(
     pane as PsychePane & Record<string, unknown>,
     panes as Array<PsychePane & Record<string, unknown>>,
     currentGeneration,
   );
+  const { ownership } = assessment;
   if (ownership === 'stale-generation') {
     // The exact config-CAS that invoked this callback removes only this old
     // record. A reused ID in the new server must never receive a kill command.
@@ -115,13 +116,13 @@ async function tearDownOwnedPane(
     // after a server restart. Only remove the record when every resource is
     // already proven absent; never issue a kill based on that ID alone.
     return verifyFullPaneAbsent({
-      target: pane,
+      target: assessment.target,
       probePane: (paneId) => probeTmuxPanePresence(paneId),
       probeWindow: probeTmuxWindowPresence,
     });
   }
   return tearDownFullPaneWithVerification({
-    target: pane,
+    target: assessment.target,
     probePane: (paneId) => probeTmuxPanePresence(paneId),
     killPane: (paneId) => {
       execSync(`tmux kill-pane -t '${paneId}'`, {

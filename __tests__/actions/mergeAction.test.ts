@@ -127,6 +127,14 @@ describe('merge sibling teardown', () => {
       savePanes: vi.fn(),
       removePaneIdentitiesFromConfig: removePaneIdentitiesFromConfigMock,
     };
+    removePaneIdentitiesFromConfigMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const beforeRemove = args[1] as undefined | ((
+        panes?: readonly PsychePane[],
+        exactPanes?: readonly PsychePane[],
+      ) => Promise<void> | void);
+      await beforeRemove?.([pane, sibling], [sibling]);
+      return [pane];
+    });
 
     const confirmation = await mergePane(pane, context);
     expect(confirmation).toMatchObject({ type: 'confirm', title: 'Sibling Agents Active' });
@@ -138,7 +146,7 @@ describe('merge sibling teardown', () => {
     });
     expect(result.message).toContain('retained');
     expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
-    expect(removePaneIdentitiesFromConfigMock).not.toHaveBeenCalled();
+    expect(removePaneIdentitiesFromConfigMock).toHaveBeenCalledOnce();
     expect(executeMergeMock).not.toHaveBeenCalled();
   });
 
@@ -164,6 +172,7 @@ describe('merge sibling teardown', () => {
       slug: 'feature-a2',
       paneId: '%2',
       devWindowId: '@8',
+      devTmuxServerIdentity: pane.tmuxServerIdentity,
       devStatus: 'running',
     };
     let siblingPaneLive = true;
@@ -183,7 +192,12 @@ describe('merge sibling teardown', () => {
       order.push('kill-pane');
       siblingPaneLive = false;
     });
-    removePaneIdentitiesFromConfigMock.mockImplementation(async () => {
+    removePaneIdentitiesFromConfigMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const beforeRemove = args[1] as undefined | ((
+        panes?: readonly PsychePane[],
+        exactPanes?: readonly PsychePane[],
+      ) => Promise<void> | void);
+      await beforeRemove?.([pane, sibling], [sibling]);
       order.push('remove-record');
       return [pane];
     });
@@ -202,5 +216,90 @@ describe('merge sibling teardown', () => {
     expect(tmuxServiceMock.killWindow).toHaveBeenCalledWith('@8');
     expect(tmuxServiceMock.killPane).toHaveBeenCalledWith('%2');
     expect(order).toEqual(['kill-window', 'kill-pane', 'remove-record']);
+  });
+
+  it('tears down a dev window added after the merge snapshot before removing its sibling record', async () => {
+    const { mergePane } = await import('../../src/actions/implementations/mergeAction.js');
+    const generation = {
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    };
+    const pane: PsychePane = {
+      id: 'psyche-owner',
+      slug: 'feature',
+      prompt: '',
+      paneId: '%1',
+      worktreePath: '/repo/.psyche/worktrees/feature',
+      branchName: 'feature',
+      tmuxServerIdentity: generation,
+    };
+    const sibling: PsychePane = {
+      ...pane,
+      id: 'psyche-sibling',
+      slug: 'feature-a2',
+      paneId: '%2',
+    };
+    const freshSibling: PsychePane = {
+      ...sibling,
+      devWindowId: '@new-dev',
+      devPaneId: '%new-dev',
+      devTmuxServerIdentity: generation,
+      devStatus: 'running',
+    };
+    let siblingPaneLive = true;
+    let devPaneLive = true;
+    let devWindowLive = true;
+    const order: string[] = [];
+    tmuxServiceMock.probePanePresence.mockImplementation(async (paneId: string) => {
+      if (paneId === '%new-dev') return devPaneLive ? 'present' : 'absent';
+      return paneId === '%2' && siblingPaneLive ? 'present' : 'absent';
+    });
+    tmuxServiceMock.probeWindowPresence.mockImplementation(async (windowId: string) => (
+      windowId === '@new-dev' && devWindowLive ? 'present' : 'absent'
+    ));
+    tmuxServiceMock.killPane.mockImplementation(async (paneId: string) => {
+      if (paneId === '%new-dev') {
+        order.push('kill-dev-pane');
+        devPaneLive = false;
+      } else {
+        order.push('kill-sibling-pane');
+        siblingPaneLive = false;
+      }
+    });
+    tmuxServiceMock.killWindow.mockImplementation(async () => {
+      order.push('kill-dev-window');
+      devWindowLive = false;
+    });
+    removePaneIdentitiesFromConfigMock.mockImplementationOnce(async (...args: unknown[]) => {
+      const beforeRemove = args[1] as undefined | ((
+        panes?: readonly PsychePane[],
+        exactPanes?: readonly PsychePane[],
+      ) => Promise<void> | void);
+      // This is the config-lock callback. It exposes a new dev claim that did
+      // not exist in context.panes when merge initially selected siblings.
+      await beforeRemove?.([pane, freshSibling], [freshSibling]);
+      order.push('remove-record');
+      return [pane];
+    });
+    const context = {
+      panes: [pane, sibling],
+      sessionName: 'psyche-test',
+      projectName: 'repo',
+      savePanes: vi.fn(),
+      removePaneIdentitiesFromConfig: removePaneIdentitiesFromConfigMock,
+    };
+
+    const confirmation = await mergePane(pane, context);
+    const result = await confirmation.onConfirm!();
+
+    expect(result).toMatchObject({ type: 'confirm', title: 'Merge Worktree' });
+    expect(order).toEqual([
+      'kill-dev-pane',
+      'kill-dev-window',
+      'kill-sibling-pane',
+      'remove-record',
+    ]);
   });
 });

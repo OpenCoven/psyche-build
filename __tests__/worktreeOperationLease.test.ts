@@ -356,7 +356,7 @@ describe('worktree operation lease', () => {
         createNonce: () => 'first-owner',
       },
     );
-    await first.trackChildProcess(303);
+    const child = await first.trackChildProcess(303);
     childAlive = false;
 
     const recovered = await acquireWorktreeOperationLease(
@@ -393,19 +393,16 @@ describe('worktree operation lease', () => {
         createNonce: () => 'deferred-owner',
       },
     );
-    await first.trackChildProcess(303);
+    const child = await first.trackChildProcess(303);
 
     // Production callers release once from their finally block. The parent
     // process remains alive, so recovery must be driven by the tracked child,
     // not a second release call after it exits.
     await first.release();
-    expect(JSON.parse(readFileSync(
-      join(lockDirFor(projectRoot, worktreePath), 'lease.json'),
-      'utf8',
-    ))).toMatchObject({
-      nonce: 'deferred-owner',
-      releaseRequested: true,
-    });
+    const deferredLockDir = lockDirFor(projectRoot, worktreePath);
+    expect(existsSync(
+      join(deferredLockDir, 'release-requested.deferred-owner'),
+    )).toBe(true);
 
     await expect(acquireWorktreeOperationLease(
       { projectRoot, worktreePath, operation: 'resume' },
@@ -427,6 +424,9 @@ describe('worktree operation lease', () => {
     )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
 
     childAlive = false;
+    await first.clearChildProcess(child);
+    expect(existsSync(deferredLockDir)).toBe(false);
+
     const contender = await acquireWorktreeOperationLease(
       { projectRoot, worktreePath, operation: 'resume' },
       {
@@ -442,6 +442,70 @@ describe('worktree operation lease', () => {
     );
 
     expect(contender.nonce).toBe('contender-after-child-exit');
+    await contender.release();
+  });
+
+  it('keeps a deferred release sticky when pending-child cleanup commits a stale record', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        getProcessStartIdentity: (pid) => pid === 101 ? 'owner-start' : undefined,
+        createNonce: () => 'sticky-owner',
+      },
+    );
+    await first.preparePendingGitMutation({
+      nonce: 'sticky-pending',
+      deadline: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    let releasePendingClear!: () => void;
+    let allowPendingClear!: () => void;
+    const pendingClearRead = new Promise<void>((resolve) => {
+      releasePendingClear = resolve;
+    });
+    const pendingClearMayCommit = new Promise<void>((resolve) => {
+      allowPendingClear = resolve;
+    });
+    const clearPending = clearPendingGitMutationLease(
+      { lockDir: first.lockDir, leaseNonce: first.nonce },
+      {
+        mutationNonce: 'sticky-pending',
+        beforeReplace: async () => {
+          releasePendingClear();
+          await pendingClearMayCommit;
+        },
+      },
+    );
+
+    // The clear operation has read the old record but has not replaced it.
+    // Releasing now was the reviewer reproduction: a later stale replacement
+    // used to erase releaseRequested and strand this live owner lease.
+    await pendingClearRead;
+    await first.release();
+    expect(existsSync(
+      join(first.lockDir, 'release-requested.sticky-owner'),
+    )).toBe(true);
+
+    allowPendingClear();
+    await clearPending;
+    expect(existsSync(first.lockDir)).toBe(false);
+
+    const contender = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'resume' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 101 || pid === 202,
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'owner-start' : pid === 202 ? 'contender-start' : undefined
+        ),
+        createNonce: () => 'sticky-contender',
+      },
+    );
+    expect(contender.nonce).toBe('sticky-contender');
+    await first.release();
     await contender.release();
   });
 

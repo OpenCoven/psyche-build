@@ -1676,11 +1676,12 @@ export async function killBridgePane(
         );
       }
 
-      const ownership = assessTmuxTeardownOwnership(
+      const assessment = assessTmuxTeardownOwnership(
         current as PsychePane & Record<string, unknown>,
         panes as Array<PsychePane & Record<string, unknown>>,
         (deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity)(),
       );
+      const { ownership } = assessment;
       if (ownership === 'unverified-generation' || ownership === 'ambiguous') {
         throw bridgeError(
           ownership === 'ambiguous' ? 'pane_ownership_ambiguous' : 'tmux_generation_unverified',
@@ -1707,13 +1708,7 @@ export async function killBridgePane(
 
       if (ownership === 'legacy') {
         const teardown = await verifyFullPaneAbsent({
-          target: {
-            paneId: expectedIdentity.paneId,
-            testPaneId: current.testPaneId,
-            testWindowId: current.testWindowId,
-            devPaneId: current.devPaneId,
-            devWindowId: current.devWindowId,
-          },
+          target: assessment.target,
           probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
           probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
         });
@@ -1732,13 +1727,7 @@ export async function killBridgePane(
         }
       } else if (ownership !== 'stale-generation') {
         const teardown = await tearDownFullPaneWithVerification({
-          target: {
-            paneId: expectedIdentity.paneId,
-            testPaneId: current.testPaneId,
-            testWindowId: current.testWindowId,
-            devPaneId: current.devPaneId,
-            devWindowId: current.devWindowId,
-          },
+          target: assessment.target,
           probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
           killPane: (targetPaneId) => deps.killTmuxPane(targetPaneId),
           probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
