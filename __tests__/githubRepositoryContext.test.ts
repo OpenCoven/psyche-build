@@ -135,7 +135,8 @@ describe('readRepositoryContext', () => {
     const { runner, calls } = createRunner({
       'git\0branch\0--show-current': { stdout: `${branch}\n` },
       [`git\0config\0branch.${branch}.remote`]: { stdout: `${remoteName}\r\n` },
-      'git\0remote': { stdout: `${remoteName}\r\n` },
+      'git\0remote': { stdout: `origin\n${remoteName}\r\n` },
+      'git\0remote\0get-url\0origin': { stdout: 'https://github.com/OpenCoven/origin-repo.git\n' },
       [`git\0remote\0get-url\0${remoteName}`]: { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
     });
 
@@ -145,6 +146,29 @@ describe('readRepositoryContext', () => {
     expect(context.upstreamRemote).toBe(remoteName);
     expect(context.rawRemotes).toEqual([
       { name: remoteName, url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: 'origin', url: 'https://github.com/OpenCoven/origin-repo.git' },
+    ]);
+    expect(context.remotes).toEqual([
+      {
+        name: remoteName,
+        rawUrl: 'https://github.com/OpenCoven/psyche-build.git',
+        repository: {
+          host: 'github.com',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://github.com/OpenCoven/psyche-build',
+        },
+      },
+      {
+        name: 'origin',
+        rawUrl: 'https://github.com/OpenCoven/origin-repo.git',
+        repository: {
+          host: 'github.com',
+          owner: 'OpenCoven',
+          name: 'origin-repo',
+          url: 'https://github.com/OpenCoven/origin-repo',
+        },
+      },
     ]);
     expect(calls).toEqual([
       {
@@ -161,6 +185,11 @@ describe('readRepositoryContext', () => {
         command: 'git',
         args: ['remote'],
         options: { cwd: worktreePath },
+      },
+      {
+        command: 'git',
+        args: ['remote', 'get-url', 'origin'],
+        options: { cwd: worktreePath, allowFailure: true },
       },
       {
         command: 'git',

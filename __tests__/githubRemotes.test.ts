@@ -16,9 +16,22 @@ function createRemote(name: string, rawUrl: string, host = 'github.com'): GitHub
 
 describe('normalizeGitHubRemote', () => {
   it('normalizes supported GitHub remote URL formats to canonical repository identities', () => {
-    expect(normalizeGitHubRemote(' origin ', 'https://GitHub.COM/OpenCoven/psyche-build.git')).toEqual({
+    const nbspName = '\u00a0origin\u00a0';
+
+    expect(normalizeGitHubRemote('origin', 'https://GitHub.COM/OpenCoven/psyche-build.git')).toEqual({
       name: 'origin',
       rawUrl: 'https://GitHub.COM/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'github.com',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://github.com/OpenCoven/psyche-build',
+      },
+    });
+
+    expect(normalizeGitHubRemote(nbspName, 'https://github.com/OpenCoven/psyche-build.git')).toEqual({
+      name: nbspName,
+      rawUrl: 'https://github.com/OpenCoven/psyche-build.git',
       repository: {
         host: 'github.com',
         owner: 'OpenCoven',
@@ -146,6 +159,11 @@ describe('normalizeGitHubRemote', () => {
     const invalidInputs: Array<[string, string]> = [
       ['', 'https://github.com/OpenCoven/psyche-build.git'],
       ['   ', 'https://github.com/OpenCoven/psyche-build.git'],
+      [' origin', 'https://github.com/OpenCoven/psyche-build.git'],
+      ['origin ', 'https://github.com/OpenCoven/psyche-build.git'],
+      ['\torigin', 'https://github.com/OpenCoven/psyche-build.git'],
+      ['origin\t', 'https://github.com/OpenCoven/psyche-build.git'],
+      ['origin\u000b', 'https://github.com/OpenCoven/psyche-build.git'],
       ['ori\ngin', 'https://github.com/OpenCoven/psyche-build.git'],
       ['origin', ' https://github.com/OpenCoven/psyche-build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git '],

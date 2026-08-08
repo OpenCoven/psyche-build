@@ -1,5 +1,6 @@
 import {
   compareText,
+  isValidGitRemoteName,
   normalizeGitHubRemote,
   orderGitHubRemotes,
   type GitHubRemote,
@@ -172,7 +173,7 @@ async function runRequiredGitCommand(
 }
 
 function isValidRemoteName(name: string): boolean {
-  return name.length > 0 && !ASCII_WHITESPACE_OR_CONTROL.test(name);
+  return isValidGitRemoteName(name);
 }
 
 function parseRequiredValue(stdout: string): string | null {
