@@ -10,6 +10,8 @@ const panes = await import(pathToFileURL(join(panesRoot, 'pane-tree.mjs')).href)
 const entry = await import(pathToFileURL(join(panesRoot, 'pane-entry.js')).href);
 
 describe('Tauri physical pane tree', () => {
+  const minimums = { width: 320, height: 120, separator: 6 };
+
   test('exposes every pane-tree API through the browser entrypoint', () => {
     expect(Object.keys(entry).sort()).toEqual([
       'canFit',
@@ -35,6 +37,9 @@ describe('Tauri physical pane tree', () => {
   test('inserts panes below a leaf without mutating the existing tree', () => {
     const leafA = panes.createLeaf('leaf-a', 'thread-a');
     const leafB = panes.createLeaf('leaf-b', 'thread-b');
+
+    expect(panes.insertBelow(null, 'missing', leafA, 'split-unused')).toBe(leafA);
+
     const firstTree = panes.insertBelow(leafA, 'leaf-a', leafB, 'split-1');
 
     expect(firstTree).toEqual({
@@ -110,9 +115,20 @@ describe('Tauri physical pane tree', () => {
       'split-1',
     );
 
-    expect(panes.canFit(tree, 319, 246)).toBe(false);
-    expect(panes.canFit(tree, 320, 245)).toBe(false);
-    expect(panes.canFit(tree, 320, 246)).toBe(true);
+    expect(panes.canFit(tree, { x: 0, y: 0, width: 319, height: 246 }, minimums)).toBe(false);
+    expect(panes.canFit(tree, { x: 0, y: 0, width: 320, height: 245 }, minimums)).toBe(false);
+    expect(panes.canFit(tree, { x: 0, y: 0, width: 320, height: 246 }, minimums)).toBe(true);
+
+    const customMinimums = { width: 400, height: 100, separator: 10 };
+    expect(
+      panes.canFit(tree, { x: 5, y: 10, width: 400, height: 210 }, customMinimums),
+    ).toBe(true);
+    expect(
+      panes.canFit(tree, { x: 5, y: 10, width: 399, height: 210 }, customMinimums),
+    ).toBe(false);
+    expect(
+      panes.canFit(tree, { x: 5, y: 10, width: 400, height: 209 }, customMinimums),
+    ).toBe(false);
   });
 
   test('resizes a split immutably and clamps its ratio', () => {
@@ -142,19 +158,90 @@ describe('Tauri physical pane tree', () => {
       0.9,
     );
 
-    expect(panes.layoutRects(tree, 800, 300)).toEqual({
+    expect(
+      panes.layoutRects(
+        tree,
+        { x: 10, y: 20, width: 800, height: 300 },
+        minimums,
+      ),
+    ).toEqual({
       leaves: [
-        { id: 'leaf-a', x: 0, y: 0, width: 800, height: 174 },
-        { id: 'leaf-b', x: 0, y: 180, width: 800, height: 120 },
+        {
+          leafId: 'leaf-a',
+          threadId: 'thread-a',
+          x: 10,
+          y: 20,
+          width: 800,
+          height: 174,
+        },
+        {
+          leafId: 'leaf-b',
+          threadId: 'thread-b',
+          x: 10,
+          y: 200,
+          width: 800,
+          height: 120,
+        },
       ],
       splits: [
         {
-          id: 'split-1',
-          x: 0,
-          y: 174,
+          splitId: 'split-1',
+          x: 10,
+          y: 194,
           width: 800,
           height: 6,
-          ratio: 174 / 294,
+          ratio: 0.5918367346938775,
+        },
+      ],
+    });
+  });
+
+  test('lays out panes with caller-provided minimums', () => {
+    const customMinimums = { width: 200, height: 50, separator: 10 };
+    const tree = panes.resizeSplit(
+      panes.insertBelow(
+        panes.createLeaf('leaf-a', 'thread-a'),
+        'leaf-a',
+        panes.createLeaf('leaf-b', 'thread-b'),
+        'split-1',
+      ),
+      'split-1',
+      0.8,
+    );
+
+    expect(
+      panes.layoutRects(
+        tree,
+        { x: 3, y: 7, width: 400, height: 150 },
+        customMinimums,
+      ),
+    ).toEqual({
+      leaves: [
+        {
+          leafId: 'leaf-a',
+          threadId: 'thread-a',
+          x: 3,
+          y: 7,
+          width: 400,
+          height: 90,
+        },
+        {
+          leafId: 'leaf-b',
+          threadId: 'thread-b',
+          x: 3,
+          y: 107,
+          width: 400,
+          height: 50,
+        },
+      ],
+      splits: [
+        {
+          splitId: 'split-1',
+          x: 3,
+          y: 97,
+          width: 400,
+          height: 10,
+          ratio: 90 / 140,
         },
       ],
     });
