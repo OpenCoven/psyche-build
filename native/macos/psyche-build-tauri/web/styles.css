@@ -756,6 +756,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border-bottom: 1px solid var(--border);
   padding: 0 6px;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: thin;
 }
 .tab {
