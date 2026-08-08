@@ -73,6 +73,17 @@ describe('normalizeGitHubRemote', () => {
       },
     });
 
+    expect(normalizeGitHubRemote('enterprise-ssh-22', 'ssh://git@ghe.example.test:22/OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-ssh-22',
+      rawUrl: 'ssh://git@ghe.example.test:22/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test:22',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test:22/OpenCoven/psyche-build',
+      },
+    });
+
     expect(normalizeGitHubRemote('enterprise-https-443', 'https://ghe.example.test:443/OpenCoven/psyche-build.git')).toEqual({
       name: 'enterprise-https-443',
       rawUrl: 'https://ghe.example.test:443/OpenCoven/psyche-build.git',
@@ -92,6 +103,17 @@ describe('normalizeGitHubRemote', () => {
         owner: 'OpenCoven',
         name: 'psyche-build',
         url: 'https://ghe.example.test:8443/OpenCoven/psyche-build',
+      },
+    });
+
+    expect(normalizeGitHubRemote('enterprise-https-65535', 'https://ghe.example.test:65535/OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-https-65535',
+      rawUrl: 'https://ghe.example.test:65535/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test:65535',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test:65535/OpenCoven/psyche-build',
       },
     });
   });
@@ -151,6 +173,22 @@ describe('normalizeGitHubRemote', () => {
 
     for (const [name, rawUrl] of invalidInputs) {
       expect(normalizeGitHubRemote(name, rawUrl)).toBeNull();
+    }
+  });
+
+  it('rejects enterprise remotes with invalid explicit ports', () => {
+    const invalidPorts = ['0', '022', '65536', '99999', '+22', '-22', '22.0', '22a'];
+
+    for (const port of invalidPorts) {
+      expect(normalizeGitHubRemote(
+        'https-port',
+        `https://ghe.example.test:${port}/OpenCoven/psyche-build.git`,
+      )).toBeNull();
+
+      expect(normalizeGitHubRemote(
+        'ssh-port',
+        `ssh://git@ghe.example.test:${port}/OpenCoven/psyche-build.git`,
+      )).toBeNull();
     }
   });
 });

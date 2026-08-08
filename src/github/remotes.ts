@@ -164,7 +164,7 @@ function parseHostAndPort(value: string): { host: string; hostname: string; port
 
   const [, rawHostname, rawPort] = match;
   const hostname = rawHostname.toLowerCase();
-  if (!hostname) {
+  if (!hostname || (rawPort !== undefined && !isCanonicalPort(rawPort))) {
     return null;
   }
 
@@ -173,6 +173,19 @@ function parseHostAndPort(value: string): { host: string; hostname: string; port
     hostname,
     port: rawPort ?? null,
   };
+}
+
+function isCanonicalPort(rawPort: string): boolean {
+  if (!/^[1-9][0-9]*$/u.test(rawPort)) {
+    return false;
+  }
+
+  if (rawPort.length > 1 && rawPort.startsWith('0')) {
+    return false;
+  }
+
+  const port = Number(rawPort);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
 function parseRepositoryPath(rawPath: string): { owner: string; name: string } | null {
