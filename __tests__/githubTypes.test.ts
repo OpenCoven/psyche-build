@@ -74,6 +74,20 @@ describe('GitHub domain validation', () => {
     expect(account).not.toHaveProperty('token');
   });
 
+  it('accepts gh account responses with api url and preferred html_url', () => {
+    expect(parseGitHubAccount({
+      login: 'BunsDev',
+      id: 123,
+      url: 'https://api.github.com/users/BunsDev',
+      html_url: 'https://github.com/BunsDev',
+    }, 'GitHub.COM')).toEqual({
+      host: 'github.com',
+      login: 'BunsDev',
+      id: '123',
+      source: 'gh',
+    });
+  });
+
   it('parses a bounded pull request overview', () => {
     const overview = parsePullRequestOverview(
       createOverviewValue(),
@@ -225,6 +239,40 @@ describe('GitHub domain validation', () => {
     });
   });
 
+  it('accepts legacy checks with empty workflow and link strings', () => {
+    const overview = parsePullRequestOverview(
+      createOverviewValue(),
+      repository,
+      null,
+      [{
+        bucket: 'pass',
+        link: '',
+        name: 'legacy-status',
+        state: 'SUCCESS',
+        workflow: '',
+      }],
+      [{
+        bucket: 'pass',
+        link: '',
+        name: 'legacy-status',
+        state: 'SUCCESS',
+        workflow: '',
+      }],
+      '2026-08-06T18:01:00Z',
+    );
+
+    expect(overview.checks).toEqual({
+      total: 1,
+      pending: 0,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      cancelled: 0,
+      required: { total: 1, pending: 0, passed: 1, failed: 0 },
+      optional: { total: 0, pending: 0, passed: 0, failed: 0 },
+    });
+  });
+
   it('parses repository permissions and rejects malformed permission payloads', () => {
     expect(parseRepositoryPermissions(permissions)).toEqual(permissions);
     expect(parseRepositoryPermissions(null)).toBeNull();
@@ -365,6 +413,38 @@ describe('GitHub domain validation', () => {
     expect(() => parsePullRequestOverview(
       createOverviewValue({
         commits: ['abc123'],
+      }),
+      repository,
+      null,
+      [],
+      [],
+      '2026-08-06T18:01:00Z',
+    )).toThrowError(new Error('invalid pull request overview'));
+  });
+
+  it('parses mixed user and team review requests', () => {
+    const overview = parsePullRequestOverview(
+      createOverviewValue({
+        reviewRequests: [
+          { login: 'reviewer' },
+          { slug: 'platform', name: 'Platform Team' },
+          { slug: '', name: 'Design Team' },
+        ],
+      }),
+      repository,
+      null,
+      [],
+      [],
+      '2026-08-06T18:01:00Z',
+    );
+
+    expect(overview.requestedReviewers).toEqual(['reviewer', 'platform', 'Design Team']);
+  });
+
+  it('rejects review request entries with neither login nor team identifier', () => {
+    expect(() => parsePullRequestOverview(
+      createOverviewValue({
+        reviewRequests: [{ name: '' }],
       }),
       repository,
       null,

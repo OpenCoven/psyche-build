@@ -125,13 +125,9 @@ export function parseGitHubAccount(value: unknown, host: string): GitHubAccountR
       getOwnDataProperty(record, 'login', invalidGitHubAccount),
       invalidGitHubAccount,
     );
-    const url = requireHttpsUrl(
-      getOwnDataProperty(record, 'url', invalidGitHubAccount),
-      invalidGitHubAccount,
-    );
-    if (new URL(url).hostname.toLowerCase() !== normalizedHost) {
-      invalidGitHubAccount();
-    }
+    const publicUrl = getOptionalOwnDataProperty(record, 'html_url', invalidGitHubAccount);
+    const apiUrl = getOptionalOwnDataProperty(record, 'url', invalidGitHubAccount);
+    validateGitHubAccountUrls(publicUrl, apiUrl);
 
     const idValue = getOptionalOwnDataProperty(record, 'id', invalidGitHubAccount);
     const parsed: GitHubAccountRef = {
@@ -235,7 +231,7 @@ export function parsePullRequestOverview(
       ),
       labels: parseLabels(getOwnDataProperty(record, 'labels', invalidPullRequestOverview)),
       assignees: parseLoginList(getOwnDataProperty(record, 'assignees', invalidPullRequestOverview)),
-      requestedReviewers: parseLoginList(
+      requestedReviewers: parseReviewRequests(
         getOwnDataProperty(record, 'reviewRequests', invalidPullRequestOverview),
       ),
       viewerPermissions: parsedPermissions,
@@ -492,6 +488,31 @@ function parseLoginList(value: unknown): readonly string[] {
   });
 }
 
+function parseReviewRequests(value: unknown): readonly string[] {
+  return requireArray(value, invalidPullRequestOverview).map((entry) => {
+    const record = requireRecord(entry, invalidPullRequestOverview);
+    const login = getOptionalOwnDataProperty(record, 'login', invalidPullRequestOverview);
+    if (login !== MISSING_PROPERTY) {
+      return requireNonEmptyString(login, invalidPullRequestOverview);
+    }
+
+    const slug = getOptionalOwnDataProperty(record, 'slug', invalidPullRequestOverview);
+    if (slug !== MISSING_PROPERTY) {
+      const parsedSlug = requireString(slug, invalidPullRequestOverview);
+      if (parsedSlug.length > 0) {
+        return parsedSlug;
+      }
+    }
+
+    const name = getOptionalOwnDataProperty(record, 'name', invalidPullRequestOverview);
+    if (name !== MISSING_PROPERTY) {
+      return requireNonEmptyString(name, invalidPullRequestOverview);
+    }
+
+    return invalidPullRequestOverview();
+  });
+}
+
 function parseChecks(allChecks: unknown, requiredChecks: unknown): PullRequestCheckSummary {
   const parsedAllChecks = requireArray(allChecks, invalidPullRequestOverview).map((entry) =>
     parseCheck(entry, invalidPullRequestOverview),
@@ -543,9 +564,9 @@ function parseCheck(value: unknown, onError: ErrorFactory): ParsedCheck {
     ['pending', 'pass', 'fail', 'skipping', 'cancel'] as const,
     onError,
   );
-  const workflow = requireNonEmptyString(getOwnDataProperty(record, 'workflow', onError), onError);
+  const workflow = requireString(getOwnDataProperty(record, 'workflow', onError), onError);
   const name = requireNonEmptyString(getOwnDataProperty(record, 'name', onError), onError);
-  const link = requireHttpsUrl(getOwnDataProperty(record, 'link', onError), onError);
+  const link = requireString(getOwnDataProperty(record, 'link', onError), onError);
   requireNonEmptyString(getOwnDataProperty(record, 'state', onError), onError);
 
   return {
@@ -568,6 +589,21 @@ function parseCommitCount(value: unknown): number {
 
 function buildRequiredCheckKey(workflow: string, name: string, link: string): string {
   return `${workflow}\0${name}\0${link}`;
+}
+
+function validateGitHubAccountUrls(
+  publicUrl: unknown | typeof MISSING_PROPERTY,
+  apiUrl: unknown | typeof MISSING_PROPERTY,
+): void {
+  if (publicUrl !== MISSING_PROPERTY) {
+    requireHttpsUrl(publicUrl, invalidGitHubAccount);
+  }
+  if (apiUrl !== MISSING_PROPERTY) {
+    requireHttpsUrl(apiUrl, invalidGitHubAccount);
+  }
+  if (publicUrl === MISSING_PROPERTY && apiUrl === MISSING_PROPERTY) {
+    invalidGitHubAccount();
+  }
 }
 
 function getOwnDataProperty(record: PlainRecord, key: string, onError: ErrorFactory): unknown {
