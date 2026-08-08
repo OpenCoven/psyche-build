@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 interface OwnerRecord {
@@ -18,6 +18,7 @@ export interface OwnerLock {
 export interface OwnerLockOptions {
   pid?: number;
   isProcessAlive?: (pid: number) => boolean;
+  processStartedAt?: (pid: number) => number | undefined;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -31,9 +32,19 @@ export async function acquireOwnerLock(
   const epochPath = path.join(runtimeDir, 'owner-epoch.json');
   const pid = options.pid ?? process.pid;
   const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+  const processStartedAt = options.processStartedAt;
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   await mkdir(runtimeDir, { recursive: true });
   const nonce = randomUUID();
+
+  const isReusedPid = (previous: OwnerRecord): boolean => {
+    if (!processStartedAt) return false;
+    const startedAt = processStartedAt(previous.pid);
+    if (typeof startedAt !== 'number') return false;
+    const acquiredAt = Date.parse(previous.acquiredAt);
+    if (Number.isNaN(acquiredAt)) return false;
+    return startedAt > acquiredAt;
+  };
 
   while (true) {
     const candidateDir = path.join(runtimeDir, `owner.candidate.${nonce}`);
@@ -49,10 +60,14 @@ export async function acquireOwnerLock(
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        await sleep(10);
+        continue;
+      }
       if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-      await rm(candidateDir, { recursive: true });
+      await rm(candidateDir, { recursive: true, force: true });
       const previous = JSON.parse(await readFile(recordPath, 'utf8')) as OwnerRecord;
-      if (isProcessAlive(previous.pid)) {
+      if (isProcessAlive(previous.pid) && !isReusedPid(previous)) {
         throw new Error(`psyche control plane already owned by pid ${previous.pid}`);
       }
       const quarantine = path.join(runtimeDir, `owner.stale.${randomUUID()}`);
@@ -62,7 +77,7 @@ export async function acquireOwnerLock(
         if ((renameError as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw renameError;
       }
-      await rm(quarantine, { recursive: true });
+      await rm(quarantine, { recursive: true, force: true });
       await sleep(10);
     }
   }
@@ -89,6 +104,8 @@ export async function acquireOwnerLock(
     await rm(lockDir, { recursive: true, force: true });
     throw error;
   }
+
+  await reapOrphans(runtimeDir, nonce);
 
   return {
     epoch,
@@ -127,4 +144,19 @@ function defaultIsProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function reapOrphans(runtimeDir: string, ownNonce: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(runtimeDir);
+  } catch {
+    return;
+  }
+  const ownCandidate = `owner.candidate.${ownNonce}`;
+  await Promise.all(entries
+    .filter((entry) =>
+      (entry.startsWith('owner.candidate.') || entry.startsWith('owner.stale.'))
+      && entry !== ownCandidate)
+    .map((entry) => rm(path.join(runtimeDir, entry), { recursive: true, force: true })));
 }

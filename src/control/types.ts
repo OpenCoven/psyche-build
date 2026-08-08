@@ -125,6 +125,7 @@ export interface ControlSnapshot {
   leases: Record<string, {
     paneId: string;
     actorId: string;
+    actorKind: 'human' | 'psyche';
     taskId?: string;
     revision: number;
     expiresAt: string;

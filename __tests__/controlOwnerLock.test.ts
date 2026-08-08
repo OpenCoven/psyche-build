@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -90,5 +90,37 @@ describe('project owner lock', () => {
     const lock = await acquireOwnerLock(root, { pid: 101, isProcessAlive: () => false });
     await rm(path.join(root, '.psyche', 'runtime', 'owner.lock'), { recursive: true, force: true });
     await expect(lock.release()).resolves.toBeUndefined();
+  });
+
+  it('reaps orphaned candidate and stale directories after acquiring the lock', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-owner-'));
+    roots.push(root);
+    const runtimeDir = path.join(root, '.psyche', 'runtime');
+    const candidateDir = path.join(runtimeDir, 'owner.candidate.stray');
+    const staleDir = path.join(runtimeDir, 'owner.stale.stray');
+    await mkdir(candidateDir, { recursive: true });
+    await mkdir(staleDir, { recursive: true });
+
+    const lock = await acquireOwnerLock(root, { pid: 101, isProcessAlive: () => false });
+
+    await expect(stat(candidateDir)).rejects.toThrow();
+    await expect(stat(staleDir)).rejects.toThrow();
+    await lock.release();
+  });
+
+  it('reclaims a live pid owner when the process started after the lock was acquired', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'psyche-owner-'));
+    roots.push(root);
+    const first = await acquireOwnerLock(root, { pid: 101, isProcessAlive: () => true });
+
+    const second = await acquireOwnerLock(root, {
+      pid: 202,
+      isProcessAlive: () => true,
+      processStartedAt: (pid) => (pid === 101 ? Date.now() + 60_000 : undefined),
+    });
+
+    expect(second.epoch).toBeGreaterThan(first.epoch);
+    await second.release();
+    await first.release();
   });
 });
