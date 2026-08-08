@@ -74,6 +74,9 @@
      *  Refreshed on boot and on project switch via `agent_skills`. */
     agentSkills: [],
   };
+  var paneLayouts = new Map();
+  var paneCounter = 0;
+  var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
 
   function handleVisibilityChange() {
     if (document.visibilityState === "hidden") saveWorkspaceNow();
@@ -114,6 +117,61 @@
   function activeWorkspaceRoot(project) {
     var worktree = selectedWorktree(project);
     return worktree ? worktree.path : (project && project.root);
+  }
+  function nextPaneId(prefix) {
+    paneCounter += 1;
+    return prefix + "-" + paneCounter;
+  }
+  function paneLayoutKey(projectId, worktreePath) {
+    return String(projectId || "") + "\u0000" + String(worktreePath || "");
+  }
+  function paneLayoutFor(projectId, worktreePath) {
+    return paneLayouts.get(paneLayoutKey(projectId, worktreePath)) || null;
+  }
+  function activePaneLayout() {
+    var project = activeProject();
+    return project ? paneLayoutFor(project.id, activeWorkspaceRoot(project)) : null;
+  }
+  function activatePaneLayoutFocus(project, worktreePath) {
+    project.selectedWorktreePath = worktreePath;
+    var layout = paneLayoutFor(project.id, worktreePath);
+    var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
+    var thread = leaf && findThread(leaf.threadId);
+    state.activeThreadId = thread ? thread.id : null;
+    if (thread) project.lastActiveThreadId = thread.id;
+    renderPaneWorkspace();
+  }
+  function measuredTerminalHost() {
+    var rect = terminalHost.getBoundingClientRect();
+    var styles = window.getComputedStyle(terminalHost);
+    var horizontalPadding = (parseFloat(styles.paddingLeft) || 0) +
+      (parseFloat(styles.paddingRight) || 0);
+    var verticalPadding = (parseFloat(styles.paddingTop) || 0) +
+      (parseFloat(styles.paddingBottom) || 0);
+    return {
+      x: 0,
+      y: 0,
+      width: Math.max(0, rect.width - horizontalPadding),
+      height: Math.max(0, rect.height - verticalPadding),
+    };
+  }
+  function preparePanePlacement(threadId, projectId, worktreePath) {
+    var key = paneLayoutKey(projectId, worktreePath);
+    var current = paneLayouts.get(key) || null;
+    var leaf = PsychePanes.createLeaf(nextPaneId("leaf"), threadId);
+    var root = current && current.root
+      ? PsychePanes.insertBelow(
+          current.root,
+          current.focusedLeafId,
+          leaf,
+          nextPaneId("split")
+        )
+      : leaf;
+    if (!PsychePanes.canFit(root, measuredTerminalHost(), PANE_MINIMUMS)) return null;
+    return { key: key, value: { root: root, focusedLeafId: leaf.id } };
+  }
+  function commitPanePlacement(placement) {
+    paneLayouts.set(placement.key, placement.value);
   }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
@@ -156,7 +214,10 @@
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
-    var threads = state.threads.filter(function (t) { return t.projectId === id && !t.hidden; });
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var threads = state.threads.filter(function (t) {
+      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden;
+    });
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
         ? project.lastActiveThreadId
@@ -165,9 +226,7 @@
       await focusThread(nextId);
     } else {
       state.activeThreadId = null;
-      Array.prototype.forEach.call(terminalHost.children, function (el) {
-        el.classList.remove("active");
-      });
+      renderPaneWorkspace();
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
@@ -482,7 +541,7 @@
     }
     handlePanelLayoutTransition(previousLayout, layout);
     requestAnimationFrame(function () {
-      fitActiveTerm();
+      scheduleVisiblePaneFit();
       syncBrowserBounds();
     });
   }
@@ -630,10 +689,18 @@
   function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
+    var worktreePath = opts.worktreePath || opts.projectRoot ||
+      (project && activeWorkspaceRoot(project));
+    var projectId = project ? project.id : null;
+    var placement = preparePanePlacement(id, projectId, worktreePath);
+    if (!placement) {
+      setStatus("Not enough space for another terminal pane", "warn");
+      return null;
+    }
     var thread = {
       id: id,
-      projectId: project ? project.id : null,
-      worktreePath: opts.projectRoot || (project && activeWorkspaceRoot(project)),
+      projectId: projectId,
+      worktreePath: worktreePath,
       name: opts.name || "thread " + (state.threads.length + 1),
       kind: opts.kind || "shell",
       command: opts.command,
@@ -645,7 +712,9 @@
       term: null,
       fit: null,
       host: null,
+      pane: null,
     };
+    commitPanePlacement(placement);
     state.threads.push(thread);
     refreshSidebar();
     refreshTabs();
@@ -814,10 +883,47 @@
   }
 
   function mountTerminal(thread) {
+    var pane = document.createElement("section");
+    pane.className = "terminal-pane";
+    pane.dataset.threadId = thread.id;
+    var header = document.createElement("header");
+    header.className = "terminal-pane-header";
+    var title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    title.textContent = thread.name;
+    var status = document.createElement("span");
+    status.className = "terminal-pane-status";
+    status.textContent = thread.status;
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "terminal-pane-close";
+    close.title = "Stop and close terminal";
+    close.setAttribute("aria-label", "Stop and close " + thread.name);
+    close.textContent = "×";
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeThread(thread.id);
+    });
+    header.appendChild(title);
+    header.appendChild(status);
+    header.appendChild(close);
+    var body = document.createElement("div");
+    body.className = "terminal-pane-body";
     var container = document.createElement("div");
     container.className = "term-instance";
     container.dataset.threadId = thread.id;
-    terminalHost.appendChild(container);
+    body.appendChild(container);
+    pane.appendChild(header);
+    pane.appendChild(body);
+    pane.addEventListener("pointerdown", function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    });
+    thread.pane = pane;
+    thread.host = container;
+    thread.paneTitle = title;
+    thread.paneStatus = status;
+    thread.paneClose = close;
+    renderPaneWorkspace();
 
     var term = new window.Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
@@ -880,7 +986,71 @@
 
     thread.term = term;
     thread.fit = fit;
-    thread.host = container;
+  }
+
+  function createPaneDivider(node, ratio) {
+    var divider = document.createElement("div");
+    divider.className = "terminal-pane-divider";
+    divider.dataset.splitId = node.id;
+    divider.setAttribute("role", "separator");
+    divider.setAttribute("aria-orientation", "horizontal");
+    divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
+    divider.tabIndex = 0;
+    return divider;
+  }
+
+  function renderPaneNode(node, splitRatios) {
+    if (node.type === "leaf") {
+      var thread = findThread(node.threadId);
+      return thread && thread.pane ? thread.pane : document.createDocumentFragment();
+    }
+    var ratio = splitRatios.get(node.id);
+    if (!Number.isFinite(ratio)) ratio = node.ratio;
+    var split = document.createElement("div");
+    split.className = "terminal-pane-split";
+    var first = document.createElement("div");
+    first.className = "terminal-pane-branch";
+    first.style.flexGrow = String(ratio);
+    first.appendChild(renderPaneNode(node.first, splitRatios));
+    var second = document.createElement("div");
+    second.className = "terminal-pane-branch";
+    second.style.flexGrow = String(1 - ratio);
+    second.appendChild(renderPaneNode(node.second, splitRatios));
+    split.appendChild(first);
+    split.appendChild(createPaneDivider(node, ratio));
+    split.appendChild(second);
+    return split;
+  }
+
+  function renderPaneWorkspace() {
+    if (!terminalHost) return;
+    terminalHost.replaceChildren();
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) {
+      renderTerminalEmptyState();
+      return;
+    }
+    var projected = PsychePanes.layoutRects(
+      layout.root,
+      measuredTerminalHost(),
+      PANE_MINIMUMS
+    );
+    var splitRatios = new Map();
+    projected.splits.forEach(function (split) {
+      splitRatios.set(split.splitId, split.ratio);
+    });
+    terminalHost.appendChild(renderPaneNode(layout.root, splitRatios));
+    projected.leaves.forEach(function (leaf) {
+      var thread = findThread(leaf.threadId);
+      if (!thread || !thread.pane) return;
+      thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
+      if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
+      if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
+      if (thread.paneClose) {
+        thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
+      }
+    });
+    scheduleVisiblePaneFit();
   }
 
   async function focusThread(id) {
@@ -895,14 +1065,17 @@
       state.activeProjectId = thread.projectId;
     }
     var project = findProject(thread.projectId);
-    if (project) project.lastActiveThreadId = id;
-
-    Array.prototype.forEach.call(terminalHost.children, function (el) {
-      el.classList.toggle("active", el.dataset.threadId === id);
-    });
+    if (project) {
+      project.lastActiveThreadId = id;
+      project.selectedWorktreePath = thread.worktreePath;
+    }
+    var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
+    var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
+    if (layout && leaf) layout.focusedLeafId = leaf.id;
+    renderPaneWorkspace();
     refreshSidebar();
     requestAnimationFrame(function () {
-      fitActiveTerm();
+      scheduleVisiblePaneFit();
       if (thread.term) thread.term.focus();
     });
 
@@ -916,13 +1089,30 @@
     return "warn";
   }
 
+  function detachThreadPane(thread) {
+    if (!thread) return null;
+    var key = paneLayoutKey(thread.projectId, thread.worktreePath);
+    var layout = paneLayouts.get(key);
+    if (!layout || !layout.root) return null;
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    if (!leaf) return null;
+    var removed = PsychePanes.removeLeaf(layout.root, leaf.id);
+    if (!removed.root) {
+      paneLayouts.delete(key);
+      return null;
+    }
+    layout.root = removed.root;
+    layout.focusedLeafId = removed.nextLeafId;
+    paneLayouts.set(key, layout);
+    var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
+    return nextLeaf ? nextLeaf.threadId : null;
+  }
+
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread) return;
+    var nextThreadId = detachThreadPane(thread);
     invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
-    if (thread.host && thread.host.parentNode) {
-      thread.host.parentNode.removeChild(thread.host);
-    }
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -931,19 +1121,15 @@
     if (state.activeThreadId === id) {
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
-      var siblings = state.threads.filter(function (t) {
-        return t.projectId === closingProjectId;
-      });
-      var next = siblings[siblings.length - 1] || state.threads[state.threads.length - 1] || null;
       state.activeThreadId = null;
-      if (next && (!options || options.focus !== false)) {
-        focusThread(next.id);
+      if (nextThreadId && (!options || options.focus !== false)) {
+        focusThread(nextThreadId);
       } else {
-        Array.prototype.forEach.call(terminalHost.children, function (el) {
-          el.classList.remove("active");
-        });
+        renderPaneWorkspace();
         setProjectStatus(findProject(closingProjectId), "");
       }
+    } else {
+      renderPaneWorkspace();
     }
     refreshSidebar();
     refreshTabs();
@@ -951,35 +1137,49 @@
 
   function hideThread(id) {
     var thread = findThread(id);
-    if (!thread) return false;
+    if (!thread || thread.hidden) return false;
+    var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
     if (state.activeThreadId === id) {
-      var replacement = state.threads.find(function (candidate) {
-        return candidate.id !== id && !candidate.hidden &&
-          candidate.projectId === thread.projectId && candidate.status !== "exited";
-      });
       state.activeThreadId = null;
-      if (replacement) focusThread(replacement.id);
-      else Array.prototype.forEach.call(terminalHost.children, function (el) {
-        el.classList.remove("active");
-      });
+      if (nextThreadId) focusThread(nextThreadId);
     }
+    renderPaneWorkspace();
     refreshSidebar();
     refreshTabs();
     return true;
   }
 
+  function reopenThread(id) {
+    var thread = findThread(id);
+    if (!thread || !thread.hidden) return false;
+    var placement = preparePanePlacement(thread.id, thread.projectId, thread.worktreePath);
+    if (!placement) {
+      setStatus("Not enough space to reopen this terminal pane", "warn");
+      return false;
+    }
+    thread.hidden = false;
+    commitPanePlacement(placement);
+    var project = findProject(thread.projectId);
+    if (project) {
+      state.activeProjectId = project.id;
+      project.selectedWorktreePath = thread.worktreePath;
+      project.lastActiveThreadId = thread.id;
+    }
+    state.activeThreadId = thread.id;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
+  }
+
   function reopenThreads(projectId, worktreePath) {
     var reopened = 0;
-    state.threads.forEach(function (thread) {
+    for (var i = 0; i < state.threads.length; i++) {
+      var thread = state.threads[i];
       if (thread.projectId === projectId && thread.worktreePath === worktreePath && thread.hidden) {
-        thread.hidden = false;
+        if (!reopenThread(thread.id)) break;
         reopened += 1;
       }
-    });
-    if (reopened) {
-      refreshSidebar();
-      refreshTabs();
     }
     return reopened;
   }
@@ -1048,13 +1248,24 @@
     if (event.key === "Escape") closeSessionContextMenu();
   });
 
-  function fitActiveTerm() {
-    var thread = findThread(state.activeThreadId);
-    if (!thread || !thread.fit) return;
-    try { thread.fit.fit(); } catch (_) {}
+  function scheduleVisiblePaneFit() {
+    requestAnimationFrame(function () {
+      var layout = activePaneLayout();
+      if (!layout || !layout.root) return;
+      var projected = PsychePanes.layoutRects(
+        layout.root,
+        measuredTerminalHost(),
+        PANE_MINIMUMS
+      );
+      projected.leaves.forEach(function (leaf) {
+        var thread = findThread(leaf.threadId);
+        if (!thread || !thread.fit) return;
+        try { thread.fit.fit(); } catch (_) {}
+      });
+    });
   }
   window.addEventListener("resize", function () {
-    fitActiveTerm();
+    scheduleVisiblePaneFit();
     syncBrowserBounds();
   });
 
@@ -1287,9 +1498,18 @@
         worktreeHead.disabled = Boolean(worktree.virtual);
         worktreeHead.addEventListener("click", async function () {
           if (worktree.virtual) return;
-          if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
-          project.selectedWorktreePath = worktree.path;
+          if (project.id !== state.activeProjectId) {
+            var previousWorktreePath = project.selectedWorktreePath;
+            project.selectedWorktreePath = worktree.path;
+            if (!(await setActiveProject(project.id))) {
+              project.selectedWorktreePath = previousWorktreePath;
+              return;
+            }
+          } else {
+            activatePaneLayoutFocus(project, worktree.path);
+          }
           worktree.collapsed = false;
+          renderPaneWorkspace();
           renderPanel(currentPanel());
           loadAgentSkills();
           refreshSidebar();
@@ -1329,6 +1549,7 @@
               run: async function () {
                 project.selectedWorktreePath = worktree.path;
                 if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+                renderPaneWorkspace();
                 ensureProjectPsyche(project);
                 refreshSidebar();
                 saveWorkspaceSoon();
@@ -1515,7 +1736,8 @@
   function renderTerminalEmptyState() {
     var existing = terminalHost.querySelector(".terminal-empty");
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
-    if (activeProjectThreads().length > 0) return;
+    var layout = activePaneLayout();
+    if (layout && layout.root) return;
     var empty = document.createElement("div");
     empty.className = "terminal-empty";
     empty.textContent = activeProject() ? "No terminal pane yet — opening Psyche…" : "Drop/open a project to begin";
@@ -1561,9 +1783,7 @@
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
-        Array.prototype.forEach.call(terminalHost.children, function (el) {
-          el.classList.remove("active");
-        });
+        renderPaneWorkspace();
         setStatus("no project — click + to open one", "");
       }
     }
@@ -1785,9 +2005,7 @@
           ? project.lastActiveThreadId
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
-      Array.prototype.forEach.call(terminalHost.children, function (element) {
-        element.classList.toggle("active", element.dataset.threadId === nextThreadId);
-      });
+      renderPaneWorkspace();
       restoreProjectLayout(project);
       // A stored browser-only layout hides the terminal area that owns the
       // editor. Change only the live surface; keep the project's saved layout.
@@ -1837,7 +2055,7 @@
     if (fileViewEl) fileViewEl.hidden = true;
     if (terminalHost) terminalHost.hidden = false;
     refreshTabs();
-    requestAnimationFrame(function () { fitActiveTerm(); });
+    requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;
   }
 
@@ -1865,7 +2083,7 @@
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
       refreshTabs();
-      requestAnimationFrame(function () { fitActiveTerm(); });
+      requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     }
     return true;
   }
@@ -2861,7 +3079,7 @@
       if (splitFrame) return;
       splitFrame = requestAnimationFrame(function () {
         splitFrame = 0;
-        fitActiveTerm();
+        scheduleVisiblePaneFit();
         syncBrowserBounds();
       });
     }

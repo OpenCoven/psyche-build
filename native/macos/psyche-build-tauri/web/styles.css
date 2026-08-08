@@ -857,15 +857,95 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   background: transparent;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 8px 12px 4px;
 }
-.term-instance {
-  position: absolute;
-  inset: 8px 12px 4px;
-  visibility: hidden;
+.terminal-pane-split,
+.terminal-pane-branch {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
-.term-instance.active { visibility: visible; }
+.terminal-pane-branch {
+  flex-basis: 0;
+  overflow: hidden;
+}
+.terminal-pane {
+  display: grid;
+  grid-template-rows: 24px minmax(0, 1fr);
+  min-width: 320px;
+  min-height: 120px;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.45));
+}
+.terminal-pane.focused {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.18);
+}
+.terminal-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 6px 0 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+}
+.terminal-pane-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-pane-status {
+  flex: none;
+  text-transform: lowercase;
+}
+.terminal-pane-retry,
+.terminal-pane-close {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.terminal-pane-retry:hover,
+.terminal-pane-close:hover {
+  color: var(--text);
+}
+.terminal-pane-body,
+.term-instance {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.terminal-pane-body {
+  overflow: hidden;
+  padding: 4px 6px;
+}
+.term-instance {
+  position: relative;
+}
+.terminal-pane-divider {
+  flex: 0 0 6px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: row-resize;
+}
+.terminal-pane-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 
 .command-bar {
   display: flex;

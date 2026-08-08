@@ -64,7 +64,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
     expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
+      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
     );
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
@@ -729,6 +729,7 @@ describe('native CodeMirror workspace editor surface', () => {
           classList: { toggle: () => undefined },
         }],
       },
+      renderPaneWorkspace: () => undefined,
       restoreProjectLayout: () => { visibleLayout = project.layout.mode; },
       applyLayout: (layout: string, options: unknown) => {
         visibleLayout = layout;
@@ -817,7 +818,7 @@ describe('native CodeMirror workspace editor surface', () => {
       fileViewEl: { hidden: false },
       terminalHost: { hidden: true },
       requestAnimationFrame: () => undefined,
-      fitActiveTerm: () => undefined,
+      scheduleVisiblePaneFit: () => undefined,
     });
 
     const closing = closeFileTab(file.id);
@@ -864,6 +865,7 @@ describe('native CodeMirror workspace editor surface', () => {
       closeThread: () => undefined,
       fileViewEl: { hidden: true },
       terminalHost: { hidden: false, children: [] },
+      renderPaneWorkspace: () => undefined,
       setActiveProject: async () => true,
       setStatus: () => undefined,
       refreshTabs: () => undefined,
