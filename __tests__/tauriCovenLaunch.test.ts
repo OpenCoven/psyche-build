@@ -1072,6 +1072,8 @@ describe('native Coven launch routing', () => {
   });
 
   it('routes native defaults to Coven while retaining explicit shell and Psyche commands', () => {
+    expect(mainJs).toContain('No terminal pane yet — opening Coven…');
+    expect(mainJs).not.toContain('No terminal pane yet — opening Psyche…');
     expect(mainJs).not.toMatch(/function\s+ensureProjectPsyche\s*\(/);
     expect(mainJs).not.toMatch(/function\s+spawnDefaultThread(?:In)?\s*\(/);
     expect(mainJs).toMatch(/cmd:\s*"\/new-thread"[\s\S]*?run:\s*runNewThreadCommand/);

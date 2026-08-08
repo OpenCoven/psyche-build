@@ -1986,7 +1986,7 @@
     if (layout && layout.root) return;
     var empty = document.createElement("div");
     empty.className = "terminal-empty";
-    empty.textContent = activeProject() ? "No terminal pane yet — opening Psyche…" : "Drop/open a project to begin";
+    empty.textContent = activeProject() ? "No terminal pane yet — opening Coven…" : "Drop/open a project to begin";
     terminalHost.appendChild(empty);
   }
 
