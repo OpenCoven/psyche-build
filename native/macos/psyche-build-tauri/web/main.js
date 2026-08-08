@@ -1055,37 +1055,71 @@
     divider.tabIndex = 0;
     divider.addEventListener("pointerdown", function (event) {
       event.preventDefault();
+      var dragLayout = activePaneLayout();
       var parent = divider.parentElement;
       var rect = parent && parent.getBoundingClientRect();
-      if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0) {
+      if (!dragLayout || !rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0) {
         return;
       }
+      var pointerId = event.pointerId;
       function onPointerMove(moveEvent) {
-        updateActiveSplit(node.id, (moveEvent.clientY - rect.top) / rect.height);
+        if (moveEvent.pointerId !== pointerId) return;
+        if (activePaneLayout() !== dragLayout) {
+          stopPointerResize();
+          return;
+        }
+        if (!Number.isFinite(moveEvent.clientY)) return;
+        var nextRatio = (moveEvent.clientY - rect.top) / rect.height;
+        if (!Number.isFinite(nextRatio)) return;
+        updateActiveSplit(node.id, nextRatio, dragLayout);
       }
-      function stopPointerResize() {
+      function stopPointerResize(endEvent) {
+        if (endEvent && endEvent.pointerId !== undefined && endEvent.pointerId !== pointerId) return;
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", stopPointerResize);
         window.removeEventListener("pointercancel", stopPointerResize);
+        window.removeEventListener("blur", stopPointerResize);
       }
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", stopPointerResize);
       window.addEventListener("pointercancel", stopPointerResize);
+      window.addEventListener("blur", stopPointerResize);
     });
     divider.addEventListener("keydown", function (event) {
       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
       event.preventDefault();
       var step = event.shiftKey ? 0.01 : 0.04;
-      updateActiveSplit(node.id, ratio + (event.key === "ArrowUp" ? -step : step));
+      updateActiveSplit(
+        node.id,
+        ratio + (event.key === "ArrowUp" ? -step : step),
+        activePaneLayout(),
+        true
+      );
     });
     return divider;
   }
 
-  function updateActiveSplit(splitId, ratio) {
+  function focusPaneDivider(splitId) {
+    if (!terminalHost) return false;
+    var dividers = terminalHost.querySelectorAll(".terminal-pane-divider");
+    for (var i = 0; i < dividers.length; i++) {
+      if (dividers[i].dataset.splitId !== splitId) continue;
+      dividers[i].focus();
+      return true;
+    }
+    return false;
+  }
+
+  function updateActiveSplit(splitId, ratio, expectedLayout, restoreFocus) {
+    if (!Number.isFinite(ratio)) return false;
     var layout = activePaneLayout();
-    if (!layout || !layout.root) return;
-    layout.root = PsychePanes.resizeSplit(layout.root, splitId, ratio);
+    if (!layout || !layout.root || (expectedLayout && layout !== expectedLayout)) return false;
+    var nextRoot = PsychePanes.resizeSplit(layout.root, splitId, ratio);
+    if (nextRoot === layout.root) return false;
+    layout.root = nextRoot;
     renderPaneWorkspace();
+    if (restoreFocus) focusPaneDivider(splitId);
+    return true;
   }
 
   function renderPaneNode(node, splitRatios) {

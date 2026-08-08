@@ -55,6 +55,7 @@ class FakeEventTarget {
   parentElement: { getBoundingClientRect: () => Record<string, number> } | null = null;
   attributes = new Map<string, string>();
   listeners = new Map<string, Set<(event: Record<string, unknown>) => void>>();
+  focusCalls = 0;
 
   setAttribute(name: string, value: string) {
     this.attributes.set(name, value);
@@ -73,18 +74,24 @@ class FakeEventTarget {
   dispatch(name: string, event: Record<string, unknown>) {
     this.listeners.get(name)?.forEach((listener) => listener(event));
   }
+
+  focus() {
+    this.focusCalls += 1;
+  }
 }
 
 describe('Tauri physical terminal panes', () => {
   it('makes pane dividers accessible and resizable by pointer and keyboard', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();
+    const layout = { root: {} };
     const updates: Array<[string, number]> = [];
     const createPaneDivider = compileFunction<(
       node: { id: string }, ratio: number,
     ) => FakeEventTarget>(functionSource('createPaneDivider'), {
       document: { createElement: () => divider },
       window: windowTarget,
+      activePaneLayout: () => layout,
       updateActiveSplit: (splitId: string, ratio: number) => updates.push([splitId, ratio]),
     });
 
@@ -104,12 +111,14 @@ describe('Tauri physical terminal panes', () => {
       getBoundingClientRect: () => ({ top: 100, height: 200 }),
     };
     let prevented = 0;
-    divider.dispatch('pointerdown', { preventDefault: () => { prevented += 1; } });
+    divider.dispatch('pointerdown', {
+      pointerId: 7, preventDefault: () => { prevented += 1; },
+    });
     divider.parentElement = null;
-    windowTarget.dispatch('pointermove', { clientY: 250 });
+    windowTarget.dispatch('pointermove', { pointerId: 7, clientY: 250 });
     expect(prevented).toBe(1);
     expect(updates).toEqual([['split-a', 0.75]]);
-    windowTarget.dispatch('pointercancel', {});
+    windowTarget.dispatch('pointercancel', { pointerId: 7 });
     expect(windowTarget.listeners.get('pointermove')?.size).toBe(0);
     expect(windowTarget.listeners.get('pointerup')?.size).toBe(0);
     expect(windowTarget.listeners.get('pointercancel')?.size).toBe(0);
@@ -117,15 +126,25 @@ describe('Tauri physical terminal panes', () => {
     divider.dispatch('keydown', {
       key: 'ArrowUp', shiftKey: false, preventDefault: () => { prevented += 1; },
     });
-    divider.dispatch('keydown', {
+    const replacement = new FakeEventTarget();
+    const createReplacementDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => replacement },
+      window: windowTarget,
+      activePaneLayout: () => layout,
+      updateActiveSplit: (splitId: string, nextRatio: number) => updates.push([splitId, nextRatio]),
+    });
+    createReplacementDivider({ id: 'split-a' }, 0.38);
+    replacement.dispatch('keydown', {
       key: 'ArrowDown', shiftKey: true, preventDefault: () => { prevented += 1; },
     });
-    divider.dispatch('keydown', {
+    replacement.dispatch('keydown', {
       key: 'Home', shiftKey: false, preventDefault: () => { prevented += 1; },
     });
     expect(updates.slice(1)).toEqual([
       ['split-a', 0.38],
-      ['split-a', 0.43],
+      ['split-a', 0.39],
     ]);
     expect(prevented).toBe(3);
   });
@@ -133,6 +152,7 @@ describe('Tauri physical terminal panes', () => {
   it('ignores pointer resizing when the split has no measurable height', () => {
     const windowTarget = new FakeEventTarget();
     const divider = new FakeEventTarget();
+    const layout = { root: {} };
     const updates: number[] = [];
     divider.parentElement = {
       getBoundingClientRect: () => ({ top: 20, height: 0 }),
@@ -142,14 +162,59 @@ describe('Tauri physical terminal panes', () => {
     ) => FakeEventTarget>(functionSource('createPaneDivider'), {
       document: { createElement: () => divider },
       window: windowTarget,
+      activePaneLayout: () => layout,
       updateActiveSplit: (_splitId: string, ratio: number) => updates.push(ratio),
     });
     createPaneDivider({ id: 'split-zero' }, 0.5);
-    divider.dispatch('pointerdown', { preventDefault: () => undefined });
-    windowTarget.dispatch('pointermove', { clientY: 40 });
-    windowTarget.dispatch('pointerup', {});
+    divider.dispatch('pointerdown', { pointerId: 3, preventDefault: () => undefined });
+    windowTarget.dispatch('pointermove', { pointerId: 3, clientY: 40 });
+    windowTarget.dispatch('pointerup', { pointerId: 3 });
     expect(updates).toEqual([]);
     expect(windowTarget.listeners.get('pointermove')?.size || 0).toBe(0);
+  });
+
+  it('ignores stale layouts and unrelated pointers during divider drags', () => {
+    const windowTarget = new FakeEventTarget();
+    const divider = new FakeEventTarget();
+    const originalLayout = { root: {} };
+    let currentLayout = originalLayout;
+    const updates: number[] = [];
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ top: 20, height: 100 }),
+    };
+    const createPaneDivider = compileFunction<(
+      node: { id: string }, ratio: number,
+    ) => FakeEventTarget>(functionSource('createPaneDivider'), {
+      document: { createElement: () => divider },
+      window: windowTarget,
+      activePaneLayout: () => currentLayout,
+      updateActiveSplit: (_splitId: string, ratio: number) => updates.push(ratio),
+    });
+    createPaneDivider({ id: 'split-stale' }, 0.5);
+    divider.dispatch('pointerdown', { pointerId: 11, preventDefault: () => undefined });
+    windowTarget.dispatch('pointermove', { pointerId: 12, clientY: 70 });
+    expect(updates).toEqual([]);
+    expect(windowTarget.listeners.get('pointermove')?.size).toBe(1);
+
+    currentLayout = { root: {} };
+    windowTarget.dispatch('pointermove', { pointerId: 11, clientY: 70 });
+    expect(updates).toEqual([]);
+    expect(windowTarget.listeners.get('pointermove')?.size).toBe(0);
+    expect(windowTarget.listeners.get('blur')?.size || 0).toBe(0);
+
+    currentLayout = originalLayout;
+    divider.parentElement = {
+      getBoundingClientRect: () => ({ top: 20, height: 100 }),
+    };
+    divider.dispatch('pointerdown', { pointerId: 13, preventDefault: () => undefined });
+    windowTarget.dispatch('blur', {});
+    expect(windowTarget.listeners.get('pointermove')?.size).toBe(0);
+
+    divider.dispatch('pointerdown', { pointerId: 14, preventDefault: () => undefined });
+    windowTarget.dispatch('pointermove', { pointerId: 14, clientY: Number.NaN });
+    windowTarget.dispatch('pointermove', { pointerId: 14, clientY: Number.POSITIVE_INFINITY });
+    windowTarget.dispatch('pointerup', { pointerId: 14 });
+    expect(updates).toEqual([]);
   });
 
   it('resizes only the active layout without changing its focused leaf', () => {
@@ -160,50 +225,75 @@ describe('Tauri physical terminal panes', () => {
       focusedLeafId: 'leaf-b',
     };
     let renders = 0;
-    const updateActiveSplit = compileFunction<(splitId: string, ratio: number) => void>(
+    const otherDivider = new FakeEventTarget();
+    otherDivider.dataset.splitId = 'split-other';
+    const replacementDivider = new FakeEventTarget();
+    replacementDivider.dataset.splitId = 'split-a';
+    const focusPaneDivider = compileFunction<(splitId: string) => boolean>(
+      functionSource('focusPaneDivider'),
+      {
+        terminalHost: { querySelectorAll: () => [otherDivider, replacementDivider] },
+      },
+    );
+    const updateActiveSplit = compileFunction<(
+      splitId: string, ratio: number, expectedLayout?: typeof layout, restoreFocus?: boolean,
+    ) => boolean>(
       functionSource('updateActiveSplit'),
       {
         activePaneLayout: () => layout,
         PsychePanes,
         renderPaneWorkspace: () => { renders += 1; },
+        focusPaneDivider,
       },
     );
-    updateActiveSplit('split-a', 0.7);
+    expect(updateActiveSplit('split-a', Number.NaN)).toBe(false);
+    expect(updateActiveSplit('split-a', Number.POSITIVE_INFINITY)).toBe(false);
+    expect(updateActiveSplit('split-a', 0.8, { ...layout })).toBe(false);
+    expect(updateActiveSplit('split-a', 0.7, layout, true)).toBe(true);
     expect(layout.root).toMatchObject({ id: 'split-a', ratio: 0.7 });
     expect(layout.focusedLeafId).toBe('leaf-b');
     expect(renders).toBe(1);
+    expect(otherDivider.focusCalls).toBe(0);
+    expect(replacementDivider.focusCalls).toBe(1);
   });
 
   it('coalesces visible pane fitting to one animation frame and fits every leaf', () => {
     expect(mainJs).toMatch(/var visiblePaneFitFrame = 0;/);
     expect(mainJs).not.toMatch(/fitActiveTerm/);
-    let queued: (() => void) | null = null;
-    let fitVisibleCalls = 0;
-    const scheduleFactory = Function(
-      'requestAnimationFrame',
-      'fitVisiblePanes',
-      `"use strict"; var visiblePaneFitFrame = 0; return ${functionSource('scheduleVisiblePaneFit')};`,
-    ) as (
-      raf: (callback: () => void) => number,
-      fitVisiblePanes: () => void,
-    ) => () => void;
-    const scheduleVisiblePaneFit = scheduleFactory(
-      (callback) => { queued = callback; return 17; },
-      () => { fitVisibleCalls += 1; },
-    );
-    scheduleVisiblePaneFit();
-    scheduleVisiblePaneFit();
-    expect(queued).not.toBeNull();
-    (queued as unknown as () => void)();
-    expect(fitVisibleCalls).toBe(1);
-
+    const queued: Array<() => void> = [];
+    const terminalHost = { hidden: false };
+    let layout: { root: Record<string, unknown> } | null = { root: { type: 'leaf' } };
     const fits: string[] = [];
     const warnings: unknown[][] = [];
-    const fitVisiblePanes = compileFunction<() => void>(functionSource('fitVisiblePanes'), {
-      visiblePaneFitFrame: 17,
-      terminalHost: { hidden: false },
-      activePaneLayout: () => ({ root: { type: 'leaf' } }),
-      PsychePanes: {
+    const paneFitFactory = Function(
+      'requestAnimationFrame',
+      'terminalHost',
+      'activePaneLayout',
+      'PsychePanes',
+      'measuredTerminalHost',
+      'PANE_MINIMUMS',
+      'findThread',
+      'console',
+      `"use strict";
+       var visiblePaneFitFrame = 0;
+       var fitVisiblePanes = ${functionSource('fitVisiblePanes')};
+       var scheduleVisiblePaneFit = ${functionSource('scheduleVisiblePaneFit')};
+       return { fitVisiblePanes, scheduleVisiblePaneFit };`,
+    ) as (
+      raf: (callback: () => void) => number,
+      host: typeof terminalHost,
+      activeLayout: () => typeof layout,
+      panes: { layoutRects: () => { leaves: Array<{ threadId: string }> } },
+      measure: () => Record<string, number>,
+      minimums: Record<string, number>,
+      find: (id: string) => { fit: { fit: () => void } },
+      logger: { warn: (...args: unknown[]) => void },
+    ) => { fitVisiblePanes: () => void; scheduleVisiblePaneFit: () => void };
+    const paneFit = paneFitFactory(
+      (callback) => { queued.push(callback); return queued.length; },
+      terminalHost,
+      () => layout,
+      {
         layoutRects: () => ({
           leaves: [
             { threadId: 'thread-a' },
@@ -212,9 +302,9 @@ describe('Tauri physical terminal panes', () => {
           ],
         }),
       },
-      measuredTerminalHost: () => ({ x: 0, y: 0, width: 800, height: 600 }),
-      PANE_MINIMUMS: { width: 320, height: 120, separator: 6 },
-      findThread: (id: string) => ({
+      () => ({ x: 0, y: 0, width: 800, height: 600 }),
+      { width: 320, height: 120, separator: 6 },
+      (id: string) => ({
         fit: {
           fit: () => {
             fits.push(id);
@@ -222,11 +312,34 @@ describe('Tauri physical terminal panes', () => {
           },
         },
       }),
-      console: { warn: (...args: unknown[]) => warnings.push(args) },
-    });
-    fitVisiblePanes();
+      { warn: (...args: unknown[]) => warnings.push(args) },
+    );
+    const scheduleVisiblePaneFit = paneFit.scheduleVisiblePaneFit;
+    scheduleVisiblePaneFit();
+    scheduleVisiblePaneFit();
+    expect(queued).toHaveLength(1);
+    queued.shift()?.();
     expect(fits).toEqual(['thread-a', 'thread-b', 'thread-c']);
     expect(warnings).toHaveLength(1);
+
+    terminalHost.hidden = true;
+    scheduleVisiblePaneFit();
+    expect(queued).toHaveLength(1);
+    queued.shift()?.();
+    expect(fits).toHaveLength(3);
+
+    terminalHost.hidden = false;
+    layout = null;
+    scheduleVisiblePaneFit();
+    expect(queued).toHaveLength(1);
+    queued.shift()?.();
+    expect(fits).toHaveLength(3);
+
+    layout = { root: { type: 'leaf' } };
+    scheduleVisiblePaneFit();
+    expect(queued).toHaveLength(1);
+    queued.shift()?.();
+    expect(fits).toHaveLength(6);
   });
 
   it('keeps pane topology process-local and keys it by project and worktree', () => {
