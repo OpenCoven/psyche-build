@@ -229,6 +229,7 @@ export function createCovenDiscoveryState() {
     message: null,
     requestId: 0,
     refreshedAt: null,
+    stale: false,
   };
 }
 
@@ -258,9 +259,10 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
     return {
       ...state,
       phase: 'error',
-      sessionsByProject: new Map(),
+      sessionsByProject: state.sessionsByProject,
       message: null,
       refreshedAt,
+      stale: state.sessionsByProject.size > 0,
     };
   }
 
@@ -271,15 +273,17 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
       sessionsByProject: groupCovenSessions(response.sessions),
       message,
       refreshedAt,
+      stale: false,
     };
   }
 
   return {
     ...state,
     phase: status,
-    sessionsByProject: new Map(),
+    sessionsByProject: state.sessionsByProject,
     message,
     refreshedAt,
+    stale: state.sessionsByProject.size > 0,
   };
 }
 
@@ -291,5 +295,6 @@ export function invalidateCovenRequests(state) {
     message: null,
     requestId: state.requestId + 1,
     refreshedAt: null,
+    stale: false,
   };
 }
