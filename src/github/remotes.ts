@@ -13,11 +13,13 @@ const PATH_WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Control}]/u;
 
 interface ParsedAuthority {
   explicitPort: string | null;
+  host: string;
   userinfo: string | null;
 }
 
 interface ParsedUrlRemote {
   authority: ParsedAuthority;
+  rawPath: string;
   url: URL;
 }
 
@@ -86,12 +88,12 @@ function parseHttpsRemote(rawUrl: string): GitHubRepositoryRef | null {
     return null;
   }
 
-  const hostname = normalizeCanonicalHostname(parsed.url.hostname);
-  if (!isGitHubCliHostname(hostname)) {
+  const hostname = canonicalizeGitHubCliHostname(parsed.authority.host);
+  if (!hostname || hostname === 'ssh.github.com') {
     return null;
   }
 
-  const repositoryPath = parseRepositoryPath(parsed.url.pathname);
+  const repositoryPath = parseRepositoryPath(parsed.rawPath);
   if (!repositoryPath) {
     return null;
   }
@@ -137,12 +139,12 @@ function parseSshRemote(rawUrl: string): GitHubRepositoryRef | null {
     return null;
   }
 
-  const hostname = normalizeCanonicalHostname(parsed.url.hostname);
-  if (!isGitHubCliHostname(hostname)) {
+  const hostname = canonicalizeGitHubCliHostname(parsed.authority.host);
+  if (!hostname) {
     return null;
   }
 
-  const repositoryPath = parseRepositoryPath(parsed.url.pathname);
+  const repositoryPath = parseRepositoryPath(parsed.rawPath);
   if (!repositoryPath) {
     return null;
   }
@@ -171,12 +173,12 @@ function parseUrlRemote(rawUrl: string, protocol: 'https:' | 'ssh:'): ParsedUrlR
     return null;
   }
 
-  const rawAuthority = extractRawAuthority(rawUrl);
-  if (rawAuthority === null) {
+  const rawUrlParts = extractRawUrlParts(rawUrl);
+  if (rawUrlParts === null) {
     return null;
   }
 
-  const authority = parseAuthority(rawAuthority);
+  const authority = parseAuthority(rawUrlParts.authority);
   if (!authority) {
     return null;
   }
@@ -196,10 +198,10 @@ function parseUrlRemote(rawUrl: string, protocol: 'https:' | 'ssh:'): ParsedUrlR
     return null;
   }
 
-  return { authority, url };
+  return { authority, rawPath: rawUrlParts.path, url };
 }
 
-function extractRawAuthority(rawUrl: string): string | null {
+function extractRawUrlParts(rawUrl: string): { authority: string; path: string } | null {
   const schemeIndex = rawUrl.indexOf('://');
   if (schemeIndex < 0) {
     return null;
@@ -210,7 +212,22 @@ function extractRawAuthority(rawUrl: string): string | null {
     return null;
   }
 
-  return rawUrl.slice(schemeIndex + 3, pathStart);
+  const queryIndex = rawUrl.indexOf('?', pathStart);
+  const fragmentIndex = rawUrl.indexOf('#', pathStart);
+  let pathEnd = rawUrl.length;
+
+  if (queryIndex >= 0) {
+    pathEnd = queryIndex;
+  }
+
+  if (fragmentIndex >= 0 && fragmentIndex < pathEnd) {
+    pathEnd = fragmentIndex;
+  }
+
+  return {
+    authority: rawUrl.slice(schemeIndex + 3, pathStart),
+    path: rawUrl.slice(pathStart, pathEnd),
+  };
 }
 
 function parseAuthority(rawAuthority: string): ParsedAuthority | null {
@@ -241,6 +258,7 @@ function parseAuthority(rawAuthority: string): ParsedAuthority | null {
 
   return {
     explicitPort: parsedHost.port,
+    host: parsedHost.host,
     userinfo,
   };
 }
@@ -316,19 +334,8 @@ function canonicalizeScpHost(rawHost: string): string | null {
     return null;
   }
 
-  let url: URL;
-  try {
-    url = new URL(`ssh://git@${rawHost}/repo`);
-  } catch {
-    return null;
-  }
-
-  if (url.username !== 'git' || url.password || !url.hostname) {
-    return null;
-  }
-
-  const hostname = normalizeCanonicalHostname(url.hostname);
-  if (!isGitHubCliHostname(hostname) || hostname === 'ssh.github.com') {
+  const hostname = canonicalizeGitHubCliHostname(rawHost);
+  if (!hostname || hostname === 'ssh.github.com') {
     return null;
   }
 
@@ -344,12 +351,48 @@ function isCanonicalPort(rawPort: string): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
-function normalizeCanonicalHostname(hostname: string): string {
-  return hostname.toLowerCase();
+function canonicalizeGitHubCliHostname(hostname: string): string | null {
+  let canonical = hostname;
+  try {
+    canonical = new URL(`https://${hostname}/`).hostname;
+  } catch {
+    return null;
+  }
+
+  canonical = normalizeCanonicalHostname(canonical);
+  return isValidGitHubCliHostname(canonical) ? canonical : null;
 }
 
-function isGitHubCliHostname(hostname: string): boolean {
-  return hostname.length > 0 && !hostname.startsWith('[') && !hostname.includes(':');
+function normalizeCanonicalHostname(hostname: string): string {
+  const lowercased = hostname.toLowerCase();
+  return lowercased.endsWith('.') ? lowercased.slice(0, -1) : lowercased;
+}
+
+function isValidGitHubCliHostname(hostname: string): boolean {
+  if (!hostname || hostname.startsWith('[') || hostname.includes(':') || hostname.length > 253) {
+    return false;
+  }
+
+  if (!hostname.includes('.')) {
+    return false;
+  }
+
+  const labels = hostname.split('.');
+  if (labels.some((label) =>
+    label.length < 1
+    || label.length > 63
+    || !/^[a-z0-9-]+$/u.test(label)
+    || label.startsWith('-')
+    || label.endsWith('-')
+  )) {
+    return false;
+  }
+
+  if (labels.every((label) => /^[0-9]+$/u.test(label))) {
+    return false;
+  }
+
+  return true;
 }
 
 function parseRepositoryPath(rawPath: string): { owner: string; name: string } | null {

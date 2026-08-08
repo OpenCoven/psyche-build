@@ -27,7 +27,15 @@ export interface RepositoryContext {
   remotes: readonly GitHubRemote[];
 }
 
+interface ParsedRemoteUrl {
+  diagnosticUrl: string;
+  normalizedUrl: string;
+}
+
+const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
 const ASCII_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
+const ASCII_EDGE_WHITESPACE = /^[\u0009-\u000d\u0020]|[\u0009-\u000d\u0020]$/u;
+const REDACTED_REMOTE_URL = '<redacted-remote-url>';
 const REPOSITORY_CONTEXT_ERROR = 'unable to read Git repository context';
 
 export async function readRepositoryContext(
@@ -51,9 +59,9 @@ export async function readRepositoryContext(
       continue;
     }
 
-    rawRemotes.push({ name: remoteName, url: remoteUrl });
+    rawRemotes.push({ name: remoteName, url: remoteUrl.diagnosticUrl });
 
-    const normalized = normalizeGitHubRemote(remoteName, remoteUrl);
+    const normalized = normalizeGitHubRemote(remoteName, remoteUrl.normalizedUrl);
     if (normalized) {
       normalizedRemotes.push(normalized);
     }
@@ -138,7 +146,7 @@ async function readRemoteUrl(
   worktreePath: string,
   remoteName: string,
   runner: ReadOnlyCommandRunner,
-): Promise<string | null> {
+): Promise<ParsedRemoteUrl | null> {
   try {
     const result = await runner.run('git', ['remote', 'get-url', '--', remoteName], {
       cwd: worktreePath,
@@ -149,7 +157,15 @@ async function readRemoteUrl(
       return null;
     }
 
-    return parseRemoteUrlOutput(result.stdout);
+    const normalizedUrl = parseRemoteUrlOutput(result.stdout);
+    if (normalizedUrl === null) {
+      return null;
+    }
+
+    return {
+      diagnosticUrl: sanitizeDiagnosticRemoteUrl(normalizedUrl),
+      normalizedUrl,
+    };
   } catch {
     return null;
   }
@@ -199,7 +215,12 @@ function parseOptionalValue(stdout: string): string | null {
 }
 
 function parseRemoteUrlOutput(stdout: string): string | null {
-  return parseOptionalValue(stdout);
+  const value = stripSingleTrailingLineTerminator(stdout);
+  if (!value || ASCII_EDGE_WHITESPACE.test(value) || ASCII_CONTROL.test(value)) {
+    return null;
+  }
+
+  return value;
 }
 
 function splitGitOutputLines(stdout: string): string[] {
@@ -216,6 +237,80 @@ function stripSingleTrailingLineTerminator(value: string): string {
   }
 
   return value;
+}
+
+function sanitizeDiagnosticRemoteUrl(remoteUrl: string): string {
+  if (isValidGitScpDiagnostic(remoteUrl)) {
+    return remoteUrl;
+  }
+
+  const sanitizedSchemeUrl = sanitizeSchemeRemoteUrl(remoteUrl);
+  if (sanitizedSchemeUrl !== null) {
+    return sanitizedSchemeUrl;
+  }
+
+  if (looksCredentialBearing(remoteUrl)) {
+    return REDACTED_REMOTE_URL;
+  }
+
+  return remoteUrl;
+}
+
+function isValidGitScpDiagnostic(remoteUrl: string): boolean {
+  return /^git@[^:/\\@[\]\s?#]+:[^?#]+$/u.test(remoteUrl);
+}
+
+function sanitizeSchemeRemoteUrl(remoteUrl: string): string | null {
+  const rawParts = extractSchemeUrlParts(remoteUrl);
+  if (rawParts === null) {
+    return null;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(remoteUrl);
+  } catch {
+    return rawParts.authority.includes('@') ? REDACTED_REMOTE_URL : null;
+  }
+
+  if (
+    url.protocol === 'ssh:'
+    && rawParts.authority.startsWith('git@')
+    && !url.password
+    && rawParts.authority.indexOf('@') === rawParts.authority.lastIndexOf('@')
+  ) {
+    return remoteUrl;
+  }
+
+  if (rawParts.authority.includes('@') || url.username || url.password) {
+    return `${url.protocol}//${url.host}${rawParts.suffix}`;
+  }
+
+  return remoteUrl;
+}
+
+function extractSchemeUrlParts(remoteUrl: string): { authority: string; suffix: string } | null {
+  const schemeIndex = remoteUrl.indexOf('://');
+  if (schemeIndex < 0) {
+    return null;
+  }
+
+  const pathStart = remoteUrl.indexOf('/', schemeIndex + 3);
+  if (pathStart < 0) {
+    return {
+      authority: remoteUrl.slice(schemeIndex + 3),
+      suffix: '',
+    };
+  }
+
+  return {
+    authority: remoteUrl.slice(schemeIndex + 3, pathStart),
+    suffix: remoteUrl.slice(pathStart),
+  };
+}
+
+function looksCredentialBearing(remoteUrl: string): boolean {
+  return remoteUrl.startsWith('*') || (/^[^/@\s][^/\s]*@/u.test(remoteUrl) && !remoteUrl.startsWith('git@'));
 }
 
 function orderNamedEntries<T extends { name: string }>(

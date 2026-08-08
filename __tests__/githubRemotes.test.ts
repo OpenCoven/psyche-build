@@ -62,6 +62,17 @@ describe('normalizeGitHubRemote', () => {
       },
     });
 
+    expect(normalizeGitHubRemote('enterprise-https-rooted', 'https://ghe.example.test./OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-https-rooted',
+      rawUrl: 'https://ghe.example.test./OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test/OpenCoven/psyche-build',
+      },
+    });
+
     expect(
       normalizeGitHubRemote('enterprise-ssh', 'ssh://git@GHE.Example.Test:2222/Open%43oven/psyche%2Dbuild%2Egit'),
     ).toEqual({
@@ -75,9 +86,42 @@ describe('normalizeGitHubRemote', () => {
       },
     });
 
+    expect(normalizeGitHubRemote('enterprise-ssh-rooted', 'ssh://git@ghe.example.test.:2222/OpenCoven/psyche-build.git')).toEqual({
+      name: 'enterprise-ssh-rooted',
+      rawUrl: 'ssh://git@ghe.example.test.:2222/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test/OpenCoven/psyche-build',
+      },
+    });
+
     expect(normalizeGitHubRemote('github-https-443', 'https://github.com:443/OpenCoven/psyche-build.git')).toEqual({
       name: 'github-https-443',
       rawUrl: 'https://github.com:443/OpenCoven/psyche-build.git',
+      repository: {
+        host: 'github.com',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://github.com/OpenCoven/psyche-build',
+      },
+    });
+
+    expect(normalizeGitHubRemote('github-rooted', 'https://github.com./OpenCoven/psyche-build.git')).toEqual({
+      name: 'github-rooted',
+      rawUrl: 'https://github.com./OpenCoven/psyche-build.git',
+      repository: {
+        host: 'github.com',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://github.com/OpenCoven/psyche-build',
+      },
+    });
+
+    expect(normalizeGitHubRemote('github-ssh-default', 'ssh://git@github.com/OpenCoven/psyche-build.git')).toEqual({
+      name: 'github-ssh-default',
+      rawUrl: 'ssh://git@github.com/OpenCoven/psyche-build.git',
       repository: {
         host: 'github.com',
         owner: 'OpenCoven',
@@ -107,11 +151,24 @@ describe('normalizeGitHubRemote', () => {
         url: 'https://github.com/OpenCoven/psyche-build',
       },
     });
+
+    expect(normalizeGitHubRemote('scp-rooted', 'git@ghe.example.test.:OpenCoven/psyche-build.git')).toEqual({
+      name: 'scp-rooted',
+      rawUrl: 'git@ghe.example.test.:OpenCoven/psyche-build.git',
+      repository: {
+        host: 'ghe.example.test',
+        owner: 'OpenCoven',
+        name: 'psyche-build',
+        url: 'https://ghe.example.test/OpenCoven/psyche-build',
+      },
+    });
   });
 
-  it('canonicalizes IDN authorities for gh hostnames', () => {
+  it('canonicalizes IDN authorities for gh hostnames across HTTPS, ssh, and SCP remotes', () => {
     const unicodeIdn = normalizeGitHubRemote('unicode-idn', 'https://BÜCHER.example/OpenCoven/psyche-build.git');
     const punycodeIdn = normalizeGitHubRemote('punycode-idn', 'https://xn--bcher-kva.example/OpenCoven/psyche-build.git');
+    const sshUnicodeIdn = normalizeGitHubRemote('ssh-unicode-idn', 'ssh://git@BÜCHER.example/OpenCoven/psyche-build.git');
+    const scpUnicodeIdn = normalizeGitHubRemote('scp-unicode-idn', 'git@BÜCHER.example:OpenCoven/psyche-build.git');
 
     expect(unicodeIdn?.repository).toEqual({
       host: 'xn--bcher-kva.example',
@@ -120,6 +177,8 @@ describe('normalizeGitHubRemote', () => {
       url: 'https://xn--bcher-kva.example/OpenCoven/psyche-build',
     });
     expect(punycodeIdn?.repository).toEqual(unicodeIdn?.repository);
+    expect(sshUnicodeIdn?.repository).toEqual(unicodeIdn?.repository);
+    expect(scpUnicodeIdn?.repository).toEqual(unicodeIdn?.repository);
   });
 
   it('rejects unsupported or malformed remote names and URLs', () => {
@@ -147,8 +206,18 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'https://github.com:8443/OpenCoven/psyche-build.git'],
       ['origin', 'https://[2001:db8::1]:443/OpenCoven/psyche-build.git'],
       ['origin', 'https://ghe.example.test:8443/OpenCoven/psyche-build.git'],
+      ['origin', 'https://127.0.0.1/OpenCoven/psyche-build.git'],
+      ['origin', 'https://localhost/OpenCoven/psyche-build.git'],
+      ['origin', 'https://ghe..example.test/OpenCoven/psyche-build.git'],
+      ['origin', 'https://-ghe.example.test/OpenCoven/psyche-build.git'],
+      ['origin', 'https://ghe.example-.test/OpenCoven/psyche-build.git'],
       ['origin', 'https://ghe%2Eexample.test/OpenCoven/psyche-build.git'],
       ['origin', 'https://ghe.example.test\\OpenCoven/psyche-build.git'],
+      ['origin', 'https://ssh.github.com/OpenCoven/psyche-build.git'],
+      ['origin', 'https://ghe.example.test/./psyche-build.git'],
+      ['origin', 'https://ghe.example.test/../psyche-build.git'],
+      ['origin', 'https://ghe.example.test/%2e/psyche-build.git'],
+      ['origin', 'https://ghe.example.test/%2E%2E/psyche-build.git'],
       ['origin', 'https://ghe.example.test/Open%2Fcoven/psyche-build.git'],
       ['origin', 'https://ghe.example.test/OpenCoven/psyche%2Fbuild.git'],
       ['origin', 'https://ghe.example.test/OpenCoven/psyche%5Cbuild.git'],
@@ -169,6 +238,10 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'git@evil@github.com:OpenCoven/psyche-build.git'],
       ['origin', 'git@github\\com:OpenCoven/psyche-build.git'],
       ['origin', 'git@[2001:db8::1]:OpenCoven/psyche-build.git'],
+      ['origin', 'git@127.0.0.1:OpenCoven/psyche-build.git'],
+      ['origin', 'git@localhost:OpenCoven/psyche-build.git'],
+      ['origin', 'git@ghe..example.test:OpenCoven/psyche-build.git'],
+      ['origin', 'git@ghe.example.test.:./psyche-build.git'],
       ['origin', 'git@ghe%2Eexample.test:OpenCoven/psyche-build.git'],
       ['origin', 'git@ssh.github.com:OpenCoven/psyche-build.git'],
       ['origin', 'git@github.com:OpenCoven/psyche-build.git?view=1'],
@@ -178,8 +251,15 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'ssh://git@ssh.github.com:22/OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ssh.github.com:444/OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@[2001:db8::1]:2222/OpenCoven/psyche-build.git'],
+      ['origin', 'ssh://git@127.0.0.1/OpenCoven/psyche-build.git'],
+      ['origin', 'ssh://git@localhost/OpenCoven/psyche-build.git'],
+      ['origin', 'ssh://git@ghe..example.test/OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ghe%2Eexample.test/OpenCoven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test\\OpenCoven/psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/./psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/../psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/%2e/psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/%2E%2E/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open%20Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche build.git'],

@@ -227,7 +227,7 @@ describe('readRepositoryContext', () => {
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
       'git\0remote': { stdout: 'mirror\norigin\nbroken\norigin\n' },
-      'git\0remote\0get-url\0--\0mirror': { stdout: 'file:///Users/buns/mirror\n' },
+      'git\0remote\0get-url\0--\0mirror': { stdout: 'file:///Users/buns/My Repo\n' },
       'git\0remote\0get-url\0--\0origin': { stdout: 'https://github.com/OpenCoven/psyche-build.git\n' },
       'git\0remote\0get-url\0--\0broken': { stdout: '', exitCode: 2 },
     });
@@ -238,7 +238,7 @@ describe('readRepositoryContext', () => {
     expect(context.upstreamRemote).toBeNull();
     expectRawRemotes(context.rawRemotes, [
       { name: 'origin', url: 'https://github.com/OpenCoven/psyche-build.git' },
-      { name: 'mirror', url: 'file:///Users/buns/mirror' },
+      { name: 'mirror', url: 'file:///Users/buns/My Repo' },
     ]);
     expect(context.remotes.map((remote) => remote.name)).toEqual(['origin']);
     expect(calls.map((call) => call.args.join(' '))).toEqual([
@@ -291,20 +291,58 @@ describe('readRepositoryContext', () => {
     ]);
   });
 
-  it('skips malformed get-url output with ASCII padding instead of trimming it into validity', async () => {
+  it('skips malformed get-url output with ASCII padding or controls instead of trimming it into validity', async () => {
     const worktreePath = '/repo/.worktrees/pr';
     const { runner } = createRunner({
       'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
       'git\0config\0branch.feat/pr.remote': { stdout: 'origin\n' },
-      'git\0remote': { stdout: 'origin\nupstream\n' },
+      'git\0remote': { stdout: 'origin\nupstream\ncontrol\nnewline\n' },
       'git\0remote\0get-url\0--\0origin': { stdout: ' git@github.com:OpenCoven/psyche-build.git\n' },
       'git\0remote\0get-url\0--\0upstream': { stdout: 'https://github.com/OpenCoven/psyche-build.git \n' },
+      'git\0remote\0get-url\0--\0control': { stdout: 'file:///Users/buns/My\u0007Repo\n' },
+      'git\0remote\0get-url\0--\0newline': { stdout: 'file:///Users/buns/Repo\nsecond\n' },
     });
 
     const context = await readRepositoryContext(worktreePath, runner);
 
     expect(context.rawRemotes).toEqual([]);
     expect(context.remotes).toEqual([]);
+  });
+
+  it('sanitizes credential-bearing raw diagnostics without leaking secrets', async () => {
+    const worktreePath = '/repo/.worktrees/pr';
+    const { runner } = createRunner({
+      'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+      'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+      'git\0remote': { stdout: 'masked\nauth\norigin\n' },
+      'git\0remote\0get-url\0--\0masked': { stdout: '******github.com/o/r.git\n' },
+      'git\0remote\0get-url\0--\0auth': { stdout: 'https://token:secret@github.com/OpenCoven/psyche-build.git\n' },
+      'git\0remote\0get-url\0--\0origin': { stdout: 'git@github.com:OpenCoven/psyche-build.git\n' },
+    });
+
+    const context = await readRepositoryContext(worktreePath, runner);
+    const serialized = JSON.stringify(context);
+
+    expect(context.rawRemotes).toEqual([
+      { name: 'origin', url: 'git@github.com:OpenCoven/psyche-build.git' },
+      { name: 'auth', url: 'https://github.com/OpenCoven/psyche-build.git' },
+      { name: 'masked', url: '<redacted-remote-url>' },
+    ]);
+    expect(context.remotes).toEqual([
+      {
+        name: 'origin',
+        rawUrl: 'git@github.com:OpenCoven/psyche-build.git',
+        repository: {
+          host: 'github.com',
+          owner: 'OpenCoven',
+          name: 'psyche-build',
+          url: 'https://github.com/OpenCoven/psyche-build',
+        },
+      },
+    ]);
+    expect(serialized).not.toContain('token');
+    expect(serialized).not.toContain('secret');
+    expect(serialized).not.toContain('******github.com/o/r.git');
   });
 
   it('rejects ASCII-padded required Git names instead of trimming them', async () => {
