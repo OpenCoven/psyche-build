@@ -659,6 +659,7 @@
     var thread = findThread(payload.thread_id);
     if (!thread) return;
     thread.status = "exited";
+    syncThreadPaneMetadata(thread);
     if (thread.term) {
       thread.term.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
     }
@@ -746,6 +747,7 @@
     }).then(function () {
       thread.status = "running";
       thread.spawning = false;
+      syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
       if (state.activeThreadId === thread.id) {
@@ -771,6 +773,7 @@
           setStatus("start failed", "error");
         }
       }
+      syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
     });
@@ -923,6 +926,7 @@
     thread.paneTitle = title;
     thread.paneStatus = status;
     thread.paneClose = close;
+    syncThreadPaneMetadata(thread);
     renderPaneWorkspace();
 
     var term = new window.Terminal({
@@ -1044,11 +1048,7 @@
       var thread = findThread(leaf.threadId);
       if (!thread || !thread.pane) return;
       thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
-      if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
-      if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
-      if (thread.paneClose) {
-        thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
-      }
+      syncThreadPaneMetadata(thread);
     });
     scheduleVisiblePaneFit();
   }
@@ -1089,6 +1089,15 @@
     return "warn";
   }
 
+  function syncThreadPaneMetadata(thread) {
+    if (!thread) return;
+    if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
+    if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
+    if (thread.paneClose) {
+      thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
+    }
+  }
+
   function detachThreadPane(thread) {
     if (!thread) return null;
     var key = paneLayoutKey(thread.projectId, thread.worktreePath);
@@ -1102,7 +1111,9 @@
       return null;
     }
     layout.root = removed.root;
-    layout.focusedLeafId = removed.nextLeafId;
+    if (layout.focusedLeafId === leaf.id) {
+      layout.focusedLeafId = removed.nextLeafId;
+    }
     paneLayouts.set(key, layout);
     var nextLeaf = PsychePanes.findLeafById(removed.root, removed.nextLeafId);
     return nextLeaf ? nextLeaf.threadId : null;
@@ -1279,6 +1290,7 @@
     var trimmed = String(newName || "").trim();
     if (!trimmed) return false;
     t.name = trimmed;
+    syncThreadPaneMetadata(t);
     saveWorkspaceSoon();
     if (state.activeThreadId === id) {
       setProjectStatus(findProject(t.projectId), statusLevel(t.status));
@@ -3685,7 +3697,11 @@
     if (!project) return null;
     var worktree = selectedWorktree(project);
     var existing = state.threads.find(function (t) { return t.projectId === project.id && t.worktreePath === worktree.path && t.kind === "psyche" && t.status !== "exited"; });
-    if (existing) { focusThread(existing.id); return existing; }
+    if (existing) {
+      if (existing.hidden) reopenThread(existing.id);
+      else focusThread(existing.id);
+      return existing;
+    }
     return spawnDefaultThreadIn(project);
   }
 
