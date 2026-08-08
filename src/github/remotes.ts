@@ -11,6 +11,8 @@ const ASCII_REMOTE_NAME_INVALID = /[\u0000-\u0020\u007f]/;
 const UNSAFE_UNICODE_TEXT_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const AUTHORITY_WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Control}]/u;
 const PATH_WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Control}]/u;
+const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u;
+const GITHUB_REPOSITORY_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
 
 interface ParsedAuthority {
   explicitPort: string | null;
@@ -401,6 +403,10 @@ function parseRepositoryPath(rawPath: string): { owner: string; name: string } |
     return null;
   }
 
+  if (!isValidGitHubOwner(owner) || !isValidGitHubRepositoryName(name)) {
+    return null;
+  }
+
   return { owner, name };
 }
 
@@ -438,6 +444,14 @@ function decodeRepositorySegment(rawSegment: string, stripGitSuffix: boolean): s
 
 function hasInvalidDecodedPathContent(value: string): boolean {
   return value.includes('/') || value.includes('\\') || PATH_WHITESPACE_OR_CONTROL.test(value);
+}
+
+function isValidGitHubOwner(owner: string): boolean {
+  return !hasUnsafeUnicodeTextCharacter(owner) && GITHUB_OWNER_PATTERN.test(owner);
+}
+
+function isValidGitHubRepositoryName(name: string): boolean {
+  return !hasUnsafeUnicodeTextCharacter(name) && GITHUB_REPOSITORY_NAME_PATTERN.test(name);
 }
 
 function buildRepositoryRef(host: string, owner: string, name: string): GitHubRepositoryRef {

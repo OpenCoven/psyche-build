@@ -185,6 +185,39 @@ describe('normalizeGitHubRemote', () => {
         url: 'https://ghe.example.test/OpenCoven/psyche-build.git',
       },
     });
+
+    expect(normalizeGitHubRemote('allowed-owner-repo', 'https://github.com/Open-Coven/repo.name_.git')).toEqual({
+      name: 'allowed-owner-repo',
+      rawUrl: 'https://github.com/Open-Coven/repo.name_.git',
+      repository: {
+        host: 'github.com',
+        owner: 'Open-Coven',
+        name: 'repo.name_',
+        url: 'https://github.com/Open-Coven/repo.name_',
+      },
+    });
+
+    expect(normalizeGitHubRemote('dot-github', 'git@github.com:OpenCoven/.github.git')).toEqual({
+      name: 'dot-github',
+      rawUrl: 'git@github.com:OpenCoven/.github.git',
+      repository: {
+        host: 'github.com',
+        owner: 'OpenCoven',
+        name: '.github',
+        url: 'https://github.com/OpenCoven/.github',
+      },
+    });
+
+    expect(normalizeGitHubRemote('repo-git-name', 'ssh://git@github.com/OpenCoven/repo.git.git')).toEqual({
+      name: 'repo-git-name',
+      rawUrl: 'ssh://git@github.com/OpenCoven/repo.git.git',
+      repository: {
+        host: 'github.com',
+        owner: 'OpenCoven',
+        name: 'repo.git',
+        url: 'https://github.com/OpenCoven/repo.git',
+      },
+    });
   });
 
   it('canonicalizes IDN authorities for gh hostnames across HTTPS, ssh, and SCP remotes', () => {
@@ -224,9 +257,26 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'https://github.com/Open%20Coven/psyche-build.git'],
       ['origin', 'https://github.com/Open%09Coven/psyche-build.git'],
       ['origin', 'https://github.com/Open%0ACoven/psyche-build.git'],
+      ['origin', 'https://github.com/Open%40Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open:Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open#Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open?Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open%E2%80%AECoven/psyche-build.git'],
+      ['origin', 'https://github.com/OpenCoven%E2%80%AE/psyche-build.git'],
+      ['origin', 'https://github.com/-OpenCoven/psyche-build.git'],
+      ['origin', 'https://github.com/OpenCoven-/psyche-build.git'],
+      ['origin', 'https://github.com/Open_Coven/psyche-build.git'],
+      ['origin', 'https://github.com/Open.Coven/psyche-build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche%20build.git'],
       ['origin', 'https://github.com/OpenCoven/psyche%09build.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche-build%3Fsecret.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche-build%23secret.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche-build%40secret.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche-build%3Asecret.git'],
+      ['origin', 'https://github.com/OpenCoven/%E2%80%AE.git'],
+      ['origin', 'https://github.com/OpenCoven/psyche-build%E2%80%AE.git'],
+      ['origin', 'https://github.com/OpenCoven/機能.git'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git#frag'],
       ['origin', 'https://github.com/OpenCoven/psyche-build.git?view=1'],
       ['origin', `https://${'user:pw@'}github.com/OpenCoven/psyche-build.git`],
@@ -259,8 +309,11 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'git@github.com:OpenCoven'],
       ['origin', 'git@github.com:Open Coven/psyche-build.git'],
       ['origin', 'git@github.com:Open%20Coven/psyche-build.git'],
+      ['origin', 'git@github.com:Open%40Coven/psyche-build.git'],
       ['origin', 'git@github.com:OpenCoven/psyche build.git'],
       ['origin', 'git@github.com:OpenCoven/psyche%20build.git'],
+      ['origin', 'git@github.com:OpenCoven/psyche-build%3Fsecret.git'],
+      ['origin', 'git@github.com:OpenCoven/%E2%80%AE.git'],
       ['origin', 'git@evil@github.com:OpenCoven/psyche-build.git'],
       ['origin', 'git@github\\com:OpenCoven/psyche-build.git'],
       ['origin', 'git@[2001:db8::1]:OpenCoven/psyche-build.git'],
@@ -284,8 +337,11 @@ describe('normalizeGitHubRemote', () => {
       ['origin', 'ssh://git@ghe.example.test/%2E%2E/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/Open%20Coven/psyche-build.git'],
+      ['origin', 'ssh://git@ghe.example.test/Open%40Coven/psyche-build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche build.git'],
       ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche%20build.git'],
+      ['origin', 'ssh://git@ghe.example.test/OpenCoven/psyche-build%3Fsecret.git'],
+      ['origin', 'ssh://git@ghe.example.test/OpenCoven/%E2%80%AE.git'],
       ['origin', 'https://github.com/OpenCoven'],
       ['origin', 'https://github.com/OpenCoven/psyche-build/issues'],
       ['origin', 'https://github.com/OpenCoven/.git'],
