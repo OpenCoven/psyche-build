@@ -384,15 +384,18 @@ describe('Tauri physical terminal panes', () => {
   it('focuses from pane chrome without duplicating body focus or racing close', () => {
     const thread = { id: 'thread-a' };
     const bodyTarget = { id: 'body-target' };
+    const retryTarget = { id: 'retry-target' };
     const closeTarget = { id: 'close-target' };
     const headerTarget = { id: 'header-target' };
     const body = { contains: (target: unknown) => target === bodyTarget };
+    const retry = { contains: (target: unknown) => target === retryTarget };
     const close = { contains: (target: unknown) => target === closeTarget };
     const state = { activeThreadId: 'thread-b' };
     const focused: string[] = [];
     const handlePanePointerDown = compileFunction<(
       value: typeof thread,
       bodyElement: typeof body,
+      retryElement: typeof retry,
       closeElement: typeof close,
       event: { target: unknown },
     ) => void>(functionSource('handlePanePointerDown'), {
@@ -400,10 +403,11 @@ describe('Tauri physical terminal panes', () => {
       focusThread: (id: string) => { focused.push(id); },
     });
 
-    handlePanePointerDown(thread, body, close, { target: bodyTarget });
-    handlePanePointerDown(thread, body, close, { target: closeTarget });
+    handlePanePointerDown(thread, body, retry, close, { target: bodyTarget });
+    handlePanePointerDown(thread, body, retry, close, { target: retryTarget });
+    handlePanePointerDown(thread, body, retry, close, { target: closeTarget });
     expect(focused).toEqual([]);
-    handlePanePointerDown(thread, body, close, { target: headerTarget });
+    handlePanePointerDown(thread, body, retry, close, { target: headerTarget });
     expect(focused).toEqual([thread.id]);
   });
 
@@ -537,7 +541,7 @@ describe('Tauri physical terminal panes', () => {
     expect(attributes.get('aria-label')).toBe('Stop and close Renamed');
 
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "running";[\s\S]*syncThreadPaneMetadata\(thread\)/);
-    expect(functionSource('spawnPty')).toMatch(/thread\.status = "exited";[\s\S]*syncThreadPaneMetadata\(thread\)/);
+    expect(functionSource('handlePtyExit')).toMatch(/thread\.status = "exited";[\s\S]*syncThreadPaneMetadata\(thread\)/);
     expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
   });
 
@@ -646,7 +650,8 @@ describe('Tauri physical terminal panes', () => {
         launchKind: null, covenSessionId: null,
       },
       status: 'starting', spawning: true,
-      closing: false, startInFlight: false, term: null, fit: null,
+      closing: false, closeStarted: false, startInFlight: false,
+      stopRequested: false, ptyStarted: false, term: null, fit: null,
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     const pendingDataBuffers = new Map([[thread.id, [new Uint8Array([1])]]]);
@@ -658,6 +663,9 @@ describe('Tauri physical terminal panes', () => {
     };
     const isLiveThread = (candidate: typeof thread) =>
       state.threads.includes(candidate) && !candidate.closing;
+    const stopThreadPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('stopThreadPty'), { invoke },
+    );
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'),
       {
@@ -671,15 +679,16 @@ describe('Tauri physical terminal panes', () => {
         setProjectStatus: () => undefined,
         findProject: () => project,
         setStatus: () => undefined,
+        stopThreadPty,
       },
     );
     const starting = spawnPty(thread);
     expect(thread.startInFlight).toBe(true);
-    const closeThread = compileFunction<(id: string) => void>(functionSource('closeThread'), {
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers,
-      invoke,
+      stopThreadPty,
       state,
       renderPaneWorkspace: () => undefined,
       setProjectStatus: () => undefined,
@@ -688,10 +697,10 @@ describe('Tauri physical terminal panes', () => {
       refreshTabs: () => undefined,
       focusThread: () => undefined,
     });
-    closeThread(thread.id);
+    expect(closeThread(thread.id)).toBe(true);
     start.resolve();
     await expect(starting).resolves.toBe(false);
-    expect(stopCalls).toBeGreaterThanOrEqual(2);
+    expect(stopCalls).toBe(1);
     expect(thread.status).toBe('starting');
     expect(thread.startInFlight).toBe(false);
     expect(state.threads).toEqual([]);

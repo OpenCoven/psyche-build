@@ -629,6 +629,319 @@ describe('native Coven launch routing', () => {
     expect(spawned).toBe(1);
   });
 
+  it('retains one pane through fail, retry, exit, and retry lifecycle transitions', async () => {
+    const project = { id: 'project' };
+    const writes: string[] = [];
+    const thread = {
+      id: 'thread-1', projectId: project.id, worktreePath: '/repo', name: 'Coven',
+      launch: {
+        command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-chat', covenSessionId: null,
+      },
+      status: 'starting', spawning: true, closing: false, closeStarted: false,
+      startInFlight: false, stopRequested: false, ptyStarted: false,
+      term: { cols: 120, rows: 40, write: (value: string) => writes.push(value) },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const pendingDataBuffers = new Map<string, Uint8Array[]>();
+    const starts: Array<'fail' | 'run'> = ['fail', 'run', 'run'];
+    const invoke = async (command: string) => {
+      if (command !== 'pty_start') return undefined;
+      if (starts.shift() === 'fail') throw new Error('coven unavailable');
+      return undefined;
+    };
+    const dependencies = {
+      invoke,
+      isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+      pendingDataBuffers,
+      syncThreadPaneMetadata: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      state,
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      setStatus: () => undefined,
+      stopThreadPty: () => Promise.resolve(false),
+    };
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('spawnPty'), dependencies,
+    );
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'), {
+        findThread: () => thread,
+        isLiveThread: dependencies.isLiveThread,
+        spawnPty,
+      },
+    );
+    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+      functionSource('handlePtyExit'), {
+        findThread: () => thread,
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => project,
+      },
+    );
+
+    await expect(spawnPty(thread)).resolves.toBe(false);
+    expect(thread.status).toBe('failed');
+    expect(state.threads).toEqual([thread]);
+    await expect(retryThread(thread.id)).resolves.toBe(true);
+    expect(thread.status).toBe('running');
+    expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+    expect(thread.status).toBe('exited');
+    expect(thread.startInFlight).toBe(false);
+    await expect(retryThread(thread.id)).resolves.toBe(true);
+    expect(thread.status).toBe('running');
+    expect(state.threads).toEqual([thread]);
+    expect(writes.join('')).toContain('[pty_start error]');
+    expect(writes.join('')).toContain('[process exited]');
+  });
+
+  it('prevents rapid double retry while a retry start is in flight', async () => {
+    let resolveStart: (() => void) | null = null;
+    let starts = 0;
+    const thread = {
+      id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
+      closing: false, closeStarted: false, startInFlight: false, stopRequested: false,
+      ptyStarted: false, launch: {
+        command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-chat', covenSessionId: null,
+      }, term: null,
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('spawnPty'), {
+        invoke: () => { starts += 1; return new Promise<void>((resolve) => { resolveStart = resolve; }); },
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        pendingDataBuffers: new Map(),
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => ({ id: 'project' }),
+        setStatus: () => undefined,
+        stopThreadPty: () => Promise.resolve(false),
+      },
+    );
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'), {
+        findThread: () => thread,
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        spawnPty,
+      },
+    );
+
+    const first = retryThread(thread.id);
+    await expect(retryThread(thread.id)).resolves.toBe(false);
+    expect(starts).toBe(1);
+    expect(thread.status).toBe('starting');
+    (resolveStart as unknown as () => void)();
+    await expect(first).resolves.toBe(true);
+  });
+
+  it('adopts an already-running Rust PTY response as the live retry', async () => {
+    const writes: Uint8Array[] = [];
+    const thread = {
+      id: 'thread-1', projectId: 'project', status: 'failed', spawning: false,
+      closing: false, closeStarted: false, startInFlight: false, stopRequested: true,
+      ptyStarted: false, launch: {
+        command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-chat', covenSessionId: null,
+      }, term: { cols: 120, rows: 40, write: (value: Uint8Array) => writes.push(value) },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const buffered = new Uint8Array([1, 2, 3]);
+    const pendingDataBuffers = new Map([[thread.id, [buffered]]]);
+    const projectLevels: string[] = [];
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('spawnPty'), {
+        invoke: async () => { throw new Error('PTY already running for thread'); },
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        pendingDataBuffers,
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: (_project: unknown, level: string) => { projectLevels.push(level); },
+        findProject: () => ({ id: 'project' }),
+        setStatus: () => undefined,
+        stopThreadPty: () => Promise.resolve(false),
+      },
+    );
+
+    await expect(spawnPty(thread)).resolves.toBe(true);
+    expect(thread.status).toBe('running');
+    expect(thread.ptyStarted).toBe(true);
+    expect(thread.stopRequested).toBe(false);
+    expect(writes).toEqual([buffered]);
+    expect(pendingDataBuffers.has(thread.id)).toBe(false);
+    expect(projectLevels).toEqual(['ok']);
+  });
+
+  it('resets stop coordination for retry and stops the retried PTY once on close', async () => {
+    const calls: string[] = [];
+    const thread = {
+      id: 'thread-1', projectId: 'project', worktreePath: '/repo', status: 'exited',
+      spawning: false, closing: false, closeStarted: false, startInFlight: false,
+      stopRequested: true, ptyStarted: false,
+      launch: {
+        command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-chat', covenSessionId: null,
+      }, term: { cols: 120, rows: 40, dispose: () => { calls.push('dispose'); } },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const invoke = async (command: string) => { calls.push(command); };
+    const stopThreadPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('stopThreadPty'), { invoke },
+    );
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('spawnPty'), {
+        invoke,
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        pendingDataBuffers: new Map(),
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => ({ id: 'project' }),
+        setStatus: () => undefined,
+        stopThreadPty,
+      },
+    );
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('retryThread'), {
+        findThread: () => thread,
+        isLiveThread: (value: typeof thread) => state.threads.includes(value) && !value.closing,
+        spawnPty,
+      },
+    );
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      findThread: () => thread,
+      detachThreadPane: () => null,
+      pendingDataBuffers: new Map(),
+      stopThreadPty,
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => ({ id: 'project' }),
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+
+    await expect(retryThread(thread.id)).resolves.toBe(true);
+    expect(thread.stopRequested).toBe(false);
+    expect(closeThread(thread.id)).toBe(true);
+    expect(closeThread(thread.id)).toBe(false);
+    expect(calls.filter((call) => call === 'pty_stop')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'dispose')).toHaveLength(1);
+    expect(state.threads).toEqual([]);
+  });
+
+  it('stops once when close wins a start and ignores late lifecycle callbacks', async () => {
+    let resolveStart: (() => void) | null = null;
+    let stopCalls = 0;
+    const thread = {
+      id: 'thread-1', projectId: 'project', worktreePath: '/repo', status: 'starting',
+      spawning: true, closing: false, closeStarted: false, startInFlight: false,
+      stopRequested: false, ptyStarted: false,
+      launch: {
+        command: '/bin/coven', args: ['chat'], env: {}, projectRoot: '/repo', cwd: '/repo',
+        launchKind: 'coven-chat', covenSessionId: null,
+      }, term: { cols: 120, rows: 40, dispose: () => undefined },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const invoke = (command: string) => {
+      if (command === 'pty_start') return new Promise<void>((resolve) => { resolveStart = resolve; });
+      if (command === 'pty_stop') stopCalls += 1;
+      return Promise.resolve();
+    };
+    const isLiveThread = (value: typeof thread) => state.threads.includes(value) && !value.closing;
+    const stopThreadPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('stopThreadPty'), { invoke },
+    );
+    const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
+      functionSource('spawnPty'), {
+        invoke, isLiveThread, stopThreadPty,
+        pendingDataBuffers: new Map(),
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => ({ id: 'project' }),
+        setStatus: () => undefined,
+      },
+    );
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      findThread: () => state.threads.find((value) => value.id === thread.id) || null,
+      detachThreadPane: () => null,
+      pendingDataBuffers: new Map(),
+      stopThreadPty,
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: () => ({ id: 'project' }),
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+    const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
+      functionSource('handlePtyExit'), {
+        findThread: () => state.threads.find((value) => value.id === thread.id) || null,
+        syncThreadPaneMetadata: () => undefined,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        state,
+        setProjectStatus: () => undefined,
+        findProject: () => ({ id: 'project' }),
+      },
+    );
+
+    const starting = spawnPty(thread);
+    expect(closeThread(thread.id)).toBe(true);
+    expect(closeThread(thread.id)).toBe(false);
+    (resolveStart as unknown as () => void)();
+    await expect(starting).resolves.toBe(false);
+    expect(stopCalls).toBe(1);
+    expect(handlePtyExit({ thread_id: thread.id })).toBe(false);
+    expect(state.threads).toEqual([]);
+  });
+
+  it('shows one retry control only for failed and exited panes', () => {
+    const retry = { hidden: false, setAttribute: () => undefined };
+    const attributes = new Map<string, string>();
+    const thread = {
+      name: 'Coven', status: 'starting', paneTitle: { textContent: '' },
+      paneStatus: { textContent: '' }, paneRetry: retry,
+      paneClose: { setAttribute: (key: string, value: string) => attributes.set(key, value) },
+    };
+    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
+      functionSource('syncThreadPaneMetadata'), {},
+    );
+    syncThreadPaneMetadata(thread);
+    expect(retry.hidden).toBe(true);
+    thread.status = 'failed';
+    syncThreadPaneMetadata(thread);
+    expect(retry.hidden).toBe(false);
+    thread.status = 'running';
+    syncThreadPaneMetadata(thread);
+    expect(retry.hidden).toBe(true);
+    thread.status = 'exited';
+    syncThreadPaneMetadata(thread);
+    expect(retry.hidden).toBe(false);
+    expect(attributes.get('aria-label')).toBe('Stop and close Coven');
+
+    const mount = functionSource('mountTerminal');
+    expect(mount.match(/className = "terminal-pane-retry"/g)).toHaveLength(1);
+    expect(mount).toMatch(/retry\.addEventListener\("click", function \(event\) \{[\s\S]*event\.stopPropagation\(\);[\s\S]*retryThread\(thread\.id\)/);
+  });
+
   it('routes native defaults to Coven while retaining explicit shell and Psyche commands', () => {
     expect(mainJs).not.toMatch(/function\s+ensureProjectPsyche\s*\(/);
     expect(mainJs).not.toMatch(/function\s+spawnDefaultThread(?:In)?\s*\(/);

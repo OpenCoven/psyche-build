@@ -676,11 +676,14 @@
     }
   }).catch(function () {});
 
-  listen("pty:exit", function (event) {
-    var payload = event.payload || {};
+  function handlePtyExit(payload) {
+    payload = payload || {};
     var thread = findThread(payload.thread_id);
-    if (!thread) return;
+    if (!thread || thread.closing || thread.closeStarted) return false;
     thread.ptyStarted = false;
+    thread.startInFlight = false;
+    thread.stopRequested = false;
+    thread.spawning = false;
     thread.status = "exited";
     syncThreadPaneMetadata(thread);
     if (thread.term) {
@@ -691,6 +694,11 @@
     if (state.activeThreadId === thread.id) {
       setProjectStatus(findProject(thread.projectId), "warn");
     }
+    return true;
+  }
+
+  listen("pty:exit", function (event) {
+    handlePtyExit(event.payload || {});
   }).catch(function () {});
 
   function findThread(id) {
@@ -757,7 +765,9 @@
       host: null,
       pane: null,
       closing: false,
+      closeStarted: false,
       startInFlight: false,
+      stopRequested: false,
       ptyStarted: false,
     };
     commitPanePlacement(placement);
@@ -777,10 +787,33 @@
     return thread;
   }
 
+  function stopThreadPty(thread) {
+    if (!thread || thread.stopRequested) return Promise.resolve(false);
+    thread.stopRequested = true;
+    return invoke("pty_stop", {
+      threadId: thread.id,
+      thread_id: thread.id,
+    }).then(function () {
+      return true;
+    }).catch(function () {
+      thread.stopRequested = false;
+      return false;
+    });
+  }
+
   function spawnPty(thread) {
-    if (!isLiveThread(thread)) return Promise.resolve(false);
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        thread.ptyStarted || thread.status === "running") {
+      return Promise.resolve(false);
+    }
     var launch = thread.launch;
+    thread.stopRequested = false;
     thread.startInFlight = true;
+    thread.status = "starting";
+    thread.spawning = true;
+    syncThreadPaneMetadata(thread);
+    refreshSidebar();
+    refreshTabs();
     return invoke("pty_start", {
       options: {
         threadId: thread.id,
@@ -802,10 +835,7 @@
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
         pendingDataBuffers.delete(thread.id);
-        return invoke("pty_stop", {
-          threadId: thread.id,
-          thread_id: thread.id,
-        }).catch(function () {}).then(function () { return false; });
+        return stopThreadPty(thread).then(function () { return false; });
       }
       thread.ptyStarted = true;
       thread.status = "running";
@@ -825,17 +855,31 @@
       return true;
     }).catch(function (err) {
       thread.startInFlight = false;
+      var msg = String(err);
       if (!isLiveThread(thread)) {
         pendingDataBuffers.delete(thread.id);
+        if (msg.indexOf("already running") !== -1) {
+          thread.ptyStarted = true;
+          return stopThreadPty(thread).then(function () { return false; });
+        }
         return false;
       }
-      thread.status = "exited";
       thread.spawning = false;
-      var msg = String(err);
       if (msg.indexOf("already running") !== -1) {
         thread.ptyStarted = true;
         thread.status = "running";
+        thread.stopRequested = false;
+        if (state.activeThreadId === thread.id) {
+          setProjectStatus(findProject(thread.projectId), "ok");
+        }
+        var pending = pendingDataBuffers.get(thread.id);
+        if (pending && thread.term) {
+          for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
+          pendingDataBuffers.delete(thread.id);
+        }
       } else {
+        thread.ptyStarted = false;
+        thread.status = "failed";
         if (thread.term) {
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
@@ -846,8 +890,17 @@
       syncThreadPaneMetadata(thread);
       refreshSidebar();
       refreshTabs();
-      return false;
+      return thread.status === "running";
     });
+  }
+
+  function retryThread(id) {
+    var thread = findThread(id);
+    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
+        (thread.status !== "failed" && thread.status !== "exited")) {
+      return Promise.resolve(false);
+    }
+    return spawnPty(thread);
   }
 
   var TERMINAL_URL_RE = /\b((?:https?:\/\/|localhost(?::\d+)?|(?:127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?:[^\s<>"'`]*)?)/ig;
@@ -970,6 +1023,16 @@
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
     status.textContent = thread.status;
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "terminal-pane-retry";
+    retry.title = "Retry terminal";
+    retry.setAttribute("aria-label", "Retry " + thread.name);
+    retry.textContent = "Retry";
+    retry.addEventListener("click", function (event) {
+      event.stopPropagation();
+      retryThread(thread.id);
+    });
     var close = document.createElement("button");
     close.type = "button";
     close.className = "terminal-pane-close";
@@ -982,6 +1045,7 @@
     });
     header.appendChild(title);
     header.appendChild(status);
+    header.appendChild(retry);
     header.appendChild(close);
     var body = document.createElement("div");
     body.className = "terminal-pane-body";
@@ -992,12 +1056,13 @@
     pane.appendChild(header);
     pane.appendChild(body);
     pane.addEventListener("pointerdown", function (event) {
-      handlePanePointerDown(thread, body, close, event);
+      handlePanePointerDown(thread, body, retry, close, event);
     });
     thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneStatus = status;
+    thread.paneRetry = retry;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
     renderPaneWorkspace();
@@ -1065,9 +1130,10 @@
     thread.fit = fit;
   }
 
-  function handlePanePointerDown(thread, body, close, event) {
+  function handlePanePointerDown(thread, body, retry, close, event) {
     var target = event.target;
-    if ((body && body.contains(target)) || (close && close.contains(target))) return;
+    if ((body && body.contains(target)) || (retry && retry.contains(target)) ||
+        (close && close.contains(target))) return;
     if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
@@ -1240,6 +1306,10 @@
     if (!thread) return;
     if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
     if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
+    if (thread.paneRetry) {
+      thread.paneRetry.hidden = thread.status !== "failed" && thread.status !== "exited";
+      thread.paneRetry.setAttribute("aria-label", "Retry " + thread.name);
+    }
     if (thread.paneClose) {
       thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
     }
@@ -1268,13 +1338,12 @@
 
   function closeThread(id, options) {
     var thread = findThread(id);
-    if (!thread) return;
+    if (!thread || thread.closeStarted) return false;
+    thread.closeStarted = true;
     thread.closing = true;
     pendingDataBuffers.delete(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.ptyStarted || thread.startInFlight) {
-      invoke("pty_stop", { threadId: id, thread_id: id }).catch(function () {});
-    }
+    if (thread.ptyStarted) stopThreadPty(thread);
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -1295,6 +1364,7 @@
     }
     refreshSidebar();
     refreshTabs();
+    return true;
   }
 
   function hideThread(id) {
