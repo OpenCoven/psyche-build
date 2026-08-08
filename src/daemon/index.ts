@@ -9,10 +9,10 @@ import {
   type ClientRequest,
   type ServerResponse,
   type StreamId,
+  type CovenSessionSummary,
   encodeBinaryFrame,
 } from './protocol.js';
 import {
-  buildDesktopUseQuickInput,
   buildDesktopUseStateFromEvents,
 } from '../utils/covenDesktopUse.js';
 import { TmuxControl, tmuxSessionNameForRoot, tmuxSessionExists } from '../services/tmuxControl.js';
@@ -27,12 +27,10 @@ import {
   listScopedProjects,
   createCovenClient,
   mutateBridgeConfig,
-  launchProjectCovenSession,
-  openProjectCovenSession,
-  routeProjectCovenSessionCapability,
   readPaneStatus,
   resolveConfiguredPaneId,
   tmuxPaneExists,
+  type BridgeCovenOpenResult,
 } from './bridge.js';
 import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
 import { createHostControlPlane } from '../control/host.js';
@@ -42,8 +40,8 @@ import {
   AgenticCapabilityRouter,
   createCovenNativeCapabilityStrategy,
   type AgenticCapabilityStrategy,
+  type AgenticCapabilityExecution,
 } from '../orchestration/capabilityRouter.js';
-import type { CovenClient } from './bridge.js';
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
@@ -117,6 +115,7 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     tmux,
     projectRoot: canonicalProjectRoot,
     sessionName,
+    capabilityRouter,
   });
   const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
 
@@ -159,7 +158,6 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       serverVersion,
       authedViaHeader,
       tmux,
-      capabilityRouter,
       controlRuntime: host.runtime,
       ownerEpoch: host.epoch,
     });
@@ -183,7 +181,6 @@ export interface ConnectionDeps {
   serverVersion: string;
   authedViaHeader: boolean;
   tmux: TmuxControl;
-  capabilityRouter: AgenticCapabilityRouter;
   /**
    * The single authority for pane mutations.
    *
@@ -510,46 +507,74 @@ export class Connection {
         return;
       }
       case 'coven.sessions.launch': {
-        try {
-          const session = await launchProjectCovenSession(this.deps.projectRoot, msg.launch, createCovenClient());
-          this.send({ type: 'coven.sessions.launch.result', requestId: msg.requestId, session });
-          await this.emitWorkspaceChanged();
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_launch_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.session.launch',
+          {
+            harness: msg.launch.harness,
+            prompt: msg.launch.prompt,
+            cwd: msg.launch.cwd,
+            title: msg.launch.title,
+          },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.launch:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_session_launch_failed', outcome);
+          return;
         }
+        const session = outcome.value as CovenSessionSummary;
+        this.send({ type: 'coven.sessions.launch.result', requestId: msg.requestId, session });
+        await this.emitWorkspaceChanged();
         return;
       }
       case 'coven.sessions.open': {
-        try {
-          const result = await openProjectCovenSession(this.deps.projectRoot, this.deps.tmux.sessionName, msg.id);
-          this.send({
-            type: 'coven.sessions.open.result',
-            requestId: msg.requestId,
-            id: result.id,
-            pane: result.pane,
-            session: result.session,
-          });
-          await this.emitWorkspaceChanged();
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_open_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.session.open',
+          { sessionId: msg.id },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.open:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_session_open_failed', outcome);
+          return;
         }
+        const result = outcome.value as BridgeCovenOpenResult;
+        this.send({
+          type: 'coven.sessions.open.result',
+          requestId: msg.requestId,
+          id: result.id,
+          pane: result.pane,
+          session: result.session,
+        });
+        await this.emitWorkspaceChanged();
         return;
       }
       case 'coven.capabilities.execute': {
-        try {
-          this.send(await dispatchCovenCapabilityRequest(
-            this.deps.projectRoot,
-            msg,
-            this.deps.capabilityRouter,
-          ));
-        } catch (e) {
-          this.send({
-            type: 'error',
-            requestId: msg.requestId,
-            code: bridgeErrorCode(e, 'coven_capability_execution_failed'),
-            message: bridgeErrorMessage(e),
-          });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.capability.execute',
+          {
+            sessionId: msg.sessionId,
+            capability: msg.capability.capability,
+            prompt: msg.capability.prompt,
+            provider: msg.capability.provider,
+            taskId: msg.capability.taskId,
+            traceId: msg.capability.traceId,
+            idempotencyKey: msg.capability.idempotencyKey,
+            title: msg.capability.title,
+            state: msg.capability.state,
+            attempt: msg.capability.attempt,
+          },
+          { actorKind: 'compatibility', idempotencyKey: msg.capability.idempotencyKey && msg.capability.idempotencyKey.length > 0 ? `v0:coven.capability:${msg.capability.idempotencyKey}` : `v0:coven.capability:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_capability_execution_failed', outcome);
+          return;
         }
+        const value = outcome.value as { sessionId: string; execution: AgenticCapabilityExecution };
+        this.send({
+          type: 'coven.capabilities.execute.result',
+          requestId: msg.requestId,
+          sessionId: value.sessionId,
+          execution: value.execution,
+        });
         return;
       }
       case 'coven.desktop.state': {
@@ -567,13 +592,22 @@ export class Connection {
         return;
       }
       case 'coven.desktop.action': {
-        try {
-          const client = createCovenClient();
-          await client.sendInput?.(msg.sessionId, buildDesktopUseQuickInput(msg.action));
-          this.send({ type: 'coven.desktop.action.result', requestId: msg.requestId, sessionId: msg.sessionId, action: msg.action, accepted: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_desktop_action_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.desktop.action',
+          { sessionId: msg.sessionId, action: msg.action },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.desktop.action:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_desktop_action_failed', outcome);
+          return;
         }
+        this.send({
+          type: 'coven.desktop.action.result',
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          action: msg.action,
+          accepted: true,
+        });
         return;
       }
       case 'panes.capture': {
@@ -959,27 +993,6 @@ function isStaleLeaseOutcome(outcome: CommandOutcome): boolean {
 function batchLaneIdempotencyKey(batchKey: string, index: number): string {
   const digest = createHash('sha256').update(batchKey).digest('hex').slice(0, 32);
   return `batch:${digest}:${index}`;
-}
-
-export async function dispatchCovenCapabilityRequest(
-  projectRoot: string,
-  request: Extract<ClientRequest, { type: 'coven.capabilities.execute' }>,
-  router: AgenticCapabilityRouter,
-  client: CovenClient = createCovenClient(),
-): Promise<Extract<ServerResponse, { type: 'coven.capabilities.execute.result' }>> {
-  const execution = await routeProjectCovenSessionCapability(
-    projectRoot,
-    request.sessionId,
-    request.capability,
-    router,
-    client,
-  );
-  return {
-    type: 'coven.capabilities.execute.result',
-    requestId: request.requestId,
-    sessionId: request.sessionId,
-    execution,
-  };
 }
 
 /** Error carrying a protocol `code`, matching what bridge.ts throws. */
