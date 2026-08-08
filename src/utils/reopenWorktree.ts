@@ -208,7 +208,7 @@ async function reopenWorktreeWithReuseReservation(
     paneInfo = splitPane({ targetPane });
   }
 
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
   const newPane: PsychePane = {
     id: psychePaneId,
     slug,
@@ -230,6 +230,11 @@ async function reopenWorktreeWithReuseReservation(
   };
 
   try {
+    if (!tmuxServerIdentity) {
+      throw new Error(
+        `Could not capture tmux server generation for reopened pane ${paneInfo}`,
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (!(await tmuxService.paneExists(paneInfo))) {
       throw new Error(`newly split pane ${paneInfo} is not present`);
@@ -263,10 +268,15 @@ async function reopenWorktreeWithReuseReservation(
         operation: 'reopen-worktree',
         reason: `reopened pane persistence failed: ${persistenceError}`,
         reservation,
-        persistConfigRecovery: () => persistReopenedPaneRecovery(
-          sessionProjectRoot,
-          newPane,
-        ),
+        persistConfigRecovery: tmuxServerIdentity
+          ? () => persistReopenedPaneRecovery(
+            sessionProjectRoot,
+            newPane,
+          )
+          : async () => ({
+            durable: false,
+            message: 'refused to persist an unversioned reopened pane record',
+          }),
       });
       const message = `Failed to persist reopened pane before agent launch: ${persistenceError}; pane teardown is ${teardown.presence}; ${recovery.message}`;
       if (recovery.retained) {

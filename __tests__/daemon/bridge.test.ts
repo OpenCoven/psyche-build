@@ -3,7 +3,7 @@ import http from 'node:http';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildCovenAttachCommand,
   buildScopedProject,
@@ -13,6 +13,7 @@ import {
   listProjectCovenSessions,
   openProjectCovenSession,
   listScopedProjects,
+  killBridgePane,
   readPaneStatus,
   resolveCovenEndpoint,
   resolveScopedCwd,
@@ -382,6 +383,92 @@ describe('daemon bridge Coven helpers', () => {
       type: 'shell',
       covenSession: { id: 'session-1', harness: 'codex', status: 'running' },
     });
+  });
+
+  it('owns a reused Coven pane ID in the new tmux generation only', async () => {
+    const root = await tempDir('psyche-bridge-coven-reused-id-');
+    const oldGeneration = {
+      pid: 111,
+      processStartIdentity: 'old-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const newGeneration = {
+      pid: 222,
+      processStartIdentity: 'new-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$2',
+    };
+    await writeConfig(root, {
+      projectName: 'project',
+      projectRoot: root,
+      panes: [{
+        id: 'old-coven-pane',
+        paneId: '%42',
+        slug: 'old-coven',
+        prompt: '',
+        tmuxServerIdentity: oldGeneration,
+        type: 'shell',
+        shellType: 'coven',
+      }],
+      settings: {},
+    });
+
+    const opened = await openProjectCovenSession(
+      root,
+      'psyche-test',
+      'session-1',
+      {
+        listSessions: async () => [{
+          id: 'session-1',
+          projectRoot: root,
+          harness: 'codex',
+          title: 'Reused ID',
+          status: 'running',
+          createdAt: '2026-04-27T10:00:00Z',
+          updatedAt: '2026-04-27T10:01:00Z',
+        }],
+      },
+      {
+        tmuxSessionExists: () => true,
+        createTmuxPane: () => '%42',
+        sendTmuxCommand: vi.fn(),
+        getTmuxServerIdentity: () => newGeneration,
+      },
+    );
+
+    const created = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    ).panes.find((pane: { tmuxServerIdentity?: unknown }) => (
+      JSON.stringify(pane.tmuxServerIdentity) === JSON.stringify(newGeneration)
+    ));
+    expect(created).toMatchObject({
+      paneId: '%42',
+      tmuxServerIdentity: newGeneration,
+      shellType: 'coven',
+    });
+
+    let live = true;
+    const kill = vi.fn(() => {
+      live = false;
+    });
+    await killBridgePane(root, opened.id, {
+      tmuxPaneExists: () => live,
+      killTmuxPane: kill,
+      getTmuxServerIdentity: () => newGeneration,
+    });
+
+    expect(kill).toHaveBeenCalledWith('%42');
+    const remaining = JSON.parse(
+      await readFile(path.join(root, '.psyche', 'psyche.config.json'), 'utf8'),
+    ).panes;
+    expect(remaining).toEqual([
+      expect.objectContaining({
+        id: 'old-coven-pane',
+        paneId: '%42',
+        tmuxServerIdentity: oldGeneration,
+      }),
+    ]);
   });
 
   it('confirms Coven pane teardown before removing a failed attach record', async () => {

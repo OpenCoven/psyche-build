@@ -38,6 +38,19 @@ vi.mock('../../src/utils/gitProcess.js', () => ({
   runGitProcess: runGitProcessMock,
 }));
 
+vi.mock('../../src/services/TmuxServerIdentity.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/TmuxServerIdentity.js')>();
+  return {
+    ...actual,
+    parseTmuxServerIdentity: vi.fn(() => ({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    })),
+  };
+});
+
 // Mock StateManager
 const mockGetPanes = vi.fn((): PsychePane[] => []);
 const mockSetPanes = vi.fn();
@@ -1129,12 +1142,19 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should kill tmux pane when closing', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       const testPane: PsychePane = {
         id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -1148,6 +1168,7 @@ describe('Pane Lifecycle Integration Tests', () => {
           await beforeRemove?.();
           return [];
         }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1168,12 +1189,19 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should queue worktree cleanup with kill_and_clean option', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       const testPane: PsychePane = {
         id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -1187,6 +1215,7 @@ describe('Pane Lifecycle Integration Tests', () => {
           await beforeRemove?.();
           return [];
         }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -1207,6 +1236,12 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should handle background cleanup enqueue failure gracefully', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       mockEnqueueCleanup.mockImplementation(() => {
         throw new Error('enqueue failed');
@@ -1217,6 +1252,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -1230,6 +1266,7 @@ describe('Pane Lifecycle Integration Tests', () => {
           await beforeRemove?.();
           return [];
         }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);

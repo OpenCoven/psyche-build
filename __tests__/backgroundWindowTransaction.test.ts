@@ -123,12 +123,21 @@ describe('background window transaction', () => {
       type: 'test',
       projectRoot,
       pane: original,
-      createWindow: async () => ({ windowId: '@7', paneId: '%7' }),
+      createWindow: async () => ({
+        windowId: '@7',
+        paneId: '%7',
+        tmuxServerIdentity: serverGeneration,
+      }),
       sendCommand,
       tearDownResource,
+      getTmuxServerIdentity: () => serverGeneration,
     })).rejects.toThrow(/missing or rebound/);
 
-    expect(tearDownResource).toHaveBeenCalledWith({ windowId: '@7', paneId: '%7' });
+    expect(tearDownResource).toHaveBeenCalledWith({
+      windowId: '@7',
+      paneId: '%7',
+      tmuxServerIdentity: serverGeneration,
+    });
     expect(sendCommand).not.toHaveBeenCalled();
     expect(readPanes(projectRoot)).toEqual([
       expect.objectContaining({ paneId: '%rebound' }),
@@ -145,13 +154,22 @@ describe('background window transaction', () => {
       type: 'dev',
       projectRoot,
       pane: current,
-      createWindow: async () => ({ windowId: '@8', paneId: '%8' }),
+      createWindow: async () => ({
+        windowId: '@8',
+        paneId: '%8',
+        tmuxServerIdentity: serverGeneration,
+      }),
       sendCommand,
       tearDownResource,
+      getTmuxServerIdentity: () => serverGeneration,
     })).rejects.toThrow(/already owns/);
 
     expect(sendCommand).not.toHaveBeenCalled();
-    expect(tearDownResource).toHaveBeenCalledWith({ windowId: '@8', paneId: '%8' });
+    expect(tearDownResource).toHaveBeenCalledWith({
+      windowId: '@8',
+      paneId: '%8',
+      tmuxServerIdentity: serverGeneration,
+    });
     expect(readPanes(projectRoot)).toEqual([
       expect.objectContaining({ devWindowId: '@old', devPaneId: '%old' }),
     ]);
@@ -205,11 +223,16 @@ describe('background window transaction', () => {
       type: 'test',
       projectRoot,
       pane: current,
-      createWindow: async () => ({ windowId: '@7', paneId: '%7' }),
+      createWindow: async () => ({
+        windowId: '@7',
+        paneId: '%7',
+        tmuxServerIdentity: serverGeneration,
+      }),
       sendCommand: async () => {
         throw new Error('tmux send-keys failed');
       },
       tearDownResource: async () => ({ presence: 'absent' }),
+      getTmuxServerIdentity: () => serverGeneration,
     })).rejects.toThrow(/Failed to launch test command/);
 
     expect(readPanes(projectRoot)).toEqual([
@@ -249,23 +272,28 @@ describe('background window transaction', () => {
       type: 'dev',
       projectRoot,
       pane: current,
-      createWindow: async () => ({ windowId: '@8', paneId: '%8' }),
+      createWindow: async () => ({
+        windowId: '@8',
+        paneId: '%8',
+        tmuxServerIdentity: serverGeneration,
+      }),
       sendCommand: async () => {
         throw new Error('launch failed');
       },
       tearDownResource: async () => ({ presence: 'unknown' }),
+      getTmuxServerIdentity: () => serverGeneration,
     })).rejects.toThrow(/retained durable recovery fields/);
 
     expect(readPanes(projectRoot)).toEqual([
       expect.objectContaining({
         devWindowId: '@8',
         devPaneId: '%8',
-        backgroundWindowRecoveries: [{
+        backgroundWindowRecoveries: [expect.objectContaining({
           type: 'dev',
           windowId: '@8',
           paneId: '%8',
           reason: expect.any(String),
-        }],
+        })],
       }),
     ]);
   });

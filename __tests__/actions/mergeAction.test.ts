@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../../src/types.js';
 
 const tmuxServiceMock = vi.hoisted(() => ({
+  getServerIdentity: vi.fn(),
   probePanePresence: vi.fn(async (_paneId: string): Promise<'present' | 'absent' | 'unknown'> => 'unknown'),
   killPane: vi.fn(async (_paneId: string) => {}),
   probeWindowPresence: vi.fn(async (_windowId: string): Promise<'present' | 'absent' | 'unknown'> => 'unknown'),
@@ -94,6 +95,12 @@ describe('merge sibling teardown', () => {
     tmuxServiceMock.killPane.mockResolvedValue(undefined);
     tmuxServiceMock.probeWindowPresence.mockResolvedValue('unknown');
     tmuxServiceMock.killWindow.mockResolvedValue(undefined);
+    tmuxServiceMock.getServerIdentity.mockReturnValue({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    });
     removePaneIdentitiesFromConfigMock.mockResolvedValue([]);
   });
 
@@ -144,6 +151,12 @@ describe('merge sibling teardown', () => {
       paneId: '%1',
       worktreePath: '/repo/.psyche/worktrees/feature',
       branchName: 'feature',
+      tmuxServerIdentity: {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      },
     };
     const sibling: PsychePane = {
       ...pane,

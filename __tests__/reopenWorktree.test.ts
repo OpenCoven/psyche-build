@@ -6,6 +6,7 @@ const fsMock = vi.hoisted(() => ({
 
 const tmuxServiceMock = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
+  getServerIdentity: vi.fn(),
   getCurrentSessionNameSync: vi.fn(() => 'psyche-test'),
   paneExists: vi.fn(async () => true),
   setSessionOptionSync: vi.fn(),
@@ -138,6 +139,7 @@ describe('reopenWorktree', () => {
       worktreePath: string,
     ) => ({
       canonicalWorktreePath: worktreePath,
+      retain: vi.fn(),
       complete: vi.fn(async () => {}),
       cancel: vi.fn(async () => {}),
     }));
@@ -145,6 +147,12 @@ describe('reopenWorktree', () => {
     persistReopenedPaneMock.mockResolvedValue(undefined);
     tmuxServiceMock.killPane.mockResolvedValue(undefined);
     tmuxServiceMock.probePanePresence.mockResolvedValue('present');
+    tmuxServiceMock.getServerIdentity.mockReturnValue({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    });
     mutateProjectPaneConfigMock.mockImplementation(async (
       _projectRoot: string,
       mutation: (config: Record<string, unknown>) => unknown | Promise<unknown>,
@@ -298,6 +306,7 @@ describe('reopenWorktree', () => {
       worktreePath: string,
     ) => ({
       canonicalWorktreePath: worktreePath,
+      retain: () => {},
       complete: async () => {
         order.push('lease-released');
       },
@@ -342,6 +351,7 @@ describe('reopenWorktree', () => {
       worktreePath: string,
     ) => ({
       canonicalWorktreePath: worktreePath,
+      retain: () => {},
       complete: async () => {
         order.push('lease-completed');
       },

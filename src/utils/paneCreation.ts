@@ -474,7 +474,7 @@ async function createPaneWithReuseReservation(
     }
   }
 
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+  const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
   const newPane: PsychePane = {
     id: createPsychePaneId(),
     slug,
@@ -497,6 +497,34 @@ async function createPaneWithReuseReservation(
   // failure must either leave an exact durable record or prove the pane is
   // gone. Construct the identity before touching any fallible post-split
   // operation so uncertain teardown has something precise to retain.
+  if (!tmuxServerIdentity) {
+    const teardown = await terminatePaneForRollback(tmuxService, paneInfo);
+    const recovery = teardown.presence === 'absent'
+      ? undefined
+      : await retainPaneRecovery({
+        projectRoot,
+        sessionProjectRoot,
+        pane: newPane,
+        operation: 'pane-creation-generation',
+        reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
+        reservation: options.reuseReservation,
+        persistConfigRecovery: async () => ({
+          durable: false,
+          message: 'refused to persist an unversioned pane record',
+        }),
+      });
+    if (recovery?.retained) {
+      throw new PaneLifecycleReservationRetainedError(
+        `Could not capture tmux server generation for pane "${slug}"; ${recovery.message}`,
+      );
+    }
+    throw new Error(
+      `Could not capture tmux server generation for pane "${slug}"${
+        recovery ? `; ${recovery.message}` : ''
+      }`,
+    );
+  }
+
   try {
     await waitForPaneReady(tmuxService, paneInfo);
 

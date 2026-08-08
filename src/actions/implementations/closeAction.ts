@@ -21,6 +21,7 @@ import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
 import {
   paneRecoveryInstructions,
   tearDownFullPaneWithVerification,
+  verifyFullPaneAbsent,
   type TmuxPanePresence,
 } from '../../utils/paneTeardown.js';
 import {
@@ -108,6 +109,16 @@ async function tearDownOwnedPane(
       backgroundPanes: new Map(),
       windows: new Map(),
     };
+  }
+  if (ownership === 'legacy') {
+    // A legacy ID has no tmux generation, so it may name an unrelated pane
+    // after a server restart. Only remove the record when every resource is
+    // already proven absent; never issue a kill based on that ID alone.
+    return verifyFullPaneAbsent({
+      target: pane,
+      probePane: (paneId) => probeTmuxPanePresence(paneId),
+      probeWindow: probeTmuxWindowPresence,
+    });
   }
   return tearDownFullPaneWithVerification({
     target: pane,

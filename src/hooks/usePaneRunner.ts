@@ -131,12 +131,37 @@ export default function usePaneRunner({
         pane,
         createWindow: async () => {
           const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
+          // Capture before any follow-up tmux operation so a restarted server
+          // can never make this window/pane pair appear owned by a new
+          // generation.
+          const tmuxServerIdentity = tmuxService.getServerIdentity?.(windowId);
+          if (!tmuxServerIdentity) {
+            const paneId = await tmuxService.getWindowPaneId(windowId);
+            const [panePresence, windowPresence] = await Promise.all([
+              tmuxService.probePanePresence(paneId),
+              tmuxService.probeWindowPresence(windowId),
+            ]);
+            if (panePresence !== 'absent' || windowPresence !== 'absent') {
+              const marker = await writeWorktreeRecoveryMarker({
+                projectRoot,
+                worktreePath: pane.worktreePath || projectRoot,
+                pane: { id: pane.id, paneId: pane.paneId },
+                operation: 'background-window-generation',
+                reason: `could not capture tmux server generation for ${type} window ${windowId} and pane ${paneId}; probes are pane=${panePresence}, window=${windowPresence}. Retained without killing an unversioned possibly reused resource.`,
+              });
+              throw new Error(
+                `Could not capture tmux server generation for ${type} window ${windowId}; wrote recovery marker ${marker.path}`,
+              );
+            }
+            throw new Error(
+              `Could not capture tmux server generation for ${type} window ${windowId}; resource is already absent`,
+            );
+          }
           const paneId = await tmuxService.getWindowPaneId(windowId);
-          const tmuxServerIdentity = tmuxService.getServerIdentity?.();
           return {
             windowId,
             paneId,
-            ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+            tmuxServerIdentity,
           };
         },
         sendCommand: (resource) => tmuxService.sendKeys(

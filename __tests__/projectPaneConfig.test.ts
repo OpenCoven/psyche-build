@@ -6,6 +6,7 @@ import {
   mutateProjectPaneConfig,
   mutateProjectPaneSettings,
   removeProjectPaneConfigPaneIdentities,
+  replaceProjectPaneConfigPaneIdentity,
   upsertProjectPaneConfigPanes,
 } from '../src/services/ProjectPaneConfig.js';
 import {
@@ -72,6 +73,69 @@ describe('project pane config mutation', () => {
       paneId: '%1',
     }]);
     expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([]);
+  });
+
+  it('rebinds a restored pane to its new tmux generation without inheriting stale background resources', async () => {
+    const projectRoot = createProject();
+    const oldGeneration = {
+      pid: 111,
+      processStartIdentity: 'old-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const newGeneration = {
+      pid: 222,
+      processStartIdentity: 'new-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$2',
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [{
+        id: 'psyche-restored',
+        paneId: '%1',
+        slug: 'restored',
+        prompt: '',
+        tmuxServerIdentity: oldGeneration,
+        testPaneId: '%old-test',
+        testWindowId: '@old-test',
+        testTmuxServerIdentity: oldGeneration,
+        testStatus: 'running',
+        devPaneId: '%old-dev',
+        devWindowId: '@old-dev',
+        devTmuxServerIdentity: oldGeneration,
+        devStatus: 'running',
+        backgroundWindowRecoveries: [{
+          type: 'test',
+          paneId: '%old-recovery',
+          windowId: '@old-recovery',
+          tmuxServerIdentity: oldGeneration,
+          reason: 'old server',
+        }],
+      }];
+    });
+
+    const replacement = await replaceProjectPaneConfigPaneIdentity(
+      projectRoot,
+      { id: 'psyche-restored', paneId: '%1' },
+      {
+        id: 'psyche-restored',
+        paneId: '%9',
+        slug: 'restored',
+        prompt: '',
+        tmuxServerIdentity: newGeneration,
+      },
+    );
+
+    expect(replacement.result).toMatchObject({
+      id: 'psyche-restored',
+      paneId: '%9',
+      tmuxServerIdentity: newGeneration,
+    });
+    expect(replacement.result).not.toHaveProperty('testPaneId');
+    expect(replacement.result).not.toHaveProperty('testWindowId');
+    expect(replacement.result).not.toHaveProperty('devPaneId');
+    expect(replacement.result).not.toHaveProperty('devWindowId');
+    expect(replacement.result).not.toHaveProperty('backgroundWindowRecoveries');
   });
 
   it('keeps a daemon pane when a stale TUI closes a different pane', async () => {

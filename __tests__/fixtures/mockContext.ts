@@ -4,6 +4,7 @@
 
 import type { PsychePane } from '../../src/types.js';
 import type { ActionContext } from '../../src/actions/types.js';
+import { mockTmuxServerIdentity } from './mockPanes.js';
 
 export function createMockContext(
   panes: PsychePane[] = [],
@@ -23,6 +24,7 @@ export function createMockContext(
     },
     onPaneUpdate: undefined,
     onPaneRemove: undefined,
+    getTmuxServerIdentity: () => mockTmuxServerIdentity,
     ...overrides,
   };
 

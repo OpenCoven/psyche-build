@@ -37,11 +37,14 @@ import {
   paneRecoveryInstructions,
   tearDownFullPaneWithVerification,
   tearDownPaneWithVerification,
+  verifyFullPaneAbsent,
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
 import {
   getCurrentTmuxServerIdentity,
+  isTmuxServerIdentity,
+  sameTmuxServerIdentity,
   type TmuxServerIdentity,
 } from '../services/TmuxServerIdentity.js';
 import {
@@ -232,6 +235,10 @@ interface VerifiedSharedWorktree {
   worktreePath: string;
   branch: string;
   oid: string;
+}
+
+class BridgePaneReservationRetainedError extends Error {
+  readonly reservationRetained = true;
 }
 
 export function isPathInsideOrEqual(parent: string, candidate: string): boolean {
@@ -447,6 +454,19 @@ export async function openProjectCovenSession(
     projectRoot,
     async ({ config, persist }) => {
       const paneId = deps.createTmuxPane(sessionName, session.projectRoot, title);
+      const tmuxServerIdentity = (
+        deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
+      )(paneId);
+      if (!tmuxServerIdentity) {
+        await rejectUnversionedBridgePaneAllocation(
+          projectRoot,
+          session.projectRoot,
+          paneId,
+          deps,
+          'coven-session-open',
+          nextBridgePaneId(),
+        );
+      }
 
       const now = new Date().toISOString();
       const record: RawConfigPane = {
@@ -456,6 +476,7 @@ export async function openProjectCovenSession(
         displayName: title,
         prompt: '',
         paneId,
+        tmuxServerIdentity,
         cwd: session.projectRoot,
         projectRoot,
         projectName: path.basename(projectRoot),
@@ -1285,13 +1306,20 @@ export async function spawnBridgePane(
         throw error;
       }
       let settled = false;
+      let retained = false;
       try {
         const result = await finishSpawn(reservation.canonicalWorktreePath);
         await reservation.complete();
         settled = true;
         return result;
+      } catch (error) {
+        if (error instanceof BridgePaneReservationRetainedError) {
+          reservation.retain();
+          retained = true;
+        }
+        throw error;
       } finally {
-        if (!settled) {
+        if (!settled && !retained) {
           await reservation.cancel();
         }
       }
@@ -1387,16 +1415,48 @@ export async function spawnBridgePane(
         paneId = deps.createTmuxPane(sessionName, effectiveWorktreePath, title);
         const tmuxServerIdentity = (
           deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity
-        )(sessionName);
+        )(paneId);
+        const psychePaneId = nextBridgePaneId();
+        if (!tmuxServerIdentity) {
+          const teardown = await tearDownBridgeTmuxPane(deps, paneId);
+          if (teardown.presence !== 'absent') {
+            rollbackBlockedByUnconfirmedPane = true;
+            creationReservation?.retain();
+            let recovery = 'could not write a recovery marker';
+            try {
+              const marker = await writeWorktreeRecoveryMarker({
+                projectRoot: scoped.projectRoot,
+                worktreePath: effectiveWorktreePath,
+                pane: { id: psychePaneId, paneId },
+                operation: 'bridge-pane-generation',
+                reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
+              });
+              recovery = `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+            } catch (error) {
+              recovery = `could not write recovery marker: ${bridgeErrorMessage(error)}`;
+            }
+            const message = `could not capture tmux server generation for pane ${paneId}; pane teardown is ${
+              teardown.presence
+            }; ${recovery}`;
+            if (attaching) {
+              throw new BridgePaneReservationRetainedError(message);
+            }
+            throw bridgeError('tmux_generation_unverified', message);
+          }
+          throw bridgeError(
+            'tmux_generation_unverified',
+            `could not capture tmux server generation for pane ${paneId}; pane was removed`,
+          );
+        }
         const now = new Date().toISOString();
         const pane: RawConfigPane = {
-          id: nextBridgePaneId(),
+          id: psychePaneId,
           slug: paneSlug,
           title,
           displayName: title,
           prompt: request.prompt || '',
           paneId,
-          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+          tmuxServerIdentity,
           projectRoot: scoped.projectRoot,
           projectName: path.basename(scoped.projectRoot),
           type: 'worktree',
@@ -1566,7 +1626,11 @@ export async function killBridgePane(
 ): Promise<BridgeKillResult> {
   const scoped = await resolveScopedCwd(projectRoot);
   const config = await readBridgeConfig(scoped.projectRoot);
-  const found = findRawPane(config, paneId);
+  const found = findRawPaneForKill(
+    config,
+    paneId,
+    (deps.getTmuxServerIdentity ?? getCurrentTmuxServerIdentity)(),
+  );
   if (!found) {
     throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
   }
@@ -1641,7 +1705,32 @@ export async function killBridgePane(
         );
       }
 
-      if (ownership !== 'stale-generation') {
+      if (ownership === 'legacy') {
+        const teardown = await verifyFullPaneAbsent({
+          target: {
+            paneId: expectedIdentity.paneId,
+            testPaneId: current.testPaneId,
+            testWindowId: current.testWindowId,
+            devPaneId: current.devPaneId,
+            devWindowId: current.devWindowId,
+          },
+          probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
+          probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
+        });
+        if (teardown.presence !== 'absent') {
+          throw bridgeError(
+            teardown.presence === 'unknown'
+              ? 'pane_probe_unknown'
+              : 'pane_legacy_present',
+            `legacy pane record ${expectedIdentity.paneId} has no complete tmux generation and may reference a reused ID; retained it without killing. ${
+              paneRecoveryInstructions(
+                expectedIdentity.paneId,
+                projectPaneConfigPath(scoped.projectRoot),
+              )
+            }`,
+          );
+        }
+      } else if (ownership !== 'stale-generation') {
         const teardown = await tearDownFullPaneWithVerification({
           target: {
             paneId: expectedIdentity.paneId,
@@ -1709,6 +1798,48 @@ async function tearDownBridgeTmuxPane(
     probe: () => deps.probeTmuxPane?.(paneId) ?? 'unknown',
     kill: () => (deps.killTmuxPane ?? killTmuxPane)(paneId),
   });
+}
+
+/**
+ * A fresh tmux pane without a captured server generation can never become a
+ * normal registry record. If cleanup is uncertain, leave an operator-visible
+ * marker rather than silently orphaning the pane behind a reusable ID.
+ */
+async function rejectUnversionedBridgePaneAllocation(
+  projectRoot: string,
+  worktreePath: string,
+  paneId: string,
+  deps: Pick<BridgeSpawnDeps, 'killTmuxPane' | 'probeTmuxPane'>,
+  operation: string,
+  psychePaneId: string,
+): Promise<never> {
+  const teardown = await tearDownBridgeTmuxPane(deps, paneId);
+  if (teardown.presence === 'absent') {
+    throw bridgeError(
+      'tmux_generation_unverified',
+      `could not capture tmux server generation for pane ${paneId}; pane was removed`,
+    );
+  }
+
+  let recovery = 'could not write a recovery marker';
+  try {
+    const marker = await writeWorktreeRecoveryMarker({
+      projectRoot,
+      worktreePath,
+      pane: { id: psychePaneId, paneId },
+      operation,
+      reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
+    });
+    recovery = `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+  } catch (error) {
+    recovery = `could not write recovery marker: ${bridgeErrorMessage(error)}`;
+  }
+  throw bridgeError(
+    'tmux_generation_unverified',
+    `could not capture tmux server generation for pane ${paneId}; pane teardown is ${
+      teardown.presence
+    }; ${recovery}`,
+  );
 }
 
 export function killTmuxPane(paneId: string): void {
@@ -1874,6 +2005,46 @@ function bridgeConfigPath(projectRoot: string): string {
 function findRawPane(config: BridgeConfig, paneId: string): RawConfigPane | undefined {
   const panes = Array.isArray(config.panes) ? config.panes : [];
   return panes.find((pane) => pane.id === paneId || pane.paneId === paneId);
+}
+
+/**
+ * A tmux ID can legitimately appear in two records after a server restart.
+ * An explicit Psyche record ID always wins; an ambiguous tmux ID is resolved
+ * only by the one record whose captured generation matches the live server.
+ */
+function findRawPaneForKill(
+  config: BridgeConfig,
+  requestedId: string,
+  currentGeneration: TmuxServerIdentity | undefined,
+): RawConfigPane | undefined {
+  const panes = Array.isArray(config.panes) ? config.panes : [];
+  const exactRecord = panes.find((pane) => pane.id === requestedId);
+  if (exactRecord) {
+    return exactRecord;
+  }
+
+  const matchingTmuxId = panes.filter((pane) => pane.paneId === requestedId);
+  if (matchingTmuxId.length <= 1) {
+    return matchingTmuxId[0];
+  }
+  if (!currentGeneration) {
+    throw bridgeError(
+      'pane_ownership_ambiguous',
+      `tmux pane ${requestedId} has multiple historical records and the current server generation is unavailable`,
+    );
+  }
+
+  const currentRecords = matchingTmuxId.filter((pane) => (
+    isTmuxServerIdentity(pane.tmuxServerIdentity)
+    && sameTmuxServerIdentity(pane.tmuxServerIdentity, currentGeneration)
+  ));
+  if (currentRecords.length === 1) {
+    return currentRecords[0];
+  }
+  throw bridgeError(
+    'pane_ownership_ambiguous',
+    `tmux pane ${requestedId} has ${matchingTmuxId.length} records without one uniquely owned current-generation target`,
+  );
 }
 
 function rawPaneIdentity(pane: RawConfigPane): { id: string; paneId: string } {

@@ -32,6 +32,7 @@ import {
   tearDownPaneWithVerification,
   type TmuxPanePresence,
 } from '../utils/paneTeardown.js';
+import { retainPaneRecovery } from '../utils/paneLifecycleRecovery.js';
 
 // Separate config structure to match new format
 export interface PsycheConfig {
@@ -310,11 +311,40 @@ async function restoreMissingPaneWithLease(
   try {
     const worktreePath = reservation.canonicalWorktreePath;
     const newPaneId = splitPane({ cwd: worktreePath });
-    const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+    const tmuxServerIdentity = tmuxService.getServerIdentity?.(newPaneId);
+    if (!tmuxServerIdentity) {
+      const unversionedPane: PsychePane = {
+        ...missingPane,
+        paneId: newPaneId,
+        worktreePath,
+      };
+      const teardown = await tearDownRestoredPane(tmuxService, newPaneId);
+      if (teardown.presence === 'absent') {
+        throw new Error(
+          `Could not capture tmux server generation for restored pane ${missingPane.id}`,
+        );
+      }
+      const recovery = await retainPaneRecovery({
+        projectRoot: sessionProjectRoot,
+        sessionProjectRoot,
+        pane: unversionedPane,
+        operation: 'pane-restoration-generation',
+        reason: `could not capture tmux server generation; pane teardown is ${teardown.presence}`,
+        reservation,
+        persistConfigRecovery: async () => ({
+          durable: false,
+          message: 'refused to persist an unversioned restored pane record',
+        }),
+      });
+      retainDestructiveProtection = recovery.retained;
+      throw new RestoreReservationRetentionError(
+        `Could not capture tmux server generation for restored pane ${missingPane.id}; ${recovery.message}`,
+      );
+    }
     const reboundPane: PsychePane = {
       ...missingPane,
       paneId: newPaneId,
-      ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+      tmuxServerIdentity,
       worktreePath,
     };
 
@@ -328,11 +358,20 @@ async function restoreMissingPaneWithLease(
     }
 
     try {
-      await replaceProjectPaneConfigPaneIdentity(
+      const replacement = await replaceProjectPaneConfigPaneIdentity(
         sessionProjectRoot,
         expected,
         reboundPane,
       );
+      // Object.assign alone would retain removed old-generation test/dev
+      // fields on the caller's in-memory object. Replace the exact object
+      // contents so the restored pane cannot target stale resource IDs before
+      // the next config reload.
+      const mutableMissingPane = missingPane as unknown as Record<string, unknown>;
+      for (const key of Object.keys(mutableMissingPane)) {
+        delete mutableMissingPane[key];
+      }
+      Object.assign(missingPane, replacement.result as PsychePane);
     } catch (error) {
       const persistenceError = error instanceof Error ? error.message : String(error);
       const teardown = await tearDownRestoredPane(tmuxService, newPaneId);
@@ -359,7 +398,6 @@ async function restoreMissingPaneWithLease(
     // receive any command. From this point the record protects the worktree.
     await reservation.complete();
     reservationSettled = true;
-    Object.assign(missingPane, reboundPane);
 
     await tmuxService.sendKeys(newPaneId, `"echo '# Pane restored: ${missingPane.slug}'" Enter`);
     const promptPreview = missingPane.prompt?.substring(0, 50) || '';

@@ -377,6 +377,74 @@ describe('worktree operation lease', () => {
     await recovered.release();
   });
 
+  it('reclaims a deferred release after its tracked Git child exits while the original owner lives', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let childAlive = true;
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101 || (pid === 303 && childAlive),
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'application-start'
+            : pid === 303 ? 'git-child-start'
+              : undefined
+        ),
+        createNonce: () => 'deferred-owner',
+      },
+    );
+    await first.trackChildProcess(303);
+
+    // Production callers release once from their finally block. The parent
+    // process remains alive, so recovery must be driven by the tracked child,
+    // not a second release call after it exits.
+    await first.release();
+    expect(JSON.parse(readFileSync(
+      join(lockDirFor(projectRoot, worktreePath), 'lease.json'),
+      'utf8',
+    ))).toMatchObject({
+      nonce: 'deferred-owner',
+      releaseRequested: true,
+    });
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'resume' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => (
+          pid === 101 || pid === 202 || (pid === 303 && childAlive)
+        ),
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'application-start'
+            : pid === 202 ? 'contender-start'
+              : pid === 303 ? 'git-child-start'
+                : undefined
+        ),
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'contender',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+
+    childAlive = false;
+    const contender = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'resume' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 101 || pid === 202,
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'application-start'
+            : pid === 202 ? 'contender-start'
+              : undefined
+        ),
+        createNonce: () => 'contender-after-child-exit',
+      },
+    );
+
+    expect(contender.nonce).toBe('contender-after-child-exit');
+    await contender.release();
+  });
+
   it('does not steal a dead-parent lease when the live child identity is uncertain', async () => {
     const { projectRoot, worktreePath } = createLeaseTarget();
     const first = await acquireWorktreeOperationLease(

@@ -11,6 +11,7 @@ const tmuxServiceMock = vi.hoisted(() => ({
   paneExists: vi.fn(async () => true),
   probePanePresence: vi.fn(async () => 'present'),
   killPane: vi.fn(async () => {}),
+  getServerIdentity: vi.fn(),
 }));
 
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%9'));
@@ -53,7 +54,17 @@ describe('pane restoration', () => {
     tmuxServiceMock.paneExists.mockResolvedValue(true);
     tmuxServiceMock.probePanePresence.mockResolvedValue('present');
     tmuxServiceMock.killPane.mockResolvedValue(undefined);
-    replaceProjectPaneConfigPaneIdentityMock.mockResolvedValue(undefined);
+    tmuxServiceMock.getServerIdentity.mockReturnValue({
+      pid: 4242,
+      processStartIdentity: 'tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    });
+    replaceProjectPaneConfigPaneIdentityMock.mockImplementation(async (
+      _projectRoot: string,
+      _expected: unknown,
+      replacement: PsychePane,
+    ) => ({ result: replacement }));
     beginWorktreeReuseReservationMock.mockImplementation(async (
       worktreePath: string,
     ) => ({
@@ -85,6 +96,10 @@ describe('pane restoration', () => {
       expect.objectContaining({
         id: 'psyche-1',
         paneId: '%9',
+        tmuxServerIdentity: expect.objectContaining({
+          pid: 4242,
+          processStartIdentity: 'tmux-server-start',
+        }),
         worktreePath: '/repo/.psyche/worktrees/feature-codex',
       }),
     );
@@ -125,5 +140,59 @@ describe('pane restoration', () => {
     expect(complete).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
     expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not retain old-generation background IDs in the restored in-memory pane', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+    const pane: PsychePane = {
+      id: 'psyche-1',
+      slug: 'feature-codex',
+      prompt: 'fix the failing tests',
+      paneId: '%2',
+      worktreePath: '/repo/.psyche/worktrees/feature-codex',
+      projectRoot: '/repo',
+      tmuxServerIdentity: {
+        pid: 111,
+        processStartIdentity: 'old-server-start',
+      },
+      testPaneId: '%old-test',
+      testWindowId: '@old-test',
+      devPaneId: '%old-dev',
+      devWindowId: '@old-dev',
+      backgroundWindowRecoveries: [{
+        type: 'test',
+        paneId: '%old-recovery',
+        windowId: '@old-recovery',
+        reason: 'old server',
+      }],
+    };
+    replaceProjectPaneConfigPaneIdentityMock.mockImplementationOnce(async (
+      _projectRoot: string,
+      _expected: unknown,
+      replacement: PsychePane,
+    ) => {
+      const result = { ...replacement };
+      delete result.testPaneId;
+      delete result.testWindowId;
+      delete result.devPaneId;
+      delete result.devWindowId;
+      delete result.backgroundWindowRecoveries;
+      return { result };
+    });
+
+    await recreateMissingPanes([pane], '/repo/.psyche/psyche.config.json');
+
+    expect(pane).toMatchObject({
+      paneId: '%9',
+      tmuxServerIdentity: expect.objectContaining({
+        pid: 4242,
+        processStartIdentity: 'tmux-server-start',
+      }),
+    });
+    expect(pane).not.toHaveProperty('testPaneId');
+    expect(pane).not.toHaveProperty('testWindowId');
+    expect(pane).not.toHaveProperty('devPaneId');
+    expect(pane).not.toHaveProperty('devWindowId');
+    expect(pane).not.toHaveProperty('backgroundWindowRecoveries');
   });
 });

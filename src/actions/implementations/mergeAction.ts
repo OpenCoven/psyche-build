@@ -25,8 +25,13 @@ import {
 } from '../../utils/mergeTargets.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
 import { TmuxService } from '../../services/TmuxService.js';
-import { tearDownFullPaneWithVerification } from '../../utils/paneTeardown.js';
+import {
+  tearDownFullPaneWithVerification,
+  verifyFullPaneAbsent,
+} from '../../utils/paneTeardown.js';
 import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
+import { getCurrentTmuxServerIdentity } from '../../services/TmuxServerIdentity.js';
+import { assessTmuxTeardownOwnership } from '../../services/TmuxResourceOwnership.js';
 
 /**
  * Merge a worktree into the main branch with comprehensive pre-checks.
@@ -142,13 +147,40 @@ async function executeSingleRootMerge(
   const closeSiblings = async (): Promise<ActionResult | undefined> => {
     const tmuxService = TmuxService.getInstance();
     for (const sibling of siblingPanes) {
-      const teardown = await tearDownFullPaneWithVerification({
+      const ownership = assessTmuxTeardownOwnership(
+        sibling as PsychePane & Record<string, unknown>,
+        activeContext.panes as Array<PsychePane & Record<string, unknown>>,
+        tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+      );
+      const teardown = ownership === 'legacy'
+        ? await verifyFullPaneAbsent({
+          target: sibling,
+          probePane: (paneId) => tmuxService.probePanePresence(paneId),
+          probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        })
+        : ownership === 'stale-generation'
+          ? {
+            presence: 'absent' as const,
+            error: undefined,
+            pane: { presence: 'absent' as const },
+            backgroundPanes: new Map(),
+            windows: new Map(),
+          }
+          : ownership === 'unverified-generation' || ownership === 'ambiguous'
+            ? {
+              presence: 'unknown' as const,
+              error: undefined,
+              pane: { presence: 'unknown' as const },
+              backgroundPanes: new Map(),
+              windows: new Map(),
+            }
+            : await tearDownFullPaneWithVerification({
         target: sibling,
         probePane: (paneId) => tmuxService.probePanePresence(paneId),
         killPane: (paneId) => tmuxService.killPane(paneId),
         probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
         killWindow: (windowId) => tmuxService.killWindow(windowId),
-      });
+            });
       if (teardown.presence !== 'absent') {
         const detail = teardown.error ? `: ${teardown.error}` : '';
         LogService.getInstance().warn(

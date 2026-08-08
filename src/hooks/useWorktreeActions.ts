@@ -13,7 +13,12 @@ import {
   describeLiveTmuxWorktreeGuard,
   inspectLiveTmuxWorktreeConsumers,
 } from '../services/LiveTmuxWorktreeGuard.js';
-import { tearDownFullPaneWithVerification } from '../utils/paneTeardown.js';
+import {
+  tearDownFullPaneWithVerification,
+  verifyFullPaneAbsent,
+} from '../utils/paneTeardown.js';
+import { getCurrentTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
+import { assessTmuxTeardownOwnership } from '../services/TmuxResourceOwnership.js';
 
 interface Params {
   panes: PsychePane[];
@@ -44,13 +49,38 @@ export default function useWorktreeActions({
   const closePane = useCallback(async (pane: PsychePane) => {
     try {
       const tmuxService = TmuxService.getInstance();
-      const teardown = await tearDownFullPaneWithVerification({
+      const ownership = assessTmuxTeardownOwnership(
+        pane as PsychePane & Record<string, unknown>,
+        panes as Array<PsychePane & Record<string, unknown>>,
+        tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+      );
+      const teardown = ownership === 'legacy'
+        ? await verifyFullPaneAbsent({
+          target: pane,
+          probePane: (paneId) => tmuxService.probePanePresence(paneId),
+          probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        })
+        : ownership === 'stale-generation'
+          ? {
+            presence: 'absent' as const,
+            pane: { presence: 'absent' as const },
+            backgroundPanes: new Map(),
+            windows: new Map(),
+          }
+          : ownership === 'unverified-generation' || ownership === 'ambiguous'
+            ? {
+              presence: 'unknown' as const,
+              pane: { presence: 'unknown' as const },
+              backgroundPanes: new Map(),
+              windows: new Map(),
+            }
+            : await tearDownFullPaneWithVerification({
         target: pane,
         probePane: (paneId) => tmuxService.probePanePresence(paneId),
         killPane: (paneId) => tmuxService.killPane(paneId),
         probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
         killWindow: (windowId) => tmuxService.killWindow(windowId),
-      });
+            });
       if (teardown.presence !== 'absent') {
         throw new Error(`Could not confirm pane teardown (${teardown.presence})`);
       }

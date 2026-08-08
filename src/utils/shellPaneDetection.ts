@@ -13,6 +13,7 @@ import {
 } from './projectRoot.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import { createPsychePaneId } from './paneIdentity.js';
+import type { TmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 
 /**
  * Detects the shell type running in a tmux pane
@@ -209,9 +210,27 @@ async function detectPaneProjectInfo(
  * @param existingTitle Optional existing title (used for display but not for tracking)
  * @returns PsychePane object for the shell pane
  */
-export async function createShellPane(paneId: string, nextId: number, existingTitle?: string): Promise<PsychePane> {
+export interface CreateShellPaneOptions {
+  /** Captured synchronously by a transactional allocator. */
+  tmuxServerIdentity?: TmuxServerIdentity;
+  /** Defer title mutation until the caller has durably persisted the record. */
+  setPaneTitle?: boolean;
+}
+
+export async function createShellPane(
+  paneId: string,
+  nextId: number,
+  existingTitle?: string,
+  options: CreateShellPaneOptions = {},
+): Promise<PsychePane> {
   const tmuxService = TmuxService.getInstance();
-  const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+  const tmuxServerIdentity = options.tmuxServerIdentity
+    ?? tmuxService.getServerIdentity?.(paneId);
+  if (!tmuxServerIdentity) {
+    throw new Error(
+      `Cannot track shell pane ${paneId} without its tmux server generation`,
+    );
+  }
   const shellType = await detectShellType(paneId);
   const paneProjectInfo = await detectPaneProjectInfo(paneId);
 
@@ -222,13 +241,15 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
   const slug = `shell-${nextId}`;
 
   // Always set the title to ensure unique titles for proper rebinding
-  try {
-    await tmuxService.setPaneTitle(paneId, slug);
-  } catch (error) {
-    // LogService.getInstance().debug(
-    //   `Failed to set title for shell pane ${paneId}`,
-    //   'shellDetection'
-    // );
+  if (options.setPaneTitle !== false) {
+    try {
+      await tmuxService.setPaneTitle(paneId, slug);
+    } catch (error) {
+      // LogService.getInstance().debug(
+      //   `Failed to set title for shell pane ${paneId}`,
+      //   'shellDetection'
+      // );
+    }
   }
 
   return {
@@ -236,7 +257,7 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
     slug,
     prompt: '', // No prompt for manually created panes
     paneId,
-    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+    tmuxServerIdentity,
     projectRoot: paneProjectInfo.projectRoot,
     projectName: paneProjectInfo.projectName,
     cwdReference: paneProjectInfo.cwdReference,

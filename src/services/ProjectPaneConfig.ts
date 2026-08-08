@@ -17,6 +17,11 @@ import {
   type ProcessStartIdentityResolver,
 } from './ProcessIdentity.js';
 import { findTmuxResourceConflict } from './TmuxResourceOwnership.js';
+import {
+  isTmuxServerIdentity,
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from './TmuxServerIdentity.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -422,6 +427,15 @@ export async function replaceProjectPaneConfigPaneIdentity(
   if (!replacementIdentity || replacementIdentity.id !== expected.id) {
     throw new Error('Pane identity replacement requires the same non-empty pane ID');
   }
+  const replacementRecord = asRecord(replacement);
+  const replacementGeneration = tmuxServerIdentityOf(
+    replacementRecord.tmuxServerIdentity,
+  );
+  if (!replacementGeneration) {
+    throw new Error(
+      'Pane identity replacement requires the new tmux server generation',
+    );
+  }
 
   return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
     const panes = Array.isArray(config.panes) ? [...config.panes] : [];
@@ -439,23 +453,114 @@ export async function replaceProjectPaneConfigPaneIdentity(
     }
 
     const currentRecord = asRecord(panes[exactIndex]);
-    const replacementRecord = asRecord(replacement);
-    const next = {
+    const next: Record<string, unknown> = {
       ...currentRecord,
       id: expected.id,
       paneId: replacementIdentity.paneId,
+      tmuxServerIdentity: replacementGeneration,
       ...(
         typeof replacementRecord.worktreePath === 'string'
           ? { worktreePath: replacementRecord.worktreePath }
           : {}
       ),
     };
+    reconcileReplacedPaneTmuxResources(
+      next,
+      currentRecord,
+      replacementGeneration,
+    );
     panes[exactIndex] = next;
     config.panes = panes;
     config.lastUpdated = new Date().toISOString();
     await persist();
     return next;
   }, options);
+}
+
+/**
+ * A primary-pane rebind is a new allocation, not an inheritance of every
+ * resource the old pane record happened to contain. Retain only background
+ * resources whose own (or old primary fallback) generation proves that they
+ * still belong to the replacement server.
+ */
+function reconcileReplacedPaneTmuxResources(
+  next: Record<string, unknown>,
+  previous: Record<string, unknown>,
+  replacementGeneration: TmuxServerIdentity,
+): void {
+  const previousPrimaryGeneration = tmuxServerIdentityOf(
+    previous.tmuxServerIdentity,
+  );
+
+  if (!resourceHasReplacementGeneration(
+    previous,
+    'testTmuxServerIdentity',
+    previousPrimaryGeneration,
+    replacementGeneration,
+  )) {
+    delete next.testWindowId;
+    delete next.testPaneId;
+    delete next.testTmuxServerIdentity;
+    delete next.testStatus;
+    delete next.testOutput;
+  }
+
+  if (!resourceHasReplacementGeneration(
+    previous,
+    'devTmuxServerIdentity',
+    previousPrimaryGeneration,
+    replacementGeneration,
+  )) {
+    delete next.devWindowId;
+    delete next.devPaneId;
+    delete next.devTmuxServerIdentity;
+    delete next.devStatus;
+    delete next.devUrl;
+  }
+
+  const recoveries = Array.isArray(previous.backgroundWindowRecoveries)
+    ? previous.backgroundWindowRecoveries.filter((recovery) => {
+      if (!recovery || typeof recovery !== 'object') {
+        return false;
+      }
+      const recoveryGeneration = tmuxServerIdentityOf(
+        (recovery as Record<string, unknown>).tmuxServerIdentity,
+      ) ?? previousPrimaryGeneration;
+      return Boolean(
+        recoveryGeneration
+        && sameTmuxServerIdentity(recoveryGeneration, replacementGeneration),
+      );
+    })
+    : [];
+  if (recoveries.length > 0) {
+    next.backgroundWindowRecoveries = recoveries;
+  } else {
+    delete next.backgroundWindowRecoveries;
+  }
+}
+
+function resourceHasReplacementGeneration(
+  previous: Record<string, unknown>,
+  generationField: 'testTmuxServerIdentity' | 'devTmuxServerIdentity',
+  previousPrimaryGeneration: TmuxServerIdentity | undefined,
+  replacementGeneration: TmuxServerIdentity,
+): boolean {
+  const hasResource = generationField === 'testTmuxServerIdentity'
+    ? typeof previous.testWindowId === 'string' || typeof previous.testPaneId === 'string'
+    : typeof previous.devWindowId === 'string' || typeof previous.devPaneId === 'string';
+  if (!hasResource) {
+    return true;
+  }
+  const resourceGeneration = tmuxServerIdentityOf(previous[generationField])
+    ?? previousPrimaryGeneration;
+  return Boolean(
+    resourceGeneration
+    && sameTmuxServerIdentity(resourceGeneration, replacementGeneration),
+  );
+}
+
+function tmuxServerIdentityOf(value: unknown): TmuxServerIdentity | undefined {
+  return isTmuxServerIdentity(value) ? value : undefined;
 }
 
 /**

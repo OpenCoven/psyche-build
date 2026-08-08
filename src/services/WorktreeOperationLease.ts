@@ -36,6 +36,12 @@ export interface WorktreeOperationLeaseRecord {
   operation: string;
   acquiredAt: string;
   /**
+   * The owner called release while a tracked destructive mutation was still
+   * live. Once every tracked mutation identity is gone, the original owner
+   * must no longer keep this exact lease from being reclaimed.
+   */
+  releaseRequested?: boolean;
+  /**
    * Written before a separate Git mutation supervisor is spawned. A dead
    * caller must not make this lease stealable during the supervisor's launch
    * window, and a claimed supervisor remains independently verifiable.
@@ -1150,6 +1156,20 @@ async function releaseOwnedLease(
     // A caller may reach its finally block after an IPC failure while the
     // detached Git group still runs. Do not turn a normal release attempt
     // into authorization to steal that mutation's lease.
+    // The companion child record outlives this caller. Persisting the request
+    // changes stale recovery from "wait for the application owner" to "wait
+    // only for the tracked mutation identities", so one release call is
+    // sufficient when that child exits later.
+    try {
+      await updateOwnedLeaseRecord(lockDir, nonce, (record) => ({
+        ...record,
+        releaseRequested: true,
+      }));
+    } catch (error) {
+      if (!isLeaseOwnershipGoneError(error)) {
+        throw error;
+      }
+    }
     return;
   }
 
@@ -1205,6 +1225,10 @@ function isLeaseRecord(value: unknown): value is WorktreeOperationLeaseRecord {
     && typeof record.canonicalPath === 'string'
     && typeof record.operation === 'string'
     && typeof record.acquiredAt === 'string'
+    && (
+      record.releaseRequested === undefined
+      || typeof record.releaseRequested === 'boolean'
+    )
     && (
       record.pendingMutation === undefined
       || isPendingGitMutation(record.pendingMutation)
@@ -1278,6 +1302,19 @@ function isLeaseOwnerStale(
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
   now: Date = new Date(),
 ): boolean {
+  if (record.releaseRequested) {
+    // A normal release must not be stranded merely because the originating
+    // application remains alive after handing its final destructive child to
+    // the lease. Pending launch/supervisor and Git-child identities still
+    // block reclaiming until they are conclusively stale.
+    return !hasLiveOrUnverifiableMutation(
+      record,
+      isOwnerProcessAlive,
+      resolveProcessStartIdentity,
+      now,
+    );
+  }
+
   const pending = record.pendingMutation;
   if (pending) {
     // A process may die after persisting pendingMutation but before fork has

@@ -1,5 +1,6 @@
 import type { PsychePane } from '../types.js';
 import {
+  isTmuxServerIdentity,
   sameTmuxServerIdentity,
   type TmuxServerIdentity,
 } from '../services/TmuxServerIdentity.js';
@@ -21,7 +22,7 @@ export interface BackgroundWindowResource {
   windowId: string;
   paneId: string;
   /** The tmux generation that allocated this detached pane/window pair. */
-  tmuxServerIdentity?: TmuxServerIdentity;
+  tmuxServerIdentity: TmuxServerIdentity;
 }
 
 export interface BackgroundWindowTransactionOptions {
@@ -478,8 +479,15 @@ function asPane(value: unknown): PsychePane {
 function assertBackgroundResource(
   resource: BackgroundWindowResource,
 ): asserts resource is BackgroundWindowResource {
-  if (!resource || !resource.windowId || !resource.paneId) {
-    throw new Error('Background window creation did not return stable window and pane IDs');
+  if (
+    !resource
+    || !resource.windowId
+    || !resource.paneId
+    || !isTmuxServerIdentity(resource.tmuxServerIdentity)
+  ) {
+    throw new Error(
+      'Background window creation did not return stable window, pane, and tmux generation IDs',
+    );
   }
 }
 

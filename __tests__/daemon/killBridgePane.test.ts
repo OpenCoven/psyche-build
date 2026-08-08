@@ -3,6 +3,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { killBridgePane } from '../../src/daemon/bridge.js';
+import { replaceProjectPaneConfigPaneIdentity } from '../../src/services/ProjectPaneConfig.js';
+
+const oldServerGeneration = {
+  pid: 111,
+  processStartIdentity: 'Thu Aug  7 19:00:00 2026',
+  socketPath: '/tmp/tmux-501/default',
+  sessionId: '$1',
+};
+const currentServerGeneration = {
+  pid: 222,
+  processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+  socketPath: '/tmp/tmux-501/default',
+  sessionId: '$1',
+};
 
 let projectRoot: string;
 let worktreePath: string;
@@ -33,6 +47,7 @@ function pane(overrides: Record<string, unknown> = {}) {
     worktreePath,
     branchName: 'psyche/fix-auth',
     agent: 'coven-code',
+    tmuxServerIdentity: currentServerGeneration,
     ...overrides,
   };
 }
@@ -44,6 +59,7 @@ function deps(exists: boolean | undefined = true) {
     killTmuxPane: vi.fn(() => {
       presence = false;
     }),
+    getTmuxServerIdentity: () => currentServerGeneration,
   };
 }
 
@@ -59,19 +75,6 @@ afterEach(() => {
 });
 
 describe('killBridgePane', () => {
-  const oldServerGeneration = {
-    pid: 111,
-    processStartIdentity: 'Thu Aug  7 19:00:00 2026',
-    socketPath: '/tmp/tmux-501/default',
-    sessionId: '$1',
-  };
-  const currentServerGeneration = {
-    pid: 222,
-    processStartIdentity: 'Thu Aug  7 20:00:00 2026',
-    socketPath: '/tmp/tmux-501/default',
-    sessionId: '$1',
-  };
-
   it('kills the tmux pane and removes the config record', async () => {
     writeConfig([pane()]);
     const d = deps();
@@ -116,6 +119,85 @@ describe('killBridgePane', () => {
     await killBridgePane(projectRoot, '%3', d);
 
     expect(d.killTmuxPane).toHaveBeenCalledWith('%3');
+    expect(readConfig().panes).toEqual([]);
+  });
+
+  it('does not kill a live unversioned legacy record but removes it once absent', async () => {
+    writeConfig([pane({ tmuxServerIdentity: undefined })]);
+    const live = {
+      tmuxPaneExists: vi.fn(() => true),
+      killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
+    };
+
+    await expect(killBridgePane(projectRoot, '%3', live))
+      .rejects.toMatchObject({ code: 'pane_legacy_present' });
+    expect(live.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toHaveLength(1);
+
+    const absent = {
+      tmuxPaneExists: vi.fn(() => false),
+      killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
+    };
+    const result = await killBridgePane(projectRoot, '%3', absent);
+
+    expect(result.killed).toBe(false);
+    expect(absent.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toEqual([]);
+  });
+
+  it('kills only the replacement pane after restart restoration clears old-generation resources', async () => {
+    writeConfig([pane({
+      tmuxServerIdentity: oldServerGeneration,
+      testPaneId: '%old-test',
+      testWindowId: '@old-test',
+      testTmuxServerIdentity: oldServerGeneration,
+      devPaneId: '%old-dev',
+      devWindowId: '@old-dev',
+      devTmuxServerIdentity: oldServerGeneration,
+      backgroundWindowRecoveries: [{
+        type: 'test',
+        paneId: '%old-recovery',
+        windowId: '@old-recovery',
+        tmuxServerIdentity: oldServerGeneration,
+        reason: 'old server',
+      }],
+    })]);
+    await replaceProjectPaneConfigPaneIdentity(
+      projectRoot,
+      { id: 'psyche-1', paneId: '%3' },
+      {
+        id: 'psyche-1',
+        paneId: '%9',
+        slug: 'fix-auth',
+        prompt: '',
+        tmuxServerIdentity: currentServerGeneration,
+      },
+    );
+
+    const livePanes = new Set(['%9', '%old-test', '%old-dev', '%old-recovery']);
+    const liveWindows = new Set(['@old-test', '@old-dev', '@old-recovery']);
+    const d = {
+      tmuxPaneExists: vi.fn((id: string) => livePanes.has(id)),
+      probeTmuxPane: vi.fn((id: string) => (
+        livePanes.has(id) ? 'present' as const : 'absent' as const
+      )),
+      killTmuxPane: vi.fn((id: string) => livePanes.delete(id)),
+      probeTmuxWindow: vi.fn((id: string) => (
+        liveWindows.has(id) ? 'present' as const : 'absent' as const
+      )),
+      killTmuxWindow: vi.fn((id: string) => liveWindows.delete(id)),
+      getTmuxServerIdentity: () => currentServerGeneration,
+    };
+
+    await killBridgePane(projectRoot, '%9', d);
+
+    expect(d.killTmuxPane).toHaveBeenCalledWith('%9');
+    expect(d.killTmuxPane).not.toHaveBeenCalledWith('%old-test');
+    expect(d.killTmuxPane).not.toHaveBeenCalledWith('%old-dev');
+    expect(d.killTmuxPane).not.toHaveBeenCalledWith('%old-recovery');
+    expect(d.killTmuxWindow).not.toHaveBeenCalled();
     expect(readConfig().panes).toEqual([]);
   });
 
@@ -172,6 +254,7 @@ describe('killBridgePane', () => {
     const d = {
       tmuxPaneExists: vi.fn(() => true),
       killTmuxPane: vi.fn(() => { throw new Error('tmux refused'); }),
+      getTmuxServerIdentity: () => currentServerGeneration,
     };
 
     await expect(killBridgePane(projectRoot, '%3', d))
@@ -186,6 +269,7 @@ describe('killBridgePane', () => {
     const d = {
       tmuxPaneExists: vi.fn(() => undefined),
       killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
     };
 
     await expect(killBridgePane(projectRoot, '%3', d))
@@ -204,6 +288,7 @@ describe('killBridgePane', () => {
         return probes === 1 ? true : undefined;
       }),
       killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
     };
 
     await expect(killBridgePane(projectRoot, '%3', d))
@@ -238,6 +323,7 @@ describe('killBridgePane', () => {
         order.push(`window:${id}`);
         liveWindows.delete(id);
       }),
+      getTmuxServerIdentity: () => currentServerGeneration,
       afterInitialProbe: () => {
         writeConfig([pane({
           testPaneId: '%fresh-test',
@@ -268,6 +354,7 @@ describe('killBridgePane', () => {
       killTmuxPane: vi.fn(),
       probeTmuxWindow: vi.fn(() => 'absent' as const),
       killTmuxWindow: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
     };
 
     await expect(killBridgePane(projectRoot, '%3', d))
@@ -289,6 +376,7 @@ describe('killBridgePane', () => {
     const d = {
       tmuxPaneExists: vi.fn(() => true),
       killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
       afterInitialProbe: async () => {
         signalProbePause();
         await paused;

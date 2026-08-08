@@ -3,6 +3,7 @@ import type { PsychePane } from '../src/types.js';
 
 const tmuxService = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
+  getServerIdentity: vi.fn(),
   paneExists: vi.fn(async () => true),
   setPaneTitle: vi.fn(async () => {}),
   sendShellCommand: vi.fn(async () => {}),
@@ -77,6 +78,12 @@ describe('conflict resolution pane transaction', () => {
       cancel: vi.fn(async () => {}),
     });
     tmuxService.paneExists.mockResolvedValue(true);
+    tmuxService.getServerIdentity.mockReturnValue({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    });
     tmuxService.sendShellCommand.mockResolvedValue(undefined);
     tmuxService.sendTmuxKeys.mockResolvedValue(undefined);
     tmuxService.selectPane.mockResolvedValue(undefined);

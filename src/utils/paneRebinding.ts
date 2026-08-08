@@ -2,7 +2,10 @@ import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { getPaneTitleCandidates } from './paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
-import { getCurrentTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
+import {
+  getCurrentTmuxServerIdentity,
+  sameTmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
 
 /**
  * Attempts to rebind a pane whose ID has changed by matching on its stable tmux title.
@@ -39,12 +42,34 @@ export function rebindPaneByTitle(
   //           `Rebound pane ${pane.id} from ${pane.paneId} to ${remappedId} (matched by title: ${candidate})`,
   //           'shellDetection'
   //         );
-        const tmuxServerIdentity = getCurrentTmuxServerIdentity();
-        return {
+        const tmuxServerIdentity = getCurrentTmuxServerIdentity(remappedId);
+        if (!tmuxServerIdentity) {
+          // A title match without a server generation is not an ownership
+          // proof. Keep the old record instead of rebinding it to a reused ID.
+          return pane;
+        }
+        const rebound: PsychePane = {
           ...pane,
           paneId: remappedId,
-          ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+          tmuxServerIdentity,
         };
+        if (
+          !pane.tmuxServerIdentity
+          || !sameTmuxServerIdentity(pane.tmuxServerIdentity, tmuxServerIdentity)
+        ) {
+          delete rebound.testWindowId;
+          delete rebound.testPaneId;
+          delete rebound.testTmuxServerIdentity;
+          delete rebound.testStatus;
+          delete rebound.testOutput;
+          delete rebound.devWindowId;
+          delete rebound.devPaneId;
+          delete rebound.devTmuxServerIdentity;
+          delete rebound.devStatus;
+          delete rebound.devUrl;
+          delete rebound.backgroundWindowRecoveries;
+        }
+        return rebound;
       }
     }
   }

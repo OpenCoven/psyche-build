@@ -181,7 +181,7 @@ async function attachAgentToReservedWorktree(
           throw new Error('tmux returned no pane ID');
         }
 
-        const tmuxServerIdentity = tmuxService.getServerIdentity?.();
+        const tmuxServerIdentity = tmuxService.getServerIdentity?.(paneInfo);
         newPane = {
           id: psychePaneId,
           slug,
@@ -197,6 +197,19 @@ async function attachAgentToReservedWorktree(
           permissionMode: settings.permissionMode,
           autopilot: settings.enableAutopilotByDefault ?? false,
         };
+        if (!tmuxServerIdentity) {
+          throw new Error(
+            `Could not capture tmux server generation for attached pane ${paneInfo}`,
+          );
+        }
+
+        // The exact record and generation are durable before this pane
+        // receives a title, layout mutation, cwd, or agent command.
+        config.projectName = config.projectName || path.basename(sessionProjectRoot);
+        config.projectRoot = config.projectRoot || sessionProjectRoot;
+        config.panes = [...freshPanes, newPane];
+        config.lastUpdated = new Date().toISOString();
+        await persist();
 
         const start = Date.now();
         while ((Date.now() - start) < 600) {
@@ -229,12 +242,6 @@ async function attachAgentToReservedWorktree(
         await tmuxService.sendShellCommand(paneInfo, `cd "${worktreePath}"`);
         await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
         await new Promise(r => setTimeout(r, 300));
-
-        config.projectName = config.projectName || path.basename(sessionProjectRoot);
-        config.projectRoot = config.projectRoot || sessionProjectRoot;
-        config.panes = [...freshPanes, newPane];
-        config.lastUpdated = new Date().toISOString();
-        await persist();
         return newPane;
       } catch (error) {
         const teardown = paneInfo
@@ -248,13 +255,18 @@ async function attachAgentToReservedWorktree(
             operation: 'attach-agent',
             reason: `attached pane setup or persistence failed: ${errorMessage(error)}`,
             reservation,
-            persistConfigRecovery: () => persistAttachedRecoveryRecord(
-              config,
-              persist,
-              freshPanes,
-              newPane!,
-              sessionProjectRoot,
-            ),
+            persistConfigRecovery: newPane.tmuxServerIdentity
+              ? () => persistAttachedRecoveryRecord(
+                config,
+                persist,
+                freshPanes,
+                newPane!,
+                sessionProjectRoot,
+              )
+              : async () => ({
+                durable: false,
+                message: 'refused to persist an unversioned attached pane record',
+              }),
           })
           : undefined;
         const recoveryMessage = teardown && teardown.presence !== 'absent'

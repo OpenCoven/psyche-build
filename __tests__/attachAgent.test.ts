@@ -3,6 +3,7 @@ import type { PsychePane } from '../src/types.js';
 
 const tmuxServiceMock = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%1'),
+  getServerIdentity: vi.fn(),
   paneExists: vi.fn(async () => true),
   probePanePresence: vi.fn(async () => 'present'),
   setPaneTitle: vi.fn(async (_paneId?: string, _title?: string) => {}),
@@ -171,6 +172,12 @@ describe('attachAgentToWorktree', () => {
     paneAlive = true;
     splitPaneMock.mockReturnValue('%2');
     tmuxServiceMock.getCurrentPaneIdSync.mockReturnValue('%1');
+    tmuxServiceMock.getServerIdentity.mockReturnValue({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    });
     tmuxServiceMock.paneExists.mockImplementation(async () => paneAlive);
     tmuxServiceMock.probePanePresence.mockImplementation(async () => (
       paneAlive ? 'present' : 'absent'

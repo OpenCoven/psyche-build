@@ -27,7 +27,6 @@ import { SIDEBAR_WIDTH } from "./utils/layoutManager.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
 import { StateManager } from "./shared/StateManager.js"
 import {
-  ANIMATION_DELAY,
   STATUS_MESSAGE_DURATION_SHORT,
 } from "./constants/timing.js"
 import {
@@ -135,6 +134,7 @@ import {
   getNextPsycheId,
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
+import { createTransactionalPane } from "./utils/transactionalPaneCreation.js"
 
 const SidePanelRail: React.FC = () => (
   <Box flexDirection="column" width={4} alignItems="center">
@@ -1061,33 +1061,41 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
-      const newPaneId = await tmuxService.splitPane({ cwd: targetProjectRoot })
-      await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
-
-      const shellPane = await createShellPane(
-        newPaneId,
-        getNextPsycheId(existingPanes)
-      )
-      if (ritualPane?.name?.trim()) {
-        shellPane.displayName = ritualPane.name.trim()
-      }
-      shellPane.projectRoot = targetProjectRoot
-      shellPane.projectName = basename(targetProjectRoot)
-      shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-
-      if (shellPane.displayName) {
-        await tmuxService.setPaneTitle(
-          newPaneId,
-          getPaneTmuxTitle(shellPane, targetProjectRoot, shellPane.projectName)
-        )
-      }
-
-      if (ritualPane?.command?.trim()) {
-        await tmuxService.sendShellCommand(newPaneId, ritualPane.command.trim())
-        await tmuxService.sendTmuxKeys(newPaneId, "Enter")
-      }
-
-      await savePanes([...existingPanes, shellPane], existingPanes)
+      const shellPane = await createTransactionalPane({
+        projectRoot: targetProjectRoot,
+        sessionProjectRoot,
+        operation: "ritual-terminal-pane",
+        tmuxService,
+        allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
+        createPane: async ({ paneId, tmuxServerIdentity }) => {
+          const pane = await createShellPane(
+            paneId,
+            getNextPsycheId(existingPanes),
+            undefined,
+            { tmuxServerIdentity, setPaneTitle: false },
+          )
+          if (ritualPane?.name?.trim()) {
+            pane.displayName = ritualPane.name.trim()
+          }
+          pane.projectRoot = targetProjectRoot
+          pane.projectName = basename(targetProjectRoot)
+          pane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
+          return pane
+        },
+        persist: (pane) => savePanes([...existingPanes, pane], existingPanes),
+        activate: async (pane) => {
+          await tmuxService.setPaneTitle(
+            pane.paneId,
+            pane.displayName
+              ? getPaneTmuxTitle(pane, targetProjectRoot, pane.projectName)
+              : pane.slug,
+          )
+          if (ritualPane?.command?.trim()) {
+            await tmuxService.sendShellCommand(pane.paneId, ritualPane.command.trim())
+            await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
+          }
+        },
+      })
       await loadPanes()
       return shellPane
     } catch (error: any) {

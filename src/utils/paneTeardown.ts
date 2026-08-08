@@ -36,6 +36,12 @@ export interface FullPaneTeardownOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export interface FullPaneAbsenceVerificationOptions {
+  target: FullPaneTeardownTarget;
+  probePane: (paneId: string) => Promise<TmuxPanePresence> | TmuxPanePresence;
+  probeWindow: (windowId: string) => Promise<TmuxPanePresence> | TmuxPanePresence;
+}
+
 export interface FullPaneTeardownResult {
   presence: TmuxPanePresence;
   error?: string;
@@ -101,6 +107,7 @@ export async function tearDownFullPaneWithVerification(
       sleep: options.sleep,
     }));
   }
+
   const failedBackgroundPane = [...backgroundPanes.values()].find(
     (result) => result.presence !== 'absent',
   );
@@ -162,6 +169,57 @@ export async function tearDownFullPaneWithVerification(
   return {
     presence,
     ...(error ? { error } : {}),
+    pane,
+    backgroundPanes,
+    windows,
+  };
+}
+
+/**
+ * Legacy records have pane/window IDs without a server generation. Those IDs
+ * are unsafe destructive targets after a tmux restart, so callers use this
+ * probe-only path to prove every recorded resource is absent before removing
+ * the stale record.
+ */
+export async function verifyFullPaneAbsent(
+  options: FullPaneAbsenceVerificationOptions,
+): Promise<FullPaneTeardownResult> {
+  const backgroundPanes = new Map<string, VerifiedPaneTeardownResult>();
+  const backgroundPaneIds = Array.from(new Set(
+    [options.target.testPaneId, options.target.devPaneId].filter(
+      (paneId): paneId is string => Boolean(paneId) && paneId !== options.target.paneId,
+    ),
+  ));
+  for (const paneId of backgroundPaneIds) {
+    backgroundPanes.set(paneId, {
+      presence: await probePanePresence(() => options.probePane(paneId)),
+    });
+  }
+
+  const windows = new Map<string, VerifiedPaneTeardownResult>();
+  const windowIds = Array.from(new Set(
+    [options.target.testWindowId, options.target.devWindowId].filter(
+      (windowId): windowId is string => Boolean(windowId),
+    ),
+  ));
+  for (const windowId of windowIds) {
+    windows.set(windowId, {
+      presence: await probePanePresence(() => options.probeWindow(windowId)),
+    });
+  }
+
+  const pane = {
+    presence: await probePanePresence(() => options.probePane(options.target.paneId)),
+  };
+  const outcomes = [...backgroundPanes.values(), ...windows.values(), pane];
+  const presence = outcomes.some((outcome) => outcome.presence === 'unknown')
+    ? 'unknown'
+    : outcomes.some((outcome) => outcome.presence === 'present')
+      ? 'present'
+      : 'absent';
+
+  return {
+    presence,
     pane,
     backgroundPanes,
     windows,

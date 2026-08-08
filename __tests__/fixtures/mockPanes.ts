@@ -4,12 +4,20 @@
 
 import type { PsychePane } from '../../src/types.js';
 
+export const mockTmuxServerIdentity = {
+  pid: 4242,
+  processStartIdentity: 'test-tmux-server-start',
+  socketPath: '/tmux.sock',
+  sessionId: '$test',
+};
+
 export function createMockPane(overrides?: Partial<PsychePane>): PsychePane {
   return {
     id: 'psyche-1',
     slug: 'test-pane',
     prompt: 'test prompt',
     paneId: '%42',
+    tmuxServerIdentity: mockTmuxServerIdentity,
     worktreePath: '/test/worktree/path',
     agent: 'claude',
     type: 'worktree',

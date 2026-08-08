@@ -178,8 +178,11 @@ export function assessTmuxTeardownOwnership(
 ): TmuxTeardownOwnership {
   const resources = tmuxResourcesForPane(pane);
   const generations = resources.map((resource) => resource.generation);
-  const hasGeneration = generations.some(Boolean);
-  if (!hasGeneration) {
+  // Any resource without a generation is a legacy identity. A record with a
+  // partially-versioned background resource is still unsafe to kill: its
+  // unversioned primary/background ID could have been reused by another
+  // server. Callers may remove it only after a non-destructive absence probe.
+  if (generations.some((generation) => !generation)) {
     return 'legacy';
   }
   if (!currentGeneration) {

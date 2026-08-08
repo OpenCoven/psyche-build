@@ -247,6 +247,47 @@ describe('closeAction', () => {
       );
     });
 
+    it('never kills a live unversioned legacy pane record', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane]);
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '%42\n' : Buffer.from('')
+      ));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'worktree cleanup was not started');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([pane]);
+    });
+
+    it('removes an absent unversioned legacy record without killing its ID', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane]);
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '' : Buffer.from('')
+      ));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
     it('aborts before teardown and refreshes UI when the exact pane identity was rebound', async () => {
       const pane = createWorktreePane({ id: 'psyche-identity', paneId: '%42' });
       const refreshPanes = vi.fn(async () => {});

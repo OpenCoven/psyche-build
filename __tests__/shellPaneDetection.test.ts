@@ -13,6 +13,12 @@ vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: {
     getInstance: vi.fn(() => ({
       setPaneTitle: setPaneTitleMock,
+      getServerIdentity: () => ({
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      }),
     })),
   },
 }));
