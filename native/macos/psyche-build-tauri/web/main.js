@@ -140,7 +140,6 @@
     var thread = leaf && findThread(leaf.threadId);
     state.activeThreadId = thread ? thread.id : null;
     if (thread) project.lastActiveThreadId = thread.id;
-    renderPaneWorkspace();
   }
   async function activateProjectWorktree(project, worktreePath) {
     if (!project || !(await showTerminalView())) return false;
@@ -969,8 +968,8 @@
     body.appendChild(container);
     pane.appendChild(header);
     pane.appendChild(body);
-    pane.addEventListener("pointerdown", function () {
-      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    pane.addEventListener("pointerdown", function (event) {
+      handlePanePointerDown(thread, body, close, event);
     });
     thread.pane = pane;
     thread.host = container;
@@ -1041,6 +1040,12 @@
 
     thread.term = term;
     thread.fit = fit;
+  }
+
+  function handlePanePointerDown(thread, body, close, event) {
+    var target = event.target;
+    if ((body && body.contains(target)) || (close && close.contains(target))) return;
+    if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
   function createPaneDivider(node, ratio) {

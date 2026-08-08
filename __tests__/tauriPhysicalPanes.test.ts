@@ -381,6 +381,32 @@ describe('Tauri physical terminal panes', () => {
     expect(mountTerminal).not.toMatch(/terminalHost\.appendChild\(container\)/);
   });
 
+  it('focuses from pane chrome without duplicating body focus or racing close', () => {
+    const thread = { id: 'thread-a' };
+    const bodyTarget = { id: 'body-target' };
+    const closeTarget = { id: 'close-target' };
+    const headerTarget = { id: 'header-target' };
+    const body = { contains: (target: unknown) => target === bodyTarget };
+    const close = { contains: (target: unknown) => target === closeTarget };
+    const state = { activeThreadId: 'thread-b' };
+    const focused: string[] = [];
+    const handlePanePointerDown = compileFunction<(
+      value: typeof thread,
+      bodyElement: typeof body,
+      closeElement: typeof close,
+      event: { target: unknown },
+    ) => void>(functionSource('handlePanePointerDown'), {
+      state,
+      focusThread: (id: string) => { focused.push(id); },
+    });
+
+    handlePanePointerDown(thread, body, close, { target: bodyTarget });
+    handlePanePointerDown(thread, body, close, { target: closeTarget });
+    expect(focused).toEqual([]);
+    handlePanePointerDown(thread, body, close, { target: headerTarget });
+    expect(focused).toEqual([thread.id]);
+  });
+
   it('projects pane-tree layout ratios into a simultaneous DOM tree', () => {
     expect(functionSource('renderPaneNode')).toMatch(/terminal-pane-split/);
     expect(functionSource('renderPaneNode')).toMatch(/terminal-pane-branch/);
@@ -772,6 +798,46 @@ describe('Tauri physical terminal panes', () => {
       'terminal', `project:${project.id}`, 'panes', 'panel',
       'skills', 'sidebar', 'browser', 'save', 'focus:hidden-thread',
     ]);
+  });
+
+  it('renders an active-project worktree switch exactly once at coordinator level', async () => {
+    const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: null as string | null };
+    const thread = { id: 'thread-a' };
+    const state = { activeProjectId: project.id, activeThreadId: null as string | null };
+    let renders = 0;
+    const renderPaneWorkspace = () => { renders += 1; };
+    const activatePaneLayoutFocus = compileFunction<(
+      value: typeof project, path: string,
+    ) => void>(functionSource('activatePaneLayoutFocus'), {
+      paneLayoutFor: () => ({
+        root: PsychePanes.createLeaf('leaf-a', thread.id),
+        focusedLeafId: 'leaf-a',
+      }),
+      PsychePanes,
+      findThread: () => thread,
+      state,
+      renderPaneWorkspace,
+    });
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => true,
+      state,
+      setActiveProject: async () => true,
+      activatePaneLayoutFocus,
+      renderPaneWorkspace,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+    });
+
+    await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
+    expect(project.selectedWorktreePath).toBe('/target');
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(renders).toBe(1);
   });
 
   it('accepts guarded /new-thread creation only after revealing the terminal', async () => {
