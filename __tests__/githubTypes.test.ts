@@ -88,6 +88,36 @@ describe('GitHub domain validation', () => {
     });
   });
 
+  it('accepts ghes account responses when public and api urls stay on the requested host', () => {
+    expect(parseGitHubAccount({
+      login: 'BunsDev',
+      id: '123',
+      url: 'https://ghe.example.test/api/v3/users/BunsDev',
+      html_url: 'https://ghe.example.test/BunsDev',
+    }, 'GHE.EXAMPLE.TEST')).toEqual({
+      host: 'ghe.example.test',
+      login: 'BunsDev',
+      id: '123',
+      source: 'gh',
+    });
+  });
+
+  it('rejects account urls that do not match the requested host rules', () => {
+    expect(() => parseGitHubAccount({
+      login: 'BunsDev',
+      id: 123,
+      url: 'https://api.github.com/users/BunsDev',
+      html_url: 'https://github.com/BunsDev',
+    }, 'ghe.example.test')).toThrowError(new Error('invalid GitHub account response'));
+
+    expect(() => parseGitHubAccount({
+      login: 'BunsDev',
+      id: 123,
+      url: 'https://ghe.example.test/api/v3/users/BunsDev',
+      html_url: 'https://ghe.example.test/BunsDev',
+    }, 'github.com')).toThrowError(new Error('invalid GitHub account response'));
+  });
+
   it('parses a bounded pull request overview', () => {
     const overview = parsePullRequestOverview(
       createOverviewValue(),

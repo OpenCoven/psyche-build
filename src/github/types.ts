@@ -127,7 +127,7 @@ export function parseGitHubAccount(value: unknown, host: string): GitHubAccountR
     );
     const publicUrl = getOptionalOwnDataProperty(record, 'html_url', invalidGitHubAccount);
     const apiUrl = getOptionalOwnDataProperty(record, 'url', invalidGitHubAccount);
-    validateGitHubAccountUrls(publicUrl, apiUrl);
+    validateGitHubAccountUrls(normalizedHost, publicUrl, apiUrl);
 
     const idValue = getOptionalOwnDataProperty(record, 'id', invalidGitHubAccount);
     const parsed: GitHubAccountRef = {
@@ -603,16 +603,31 @@ function buildRequiredCheckKey(workflow: string, name: string, link: string): st
 }
 
 function validateGitHubAccountUrls(
+  host: string,
   publicUrl: unknown | typeof MISSING_PROPERTY,
   apiUrl: unknown | typeof MISSING_PROPERTY,
 ): void {
   if (publicUrl !== MISSING_PROPERTY) {
-    requireHttpsUrl(publicUrl, invalidGitHubAccount);
+    validateGitHubAccountUrlHost(host, requireHttpsUrl(publicUrl, invalidGitHubAccount));
   }
   if (apiUrl !== MISSING_PROPERTY) {
-    requireHttpsUrl(apiUrl, invalidGitHubAccount);
+    validateGitHubAccountUrlHost(host, requireHttpsUrl(apiUrl, invalidGitHubAccount));
   }
   if (publicUrl === MISSING_PROPERTY && apiUrl === MISSING_PROPERTY) {
+    invalidGitHubAccount();
+  }
+}
+
+function validateGitHubAccountUrlHost(host: string, url: string): void {
+  const parsedUrl = new URL(url);
+  const urlHost = parsedUrl.hostname.toLowerCase();
+  if (host === 'github.com') {
+    if (urlHost !== 'github.com' && urlHost !== 'api.github.com') {
+      invalidGitHubAccount();
+    }
+    return;
+  }
+  if (urlHost !== host) {
     invalidGitHubAccount();
   }
 }
