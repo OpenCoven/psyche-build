@@ -74,9 +74,9 @@ function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
 async function tearDownOwnedPane(pane: PsychePane) {
   return tearDownFullPaneWithVerification({
     target: pane,
-    probePane: () => probeTmuxPanePresence(pane.paneId),
-    killPane: () => {
-      execSync(`tmux kill-pane -t '${pane.paneId}'`, {
+    probePane: (paneId) => probeTmuxPanePresence(paneId),
+    killPane: (paneId) => {
+      execSync(`tmux kill-pane -t '${paneId}'`, {
         stdio: 'pipe',
         timeout: 5000,
       });
@@ -243,8 +243,16 @@ async function executeCloseOption(
       try {
         updatedPanes = await context.removePaneIdentitiesFromConfig(
           [{ id: pane.id, paneId: pane.paneId }],
-          async () => {
-            const teardown = await tearDownOwnedPane(pane);
+          async (_panes, exactPanes) => {
+            // ProjectPaneConfig always supplies this fresh record. The
+            // snapshot fallback preserves legacy ActionContext adapters that
+            // predate the second guard argument; production close paths never
+            // take it.
+            const current = exactPanes?.[0] || pane;
+            // The config lease has already revalidated this exact identity.
+            // Read its current background pane/window fields here rather than
+            // tearing down a stale UI snapshot after a concurrent update.
+            const teardown = await tearDownOwnedPane(current);
             if (teardown.presence !== 'absent') {
               const message = teardown.presence === 'unknown'
                 ? `Could not confirm pane "${paneName}" and all owned background windows closed; pane record and worktree were preserved. ${

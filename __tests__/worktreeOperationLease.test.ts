@@ -14,6 +14,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   acquireProjectWorktreeLifecycleLease,
   acquireWorktreeOperationLease,
+  claimPendingGitMutationLease,
+  clearPendingGitMutationLease,
   type WorktreeOperationLeaseRecord,
 } from '../src/services/WorktreeOperationLease.js';
 
@@ -437,5 +439,145 @@ describe('worktree operation lease', () => {
     expect(existsSync(join(lockDir, 'child.replacement-owner.json'))).toBe(false);
     await first.release();
     await replacement.release();
+  });
+
+  it('keeps a dead parent lease unstealable while its supervisor claim is pending', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let now = new Date('2026-08-07T00:00:00.000Z');
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'create' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        getProcessStartIdentity: () => 'parent-start',
+        now: () => now,
+        createNonce: () => 'pending-owner',
+      },
+    );
+    await first.preparePendingGitMutation({
+      nonce: 'mutation-pending',
+      deadline: new Date(now.getTime() + 60_000).toISOString(),
+    });
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202,
+        getProcessStartIdentity: (pid) => pid === 202 ? 'contender-start' : undefined,
+        now: () => now,
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'contender',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+
+    const record = JSON.parse(readFileSync(
+      join(lockDirFor(projectRoot, worktreePath), 'lease.json'),
+      'utf8',
+    )) as WorktreeOperationLeaseRecord;
+    expect(record.pendingMutation).toMatchObject({
+      nonce: 'mutation-pending',
+      deadline: new Date(now.getTime() + 60_000).toISOString(),
+    });
+    await first.release();
+  });
+
+  it('keeps a dead parent lease unstealable while its claimed supervisor is live', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let now = new Date('2026-08-07T00:00:00.000Z');
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        getProcessStartIdentity: () => 'parent-start',
+        now: () => now,
+        createNonce: () => 'supervisor-owner',
+      },
+    );
+    await first.preparePendingGitMutation({
+      nonce: 'mutation-supervisor',
+      deadline: new Date(now.getTime() + 1).toISOString(),
+    });
+    await claimPendingGitMutationLease(
+      { lockDir: first.lockDir, leaseNonce: first.nonce },
+      {
+        mutationNonce: 'mutation-supervisor',
+        pid: 303,
+        processStartIdentity: 'supervisor-start',
+        now: () => now,
+      },
+    );
+    now = new Date(now.getTime() + 2);
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202 || pid === 303,
+        getProcessStartIdentity: (pid) => (
+          pid === 202 ? 'contender-start' : pid === 303 ? 'supervisor-start' : undefined
+        ),
+        now: () => now,
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'contender',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+    await first.release();
+  });
+
+  it('allows recovery after the supervisor exits and clears its ownership', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let now = new Date('2026-08-07T00:00:00.000Z');
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'rollback' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101,
+        getProcessStartIdentity: () => 'parent-start',
+        now: () => now,
+        createNonce: () => 'supervisor-owner',
+      },
+    );
+    await first.preparePendingGitMutation({
+      nonce: 'mutation-complete',
+      deadline: new Date(now.getTime() + 1).toISOString(),
+    });
+    const supervisor = await claimPendingGitMutationLease(
+      { lockDir: first.lockDir, leaseNonce: first.nonce },
+      {
+        mutationNonce: 'mutation-complete',
+        pid: 303,
+        processStartIdentity: 'supervisor-start',
+        now: () => now,
+      },
+    );
+    now = new Date(now.getTime() + 2);
+    await clearPendingGitMutationLease(
+      { lockDir: first.lockDir, leaseNonce: first.nonce },
+      {
+        mutationNonce: 'mutation-complete',
+        supervisor,
+      },
+    );
+
+    const recovered = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202,
+        getProcessStartIdentity: (pid) => pid === 202 ? 'contender-start' : undefined,
+        now: () => now,
+        createNonce: () => 'contender',
+      },
+    );
+    expect(JSON.parse(readFileSync(
+      join(lockDirFor(projectRoot, worktreePath), 'lease.json'),
+      'utf8',
+    ))).toMatchObject({ nonce: 'contender' });
+    await first.release();
+    await recovered.release();
   });
 });

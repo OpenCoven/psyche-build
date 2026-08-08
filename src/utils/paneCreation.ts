@@ -712,7 +712,17 @@ async function createPaneWithReuseReservation(
       // Creation ownership begins only after this direct child exits zero.
       // A directory appearing after a failed child can belong to an external
       // creator and must never be rolled back by this transaction.
-      const addResult = await runGitProcess(worktreeArgs, projectRoot);
+      const supervisedMutation = (
+        creationReservation as WorktreeCreationReservation & {
+          runGitMutation?: (
+            args: readonly string[],
+            cwd: string,
+          ) => ReturnType<typeof runGitProcess>;
+        }
+      ).runGitMutation;
+      const addResult = supervisedMutation
+        ? await supervisedMutation(worktreeArgs, projectRoot)
+        : await runGitProcess(worktreeArgs, projectRoot);
       if (addResult.exitCode !== 0) {
         throw new Error(
           `git ${worktreeArgs.join(' ')} failed with exit code ${

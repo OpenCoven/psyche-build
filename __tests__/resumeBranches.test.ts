@@ -9,6 +9,7 @@ const execSyncMock = vi.hoisted(() => vi.fn());
 const createPaneMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const writeWorktreeMetadataMock = vi.hoisted(() => vi.fn());
+const runGitMutationWithSupervisorMock = vi.hoisted(() => vi.fn());
 
 vi.mock('child_process', () => ({
   exec: execMock,
@@ -33,6 +34,12 @@ vi.mock('../src/utils/settingsManager.js', () => ({
       permissionMode: 'plan',
     })),
   })),
+}));
+
+vi.mock('../src/services/GitMutationSupervisor.js', () => ({
+  runGitMutationWithSupervisor: (...args: unknown[]) => (
+    runGitMutationWithSupervisorMock(...args)
+  ),
 }));
 
 function createTempRepoDir(prefix: string): string {
@@ -76,6 +83,27 @@ function installGitCommandMock(
 
     return {} as any;
   });
+
+  runGitMutationWithSupervisorMock.mockImplementation(async ({
+    cwd,
+    args,
+  }: {
+    cwd: string;
+    args: string[];
+  }) => new Promise((resolve, reject) => {
+    const command = `git ${args.map((arg) => `'${arg.replace(/'/g, "'\\''")}'`).join(' ')}`;
+    execMock(
+      command,
+      { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 },
+      (error: Error | null, _stdout?: string, stderr?: string) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ exitCode: 0, stderr: stderr || '' });
+      },
+    );
+  }));
 }
 
 describe('resumeBranches', () => {

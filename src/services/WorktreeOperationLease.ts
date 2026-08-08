@@ -35,11 +35,35 @@ export interface WorktreeOperationLeaseRecord {
   canonicalPath: string;
   operation: string;
   acquiredAt: string;
+  /**
+   * Written before a separate Git mutation supervisor is spawned. A dead
+   * caller must not make this lease stealable during the supervisor's launch
+   * window, and a claimed supervisor remains independently verifiable.
+   */
+  pendingMutation?: PendingGitMutation;
 }
 
 export interface LeaseChildProcess {
   pid: number;
   processStartIdentity: string;
+}
+
+export interface PendingGitMutation {
+  nonce: string;
+  deadline: string;
+  supervisorPid?: number;
+  supervisorProcessStartIdentity?: string;
+  claimedAt?: string;
+}
+
+export interface PendingGitMutationRequest {
+  nonce: string;
+  deadline: string;
+}
+
+export interface PendingGitMutationLeaseRef {
+  lockDir: string;
+  leaseNonce: string;
 }
 
 interface LeaseProcessTracker {
@@ -49,6 +73,13 @@ interface LeaseProcessTracker {
    */
   trackChildProcess: (pid: number) => Promise<LeaseChildProcess>;
   clearChildProcess: (child: LeaseChildProcess) => Promise<void>;
+  /**
+   * Makes an impending supervised Git mutation durable before the helper
+   * process exists. The pending deadline closes the parent-death launch gap.
+   */
+  preparePendingGitMutation: (
+    request: PendingGitMutationRequest,
+  ) => Promise<void>;
 }
 
 export interface WorktreeOperationLeaseRequest {
@@ -204,7 +235,7 @@ export async function acquireWorktreeOperationLease(
     `${paths.lockKey}.candidate.${nonce}`,
   );
   const candidateRecordPath = path.join(candidateDir, LEASE_FILE_NAME);
-  const deadline = Date.now() + timeoutMs;
+  const deadline = now().getTime() + timeoutMs;
   let acquired = false;
   let lastWaitReason = 'another worktree operation is in progress';
 
@@ -230,12 +261,14 @@ export async function acquireWorktreeOperationLease(
           current.record,
           isOwnerProcessAlive,
           resolveProcessStartIdentity,
+          now(),
         )) {
           const quarantined = await quarantineDeadLease(
             paths,
             current.record,
             isOwnerProcessAlive,
             resolveProcessStartIdentity,
+            now,
           );
           if (quarantined) {
             continue;
@@ -275,6 +308,7 @@ export async function acquireWorktreeOperationLease(
       paths.lockDir,
       nonce,
       resolveProcessStartIdentity,
+      now,
     ),
     release: async () => {
       await releaseOwnedLease(paths.lockDir, nonce);
@@ -336,7 +370,7 @@ export async function acquireProjectWorktreeLifecycleLease(
     `${PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME}.candidate.${nonce}`,
   );
   const candidateRecordPath = path.join(candidateDir, LEASE_FILE_NAME);
-  const deadline = Date.now() + timeoutMs;
+  const deadline = now().getTime() + timeoutMs;
   let acquired = false;
   let lastWaitReason = 'another project worktree lifecycle mutation is in progress';
 
@@ -362,12 +396,14 @@ export async function acquireProjectWorktreeLifecycleLease(
           current.record,
           isOwnerProcessAlive,
           resolveProcessStartIdentity,
+          now(),
         )) {
           if (await quarantineProjectLifecycleLease(
             paths,
             current.record,
             isOwnerProcessAlive,
             resolveProcessStartIdentity,
+            now,
           )) {
             continue;
           }
@@ -403,6 +439,7 @@ export async function acquireProjectWorktreeLifecycleLease(
       paths.lockDir,
       nonce,
       resolveProcessStartIdentity,
+      now,
     ),
     release: async () => {
       await releaseOwnedLease(paths.lockDir, nonce);
@@ -577,6 +614,62 @@ async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
   }
 }
 
+async function readRawLeaseRecord(lockDir: string): Promise<LockReadResult> {
+  try {
+    const raw = await readFile(path.join(lockDir, LEASE_FILE_NAME), 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    return {
+      record: isLeaseRecord(parsed) ? parsed : undefined,
+      missing: false,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { missing: true };
+    }
+    if (error instanceof SyntaxError) {
+      return { missing: false };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Updates lease.json by atomic replacement after verifying the immutable
+ * nonce. A stale owner can only ever update its own quarantined directory,
+ * never a replacement lease at the active path.
+ */
+async function updateOwnedLeaseRecord(
+  lockDir: string,
+  nonce: string,
+  mutation: (record: WorktreeOperationLeaseRecord) => WorktreeOperationLeaseRecord,
+): Promise<void> {
+  const current = await readRawLeaseRecord(lockDir);
+  if (!current.record || current.record.nonce !== nonce) {
+    throw new Error('Worktree lease ownership changed');
+  }
+
+  const next = mutation(current.record);
+  if (next.nonce !== nonce) {
+    throw new Error('Worktree lease mutation cannot change its ownership nonce');
+  }
+
+  const recordPath = path.join(lockDir, LEASE_FILE_NAME);
+  const temporaryPath = path.join(
+    lockDir,
+    `${LEASE_FILE_NAME}.${nonce}.${randomUUID()}.update`,
+  );
+  try {
+    await writeLeaseRecord(temporaryPath, next);
+    await rename(temporaryPath, recordPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+function isLeaseOwnershipGoneError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Worktree lease ownership changed';
+}
+
 function childLeaseRecordPath(lockDir: string, nonce: string): string {
   return path.join(lockDir, `${CHILD_LEASE_FILE_PREFIX}${nonce}.json`);
 }
@@ -612,9 +705,10 @@ async function quarantineDeadLease(
   record: WorktreeOperationLeaseRecord,
   isOwnerProcessAlive: (pid: number) => boolean,
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
+  now: () => Date,
 ): Promise<boolean> {
   // Check immediately before the atomic move. A live lease is never moved.
-  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity)) {
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity, now())) {
     return false;
   }
 
@@ -643,8 +737,9 @@ async function quarantineProjectLifecycleLease(
   record: WorktreeOperationLeaseRecord,
   isOwnerProcessAlive: (pid: number) => boolean,
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
+  now: () => Date,
 ): Promise<boolean> {
-  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity)) {
+  if (!isLeaseOwnerStale(record, isOwnerProcessAlive, resolveProcessStartIdentity, now())) {
     return false;
   }
 
@@ -668,6 +763,7 @@ function createLeaseProcessTracker(
   lockDir: string,
   nonce: string,
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
+  now: () => Date,
 ): LeaseProcessTracker {
   return {
     trackChildProcess: async (pid: number): Promise<LeaseChildProcess> => {
@@ -704,7 +800,185 @@ function createLeaseProcessTracker(
       }
       await rm(childLeaseRecordPath(lockDir, nonce), { force: true });
     },
+    preparePendingGitMutation: async (
+      request: PendingGitMutationRequest,
+    ): Promise<void> => {
+      await preparePendingGitMutationLease(
+        { lockDir, leaseNonce: nonce },
+        request,
+        now,
+      );
+    },
   };
+}
+
+/**
+ * Records a pending supervised mutation before the child process is spawned.
+ * This state is deliberately part of lease.json: if the caller dies between
+ * persistence and the supervisor's claim, recovery waits for the deadline
+ * instead of treating the otherwise-dead parent as authorization to steal.
+ */
+async function preparePendingGitMutationLease(
+  lease: PendingGitMutationLeaseRef,
+  request: PendingGitMutationRequest,
+  now: () => Date,
+): Promise<void> {
+  if (!isSafeNonce(request.nonce)) {
+    throw new Error('Pending Git mutation nonce contains unsupported characters');
+  }
+  if (!isFutureOrPresentTimestamp(request.deadline, now())) {
+    throw new Error('Pending Git mutation deadline must be a valid future timestamp');
+  }
+
+  await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
+    const pending = record.pendingMutation;
+    if (pending && pending.nonce !== request.nonce) {
+      throw new Error('A different Git mutation is already pending on this lease');
+    }
+    return {
+      ...record,
+      pendingMutation: {
+        nonce: request.nonce,
+        deadline: request.deadline,
+      },
+    };
+  });
+}
+
+export interface ClaimPendingGitMutationLeaseRequest {
+  mutationNonce: string;
+  pid?: number;
+  processStartIdentity?: string;
+  now?: () => Date;
+}
+
+/**
+ * The supervisor's first durable action. It associates its canonical process
+ * identity with the exact pending mutation before it starts Git, making a
+ * live helper sufficient to retain a lease even after its parent disappears.
+ */
+export async function claimPendingGitMutationLease(
+  lease: PendingGitMutationLeaseRef,
+  request: ClaimPendingGitMutationLeaseRequest,
+): Promise<LeaseChildProcess> {
+  const pid = request.pid ?? process.pid;
+  const processStartIdentity = request.processStartIdentity
+    ?? getProcessStartIdentity(pid);
+  if (!Number.isInteger(pid) || pid <= 0 || !isSafeProcessStartIdentity(processStartIdentity)) {
+    throw new Error('Cannot claim pending Git mutation without a canonical supervisor identity');
+  }
+  if (!isSafeNonce(request.mutationNonce)) {
+    throw new Error('Pending Git mutation nonce contains unsupported characters');
+  }
+
+  const now = request.now ?? (() => new Date());
+  await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
+    const pending = record.pendingMutation;
+    if (!pending || pending.nonce !== request.mutationNonce) {
+      throw new Error('Pending Git mutation no longer belongs to this supervisor');
+    }
+    if (
+      pending.supervisorPid !== undefined
+      && (
+        pending.supervisorPid !== pid
+        || pending.supervisorProcessStartIdentity !== processStartIdentity
+      )
+    ) {
+      throw new Error('Pending Git mutation is already claimed by another supervisor');
+    }
+    return {
+      ...record,
+      pendingMutation: {
+        ...pending,
+        supervisorPid: pid,
+        supervisorProcessStartIdentity: processStartIdentity,
+        claimedAt: now().toISOString(),
+      },
+    };
+  });
+
+  const child = { pid, processStartIdentity };
+  await replaceChildLeaseRecord(lease.lockDir, lease.leaseNonce, child);
+  return child;
+}
+
+export interface ClearPendingGitMutationLeaseRequest {
+  mutationNonce: string;
+  supervisor?: LeaseChildProcess;
+}
+
+/**
+ * Clears supervisor ownership only after the Git child has exited. When the
+ * supervisor crashed, this intentionally leaves the pending record behind
+ * until its deadline so a contender cannot race an uncertain launch.
+ */
+export async function clearPendingGitMutationLease(
+  lease: PendingGitMutationLeaseRef,
+  request: ClearPendingGitMutationLeaseRequest,
+): Promise<void> {
+  if (!isSafeNonce(request.mutationNonce)) {
+    return;
+  }
+
+  let cleared = false;
+  try {
+    await updateOwnedLeaseRecord(lease.lockDir, lease.leaseNonce, (record) => {
+      const pending = record.pendingMutation;
+      if (!pending || pending.nonce !== request.mutationNonce) {
+        return record;
+      }
+      if (!request.supervisor && pending.supervisorPid !== undefined) {
+        return record;
+      }
+      if (
+        request.supervisor
+        && (
+          pending.supervisorPid !== request.supervisor.pid
+          || pending.supervisorProcessStartIdentity
+            !== request.supervisor.processStartIdentity
+        )
+      ) {
+        return record;
+      }
+      cleared = true;
+      const next = { ...record };
+      delete next.pendingMutation;
+      return next;
+    });
+  } catch (error) {
+    if (!isLeaseOwnershipGoneError(error)) {
+      throw error;
+    }
+    return;
+  }
+
+  if (
+    cleared
+    && request.supervisor
+  ) {
+    const current = await readLeaseRecord(lease.lockDir);
+    if (
+      current.record
+      && current.record.nonce === lease.leaseNonce
+      && current.record.childPid === request.supervisor.pid
+      && current.record.childProcessStartIdentity
+        === request.supervisor.processStartIdentity
+    ) {
+      await rm(childLeaseRecordPath(lease.lockDir, lease.leaseNonce), { force: true });
+    }
+  }
+}
+
+/**
+ * Clears only a pending mutation which was never claimed. This is used when
+ * fork itself fails; it cannot erase a helper that claimed before its IPC
+ * status reached the parent.
+ */
+export async function clearUnclaimedPendingGitMutationLease(
+  lease: PendingGitMutationLeaseRef,
+  mutationNonce: string,
+): Promise<void> {
+  await clearPendingGitMutationLease(lease, { mutationNonce });
 }
 
 /**
@@ -798,6 +1072,39 @@ function isLeaseRecord(value: unknown): value is WorktreeOperationLeaseRecord {
     && typeof record.canonicalPath === 'string'
     && typeof record.operation === 'string'
     && typeof record.acquiredAt === 'string'
+    && (
+      record.pendingMutation === undefined
+      || isPendingGitMutation(record.pendingMutation)
+    )
+  );
+}
+
+function isPendingGitMutation(value: unknown): value is PendingGitMutation {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const pending = value as Partial<PendingGitMutation>;
+  const hasSupervisorPid = pending.supervisorPid !== undefined;
+  const hasSupervisorIdentity = pending.supervisorProcessStartIdentity !== undefined;
+  return (
+    typeof pending.nonce === 'string'
+    && isSafeNonce(pending.nonce)
+    && typeof pending.deadline === 'string'
+    && Number.isFinite(Date.parse(pending.deadline))
+    && hasSupervisorPid === hasSupervisorIdentity
+    && (
+      !hasSupervisorPid
+      || (
+        typeof pending.supervisorPid === 'number'
+        && Number.isInteger(pending.supervisorPid)
+        && pending.supervisorPid > 0
+        && isSafeProcessStartIdentity(pending.supervisorProcessStartIdentity)
+      )
+    )
+    && (
+      pending.claimedAt === undefined
+      || typeof pending.claimedAt === 'string'
+    )
   );
 }
 
@@ -824,7 +1131,30 @@ function isLeaseOwnerStale(
   record: WorktreeOperationLeaseRecord,
   isOwnerProcessAlive: (pid: number) => boolean,
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
+  now: Date = new Date(),
 ): boolean {
+  const pending = record.pendingMutation;
+  if (pending) {
+    // A process may die after persisting pendingMutation but before fork has
+    // created the supervisor. Until the declared deadline this is an
+    // intentionally unstealable launch window.
+    if (isFutureOrPresentTimestamp(pending.deadline, now)) {
+      return false;
+    }
+    if (
+      pending.supervisorPid !== undefined
+      && pending.supervisorProcessStartIdentity !== undefined
+      && !isProcessIdentityStale(
+        pending.supervisorPid,
+        pending.supervisorProcessStartIdentity,
+        isOwnerProcessAlive,
+        resolveProcessStartIdentity,
+      )
+    ) {
+      return false;
+    }
+  }
+
   if (!isProcessIdentityStale(
     record.pid,
     record.processStartIdentity,
@@ -847,6 +1177,11 @@ function isLeaseOwnerStale(
     isOwnerProcessAlive,
     resolveProcessStartIdentity,
   );
+}
+
+function isFutureOrPresentTimestamp(value: string, now: Date): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp >= now.getTime();
 }
 
 function isProcessIdentityStale(

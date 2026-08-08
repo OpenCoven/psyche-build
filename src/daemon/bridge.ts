@@ -35,12 +35,14 @@ import {
 import { buildPromptReadAndDeleteSnippet, writePromptFile } from '../utils/promptStore.js';
 import {
   paneRecoveryInstructions,
+  tearDownFullPaneWithVerification,
   tearDownPaneWithVerification,
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
 import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import { createPsychePaneId } from '../utils/paneIdentity.js';
+import { runGitProcess } from '../utils/gitProcess.js';
 import type { PsycheConfig } from '../types.js';
 import {
   isAgenticCapability,
@@ -190,6 +192,10 @@ interface RawConfigPane extends Record<string, unknown> {
   branchName?: string;
   agent?: string;
   agentStatus?: string;
+  testWindowId?: string;
+  testPaneId?: string;
+  devWindowId?: string;
+  devPaneId?: string;
   worktreeIdentity?: {
     realpath: string;
     branch: string;
@@ -1167,10 +1173,11 @@ export async function spawnBridgePane(
       let provisionalIdentity: CreatedWorktreeIdentity | undefined;
       let rollbackOwnershipLostReason: string | undefined;
       try {
-        const creation = createGitWorktree(
+        const creation = await createGitWorktree(
           scoped.projectRoot,
           reservation.canonicalWorktreePath,
           nextBranch,
+          reservation,
           request.startPointBranch,
           (provisional) => {
             if (!provisional.rollbackOwnershipClaimed) {
@@ -1490,8 +1497,14 @@ export async function spawnBridgePane(
 }
 
 export interface BridgeKillDeps {
-  tmuxPaneExists: (paneId: string) => boolean | undefined;
+  /** Legacy boolean probe retained for existing callers. */
+  tmuxPaneExists?: (paneId: string) => boolean | undefined;
+  /** Tri-state probe used for verified primary/background pane teardown. */
+  probeTmuxPane?: (paneId: string) => TmuxPanePresence;
   killTmuxPane: (paneId: string) => void;
+  /** Tri-state probe used for detached background windows. */
+  probeTmuxWindow?: (windowId: string) => TmuxPanePresence;
+  killTmuxWindow?: (windowId: string) => void;
   /**
    * Optional lifecycle seam after the initial non-destructive probe and
    * before the locked identity check.
@@ -1511,7 +1524,10 @@ export interface BridgeKillResult {
 
 export const defaultKillDeps: BridgeKillDeps = {
   tmuxPaneExists,
+  probeTmuxPane: probeTmuxPanePresence,
   killTmuxPane,
+  probeTmuxWindow: probeTmuxWindowPresence,
+  killTmuxWindow,
 };
 
 /**
@@ -1546,8 +1562,8 @@ export async function killBridgePane(
     paneId: tmuxPaneId,
   };
 
-  const initialPresence = deps.tmuxPaneExists(tmuxPaneId);
-  if (initialPresence === undefined) {
+  const initialPresence = probeBridgeTmuxPane(deps, tmuxPaneId);
+  if (initialPresence === 'unknown') {
     throw bridgeError(
       'pane_probe_unknown',
       `could not confirm whether tmux pane ${tmuxPaneId} exists; retained pane record. ${
@@ -1582,8 +1598,8 @@ export async function killBridgePane(
 
       // Re-probe only after the locked exact-identity check. The pre-lock
       // result is deliberately not trusted for a kill or deregistration.
-      const currentPresence = deps.tmuxPaneExists(expectedIdentity.paneId);
-      if (currentPresence === undefined) {
+      const currentPresence = probeBridgeTmuxPane(deps, expectedIdentity.paneId);
+      if (currentPresence === 'unknown') {
         throw bridgeError(
           'pane_probe_unknown',
           `could not confirm whether tmux pane ${expectedIdentity.paneId} exists; retained pane record. ${
@@ -1595,30 +1611,35 @@ export async function killBridgePane(
         );
       }
 
-      let killed = false;
-      if (currentPresence) {
-        try {
-          deps.killTmuxPane(expectedIdentity.paneId);
-          killed = true;
-        } catch (error) {
-          throw bridgeError(
-            'pane_kill_failed',
-            `failed to kill tmux pane: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-
-        const afterKill = deps.tmuxPaneExists(expectedIdentity.paneId);
-        if (afterKill !== false) {
-          throw bridgeError(
-            afterKill === undefined ? 'pane_probe_unknown' : 'pane_kill_unconfirmed',
-            `could not confirm tmux pane ${expectedIdentity.paneId} is absent; retained pane record. ${
-              paneRecoveryInstructions(
-                expectedIdentity.paneId,
-                projectPaneConfigPath(scoped.projectRoot),
-              )
-            }`,
-          );
-        }
+      const teardown = await tearDownFullPaneWithVerification({
+        target: {
+          paneId: expectedIdentity.paneId,
+          testPaneId: current.testPaneId,
+          testWindowId: current.testWindowId,
+          devPaneId: current.devPaneId,
+          devWindowId: current.devWindowId,
+        },
+        probePane: (targetPaneId) => probeBridgeTmuxPane(deps, targetPaneId),
+        killPane: (targetPaneId) => deps.killTmuxPane(targetPaneId),
+        probeWindow: (windowId) => probeBridgeTmuxWindow(deps, windowId),
+        killWindow: (windowId) => (
+          (deps.killTmuxWindow ?? killTmuxWindow)(windowId)
+        ),
+      });
+      if (teardown.presence !== 'absent') {
+        throw bridgeError(
+          teardown.error
+            ? 'pane_kill_failed'
+            : teardown.presence === 'unknown'
+            ? 'pane_probe_unknown'
+            : 'pane_kill_unconfirmed',
+          `could not confirm tmux pane ${expectedIdentity.paneId} and all owned background resources are absent; retained pane record. ${
+            paneRecoveryInstructions(
+              expectedIdentity.paneId,
+              projectPaneConfigPath(scoped.projectRoot),
+            )
+          }${teardown.error ? ` (${teardown.error})` : ''}`,
+        );
       }
 
       // Remove only the exact record that was locked above. Matching either
@@ -1629,7 +1650,7 @@ export async function killBridgePane(
       ));
       currentConfig.lastUpdated = new Date().toISOString();
       await persist();
-      return { pane: current, killed };
+      return { pane: current, killed: currentPresence === 'present' };
     },
   );
   const { pane, killed } = mutation.result;
@@ -1684,6 +1705,46 @@ export function tmuxPaneExists(paneId: string): boolean | undefined {
     : presence === 'absent'
       ? false
       : undefined;
+}
+
+export function killTmuxWindow(windowId: string): void {
+  execFileSync('tmux', ['kill-window', '-t', windowId], { stdio: 'ignore' });
+}
+
+export function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
+  try {
+    const output = execFileSync(
+      'tmux',
+      ['list-windows', '-a', '-F', '#{window_id}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+    );
+    return output
+      .split('\n')
+      .map((line) => line.trim())
+      .includes(windowId)
+      ? 'present'
+      : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function probeBridgeTmuxPane(
+  deps: BridgeKillDeps,
+  paneId: string,
+): TmuxPanePresence {
+  if (deps.probeTmuxPane) {
+    return deps.probeTmuxPane(paneId);
+  }
+  const exists = deps.tmuxPaneExists?.(paneId);
+  return exists === true ? 'present' : exists === false ? 'absent' : 'unknown';
+}
+
+function probeBridgeTmuxWindow(
+  deps: BridgeKillDeps,
+  windowId: string,
+): TmuxPanePresence {
+  return deps.probeTmuxWindow?.(windowId) ?? 'unknown';
 }
 
 export function createTmuxPane(sessionName: string, cwd: string, title?: string): string {
@@ -1860,10 +1921,11 @@ async function resolveSpawnBranch(projectRoot: string, requestedBranch: string |
   throw bridgeError('branch_exhausted', 'could not allocate a unique psyche branch');
 }
 
-function createGitWorktree(
+async function createGitWorktree(
   projectRoot: string,
   worktreePath: string,
   branch: string,
+  reservation: WorktreeCreationReservation,
   startPointBranch?: string,
   onWorktreeCreated?: (provisional: {
     startingOid: string;
@@ -1873,13 +1935,13 @@ function createGitWorktree(
     rollbackOwnershipLostReason?: string;
   }) => void,
   readCreatedWorktreeBranch: (worktreePath: string) => string | null = readWorktreeBranch,
-): {
+): Promise<{
   startingOid: string;
   createdOid: string;
   branchCreatedByThisAttempt: boolean;
   rollbackOwnershipClaimed: boolean;
   rollbackOwnershipLostReason?: string;
-} {
+}> {
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
     execFileSync('git', ['-C', projectRoot, 'rev-parse', '--is-inside-work-tree'], { stdio: 'ignore' });
@@ -1892,12 +1954,29 @@ function createGitWorktree(
       projectRoot,
       branchExisted ? `refs/heads/${branch}` : (startPointBranch || 'HEAD'),
     );
-    if (branchExisted) {
-      execFileSync('git', ['-C', projectRoot, 'worktree', 'add', worktreePath, branch], { stdio: 'pipe' });
-    } else {
-      const args = ['-C', projectRoot, 'worktree', 'add', worktreePath, '-b', branch];
-      if (startPointBranch) args.push(startPointBranch);
-      execFileSync('git', args, { stdio: 'pipe' });
+    const args = branchExisted
+      ? ['worktree', 'add', worktreePath, branch]
+      : ['worktree', 'add', worktreePath, '-b', branch];
+    if (!branchExisted && startPointBranch) {
+      args.push(startPointBranch);
+    }
+    const supervisedMutation = (
+      reservation as WorktreeCreationReservation & {
+        runGitMutation?: (
+          args: readonly string[],
+          cwd: string,
+        ) => ReturnType<typeof runGitProcess>;
+      }
+    ).runGitMutation;
+    const result = supervisedMutation
+      ? await supervisedMutation(args, projectRoot)
+      : await runGitProcess(args, projectRoot);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `git ${args.join(' ')} failed with exit code ${
+          result.exitCode ?? 'unknown'
+        }${result.stderr ? `: ${result.stderr}` : ''}`,
+      );
     }
 
     const createdOid = readGitOid(projectRoot, `refs/heads/${branch}`);

@@ -21,7 +21,9 @@ export interface VerifiedPaneTeardownOptions {
 export interface FullPaneTeardownTarget {
   paneId: string;
   testWindowId?: string;
+  testPaneId?: string;
   devWindowId?: string;
+  devPaneId?: string;
 }
 
 export interface FullPaneTeardownOptions {
@@ -38,6 +40,7 @@ export interface FullPaneTeardownResult {
   presence: TmuxPanePresence;
   error?: string;
   pane: VerifiedPaneTeardownResult;
+  backgroundPanes: ReadonlyMap<string, VerifiedPaneTeardownResult>;
   windows: ReadonlyMap<string, VerifiedPaneTeardownResult>;
 }
 
@@ -84,6 +87,36 @@ export async function tearDownPaneWithVerification(
 export async function tearDownFullPaneWithVerification(
   options: FullPaneTeardownOptions,
 ): Promise<FullPaneTeardownResult> {
+  const backgroundPanes = new Map<string, VerifiedPaneTeardownResult>();
+  const backgroundPaneIds = Array.from(new Set(
+    [options.target.testPaneId, options.target.devPaneId].filter(
+      (paneId): paneId is string => Boolean(paneId) && paneId !== options.target.paneId,
+    ),
+  ));
+  for (const paneId of backgroundPaneIds) {
+    backgroundPanes.set(paneId, await tearDownPaneWithVerification({
+      probe: () => options.probePane(paneId),
+      kill: () => options.killPane(paneId),
+      verifyDelaysMs: options.verifyDelaysMs,
+      sleep: options.sleep,
+    }));
+  }
+  const failedBackgroundPane = [...backgroundPanes.values()].find(
+    (result) => result.presence !== 'absent',
+  );
+  if (failedBackgroundPane) {
+    return {
+      presence: failedBackgroundPane.presence,
+      ...(failedBackgroundPane.error ? { error: failedBackgroundPane.error } : {}),
+      // The main pane was deliberately not touched after an uncertain owned
+      // background process. Its actual state is irrelevant to safe record
+      // removal, so use absent only as a non-result placeholder.
+      pane: { presence: 'absent' },
+      backgroundPanes,
+      windows: new Map(),
+    };
+  }
+
   const windows = new Map<string, VerifiedPaneTeardownResult>();
   const windowIds = Array.from(new Set(
     [options.target.testWindowId, options.target.devWindowId].filter(
@@ -99,6 +132,18 @@ export async function tearDownFullPaneWithVerification(
       sleep: options.sleep,
     }));
   }
+  const failedWindow = [...windows.values()].find(
+    (result) => result.presence !== 'absent',
+  );
+  if (failedWindow) {
+    return {
+      presence: failedWindow.presence,
+      ...(failedWindow.error ? { error: failedWindow.error } : {}),
+      pane: { presence: 'absent' },
+      backgroundPanes,
+      windows,
+    };
+  }
 
   const pane = await tearDownPaneWithVerification({
     probe: () => options.probePane(options.target.paneId),
@@ -106,7 +151,7 @@ export async function tearDownFullPaneWithVerification(
     verifyDelaysMs: options.verifyDelaysMs,
     sleep: options.sleep,
   });
-  const outcomes = [...windows.values(), pane];
+  const outcomes = [...backgroundPanes.values(), ...windows.values(), pane];
   const presence = outcomes.some((outcome) => outcome.presence === 'unknown')
     ? 'unknown'
     : outcomes.some((outcome) => outcome.presence === 'present')
@@ -114,7 +159,13 @@ export async function tearDownFullPaneWithVerification(
       : 'absent';
   const error = outcomes.find((outcome) => outcome.error)?.error;
 
-  return { presence, ...(error ? { error } : {}), pane, windows };
+  return {
+    presence,
+    ...(error ? { error } : {}),
+    pane,
+    backgroundPanes,
+    windows,
+  };
 }
 
 export async function probePanePresence(

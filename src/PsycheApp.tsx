@@ -469,6 +469,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     projectSettings,
     setStatusMessage,
     setRunningCommand,
+    refreshPanes: loadPanes,
   })
 
   // Spinner animation and branch detection now handled in hooks

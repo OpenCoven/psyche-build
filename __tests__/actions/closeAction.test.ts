@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { closePane } from '../../src/actions/implementations/closeAction.js';
+import type { PsychePane } from '../../src/types.js';
 import { createMockPane, createShellPane, createWorktreePane } from '../fixtures/mockPanes.js';
 import { createMockContext } from '../fixtures/mockContext.js';
 import { expectChoice, expectSuccess, expectError } from '../helpers/actionAssertions.js';
@@ -240,6 +241,66 @@ describe('closeAction', () => {
         .toBeLessThan(commands.findIndex((command) => command.includes("kill-pane -t '%42'")));
       expect(commands.some((command) => command.includes("kill-window -t '@8'"))).toBe(true);
       expect(context.panes).toEqual([]);
+    });
+
+    it('uses fresh locked background pane/window fields rather than stale UI fields', async () => {
+      const stalePane = createWorktreePane({
+        paneId: '%42',
+        testPaneId: '%stale-test',
+        testWindowId: '@stale-test',
+        devPaneId: '%stale-dev',
+        devWindowId: '@stale-dev',
+      });
+      const freshPane = {
+        ...stalePane,
+        testPaneId: '%fresh-test',
+        testWindowId: '@fresh-test',
+        devPaneId: '%fresh-dev',
+        devWindowId: '@fresh-dev',
+      };
+      const livePanes = new Set(['%42', '%fresh-test', '%fresh-dev']);
+      const liveWindows = new Set(['@fresh-test', '@fresh-dev']);
+      const removePaneIdentitiesFromConfig = vi.fn(async (
+        _identities: unknown,
+        beforeRemove?: (
+          panes?: readonly PsychePane[],
+          exactPanes?: readonly PsychePane[],
+        ) => Promise<void> | void,
+      ) => {
+        await beforeRemove?.([], [freshPane]);
+        return [];
+      });
+      const context = createMockContext([stalePane], {
+        removePaneIdentitiesFromConfig,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return [...livePanes].join('\n');
+        if (command.includes('list-windows')) return [...liveWindows].join('\n');
+        if (command.includes('kill-pane')) {
+          const paneId = command.match(/-t '([^']+)'/)?.[1];
+          if (paneId) livePanes.delete(paneId);
+          return Buffer.from('');
+        }
+        if (command.includes('kill-window')) {
+          const windowId = command.match(/-t '([^']+)'/)?.[1];
+          if (windowId) liveWindows.delete(windowId);
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(stalePane, context);
+      await choice.onSelect!('kill_only');
+
+      const commands = vi.mocked(execSync).mock.calls
+        .map(([command]) => String(command));
+      expect(commands.some((command) => command.includes("kill-pane -t '%fresh-test'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-pane -t '%fresh-dev'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-window -t '@fresh-test'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-window -t '@fresh-dev'"))).toBe(true);
+      expect(commands.some((command) => command.includes('stale-test'))).toBe(false);
+      expect(commands.some((command) => command.includes('stale-dev'))).toBe(false);
     });
 
     it('preserves the record when a transient tmux probe cannot confirm absence', async () => {

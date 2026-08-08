@@ -12,6 +12,12 @@ import {
   type ProjectWorktreeLifecycleLease,
   type WorktreeOperationLease,
 } from './WorktreeOperationLease.js';
+import {
+  isGitMutationSupervisorLease,
+  runGitMutationWithSupervisor,
+  type GitMutationSupervisorResult,
+  type GitMutationSupervisorLease,
+} from './GitMutationSupervisor.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
   paneReferencesWorktree,
@@ -86,6 +92,14 @@ export interface WorktreeCreationReservation {
   rollbackCreatedWorktree: (
     identity: CreatedWorktreeIdentity,
   ) => Promise<WorktreeRollbackResult>;
+  /**
+   * Executes a Git mutation under this reservation's exact-path and
+   * project-wide filesystem leases.
+   */
+  runGitMutation: (
+    args: readonly string[],
+    cwd: string,
+  ) => Promise<GitMutationSupervisorResult>;
   complete: () => Promise<void>;
   cancel: () => Promise<void>;
 }
@@ -108,7 +122,11 @@ interface GitTextResult extends CommandResult {
 
 type MutationLease = Pick<
   WorktreeOperationLease | ProjectWorktreeLifecycleLease,
-  'trackChildProcess' | 'clearChildProcess'
+  | 'trackChildProcess'
+  | 'clearChildProcess'
+  | 'lockDir'
+  | 'nonce'
+  | 'preparePendingGitMutation'
 >;
 
 interface WorktreeIdentity {
@@ -431,6 +449,22 @@ export class WorktreeCleanupService {
             ],
           );
         },
+        runGitMutation: (args, cwd) => runGitMutationWithSupervisor({
+          args,
+          cwd,
+          leases: [
+            operationLease!,
+            ...(projectLifecycleLease
+              ? [projectLifecycleLease]
+              : ownedProjectLifecycleLease
+                ? [ownedProjectLifecycleLease]
+                : []),
+          ].map((lease): GitMutationSupervisorLease => ({
+            lockDir: lease.lockDir,
+            leaseNonce: lease.nonce,
+            preparePendingGitMutation: lease.preparePendingGitMutation,
+          })),
+        }),
         complete: settle,
         cancel: settle,
       };
@@ -1524,6 +1558,46 @@ export class WorktreeCleanupService {
     cwd: string,
     mutationLeases: readonly MutationLease[] = [],
   ): Promise<CommandResult> {
+    const uniqueMutationLeases = Array.from(new Set(mutationLeases));
+    const supervisedLeases = uniqueMutationLeases
+      .filter((lease) => (
+        typeof lease.preparePendingGitMutation === 'function'
+        && typeof lease.lockDir === 'string'
+        && typeof lease.nonce === 'string'
+      ))
+      .map((lease): GitMutationSupervisorLease => ({
+        lockDir: lease.lockDir,
+        leaseNonce: lease.nonce,
+        preparePendingGitMutation: lease.preparePendingGitMutation,
+      }));
+
+    // Real lifecycle leases always expose the pending-mutation protocol. The
+    // direct-child fallback keeps legacy/injected test leases usable while
+    // never weakening production cleanup, prune, rollback, or branch delete.
+    if (
+      supervisedLeases.length === uniqueMutationLeases.length
+      && supervisedLeases.every(isGitMutationSupervisorLease)
+    ) {
+      return runGitMutationWithSupervisor({
+        args,
+        cwd,
+        leases: supervisedLeases,
+      }).then((result) => (
+        result.exitCode === 0
+          ? { success: true }
+          : {
+            success: false,
+            error: result.stderr
+              || `git ${args.join(' ')} failed with exit code ${
+                result.exitCode ?? 'unknown'
+              }`,
+          }
+      )).catch((error) => ({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+
     return new Promise((resolve) => {
       const child = spawn('git', args, {
         cwd,
@@ -1535,7 +1609,7 @@ export class WorktreeCleanupService {
       let childError: Error | undefined;
       let childTrackingError: Error | undefined;
       const trackedLeases = Array.from(
-        new Set(mutationLeases.filter((lease): lease is MutationLease => (
+        new Set(uniqueMutationLeases.filter((lease): lease is MutationLease => (
           typeof lease.trackChildProcess === 'function'
           && typeof lease.clearChildProcess === 'function'
         ))),

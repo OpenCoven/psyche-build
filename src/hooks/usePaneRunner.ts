@@ -10,6 +10,7 @@ import {
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
 import {
+  retainBackgroundWindowPaneId,
   startBackgroundWindowTransaction,
 } from '../utils/backgroundWindowTransaction.js';
 import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
@@ -21,9 +22,17 @@ interface Params {
   projectSettings: ProjectSettings;
   setStatusMessage: (msg: string) => void;
   setRunningCommand: (v: boolean) => void;
+  refreshPanes?: () => Promise<void>;
 }
 
-export default function usePaneRunner({ panes, savePanes, projectSettings, setStatusMessage, setRunningCommand }: Params) {
+export default function usePaneRunner({
+  panes,
+  savePanes,
+  projectSettings,
+  setStatusMessage,
+  setRunningCommand,
+  refreshPanes,
+}: Params) {
   const copyNonGitFiles = async (worktreePath: string, sourceProjectRoot?: string) => {
     try {
       setStatusMessage('Copying non-git files from main...');
@@ -60,21 +69,38 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       setStatusMessage(`Starting ${type} in background window...`);
 
       const tmuxService = TmuxService.getInstance();
-      const tearDownWindow = (windowId: string): Promise<VerifiedPaneTeardownResult> => (
-        tearDownPaneWithVerification({
-          probe: () => tmuxService.probeWindowPresence(windowId),
-          kill: () => tmuxService.killWindow(windowId),
-        })
-      );
+      const projectRoot = pane.projectRoot
+        || deriveProjectRootFromWorktreePath(pane.worktreePath)
+        || process.cwd();
+      const tearDownResource = async (
+        resource: { windowId: string; paneId: string },
+      ): Promise<VerifiedPaneTeardownResult> => {
+        const backgroundPane = await tearDownPaneWithVerification({
+          probe: () => tmuxService.probePanePresence(resource.paneId),
+          kill: () => tmuxService.killPane(resource.paneId),
+        });
+        const window = await tearDownPaneWithVerification({
+          probe: () => tmuxService.probeWindowPresence(resource.windowId),
+          kill: () => tmuxService.killWindow(resource.windowId),
+        });
+        const presence = [backgroundPane, window].some(
+          (result) => result.presence === 'unknown',
+        )
+          ? 'unknown'
+          : [backgroundPane, window].some((result) => result.presence === 'present')
+            ? 'present'
+            : 'absent';
+        return {
+          presence,
+          ...(backgroundPane.error || window.error
+            ? { error: backgroundPane.error || window.error }
+            : {}),
+        };
+      };
       const retainUncertainRecovery = async (
         recoveryPane: PsychePane,
         reason: string,
       ): Promise<string | undefined> => {
-        const projectRoot = recoveryPane.projectRoot
-          || (recoveryPane.worktreePath
-            ? deriveProjectRootFromWorktreePath(recoveryPane.worktreePath)
-            : undefined)
-          || process.cwd();
         try {
           const marker = await writeWorktreeRecoveryMarker({
             projectRoot,
@@ -94,16 +120,6 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
         }
       };
 
-      const existingWindowId = type === 'test' ? pane.testWindowId : pane.devWindowId;
-      if (existingWindowId) {
-        const existingTeardown = await tearDownWindow(existingWindowId);
-        if (existingTeardown.presence !== 'absent') {
-          throw new Error(
-            `Could not confirm existing ${type} window ${existingWindowId} closed (${existingTeardown.presence})`,
-          );
-        }
-      }
-
       const windowName = `${pane.slug}-${type}`;
       const runtimeDir = path.join(pane.worktreePath, '.psyche');
       await fs.mkdir(runtimeDir, { recursive: true });
@@ -111,17 +127,21 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       const fullCommand = `cd "${pane.worktreePath}" && ${command} 2>&1 | tee ${logFile}`;
       const transaction = await startBackgroundWindowTransaction({
         type,
+        projectRoot,
         pane,
-        panes,
-        createWindow: () => tmuxService.newWindow({ name: windowName, detached: true }),
-        sendCommand: (windowId) => tmuxService.sendKeys(
-          windowId,
+        createWindow: async () => {
+          const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
+          const paneId = await tmuxService.getWindowPaneId(windowId);
+          return { windowId, paneId };
+        },
+        sendCommand: (resource) => tmuxService.sendKeys(
+          resource.paneId,
           `'${fullCommand.replace(/'/g, "'\\''")}' Enter`,
         ),
-        savePanes,
-        tearDownWindow,
+        tearDownResource,
         retainUncertainRecovery,
       });
+      await refreshPanes?.();
 
       if (type === 'test') setTimeout(() => monitorTestOutput(transaction.pane.id, logFile), 2000);
       else setTimeout(() => monitorDevOutput(transaction.pane.id, logFile), 2000);
@@ -147,10 +167,17 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
 
       const pane = panes.find(p => p.id === paneId);
-      if (pane?.testWindowId) {
+      const testTarget = pane?.testPaneId || pane?.testWindowId;
+      if (testTarget) {
         try {
-          execSync(`tmux list-windows -F '#{window_id}' | rg -q '${pane.testWindowId}'`, { stdio: 'pipe' });
-          const paneOutput = execSync(`tmux capture-pane -t '${pane.testWindowId}' -p | tail -5`, { encoding: 'utf-8' });
+          const targetList = pane?.testPaneId
+            ? `tmux list-panes -a -F '#{pane_id}' | rg -q '${testTarget}'`
+            : `tmux list-windows -a -F '#{window_id}' | rg -q '${testTarget}'`;
+          execSync(targetList, { stdio: 'pipe' });
+          const paneOutput = execSync(
+            `tmux capture-pane -t '${testTarget}' -p | tail -5`,
+            { encoding: 'utf-8' },
+          );
           if (paneOutput.includes('$') || paneOutput.includes('#')) {
             if (status === 'running') status = 'passed';
           }
@@ -176,8 +203,16 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
       const pane = panes.find(p => p.id === paneId);
       let status: 'running' | 'stopped' = 'running';
-      if (pane?.devWindowId) {
-        try { execSync(`tmux list-windows -F '#{window_id}' | rg -q '${pane.devWindowId}'`, { stdio: 'pipe' }); } catch { status = 'stopped'; }
+      const devTarget = pane?.devPaneId || pane?.devWindowId;
+      if (devTarget) {
+        try {
+          const targetList = pane?.devPaneId
+            ? `tmux list-panes -a -F '#{pane_id}' | rg -q '${devTarget}'`
+            : `tmux list-windows -a -F '#{window_id}' | rg -q '${devTarget}'`;
+          execSync(targetList, { stdio: 'pipe' });
+        } catch {
+          status = 'stopped';
+        }
       }
       const updatedPanes = panes.map(p => p.id === paneId ? { ...p, devStatus: status, devUrl: devUrl || p.devUrl } : p);
       await savePanes(updatedPanes, panes);
@@ -194,7 +229,19 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
     }
     try {
       const tmuxService = TmuxService.getInstance();
-      await tmuxService.joinPane(windowId, true);
+      const backgroundPaneId = await tmuxService.joinPane(windowId, true);
+      const projectRoot = pane.projectRoot
+        || (pane.worktreePath
+          ? deriveProjectRootFromWorktreePath(pane.worktreePath)
+          : undefined)
+        || process.cwd();
+      await retainBackgroundWindowPaneId(
+        projectRoot,
+        pane,
+        type,
+        backgroundPaneId,
+      );
+      await refreshPanes?.();
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();

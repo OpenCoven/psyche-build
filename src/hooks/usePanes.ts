@@ -291,7 +291,10 @@ export default function usePanes(
 
   const removePaneIdentitiesFromConfig = async (
     identities: Iterable<PaneLifecycleIdentity>,
-    beforeRemove?: () => Promise<void>,
+    beforeRemove?: (
+      panes?: readonly PsychePane[],
+      exactPanes?: readonly PsychePane[],
+    ) => Promise<void> | void,
   ): Promise<PsychePane[]> => {
     return withWriteLock(async () => {
       const fallbackProjectRoot = path.dirname(path.dirname(panesFile));
@@ -299,7 +302,12 @@ export default function usePanes(
         await compareAndRemoveProjectPaneConfigPaneIdentities(
           fallbackProjectRoot,
           identities,
-          beforeRemove,
+          beforeRemove
+            ? (freshPanes, exactPanes) => beforeRemove(
+              freshPanes as PsychePane[],
+              exactPanes as PsychePane[],
+            )
+            : undefined,
         );
         const mutation = await mutateProjectPaneConfig(
           fallbackProjectRoot,

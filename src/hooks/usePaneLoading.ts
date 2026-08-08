@@ -45,6 +45,37 @@ export interface PsycheConfig {
   welcomePaneId?: string;
 }
 
+/**
+ * Compatibility migration for records written while background windows only
+ * had window IDs. Recovery records created by newer clients can carry the
+ * durable pane identity, so hydrate it without discarding legacy window
+ * ownership when loading a mixed-version project config.
+ */
+export function migrateBackgroundPaneResources(pane: PsychePane): PsychePane {
+  const recoveries = Array.isArray(pane.backgroundWindowRecoveries)
+    ? pane.backgroundWindowRecoveries
+    : [];
+  const testRecovery = recoveries.find((recovery) => (
+    recovery.type === 'test' && recovery.windowId === pane.testWindowId
+  ));
+  const devRecovery = recoveries.find((recovery) => (
+    recovery.type === 'dev' && recovery.windowId === pane.devWindowId
+  ));
+  return {
+    ...pane,
+    ...(
+      !pane.testPaneId && testRecovery?.paneId
+        ? { testPaneId: testRecovery.paneId }
+        : {}
+    ),
+    ...(
+      !pane.devPaneId && devRecovery?.paneId
+        ? { devPaneId: devRecovery.paneId }
+        : {}
+    ),
+  };
+}
+
 interface PaneLoadResult {
   panes: PsychePane[];
   allPaneIds: string[];
@@ -150,11 +181,17 @@ export async function loadPanesFromFile(panesFile: string): Promise<PsychePane[]
     const parsed: any = JSON.parse(content);
 
     if (Array.isArray(parsed)) {
-      return syncPaneColorThemes(parsed as PsychePane[], [], fallbackProjectRoot);
+      return syncPaneColorThemes(
+        (parsed as PsychePane[]).map(migrateBackgroundPaneResources),
+        [],
+        fallbackProjectRoot,
+      );
     } else {
       const config = parsed as PsycheConfig;
       const projectRoot = config.projectRoot || fallbackProjectRoot;
-      const panes = Array.isArray(config.panes) ? config.panes : [];
+      const panes = Array.isArray(config.panes)
+        ? config.panes.map(migrateBackgroundPaneResources)
+        : [];
       const sidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
       return syncPaneColorThemes(panes, sidebarProjects, projectRoot);
     }

@@ -23,7 +23,10 @@ interface UseActionSystemParams {
   removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
   removePaneIdentitiesFromConfig?: (
     identities: Iterable<PaneLifecycleIdentity>,
-    beforeRemove?: () => Promise<void>,
+    beforeRemove?: (
+      panes?: readonly PsychePane[],
+      exactPanes?: readonly PsychePane[],
+    ) => Promise<void> | void,
   ) => Promise<PsychePane[]>;
   refreshPanes?: () => Promise<void>;
   sessionName: string;

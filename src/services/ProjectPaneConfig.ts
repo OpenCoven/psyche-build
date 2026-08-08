@@ -80,6 +80,7 @@ export interface ProjectPaneConfigPaneIdentity {
 
 export type ProjectPaneConfigIdentityRemovalGuard = (
   panes: readonly ProjectPaneConfigPane[],
+  exactPanes: readonly ProjectPaneConfigPane[],
 ) => void | Promise<void>;
 
 export class ProjectPaneConfigError extends Error {
@@ -577,7 +578,10 @@ export async function compareAndRemoveProjectPaneConfigPaneIdentities(
       }
     }
 
-    await beforeRemove?.(panes);
+    const exactPanes = Array.from(expectedById.values()).map((identity) => (
+      panes.find((pane) => hasPaneRecordIdentity(pane, identity))!
+    ));
+    await beforeRemove?.(panes, exactPanes);
     config.panes = panes.filter((pane) => {
       const identity = paneRecordIdentity(pane);
       return !identity || !expectedById.has(identity.id);

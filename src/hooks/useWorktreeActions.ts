@@ -13,6 +13,7 @@ import {
   describeLiveTmuxWorktreeGuard,
   inspectLiveTmuxWorktreeConsumers,
 } from '../services/LiveTmuxWorktreeGuard.js';
+import { tearDownFullPaneWithVerification } from '../utils/paneTeardown.js';
 
 interface Params {
   panes: PsychePane[];
@@ -43,15 +44,16 @@ export default function useWorktreeActions({
   const closePane = useCallback(async (pane: PsychePane) => {
     try {
       const tmuxService = TmuxService.getInstance();
-
-      if (pane.testWindowId) {
-        try { await tmuxService.killWindow(pane.testWindowId); } catch {}
+      const teardown = await tearDownFullPaneWithVerification({
+        target: pane,
+        probePane: (paneId) => tmuxService.probePanePresence(paneId),
+        killPane: (paneId) => tmuxService.killPane(paneId),
+        probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        killWindow: (windowId) => tmuxService.killWindow(windowId),
+      });
+      if (teardown.presence !== 'absent') {
+        throw new Error(`Could not confirm pane teardown (${teardown.presence})`);
       }
-      if (pane.devWindowId) {
-        try { await tmuxService.killWindow(pane.devWindowId); } catch {}
-      }
-
-      await tmuxService.killPane(pane.paneId);
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();

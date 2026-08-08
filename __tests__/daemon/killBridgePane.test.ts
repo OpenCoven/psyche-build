@@ -163,6 +163,70 @@ describe('killBridgePane', () => {
     expect(readConfig().panes).toHaveLength(1);
   });
 
+  it('fetches fresh exact resource fields and tears down background panes before windows', async () => {
+    writeConfig([pane({
+      testPaneId: '%old-test',
+      testWindowId: '@old-test',
+      devPaneId: '%old-dev',
+      devWindowId: '@old-dev',
+    })]);
+    const order: string[] = [];
+    const livePanes = new Set(['%3', '%fresh-test', '%fresh-dev']);
+    const liveWindows = new Set(['@fresh-test', '@fresh-dev']);
+    const d = {
+      tmuxPaneExists: vi.fn(() => true),
+      probeTmuxPane: vi.fn((id: string) => (
+        livePanes.has(id) ? 'present' as const : 'absent' as const
+      )),
+      killTmuxPane: vi.fn((id: string) => {
+        order.push(`pane:${id}`);
+        livePanes.delete(id);
+      }),
+      probeTmuxWindow: vi.fn((id: string) => (
+        liveWindows.has(id) ? 'present' as const : 'absent' as const
+      )),
+      killTmuxWindow: vi.fn((id: string) => {
+        order.push(`window:${id}`);
+        liveWindows.delete(id);
+      }),
+      afterInitialProbe: () => {
+        writeConfig([pane({
+          testPaneId: '%fresh-test',
+          testWindowId: '@fresh-test',
+          devPaneId: '%fresh-dev',
+          devWindowId: '@fresh-dev',
+        })]);
+      },
+    };
+
+    await killBridgePane(projectRoot, '%3', d);
+
+    expect(order).toEqual([
+      'pane:%fresh-test',
+      'pane:%fresh-dev',
+      'window:@fresh-test',
+      'window:@fresh-dev',
+      'pane:%3',
+    ]);
+    expect(readConfig().panes).toEqual([]);
+  });
+
+  it('preserves the fresh record when a background resource probe is unknown', async () => {
+    writeConfig([pane({ testPaneId: '%test', testWindowId: '@test' })]);
+    const d = {
+      tmuxPaneExists: vi.fn(() => true),
+      probeTmuxPane: vi.fn((id: string) => id === '%3' ? 'present' as const : 'unknown' as const),
+      killTmuxPane: vi.fn(),
+      probeTmuxWindow: vi.fn(() => 'absent' as const),
+      killTmuxWindow: vi.fn(),
+    };
+
+    await expect(killBridgePane(projectRoot, '%3', d))
+      .rejects.toMatchObject({ code: 'pane_probe_unknown' });
+    expect(readConfig().panes).toHaveLength(1);
+    expect(d.killTmuxPane).not.toHaveBeenCalledWith('%3');
+  });
+
   it('does not kill or remove a replacement after a paused read observes a rebind', async () => {
     writeConfig([pane()]);
     let releaseProbePause!: () => void;

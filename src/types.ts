@@ -84,9 +84,13 @@ export interface PsychePane {
   cwdReference?: string;
   browserPath?: string; // Root path when a shell pane is a psyche file browser
   testWindowId?: string;  // Background window for tests
+  /** Stable tmux pane ID for the test process, including after join-pane. */
+  testPaneId?: string;
   testStatus?: 'running' | 'passed' | 'failed';
   testOutput?: string;
   devWindowId?: string;   // Background window for dev server
+  /** Stable tmux pane ID for the dev process, including after join-pane. */
+  devPaneId?: string;
   devStatus?: 'running' | 'stopped';
   devUrl?: string;        // Detected dev server URL
   /**
@@ -96,6 +100,7 @@ export interface PsychePane {
   backgroundWindowRecoveries?: Array<{
     type: 'test' | 'dev';
     windowId: string;
+    paneId?: string;
     reason: string;
   }>;
   agent?: AgentName;

@@ -366,6 +366,20 @@ export class TmuxService {
   }
 
   /**
+   * Returns the stable tmux pane ID currently contained by a window. Detached
+   * background windows start with one pane, whose identity survives join-pane.
+   */
+  async getWindowPaneId(windowId: string): Promise<string> {
+    return this.executeWithRetry(
+      () => this.execute(
+        `tmux display-message -t '${windowId}' -p '#{pane_id}'`,
+      ).trim(),
+      RetryStrategy.IDEMPOTENT,
+      `getWindowPaneId(${windowId})`,
+    );
+  }
+
+  /**
    * Get current window dimensions
    */
   async getWindowDimensions(): Promise<WindowDimensions> {
@@ -970,7 +984,8 @@ export class TmuxService {
   /**
    * Join a pane from a window (pulls pane into current window)
    */
-  async joinPane(sourceWindowId: string, horizontal: boolean = true): Promise<void> {
+  async joinPane(sourceWindowId: string, horizontal: boolean = true): Promise<string> {
+    const sourcePaneId = await this.getWindowPaneId(sourceWindowId);
     await this.executeWithRetry(
       () => {
         const direction = horizontal ? '-h' : '-v';
@@ -979,6 +994,7 @@ export class TmuxService {
       RetryStrategy.FAST,
       `joinPane(${sourceWindowId})`
     );
+    return sourcePaneId;
   }
 
   /**
