@@ -34,6 +34,9 @@ import {
 } from './bridge.js';
 import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
 import { createHostControlPlane } from '../control/host.js';
+import { ControlServer } from '../control/server.js';
+import { createControlCredentialStore } from '../control/credentials.js';
+import { controlEndpointForProject } from '../control/endpoint.js';
 import { createDaemonControlHandlers } from './controlHandlers.js';
 import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
@@ -119,6 +122,29 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   });
   const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
 
+  // Mount the canonical control socket alongside the v0 WebSocket. Both share
+  // the one host runtime, so every mutation — from either transport — passes
+  // through the single journaled, lease-revalidating authority. Everything that
+  // can fail after the owner fence is held runs inside the try so the fence is
+  // released before rethrowing and the lock never leaks.
+  const controlEndpoint = controlEndpointForProject(canonicalProjectRoot);
+  let controlServer: ControlServer;
+  try {
+    const controlCredentials = await createControlCredentialStore({
+      projectRoot: canonicalProjectRoot,
+    });
+    controlServer = await ControlServer.start({
+      endpoint: controlEndpoint,
+      projectRoot: canonicalProjectRoot,
+      ownerEpoch: host.epoch,
+      runtime: host.runtime,
+      credentials: controlCredentials,
+    });
+  } catch (error) {
+    await host.close().catch(() => undefined);
+    throw error;
+  }
+
   const wss = new WebSocketServer({
     host: '127.0.0.1',
     port,
@@ -146,6 +172,8 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start psyche first)'}`);
   // eslint-disable-next-line no-console
   console.log(`token file:    ${tokenFilePath()}`);
+  // eslint-disable-next-line no-console
+  console.log(`control socket: ${controlEndpoint}`);
 
   wss.on('connection', (ws, req) => {
     const header = req.headers['authorization'];
@@ -169,7 +197,16 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.log(`\npsyche daemon shutting down (${signal})`);
     tmux.stop();
     wss.close();
-    void host.close().catch(() => undefined).finally(() => process.exit(0));
+    // Close the control socket before releasing the owner fence. host.close()
+    // frees the fence, so if it ran concurrently a successor daemon could win
+    // the fence and try to bind the same endpoint while this control server is
+    // still tearing down its listener/socket file. Sequential teardown (reverse
+    // of mount order) closes and unlinks the socket first, then frees the fence.
+    void controlServer.close()
+      .catch(() => undefined)
+      .then(() => host.close())
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
