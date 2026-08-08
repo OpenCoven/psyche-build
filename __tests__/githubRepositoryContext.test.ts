@@ -128,9 +128,8 @@ describe('readRepositoryContext', () => {
   });
 
   it('preserves non-ASCII branch and remote names exactly when reading Git output', async () => {
-    const nbsp = '\u00a0';
-    const branch = `feat${nbsp}pr`;
-    const remoteName = `origi${nbsp}n`;
+    const branch = '機能-é';
+    const remoteName = '遠端-é';
     const worktreePath = '/repo/.worktrees/pr';
     const { runner, calls } = createRunner({
       'git\0branch\0--show-current': { stdout: `${branch}\n` },
@@ -197,6 +196,51 @@ describe('readRepositoryContext', () => {
         options: { cwd: worktreePath, allowFailure: true },
       },
     ]);
+  });
+
+  it('rejects unsafe Unicode characters in branch and remote names', async () => {
+    const unsafeCharacters = ['\u0085', '\u2028', '\u2029', '\u202e'];
+
+    for (const unsafeCharacter of unsafeCharacters) {
+      const branchWorktreePath = '/repo/.worktrees/unsafe-branch';
+      const unsafeBranch = createRunner({
+        'git\0branch\0--show-current': { stdout: `feat${unsafeCharacter}pr\n` },
+      });
+
+      await expect(readRepositoryContext(branchWorktreePath, unsafeBranch.runner)).rejects.toThrowError(
+        new Error('unable to read Git repository context'),
+      );
+
+      const upstreamWorktreePath = '/repo/.worktrees/unsafe-upstream';
+      const unsafeUpstream = createRunner({
+        'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+        'git\0config\0branch.feat/pr.remote': { stdout: `origin${unsafeCharacter}\n` },
+      });
+
+      await expect(readRepositoryContext(upstreamWorktreePath, unsafeUpstream.runner)).rejects.toThrowError(
+        new Error('unable to read Git repository context'),
+      );
+      expect(unsafeUpstream.calls.map((call) => call.args.join(' '))).toEqual([
+        'branch --show-current',
+        'config branch.feat/pr.remote',
+      ]);
+
+      const remoteListWorktreePath = '/repo/.worktrees/unsafe-remotes';
+      const unsafeRemoteList = createRunner({
+        'git\0branch\0--show-current': { stdout: 'feat/pr\n' },
+        'git\0config\0branch.feat/pr.remote': { stdout: '', exitCode: 1 },
+        'git\0remote': { stdout: `origin\nbad${unsafeCharacter}name\n` },
+      });
+
+      await expect(readRepositoryContext(remoteListWorktreePath, unsafeRemoteList.runner)).rejects.toThrowError(
+        new Error('unable to read Git repository context'),
+      );
+      expect(unsafeRemoteList.calls.map((call) => call.args.join(' '))).toEqual([
+        'branch --show-current',
+        'config branch.feat/pr.remote',
+        'remote',
+      ]);
+    }
   });
 
   it('treats detached HEAD as branchless and never queries branch config', async () => {

@@ -8,6 +8,7 @@ export interface GitHubRemote {
 
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
 const ASCII_REMOTE_NAME_INVALID = /[\u0000-\u0020\u007f]/;
+const UNSAFE_UNICODE_TEXT_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const AUTHORITY_WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Control}]/u;
 const PATH_WHITESPACE_OR_CONTROL = /[\p{White_Space}\p{Control}]/u;
 
@@ -67,7 +68,11 @@ export function compareText(left: string, right: string): number {
 }
 
 export function isValidGitRemoteName(name: string): boolean {
-  return name.length > 0 && !ASCII_REMOTE_NAME_INVALID.test(name);
+  return name.length > 0 && !ASCII_REMOTE_NAME_INVALID.test(name) && !hasUnsafeUnicodeTextCharacter(name);
+}
+
+export function hasUnsafeUnicodeTextCharacter(value: string): boolean {
+  return UNSAFE_UNICODE_TEXT_CHARACTER.test(value);
 }
 
 function normalizeRemoteName(name: string): string | null {

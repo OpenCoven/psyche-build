@@ -1,5 +1,6 @@
 import {
   compareText,
+  hasUnsafeUnicodeTextCharacter,
   isValidGitRemoteName,
   normalizeGitHubRemote,
   orderGitHubRemotes,
@@ -30,7 +31,6 @@ export interface RepositoryContext {
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/;
 const ASCII_WHITESPACE_OR_CONTROL = /[\u0000-\u0020\u007f]/;
 const ASCII_EDGE_WHITESPACE = /^[\u0009-\u000d\u0020]|[\u0009-\u000d\u0020]$/u;
-const UNSAFE_FILE_DIAGNOSTIC_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const REDACTED_REMOTE_URL = '<redacted-remote-url>';
 const REPOSITORY_CONTEXT_ERROR = 'unable to read Git repository context';
 
@@ -135,8 +135,20 @@ async function readBranchRemote(
     }
 
     const remoteName = parseOptionalValue(result.stdout);
-    return remoteName && isValidRemoteName(remoteName) ? remoteName : null;
-  } catch {
+    if (remoteName === null) {
+      return null;
+    }
+
+    if (!isValidRemoteName(remoteName)) {
+      throw new Error(REPOSITORY_CONTEXT_ERROR);
+    }
+
+    return remoteName;
+  } catch (error) {
+    if (error instanceof Error && error.message === REPOSITORY_CONTEXT_ERROR) {
+      throw error;
+    }
+
     return null;
   }
 }
@@ -189,7 +201,7 @@ function parseRequiredValue(stdout: string): string | null {
     return null;
   }
 
-  if (ASCII_WHITESPACE_OR_CONTROL.test(value)) {
+  if (hasInvalidGitDerivedName(value)) {
     throw new Error(REPOSITORY_CONTEXT_ERROR);
   }
 
@@ -198,8 +210,12 @@ function parseRequiredValue(stdout: string): string | null {
 
 function parseOptionalValue(stdout: string): string | null {
   const value = stripSingleTrailingLineTerminator(stdout);
-  if (!value || ASCII_WHITESPACE_OR_CONTROL.test(value)) {
+  if (!value) {
     return null;
+  }
+
+  if (hasInvalidGitDerivedName(value)) {
+    throw new Error(REPOSITORY_CONTEXT_ERROR);
   }
 
   return value;
@@ -520,7 +536,7 @@ function isSafeRawFileSegment(rawSegment: string): boolean {
     || decoded === '..'
     || decoded.includes('/')
     || decoded.includes('\\')
-    || hasUnsafeFileDiagnosticCharacter(decoded)
+    || hasUnsafeUnicodeTextCharacter(decoded)
   ) {
     return false;
   }
@@ -532,8 +548,8 @@ function serializeSafeFilePath(rawPath: string): string {
   return rawPath;
 }
 
-function hasUnsafeFileDiagnosticCharacter(value: string): boolean {
-  return UNSAFE_FILE_DIAGNOSTIC_CHARACTER.test(value);
+function hasInvalidGitDerivedName(value: string): boolean {
+  return ASCII_WHITESPACE_OR_CONTROL.test(value) || hasUnsafeUnicodeTextCharacter(value);
 }
 
 function hasAtOutsideAuthority(value: string, scheme: string): boolean {
