@@ -295,4 +295,147 @@ describe('worktree operation lease', () => {
     expect(existsSync(`${lockDir.replace(/\.lock$/, '')}.stale.first-owner`)).toBe(false);
     await first.release();
   });
+
+  it('does not steal a dead parent lease while its tracked Git child is live', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101 || pid === 303,
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'parent-start' : pid === 303 ? 'git-child-start' : undefined
+        ),
+        createNonce: () => 'first-owner',
+      },
+    );
+    const child = await first.trackChildProcess(303);
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        // The parent has died, but its direct Git child still owns the
+        // destructive operation and must keep the filesystem lease live.
+        isProcessAlive: (pid) => pid === 202 || pid === 303,
+        getProcessStartIdentity: (pid) => (
+          pid === 202 ? 'contender-start' : pid === 303 ? 'git-child-start' : undefined
+        ),
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'contender',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+
+    const childRecord = JSON.parse(readFileSync(
+      join(lockDirFor(projectRoot, worktreePath), 'child.first-owner.json'),
+      'utf8',
+    ));
+    expect(childRecord).toMatchObject({
+      nonce: 'first-owner',
+      pid: child.pid,
+      processStartIdentity: child.processStartIdentity,
+    });
+    await first.clearChildProcess(child);
+    await first.release();
+  });
+
+  it('recovers a dead-parent lease after its tracked Git child exits', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    let childAlive = true;
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101 || (pid === 303 && childAlive),
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'parent-start' : pid === 303 ? 'git-child-start' : undefined
+        ),
+        createNonce: () => 'first-owner',
+      },
+    );
+    await first.trackChildProcess(303);
+    childAlive = false;
+
+    const recovered = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202,
+        getProcessStartIdentity: (pid) => pid === 202 ? 'recovered-start' : undefined,
+        createNonce: () => 'recovered-owner',
+      },
+    );
+
+    expect(JSON.parse(readFileSync(
+      join(lockDirFor(projectRoot, worktreePath), 'lease.json'),
+      'utf8',
+    ))).toMatchObject({ nonce: 'recovered-owner' });
+    await first.release();
+    await recovered.release();
+  });
+
+  it('does not steal a dead-parent lease when the live child identity is uncertain', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: (pid) => pid === 101 || pid === 303,
+        getProcessStartIdentity: (pid) => (
+          pid === 101 ? 'parent-start' : pid === 303 ? 'git-child-start' : undefined
+        ),
+        createNonce: () => 'first-owner',
+      },
+    );
+    await first.trackChildProcess(303);
+
+    await expect(acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202 || pid === 303,
+        // A permission/transient ps failure cannot be treated as a dead child.
+        getProcessStartIdentity: (pid) => pid === 202 ? 'contender-start' : undefined,
+        pollIntervalMs: 5,
+        timeoutMs: 25,
+        createNonce: () => 'contender',
+      },
+    )).rejects.toThrow(/Timed out waiting for worktree operation lease/);
+
+    await first.release();
+  });
+
+  it('does not let an old nonce clear child metadata from a replacement lease', async () => {
+    const { projectRoot, worktreePath } = createLeaseTarget();
+    const first = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 101,
+        isProcessAlive: () => false,
+        getProcessStartIdentity: (pid) => pid === 303 ? 'first-child-start' : 'first-start',
+        createNonce: () => 'first-owner',
+      },
+    );
+    const firstChild = await first.trackChildProcess(303);
+    const replacement = await acquireWorktreeOperationLease(
+      { projectRoot, worktreePath, operation: 'cleanup' },
+      {
+        pid: 202,
+        isProcessAlive: (pid) => pid === 202,
+        getProcessStartIdentity: (pid) => pid === 202 ? 'replacement-start' : undefined,
+        createNonce: () => 'replacement-owner',
+      },
+    );
+
+    await first.clearChildProcess(firstChild);
+    const lockDir = lockDirFor(projectRoot, worktreePath);
+    const record = JSON.parse(
+      readFileSync(join(lockDir, 'lease.json'), 'utf8'),
+    ) as WorktreeOperationLeaseRecord;
+    expect(record.nonce).toBe('replacement-owner');
+    expect(existsSync(join(lockDir, 'child.replacement-owner.json'))).toBe(false);
+    await first.release();
+    await replacement.release();
+  });
 });

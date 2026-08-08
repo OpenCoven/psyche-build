@@ -48,6 +48,7 @@ import {
 } from './paneTeardown.js';
 import { createPsychePaneId } from './paneIdentity.js';
 import { runGitProcess } from './gitProcess.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import {
   isPaneLifecycleReservationRetainedError,
   PaneLifecycleReservationRetainedError,
@@ -413,6 +414,7 @@ async function createPaneWithReuseReservation(
   let creationReservation: WorktreeCreationReservation | undefined;
   let createdWorktreeIdentity: CreatedWorktreeIdentity | undefined;
   let worktreeCreatedByThisAttempt = false;
+  let rollbackOwnershipLostReason: string | undefined;
 
   // Self-healing: Try to create pane, if it fails due to stale controlPaneId, fix and retry
   try {
@@ -549,6 +551,35 @@ async function createPaneWithReuseReservation(
     reservation: creationReservation || options.reuseReservation,
     persistConfigRecovery: () => persistPaneRecoveryRecord(sessionProjectRoot, newPane),
   });
+
+  const preserveUnownedCreatedWorktree = async (
+    operation: string,
+    failureReason: string,
+  ): Promise<string | undefined> => {
+    if (!worktreeCreatedByThisAttempt || !rollbackOwnershipLostReason) {
+      return undefined;
+    }
+
+    const reason = [
+      rollbackOwnershipLostReason,
+      `Later ${operation} failure: ${failureReason}`,
+      `Preserved worktree ${worktreePath} and branch ${branchName}; this transaction never claimed destructive rollback ownership.`,
+    ].join(' ');
+    try {
+      const marker = await writeWorktreeRecoveryMarker({
+        projectRoot,
+        worktreePath,
+        pane: { id: newPane.id, paneId: newPane.paneId },
+        operation: 'worktree-creation-ownership',
+        reason,
+      });
+      return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+    } catch (error) {
+      return `preserved hook-modified worktree and branch, but could not write recovery marker: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  };
 
   // Trigger pane_created hook (after pane created, before worktree)
   try {
@@ -690,22 +721,25 @@ async function createPaneWithReuseReservation(
         );
       }
       worktreeCreatedByThisAttempt = true;
-      createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
-        branchName,
-        startingOid,
-        createdOid: startingOid,
-        deleteBranch: !branchExists,
-        configProjectRoot: sessionProjectRoot,
-      });
 
-      const createdOid = execSync(
-        `git rev-parse --verify --end-of-options "${branchName}"`,
-        {
-          cwd: projectRoot,
-          encoding: 'utf-8',
-          stdio: 'pipe',
-        }
-      ).trim();
+      let createdOid: string;
+      try {
+        createdOid = execSync(
+          `git rev-parse --verify --end-of-options "${branchName}"`,
+          {
+            cwd: projectRoot,
+            encoding: 'utf-8',
+            stdio: 'pipe',
+          }
+        ).trim();
+      } catch (error) {
+        rollbackOwnershipLostReason = (
+          `Could not verify branch ${branchName} after git worktree add: ${
+            error instanceof Error ? error.message : String(error)
+          }.`
+        );
+        throw error;
+      }
       const checkedOutBranch = execSync(
         `git -C "${worktreePath}" rev-parse --abbrev-ref HEAD`,
         {
@@ -715,18 +749,31 @@ async function createPaneWithReuseReservation(
         }
       ).trim();
       if (!createdOid || checkedOutBranch !== branchName) {
+        rollbackOwnershipLostReason = (
+          `Could not verify that ${worktreePath} remains checked out on ${branchName} `
+          + `after git worktree add (found ${checkedOutBranch || 'no branch'}).`
+        );
         throw new Error(
           `Created worktree identity does not match ${branchName} at ${worktreePath}`
         );
       }
-      // Replace the provisional identity only after full Git verification.
-      createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
-        branchName,
-        startingOid,
-        createdOid,
-        deleteBranch: !branchExists,
-        configProjectRoot: sessionProjectRoot,
-      });
+      if (createdOid !== startingOid) {
+        // Git hooks run during `worktree add`. A post-checkout hook can make a
+        // real commit before this child exits, which means this transaction no
+        // longer owns the branch tip and must never roll it back.
+        rollbackOwnershipLostReason = (
+          `Branch ${branchName} changed from ${startingOid} to ${createdOid} `
+          + 'during git worktree add (for example, a post-checkout hook commit).'
+        );
+      } else {
+        createdWorktreeIdentity = creationReservation.recordCreatedWorktree({
+          branchName,
+          startingOid,
+          createdOid,
+          deleteBranch: !branchExists,
+          configProjectRoot: sessionProjectRoot,
+        });
+      }
 
       // The pane is moved only after direct Git creation and identity
       // verification succeed. No tmux shell command creates lifecycle state.
@@ -787,6 +834,10 @@ async function createPaneWithReuseReservation(
         'worktree-creation',
         `worktree creation failed: ${errorMsg}`,
       );
+    const ownershipRecovery = await preserveUnownedCreatedWorktree(
+      'worktree creation',
+      errorMsg,
+    );
     let rollbackError: string | undefined;
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
@@ -795,12 +846,18 @@ async function createPaneWithReuseReservation(
       if (!rollbackResult.success) {
         rollbackError = rollbackResult.error || 'unknown rollback failure';
       }
-    } else if (teardown.presence === 'absent' && worktreeCreatedByThisAttempt) {
+    } else if (
+      teardown.presence === 'absent'
+      && worktreeCreatedByThisAttempt
+      && !rollbackOwnershipLostReason
+    ) {
       rollbackError = 'worktree identity could not be recorded';
     }
     if (recovery?.retained) {
       throw new PaneLifecycleReservationRetainedError(
-        `Failed to create worktree for "${slug}": ${errorMsg}; ${recovery.message}`,
+        `Failed to create worktree for "${slug}": ${errorMsg}; ${recovery.message}${
+          ownershipRecovery ? `; ${ownershipRecovery}` : ''
+        }`,
       );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
@@ -824,6 +881,8 @@ async function createPaneWithReuseReservation(
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
       }${
         recovery ? `; ${recovery.message}` : ''
+      }${
+        ownershipRecovery ? `; ${ownershipRecovery}` : ''
       }`
     );
   }
@@ -846,6 +905,10 @@ async function createPaneWithReuseReservation(
         'worktree-created-hook',
         `worktree_created hook failed: ${hookError}`,
       );
+    const ownershipRecovery = await preserveUnownedCreatedWorktree(
+      'worktree_created hook',
+      hookError,
+    );
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
         createdWorktreeIdentity
@@ -859,7 +922,11 @@ async function createPaneWithReuseReservation(
           new Error(rollbackError)
         );
       }
-    } else if (teardown.presence === 'absent' && worktreeCreatedByThisAttempt) {
+    } else if (
+      teardown.presence === 'absent'
+      && worktreeCreatedByThisAttempt
+      && !rollbackOwnershipLostReason
+    ) {
       rollbackError = 'worktree identity could not be recorded';
       LogService.getInstance().error(
         `Failed to roll back newly created worktree for ${slug}: ${rollbackError}`,
@@ -870,7 +937,9 @@ async function createPaneWithReuseReservation(
     }
     if (recovery?.retained) {
       throw new PaneLifecycleReservationRetainedError(
-        `worktree_created hook failed for "${slug}": ${hookError}; ${recovery.message}`,
+        `worktree_created hook failed for "${slug}": ${hookError}; ${recovery.message}${
+          ownershipRecovery ? `; ${ownershipRecovery}` : ''
+        }`,
       );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
@@ -894,6 +963,8 @@ async function createPaneWithReuseReservation(
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
       }${
         recovery ? `; ${recovery.message}` : ''
+      }${
+        ownershipRecovery ? `; ${ownershipRecovery}` : ''
       }`
     );
   }
@@ -912,6 +983,10 @@ async function createPaneWithReuseReservation(
         'pane-persistence',
         `initial pane persistence failed: ${persistenceError}`,
       );
+    const ownershipRecovery = await preserveUnownedCreatedWorktree(
+      'pane persistence',
+      persistenceError,
+    );
     let rollbackError: string | undefined;
     if (teardown.presence === 'absent' && creationReservation && createdWorktreeIdentity) {
       const rollbackResult = await creationReservation.rollbackCreatedWorktree(
@@ -923,7 +998,9 @@ async function createPaneWithReuseReservation(
     }
     if (recovery?.retained) {
       throw new PaneLifecycleReservationRetainedError(
-        `Failed to persist pane "${slug}" before agent launch: ${persistenceError}; ${recovery.message}`,
+        `Failed to persist pane "${slug}" before agent launch: ${persistenceError}; ${recovery.message}${
+          ownershipRecovery ? `; ${ownershipRecovery}` : ''
+        }`,
       );
     }
     if (teardown.presence === 'absent' || recovery?.durable) {
@@ -940,6 +1017,8 @@ async function createPaneWithReuseReservation(
         rollbackError ? `; rollback failed: ${rollbackError}` : ''
       }${
         recovery ? `; ${recovery.message}` : ''
+      }${
+        ownershipRecovery ? `; ${ownershipRecovery}` : ''
       }`
     );
   }

@@ -89,6 +89,15 @@ export interface PsychePane {
   devWindowId?: string;   // Background window for dev server
   devStatus?: 'running' | 'stopped';
   devUrl?: string;        // Detected dev server URL
+  /**
+   * A failed background-window teardown must remain durable so automatic
+   * close/cleanup never assumes the worktree is unused.
+   */
+  backgroundWindowRecoveries?: Array<{
+    type: 'test' | 'dev';
+    windowId: string;
+    reason: string;
+  }>;
   agent?: AgentName;
   agentSession?: AgentSessionReference;
   orchestration?: {

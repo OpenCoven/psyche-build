@@ -18,6 +18,29 @@ export interface VerifiedPaneTeardownOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export interface FullPaneTeardownTarget {
+  paneId: string;
+  testWindowId?: string;
+  devWindowId?: string;
+}
+
+export interface FullPaneTeardownOptions {
+  target: FullPaneTeardownTarget;
+  probePane: (paneId: string) => Promise<TmuxPanePresence> | TmuxPanePresence;
+  killPane: (paneId: string) => Promise<void> | void;
+  probeWindow: (windowId: string) => Promise<TmuxPanePresence> | TmuxPanePresence;
+  killWindow: (windowId: string) => Promise<void> | void;
+  verifyDelaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface FullPaneTeardownResult {
+  presence: TmuxPanePresence;
+  error?: string;
+  pane: VerifiedPaneTeardownResult;
+  windows: ReadonlyMap<string, VerifiedPaneTeardownResult>;
+}
+
 const DEFAULT_VERIFY_DELAYS_MS = [50, 150, 300];
 
 export async function tearDownPaneWithVerification(
@@ -51,6 +74,47 @@ export async function tearDownPaneWithVerification(
     presence: 'present',
     ...(killError ? { error: killError } : {}),
   };
+}
+
+/**
+ * A pane record owns its main pane plus detached test/dev windows. Record
+ * removal and worktree cleanup are safe only after every owned tmux resource
+ * is confirmed absent.
+ */
+export async function tearDownFullPaneWithVerification(
+  options: FullPaneTeardownOptions,
+): Promise<FullPaneTeardownResult> {
+  const windows = new Map<string, VerifiedPaneTeardownResult>();
+  const windowIds = Array.from(new Set(
+    [options.target.testWindowId, options.target.devWindowId].filter(
+      (windowId): windowId is string => Boolean(windowId),
+    ),
+  ));
+
+  for (const windowId of windowIds) {
+    windows.set(windowId, await tearDownPaneWithVerification({
+      probe: () => options.probeWindow(windowId),
+      kill: () => options.killWindow(windowId),
+      verifyDelaysMs: options.verifyDelaysMs,
+      sleep: options.sleep,
+    }));
+  }
+
+  const pane = await tearDownPaneWithVerification({
+    probe: () => options.probePane(options.target.paneId),
+    kill: () => options.killPane(options.target.paneId),
+    verifyDelaysMs: options.verifyDelaysMs,
+    sleep: options.sleep,
+  });
+  const outcomes = [...windows.values(), pane];
+  const presence = outcomes.some((outcome) => outcome.presence === 'unknown')
+    ? 'unknown'
+    : outcomes.some((outcome) => outcome.presence === 'present')
+      ? 'present'
+      : 'absent';
+  const error = outcomes.find((outcome) => outcome.error)?.error;
+
+  return { presence, ...(error ? { error } : {}), pane, windows };
 }
 
 export async function probePanePresence(

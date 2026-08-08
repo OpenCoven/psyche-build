@@ -19,14 +19,36 @@ import {
 const DEFAULT_POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LEASE_FILE_NAME = 'lease.json';
+const CHILD_LEASE_FILE_PREFIX = 'child.';
 
 export interface WorktreeOperationLeaseRecord {
   pid: number;
   processStartIdentity?: string;
+  /**
+   * Effective destructive-child metadata loaded from the nonce-addressed
+   * companion record. Both values move together so a reused PID can never
+   * keep a stale lease alive.
+   */
+  childPid?: number;
+  childProcessStartIdentity?: string;
   nonce: string;
   canonicalPath: string;
   operation: string;
   acquiredAt: string;
+}
+
+export interface LeaseChildProcess {
+  pid: number;
+  processStartIdentity: string;
+}
+
+interface LeaseProcessTracker {
+  /**
+   * Records a destructive child before callers wait for its completion.
+   * The caller must clear this only from the child's close handler.
+   */
+  trackChildProcess: (pid: number) => Promise<LeaseChildProcess>;
+  clearChildProcess: (child: LeaseChildProcess) => Promise<void>;
 }
 
 export interface WorktreeOperationLeaseRequest {
@@ -39,7 +61,7 @@ export interface WorktreeOperationLeaseRequest {
   operation: string;
 }
 
-export interface WorktreeOperationLease {
+export interface WorktreeOperationLease extends LeaseProcessTracker {
   canonicalProjectRoot: string;
   canonicalWorktreePath: string;
   lockDir: string;
@@ -55,7 +77,7 @@ export interface WorktreeOperationLease {
  * deliberately have different lock keys. Callers acquire this lease first,
  * then any exact-path leases, to make those compound workspace mutations safe.
  */
-export interface ProjectWorktreeLifecycleLease {
+export interface ProjectWorktreeLifecycleLease extends LeaseProcessTracker {
   canonicalProjectRoot: string;
   lockDir: string;
   nonce: string;
@@ -108,6 +130,18 @@ interface ProjectLifecycleLeasePaths {
 interface LockReadResult {
   record?: WorktreeOperationLeaseRecord;
   missing: boolean;
+}
+
+interface ChildLeaseRecord {
+  nonce: string;
+  pid: number;
+  processStartIdentity: string;
+}
+
+interface ChildLeaseReadResult {
+  child?: LeaseChildProcess;
+  missing: boolean;
+  invalid: boolean;
 }
 
 const PROJECT_LIFECYCLE_LOCK_DIRECTORY_NAME = 'project-worktree-lifecycle.lock';
@@ -237,6 +271,11 @@ export async function acquireWorktreeOperationLease(
     canonicalWorktreePath: paths.canonicalWorktreePath,
     lockDir: paths.lockDir,
     nonce,
+    ...createLeaseProcessTracker(
+      paths.lockDir,
+      nonce,
+      resolveProcessStartIdentity,
+    ),
     release: async () => {
       await releaseOwnedLease(paths.lockDir, nonce);
     },
@@ -360,6 +399,11 @@ export async function acquireProjectWorktreeLifecycleLease(
     canonicalProjectRoot: paths.canonicalProjectRoot,
     lockDir: paths.lockDir,
     nonce,
+    ...createLeaseProcessTracker(
+      paths.lockDir,
+      nonce,
+      resolveProcessStartIdentity,
+    ),
     release: async () => {
       await releaseOwnedLease(paths.lockDir, nonce);
     },
@@ -486,12 +530,40 @@ async function writeLeaseRecord(
   }
 }
 
+async function writeChildLeaseRecord(
+  recordPath: string,
+  record: ChildLeaseRecord,
+): Promise<void> {
+  const handle = await open(recordPath, 'wx');
+  try {
+    await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
   try {
     const raw = await readFile(path.join(lockDir, LEASE_FILE_NAME), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
+    if (!isLeaseRecord(parsed)) {
+      return { record: undefined, missing: false };
+    }
+    const child = await readChildLeaseRecord(lockDir, parsed.nonce);
+    if (child.invalid) {
+      // A child file that cannot be verified is intentionally a live/unknown
+      // mutation. Do not let a contender steal the lease.
+      return { record: undefined, missing: false };
+    }
     return {
-      record: isLeaseRecord(parsed) ? parsed : undefined,
+      record: child.child
+        ? {
+          ...parsed,
+          childPid: child.child.pid,
+          childProcessStartIdentity: child.child.processStartIdentity,
+        }
+        : parsed,
       missing: false,
     };
   } catch (error) {
@@ -502,6 +574,36 @@ async function readLeaseRecord(lockDir: string): Promise<LockReadResult> {
       return { missing: false };
     }
     throw error;
+  }
+}
+
+function childLeaseRecordPath(lockDir: string, nonce: string): string {
+  return path.join(lockDir, `${CHILD_LEASE_FILE_PREFIX}${nonce}.json`);
+}
+
+async function readChildLeaseRecord(
+  lockDir: string,
+  nonce: string,
+): Promise<ChildLeaseReadResult> {
+  try {
+    const raw = await readFile(childLeaseRecordPath(lockDir, nonce), 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isChildLeaseRecord(parsed) || parsed.nonce !== nonce) {
+      return { missing: false, invalid: true };
+    }
+    return {
+      child: {
+        pid: parsed.pid,
+        processStartIdentity: parsed.processStartIdentity,
+      },
+      missing: false,
+      invalid: false,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { missing: true, invalid: false };
+    }
+    return { missing: false, invalid: true };
   }
 }
 
@@ -562,6 +664,73 @@ async function quarantineProjectLifecycleLease(
   }
 }
 
+function createLeaseProcessTracker(
+  lockDir: string,
+  nonce: string,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
+): LeaseProcessTracker {
+  return {
+    trackChildProcess: async (pid: number): Promise<LeaseChildProcess> => {
+      if (!Number.isInteger(pid) || pid <= 0) {
+        throw new Error('Cannot track a destructive Git child without a valid PID');
+      }
+
+      const processStartIdentity = resolveProcessStartIdentity(pid);
+      if (!isSafeProcessStartIdentity(processStartIdentity)) {
+        throw new Error(
+          `Cannot track destructive Git child ${pid}: process-start identity is unavailable`,
+        );
+      }
+
+      const child = { pid, processStartIdentity };
+      const current = await readLeaseRecord(lockDir);
+      if (!current.record || current.record.nonce !== nonce) {
+        throw new Error(
+          'Cannot track destructive Git child because worktree lease ownership changed',
+        );
+      }
+      await replaceChildLeaseRecord(lockDir, nonce, child);
+      return child;
+    },
+    clearChildProcess: async (child: LeaseChildProcess): Promise<void> => {
+      const current = await readLeaseRecord(lockDir);
+      if (
+        !current.record
+        || current.record.nonce !== nonce
+        || current.record.childPid !== child.pid
+        || current.record.childProcessStartIdentity !== child.processStartIdentity
+      ) {
+        return;
+      }
+      await rm(childLeaseRecordPath(lockDir, nonce), { force: true });
+    },
+  };
+}
+
+/**
+ * Child state lives in a nonce-addressed companion record instead of replacing
+ * lease.json. If an old owner wakes after a stale lease was quarantined, its
+ * old-nonce write cannot alter the replacement lease's metadata.
+ */
+async function replaceChildLeaseRecord(
+  lockDir: string,
+  nonce: string,
+  child: LeaseChildProcess,
+): Promise<void> {
+  const recordPath = childLeaseRecordPath(lockDir, nonce);
+  const temporaryPath = `${recordPath}.update`;
+  try {
+    await writeChildLeaseRecord(temporaryPath, {
+      nonce,
+      pid: child.pid,
+      processStartIdentity: child.processStartIdentity,
+    });
+    await rename(temporaryPath, recordPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
 /**
  * Releasing by rename prevents a waiting contender from racing a recursive
  * delete of the active lock directory. Once moved to its nonce-specific
@@ -617,9 +786,33 @@ function isLeaseRecord(value: unknown): value is WorktreeOperationLeaseRecord {
       record.processStartIdentity === undefined
       || isSafeProcessStartIdentity(record.processStartIdentity)
     )
+    && (
+      (record.childPid === undefined && record.childProcessStartIdentity === undefined)
+      || (
+        typeof record.childPid === 'number'
+        && Number.isInteger(record.childPid)
+        && record.childPid > 0
+        && isSafeProcessStartIdentity(record.childProcessStartIdentity)
+      )
+    )
     && typeof record.canonicalPath === 'string'
     && typeof record.operation === 'string'
     && typeof record.acquiredAt === 'string'
+  );
+}
+
+function isChildLeaseRecord(value: unknown): value is ChildLeaseRecord {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as Partial<ChildLeaseRecord>;
+  return (
+    typeof record.nonce === 'string'
+    && isSafeNonce(record.nonce)
+    && typeof record.pid === 'number'
+    && Number.isInteger(record.pid)
+    && record.pid > 0
+    && isSafeProcessStartIdentity(record.processStartIdentity)
   );
 }
 
@@ -632,18 +825,48 @@ function isLeaseOwnerStale(
   isOwnerProcessAlive: (pid: number) => boolean,
   resolveProcessStartIdentity: ProcessStartIdentityResolver,
 ): boolean {
-  if (!isOwnerProcessAlive(record.pid)) {
-    return true;
-  }
-
-  if (!record.processStartIdentity) {
+  if (!isProcessIdentityStale(
+    record.pid,
+    record.processStartIdentity,
+    isOwnerProcessAlive,
+    resolveProcessStartIdentity,
+  )) {
     return false;
   }
 
-  const currentIdentity = resolveProcessStartIdentity(record.pid);
+  if (
+    record.childPid === undefined
+    || record.childProcessStartIdentity === undefined
+  ) {
+    return true;
+  }
+
+  return isProcessIdentityStale(
+    record.childPid,
+    record.childProcessStartIdentity,
+    isOwnerProcessAlive,
+    resolveProcessStartIdentity,
+  );
+}
+
+function isProcessIdentityStale(
+  pid: number,
+  expectedIdentity: string | undefined,
+  isOwnerProcessAlive: (pid: number) => boolean,
+  resolveProcessStartIdentity: ProcessStartIdentityResolver,
+): boolean {
+  if (!isOwnerProcessAlive(pid)) {
+    return true;
+  }
+
+  if (!expectedIdentity) {
+    return false;
+  }
+
+  const currentIdentity = resolveProcessStartIdentity(pid);
   return (
     isSafeProcessStartIdentity(currentIdentity)
-    && currentIdentity !== record.processStartIdentity
+    && currentIdentity !== expectedIdentity
   );
 }
 

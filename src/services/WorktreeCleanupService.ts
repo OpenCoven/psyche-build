@@ -10,6 +10,7 @@ import {
   acquireProjectWorktreeLifecycleLease,
   acquireWorktreeOperationLease,
   type ProjectWorktreeLifecycleLease,
+  type WorktreeOperationLease,
 } from './WorktreeOperationLease.js';
 import { canonicalizePathWithExistingAncestor } from './WorktreePath.js';
 import {
@@ -104,6 +105,11 @@ interface CommandResult {
 interface GitTextResult extends CommandResult {
   output?: string;
 }
+
+type MutationLease = Pick<
+  WorktreeOperationLease | ProjectWorktreeLifecycleLease,
+  'trackChildProcess' | 'clearChildProcess'
+>;
 
 interface WorktreeIdentity {
   repoPath: string;
@@ -415,6 +421,14 @@ export class WorktreeCleanupService {
           return this.rollbackCreatedWorktreeWhileLeased(
             identity,
             operationLease!.nonce,
+            [
+              operationLease!,
+              ...(projectLifecycleLease
+                ? [projectLifecycleLease]
+                : ownedProjectLifecycleLease
+                  ? [ownedProjectLifecycleLease]
+                  : []),
+            ],
           );
         },
         complete: settle,
@@ -440,16 +454,20 @@ export class WorktreeCleanupService {
         canonicalWorktreePath,
         job.mainRepoPath,
         'rollback',
-        async () => this.rollbackCreatedWorktreeWhileLeased({
-          canonicalWorktreePath,
-          branchName: job.branchName,
-          startingOid: job.startingOid || job.branchOid,
-          createdOid: job.branchOid,
-          creatorNonce: job.creatorNonce || '',
-          mainRepoPath: job.mainRepoPath,
-          deleteBranch: job.deleteBranch,
-          configProjectRoot: job.configProjectRoot || job.mainRepoPath,
-        }),
+        async (worktreeLease) => this.rollbackCreatedWorktreeWhileLeased(
+          {
+            canonicalWorktreePath,
+            branchName: job.branchName,
+            startingOid: job.startingOid || job.branchOid,
+            createdOid: job.branchOid,
+            creatorNonce: job.creatorNonce || '',
+            mainRepoPath: job.mainRepoPath,
+            deleteBranch: job.deleteBranch,
+            configProjectRoot: job.configProjectRoot || job.mainRepoPath,
+          },
+          undefined,
+          [projectLifecycleLease, worktreeLease],
+        ),
         projectLifecycleLease,
       ),
     );
@@ -458,6 +476,7 @@ export class WorktreeCleanupService {
   private async rollbackCreatedWorktreeWhileLeased(
     identity: CreatedWorktreeIdentity,
     requiredCreatorNonce?: string,
+    mutationLeases: readonly MutationLease[] = [],
   ): Promise<WorktreeRollbackResult> {
     if (
       requiredCreatorNonce !== undefined
@@ -542,9 +561,10 @@ export class WorktreeCleanupService {
       };
     }
 
-    const removeResult = this.runGitTextSync(
+    const removeResult = await this.runGitCommand(
       ['worktree', 'remove', identity.canonicalWorktreePath],
-      identity.mainRepoPath
+      identity.mainRepoPath,
+      mutationLeases,
     );
     if (!removeResult.success) {
       const error = `failed to remove newly created worktree; preserved worktree and branch at ${identity.canonicalWorktreePath}: ${removeResult.error}`;
@@ -589,9 +609,10 @@ export class WorktreeCleanupService {
       };
     }
 
-    const deleteResult = this.runGitTextSync(
+    const deleteResult = await this.runGitCommand(
       ['branch', '-D', identity.branchName],
-      identity.mainRepoPath
+      identity.mainRepoPath,
+      mutationLeases,
     );
     if (!deleteResult.success) {
       return {
@@ -655,7 +676,7 @@ export class WorktreeCleanupService {
           job.canonicalWorktreePath,
           job.mainRepoPath,
           'cleanup',
-          async () => {
+          async (rootWorktreeLease) => {
             if (
               !this.canRunDestructiveCleanup(job)
               || !this.haveUnchangedQueuedBranchOids(job)
@@ -664,9 +685,15 @@ export class WorktreeCleanupService {
             }
 
             for (const target of job.worktreeTargets) {
-              const removeTarget = () => this.removeValidatedWorktreeTarget(job, target);
+              const removeTarget = (worktreeLease: WorktreeOperationLease) => (
+                this.removeValidatedWorktreeTarget(
+                  job,
+                  target,
+                  [projectLifecycleLease, worktreeLease],
+                )
+              );
               const removed = target.canonicalWorktreePath === job.canonicalWorktreePath
-                ? await removeTarget()
+                ? await removeTarget(rootWorktreeLease)
                 : await this.withWorktreeLifecycleLock(
                   target.canonicalWorktreePath,
                   target.repoPath,
@@ -689,7 +716,11 @@ export class WorktreeCleanupService {
         );
 
         if (job.deleteBranch && allWorktreesRemoved) {
-          await this.withWorktreeLock(job.canonicalWorktreePath, async () => {
+          await this.withWorktreeLifecycleLock(
+            job.canonicalWorktreePath,
+            job.mainRepoPath,
+            'cleanup',
+            async (worktreeLease) => {
             for (const target of job.branchTargets) {
               if (!this.canRunDestructiveCleanup(job)) {
                 continue;
@@ -716,7 +747,8 @@ export class WorktreeCleanupService {
 
               const deleteBranchResult = await this.runGitCommand(
                 ['branch', '-D', target.branchName],
-                target.repoPath
+                target.repoPath,
+                [projectLifecycleLease, worktreeLease],
               );
               if (!deleteBranchResult.success) {
                 this.logger.warn(
@@ -726,7 +758,9 @@ export class WorktreeCleanupService {
                 );
               }
             }
-          });
+            },
+            projectLifecycleLease,
+          );
         }
       },
     );
@@ -780,7 +814,7 @@ export class WorktreeCleanupService {
     canonicalWorktreePath: string,
     projectRoot: string,
     operation: 'cleanup' | 'prune' | 'rollback',
-    callback: () => Promise<T> | T,
+    callback: (lease: WorktreeOperationLease) => Promise<T> | T,
     projectLifecycleLease?: ProjectWorktreeLifecycleLease,
   ): Promise<T> {
     const ownedProjectLifecycleLease = projectLifecycleLease
@@ -798,7 +832,7 @@ export class WorktreeCleanupService {
           operation,
         });
         try {
-          return await callback();
+          return await callback(lease);
         } finally {
           await lease.release();
         }
@@ -1046,7 +1080,8 @@ export class WorktreeCleanupService {
 
   private async removeValidatedWorktreeTarget(
     job: QueuedWorktreeCleanupJob,
-    target: QueuedWorktreeIdentity
+    target: QueuedWorktreeIdentity,
+    mutationLeases: readonly MutationLease[],
   ): Promise<boolean> {
     if (!this.canRunDestructiveCleanup(job, target)) {
       return false;
@@ -1066,7 +1101,8 @@ export class WorktreeCleanupService {
 
     const removeResult = await this.runGitCommand(
       ['worktree', 'remove', target.canonicalWorktreePath],
-      target.repoPath
+      target.repoPath,
+      mutationLeases,
     );
 
     if (!removeResult.success) {
@@ -1309,7 +1345,7 @@ export class WorktreeCleanupService {
             target.canonicalWorktreePath,
             job.projectRoot,
             'prune',
-            async () => {
+            async (worktreeLease) => {
               if (
                 target.blockedByActiveReuseReservation
                 || this.isWorktreeReuseReserved(target.canonicalWorktreePath)
@@ -1361,7 +1397,8 @@ export class WorktreeCleanupService {
 
               const removeResult = await this.runGitCommand(
                 ['worktree', 'remove', target.canonicalWorktreePath],
-                job.projectRoot
+                job.projectRoot,
+                [projectLifecycleLease, worktreeLease],
               );
 
               if (!removeResult.success) {
@@ -1482,7 +1519,11 @@ export class WorktreeCleanupService {
       }));
   }
 
-  private runGitCommand(args: string[], cwd: string): Promise<CommandResult> {
+  private runGitCommand(
+    args: string[],
+    cwd: string,
+    mutationLeases: readonly MutationLease[] = [],
+  ): Promise<CommandResult> {
     return new Promise((resolve) => {
       const child = spawn('git', args, {
         cwd,
@@ -1491,19 +1532,76 @@ export class WorktreeCleanupService {
       });
 
       let stderr = '';
+      let childError: Error | undefined;
+      let childTrackingError: Error | undefined;
+      const trackedLeases = Array.from(
+        new Set(mutationLeases.filter((lease): lease is MutationLease => (
+          typeof lease.trackChildProcess === 'function'
+          && typeof lease.clearChildProcess === 'function'
+        ))),
+      );
+      let trackedChildren: Array<{
+        lease: MutationLease;
+        child: Awaited<ReturnType<MutationLease['trackChildProcess']>>;
+      }> = [];
+
+      // A destructive Git child is made visible in every filesystem lease
+      // before this function waits for it. If the owner dies during the
+      // mutation, a contender can therefore retain the lease until the child
+      // exits (or its process-start identity proves the PID was reused).
+      const tracking = Promise.all(trackedLeases.map(async (lease) => ({
+        lease,
+        child: await lease.trackChildProcess(child.pid || 0),
+      }))).then((children) => {
+        trackedChildren = children;
+      }).catch((error) => {
+        childTrackingError = error instanceof Error ? error : new Error(String(error));
+        try {
+          child.kill();
+        } catch {
+          // The close handler below remains the authority for clearing any
+          // child metadata that was successfully registered.
+        }
+      });
 
       child.stderr?.on('data', (chunk: Buffer | string) => {
         stderr += chunk.toString();
       });
 
       child.on('error', (error: Error) => {
-        resolve({
-          success: false,
-          error: error.message,
-        });
+        childError = error;
       });
 
-      child.on('close', (code: number | null) => {
+      child.on('close', async (code: number | null) => {
+        await tracking;
+        try {
+          await Promise.all(trackedChildren.map(({ lease, child: trackedChild }) => (
+            lease.clearChildProcess(trackedChild)
+          )));
+        } catch (error) {
+          resolve({
+            success: false,
+            error: `could not clear destructive Git child lease metadata: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+          return;
+        }
+
+        if (childTrackingError) {
+          resolve({
+            success: false,
+            error: childTrackingError.message,
+          });
+          return;
+        }
+        if (childError) {
+          resolve({
+            success: false,
+            error: childError.message,
+          });
+          return;
+        }
         if (code === 0) {
           resolve({ success: true });
           return;

@@ -261,6 +261,35 @@ describe('closeAction', () => {
       expect(mockEnqueueCleanup).not.toHaveBeenCalled();
     });
 
+    it('preserves the record and skips worktree cleanup when an owned dev window is unknown', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        devWindowId: '@8',
+        worktreePath: '/test/project/.psyche/worktrees/feature',
+      });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-windows')) {
+          throw new Error('tmux window probe timed out');
+        }
+        if (command.includes('list-panes')) {
+          return '%42\n';
+        }
+        if (command.includes('kill-pane')) {
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_and_clean');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
     it('removes a record when tmux confirms the pane is already absent', async () => {
       const pane = createWorktreePane({ paneId: '%42' });
       const context = createMockContext([pane]);

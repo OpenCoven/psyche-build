@@ -39,6 +39,7 @@ import {
   type TmuxPanePresence,
   type VerifiedPaneTeardownResult,
 } from '../utils/paneTeardown.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
 import { createPsychePaneId } from '../utils/paneIdentity.js';
 import type { PsycheConfig } from '../types.js';
 import {
@@ -207,7 +208,8 @@ interface BridgeCreatedWorktreeAllocation {
   branch: string;
   worktreePath: string;
   reservation: WorktreeCreationReservation;
-  identity: CreatedWorktreeIdentity;
+  identity?: CreatedWorktreeIdentity;
+  rollbackOwnershipLostReason?: string;
 }
 
 interface VerifiedSharedWorktree {
@@ -1094,6 +1096,38 @@ function listGitWorktreePaths(projectRoot: string): Set<string> {
   return out;
 }
 
+async function preserveBridgeHookModifiedWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  branch: string,
+  requestId: string,
+  ownershipReason: string,
+  failureReason: string,
+): Promise<string> {
+  const reason = [
+    ownershipReason,
+    `Later bridge spawn failure: ${failureReason}`,
+    `Preserved worktree ${worktreePath} and branch ${branch}; this transaction never claimed destructive rollback ownership.`,
+  ].join(' ');
+  try {
+    const marker = await writeWorktreeRecoveryMarker({
+      projectRoot,
+      worktreePath,
+      pane: {
+        id: `bridge-${requestId}`,
+        paneId: 'uncreated',
+      },
+      operation: 'bridge-worktree-creation-ownership',
+      reason,
+    });
+    return `preserved hook-modified worktree and branch; recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+  } catch (error) {
+    return `preserved hook-modified worktree and branch, but could not write recovery marker: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+}
+
 export async function spawnBridgePane(
   projectRoot: string,
   sessionName: string,
@@ -1112,6 +1146,7 @@ export async function spawnBridgePane(
   const attaching = request.existingWorktree !== undefined;
   let creationReservation: WorktreeCreationReservation | undefined;
   let creationIdentity: CreatedWorktreeIdentity | undefined;
+  let rollbackOwnershipLostReason: string | undefined;
   let paneId: string | undefined;
   let panePersisted = false;
   let rollbackBlockedByUnconfirmedPane = false;
@@ -1130,6 +1165,7 @@ export async function spawnBridgePane(
       const reservation = await WorktreeCleanupService.getInstance()
         .beginWorktreeCreation(nextWorktreePath, scoped.projectRoot);
       let provisionalIdentity: CreatedWorktreeIdentity | undefined;
+      let rollbackOwnershipLostReason: string | undefined;
       try {
         const creation = createGitWorktree(
           scoped.projectRoot,
@@ -1137,31 +1173,41 @@ export async function spawnBridgePane(
           nextBranch,
           request.startPointBranch,
           (provisional) => {
-            // The path was absent before this claim. Mark ownership as soon
-            // as git creates it, before the subsequent Git reads can fail.
+            if (!provisional.rollbackOwnershipClaimed) {
+              rollbackOwnershipLostReason = provisional.rollbackOwnershipLostReason
+                || `Could not prove destructive rollback ownership for ${nextBranch}.`;
+              return;
+            }
+            // The path was absent before this claim. Git has verified that no
+            // hook or external writer changed the branch while worktree add
+            // completed, so a later verification failure can be rolled back.
             provisionalIdentity = reservation.recordCreatedWorktree({
               branchName: nextBranch,
               startingOid: provisional.startingOid,
-              createdOid: provisional.startingOid,
+              createdOid: provisional.createdOid,
               deleteBranch: provisional.branchCreatedByThisAttempt,
               configProjectRoot: scoped.projectRoot,
             });
           },
           deps.readCreatedWorktreeBranch,
         );
-        const identity = reservation.recordCreatedWorktree({
-          branchName: nextBranch,
-          startingOid: creation.startingOid,
-          createdOid: creation.createdOid,
-          deleteBranch: creation.branchCreatedByThisAttempt,
-          configProjectRoot: scoped.projectRoot,
-        });
+        const identity = creation.rollbackOwnershipClaimed
+          ? reservation.recordCreatedWorktree({
+            branchName: nextBranch,
+            startingOid: creation.startingOid,
+            createdOid: creation.createdOid,
+            deleteBranch: creation.branchCreatedByThisAttempt,
+            configProjectRoot: scoped.projectRoot,
+          })
+          : undefined;
+        rollbackOwnershipLostReason ||= creation.rollbackOwnershipLostReason;
         return {
           slug: nextSlug,
           branch: nextBranch,
           worktreePath: reservation.canonicalWorktreePath,
           reservation,
           identity,
+          ...(rollbackOwnershipLostReason ? { rollbackOwnershipLostReason } : {}),
         };
       } catch (error) {
         let rollbackFailure: string | undefined;
@@ -1173,11 +1219,25 @@ export async function spawnBridgePane(
             rollbackFailure = rollback.error || 'unknown rollback failure';
           }
         }
+        const ownershipRecovery = rollbackOwnershipLostReason
+          ? await preserveBridgeHookModifiedWorktree(
+            scoped.projectRoot,
+            reservation.canonicalWorktreePath,
+            nextBranch,
+            request.requestId,
+            rollbackOwnershipLostReason,
+            bridgeErrorMessage(error),
+          )
+          : undefined;
         await reservation.cancel();
-        if (rollbackFailure) {
+        if (rollbackFailure || ownershipRecovery) {
           throw bridgeError(
             bridgeErrorCode(error, 'worktree_create_failed'),
-            `${bridgeErrorMessage(error)}; rollback failed: ${rollbackFailure}`,
+            `${bridgeErrorMessage(error)}${
+              rollbackFailure ? `; rollback failed: ${rollbackFailure}` : ''
+            }${
+              ownershipRecovery ? `; ${ownershipRecovery}` : ''
+            }`,
           );
         }
         throw error;
@@ -1188,6 +1248,7 @@ export async function spawnBridgePane(
     worktreePath = allocated.worktreePath;
     creationReservation = allocated.reservation;
     creationIdentity = allocated.identity;
+    rollbackOwnershipLostReason = allocated.rollbackOwnershipLostReason;
   }
 
   try {
@@ -1222,6 +1283,7 @@ export async function spawnBridgePane(
     return await finishSpawn(worktreePath);
   } catch (error) {
     let rollbackFailure: string | undefined;
+    let ownershipRecovery: string | undefined;
     if (
       !attaching
       && !panePersisted
@@ -1234,14 +1296,33 @@ export async function spawnBridgePane(
         rollbackFailure = rollback.error || 'unknown rollback failure';
       }
     }
+    if (
+      !attaching
+      && !panePersisted
+      && creationReservation
+      && rollbackOwnershipLostReason
+    ) {
+      ownershipRecovery = await preserveBridgeHookModifiedWorktree(
+        scoped.projectRoot,
+        worktreePath,
+        branch,
+        request.requestId,
+        rollbackOwnershipLostReason,
+        bridgeErrorMessage(error),
+      );
+    }
 
     if (creationReservation && !rollbackBlockedByUnconfirmedPane) {
       await creationReservation.cancel();
     }
-    if (rollbackFailure) {
+    if (rollbackFailure || ownershipRecovery) {
       throw bridgeError(
         bridgeErrorCode(error, 'bridge_spawn_failed'),
-        `${bridgeErrorMessage(error)}; rollback failed: ${rollbackFailure}`,
+        `${bridgeErrorMessage(error)}${
+          rollbackFailure ? `; rollback failed: ${rollbackFailure}` : ''
+        }${
+          ownershipRecovery ? `; ${ownershipRecovery}` : ''
+        }`,
       );
     }
     throw error;
@@ -1786,13 +1867,18 @@ function createGitWorktree(
   startPointBranch?: string,
   onWorktreeCreated?: (provisional: {
     startingOid: string;
+    createdOid: string;
     branchCreatedByThisAttempt: boolean;
+    rollbackOwnershipClaimed: boolean;
+    rollbackOwnershipLostReason?: string;
   }) => void,
   readCreatedWorktreeBranch: (worktreePath: string) => string | null = readWorktreeBranch,
 ): {
   startingOid: string;
   createdOid: string;
   branchCreatedByThisAttempt: boolean;
+  rollbackOwnershipClaimed: boolean;
+  rollbackOwnershipLostReason?: string;
 } {
   assertGeneratedWorktreePath(projectRoot, worktreePath);
   try {
@@ -1814,12 +1900,22 @@ function createGitWorktree(
       execFileSync('git', args, { stdio: 'pipe' });
     }
 
+    const createdOid = readGitOid(projectRoot, `refs/heads/${branch}`);
+    const rollbackOwnershipClaimed = createdOid === startingOid;
+    const rollbackOwnershipLostReason = rollbackOwnershipClaimed
+      ? undefined
+      : (
+        `Branch ${branch} changed from ${startingOid} to ${createdOid} during `
+        + 'git worktree add (for example, a post-checkout hook commit).'
+      );
     onWorktreeCreated?.({
       startingOid,
+      createdOid,
       branchCreatedByThisAttempt: !branchExisted,
+      rollbackOwnershipClaimed,
+      ...(rollbackOwnershipLostReason ? { rollbackOwnershipLostReason } : {}),
     });
 
-    const createdOid = readGitOid(projectRoot, `refs/heads/${branch}`);
     if (readCreatedWorktreeBranch(worktreePath) !== branch) {
       throw new Error(`created worktree does not point at branch ${branch}`);
     }
@@ -1827,6 +1923,8 @@ function createGitWorktree(
       startingOid,
       createdOid,
       branchCreatedByThisAttempt: !branchExisted,
+      rollbackOwnershipClaimed,
+      ...(rollbackOwnershipLostReason ? { rollbackOwnershipLostReason } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

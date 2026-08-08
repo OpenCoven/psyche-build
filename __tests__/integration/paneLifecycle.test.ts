@@ -60,6 +60,12 @@ vi.mock('../../src/shared/StateManager.js', () => ({
 const mockTriggerHook = vi.hoisted(() => vi.fn((_eventName?: string) => Promise.resolve()));
 const mockTriggerHookSync = vi.hoisted(() => vi.fn(() => Promise.resolve({ success: true })));
 const mockAtomicWriteJsonSync = vi.hoisted(() => vi.fn());
+const writeWorktreeRecoveryMarkerMock = vi.hoisted(() => vi.fn(async () => ({
+  path: '/test/.psyche/runtime/worktree-recovery/hook-owned.json',
+  marker: {
+    operatorInstructions: 'Recover the preserved worktree before cleanup.',
+  },
+})));
 
 vi.mock('../../src/utils/hooks.js', () => ({
   triggerHook: mockTriggerHook,
@@ -111,6 +117,10 @@ vi.mock('../../src/utils/atomicWrite.js', () => ({
   atomicWriteJsonSync: mockAtomicWriteJsonSync,
 }));
 
+vi.mock('../../src/services/WorktreeRecoveryMarker.js', () => ({
+  writeWorktreeRecoveryMarker: writeWorktreeRecoveryMarkerMock,
+}));
+
 // Mock fs for reading config
 vi.mock('fs', () => ({
   default: fsMock,
@@ -159,6 +169,7 @@ describe('Pane Lifecycle Integration Tests', () => {
     ensureProjectPaneConfigPaneMock.mockResolvedValue(undefined);
     mockTriggerHook.mockImplementation(() => Promise.resolve());
     mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
+    writeWorktreeRecoveryMarkerMock.mockClear();
 
     // Create fresh test environment
     tmuxSession = createMockTmuxSession('psyche-test', 1);
@@ -812,6 +823,47 @@ describe('Pane Lifecycle Integration Tests', () => {
           mainRepoPath: '/test',
           deleteBranch: true,
         })
+      );
+    });
+
+    it('preserves a post-checkout hook commit instead of claiming rollback ownership', async () => {
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('git show-ref --verify --quiet')) {
+          throw new Error('branch does not exist');
+        }
+        if (command.includes('rev-parse --verify --end-of-options "HEAD"')) {
+          return options?.encoding === 'utf-8' ? 'before-hook\n' : Buffer.from('before-hook\n');
+        }
+        if (command.includes('rev-parse --verify --end-of-options "hook-owned"')) {
+          return options?.encoding === 'utf-8' ? 'after-hook\n' : Buffer.from('after-hook\n');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
+      });
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+        success: false,
+        error: 'later lifecycle failure',
+      });
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'post checkout hook regression',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'hook-owned',
+        },
+        ['claude'],
+      )).rejects.toThrow(/preserved hook-modified worktree and branch/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          worktreePath: '/test/.psyche/worktrees/hook-owned',
+          reason: expect.stringContaining('changed from before-hook to after-hook'),
+        }),
       );
     });
 

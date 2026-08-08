@@ -57,7 +57,11 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   readProjectPaneConfigUnderLock: readProjectPaneConfigUnderLockMock,
 }));
 
-type MockChildProcess = EventEmitter & { stderr: EventEmitter | null };
+type MockChildProcess = EventEmitter & {
+  stderr: EventEmitter | null;
+  pid?: number;
+  kill?: () => void;
+};
 
 function createSuccessfulChildProcess(): MockChildProcess {
   const child = new EventEmitter() as MockChildProcess;
@@ -179,10 +183,23 @@ describe('WorktreeCleanupService', () => {
     spawnMock.mockImplementation((_command, args, options) => {
       const gitArgs = args as string[];
       const cwd = String((options as { cwd?: string } | undefined)?.cwd || '');
-      if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
-        worktreeMappings.get(cwd)?.delete(resolve(gitArgs[2]));
-      }
-      return createSuccessfulChildProcess();
+      const child = new EventEmitter() as MockChildProcess;
+      child.stderr = new EventEmitter();
+      process.nextTick(() => {
+        if (gitArgs[0] === 'worktree' && gitArgs[1] === 'remove') {
+          if (worktreeRemoveError) {
+            child.stderr?.emit('data', worktreeRemoveError.message);
+            child.emit('close', 1);
+            return;
+          }
+          worktreeMappings.get(cwd)?.delete(resolve(gitArgs[2]));
+        }
+        if (gitArgs[0] === 'branch' && gitArgs[1] === '-D') {
+          branchOids.delete(cwd);
+        }
+        child.emit('close', 0);
+      });
+      return child;
     });
   });
 
@@ -932,6 +949,77 @@ describe('WorktreeCleanupService', () => {
     expect(branchOids.has('/test/project')).toBe(false);
   });
 
+  it('tracks destructive Git children in both filesystem leases until close', async () => {
+    configureCleanupIdentity();
+    const lifecycle = {
+      trackChildProcess: vi.fn(async (pid: number) => ({
+        pid,
+        processStartIdentity: 'project-child-start',
+      })),
+      clearChildProcess: vi.fn(async () => {}),
+    };
+    const worktree = {
+      trackChildProcess: vi.fn(async (pid: number) => ({
+        pid,
+        processStartIdentity: 'worktree-child-start',
+      })),
+      clearChildProcess: vi.fn(async () => {}),
+    };
+    acquireProjectWorktreeLifecycleLeaseMock.mockResolvedValue({
+      canonicalProjectRoot: '/test/project',
+      lockDir: '/test/project/.psyche/runtime/project-worktree-lifecycle.lock',
+      nonce: 'project-lease',
+      release: async () => {},
+      ...lifecycle,
+    });
+    acquireWorktreeOperationLeaseMock.mockResolvedValue({
+      canonicalProjectRoot: '/test/project',
+      canonicalWorktreePath: '/test/project/.psyche/worktrees/react',
+      lockDir: '/test/project/.psyche/runtime/worktree-locks/test.lock',
+      nonce: 'worktree-lease',
+      release: async () => {},
+      ...worktree,
+    });
+
+    let closeChild!: () => void;
+    spawnMock.mockImplementation((_command, args, options) => {
+      expect(options).toMatchObject({ shell: false });
+      const child = new EventEmitter() as MockChildProcess;
+      child.pid = 4242;
+      child.stderr = new EventEmitter();
+      closeChild = () => {
+        const gitArgs = args as string[];
+        worktreeMappings.get('/test/project')?.delete(resolve(gitArgs[2]));
+        child.emit('close', 0);
+      };
+      return child;
+    });
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const service = WorktreeCleanupService.getInstance() as any;
+    const running = enqueueAndWait(service, false);
+
+    await vi.waitFor(() => {
+      expect(lifecycle.trackChildProcess).toHaveBeenCalledWith(4242);
+      expect(worktree.trackChildProcess).toHaveBeenCalledWith(4242);
+    });
+    expect(lifecycle.clearChildProcess).not.toHaveBeenCalled();
+    expect(worktree.clearChildProcess).not.toHaveBeenCalled();
+
+    closeChild();
+    await running;
+
+    expect(lifecycle.clearChildProcess).toHaveBeenCalledWith({
+      pid: 4242,
+      processStartIdentity: 'project-child-start',
+    });
+    expect(worktree.clearChildProcess).toHaveBeenCalledWith({
+      pid: 4242,
+      processStartIdentity: 'worktree-child-start',
+    });
+  });
+
   it('checks rollback references with the read-only config lease', async () => {
     configureCleanupIdentity();
 
@@ -973,10 +1061,10 @@ describe('WorktreeCleanupService', () => {
       success: false,
       error: `failed to remove newly created worktree; preserved worktree and branch at ${worktreePath}: contains modified or untracked files`,
     });
-    expect(execFileSyncMock).toHaveBeenCalledWith(
+    expect(spawnMock).toHaveBeenCalledWith(
       'git',
       ['worktree', 'remove', worktreePath],
-      expect.objectContaining({ cwd: '/test/project' }),
+      expect.objectContaining({ cwd: '/test/project', shell: false }),
     );
     expect(
       worktreeMappings.get('/test/project')?.get(resolve(worktreePath))
@@ -1005,10 +1093,10 @@ describe('WorktreeCleanupService', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('preserved worktree and branch');
-    expect(execFileSyncMock).toHaveBeenCalledWith(
+    expect(spawnMock).toHaveBeenCalledWith(
       'git',
       ['worktree', 'remove', worktreePath],
-      expect.anything(),
+      expect.objectContaining({ shell: false }),
     );
     expect(execFileSyncMock).not.toHaveBeenCalledWith(
       'git',

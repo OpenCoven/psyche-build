@@ -533,6 +533,27 @@ export class TmuxService {
   }
 
   /**
+   * Window counterpart to probePanePresence. A failed query is unknown, not
+   * absent, because detached test/dev windows can still hold a worktree cwd.
+   */
+  async probeWindowPresence(windowId: string): Promise<TmuxPanePresence> {
+    try {
+      const output = this.execute(
+        `tmux list-windows -a -F '#{window_id}'`,
+        { silent: true, timeout: 5000 },
+      );
+      return output
+        .split('\n')
+        .map((line) => line.trim())
+        .includes(windowId)
+        ? 'present'
+        : 'absent';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
    * Get content pane IDs (excludes control pane and spacer panes)
    */
   async getContentPaneIds(controlPaneId: string): Promise<string[]> {

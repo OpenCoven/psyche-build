@@ -20,9 +20,8 @@ import { getPaneDisplayName } from '../../utils/paneTitle.js';
 import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
 import {
   paneRecoveryInstructions,
-  tearDownPaneWithVerification,
+  tearDownFullPaneWithVerification,
   type TmuxPanePresence,
-  type VerifiedPaneTeardownResult,
 } from '../../utils/paneTeardown.js';
 
 function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
@@ -49,27 +48,6 @@ function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
   }
 }
 
-async function killTmuxPaneReliably(pane: PsychePane): Promise<VerifiedPaneTeardownResult> {
-  const result = await tearDownPaneWithVerification({
-    probe: () => probeTmuxPanePresence(pane.paneId),
-    kill: () => {
-      execSync(`tmux kill-pane -t '${pane.paneId}'`, {
-        stdio: 'pipe',
-        timeout: 5000,
-      });
-    },
-  });
-
-  if (result.presence === 'present') {
-    LogService.getInstance().warn(
-      `Pane ${pane.paneId} still exists after kill attempt`,
-      'paneActions',
-      pane.id
-    );
-  }
-  return result;
-}
-
 function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
   try {
     const windowList = execSync('tmux list-windows -a -F "#{window_id}"', {
@@ -93,43 +71,24 @@ function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
   }
 }
 
-async function killTmuxWindowReliably(
-  windowId: string,
-  pane: PsychePane,
-): Promise<VerifiedPaneTeardownResult> {
-  const result = await tearDownPaneWithVerification({
-    probe: () => probeTmuxWindowPresence(windowId),
-    kill: () => {
+async function tearDownOwnedPane(pane: PsychePane) {
+  return tearDownFullPaneWithVerification({
+    target: pane,
+    probePane: () => probeTmuxPanePresence(pane.paneId),
+    killPane: () => {
+      execSync(`tmux kill-pane -t '${pane.paneId}'`, {
+        stdio: 'pipe',
+        timeout: 5000,
+      });
+    },
+    probeWindow: probeTmuxWindowPresence,
+    killWindow: (windowId) => {
       execSync(`tmux kill-window -t '${windowId}'`, {
         stdio: 'pipe',
         timeout: 5000,
       });
     },
   });
-  if (result.presence === 'present') {
-    LogService.getInstance().warn(
-      `Background window ${windowId} still exists after close attempt`,
-      'paneActions',
-      pane.id,
-    );
-  }
-  return result;
-}
-
-async function closeOwnedBackgroundWindows(pane: PsychePane): Promise<void> {
-  const windowIds = Array.from(new Set(
-    [pane.testWindowId, pane.devWindowId].filter(
-      (windowId): windowId is string => typeof windowId === 'string' && windowId.length > 0,
-    ),
-  ));
-  for (const windowId of windowIds) {
-    const teardown = await killTmuxWindowReliably(windowId, pane);
-    if (teardown.presence !== 'absent') {
-      throw new Error(
-        `Could not confirm owned background window ${windowId} closed (${teardown.presence})`,
-      );
-    }
-  }
 }
 
 function paneKeepsWorktreeActive(
@@ -285,14 +244,13 @@ async function executeCloseOption(
         updatedPanes = await context.removePaneIdentitiesFromConfig(
           [{ id: pane.id, paneId: pane.paneId }],
           async () => {
-            await closeOwnedBackgroundWindows(pane);
-            const paneTeardown = await killTmuxPaneReliably(pane);
-            if (paneTeardown.presence !== 'absent') {
-              const message = paneTeardown.presence === 'unknown'
-                ? `Could not confirm pane "${paneName}" closed; pane record and worktree were preserved. ${
+            const teardown = await tearDownOwnedPane(pane);
+            if (teardown.presence !== 'absent') {
+              const message = teardown.presence === 'unknown'
+                ? `Could not confirm pane "${paneName}" and all owned background windows closed; pane record and worktree were preserved. ${
                   paneRecoveryInstructions(pane.paneId, panesFile)
                 }`
-                : `Failed to close pane "${paneName}"; it is still present and worktree cleanup was not started`;
+                : `Failed to close pane "${paneName}" or an owned background window; worktree cleanup was not started`;
               throw new Error(message);
             }
           },

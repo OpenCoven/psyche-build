@@ -25,7 +25,7 @@ import {
 } from '../../utils/mergeTargets.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
 import { TmuxService } from '../../services/TmuxService.js';
-import { tearDownPaneWithVerification } from '../../utils/paneTeardown.js';
+import { tearDownFullPaneWithVerification } from '../../utils/paneTeardown.js';
 import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
 
 /**
@@ -142,9 +142,12 @@ async function executeSingleRootMerge(
   const closeSiblings = async (): Promise<ActionResult | undefined> => {
     const tmuxService = TmuxService.getInstance();
     for (const sibling of siblingPanes) {
-      const teardown = await tearDownPaneWithVerification({
-        probe: () => tmuxService.probePanePresence(sibling.paneId),
-        kill: () => tmuxService.killPane(sibling.paneId),
+      const teardown = await tearDownFullPaneWithVerification({
+        target: sibling,
+        probePane: (paneId) => tmuxService.probePanePresence(paneId),
+        killPane: (paneId) => tmuxService.killPane(paneId),
+        probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        killWindow: (windowId) => tmuxService.killWindow(windowId),
       });
       if (teardown.presence !== 'absent') {
         const detail = teardown.error ? `: ${teardown.error}` : '';

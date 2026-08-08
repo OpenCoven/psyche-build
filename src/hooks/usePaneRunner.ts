@@ -1,9 +1,19 @@
 import { execSync } from 'child_process';
 import fs from 'fs/promises';
+import path from 'path';
 import type { PsychePane, ProjectSettings, SavePanes } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
+import {
+  tearDownPaneWithVerification,
+  type VerifiedPaneTeardownResult,
+} from '../utils/paneTeardown.js';
+import {
+  startBackgroundWindowTransaction,
+} from '../utils/backgroundWindowTransaction.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
+import { deriveProjectRootFromWorktreePath } from '../utils/paneProject.js';
 
 interface Params {
   panes: PsychePane[];
@@ -50,29 +60,71 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       setStatusMessage(`Starting ${type} in background window...`);
 
       const tmuxService = TmuxService.getInstance();
+      const tearDownWindow = (windowId: string): Promise<VerifiedPaneTeardownResult> => (
+        tearDownPaneWithVerification({
+          probe: () => tmuxService.probeWindowPresence(windowId),
+          kill: () => tmuxService.killWindow(windowId),
+        })
+      );
+      const retainUncertainRecovery = async (
+        recoveryPane: PsychePane,
+        reason: string,
+      ): Promise<string | undefined> => {
+        const projectRoot = recoveryPane.projectRoot
+          || (recoveryPane.worktreePath
+            ? deriveProjectRootFromWorktreePath(recoveryPane.worktreePath)
+            : undefined)
+          || process.cwd();
+        try {
+          const marker = await writeWorktreeRecoveryMarker({
+            projectRoot,
+            worktreePath: recoveryPane.worktreePath || projectRoot,
+            pane: {
+              id: recoveryPane.id,
+              paneId: recoveryPane.paneId,
+            },
+            operation: 'background-window-launch',
+            reason,
+          });
+          return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+        } catch (error) {
+          return `could not write recovery marker: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        }
+      };
 
       const existingWindowId = type === 'test' ? pane.testWindowId : pane.devWindowId;
       if (existingWindowId) {
-        try { await tmuxService.killWindow(existingWindowId); } catch {}
+        const existingTeardown = await tearDownWindow(existingWindowId);
+        if (existingTeardown.presence !== 'absent') {
+          throw new Error(
+            `Could not confirm existing ${type} window ${existingWindowId} closed (${existingTeardown.presence})`,
+          );
+        }
       }
 
       const windowName = `${pane.slug}-${type}`;
-      const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
-      const logFile = `/tmp/psyche-${pane.id}-${type}.log`;
+      const runtimeDir = path.join(pane.worktreePath, '.psyche');
+      await fs.mkdir(runtimeDir, { recursive: true });
+      const logFile = path.join(runtimeDir, `${pane.id}-${type}.log`);
       const fullCommand = `cd "${pane.worktreePath}" && ${command} 2>&1 | tee ${logFile}`;
-      await tmuxService.sendKeys(windowId, `'${fullCommand.replace(/'/g, "'\\''")}' Enter`);
+      const transaction = await startBackgroundWindowTransaction({
+        type,
+        pane,
+        panes,
+        createWindow: () => tmuxService.newWindow({ name: windowName, detached: true }),
+        sendCommand: (windowId) => tmuxService.sendKeys(
+          windowId,
+          `'${fullCommand.replace(/'/g, "'\\''")}' Enter`,
+        ),
+        savePanes,
+        tearDownWindow,
+        retainUncertainRecovery,
+      });
 
-      const updatedPane: PsychePane = {
-        ...pane,
-        [type === 'test' ? 'testWindowId' : 'devWindowId']: windowId,
-        [type === 'test' ? 'testStatus' : 'devStatus']: 'running'
-      } as PsychePane;
-
-      const updatedPanes = panes.map(p => p.id === pane.id ? updatedPane : p);
-      await savePanes(updatedPanes, panes);
-
-      if (type === 'test') setTimeout(() => monitorTestOutput(pane.id, logFile), 2000);
-      else setTimeout(() => monitorDevOutput(pane.id, logFile), 2000);
+      if (type === 'test') setTimeout(() => monitorTestOutput(transaction.pane.id, logFile), 2000);
+      else setTimeout(() => monitorDevOutput(transaction.pane.id, logFile), 2000);
 
       setRunningCommand(false);
       setStatusMessage(`${type === 'test' ? 'Test' : 'Dev server'} started in background`);
