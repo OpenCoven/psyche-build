@@ -264,7 +264,9 @@
       try {
         var response = await invoke("coven_sessions", {
           projectRoots: roots,
+          project_roots: roots,
           projectScopes: projectScopes,
+          project_scopes: projectScopes,
         });
         covenDiscovery = PsycheSessions.applyCovenResponse(
           covenDiscovery,

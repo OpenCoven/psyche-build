@@ -353,6 +353,7 @@ kbd {
   background: var(--surface-2);
   color: var(--text);
 }
+.session-coven-row:focus-visible { outline: none; border-color: var(--accent-line); }
 .session-coven-title {
   min-width: 0;
   flex: 1;
