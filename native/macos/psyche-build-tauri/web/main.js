@@ -636,8 +636,9 @@
     });
   }
 
-  // The dock is "open" only in split layout. Collapsed, it hands its column to
-  // a mini rail whose buttons reopen it on the panel they name.
+  // The dock is "open" in any layout that shows it — split, and browser-only.
+  // Collapsed, it hands its column to a mini rail whose buttons reopen it on
+  // the panel they name.
   function syncDockChrome() {
     var open = currentLayout() !== "terminal";
     if (appEl) appEl.dataset.dock = open ? "open" : "collapsed";
@@ -1807,6 +1808,8 @@
     var currentSearchQuery = sessionFilter;
     var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
+    // Walked once per render: every row tests membership against this list.
+    var onCanvasIds = canvasThreadIds();
 
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
@@ -1963,7 +1966,7 @@
             return;
           }
           var thread = entry.thread;
-          var onCanvas = canvasThreadIds().indexOf(thread.id) !== -1;
+          var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
           var wrapper = document.createElement("div");
           wrapper.className = "session-row-wrap";
           var row = document.createElement("button");
@@ -2177,6 +2180,7 @@
     empty.addEventListener("click", function (event) {
       var button = event.target.closest("[data-empty-action]");
       if (!button) return;
+      if (!activeProject()) { openProjectPicker(); return; }
       var action = button.dataset.emptyAction;
       if (action === "term") runNewShellCommand();
       else if (action === "agent") runNewThreadCommand();
