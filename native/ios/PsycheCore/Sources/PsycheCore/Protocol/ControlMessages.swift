@@ -68,6 +68,9 @@ public enum MobileServerMessage: Codable, Sendable, Equatable {
 }
 
 public enum MobileControlRequest: Codable, Sendable, Equatable {
+    /// Wire `payload.type` values this side declares for mobile control requests.
+    public static var supportedTypeNames: [String] { MessageType.allCases.map(\.rawValue) }
+
     case workspaceSnapshot(ControlRequestIDOnly)
     case spawnPane(MobilePaneSpawnRequest)
     case attachPane(MobilePaneAttachRequest)
@@ -84,6 +87,21 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
     case unknown(UnknownControlRequest)
 
     private enum CodingKeys: String, CodingKey { case type }
+    private enum MessageType: String, CaseIterable {
+        case workspaceSnapshot = "workspace.snapshot"
+        case detachPane = "panes.detach"
+        case inputPane = "panes.input"
+        case resizePane = "panes.resize"
+        case killPane = "panes.kill"
+        case paneMeta = "panes.meta"
+        case spawnPane = "panes.spawn"
+        case attachPane = "panes.attach"
+        case listFiles = "files.list"
+        case readFile = "files.read"
+        case diffFile = "files.diff"
+        case startAction = "actions.start"
+        case respondToAction = "actions.respond"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -143,6 +161,9 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
 }
 
 public enum MobileControlResponse: Codable, Sendable, Equatable {
+    /// Wire `payload.type` values this side declares for mobile control responses.
+    public static var supportedTypeNames: [String] { MessageType.allCases.map(\.rawValue) }
+
     case workspaceSnapshot(MobileWorkspaceSnapshotResult)
     case ack(ControlAckResponse)
     case paneSpawned(PaneSpawnedResponse)
@@ -156,6 +177,18 @@ public enum MobileControlResponse: Codable, Sendable, Equatable {
     case unknown(UnknownControlResponse)
 
     private enum CodingKeys: String, CodingKey { case type }
+    private enum MessageType: String, CaseIterable {
+        case ack
+        case paneSpawned = "panes.spawn.result"
+        case streamExited = "panes.stream.exit"
+        case error
+        case workspaceSnapshot = "mobile.workspace.snapshot.result"
+        case attachPane = "mobile.panes.attach.result"
+        case filesList = "files.list.result"
+        case filesRead = "files.read.result"
+        case filesDiff = "files.diff.result"
+        case actionResult = "actions.result"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -391,8 +424,8 @@ public struct ControlRequestIDOnly: Codable, Sendable, Equatable {
     public let type: String
     public let requestID: String
 
-    public init(type: String, requestID: String) {
-        self.type = type
+    public init(requestID: String) {
+        self.type = "workspace.snapshot"
         self.requestID = requestID
     }
 
@@ -651,17 +684,18 @@ public struct PaneResizeRequest: Codable, Sendable, Equatable {
 public struct PaneIDControlRequest: Codable, Sendable, Equatable {
     public let type: String
     public let requestID: String
-    public let id: String
+    public let paneID: String
 
-    public init(type: String, requestID: String, id: String) {
-        self.type = type
+    public init(requestID: String, paneID: String) {
+        self.type = "panes.kill"
         self.requestID = requestID
-        self.id = id
+        self.paneID = paneID
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, id
+        case type
         case requestID = "requestId"
+        case paneID = "id"
     }
 }
 

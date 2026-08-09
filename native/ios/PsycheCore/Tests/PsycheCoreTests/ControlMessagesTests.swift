@@ -2,6 +2,25 @@ import XCTest
 @testable import PsycheCore
 
 final class ControlMessagesTests: XCTestCase {
+    func testEncodesWorkspaceSnapshotRequestWithCanonicalDiscriminator() throws {
+        let message = MobileClientMessage.control(makeWorkspaceSnapshotRequest(requestID: "workspace-1"))
+        let object = try encodedJSONObject(of: message)
+
+        XCTAssertEqual(object["type"] as? String, "control")
+        XCTAssertEqual(payload(from: object)["type"] as? String, "workspace.snapshot")
+        XCTAssertEqual(payload(from: object)["requestId"] as? String, "workspace-1")
+    }
+
+    func testEncodesKillPaneRequestWithCanonicalDiscriminator() throws {
+        let message = MobileClientMessage.control(makeKillPaneRequest(requestID: "kill-1", paneID: "%3"))
+        let object = try encodedJSONObject(of: message)
+
+        XCTAssertEqual(object["type"] as? String, "control")
+        XCTAssertEqual(payload(from: object)["type"] as? String, "panes.kill")
+        XCTAssertEqual(payload(from: object)["requestId"] as? String, "kill-1")
+        XCTAssertEqual(payload(from: object)["id"] as? String, "%3")
+    }
+
     func testDecodesWorkspaceSnapshotRequest() throws {
         let message = try JSONDecoder().decode(
             MobileClientMessage.self,
@@ -79,6 +98,42 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(request.requestID, "req-10")
     }
 
+    func testEverySupportedMobileControlRequestFixtureDecodesToTypedCase() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        for requestType in MobileControlRequest.supportedTypeNames {
+            let fixture = try XCTUnwrap(
+                fixtures.first(where: { entry in
+                    guard let type = controlPayloadType(in: entry.value) else { return false }
+                    return type == requestType
+                }),
+                "Missing fixture for supported request type \(requestType)"
+            )
+            let request = try decodeRequestFixture(fixture.key, fixtures: fixtures)
+            if case .unknown = request {
+                XCTFail("Supported request fixture \(fixture.key) decoded as .unknown")
+            }
+        }
+    }
+
+    func testEverySupportedMobileControlResponseFixtureDecodesToTypedCase() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        for responseType in MobileControlResponse.supportedTypeNames {
+            let fixture = try XCTUnwrap(
+                fixtures.first(where: { entry in
+                    guard let type = controlPayloadType(in: entry.value) else { return false }
+                    return type == responseType
+                }),
+                "Missing fixture for supported response type \(responseType)"
+            )
+            let response = try decodeResponseFixture(fixture.key, fixtures: fixtures)
+            if case .unknown = response {
+                XCTFail("Supported response fixture \(fixture.key) decoded as .unknown")
+            }
+        }
+    }
+
     func testSupportedCanonicalControlFixturesDecodeToTypedCases() throws {
         let fixtures = try loadMobileControlFixtures()
 
@@ -146,5 +201,34 @@ final class ControlMessagesTests: XCTestCase {
         let raw = try Data(contentsOf: url)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
         return try object.mapValues { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
+    }
+
+    private func encodedJSONObject(of message: MobileClientMessage) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(message)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func payload(from object: [String: Any]) -> [String: Any] {
+        (object["payload"] as? [String: Any]) ?? [:]
+    }
+
+    private func controlPayloadType(in data: Data) -> String? {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            object["type"] as? String == "control",
+            let payload = object["payload"] as? [String: Any],
+            let type = payload["type"] as? String
+        else {
+            return nil
+        }
+        return type
+    }
+
+    private func makeWorkspaceSnapshotRequest(requestID: String) -> MobileControlRequest {
+        .workspaceSnapshot(ControlRequestIDOnly(requestID: requestID))
+    }
+
+    private func makeKillPaneRequest(requestID: String, paneID: String) -> MobileControlRequest {
+        .killPane(PaneIDControlRequest(requestID: requestID, paneID: paneID))
     }
 }
