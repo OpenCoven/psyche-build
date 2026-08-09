@@ -170,6 +170,37 @@ export function buildWorkspaceSnapshot(input: BuildWorkspaceSnapshotInput): Work
   };
 }
 
+export function normalizeWorkspaceRoot(projectRoot: string): string {
+  const trimmed = projectRoot.trim();
+  return path.resolve(trimmed || projectRoot);
+}
+
+export function normalizeWorkspaceWorktrees(
+  projectRoot: string,
+  worktrees: readonly GitWorktreeSnapshotInput[],
+): GitWorktreeSnapshotInput[] {
+  const normalizedProjectRoot = normalizeWorkspaceRoot(projectRoot);
+  const duplicatesByPath = new Map<string, GitWorktreeSnapshotInput[]>();
+
+  for (const worktree of worktrees) {
+    const normalized = {
+      ...worktree,
+      path: normalizeWorkspaceRoot(worktree.path),
+    };
+    const duplicates = duplicatesByPath.get(normalized.path) ?? [];
+    duplicates.push(normalized);
+    duplicatesByPath.set(normalized.path, duplicates);
+  }
+
+  return [...duplicatesByPath.entries()]
+    .map(([normalizedPath, duplicates]) => mergeDuplicateWorktrees(
+      normalizedPath,
+      normalizedProjectRoot,
+      duplicates,
+    ))
+    .sort((left, right) => compareWorktreePaths(left.path, right.path, normalizedProjectRoot));
+}
+
 export function normalizeIsoDateString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
@@ -219,7 +250,8 @@ export function normalizeIsoEpochMilliseconds(value: number | undefined): string
 }
 
 function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
-  const worktrees: WorktreeSnapshot[] = project.worktrees.map((worktree) => ({
+  const worktrees: WorktreeSnapshot[] = normalizeWorkspaceWorktrees(project.root, project.worktrees)
+    .map((worktree) => ({
     ...worktree,
     panes: [],
     runningCount: 0,
@@ -266,7 +298,7 @@ function covenSessionPane(session: CovenSessionSummary): PaneSnapshot {
   const id = trimmedString(session.id);
   return {
     id: id ?? session.id,
-    cwd: cwd ? path.resolve(cwd) : path.resolve(session.projectRoot.trim()),
+    cwd: cwd ? normalizeWorkspaceRoot(cwd) : normalizeWorkspaceRoot(session.projectRoot),
     title: trimmedString(session.title) ?? '',
     kind: 'coven-session',
     agent: trimmedString(session.harness) ?? '',
@@ -287,12 +319,91 @@ function mostSpecificWorktree(
 }
 
 function isInsideOrEqual(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
+  const relative = path.relative(normalizeWorkspaceRoot(parent), normalizeWorkspaceRoot(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function isRunning(status: string): boolean {
   return ['starting', 'running', 'working', 'analyzing'].includes(status);
+}
+
+/**
+ * Sort duplicate aliases by how informative they are, then by a fully
+ * normalized payload tie-breaker. The first record becomes the canonical
+ * branch/head/detached winner; safety flags are merged conservatively so a
+ * true missing/locked/prunable/dirty/bare bit is never dropped.
+ */
+function mergeDuplicateWorktrees(
+  normalizedPath: string,
+  normalizedProjectRoot: string,
+  duplicates: readonly GitWorktreeSnapshotInput[],
+): GitWorktreeSnapshotInput {
+  const ordered = [...duplicates].sort(compareDuplicateWorktreeCandidates);
+  const winner = ordered[0];
+
+  return {
+    ...winner,
+    path: normalizedPath,
+    head: trimmedString(winner.head) ?? winner.head,
+    branch: trimmedString(winner.branch),
+    isMain: normalizedPath === normalizedProjectRoot || duplicates.some((worktree) => worktree.isMain),
+    detached: winner.detached,
+    bare: duplicates.some((worktree) => worktree.bare),
+    locked: duplicates.some((worktree) => worktree.locked),
+    lockReason: trimmedString(winner.lockReason) ?? firstDefined(ordered.map((worktree) => trimmedString(worktree.lockReason))),
+    prunable: duplicates.some((worktree) => worktree.prunable),
+    pruneReason: trimmedString(winner.pruneReason) ?? firstDefined(ordered.map((worktree) => trimmedString(worktree.pruneReason))),
+    dirty: duplicates.some((worktree) => worktree.dirty),
+    missing: duplicates.some((worktree) => worktree.missing),
+  };
+}
+
+function compareDuplicateWorktreeCandidates(
+  left: GitWorktreeSnapshotInput,
+  right: GitWorktreeSnapshotInput,
+): number {
+  const leftScore = duplicateWorktreeScore(left);
+  const rightScore = duplicateWorktreeScore(right);
+  if (leftScore !== rightScore) return rightScore - leftScore;
+
+  return compareStrings(stableWorktreeRecord(left), stableWorktreeRecord(right));
+}
+
+function duplicateWorktreeScore(worktree: GitWorktreeSnapshotInput): number {
+  return (worktree.isMain ? 32 : 0)
+    + (trimmedString(worktree.branch) ? 16 : 0)
+    + (trimmedString(worktree.head) ? 8 : 0)
+    + (trimmedString(worktree.lockReason) ? 4 : 0)
+    + (trimmedString(worktree.pruneReason) ? 2 : 0)
+    + (!worktree.detached ? 1 : 0);
+}
+
+function stableWorktreeRecord(worktree: GitWorktreeSnapshotInput): string {
+  return JSON.stringify({
+    path: normalizeWorkspaceRoot(worktree.path),
+    head: trimmedString(worktree.head) ?? '',
+    branch: trimmedString(worktree.branch) ?? '',
+    isMain: worktree.isMain,
+    detached: worktree.detached,
+    bare: worktree.bare,
+    locked: worktree.locked,
+    lockReason: trimmedString(worktree.lockReason) ?? '',
+    prunable: worktree.prunable,
+    pruneReason: trimmedString(worktree.pruneReason) ?? '',
+    dirty: worktree.dirty,
+    missing: worktree.missing,
+  });
+}
+
+function compareWorktreePaths(
+  leftPath: string,
+  rightPath: string,
+  normalizedProjectRoot: string,
+): number {
+  const leftIsProjectRoot = leftPath === normalizedProjectRoot;
+  const rightIsProjectRoot = rightPath === normalizedProjectRoot;
+  if (leftIsProjectRoot !== rightIsProjectRoot) return leftIsProjectRoot ? -1 : 1;
+  return compareStrings(leftPath, rightPath);
 }
 
 function daysInMonth(year: number, month: number): number {
@@ -306,4 +417,12 @@ function daysInMonth(year: number, month: number): number {
 function trimmedString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed || undefined;
+}
+
+function firstDefined<T>(values: readonly (T | undefined)[]): T | undefined {
+  return values.find((value): value is T => value !== undefined);
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

@@ -6,6 +6,7 @@ import {
   buildWorkspaceSnapshot,
   normalizeIsoDateString,
   normalizeIsoEpochMilliseconds,
+  normalizeWorkspaceRoot,
   readProjectWorktrees,
   type GitWorktreeSnapshotInput,
   type WorkspacePaneInput,
@@ -178,8 +179,7 @@ function projectCovenSessions(
 }
 
 function normalizeRoot(projectRoot: string): string {
-  const trimmed = projectRoot.trim();
-  return path.resolve(trimmed || projectRoot);
+  return normalizeWorkspaceRoot(projectRoot);
 }
 
 function normalizeProjectTitle(title: string | undefined, projectRoot: string): string {

@@ -192,6 +192,147 @@ describe('workspace snapshot', () => {
     ]);
   });
 
+  it('canonicalizes duplicate worktree aliases into one stable conservative snapshot', () => {
+    const build = (worktrees: Array<{
+      path: string;
+      head: string;
+      branch?: string;
+      isMain: boolean;
+      detached: boolean;
+      bare: boolean;
+      locked: boolean;
+      lockReason?: string;
+      prunable: boolean;
+      pruneReason?: string;
+      dirty: boolean;
+      missing: boolean;
+    }>) => buildWorkspaceSnapshot({
+      revision: 9,
+      projects: [
+        {
+          id: 'project-1',
+          root: '/repo',
+          title: 'psyche-build',
+          worktrees,
+          panes: [
+            {
+              id: '%2',
+              cwd: '/repo/w/packages/app',
+              title: 'review shell',
+              kind: 'terminal',
+              status: 'running',
+            },
+          ],
+        },
+      ],
+    });
+
+    const ordered = build([
+      {
+        path: '/repo/w/.',
+        head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        branch: 'review',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: true,
+        lockReason: 'manual review',
+        prunable: true,
+        pruneReason: 'gitdir file points to non-existent location',
+        dirty: false,
+        missing: false,
+      },
+      {
+        path: '/repo/.',
+        head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        branch: 'main',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: false,
+        prunable: false,
+        dirty: false,
+        missing: false,
+      },
+      {
+        path: '/repo/w',
+        head: 'cccccccccccccccccccccccccccccccccccccccc',
+        isMain: false,
+        detached: true,
+        bare: true,
+        locked: false,
+        prunable: false,
+        dirty: true,
+        missing: true,
+      },
+    ]);
+
+    const reversed = build([
+      {
+        path: '/repo/w',
+        head: 'cccccccccccccccccccccccccccccccccccccccc',
+        isMain: false,
+        detached: true,
+        bare: true,
+        locked: false,
+        prunable: false,
+        dirty: true,
+        missing: true,
+      },
+      {
+        path: '/repo/.',
+        head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        branch: 'main',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: false,
+        prunable: false,
+        dirty: false,
+        missing: false,
+      },
+      {
+        path: '/repo/w/.',
+        head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        branch: 'review',
+        isMain: false,
+        detached: false,
+        bare: false,
+        locked: true,
+        lockReason: 'manual review',
+        prunable: true,
+        pruneReason: 'gitdir file points to non-existent location',
+        dirty: false,
+        missing: false,
+      },
+    ]);
+
+    expect(JSON.stringify(ordered)).toBe(JSON.stringify(reversed));
+
+    const project = ordered.projects[0];
+    expect(project.worktrees).toHaveLength(2);
+    expect(project.worktrees.map((worktree) => worktree.path)).toEqual(['/repo', '/repo/w']);
+    expect(project.worktrees[0]).toMatchObject({
+      path: '/repo',
+      branch: 'main',
+      isMain: true,
+    });
+    expect(project.worktrees[1]).toMatchObject({
+      path: '/repo/w',
+      head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      branch: 'review',
+      detached: false,
+      bare: true,
+      locked: true,
+      lockReason: 'manual review',
+      prunable: true,
+      pruneReason: 'gitdir file points to non-existent location',
+      dirty: true,
+      missing: true,
+      panes: [{ id: '%2', kind: 'terminal' }],
+    });
+  });
+
   it('normalizes valid Coven updatedAt timestamps and omits invalid ones', () => {
     const snapshot = buildWorkspaceSnapshot({
       revision: 8,
