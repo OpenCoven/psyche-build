@@ -130,6 +130,50 @@ describe("BridgeDaemon workspace change broadcasts", () => {
     expect((daemon as any).workspaceSequence).toBe(2);
   });
 
+  it("coalesces a burst of public notifications into one pending rescan", async () => {
+    let releaseFirst!: () => void;
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const provider = vi.fn(async () => {
+      const call = calls++;
+      if (call === 0) {
+        await firstRead;
+        return workspaceAtRevision(1);
+      }
+      return workspaceAtRevision(2);
+    });
+    const session = createSession("authenticated", PROTOCOL_VERSION);
+    const daemon = createDaemon(provider);
+    installSessions(daemon, [session]);
+
+    daemon.notifyWorkspaceChanged();
+    await vi.waitFor(() => expect(provider).toHaveBeenCalledTimes(1));
+
+    for (let index = 0; index < 25; index += 1) {
+      daemon.notifyWorkspaceChanged();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(provider).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await vi.waitFor(() => {
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(session.send).toHaveBeenCalledTimes(2);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(session.send.mock.calls.map(([message]) => ({
+      revision: message.payload.revision,
+      sequence: message.payload.sequence,
+    }))).toEqual([
+      { revision: 1, sequence: 1 },
+      { revision: 2, sequence: 2 },
+    ]);
+  });
+
   it("sends workspaceChanged only to authenticated protocol-v3 sessions", async () => {
     const authenticatedV3 = createSession("authenticated", PROTOCOL_VERSION);
     const authenticatedV2 = createSession("authenticated", LEGACY_PROTOCOL_VERSION);
@@ -251,6 +295,57 @@ describe("BridgeDaemon workspace change broadcasts", () => {
         );
       });
       await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("runs one pending rescan after a provider error without an unhandled rejection", async () => {
+    const providerError = new Error("workspace unavailable");
+    let rejectFirst!: () => void;
+    const firstRead = new Promise<void>((_resolve, reject) => {
+      rejectFirst = () => reject(providerError);
+    });
+    let calls = 0;
+    const provider = vi.fn(async () => {
+      const call = calls++;
+      if (call === 0) {
+        await firstRead;
+      }
+      return workspaceAtRevision(1);
+    });
+    const session = createSession("authenticated", PROTOCOL_VERSION);
+    const daemon = createDaemon(provider);
+    installSessions(daemon, [session]);
+    const logError = vi.spyOn(LogService.getInstance(), "error").mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      daemon.notifyWorkspaceChanged();
+      await vi.waitFor(() => expect(provider).toHaveBeenCalledTimes(1));
+      for (let index = 0; index < 10; index += 1) {
+        daemon.notifyWorkspaceChanged();
+      }
+
+      rejectFirst();
+      await vi.waitFor(() => {
+        expect(provider).toHaveBeenCalledTimes(2);
+        expect(session.send).toHaveBeenCalledOnce();
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(session.send).toHaveBeenCalledWith({
+        type: "workspaceChanged",
+        payload: {
+          revision: 1,
+          sequence: 1,
+          workspace: workspaceAtRevision(1),
+        },
+      });
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandled);

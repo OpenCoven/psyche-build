@@ -55,6 +55,8 @@ export class BridgeDaemon {
   private workspaceSequence = 0;
   private lastBroadcastWorkspaceRevision: number | undefined;
   private workspaceOperationQueue: Promise<void> = Promise.resolve();
+  private workspaceBroadcastInFlight = false;
+  private workspaceBroadcastPending = false;
   readonly serverId: string;
   readonly serverName: string;
 
@@ -83,19 +85,17 @@ export class BridgeDaemon {
 
   /**
    * Notify mobile clients after host workspace state changes. This fire-and-
-   * forget hook is safe for React/Ink lifecycle callers: provider failures are
-   * logged instead of escaping as unhandled promise rejections.
+   * forget hook coalesces bursts to one in-flight scan and one pending rescan.
+   * Provider failures are logged, and a pending rescan still runs afterward.
    */
   notifyWorkspaceChanged(): void {
-    void this.broadcastWorkspaceChanged().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      LogService.getInstance().error(
-        `bridge workspace change broadcast failed: ${message}`,
-        "BridgeDaemon",
-        undefined,
-        error instanceof Error ? error : undefined,
-      );
-    });
+    if (this.workspaceBroadcastInFlight) {
+      this.workspaceBroadcastPending = true;
+      return;
+    }
+
+    this.workspaceBroadcastInFlight = true;
+    void this.drainWorkspaceBroadcastNotifications().catch(() => {});
   }
 
   async start(): Promise<{ port: number; fingerprint: string }> {
@@ -391,6 +391,30 @@ export class BridgeDaemon {
         }
       }
     });
+  }
+
+  private async drainWorkspaceBroadcastNotifications(): Promise<void> {
+    try {
+      do {
+        this.workspaceBroadcastPending = false;
+        try {
+          await this.broadcastWorkspaceChanged();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          LogService.getInstance().error(
+            `bridge workspace change broadcast failed: ${message}`,
+            "BridgeDaemon",
+            undefined,
+            error instanceof Error ? error : undefined,
+          );
+        }
+      } while (this.workspaceBroadcastPending);
+    } finally {
+      this.workspaceBroadcastInFlight = false;
+      if (this.workspaceBroadcastPending) {
+        this.notifyWorkspaceChanged();
+      }
+    }
   }
 
   private readWorkspaceSnapshot(): Promise<{
