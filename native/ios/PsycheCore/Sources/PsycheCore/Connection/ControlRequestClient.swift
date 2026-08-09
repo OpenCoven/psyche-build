@@ -147,9 +147,9 @@ public actor ControlRequestClient: ControlRequesting {
                 try await transport.send(.control(request))
             } catch {
                 guard !Task.isCancelled else { return }
-                // The request never reached the host, so nothing can answer it
-                // later and the ID is safe to hand out again.
-                await self?.fail(id, token: token, with: error, releasingID: true)
+                // A send error does not prove that no bytes reached the host.
+                // Keep the ID retired in case the host still answers it.
+                await self?.fail(id, token: token, with: error)
             }
         }
 

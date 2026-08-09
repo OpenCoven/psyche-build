@@ -176,14 +176,13 @@ final class ControlRequestClientTests: XCTestCase {
         await scheduler.fire()
         _ = try? await first
 
-        do {
-            _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
-            XCTFail("Expected the timed-out ID to remain retired")
-        } catch {
-            XCTAssertEqual(error as? ControlRequestError, .duplicateRequestID("req-1"))
-        }
-
+        let probe = CompletionProbe()
+        let second = reuseAttempt(on: client, probe: probe)
+        try await waitForReuseAttempt(on: client, probe: probe)
         let handled = await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
+        let result = await second.value
+
+        assertDuplicate(result, id: "req-1")
         XCTAssertFalse(handled)
         let sent = await transport.sentMessages
         XCTAssertEqual(sent.count, 1, "The retired ID must not start another request")
@@ -341,14 +340,13 @@ final class ControlRequestClientTests: XCTestCase {
         first.cancel()
         _ = try? await first.value
 
-        do {
-            _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
-            XCTFail("Expected the cancelled ID to remain retired")
-        } catch {
-            XCTAssertEqual(error as? ControlRequestError, .duplicateRequestID("req-1"))
-        }
-
+        let probe = CompletionProbe()
+        let second = reuseAttempt(on: client, probe: probe)
+        try await waitForReuseAttempt(on: client, probe: probe)
         let handled = await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
+        let result = await second.value
+
+        assertDuplicate(result, id: "req-1")
         XCTAssertFalse(handled)
         let sent = await transport.sentMessages
         XCTAssertEqual(sent.count, 1, "The retired ID must not start another request")
@@ -374,6 +372,31 @@ final class ControlRequestClientTests: XCTestCase {
 
         let value = try await second
         XCTAssertEqual(value, .ack(ControlAckResponse(requestID: "req-1", ok: false)))
+    }
+
+    func testAmbiguousTransportFailureRetiresIDUntilDisconnect() async throws {
+        let transport = AmbiguousFailingTransport()
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+
+        do {
+            _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(
+                requestID: "req-1"
+            )))
+            XCTFail("Expected the first transport send to fail")
+        } catch {
+            XCTAssertEqual(error as? FakeTransportError, .connectionFailed)
+        }
+
+        let probe = CompletionProbe()
+        let second = reuseAttempt(on: client, probe: probe)
+        try await waitForReuseAttempt(on: client, probe: probe)
+        let handled = await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
+        let result = await second.value
+
+        assertDuplicate(result, id: "req-1")
+        XCTAssertFalse(handled)
+        let sent = await transport.sentMessages
+        XCTAssertEqual(sent.count, 1, "An ambiguous failed send must keep its ID retired")
     }
 
     func testTransportFailureFailsTheCaller() async {
@@ -458,10 +481,94 @@ final class ControlRequestClientTests: XCTestCase {
         XCTFail("Timed out waiting for \(count) scheduler waiter(s)", file: file, line: line)
         throw TestWaitError.timedOut
     }
+
+    private func reuseAttempt(
+        on client: ControlRequestClient,
+        probe: CompletionProbe
+    ) -> Task<Result<MobileControlResponse, any Error>, Never> {
+        Task {
+            let result: Result<MobileControlResponse, any Error>
+            do {
+                result = .success(try await client.send(.workspaceSnapshot(
+                    ControlRequestIDOnly(requestID: "req-1")
+                )))
+            } catch {
+                result = .failure(error)
+            }
+            await probe.markComplete()
+            return result
+        }
+    }
+
+    private func waitForReuseAttempt(
+        on client: ControlRequestClient,
+        probe: CompletionProbe,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            let hasPendingRequest = await client.pendingRequestCount > 0
+            let isComplete = await probe.isComplete
+            if hasPendingRequest || isComplete { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for the reuse attempt", file: file, line: line)
+        throw TestWaitError.timedOut
+    }
+
+    private func assertDuplicate(
+        _ result: Result<MobileControlResponse, any Error>,
+        id: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        switch result {
+        case .success:
+            XCTFail("Expected the retired ID to remain unavailable", file: file, line: line)
+        case .failure(let error):
+            XCTAssertEqual(
+                error as? ControlRequestError,
+                .duplicateRequestID(id),
+                file: file,
+                line: line
+            )
+        }
+    }
 }
 
 private enum TestWaitError: Error {
     case timedOut
+}
+
+private actor CompletionProbe {
+    private(set) var isComplete = false
+
+    func markComplete() {
+        isComplete = true
+    }
+}
+
+private actor AmbiguousFailingTransport: PsycheTransport {
+    private(set) var sentMessages: [MobileClientMessage] = []
+
+    func connect(to endpoint: HostEndpoint) async throws {}
+
+    func disconnect() async {}
+
+    func send(_ message: MobileClientMessage) async throws {
+        sentMessages.append(message)
+        if sentMessages.count == 1 {
+            throw FakeTransportError.connectionFailed
+        }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        AsyncStream { $0.finish() }
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 /// Holds every sleep open until the test fires it, so a timeout happens
