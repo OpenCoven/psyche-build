@@ -52,6 +52,8 @@ export class BridgeDaemon {
   private ritualLauncher: ((projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>) | null = null;
   private readonly mobileGateway?: MobileControlGateway;
   private workspaceSequence = 0;
+  private lastBroadcastWorkspaceRevision: number | undefined;
+  private workspaceBroadcastQueue: Promise<void> = Promise.resolve();
   readonly serverId: string;
   readonly serverName: string;
 
@@ -77,6 +79,23 @@ export class BridgeDaemon {
    */
   setRitualLauncher(fn: ((projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>) | null): void {
     this.ritualLauncher = fn;
+  }
+
+  /**
+   * Notify mobile clients after host workspace state changes. This fire-and-
+   * forget hook is safe for React/Ink lifecycle callers: provider failures are
+   * logged instead of escaping as unhandled promise rejections.
+   */
+  notifyWorkspaceChanged(): void {
+    void this.broadcastWorkspaceChanged().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      LogService.getInstance().error(
+        `bridge workspace change broadcast failed: ${message}`,
+        "BridgeDaemon",
+        undefined,
+        error instanceof Error ? error : undefined,
+      );
+    });
   }
 
   async start(): Promise<{ port: number; fingerprint: string }> {
@@ -108,6 +127,7 @@ export class BridgeDaemon {
         name: this.serverName,
         port,
         serverId: this.serverId,
+        fingerprint: this.tls.fingerprint,
       });
     } catch {
       // Bonjour publication is best-effort — networks may be offline,
@@ -312,6 +332,7 @@ export class BridgeDaemon {
         }
         try {
           await this.broadcastStateUpdates();
+          this.notifyWorkspaceChanged();
         } catch (err) {
           s.send({ type: "error", payload: { code: "state_update_failed", message: String(err) } });
         }
@@ -341,6 +362,38 @@ export class BridgeDaemon {
         session.send({ type: "paneListChanged", payload: legacy.panes });
       }
     }
+  }
+
+  private broadcastWorkspaceChanged(): Promise<void> {
+    const broadcast = this.workspaceBroadcastQueue.then(async () => {
+      if (!this.listener || !this.opts.workspaceProvider) return;
+
+      const workspace = await this.opts.workspaceProvider();
+      if (workspace.revision === this.lastBroadcastWorkspaceRevision) return;
+
+      this.workspaceSequence += 1;
+      this.lastBroadcastWorkspaceRevision = workspace.revision;
+      const message = {
+        type: "workspaceChanged" as const,
+        payload: {
+          revision: workspace.revision,
+          sequence: this.workspaceSequence,
+          workspace,
+        },
+      };
+
+      for (const session of this.listener.activeSessions) {
+        if (
+          session.state === "authenticated"
+          && session.protocolVersion === PROTOCOL_VERSION
+        ) {
+          session.send(message);
+        }
+      }
+    });
+
+    this.workspaceBroadcastQueue = broadcast.catch(() => {});
+    return broadcast;
   }
 
   private async readLegacyState(): Promise<{ panes: PaneSnapshot[]; projects: Project[] }> {

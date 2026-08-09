@@ -372,6 +372,21 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     useHooks
   )
 
+  const workspaceNotificationsReady = useRef(false)
+  const workspaceNotificationDaemon = useRef(bridgeDaemon)
+  useEffect(() => {
+    if (workspaceNotificationDaemon.current !== bridgeDaemon) {
+      workspaceNotificationDaemon.current = bridgeDaemon
+      workspaceNotificationsReady.current = false
+    }
+    if (!bridgeDaemon || isLoading) return
+    if (!workspaceNotificationsReady.current) {
+      workspaceNotificationsReady.current = true
+      return
+    }
+    bridgeDaemon.notifyWorkspaceChanged()
+  }, [bridgeDaemon, isLoading, panes, sidebarProjects])
+
   // Check for tmux hooks preference on startup
   useEffect(() => {
     const checkHooksPreference = async () => {

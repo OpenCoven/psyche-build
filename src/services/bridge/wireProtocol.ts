@@ -26,7 +26,6 @@ import type { ActionOption, ActionResult, PaneAction } from '../../actions/types
 import type { BrowserSnapshot } from '../../utils/fileBrowser.js';
 import type {
   ReadonlyWorkspaceSnapshot,
-  WorkspaceSnapshot,
 } from '../../workspace/snapshot.js';
 
 // ---------------------------------------------------------------------------
@@ -346,7 +345,7 @@ export type MobileActionsResult = {
 export interface WorkspaceChangedPayload {
   revision: number;
   sequence: number;
-  workspace: WorkspaceSnapshot;
+  workspace: ReadonlyWorkspaceSnapshot;
 }
 
 export type MobileControlRequest =

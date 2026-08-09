@@ -6,9 +6,9 @@ import {
 
 /**
  * Publishes the running daemon as `_psyche._tcp.local.` so iOS clients on
- * the same LAN find it via Bonjour. TXT record carries protocol version
- * + serverId so iOS can dedupe and reject mismatched protocol versions
- * before connecting.
+ * the same LAN find it via Bonjour. TXT retains the legacy pre-hello
+ * protocol version while advertising every supported version, plus the
+ * server identity and public TLS certificate fingerprint.
  *
  * Failures are non-fatal — networks may be offline, services may be
  * blocked. Caller should swallow exceptions from publish().
@@ -17,7 +17,7 @@ export class BridgeBonjour {
   private bj: Bonjour | null = null;
   private service: any = null;
 
-  publish(opts: { name: string; port: number; serverId: string }): void {
+  publish(opts: { name: string; port: number; serverId: string; fingerprint: string }): void {
     this.bj = new Bonjour();
     this.service = this.bj.publish({
       name: opts.name,
@@ -28,6 +28,7 @@ export class BridgeBonjour {
         proto: String(LEGACY_PROTOCOL_VERSION),
         versions: SUPPORTED_PROTOCOL_VERSIONS.join(","),
         serverId: opts.serverId,
+        fingerprint: opts.fingerprint,
       },
     });
   }
