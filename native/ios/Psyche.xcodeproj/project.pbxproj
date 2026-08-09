@@ -9,14 +9,19 @@
 /* Begin PBXBuildFile section */
 		04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0899D0A654BB447D7D88380A /* BridgeMessages.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
+		43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */; };
+		58653704CB87919CC55070A0 /* PinnedCertificateDelegateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */; };
+		67A5EDD173464941CE47C87D /* URLSessionControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */; };
 		7063996B4489396D0B070A6A /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		77624181EF84DC60C7D0099B /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */; };
 		82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */; };
 		834FD0F2CEF75F2B4DED623D /* DemoStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */; };
 		875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */; };
+		9D716B819F7802ACB98AC881 /* PinnedCertificateDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */; };
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
 		B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208B0729C5558A164DD1556 /* CockpitView.swift */; };
+		C1186894FA78279D5FCDFE9B /* URLSessionControlTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */; };
 		C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */; };
 		C47E0519F01CE5BF77E873F8 /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */; };
@@ -77,9 +82,12 @@
 /* Begin PBXFileReference section */
 		0208B0729C5558A164DD1556 /* CockpitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CockpitView.swift; sourceTree = "<group>"; };
 		0899D0A654BB447D7D88380A /* BridgeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessages.swift; sourceTree = "<group>"; };
+		09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransport.swift; sourceTree = "<group>"; };
 		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
 		171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStore.swift; sourceTree = "<group>"; };
 		1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransport.swift; sourceTree = "<group>"; };
+		462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedCertificateDelegateTests.swift; sourceTree = "<group>"; };
+		4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransportTests.swift; sourceTree = "<group>"; };
 		56D912A6A487EC289774C800 /* PsycheApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheApp.swift; sourceTree = "<group>"; };
 		6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -87,9 +95,11 @@
 		9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = PsycheCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheAppUITests.swift; sourceTree = "<group>"; };
 		A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManagerTests.swift; sourceTree = "<group>"; };
+		B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedCertificateDelegate.swift; sourceTree = "<group>"; };
 		B25C571EEFFA869223BF5924 /* ConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManager.swift; sourceTree = "<group>"; };
 		D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
+		E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransportTests.swift; sourceTree = "<group>"; };
 		F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessagesTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -134,7 +144,9 @@
 			isa = PBXGroup;
 			children = (
 				B25C571EEFFA869223BF5924 /* ConnectionManager.swift */,
+				B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */,
 				1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */,
+				09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */,
 			);
 			path = Connection;
 			sourceTree = "<group>";
@@ -216,6 +228,9 @@
 				7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */,
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
 				F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */,
+				462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */,
+				E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */,
+				4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */,
 				158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */,
 			);
 			path = PsycheCoreTests;
@@ -371,7 +386,9 @@
 				04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */,
 				FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */,
 				ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */,
+				9D716B819F7802ACB98AC881 /* PinnedCertificateDelegate.swift in Sources */,
 				AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */,
+				67A5EDD173464941CE47C87D /* URLSessionControlTransport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -382,6 +399,9 @@
 				7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */,
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
 				82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */,
+				58653704CB87919CC55070A0 /* PinnedCertificateDelegateTests.swift in Sources */,
+				43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */,
+				C1186894FA78279D5FCDFE9B /* URLSessionControlTransportTests.swift in Sources */,
 				C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

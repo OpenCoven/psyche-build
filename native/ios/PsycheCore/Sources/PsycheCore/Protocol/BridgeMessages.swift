@@ -33,11 +33,18 @@ public struct HostEndpoint: Codable, Sendable, Equatable, Hashable {
     public let host: String
     public let port: Int
     public let route: ConnectionRoute
+    public let certificateFingerprint: String
 
-    public init(host: String, port: Int, route: ConnectionRoute = .localNetwork) {
+    public init(
+        host: String,
+        port: Int,
+        route: ConnectionRoute = .localNetwork,
+        certificateFingerprint: String
+    ) {
         self.host = host
         self.port = port
         self.route = route
+        self.certificateFingerprint = certificateFingerprint
     }
 }
 

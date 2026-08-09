@@ -1,6 +1,8 @@
 import XCTest
 @testable import PsycheCore
 
+private let testCertificateFingerprint = String(repeating: "a", count: 64)
+
 final class ConnectionManagerTests: XCTestCase {
 
     /// Fails cleanly instead of trapping when a message list is shorter than a
@@ -32,7 +34,11 @@ final class ConnectionManagerTests: XCTestCase {
             clientName: "Psyche Tests",
             token: "token"
         )
-        let endpoint = HostEndpoint(host: "psyche.local", port: 4242)
+        let endpoint = HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
 
         await manager.connect(to: endpoint)
         await manager.waitForMessageProcessorReadiness()
@@ -42,22 +48,25 @@ final class ConnectionManagerTests: XCTestCase {
         let attempts = await fake.connectionAttempts
         XCTAssertEqual(attempts, [endpoint])
         guard requireCount(sent, 3, "connect handshake") else { return }
-        guard case let .hello(hello) = sent[0] else {
+        guard case let .legacy(.hello(hello)) = sent[0] else {
             return XCTFail("First request should be hello")
         }
         XCTAssertEqual(hello.clientID, "ios-device")
-        guard case .listProjects = sent[1], case .listPanes = sent[2] else {
+        guard case .legacy(.listProjects) = sent[1],
+              case .legacy(.listPanes) = sent[2] else {
             return XCTFail("Expected initial list requests")
         }
 
-        await fake.emit(.welcome(WelcomePayload(
+        await fake.emit(.legacy(.welcome(WelcomePayload(
             serverID: "host",
             serverName: "Host",
             protocolVersion: 2,
             projectName: nil
-        )))
-        await fake.emit(.projectList([Project(id: "project", displayName: "Psyche", attentionCount: 0)]))
-        await fake.emit(.paneList([PaneSnapshot(
+        ))))
+        await fake.emit(.legacy(.projectList([
+            Project(id: "project", displayName: "Psyche", attentionCount: 0)
+        ])))
+        await fake.emit(.legacy(.paneList([PaneSnapshot(
             id: "pane",
             displayName: "Terminal",
             kind: "shell",
@@ -66,7 +75,7 @@ final class ConnectionManagerTests: XCTestCase {
             worktreePath: nil,
             agent: nil,
             status: .idle
-        )]))
+        )])))
         await manager.waitForEventDrain(after: 3)
 
         let connectedState = await manager.state
@@ -86,7 +95,11 @@ final class ConnectionManagerTests: XCTestCase {
     func testFailedTransportMovesToFailedState() async {
         let manager = ConnectionManager(transport: FakeTransport(shouldFailConnection: true))
 
-        await manager.connect(to: HostEndpoint(host: "offline", port: 1))
+        await manager.connect(to: HostEndpoint(
+            host: "offline",
+            port: 1,
+            certificateFingerprint: testCertificateFingerprint
+        ))
 
         guard case .failed = await manager.state else {
             return XCTFail("Expected failed state")
@@ -97,13 +110,17 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let manager = ConnectionManager(transport: fake)
 
-        await manager.connect(to: HostEndpoint(host: "psyche.local", port: 4242))
+        await manager.connect(to: HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        ))
         await manager.waitForMessageProcessorReadiness()
 
         let helloOnly = await fake.sentMessages
         XCTAssertEqual(helloOnly.count, 1)
         guard requireCount(helloOnly, 1, "tokenless connect") else { return }
-        guard case let .hello(hello) = helloOnly[0] else {
+        guard case let .legacy(.hello(hello)) = helloOnly[0] else {
             return XCTFail("Tokenless connection should begin with hello")
         }
         XCTAssertNil(hello.token)
@@ -113,7 +130,7 @@ final class ConnectionManagerTests: XCTestCase {
         let pairingRequest = await fake.sentMessages
         XCTAssertEqual(pairingRequest.count, 2)
         guard requireCount(pairingRequest, 2, "pair request") else { return }
-        guard case let .pair(payload) = pairingRequest[1] else {
+        guard case let .legacy(.pair(payload)) = pairingRequest[1] else {
             return XCTFail("Expected typed pair request")
         }
         XCTAssertEqual(payload, PairRequestPayload(
@@ -122,13 +139,14 @@ final class ConnectionManagerTests: XCTestCase {
             clientName: "Psyche Pairing"
         ))
 
-        await fake.emit(.pairAccepted(PairAcceptedPayload(token: "paired-token")))
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "paired-token"))))
         await manager.waitForEventDrain(after: 1)
 
         let paired = await fake.sentMessages
         XCTAssertEqual(paired.count, 4)
         guard requireCount(paired, 4, "post-pair snapshot requests") else { return }
-        guard case .listProjects = paired[2], case .listPanes = paired[3] else {
+        guard case .legacy(.listProjects) = paired[2],
+              case .legacy(.listPanes) = paired[3] else {
             return XCTFail("Pair acceptance should request initial snapshots")
         }
     }
@@ -136,8 +154,16 @@ final class ConnectionManagerTests: XCTestCase {
     func testReconnectCancelsPriorReaderBeforeProcessingNewStream() async {
         let fake = FakeTransport()
         let manager = ConnectionManager(transport: fake, token: "token")
-        let firstEndpoint = HostEndpoint(host: "first", port: 4242)
-        let secondEndpoint = HostEndpoint(host: "second", port: 4242)
+        let firstEndpoint = HostEndpoint(
+            host: "first",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
+        let secondEndpoint = HostEndpoint(
+            host: "second",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
 
         await manager.connect(to: firstEndpoint)
         await manager.waitForMessageProcessorReadiness()
@@ -151,8 +177,8 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(disconnectCount, 1)
         XCTAssertEqual(streamCount, 2)
 
-        await fake.emit(.paneList([makePane(id: "stale")]), onConnection: 0)
-        await fake.emit(.paneList([makePane(id: "current")]), onConnection: 1)
+        await fake.emit(.legacy(.paneList([makePane(id: "stale")])), onConnection: 0)
+        await fake.emit(.legacy(.paneList([makePane(id: "current")])), onConnection: 1)
         await manager.waitForEventDrain(after: 1)
 
         let paneIDs = await manager.panes.map(\.id)
@@ -163,7 +189,11 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let manager = ConnectionManager(transport: fake, token: "token")
 
-        await manager.connect(to: HostEndpoint(host: "psyche.local", port: 4242))
+        await manager.connect(to: HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        ))
         await manager.waitForMessageProcessorReadiness()
         await fake.finishIncomingMessages()
 
@@ -181,9 +211,13 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let manager = ConnectionManager(transport: fake, token: "token")
 
-        await manager.connect(to: HostEndpoint(host: "psyche.local", port: 4242))
+        await manager.connect(to: HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        ))
         await manager.waitForMessageProcessorReadiness()
-        await fake.emit(.error(ProtocolError(code: "unauthorized", message: "token rejected")))
+        await fake.emit(.legacy(.error(ProtocolError(code: "unauthorized", message: "token rejected"))))
 
         await manager.waitForState(.failed("token rejected"))
 
@@ -218,7 +252,11 @@ final class ConnectionManagerTests: XCTestCase {
             clientName: "Psyche Tests",
             token: "token"
         )
-        let endpoint = HostEndpoint(host: "psyche.local", port: 4242)
+        let endpoint = HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
 
         async let first: Void = manager.connect(to: endpoint)
         async let second: Void = manager.connect(to: endpoint)
@@ -226,7 +264,10 @@ final class ConnectionManagerTests: XCTestCase {
         await manager.waitForMessageProcessorReadiness()
 
         let sent = await fake.sentMessages
-        let helloCount = sent.filter { if case .hello = $0 { return true } else { return false } }.count
+        let helloCount = sent.filter {
+            if case .legacy(.hello) = $0 { return true }
+            return false
+        }.count
         XCTAssertEqual(helloCount, 1, "A concurrent connect must not repeat the handshake")
 
         let streams = await fake.incomingMessageStreamCount
@@ -243,13 +284,17 @@ final class ConnectionManagerTests: XCTestCase {
             clientName: "Psyche Tests"
         )
 
-        await manager.connect(to: HostEndpoint(host: "psyche.local", port: 4242))
+        await manager.connect(to: HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        ))
         await manager.waitForMessageProcessorReadiness()
         await manager.pair(code: "123456")
 
         let sent = await fake.sentMessages
         guard requireCount(sent, 2, "pair defaults") else { return }
-        guard case let .pair(payload) = sent[1] else {
+        guard case let .legacy(.pair(payload)) = sent[1] else {
             return XCTFail("Expected typed pair request")
         }
         XCTAssertEqual(payload.clientID, "ios-device")

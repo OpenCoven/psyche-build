@@ -70,7 +70,8 @@ public actor ConnectionManager {
                 await self?.markMessageProcessorReady()
                 for await message in messages {
                     guard !Task.isCancelled else { return }
-                    guard let result = await self?.handle(message, for: session) else { return }
+                    guard case let .legacy(legacyMessage) = message else { continue }
+                    guard let result = await self?.handle(legacyMessage, for: session) else { return }
                     if case let .failed(reason) = result {
                         await self?.messageProcessingEnded(for: session, reason: reason)
                         return
@@ -80,11 +81,11 @@ public actor ConnectionManager {
                 await self?.messageProcessingEnded(for: session, reason: "Connection closed unexpectedly")
             }
             await waitForMessageProcessorReadiness()
-            try await transport.send(.hello(HelloPayload(
+            try await transport.send(.legacy(.hello(HelloPayload(
                 clientID: clientID,
                 clientName: clientName,
                 token: token
-            )))
+            ))))
             try await requestInitialSnapshotsIfAuthorized()
         } catch {
             await tearDownActiveConnection()
@@ -110,11 +111,11 @@ public actor ConnectionManager {
         guard hasActiveTransport else { return }
 
         do {
-            try await transport.send(.pair(PairRequestPayload(
+            try await transport.send(.legacy(.pair(PairRequestPayload(
                 code: code,
                 clientID: clientID ?? self.clientID,
                 clientName: clientName ?? self.clientName
-            )))
+            ))))
         } catch {
             await tearDownActiveConnection()
             transition(to: .failed(error.localizedDescription))
@@ -185,8 +186,8 @@ public actor ConnectionManager {
 
     private func requestInitialSnapshotsIfAuthorized() async throws {
         guard token?.isEmpty == false, !requestedInitialSnapshots else { return }
-        try await transport.send(.listProjects(EmptyPayload()))
-        try await transport.send(.listPanes(EmptyPayload()))
+        try await transport.send(.legacy(.listProjects(EmptyPayload())))
+        try await transport.send(.legacy(.listPanes(EmptyPayload())))
         requestedInitialSnapshots = true
     }
 
