@@ -870,11 +870,15 @@ fn normalize_sessions(
 }
 
 fn default_project_scopes(requested_roots: &[PathBuf]) -> Vec<CovenProjectScope> {
+    let union = requested_roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     requested_roots
         .iter()
         .map(|root| CovenProjectScope {
             project_root: root.to_string_lossy().into_owned(),
-            worktree_roots: Vec::new(),
+            worktree_roots: union.clone(),
         })
         .collect()
 }
@@ -1800,6 +1804,31 @@ mod tests {
         );
         assert_eq!(
             sessions[1].cwd.as_deref(),
+            Some(
+                linked_worktree
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_flat_roots_preserve_union_cwd_authorization() {
+        let tree = TempTree::new("legacy-flat-cwd");
+        let project = tree.directory("project");
+        let linked_worktree = tree.directory("linked-worktree");
+        let requested = vec![project.clone(), linked_worktree.clone()];
+        let payload = json!([
+            { "id": "legacy-linked", "projectRoot": project, "cwd": linked_worktree }
+        ]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "legacy-linked");
+        assert_eq!(
+            sessions[0].cwd.as_deref(),
             Some(
                 linked_worktree
                     .canonicalize()
