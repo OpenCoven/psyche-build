@@ -165,9 +165,11 @@ The cutover preserved exact v0 wire behavior. Two patterns matter:
 Two source-boundary tests in `__tests__/daemon/controlAdapter.test.ts` read
 `src/daemon/index.ts` and assert it does not call mutation effects directly:
 
-- **Pane mutations** — forbids
-  `/this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(/`
-  and the direct `updatePaneMeta(` call.
+- **Pane mutations** — a single forbidden pattern:
+  `/this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(|updatePaneMeta\(/`.
+  The `updatePaneMeta\(` alternative is part of this same regex (the re-export
+  `export { updatePaneMeta } from './bridge.js'` has no paren, so it does not
+  match).
 - **Coven mutations** — forbids `launchProjectCovenSession(`,
   `openProjectCovenSession(`, `routeProjectCovenSessionCapability(`,
   `buildDesktopUseQuickInput(`, and `this.deps.capabilityRouter`; while asserting
