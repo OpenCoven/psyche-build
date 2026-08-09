@@ -129,9 +129,10 @@ public actor ControlRequestClient: ControlRequesting {
         let waiting = pending
         pending.removeAll()
 
-        for (id, request) in waiting {
-            releaseReservation(id, token: request.token)
-        }
+        // The connection that could have answered these is gone, so nothing
+        // the host still owes can arrive on it. That retires every poisoned ID
+        // along with the pending requests.
+        reservations.removeAll()
         for request in waiting.values {
             request.transmission?.cancel()
             request.timeout?.cancel()
@@ -146,7 +147,9 @@ public actor ControlRequestClient: ControlRequesting {
                 try await transport.send(.control(request))
             } catch {
                 guard !Task.isCancelled else { return }
-                await self?.fail(id, token: token, with: error)
+                // The request never reached the host, so nothing can answer it
+                // later and the ID is safe to hand out again.
+                await self?.fail(id, token: token, with: error, releasingID: true)
             }
         }
 
@@ -158,20 +161,29 @@ public actor ControlRequestClient: ControlRequesting {
             } catch {
                 return
             }
+            // A timeout means this client gave up waiting, not that the host
+            // gave up working. It may still answer, so the ID stays retired.
             await self?.fail(id, token: token, with: ControlRequestError.timedOut(id))
         }
         pending[id]?.transmission = transmission
         pending[id]?.timeout = timeoutTask
     }
 
-    private func fail(_ id: String, token: UInt64, with error: any Error) {
+    private func fail(
+        _ id: String,
+        token: UInt64,
+        with error: any Error,
+        releasingID: Bool = false
+    ) {
         guard pending[id]?.token == token else { return }
-        _ = finish(id, with: .failure(error))
+        _ = finish(id, with: .failure(error), releasingID: releasingID)
     }
 
+    /// Cancellation abandons the wait, but the request is already on its way to
+    /// the host, so the ID stays retired for the rest of this connection.
     private func cancel(_ id: String, token: UInt64) {
         guard pending[id]?.token == token else { return }
-        _ = finish(id, with: .failure(CancellationError()))
+        _ = finish(id, with: .failure(CancellationError()), releasingID: false)
     }
 
     /// The single place a continuation is resumed. Removing first means a
@@ -182,16 +194,20 @@ public actor ControlRequestClient: ControlRequesting {
         _ id: String,
         with result: Result<MobileControlResponse, any Error>
     ) -> Bool {
-        finish(id, with: result)
+        // The host answered, so this ID is settled and free to reuse.
+        finish(id, with: result, releasingID: true)
     }
 
     @discardableResult
     private func finish(
         _ id: String,
-        with result: Result<MobileControlResponse, any Error>
+        with result: Result<MobileControlResponse, any Error>,
+        releasingID: Bool
     ) -> Bool {
         guard let request = pending.removeValue(forKey: id) else { return false }
-        releaseReservation(id, token: request.token)
+        if releasingID {
+            releaseReservation(id, token: request.token)
+        }
         request.transmission?.cancel()
         request.timeout?.cancel()
         request.continuation.resume(with: result)

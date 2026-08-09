@@ -164,6 +164,31 @@ final class ControlRequestClientTests: XCTestCase {
         XCTAssertFalse(handled)
     }
 
+    func testTimedOutIDCannotBeReusedBeforeDisconnect() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let scheduler = ManualScheduler()
+        let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+
+        async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+        try await waitForPendingRequest(on: client)
+        try await waitForScheduler(on: scheduler, count: 1)
+        await scheduler.fire()
+        _ = try? await first
+
+        do {
+            _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+            XCTFail("Expected the timed-out ID to remain retired")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .duplicateRequestID("req-1"))
+        }
+
+        let handled = await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
+        XCTAssertFalse(handled)
+        let sent = await transport.sentMessages
+        XCTAssertEqual(sent.count, 1, "The retired ID must not start another request")
+    }
+
     func testDuplicateRequestIDIsRejectedWhileTheFirstIsInFlight() async throws {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
@@ -302,6 +327,53 @@ final class ControlRequestClientTests: XCTestCase {
         let remaining = await client.pendingRequestCount
         XCTAssertEqual(remaining, 0)
         try await waitForScheduler(on: scheduler, count: 0)
+    }
+
+    func testCancelledIDCannotBeReusedBeforeDisconnect() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        let first = Task {
+            try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+        }
+        try await waitForPendingRequest(on: client)
+
+        first.cancel()
+        _ = try? await first.value
+
+        do {
+            _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+            XCTFail("Expected the cancelled ID to remain retired")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .duplicateRequestID("req-1"))
+        }
+
+        let handled = await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
+        XCTAssertFalse(handled)
+        let sent = await transport.sentMessages
+        XCTAssertEqual(sent.count, 1, "The retired ID must not start another request")
+    }
+
+    func testFailAllAllowsRetiredIDReuseOnTheNextConnection() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let scheduler = ManualScheduler()
+        let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+
+        async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+        try await waitForPendingRequest(on: client)
+        try await waitForScheduler(on: scheduler, count: 1)
+        await scheduler.fire()
+        _ = try? await first
+
+        await client.failAll()
+
+        async let second = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
+        try await waitForPendingRequest(on: client)
+        await client.handle(.ack(ControlAckResponse(requestID: "req-1", ok: false)))
+
+        let value = try await second
+        XCTAssertEqual(value, .ack(ControlAckResponse(requestID: "req-1", ok: false)))
     }
 
     func testTransportFailureFailsTheCaller() async {
