@@ -226,7 +226,9 @@
   function covenSessionsForProject(project) {
     var roots = [project.root].concat(
       (project.worktrees || []).map(function (worktree) { return worktree.path; })
-    );
+    ).filter(function (root, index, candidates) {
+      return root && candidates.indexOf(root) === index;
+    });
     return roots.reduce(function (sessions, root) {
       return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
     }, []);
@@ -1810,7 +1812,7 @@
   }
 
   function covenInlineState(discovery) {
-    if (!discovery || discovery.phase === "ready") return null;
+    if (!discovery || discovery.phase === "idle" || discovery.phase === "ready") return null;
     var message = discovery.phase === "loading"
       ? "Loading Coven sessions"
       : (discovery.message || "Coven sessions unavailable");
@@ -1826,6 +1828,7 @@
     var currentSearchQuery = sessionFilter;
     var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
+    var inlineState = covenInlineState(covenDiscovery);
 
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
@@ -1835,7 +1838,6 @@
       var railModel = PsycheSessions.buildProjectRailModel(
         project, localRows, remoteRows, currentSearchQuery
       );
-      var inlineState = covenInlineState(covenDiscovery);
       var visibleWorktrees = railModel.worktrees.filter(function (entry) {
         return entry.rows.length > 0;
       });
@@ -1854,10 +1856,10 @@
           rows: railModel.projectRows,
         });
       }
-      if (visibleWorktrees.length === 0 && !inlineState) return;
+      if (visibleWorktrees.length === 0) return;
       matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
         return count + entry.rows.length;
-      }, 0) + (inlineState ? 1 : 0);
+      }, 0);
 
       var group = document.createElement("div");
       group.className = "session-group";
@@ -2071,15 +2073,16 @@
         group.appendChild(worktreeGroup);
       });
 
-      if (inlineState) {
-        var inline = document.createElement("div");
-        inline.className = "session-inline-state " + inlineState.className;
-        inline.textContent = inlineState.message;
-        group.appendChild(inline);
-      }
-
       sessionListEl.appendChild(group);
     });
+
+    if (inlineState) {
+      var inline = document.createElement("div");
+      inline.className = "session-inline-state " + inlineState.className;
+      inline.textContent = inlineState.message;
+      sessionListEl.appendChild(inline);
+      matched += 1;
+    }
 
     if (matched === 0) {
       var empty = document.createElement("div");
@@ -2136,7 +2139,8 @@
       if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
       var items = Array.prototype.filter.call(
         sessionListEl.querySelectorAll(
-          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, .session-close"
+          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, " +
+          ".session-coven-row, .session-close"
         ),
         function (item) { return item.offsetParent !== null; }
       );
