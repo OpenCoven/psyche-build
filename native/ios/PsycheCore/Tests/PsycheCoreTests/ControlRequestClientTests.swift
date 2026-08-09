@@ -338,12 +338,14 @@ final class ControlRequestClientTests: XCTestCase {
 
     func testGeneratedRequestIDsAreUnique() async {
         let client = ControlRequestClient(transport: FakeTransport(), scheduler: ManualScheduler())
+        var ids: Set<String> = []
 
-        let first = await client.nextRequestID()
-        let second = await client.nextRequestID()
+        for _ in 0..<256 {
+            ids.insert(await client.nextRequestID())
+        }
 
-        XCTAssertNotEqual(first, second)
-        XCTAssertFalse(first.isEmpty)
+        XCTAssertEqual(ids.count, 256)
+        XCTAssertFalse(ids.contains(""))
     }
 
     private func endpoint() -> HostEndpoint {
@@ -368,6 +370,7 @@ final class ControlRequestClientTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Timed out waiting for \(count) pending request(s)", file: file, line: line)
+        throw TestWaitError.timedOut
     }
 
     private func waitForScheduler(
@@ -381,7 +384,12 @@ final class ControlRequestClientTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Timed out waiting for \(count) scheduler waiter(s)", file: file, line: line)
+        throw TestWaitError.timedOut
     }
+}
+
+private enum TestWaitError: Error {
+    case timedOut
 }
 
 /// Holds every sleep open until the test fires it, so a timeout happens
