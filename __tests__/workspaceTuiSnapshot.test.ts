@@ -1271,7 +1271,100 @@ describe('TUI workspace snapshot adapter', () => {
       .toContainEqual(expect.objectContaining({ id: 'child-session' }));
     expect(covenOnly.worktrees.find((candidate) => candidate.path === externalWorktree)?.panes)
       .toContainEqual(expect.objectContaining({ id: 'external-session' }));
-    expect(loadedRoots).toEqual(['/repo/primary', externalWorktree]);
+    expect(loadedRoots[0]).toBe('/repo/primary');
+    expect(loadedRoots.slice(1)).toEqual(expect.arrayContaining([
+      mainRoot,
+      externalWorktree,
+    ]));
+    expect(loadedRoots).toHaveLength(3);
+  });
+
+  it('starts unrelated missing-root discovery concurrently', async () => {
+    const missingRoots = ['/repo/slow-a', '/repo/slow-b'];
+    const startedRoots: string[] = [];
+    const completedRoots: string[] = [];
+    const releaseSlowLoads: Array<() => void> = [];
+    const slowLoadGates = missingRoots.map(() => new Promise<void>((resolve) => {
+      releaseSlowLoads.push(resolve);
+    }));
+    let markBothStarted = () => {};
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    const provider = createTuiWorkspaceProvider({
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: () => [],
+      covenSessionsByProject: () => new Map(missingRoots.map((projectRoot, index) => [
+        projectRoot,
+        [session({
+          id: `slow-session-${index}`,
+          projectRoot,
+        })],
+      ])),
+      loadWorktrees: async (projectRoot) => {
+        if (projectRoot === '/repo/primary') {
+          return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+        }
+        startedRoots.push(projectRoot);
+        if (startedRoots.length === missingRoots.length) markBothStarted();
+        await slowLoadGates[missingRoots.indexOf(projectRoot)];
+        completedRoots.push(projectRoot);
+        return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+      },
+    });
+
+    const pendingSnapshot = provider();
+    const startedConcurrently = await Promise.race([
+      bothStarted.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+    releaseSlowLoads[1]();
+    releaseSlowLoads[0]();
+    const snapshot = await pendingSnapshot;
+
+    expect(startedConcurrently).toBe(true);
+    expect(startedRoots).toEqual(missingRoots);
+    expect(completedRoots).toEqual([...missingRoots].reverse());
+    expect(snapshot.projects.map((candidate) => candidate.root)).toEqual([
+      '/repo/primary',
+      ...missingRoots,
+    ]);
+  });
+
+  it('never exceeds the missing-root discovery concurrency bound', async () => {
+    const missingRoots = Array.from(
+      { length: 8 },
+      (_, index) => `/repo/slow-${index}`,
+    );
+    let activeLoads = 0;
+    let maxActiveLoads = 0;
+    const provider = createTuiWorkspaceProvider({
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: () => [],
+      covenSessionsByProject: () => new Map(missingRoots.map((projectRoot, index) => [
+        projectRoot,
+        [session({
+          id: `slow-session-${index}`,
+          projectRoot,
+        })],
+      ])),
+      loadWorktrees: async (projectRoot) => {
+        if (projectRoot === '/repo/primary') {
+          return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+        }
+        activeLoads += 1;
+        maxActiveLoads = Math.max(maxActiveLoads, activeLoads);
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        activeLoads -= 1;
+        return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+      },
+    });
+
+    await provider();
+
+    expect(maxActiveLoads).toBe(2);
   });
 
   it('bounds provider discovery fan-out across aliases while loading unrelated roots', async () => {
@@ -1316,6 +1409,7 @@ describe('TUI workspace snapshot adapter', () => {
           return [worktree(projectRoot, { isMain: true, branch: 'main' })];
         }
         if (aliasRoots.includes(projectRoot)) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
           return [
             worktree(mainRoot, { isMain: true, branch: 'main' }),
             ...aliasRoots.slice(1).map((worktreeRoot) => worktree(worktreeRoot, {
@@ -1352,13 +1446,15 @@ describe('TUI workspace snapshot adapter', () => {
       mainRoot,
       ...unrelatedRoots,
     ]);
-    expect(loadedRoots.filter((projectRoot) => aliasRoots.includes(projectRoot))).toHaveLength(1);
+    const aliasLoads = loadedRoots.filter((projectRoot) => aliasRoots.includes(projectRoot));
+    expect(aliasLoads.length).toBeGreaterThan(0);
+    expect(aliasLoads.length).toBeLessThanOrEqual(2);
     expect(loadedRoots).toEqual(expect.arrayContaining([
       '/repo/primary',
       '/repo/sidebar',
       ...unrelatedRoots,
     ]));
-    expect(loadedRoots).toHaveLength(5);
+    expect(loadedRoots).toHaveLength(4 + aliasLoads.length);
     expect(project(first, mainRoot).worktrees.find(
       (candidate) => candidate.path === '/external/coven-only-review',
     )).toMatchObject({

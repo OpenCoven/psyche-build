@@ -64,6 +64,8 @@ interface WorktreeCacheEntry {
   value: readonly GitWorktreeSnapshotInput[];
 }
 
+const WORKTREE_DISCOVERY_CONCURRENCY = 2;
+
 const COVEN_SESSION_STATUSES = new Set<CovenSessionSummary['status']>([
   'starting',
   'running',
@@ -263,62 +265,54 @@ async function loadProviderWorktrees(
   cacheTtlMs: number,
   onError: ((projectRoot: string, error: unknown) => void) | undefined,
 ): Promise<Map<string, readonly GitWorktreeSnapshotInput[]>> {
-  const entries: Array<readonly [string, readonly GitWorktreeSnapshotInput[]]> = [];
-  const batchCache = new Map<string, readonly GitWorktreeSnapshotInput[]>();
-  const requestedRoots = new Set<string>();
+  const requestedRoots = [...new Set(projectRoots.map(normalizeRoot))];
+  const entries: Array<readonly [string, readonly GitWorktreeSnapshotInput[]]> =
+    requestedRoots.map((projectRoot) => [projectRoot, []]);
+  let nextIndex = 0;
 
-  for (const candidateRoot of projectRoots) {
-    const projectRoot = normalizeRoot(candidateRoot);
-    if (requestedRoots.has(projectRoot)) continue;
-    requestedRoots.add(projectRoot);
-
-    let cachedValue = batchCache.get(projectRoot);
-    if (!cachedValue) {
+  const worker = async (): Promise<void> => {
+    while (nextIndex < requestedRoots.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const projectRoot = requestedRoots[index];
       const cached = cache.get(projectRoot);
+      let cachedValue: readonly GitWorktreeSnapshotInput[] | undefined;
       if (cached && cached.expiresAt > Date.now()) {
         cachedValue = cached.value;
-        cacheWorktreeAliases(batchCache, projectRoot, cachedValue);
       }
+
+      if (!cachedValue) {
+        let value: readonly GitWorktreeSnapshotInput[];
+        try {
+          value = await loadWorktrees(projectRoot);
+        } catch (error) {
+          if (!onError) throw error;
+          onError(projectRoot, error);
+          value = [];
+        }
+
+        cachedValue = value.map((worktree) => ({
+          ...worktree,
+          path: normalizeRoot(worktree.path),
+        }));
+        const entry = {
+          expiresAt: Date.now() + cacheTtlMs,
+          value: cachedValue,
+        };
+        for (const aliasRoot of worktreeAliasRoots(projectRoot, cachedValue)) {
+          cache.set(aliasRoot, entry);
+        }
+      }
+
+      entries[index] = [projectRoot, cachedValue];
     }
+  };
 
-    if (!cachedValue) {
-      let value: readonly GitWorktreeSnapshotInput[];
-      try {
-        value = await loadWorktrees(projectRoot);
-      } catch (error) {
-        if (!onError) throw error;
-        onError(projectRoot, error);
-        value = [];
-      }
-
-      cachedValue = value.map((worktree) => ({
-        ...worktree,
-        path: normalizeRoot(worktree.path),
-      }));
-      const entry = {
-        expiresAt: Date.now() + cacheTtlMs,
-        value: cachedValue,
-      };
-      for (const aliasRoot of worktreeAliasRoots(projectRoot, cachedValue)) {
-        batchCache.set(aliasRoot, cachedValue);
-        cache.set(aliasRoot, entry);
-      }
-    }
-
-    entries.push([projectRoot, cachedValue]);
-  }
-
+  await Promise.all(Array.from(
+    { length: Math.min(WORKTREE_DISCOVERY_CONCURRENCY, requestedRoots.length) },
+    worker,
+  ));
   return new Map(entries);
-}
-
-function cacheWorktreeAliases(
-  cache: Map<string, readonly GitWorktreeSnapshotInput[]>,
-  projectRoot: string,
-  worktrees: readonly GitWorktreeSnapshotInput[],
-): void {
-  for (const aliasRoot of worktreeAliasRoots(projectRoot, worktrees)) {
-    cache.set(aliasRoot, worktrees);
-  }
 }
 
 function worktreeAliasRoots(
