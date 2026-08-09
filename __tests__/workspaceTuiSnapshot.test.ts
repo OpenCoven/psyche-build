@@ -163,7 +163,7 @@ describe('TUI workspace snapshot adapter', () => {
     const primary = project(snapshot, '/repo/primary');
     const secondary = project(snapshot, '/repo/secondary');
 
-    expect(primary.runningCount).toBe(2);
+    expect(primary.runningCount).toBe(1);
     expect(primary.attentionCount).toBe(0);
     expect(primary.worktrees.map((candidate) => ({
       path: candidate.path,
@@ -185,7 +185,7 @@ describe('TUI workspace snapshot adapter', () => {
       cwd: '/repo/primary/.psyche/worktrees/feature',
       title: 'feature-shell',
       kind: 'terminal',
-      status: 'running',
+      status: 'unknown',
     });
 
     expect(secondary.runningCount).toBe(0);
@@ -202,7 +202,39 @@ describe('TUI workspace snapshot adapter', () => {
     });
   });
 
+  it('maps missing pane status to unknown without inflating running counts', () => {
+    const snapshot = buildTuiWorkspaceSnapshot({
+      revision: 12,
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: [
+        pane({
+          id: 'shell-pane',
+          slug: 'shell-pane',
+          paneId: '%2',
+          projectRoot: '/repo/primary',
+          type: 'shell',
+        }),
+      ],
+      worktreesByProjectRoot: new Map([
+        ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+      ]),
+    });
+
+    const primary = project(snapshot, '/repo/primary');
+    expect(primary.runningCount).toBe(0);
+    expect(primary.worktrees[0].panes).toEqual([
+      expect.objectContaining({
+        id: '%2',
+        kind: 'terminal',
+        status: 'unknown',
+      }),
+    ]);
+  });
+
   it('keeps panes on unknown worktrees recoverable at the project level and omits invalid activity timestamps', () => {
+    const outOfRangeLastAgentCheck = 8_640_000_000_000_001;
+
     const snapshot = buildTuiWorkspaceSnapshot({
       revision: 13,
       primaryProjectRoot: '/repo/primary',
@@ -236,6 +268,15 @@ describe('TUI workspace snapshot adapter', () => {
           agentStatus: 'idle',
           lastAgentCheck: 0,
         }),
+        pane({
+          id: 'overflow-timestamp-pane',
+          slug: 'overflow-timestamp',
+          paneId: '%4',
+          projectRoot: '/repo/primary',
+          agent: 'codex',
+          agentStatus: 'idle',
+          lastAgentCheck: outOfRangeLastAgentCheck,
+        }),
       ],
       worktreesByProjectRoot: new Map([
         ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
@@ -252,6 +293,7 @@ describe('TUI workspace snapshot adapter', () => {
     expect(primary.worktrees[0].panes).toEqual([
       expect.objectContaining({ id: '%1', lastActivity: undefined }),
       expect.objectContaining({ id: '%3', lastActivity: undefined }),
+      expect.objectContaining({ id: '%4', lastActivity: undefined }),
     ]);
   });
 
@@ -340,5 +382,69 @@ describe('TUI workspace snapshot adapter', () => {
     }));
     expect(sidebar.worktrees[0].panes.map((candidate) => candidate.id)).toEqual(['%1', '%2']);
     expect(sidebar.worktrees[1].panes.filter((candidate) => candidate.id === 'session-b')).toHaveLength(1);
+  });
+
+  it('selects the same duplicate Coven record regardless of grouped-map order', () => {
+    const duplicatePrimary = session({
+      id: 'session-dup',
+      projectRoot: '/repo/primary',
+      cwd: '/repo/primary',
+      harness: 'zeta',
+      title: 'Zulu',
+      status: 'waiting',
+      updatedAt: '2026-08-09T01:02:03.000Z',
+    });
+    const duplicateSidebar = session({
+      id: 'session-dup',
+      projectRoot: '/repo/sidebar',
+      cwd: '/repo/sidebar/.psyche/worktrees/beta',
+      harness: 'alpha',
+      title: 'Alpha',
+      status: 'running',
+      updatedAt: '2026-08-09T01:02:03.000Z',
+    });
+
+    const build = (groupedSessions: Map<string, CovenSessionSummary[]>) => (
+      buildTuiWorkspaceSnapshot({
+        revision: 15,
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        sidebarProjects: [{ projectRoot: '/repo/sidebar', projectName: 'Sidebar' }],
+        panes: [],
+        covenSessionsByProject: groupedSessions,
+        worktreesByProjectRoot: new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/sidebar', [
+            worktree('/repo/sidebar', { isMain: true, branch: 'main' }),
+            worktree('/repo/sidebar/.psyche/worktrees/beta', { branch: 'beta' }),
+          ]],
+        ]),
+      })
+    );
+
+    const ordered = build(new Map([
+      ['/repo/primary', [duplicatePrimary]],
+      ['/repo/sidebar', [duplicateSidebar]],
+    ]));
+    const reversed = build(new Map([
+      ['/repo/sidebar', [duplicateSidebar]],
+      ['/repo/primary', [duplicatePrimary]],
+    ]));
+
+    expect(ordered).toEqual(reversed);
+
+    const primary = project(ordered, '/repo/primary');
+    const sidebar = project(ordered, '/repo/sidebar');
+
+    expect(primary.worktrees[0].panes).toContainEqual(expect.objectContaining({
+      id: 'session-dup',
+      kind: 'coven-session',
+      title: 'Zulu',
+      agent: 'zeta',
+      status: 'waiting',
+      needsAttention: true,
+      lastActivity: '2026-08-09T01:02:03.000Z',
+    }));
+    expect(sidebar.worktrees[1].panes.filter((candidate) => candidate.id === 'session-dup')).toHaveLength(0);
   });
 });

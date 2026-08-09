@@ -178,7 +178,7 @@ describe('workspace snapshot', () => {
           id: 'coven-1',
           kind: 'coven-session',
           agent: 'claude',
-          lastActivity: '2026-08-04T00:01:00Z',
+          lastActivity: '2026-08-04T00:01:00.000Z',
         },
       ],
     });
@@ -189,5 +189,61 @@ describe('workspace snapshot', () => {
         recoverability: 'missing-worktree',
       }),
     ]);
+  });
+
+  it('normalizes valid Coven updatedAt timestamps and omits invalid ones', () => {
+    const snapshot = buildWorkspaceSnapshot({
+      revision: 8,
+      projects: [
+        {
+          id: 'project-1',
+          root: '/repo',
+          title: 'psyche-build',
+          worktrees: parseGitWorktreePorcelain([
+            'worktree /repo',
+            'HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'branch refs/heads/main',
+            '',
+          ].join('\n')),
+          panes: [],
+          covenSessions: [
+            {
+              id: 'valid-coven',
+              projectRoot: '/repo',
+              cwd: '/repo',
+              harness: 'claude',
+              title: 'Valid',
+              status: 'running',
+              createdAt: '2026-08-04T00:00:00Z',
+              updatedAt: '2026-08-04T00:01:00Z',
+            },
+            {
+              id: 'invalid-coven',
+              projectRoot: '/repo',
+              cwd: '/repo',
+              harness: 'codex',
+              title: 'Invalid',
+              status: 'waiting',
+              createdAt: '2026-08-04T00:00:00Z',
+              updatedAt: 'not-a-date',
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(snapshot.projects[0].worktrees[0].panes).toHaveLength(2);
+    expect(snapshot.projects[0].worktrees[0].panes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'invalid-coven',
+        kind: 'coven-session',
+        lastActivity: undefined,
+      }),
+      expect.objectContaining({
+        id: 'valid-coven',
+        kind: 'coven-session',
+        lastActivity: '2026-08-04T00:01:00.000Z',
+      }),
+    ]));
   });
 });

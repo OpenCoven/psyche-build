@@ -4,6 +4,8 @@ import type { CovenSessionSummary } from '../daemon/protocol.js';
 import type { PsychePane, SidebarProject } from '../types.js';
 import {
   buildWorkspaceSnapshot,
+  normalizeIsoDateString,
+  normalizeIsoEpochMilliseconds,
   readProjectWorktrees,
   type GitWorktreeSnapshotInput,
   type WorkspacePaneInput,
@@ -32,8 +34,8 @@ export function buildTuiWorkspaceSnapshot(
   input: BuildTuiWorkspaceSnapshotInput,
 ): WorkspaceSnapshot {
   const primaryRoot = normalizeRoot(input.primaryProjectRoot);
-  const projects = collectProjects(input, primaryRoot);
-  const seenSessions = new Set<string>();
+  const covenSessionsByProject = deduplicateCovenSessionsByProject(input.covenSessionsByProject);
+  const projects = collectProjects(input, primaryRoot, covenSessionsByProject);
 
   return buildWorkspaceSnapshot({
     revision: input.revision,
@@ -43,7 +45,7 @@ export function buildTuiWorkspaceSnapshot(
       title: project.title,
       worktrees: readWorktreesForProject(project.root, input),
       panes: projectPanes(project.root, input.panes, primaryRoot),
-      covenSessions: projectCovenSessions(project.root, input.covenSessionsByProject, seenSessions),
+      covenSessions: projectCovenSessions(project.root, covenSessionsByProject),
     })),
   });
 }
@@ -51,6 +53,7 @@ export function buildTuiWorkspaceSnapshot(
 function collectProjects(
   input: BuildTuiWorkspaceSnapshotInput,
   primaryRoot: string,
+  covenSessionsByProject: ReadonlyMap<string, readonly CovenSessionSummary[]>,
 ): ProjectSeed[] {
   const seeds = new Map<string, ProjectSeed>();
   const primaryTitle = normalizeProjectTitle(input.primaryProjectName, primaryRoot);
@@ -80,13 +83,13 @@ function collectProjects(
     );
   }
 
-  for (const projectRoot of input.covenSessionsByProject?.keys() ?? []) {
+  for (const projectRoot of covenSessionsByProject.keys()) {
     upsertProject(seeds, normalizeRoot(projectRoot), undefined, false);
   }
 
   return [...seeds.values()].sort((left, right) => {
     if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
-    return left.title.localeCompare(right.title) || left.root.localeCompare(right.root);
+    return compareStrings(left.title, right.title) || compareStrings(left.root, right.root);
   });
 }
 
@@ -153,46 +156,25 @@ function projectPanes(
       projectRoot: pane.projectRoot?.trim() ? normalizeRoot(pane.projectRoot) : primaryRoot,
     }))
     .filter((entry) => entry.projectRoot === projectRoot)
-    .sort((left, right) => left.pane.paneId.localeCompare(right.pane.paneId) || left.index - right.index)
+    .sort((left, right) => compareStrings(left.pane.paneId, right.pane.paneId) || left.index - right.index)
     .map(({ pane, projectRoot: paneProjectRoot }) => ({
       id: pane.paneId,
       cwd: pane.worktreePath?.trim() ? normalizeRoot(pane.worktreePath) : paneProjectRoot,
       title: pane.displayName?.trim() || pane.slug || pane.id,
       kind: pane.agent ? 'agent' : 'terminal',
       agent: pane.agent,
-      status: pane.agentStatus ?? 'running',
+      status: pane.agentStatus ?? 'unknown',
       needsAttention: pane.needsAttention,
-      lastActivity: normalizePaneLastActivity(pane.lastAgentCheck),
+      lastActivity: normalizeIsoEpochMilliseconds(pane.lastAgentCheck),
     }));
 }
 
 function projectCovenSessions(
   projectRoot: string,
-  grouped: ReadonlyMap<string, readonly CovenSessionSummary[]> | undefined,
-  seenSessions: Set<string>,
+  grouped: ReadonlyMap<string, readonly CovenSessionSummary[]>,
 ): CovenSessionSummary[] {
-  if (!grouped) return [];
-  const sessions = getResolvedMapValue(grouped, projectRoot) ?? [];
-
-  return sessions
-    .filter((session) => {
-      if (seenSessions.has(session.id)) return false;
-      seenSessions.add(session.id);
-      return true;
-    })
-    .map((session) => ({
-      ...session,
-      projectRoot,
-      cwd: session.cwd?.trim() ? normalizeRoot(session.cwd) : undefined,
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function normalizePaneLastActivity(value: number | undefined): string | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return undefined;
-  }
-  return new Date(value).toISOString();
+  return [...(getResolvedMapValue(grouped, projectRoot) ?? [])]
+    .sort((left, right) => compareStrings(left.id, right.id));
 }
 
 function normalizeRoot(projectRoot: string): string {
@@ -206,4 +188,93 @@ function normalizeProjectTitle(title: string | undefined, projectRoot: string): 
 
 function fallbackProjectTitle(projectRoot: string): string {
   return path.basename(projectRoot) || 'project';
+}
+
+function deduplicateCovenSessionsByProject(
+  grouped: ReadonlyMap<string, readonly CovenSessionSummary[]> | undefined,
+): Map<string, CovenSessionSummary[]> {
+  if (!grouped) return new Map<string, CovenSessionSummary[]>();
+  const winners = new Map<string, CovenSessionSummary>();
+
+  for (const sessions of grouped.values()) {
+    for (const session of sessions) {
+      const normalized = normalizeCovenSession(session);
+      const current = winners.get(normalized.id);
+      if (!current || compareCovenSessionDuplicates(normalized, current) < 0) {
+        winners.set(normalized.id, normalized);
+      }
+    }
+  }
+
+  const byProject = new Map<string, CovenSessionSummary[]>();
+  for (const session of [...winners.values()].sort((left, right) => compareStrings(left.id, right.id))) {
+    const projectSessions = byProject.get(session.projectRoot) ?? [];
+    projectSessions.push(session);
+    byProject.set(session.projectRoot, projectSessions);
+  }
+
+  return byProject;
+}
+
+function normalizeCovenSession(session: CovenSessionSummary): CovenSessionSummary {
+  return {
+    ...session,
+    projectRoot: normalizeRoot(session.projectRoot),
+    cwd: session.cwd?.trim() ? normalizeRoot(session.cwd) : undefined,
+  };
+}
+
+/**
+ * Duplicate Coven IDs must resolve the same way regardless of grouped-map
+ * order. Prefer the newest valid updatedAt, then compare normalized
+ * projectRoot/cwd/title/harness/status fields, then the remaining normalized
+ * record payload as a stable final tie-breaker.
+ */
+function compareCovenSessionDuplicates(
+  left: CovenSessionSummary,
+  right: CovenSessionSummary,
+): number {
+  const updatedAtDifference = compareNumbersDescending(
+    updatedAtSortValue(left.updatedAt),
+    updatedAtSortValue(right.updatedAt),
+  );
+  if (updatedAtDifference) return updatedAtDifference;
+
+  const normalizedLeft = normalizedCovenSessionFields(left);
+  const normalizedRight = normalizedCovenSessionFields(right);
+
+  return compareStrings(normalizedLeft.projectRoot, normalizedRight.projectRoot)
+    || compareStrings(normalizedLeft.cwd, normalizedRight.cwd)
+    || compareStrings(normalizedLeft.title, normalizedRight.title)
+    || compareStrings(normalizedLeft.harness, normalizedRight.harness)
+    || compareStrings(normalizedLeft.status, normalizedRight.status)
+    || compareStrings(JSON.stringify(normalizedLeft), JSON.stringify(normalizedRight));
+}
+
+function updatedAtSortValue(updatedAt: string): number {
+  const normalized = normalizeIsoDateString(updatedAt);
+  return normalized ? Date.parse(normalized) : Number.NEGATIVE_INFINITY;
+}
+
+function normalizedCovenSessionFields(session: CovenSessionSummary) {
+  return {
+    id: session.id,
+    projectRoot: session.projectRoot,
+    cwd: session.cwd ?? '',
+    title: session.title.trim(),
+    harness: session.harness.trim(),
+    status: session.status.trim(),
+    createdAt: session.createdAt.trim(),
+    updatedAt: session.updatedAt.trim(),
+    archivedAt: session.archivedAt?.trim() ?? '',
+  };
+}
+
+function compareNumbersDescending(left: number, right: number): number {
+  if (left === right) return 0;
+  return left > right ? -1 : 1;
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

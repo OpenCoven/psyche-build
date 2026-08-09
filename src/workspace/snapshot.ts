@@ -167,6 +167,23 @@ export function buildWorkspaceSnapshot(input: BuildWorkspaceSnapshotInput): Work
   };
 }
 
+export function normalizeIsoDateString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+
+  const date = new Date(trimmed);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+export function normalizeIsoEpochMilliseconds(value: number | undefined): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
 function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
   const worktrees: WorktreeSnapshot[] = project.worktrees.map((worktree) => ({
     ...worktree,
@@ -211,9 +228,6 @@ function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
 }
 
 function covenSessionPane(session: CovenSessionSummary): PaneSnapshot {
-  const lastActivity = typeof session.updatedAt === 'string' && session.updatedAt.trim().length > 0
-    ? session.updatedAt
-    : undefined;
   return {
     id: session.id,
     cwd: session.cwd ?? session.projectRoot,
@@ -222,7 +236,7 @@ function covenSessionPane(session: CovenSessionSummary): PaneSnapshot {
     agent: session.harness,
     status: session.status,
     needsAttention: session.status === 'waiting',
-    lastActivity,
+    lastActivity: normalizeIsoDateString(session.updatedAt),
     recoverability: 'healthy',
   };
 }
