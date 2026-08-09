@@ -152,12 +152,12 @@
     state.activeThreadId = thread ? thread.id : null;
     if (thread) project.lastActiveThreadId = thread.id;
   }
-  async function activateProjectWorktree(project, worktreePath) {
+  async function activateProjectWorktree(project, worktreePath, options) {
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     project.selectedWorktreePath = worktreePath;
     if (project.id !== state.activeProjectId) {
-      if (!(await setActiveProject(project.id))) {
+      if (!(await setActiveProject(project.id, options))) {
         project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
@@ -326,7 +326,7 @@
     if (!p) return [];
     return state.threads.filter(function (t) { return t.projectId === p.id && !t.hidden; });
   }
-  async function setActiveProject(id) {
+  async function setActiveProject(id, options) {
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
     state.activeProjectId = id;
@@ -352,8 +352,10 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      var covenThread = await ensureProjectCoven(project);
-      if (covenThread) setStatus("no pane — launching Coven…", "");
+      if (!options || options.ensureCoven !== false) {
+        var covenThread = await ensureProjectCoven(project);
+        if (covenThread) setStatus("no pane — launching Coven…", "");
+      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -1832,7 +1834,9 @@
       return Promise.resolve().then(async function () {
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
-        if (!(await activateProjectWorktree(project, existing.worktreePath))) return null;
+        if (!(await activateProjectWorktree(
+          project, existing.worktreePath, { ensureCoven: false }
+        ))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         await waitForTerminalLayout();
@@ -1849,12 +1853,10 @@
     if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
 
     var opening = Promise.resolve().then(async function () {
-      if (!(await showTerminalView())) return null;
-      if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
-        return null;
-      }
-      await waitForTerminalLayout();
       var worktree = covenWorktreeForSession(project, session);
+      if (!worktree || !worktree.path) return null;
+      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      await waitForTerminalLayout();
       return createThread({
         project: project,
         name: session.title || "Coven " + session.id.slice(0, 8),
