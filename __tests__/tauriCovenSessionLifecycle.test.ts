@@ -80,6 +80,21 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function compileOpenCovenSession<T extends (...args: never[]) => unknown>(
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict";
+     ${functionSource(mainJs, 'waitForTerminalLayout')}
+     ${functionSource(mainJs, 'findCovenAttachment')}
+     ${functionSource(mainJs, 'covenWorktreeForSession')}
+     return (${functionSource(mainJs, 'openCovenSession')});`,
+  )(...values) as T;
+}
+
 function discoveryHarness(
   projects: Array<Record<string, unknown>>,
   visibilityState = 'visible',
@@ -266,6 +281,18 @@ describe('macOS Coven session lifecycle boundary', () => {
     );
   });
 
+  it('defines its terminal layout wait in production with one animation frame', async () => {
+    const source = functionSource(mainJs, 'waitForTerminalLayout');
+    expect(source).toContain('return new Promise(function (resolve)');
+    expect(source).toContain('requestAnimationFrame(resolve)');
+    let frameCalls = 0;
+    const waitForTerminalLayout = compileFunction<() => Promise<void>>(source, {
+      requestAnimationFrame: (callback: () => void) => { frameCalls += 1; callback(); },
+    });
+    await expect(waitForTerminalLayout()).resolves.toBeUndefined();
+    expect(frameCalls).toBe(1);
+  });
+
   it('coalesces attach calls before project switching or pane creation begins', async () => {
     const project = {
       id: 'alpha', root: '/alpha',
@@ -286,9 +313,9 @@ describe('macOS Coven session lifecycle boundary', () => {
     const covenAttachKey = compileFunction<(p: typeof project, s: typeof session) => string>(
       functionSource(mainJs, 'covenAttachKey'), {},
     );
-    const openCovenSession = compileFunction<(
+    const openCovenSession = compileOpenCovenSession<(
       p: typeof project, s: typeof session,
-    ) => Promise<unknown>>(functionSource(mainJs, 'openCovenSession'), {
+    ) => Promise<unknown>>({
       PsycheSessions,
       state,
       setStatus: () => undefined,
@@ -297,7 +324,7 @@ describe('macOS Coven session lifecycle boundary', () => {
         projectSwitches += 1;
         return new Promise<boolean>((resolve) => { resolveProject = resolve; });
       },
-      waitForTerminalLayout: async () => undefined,
+      requestAnimationFrame: (callback: () => void) => callback(),
       reopenThread: () => true,
       focusThread: async () => undefined,
       covenAttachKey,
@@ -339,27 +366,68 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(covenAttachInFlight.size).toBe(0);
   });
 
-  it('reuses, reopens, and focuses an existing local attachment', async () => {
-    const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha' }] };
+  it('selects the most-specific owned worktree for an overlapping session cwd', async () => {
+    const project = {
+      id: 'alpha', root: '/repo', selectedWorktreePath: '/repo',
+      worktrees: [{ path: '/repo' }, { path: '/repo/feature' }],
+    };
+    const session = {
+      id: 'remote', projectRoot: '/repo', cwd: '/repo/feature/packages/app',
+    };
+    let createdOptions: Record<string, unknown> | null = null;
+    const openCovenSession = compileOpenCovenSession<(
+      p: typeof project, s: typeof session,
+    ) => Promise<unknown>>({
+      PsycheSessions,
+      state: { env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [] },
+      setStatus: () => undefined,
+      showTerminalView: async () => true,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      covenAttachKey: () => 'alpha\nremote',
+      covenAttachInFlight: new Map(),
+      selectedWorktree: () => project.worktrees[0],
+      createThread: (options: Record<string, unknown>) => {
+        createdOptions = options;
+        return { id: 'attached' };
+      },
+    });
+
+    await expect(openCovenSession(project, session)).resolves.toEqual({ id: 'attached' });
+    expect(createdOptions).toMatchObject({
+      cwd: '/repo/feature/packages/app',
+      worktreePath: '/repo/feature',
+    });
+  });
+
+  it('activates the exact worktree before reopening and focusing an existing attachment', async () => {
+    const project = {
+      id: 'alpha', root: '/alpha', selectedWorktreePath: '/alpha',
+      worktrees: [{ path: '/alpha' }, { path: '/alpha-feature' }],
+    };
     const session = { id: 'remote', projectRoot: '/alpha' };
     const existing = {
       id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
-      closeStarted: false,
+      closeStarted: false, worktreePath: '/alpha-feature',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
     };
     const calls: string[] = [];
-    const openCovenSession = compileFunction<(
+    const openCovenSession = compileOpenCovenSession<(
       p: typeof project, s: typeof session,
-    ) => Promise<unknown>>(functionSource(mainJs, 'openCovenSession'), {
+    ) => Promise<unknown>>({
       PsycheSessions,
-      state: {
-        env: { coven_path: '/bin/coven' }, activeProjectId: 'other', threads: [existing],
-      },
+      state,
       setStatus: () => undefined,
-      showTerminalView: async () => { calls.push('show'); return true; },
-      setActiveProject: async () => { calls.push('project'); return true; },
-      waitForTerminalLayout: async () => { calls.push('layout'); },
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      activateProjectWorktree: async (_project: typeof project, path: string) => {
+        calls.push(`activate:${path}`);
+        project.selectedWorktreePath = path;
+        return true;
+      },
+      requestAnimationFrame: (callback: () => void) => { calls.push('layout'); callback(); },
       reopenThread: () => { calls.push('reopen'); return true; },
-      focusThread: async () => { calls.push('focus'); },
+      focusThread: async () => { calls.push('focus'); return true; },
       covenAttachKey: () => 'unused',
       covenAttachInFlight: new Map(),
       selectedWorktree: () => project.worktrees[0],
@@ -367,16 +435,84 @@ describe('macOS Coven session lifecycle boundary', () => {
     });
 
     await expect(openCovenSession(project, session)).resolves.toBe(existing);
-    expect(calls).toEqual(['show', 'project', 'layout', 'reopen', 'focus']);
+    expect(calls).toEqual(['activate:/alpha-feature', 'layout', 'reopen', 'focus']);
+    expect(project.selectedWorktreePath).toBe('/alpha-feature');
+  });
+
+  it('abandons an existing attachment that closes during its worktree switch', async () => {
+    const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha-feature' }] };
+    const session = { id: 'remote', projectRoot: '/alpha' };
+    const existing = {
+      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
+      closeStarted: false, worktreePath: '/alpha-feature',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
+    };
+    let resolveActivation: ((value: boolean) => void) | null = null;
+    let reopened = 0;
+    let focused = 0;
+    const openCovenSession = compileOpenCovenSession<(
+      p: typeof project, s: typeof session,
+    ) => Promise<unknown>>({
+      PsycheSessions,
+      state,
+      setStatus: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      activateProjectWorktree: () => new Promise<boolean>((resolve) => {
+        resolveActivation = resolve;
+      }),
+      requestAnimationFrame: (callback: () => void) => callback(),
+      reopenThread: () => { reopened += 1; return true; },
+      focusThread: async () => { focused += 1; return true; },
+      covenAttachKey: () => 'unused',
+      covenAttachInFlight: new Map(),
+    });
+
+    const opening = openCovenSession(project, session);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    existing.closeStarted = true;
+    state.threads = [];
+    (resolveActivation as unknown as (value: boolean) => void)(true);
+    await expect(opening).resolves.toBeNull();
+    expect({ reopened, focused }).toEqual({ reopened: 0, focused: 0 });
+  });
+
+  it('returns null when an existing attachment cannot be focused', async () => {
+    const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha' }] };
+    const session = { id: 'remote', projectRoot: '/alpha' };
+    const existing = {
+      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: false,
+      closeStarted: false, worktreePath: '/alpha',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
+    };
+    const openCovenSession = compileOpenCovenSession<(
+      p: typeof project, s: typeof session,
+    ) => Promise<unknown>>({
+      PsycheSessions,
+      state,
+      setStatus: () => undefined,
+      findThread: () => existing,
+      activateProjectWorktree: async () => true,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      reopenThread: () => true,
+      focusThread: async () => false,
+      covenAttachKey: () => 'unused',
+      covenAttachInFlight: new Map(),
+    });
+
+    await expect(openCovenSession(project, session)).resolves.toBeNull();
   });
 
   it('rejects invalid or unavailable attach targets before reservation', async () => {
     const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha' }] };
     const statuses: string[] = [];
     const covenAttachInFlight = new Map();
-    const openCovenSession = compileFunction<(
+    const openCovenSession = compileOpenCovenSession<(
       p: typeof project, s: { id: string },
-    ) => Promise<unknown>>(functionSource(mainJs, 'openCovenSession'), {
+    ) => Promise<unknown>>({
       PsycheSessions,
       state: { env: {}, activeProjectId: null, threads: [] },
       setStatus: (message: string) => { statuses.push(message); },
