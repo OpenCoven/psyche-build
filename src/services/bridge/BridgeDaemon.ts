@@ -24,7 +24,6 @@ import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
-import { workspaceToLegacyReadModel } from "../../workspace/legacyAdapters.js";
 
 export interface BridgeDaemonOptions {
   serverId?: string;
@@ -345,9 +344,6 @@ export class BridgeDaemon {
   }
 
   private async readLegacyState(): Promise<{ panes: PaneSnapshot[]; projects: Project[] }> {
-    if (this.opts.workspaceProvider) {
-      return workspaceToLegacyReadModel(await this.opts.workspaceProvider());
-    }
     return {
       panes: this.opts.paneProvider(),
       projects: this.opts.projectProvider(),

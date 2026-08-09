@@ -221,9 +221,24 @@ describe("BridgeDaemon", () => {
         projectName: "psyche",
         sessionName: "test-session",
         hubFactory: noopHubFactory,
-        paneProvider: () => { throw new Error("legacy pane provider should not run"); },
-        projectProvider: () => { throw new Error("legacy project provider should not run"); },
-        workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        paneProvider: () => [{
+          id: "%legacy",
+          displayName: "Legacy pane",
+          kind: "worktree",
+          projectId: "legacy-project",
+          projectName: "Legacy project",
+          worktreePath: "/legacy",
+          agent: null,
+          status: "idle",
+        }],
+        projectProvider: () => [{
+          id: "legacy-project",
+          displayName: "Legacy project",
+          attentionCount: 0,
+        }],
+        workspaceProvider: () => {
+          throw new Error("canonical provider should not serve legacy list routes");
+        },
         ...noopRituals,
         tokenStore,
       });
@@ -248,8 +263,16 @@ describe("BridgeDaemon", () => {
         client.on("error", reject);
         setTimeout(() => reject(new Error("timeout")), 2000);
       });
-      expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(3);
-      expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("project-1");
+      expect(received.find((x: any) => x.type === "paneList").payload).toEqual([
+        expect.objectContaining({ id: "%legacy", displayName: "Legacy pane" }),
+      ]);
+      expect(received.find((x: any) => x.type === "projectList").payload).toEqual([
+        {
+          id: "legacy-project",
+          displayName: "Legacy project",
+          attentionCount: 0,
+        },
+      ]);
       expect([...((daemon as any).listener.activeSessions as Set<any>)][0]?.protocolVersion).toBe(protocolVersion);
       client.close();
       await daemon.stop();

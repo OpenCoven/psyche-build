@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 import type { CovenSessionSummary } from '../daemon/protocol.js';
@@ -145,6 +145,7 @@ export function parseGitWorktreePorcelain(raw: string): GitWorktreeSnapshotInput
 }
 
 export type GitRunner = (cwd: string, args: string[]) => string;
+export type AsyncGitRunner = (cwd: string, args: string[]) => Promise<string>;
 
 export function readProjectWorktrees(
   projectRoot: string,
@@ -169,11 +170,51 @@ export function readProjectWorktrees(
   });
 }
 
+export async function readProjectWorktreesAsync(
+  projectRoot: string,
+  runGit: AsyncGitRunner = defaultAsyncGitRunner,
+): Promise<GitWorktreeSnapshotInput[]> {
+  const worktrees = parseGitWorktreePorcelain(
+    await runGit(projectRoot, ['worktree', 'list', '--porcelain']),
+  );
+
+  return Promise.all(worktrees.map(async (worktree) => {
+    if (worktree.prunable || worktree.bare) return worktree;
+    try {
+      const status = await runGit(worktree.path, [
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=normal',
+      ]);
+      return { ...worktree, dirty: status.trim().length > 0 };
+    } catch {
+      return { ...worktree, missing: true };
+    }
+  }));
+}
+
 function defaultGitRunner(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function defaultAsyncGitRunner(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 5_000,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
   });
 }
 

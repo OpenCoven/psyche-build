@@ -11,7 +11,11 @@ import type {
 import type { TuiWorkspaceSnapshotInput } from '../src/workspace/tuiSnapshot.js';
 import * as tuiSnapshotModule from '../src/workspace/tuiSnapshot.js';
 
-const { buildTuiWorkspaceSnapshot, TuiWorkspaceState } = tuiSnapshotModule;
+const {
+  buildTuiWorkspaceSnapshot,
+  createTuiWorkspaceProvider,
+  TuiWorkspaceState,
+} = tuiSnapshotModule;
 
 type MutableWorkspaceSnapshot = ReturnType<typeof buildTuiWorkspaceSnapshot>;
 
@@ -415,6 +419,157 @@ describe('TUI workspace snapshot adapter', () => {
   });
 
   describe('TUI workspace snapshot revision tracker', () => {
+    it('creates the stable canonical provider used by the production bridge', async () => {
+      let panes: PsychePane[] = [];
+      let sidebarProjects: SidebarProject[] = [
+        { projectRoot: '/repo/sidebar', projectName: 'Sidebar' },
+      ];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => panes,
+        sidebarProjects: () => sidebarProjects,
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/sidebar', [worktree('/repo/sidebar', { isMain: true, branch: 'main' })]],
+        ]),
+      });
+
+      const first = await provider();
+      const repeated = await provider();
+
+      expect(repeated).toBe(first);
+      expect(first.revision).toBe(1);
+      expect(first.projects.map((candidate) => candidate.root)).toEqual([
+        '/repo/primary',
+        '/repo/sidebar',
+      ]);
+
+      panes = [
+        pane({
+          id: 'sidebar-agent',
+          slug: 'sidebar-agent',
+          paneId: '%9',
+          projectRoot: '/repo/sidebar',
+          worktreePath: '/repo/sidebar',
+          displayName: 'Review',
+          agentStatus: 'waiting',
+          needsAttention: true,
+        }),
+      ];
+      sidebarProjects = [...sidebarProjects];
+
+      const changed = await provider();
+
+      expect(changed.revision).toBe(2);
+      expect(project(changed, '/repo/sidebar').attentionCount).toBe(1);
+    });
+
+    it('serializes concurrent provider reads so revisions follow request order', async () => {
+      let resolveFirstRead: (() => void) | undefined;
+      const firstRead = new Promise<void>((resolve) => {
+        resolveFirstRead = resolve;
+      });
+      let readCount = 0;
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: async () => {
+          readCount += 1;
+          if (readCount === 1) {
+            await firstRead;
+            return [];
+          }
+          return [
+            pane({
+              id: 'new-pane',
+              slug: 'new-pane',
+              paneId: '%9',
+              projectRoot: '/repo/primary',
+              worktreePath: '/repo/primary',
+            }),
+          ];
+        },
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+        ]),
+      });
+
+      const firstRequest = provider();
+      const secondRequest = provider();
+      await Promise.resolve();
+      expect(readCount).toBe(1);
+
+      resolveFirstRead?.();
+      const first = await firstRequest;
+      const second = await secondRequest;
+
+      expect(first.revision).toBe(1);
+      expect(project(first, '/repo/primary').worktrees[0].panes).toEqual([]);
+      expect(second.revision).toBe(2);
+      expect(project(second, '/repo/primary').worktrees[0].panes).toContainEqual(
+        expect.objectContaining({ id: '%9' }),
+      );
+    });
+
+    it('caches asynchronous worktree discovery across repeated reads', async () => {
+      const loadedRoots: string[] = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => [
+          { projectRoot: '/repo/sidebar', projectName: 'Sidebar' },
+        ],
+        loadWorktrees: async (projectRoot) => {
+          loadedRoots.push(projectRoot);
+          return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+        },
+        worktreeCacheTtlMs: 1_000,
+      });
+
+      await provider();
+      await provider();
+
+      expect(loadedRoots).toEqual(['/repo/primary', '/repo/sidebar']);
+    });
+
+    it('keeps stale sidebar projects when their worktrees cannot be read', async () => {
+      const readErrors: Array<{ projectRoot: string; error: unknown }> = [];
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        sidebarProjects: () => [
+          { projectRoot: '/repo/stale', projectName: 'Stale' },
+        ],
+        loadWorktrees: async (projectRoot) => {
+          if (projectRoot === '/repo/stale') {
+            throw new Error('project moved');
+          }
+          return [worktree('/repo/primary', { isMain: true, branch: 'main' })];
+        },
+        onWorktreeReadError: (projectRoot, error) => {
+          readErrors.push({ projectRoot, error });
+        },
+      });
+
+      const snapshot = await provider();
+
+      expect(snapshot.projects.map((candidate) => candidate.root)).toEqual([
+        '/repo/primary',
+        '/repo/stale',
+      ]);
+      expect(project(snapshot, '/repo/primary').worktrees).toHaveLength(1);
+      expect(project(snapshot, '/repo/stale').worktrees).toEqual([]);
+      expect(readErrors).toEqual([
+        {
+          projectRoot: '/repo/stale',
+          error: expect.objectContaining({ message: 'project moved' }),
+        },
+      ]);
+    });
+
     it('starts at revision 0 and returns revision 1 for the first snapshot', () => {
       const state = createTuiWorkspaceState();
 

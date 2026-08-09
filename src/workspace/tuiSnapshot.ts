@@ -9,6 +9,7 @@ import {
   normalizeIsoEpochMilliseconds,
   normalizeWorkspaceRoot,
   readProjectWorktrees,
+  readProjectWorktreesAsync,
   type GitWorktreeSnapshotInput,
   type ReadonlyWorkspaceSnapshot,
   type WorkspacePaneInput,
@@ -28,6 +29,27 @@ export interface BuildTuiWorkspaceSnapshotInput {
 }
 
 export type TuiWorkspaceSnapshotInput = Omit<BuildTuiWorkspaceSnapshotInput, 'revision'>;
+
+type MaybePromise<Value> = Value | Promise<Value>;
+
+export interface TuiWorkspaceProviderOptions {
+  primaryProjectRoot: string;
+  primaryProjectName: string;
+  panes: () => MaybePromise<readonly PsychePane[]>;
+  sidebarProjects?: () => MaybePromise<readonly SidebarProject[]>;
+  covenSessionsByProject?: () => MaybePromise<
+    ReadonlyMap<string, readonly CovenSessionSummary[]>
+  >;
+  worktreesByProjectRoot?: () => MaybePromise<
+    ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>
+  >;
+  loadWorktrees?: (
+    projectRoot: string,
+  ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>;
+  worktreeCacheTtlMs?: number;
+  onWorktreeReadError?: (projectRoot: string, error: unknown) => void;
+  state?: TuiWorkspaceState;
+}
 
 interface ProjectSeed {
   root: string;
@@ -69,6 +91,111 @@ export class TuiWorkspaceState {
   current(): ReadonlyWorkspaceSnapshot | undefined {
     return this.#snapshot;
   }
+}
+
+export function createTuiWorkspaceProvider(
+  options: TuiWorkspaceProviderOptions,
+): () => Promise<ReadonlyWorkspaceSnapshot> {
+  const state = options.state ?? new TuiWorkspaceState();
+  const worktreeCache = new Map<string, {
+    expiresAt: number;
+    value: readonly GitWorktreeSnapshotInput[];
+  }>();
+  const worktreeCacheTtlMs = Math.max(0, options.worktreeCacheTtlMs ?? 1_000);
+  const loadWorktrees = options.loadWorktrees ?? readProjectWorktreesAsync;
+  let providerQueue: Promise<void> = Promise.resolve();
+
+  const readSnapshot = async (): Promise<ReadonlyWorkspaceSnapshot> => {
+    const [
+      panes,
+      sidebarProjects,
+      covenSessionsByProject,
+      providedWorktreesByProjectRoot,
+    ] = await Promise.all([
+      options.panes(),
+      options.sidebarProjects?.(),
+      options.covenSessionsByProject?.(),
+      options.worktreesByProjectRoot?.(),
+    ]);
+
+    const workspaceInput = {
+      primaryProjectRoot: options.primaryProjectRoot,
+      primaryProjectName: options.primaryProjectName,
+      panes,
+      sidebarProjects,
+      covenSessionsByProject,
+    };
+    const worktreesByProjectRoot = providedWorktreesByProjectRoot
+      ?? await loadProviderWorktrees(
+        workspaceInput,
+        loadWorktrees,
+        worktreeCache,
+        worktreeCacheTtlMs,
+        options.onWorktreeReadError,
+      );
+
+    return state.snapshot({
+      ...workspaceInput,
+      worktreesByProjectRoot,
+    });
+  };
+
+  return () => {
+    const result = providerQueue.then(readSnapshot);
+    providerQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}
+
+async function loadProviderWorktrees(
+  input: Omit<BuildTuiWorkspaceSnapshotInput, 'revision' | 'worktreesByProjectRoot'>,
+  loadWorktrees: (
+    projectRoot: string,
+  ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>,
+  cache: Map<string, {
+    expiresAt: number;
+    value: readonly GitWorktreeSnapshotInput[];
+  }>,
+  cacheTtlMs: number,
+  onError: ((projectRoot: string, error: unknown) => void) | undefined,
+): Promise<Map<string, readonly GitWorktreeSnapshotInput[]>> {
+  const primaryRoot = normalizeRoot(input.primaryProjectRoot);
+  const covenSessionsByProject = deduplicateCovenSessionsByProject(
+    input.covenSessionsByProject,
+  );
+  const roots = collectProjects(
+    { ...input, revision: 0 },
+    primaryRoot,
+    covenSessionsByProject,
+  ).map((project) => project.root);
+
+  const entries = await Promise.all(roots.map(async (projectRoot) => {
+    const cached = cache.get(projectRoot);
+    if (cached && cached.expiresAt > Date.now()) {
+      return [projectRoot, cached.value] as const;
+    }
+
+    let value: readonly GitWorktreeSnapshotInput[];
+    try {
+      value = await loadWorktrees(projectRoot);
+    } catch (error) {
+      if (!onError) throw error;
+      onError(projectRoot, error);
+      value = [];
+    }
+
+    const cachedValue = value.map((worktree) => ({ ...worktree }));
+    cache.set(projectRoot, {
+      expiresAt: Date.now() + cacheTtlMs,
+      value: cachedValue,
+    });
+    return [projectRoot, cachedValue] as const;
+  }));
+
+  return new Map(entries);
 }
 
 export function buildTuiWorkspaceSnapshot(

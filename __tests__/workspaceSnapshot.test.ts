@@ -4,6 +4,7 @@ import {
   normalizeIsoDateString,
   parseGitWorktreePorcelain,
   readProjectWorktrees,
+  readProjectWorktreesAsync,
 } from '../src/workspace/snapshot.js';
 
 describe('workspace snapshot', () => {
@@ -90,6 +91,39 @@ describe('workspace snapshot', () => {
       { cwd: '/repo', args: ['status', '--porcelain=v1', '--untracked-files=normal'] },
       { cwd: '/external/review', args: ['status', '--porcelain=v1', '--untracked-files=normal'] },
     ]);
+  });
+
+  it('reads worktrees asynchronously without blocking the caller', async () => {
+    const calls: Array<{ cwd: string; args: string[] }> = [];
+    const worktrees = await readProjectWorktreesAsync('/repo', async (cwd, args) => {
+      calls.push({ cwd, args });
+      if (args.join(' ') === 'worktree list --porcelain') {
+        return [
+          'worktree /repo',
+          'HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'branch refs/heads/main',
+          '',
+          'worktree /external/review',
+          'HEAD bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          'branch refs/heads/feat/review',
+          '',
+        ].join('\n');
+      }
+      return cwd === '/external/review' ? ' M src/index.ts\n' : '';
+    });
+
+    expect(worktrees.map((worktree) => ({ path: worktree.path, dirty: worktree.dirty }))).toEqual([
+      { path: '/repo', dirty: false },
+      { path: '/external/review', dirty: true },
+    ]);
+    expect(calls[0]).toEqual({
+      cwd: '/repo',
+      args: ['worktree', 'list', '--porcelain'],
+    });
+    expect(calls.slice(1)).toEqual(expect.arrayContaining([
+      { cwd: '/repo', args: ['status', '--porcelain=v1', '--untracked-files=normal'] },
+      { cwd: '/external/review', args: ['status', '--porcelain=v1', '--untracked-files=normal'] },
+    ]));
   });
 
   it('groups local panes and Coven sessions under the most specific worktree', () => {
