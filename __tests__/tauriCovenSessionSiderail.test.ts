@@ -135,20 +135,45 @@ class FakeElement {
     const title = /<span class="session-title">([\s\S]*?)<\/span>/.exec(this.html);
     const sub = /<span class="session-sub">([\s\S]*?)<\/span>/.exec(this.html);
     if (!title || !sub) return;
-    const dot = new FakeElement('span');
-    dot.className = 'session-dot';
+    const glyph = /<span class="session-glyph">([\s\S]*?)<\/span>/.exec(this.html);
+    if (glyph) {
+      const glyphElement = new FakeElement('span');
+      glyphElement.className = 'session-glyph';
+      glyphElement.textContent = decodeHtml(glyph[1]);
+      this.appendChild(glyphElement);
+    }
     const text = new FakeElement('span');
     text.className = 'session-text';
+    const titleRow = new FakeElement('span');
+    titleRow.className = 'session-title-row';
     const titleElement = new FakeElement('span');
     titleElement.className = 'session-title';
     titleElement.textContent = decodeHtml(title[1]);
+    titleRow.appendChild(titleElement);
+    if (this.html.includes('class="session-oncanvas"')) {
+      const onCanvas = new FakeElement('span');
+      onCanvas.className = 'session-oncanvas';
+      titleRow.appendChild(onCanvas);
+    }
     const subElement = new FakeElement('span');
     subElement.className = 'session-sub';
     subElement.textContent = decodeHtml(sub[1]);
-    text.appendChild(titleElement);
+    text.appendChild(titleRow);
     text.appendChild(subElement);
-    this.appendChild(dot);
     this.appendChild(text);
+    const stateWrap = new FakeElement('span');
+    stateWrap.className = 'session-state';
+    const dot = new FakeElement('span');
+    dot.className = 'session-dot';
+    stateWrap.appendChild(dot);
+    const chip = /<span class="session-chip(?: muted)?">([\s\S]*?)<\/span>/.exec(this.html);
+    if (chip) {
+      const chipElement = new FakeElement('span');
+      chipElement.className = 'session-chip';
+      chipElement.textContent = decodeHtml(chip[1]);
+      stateWrap.appendChild(chipElement);
+    }
+    this.appendChild(stateWrap);
     if (this.html.includes('class="session-close"')) {
       const close = new FakeElement('button');
       close.className = 'session-close';
@@ -289,6 +314,7 @@ function createRenderer(options: {
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
   realEdit?: boolean;
+  canvasThreadIds?: string[];
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div');
@@ -328,6 +354,10 @@ function createRenderer(options: {
   const editLabelInlineImpl = options.realEdit ? realEditLabelInline : editLabelInline;
   const openCovenSession = vi.fn(options.openCovenSession ?? (() => Promise.resolve()));
   const setStatus = vi.fn();
+  const onCanvasIds = options.canvasThreadIds ?? [];
+  const canvasThreadIds = vi.fn(() => onCanvasIds);
+  const paneGlyphFor = (kind: string) =>
+    kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
   const sources = [
     'function covenInlineState() { return null; }',
@@ -339,6 +369,7 @@ function createRenderer(options: {
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
     'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
     'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
+    'canvasThreadIds', 'paneGlyphFor',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
@@ -372,6 +403,8 @@ function createRenderer(options: {
     editLabelInlineImpl,
     openCovenSession,
     setStatus,
+    canvasThreadIds,
+    paneGlyphFor,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -392,6 +425,7 @@ function createRenderer(options: {
     editLabelInline,
     openCovenSession,
     setStatus,
+    canvasThreadIds,
   };
 }
 
@@ -400,7 +434,7 @@ function textOf(elements: FakeElement[]) {
 }
 
 describe('Tauri Coven session project rail', () => {
-  it('renders local threads in input order without empty project headers', () => {
+  it('groups local threads by pane kind, in input order, without empty project headers', () => {
     const renderer = createRenderer({
       projects: [
         { id: 'alpha', name: 'Alpha', root: '/alpha' },
@@ -423,10 +457,11 @@ describe('Tauri Coven session project rail', () => {
 
     const groups = renderer.sessionListEl.querySelectorAll('.session-group');
     expect(groups).toHaveLength(1);
+    // Agent-kind panes lead, plain shells follow; input order holds inside each.
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-subsection-label')))
-      .toEqual(['Psyche']);
+      .toEqual(['Agents', 'Shells']);
     expect(groups[0].querySelectorAll('.session-row').map((row) => row.dataset.threadId))
-      .toEqual(['local', 'attached']);
+      .toEqual(['attached', 'local']);
     expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(0);
     expect(renderer.sessionListEl.textContent).not.toContain('Alpha daemon');
     expect(renderer.sessionListEl.textContent).not.toContain('Beta daemon');
@@ -629,6 +664,38 @@ describe('Tauri Coven session project rail', () => {
     expect(empty.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
     expect(empty.sessionListEl.querySelector('.session-empty')?.textContent)
       .toBe('No matching projects, worktrees, or panes.');
+  });
+
+  it('marks rows that hold a pane-tree leaf and detaches them without killing the process', async () => {
+    const renderer = createRenderer({
+      activeThreadId: 'local',
+      canvasThreadIds: ['local'],
+      threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+    });
+    renderer.render();
+
+    const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap');
+    const row = wrapper?.querySelector('.session-row');
+    const close = wrapper?.querySelector('.session-close');
+    expect(row?.querySelector('.session-oncanvas')).not.toBeNull();
+    expect(close?.title).toBe('Hide the pane — the session keeps running');
+
+    // hideThread detaches the leaf and leaves the PTY running, so the row stays
+    // reopenable rather than being a destructive close.
+    await close?.emit('click');
+    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.closeThread).not.toHaveBeenCalled();
+  });
+
+  it('omits the canvas marker for rows with no pane on the canvas', () => {
+    const renderer = createRenderer({
+      threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+    });
+    renderer.render();
+
+    const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap');
+    expect(wrapper?.querySelector('.session-row')?.querySelector('.session-oncanvas')).toBeNull();
+    expect(wrapper?.querySelector('.session-close')?.title).toBe('Hide session');
   });
 
   it('mounts the real local rename input beside controls and restores activation after settle', async () => {
