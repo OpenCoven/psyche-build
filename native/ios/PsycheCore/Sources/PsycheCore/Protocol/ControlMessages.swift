@@ -247,6 +247,51 @@ public enum MobileControlResponse: Codable, Sendable, Equatable {
     }
 }
 
+public extension MobileControlRequest {
+    /// Every declared request type carries an ID. `unknown` is whatever a
+    /// newer host sent, which may not, so this stays optional rather than
+    /// inventing one.
+    var requestID: String? {
+        switch self {
+        case .workspaceSnapshot(let payload): payload.requestID
+        case .spawnPane(let payload): payload.requestID
+        case .attachPane(let payload): payload.requestID
+        case .detachPane(let payload): payload.requestID
+        case .inputPane(let payload): payload.requestID
+        case .resizePane(let payload): payload.requestID
+        case .killPane(let payload): payload.requestID
+        case .paneMeta(let payload): payload.requestID
+        case .listFiles(let payload): payload.requestID
+        case .readFile(let payload): payload.requestID
+        case .diffFile(let payload): payload.requestID
+        case .startAction(let payload): payload.requestID
+        case .respondToAction(let payload): payload.requestID
+        case .unknown(let payload): payload.requestID
+        }
+    }
+}
+
+public extension MobileControlResponse {
+    /// The request this answers, when it answers one. `streamExited` is an
+    /// unsolicited event and a protocol error may be connection-wide, so both
+    /// legitimately have no ID and must not be correlated to a caller.
+    var requestID: String? {
+        switch self {
+        case .workspaceSnapshot(let payload): payload.requestID
+        case .ack(let payload): payload.requestID
+        case .paneSpawned(let payload): payload.requestID
+        case .attachPane(let payload): payload.requestID
+        case .streamExited: nil
+        case .filesList(let payload): payload.requestID
+        case .filesRead(let payload): payload.requestID
+        case .filesDiff(let payload): payload.requestID
+        case .actionResult(let payload): payload.requestID
+        case .error(let payload): payload.requestID
+        case .unknown(let payload): payload.requestID
+        }
+    }
+}
+
 public struct WorkspaceChangedEvent: Codable, Sendable, Equatable {
     public let revision: Int
     public let sequence: UInt64

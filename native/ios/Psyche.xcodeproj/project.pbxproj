@@ -31,7 +31,9 @@
 		C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */; };
 		C47E0519F01CE5BF77E873F8 /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		C5705019D0B13652CECE4667 /* ProtocolVersions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E78871160AA42DBF2E794D0 /* ProtocolVersions.swift */; };
+		C7F239519FB92079A04D842E /* ControlRequestClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */; };
 		D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */; };
+		DF0A29D7D868E9B39A094D45 /* ControlRequestClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */; };
 		E78D840B1348810820259800 /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D412D06D4B9BE4902586CC /* ControlMessages.swift */; };
 		FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25C571EEFFA869223BF5924 /* ConnectionManager.swift */; };
@@ -90,6 +92,7 @@
 		0208B0729C5558A164DD1556 /* CockpitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CockpitView.swift; sourceTree = "<group>"; };
 		0899D0A654BB447D7D88380A /* BridgeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessages.swift; sourceTree = "<group>"; };
 		09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransport.swift; sourceTree = "<group>"; };
+		0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClientTests.swift; sourceTree = "<group>"; };
 		1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStore.swift; sourceTree = "<group>"; };
 		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
 		171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStore.swift; sourceTree = "<group>"; };
@@ -98,6 +101,7 @@
 		4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransportTests.swift; sourceTree = "<group>"; };
 		4E78871160AA42DBF2E794D0 /* ProtocolVersions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolVersions.swift; sourceTree = "<group>"; };
 		56D912A6A487EC289774C800 /* PsycheApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheApp.swift; sourceTree = "<group>"; };
+		57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClient.swift; sourceTree = "<group>"; };
 		6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		79423F6893871C3D7AD45E8C /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
@@ -159,6 +163,7 @@
 			isa = PBXGroup;
 			children = (
 				B25C571EEFFA869223BF5924 /* ConnectionManager.swift */,
+				57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */,
 				B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */,
 				1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */,
 				09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */,
@@ -255,6 +260,7 @@
 				7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */,
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
 				F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */,
+				0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */,
 				E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */,
 				462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */,
 				E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */,
@@ -416,6 +422,7 @@
 				04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */,
 				FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */,
 				ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */,
+				DF0A29D7D868E9B39A094D45 /* ControlRequestClient.swift in Sources */,
 				531AEC6890A3351A83127EAD /* PairedHost.swift in Sources */,
 				509C226C8BAE7EC9489F375A /* PairedHostStore.swift in Sources */,
 				9D716B819F7802ACB98AC881 /* PinnedCertificateDelegate.swift in Sources */,
@@ -434,6 +441,7 @@
 				7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */,
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
 				82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */,
+				C7F239519FB92079A04D842E /* ControlRequestClientTests.swift in Sources */,
 				7F12BD7FD42EFA5F47AF774F /* PairedHostStoreTests.swift in Sources */,
 				58653704CB87919CC55070A0 /* PinnedCertificateDelegateTests.swift in Sources */,
 				43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */,
