@@ -278,6 +278,17 @@ describe('macOS Coven session lifecycle boundary', () => {
     );
   });
 
+  it('keeps native Coven create and attach outside daemon/tmux mutation paths', () => {
+    const create = functionSource(mainJs, 'covenChatLaunch');
+    const attach = functionSource(mainJs, 'openCovenSession');
+    const nativeCovenSource = `${create}\n${attach}`;
+    expect(nativeCovenSource).not.toMatch(
+      /coven\.session\.open|openProjectCovenSession|createTmuxPane|sendTmuxCommand|TMUX_TMPDIR/
+    );
+    expect(nativeCovenSource).toContain('args: ["chat"]');
+    expect(nativeCovenSource).toContain('args: ["attach", session.id]');
+  });
+
   it('reserves attach identity and releases it on settle', () => {
     const source = functionSource(mainJs, 'openCovenSession');
     expect(mainJs).toContain('var covenAttachInFlight = new Map();');

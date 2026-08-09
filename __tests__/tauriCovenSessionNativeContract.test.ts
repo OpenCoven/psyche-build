@@ -74,6 +74,10 @@ describe('Tauri Coven session native contract', () => {
       /tauri::generate_handler!\s*\[[\s\S]*?app_environment\s*,\s*coven_sessions\s*,/,
     );
     expect(libSource).not.toMatch(/load_coven_sessions\s*\(/);
+    expect(libSource).toMatch(/fn\s+validate_coven_launch\(/);
+    expect(libSource).toMatch(/fn\s+resolve_pty_cwd\(/);
+    expect(libSource).toMatch(/fn\s+linked_worktree_roots\(/);
+    expect(libSource).toMatch(/cmd\.env_remove\("TMUX"\)/);
   });
   test('shares one wall-clock deadline across health and session requests', async () => {
     const source = await readFile(covenSessionsSourcePath, 'utf8');
