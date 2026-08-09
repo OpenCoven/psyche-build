@@ -4,6 +4,8 @@ import type {
 } from '../services/bridge/wireProtocol.js';
 import type {
   PaneSnapshot,
+  ReadonlyPaneSnapshot,
+  ReadonlyWorkspaceSnapshot,
   WorkspaceSnapshot,
 } from './snapshot.js';
 
@@ -18,7 +20,7 @@ export interface LegacyWorkspaceReadModel {
  * no command or mutation handles.
  */
 export function workspaceToLegacyReadModel(
-  workspace: WorkspaceSnapshot,
+  workspace: WorkspaceSnapshot | ReadonlyWorkspaceSnapshot,
 ): LegacyWorkspaceReadModel {
   const projects: LegacyProject[] = [];
   const panes: LegacyPaneSnapshot[] = [];
@@ -44,7 +46,7 @@ export function workspaceToLegacyReadModel(
 }
 
 function toLegacyPane(
-  pane: PaneSnapshot,
+  pane: PaneSnapshot | ReadonlyPaneSnapshot,
   projectId: string,
   projectName: string,
   worktreePath: string | null,

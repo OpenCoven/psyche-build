@@ -3,8 +3,11 @@ import { hostname } from "node:os";
 import { loadOrCreateTLS, TLSMaterial } from "./TLSCertificate.js";
 import { WSSListener } from "./WSSListener.js";
 import { Session } from "./Session.js";
+import { MobileControlGateway, MobileControlGatewayError } from "./MobileControlGateway.js";
 import {
   ClientMessage,
+  MobileControlRequest,
+  MobileControlResponse,
   PaneSnapshot,
   Project,
   Ritual,
@@ -20,7 +23,7 @@ import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
-import type { WorkspaceSnapshot } from "../../workspace/snapshot.js";
+import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
 import { workspaceToLegacyReadModel } from "../../workspace/legacyAdapters.js";
 
 export interface BridgeDaemonOptions {
@@ -30,7 +33,7 @@ export interface BridgeDaemonOptions {
   paneProvider: () => PaneSnapshot[];
   projectProvider: () => Project[];
   /** Canonical source for legacy list requests when the host exposes it. */
-  workspaceProvider?: () => WorkspaceSnapshot;
+  workspaceProvider?: () => ReadonlyWorkspaceSnapshot | Promise<ReadonlyWorkspaceSnapshot>;
   sessionName: string;  // required
   hubFactory?: (sessionName: string) => PaneStreamHub;  // for tests
   ritualProvider: (projectId: string | null) => Ritual[];
@@ -48,6 +51,8 @@ export class BridgeDaemon {
   private tokens: TokenStore;
   private pairing: PairingFlow;
   private ritualLauncher: ((projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>) | null = null;
+  private readonly mobileGateway?: MobileControlGateway;
+  private workspaceSequence = 0;
   readonly serverId: string;
   readonly serverName: string;
 
@@ -56,6 +61,12 @@ export class BridgeDaemon {
     this.serverName = opts.serverName ?? hostname();
     this.tokens = opts.tokenStore ?? new TokenStore();
     this.pairing = opts.pairingFlow ?? new PairingFlow();
+    this.mobileGateway = opts.workspaceProvider
+      ? new MobileControlGateway({
+        workspaceProvider: opts.workspaceProvider,
+        workspaceSequence: () => this.workspaceSequence,
+      })
+      : undefined;
     this.pairing.on("open", (w: { code: string; expiresAt: Date }) => this.broadcastPairChallenge(w));
   }
 
@@ -231,11 +242,11 @@ export class BridgeDaemon {
       }
       case "listPanes":
         if (!this.requireAuthenticated(s)) return;
-        s.send({ type: "paneList", payload: this.readLegacyState().panes });
+        s.send({ type: "paneList", payload: (await this.readLegacyState()).panes });
         return;
       case "listProjects":
         if (!this.requireAuthenticated(s)) return;
-        s.send({ type: "projectList", payload: this.readLegacyState().projects });
+        s.send({ type: "projectList", payload: (await this.readLegacyState()).projects });
         return;
       case "ping":
         s.send({ type: "pong", payload: { token: m.payload.token } });
@@ -301,12 +312,15 @@ export class BridgeDaemon {
           return;
         }
         try {
-          this.broadcastStateUpdates();
+          await this.broadcastStateUpdates();
         } catch (err) {
           s.send({ type: "error", payload: { code: "state_update_failed", message: String(err) } });
         }
         return;
       }
+      case "control":
+        await this.handleControl(s, m.payload);
+        return;
       default:
         return;
     }
@@ -318,26 +332,129 @@ export class BridgeDaemon {
     return false;
   }
 
-  private broadcastStateUpdates(): void {
+  private async broadcastStateUpdates(): Promise<void> {
     if (!this.listener) return;
     let legacy: { panes: PaneSnapshot[]; projects: Project[] } | undefined;
     for (const session of this.listener.activeSessions) {
       if (session.state === "authenticated") {
-        legacy ??= this.readLegacyState();
+        legacy ??= await this.readLegacyState();
         session.send({ type: "projectList", payload: legacy.projects });
         session.send({ type: "paneListChanged", payload: legacy.panes });
       }
     }
   }
 
-  private readLegacyState(): { panes: PaneSnapshot[]; projects: Project[] } {
+  private async readLegacyState(): Promise<{ panes: PaneSnapshot[]; projects: Project[] }> {
     if (this.opts.workspaceProvider) {
-      return workspaceToLegacyReadModel(this.opts.workspaceProvider());
+      return workspaceToLegacyReadModel(await this.opts.workspaceProvider());
     }
     return {
       panes: this.opts.paneProvider(),
       projects: this.opts.projectProvider(),
     };
+  }
+
+  private async handleControl(
+    s: Session,
+    request: MobileControlRequest | { type: string; requestId?: unknown },
+  ): Promise<void> {
+    if (s.state !== "authenticated") {
+      this.sendControl(s, this.controlError(
+        this.safeRequestId(request),
+        "not_authenticated",
+        "pair first",
+      ));
+      return;
+    }
+
+    if (s.protocolVersion !== PROTOCOL_VERSION) {
+      this.sendControl(s, this.controlError(
+        this.safeRequestId(request),
+        "protocol_mismatch",
+        "control requires negotiated protocol v3",
+      ));
+      return;
+    }
+
+    if (!this.mobileGateway) {
+      this.sendControl(s, this.controlError(
+        this.safeRequestId(request),
+        "control_unavailable",
+        "workspace control is not available",
+      ));
+      return;
+    }
+
+    const queuedBinaryFrames: Array<{ streamId: string; sequence: number; payload: Uint8Array }> = [];
+    try {
+      const response = await this.mobileGateway.handle(request, {
+        ownerId: s.clientId ?? s.token ?? this.serverId,
+        connectionId: s.connectionId,
+        sendBinary: (streamId, sequence, payload) => {
+          queuedBinaryFrames.push({ streamId, sequence, payload });
+        },
+      });
+      this.sendControl(s, response);
+    } catch (error) {
+      this.sendControl(s, this.controlErrorPayload(request, error));
+    }
+
+    for (const frame of queuedBinaryFrames) {
+      s.sendBinary(frame.streamId, frame.sequence, frame.payload);
+    }
+  }
+
+  private sendControl(s: Session, payload: MobileControlResponse): void {
+    s.send({ type: "control", payload });
+  }
+
+  private controlErrorPayload(
+    request: { requestId?: unknown },
+    error: unknown,
+  ): Extract<MobileControlResponse, { type: "error" }> {
+    const requestId = this.controlErrorRequestId(request, error);
+    const message = this.controlErrorMessage(error);
+    const code = this.controlErrorCode(error);
+
+    return this.controlError(requestId, code, message);
+  }
+
+  private controlError(
+    requestId: string | undefined,
+    code: string,
+    message: string,
+  ): Extract<MobileControlResponse, { type: "error" }> {
+    return requestId
+      ? { type: "error", requestId, code, message }
+      : { type: "error", code, message };
+  }
+
+  private controlErrorCode(error: unknown): string {
+    if (error instanceof MobileControlGatewayError) return error.code;
+    return "internal_error";
+  }
+
+  private controlErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message.trim().length > 0) {
+      return error.message;
+    }
+    return "control request failed";
+  }
+
+  private controlErrorRequestId(
+    request: { requestId?: unknown },
+    error: unknown,
+  ): string | undefined {
+    if (error instanceof MobileControlGatewayError && error.requestId) {
+      return error.requestId;
+    }
+    return this.safeRequestId(request);
+  }
+
+  private safeRequestId(request: { requestId?: unknown }): string | undefined {
+    return typeof request.requestId === "string" && request.requestId.trim().length > 0
+      ? request.requestId
+      : undefined;
   }
 
   private subscribePane(s: Session, paneId: string, sinceSeq: number | null) {

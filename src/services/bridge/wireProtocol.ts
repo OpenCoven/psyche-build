@@ -24,7 +24,10 @@ import type {
 } from '../../daemon/protocol.js';
 import type { ActionOption, ActionResult, PaneAction } from '../../actions/types.js';
 import type { BrowserSnapshot } from '../../utils/fileBrowser.js';
-import type { WorkspaceSnapshot } from '../../workspace/snapshot.js';
+import type {
+  ReadonlyWorkspaceSnapshot,
+  WorkspaceSnapshot,
+} from '../../workspace/snapshot.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -297,7 +300,7 @@ export type MobileWorkspaceSnapshotResult = {
   type: 'mobile.workspace.snapshot.result';
   requestId: string;
   sequence: number;
-  workspace: WorkspaceSnapshot;
+  workspace: ReadonlyWorkspaceSnapshot;
 };
 
 export type MobilePaneAttachResult = {
