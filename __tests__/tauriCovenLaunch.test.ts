@@ -307,6 +307,7 @@ describe('native Coven launch routing', () => {
         findProject: () => null,
         setProjectStatus: () => undefined,
         setStatus: () => undefined,
+        refreshCovenSessions: () => Promise.resolve(),
       },
     );
     thread.command = '/bin/wrong';
@@ -690,6 +691,7 @@ describe('native Coven launch routing', () => {
       findProject: () => project,
       setStatus: () => undefined,
       stopThreadPty: () => Promise.resolve(false),
+      refreshCovenSessions: () => Promise.resolve(),
     };
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'), dependencies,
@@ -753,6 +755,7 @@ describe('native Coven launch routing', () => {
         findProject: () => ({ id: 'project' }),
         setStatus: () => undefined,
         stopThreadPty: () => Promise.resolve(false),
+        refreshCovenSessions: () => Promise.resolve(),
       },
     );
     const retryThread = compileFunction<(id: string) => Promise<boolean>>(
@@ -769,6 +772,42 @@ describe('native Coven launch routing', () => {
     expect(thread.status).toBe('starting');
     (resolveStart as unknown as () => void)();
     await expect(first).resolves.toBe(true);
+  });
+
+  it('revalidates an attachment before retrying its PTY', async () => {
+    const source = functionSource('retryThread');
+    expect(source).toContain('await refreshCovenSessions()');
+    expect(source).toContain('covenDiscovery.phase === "ready"');
+    expect(source).toContain('session.id === thread.launch.covenSessionId');
+    expect(source.indexOf('await refreshCovenSessions()')).toBeLessThan(
+      source.indexOf('spawnPty(thread)'),
+    );
+
+    const thread = {
+      id: 'attached', projectId: 'alpha', status: 'failed', startInFlight: false,
+      closeStarted: false,
+      launch: { launchKind: 'coven-attach', covenSessionId: 'gone' },
+    };
+    let spawns = 0;
+    const statuses: Array<[string, string]> = [];
+    const retryThread = compileFunction<(id: string) => Promise<boolean>>(
+      source,
+      {
+        findThread: () => thread,
+        findProject: () => ({ id: 'alpha', root: '/alpha' }),
+        refreshCovenSessions: async () => undefined,
+        covenDiscovery: { phase: 'ready' },
+        covenSessionsForProject: () => [],
+        setStatus: (message: string, level: string) => { statuses.push([message, level]); },
+        spawnPty: () => { spawns += 1; return Promise.resolve(true); },
+      },
+    );
+
+    await expect(retryThread(thread.id)).resolves.toBe(false);
+    expect(spawns).toBe(0);
+    expect(statuses).toEqual([[
+      'Coven session is no longer available; refresh the rail before retrying', 'warn',
+    ]]);
   });
 
   it('adopts an already-running Rust PTY response as the live retry', async () => {
@@ -798,6 +837,7 @@ describe('native Coven launch routing', () => {
         findProject: () => ({ id: 'project' }),
         setStatus: () => undefined,
         stopThreadPty: () => Promise.resolve(false),
+        refreshCovenSessions: () => Promise.resolve(),
       },
     );
 
@@ -839,6 +879,7 @@ describe('native Coven launch routing', () => {
         findProject: () => ({ id: 'project' }),
         setStatus: () => undefined,
         stopThreadPty,
+        refreshCovenSessions: () => Promise.resolve(),
       },
     );
     const retryThread = compileFunction<(id: string) => Promise<boolean>>(

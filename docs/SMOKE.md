@@ -107,12 +107,28 @@ Expected:
 
 Run this section when Coven is installed locally and you want to verify the optional sessions panel.
 
+### Native Coven physical panes
+
+1. Launch the unsigned macOS app with `coven` available on the augmented PATH.
+2. Open the linked-worktree path itself as the project.
+3. Confirm project open creates one `coven chat` PTY owned by that linked worktree.
+4. Press Command-T twice and confirm three simultaneous physical panes.
+5. Type distinct input in each pane and confirm focus/input isolation.
+6. Drag a divider and use its arrow-key controls; confirm all visible PTYs resize.
+7. Select a durable session in the Coven rail twice; confirm one native
+   `coven attach <id>` pane is created and the second action focuses it.
+8. Close the attachment and confirm `coven sessions` still lists the durable session.
+9. Stop the daemon and confirm new `coven chat` panes still launch while the rail
+   shows stale/unavailable discovery state.
+10. Run `/new-shell` and `/new-psyche`; confirm the former is a login shell and
+    only the latter starts the legacy tmux-backed TUI.
+
 Expected:
 
 - `coven doctor` and the local Coven daemon/status command report a usable runtime.
-- When Coven is running for the same project, the sidebar shows matching `☾ Coven sessions` entries.
-- Pressing `o` on the active project opens the latest matching session as a visible psyche pane with `coven attach <session-id>`.
-- When Coven is not installed or not running, the active project shows the compact unavailable hint and psyche keeps running.
+- When Coven is running for the same project, the sidebar shows matching rows in a `Coven` subsection.
+- Clicking a durable Coven row opens one visible native pane with `coven attach <session-id>`; clicking it again focuses that attachment.
+- When Coven is unavailable, the rail shows one global unavailable or stale-discovery state and psyche keeps running.
 
 ## Merge / PR smoke
 

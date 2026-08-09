@@ -338,8 +338,43 @@ kbd {
   letter-spacing: 0.09em;
   color: var(--muted);
 }
+.session-coven-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+.session-coven-row:hover,
+.session-coven-row:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.session-coven-row:focus-visible { outline: none; border-color: var(--accent-line); }
+.session-coven-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-coven-meta { flex: 0 0 auto; }
+.session-inline-state {
+  padding: 4px 10px 6px 28px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.coven-tone-ok { color: var(--ok); }
+.coven-tone-warn { color: var(--warn); }
+.coven-tone-danger { color: var(--error); }
+.coven-tone-neutral,
+.coven-tone-muted { color: var(--muted); }
 
-.session-row {
+.session-row,
+.session-coven-row {
   display: flex;
   align-items: center;
   gap: 8px;

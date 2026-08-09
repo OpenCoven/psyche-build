@@ -79,12 +79,22 @@
   };
   var paneLayouts = new Map();
   var covenEnsureFlights = new Map();
+  var covenAttachInFlight = new Map();
+  var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenDiscoveryFlight = null;
+  var covenPollTimer = null;
+  var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
   var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") saveWorkspaceNow();
+    if (document.visibilityState === "hidden") {
+      saveWorkspaceNow();
+      stopCovenPolling();
+    } else {
+      startCovenPolling();
+    }
   }
 
   /**
@@ -145,12 +155,12 @@
     state.activeThreadId = thread ? thread.id : null;
     if (thread) project.lastActiveThreadId = thread.id;
   }
-  async function activateProjectWorktree(project, worktreePath) {
+  async function activateProjectWorktree(project, worktreePath, options) {
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     project.selectedWorktreePath = worktreePath;
     if (project.id !== state.activeProjectId) {
-      if (!(await setActiveProject(project.id))) {
+      if (!(await setActiveProject(project.id, options))) {
         project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
@@ -197,6 +207,94 @@
   function commitPanePlacement(placement) {
     paneLayouts.set(placement.key, placement.value);
   }
+  function covenDiscoveryScopes() {
+    return state.projects.map(function (project) {
+      var worktreeRoots = (project.worktrees || [])
+        .filter(function (worktree) {
+          return !worktree.missing && !worktree.prunable && !worktree.bare &&
+            worktree.path && worktree.path !== project.root;
+        })
+        .map(function (worktree) { return worktree.path; })
+        .filter(function (root, index, roots) { return roots.indexOf(root) === index; });
+      return { projectRoot: project.root, worktreeRoots: worktreeRoots };
+    });
+  }
+  function covenDiscoveryRoots() {
+    return covenDiscoveryScopes().reduce(function (roots, scope) {
+      [scope.projectRoot].concat(scope.worktreeRoots).forEach(function (root) {
+        if (root && roots.indexOf(root) === -1) roots.push(root);
+      });
+      return roots;
+    }, []);
+  }
+  function covenSessionsForProject(project) {
+    var roots = [project.root].concat(
+      (project.worktrees || []).map(function (worktree) { return worktree.path; })
+    ).filter(function (root, index, candidates) {
+      return root && candidates.indexOf(root) === index;
+    });
+    return roots.reduce(function (sessions, root) {
+      return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
+    }, []);
+  }
+  async function refreshCovenSessions() {
+    if (document.visibilityState === "hidden" || state.projects.length === 0) {
+      return covenDiscovery;
+    }
+    var roots = covenDiscoveryRoots();
+    var projectScopes = covenDiscoveryScopes();
+    var requestKey = JSON.stringify(projectScopes.map(function (scope) {
+      return {
+        projectRoot: scope.projectRoot,
+        worktreeRoots: scope.worktreeRoots.slice().sort(),
+      };
+    }).sort(function (left, right) {
+      return left.projectRoot < right.projectRoot ? -1 :
+        (left.projectRoot > right.projectRoot ? 1 : 0);
+    }));
+    if (covenDiscoveryFlight && covenDiscoveryFlight.key === requestKey) {
+      return covenDiscoveryFlight.promise;
+    }
+    var started = PsycheSessions.beginCovenRequest(covenDiscovery);
+    covenDiscovery = started.state;
+    renderSessionList();
+    var flight = { key: requestKey, promise: null };
+    covenDiscoveryFlight = flight;
+    flight.promise = (async function () {
+      try {
+        var response = await invoke("coven_sessions", {
+          projectRoots: roots,
+          projectScopes: projectScopes,
+        });
+        covenDiscovery = PsycheSessions.applyCovenResponse(
+          covenDiscovery,
+          started.requestId,
+          response
+        );
+      } catch (_) {
+        covenDiscovery = PsycheSessions.applyCovenResponse(
+          covenDiscovery,
+          started.requestId,
+          { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
+        );
+      } finally {
+        if (covenDiscoveryFlight === flight) covenDiscoveryFlight = null;
+      }
+      renderSessionList();
+      return covenDiscovery;
+    })();
+    return flight.promise;
+  }
+  function stopCovenPolling() {
+    if (covenPollTimer) clearInterval(covenPollTimer);
+    covenPollTimer = null;
+  }
+  function startCovenPolling() {
+    stopCovenPolling();
+    if (document.visibilityState === "hidden" || state.projects.length === 0) return;
+    refreshCovenSessions();
+    covenPollTimer = setInterval(refreshCovenSessions, COVEN_POLL_MS);
+  }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
     if (state.env && state.env.native_workspace_v2 === false) {
@@ -205,6 +303,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      refreshCovenSessions();
       return Promise.resolve(project.worktrees);
     }
     return invoke("git_worktrees", { root: project.root }).then(function (worktrees) {
@@ -213,6 +312,7 @@
       project.selectedWorktreePath = selected ? selected.path : project.root;
       refreshSidebar();
       saveWorkspaceSoon();
+      refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
       project.worktrees = mergeWorktreePresentationState(project, [{
@@ -220,6 +320,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      refreshCovenSessions();
       return project.worktrees;
     });
   }
@@ -228,7 +329,7 @@
     if (!p) return [];
     return state.threads.filter(function (t) { return t.projectId === p.id && !t.hidden; });
   }
-  async function setActiveProject(id) {
+  async function setActiveProject(id, options) {
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
     state.activeProjectId = id;
@@ -254,8 +355,10 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      var covenThread = await ensureProjectCoven(project);
-      if (covenThread) setStatus("no pane — launching Coven…", "");
+      if (!options || options.ensureCoven !== false) {
+        var covenThread = await ensureProjectCoven(project);
+        if (covenThread) setStatus("no pane — launching Coven…", "");
+      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -946,6 +1049,7 @@
       if (state.activeThreadId === thread.id) {
         setProjectStatus(findProject(thread.projectId), "ok");
       }
+      if (launch.launchKind === "coven-chat") refreshCovenSessions();
       // Flush any data that arrived before the xterm was mounted.
       var pending = pendingDataBuffers.get(thread.id);
       if (pending && thread.term) {
@@ -982,6 +1086,7 @@
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
+        if (launch.launchKind === "coven-chat") refreshCovenSessions();
         var pending = pendingDataBuffers.get(thread.id);
         if (pending && thread.term) {
           for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
@@ -1004,11 +1109,22 @@
     });
   }
 
-  function retryThread(id) {
+  async function retryThread(id) {
     var thread = findThread(id);
-    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
-        (thread.status !== "failed" && thread.status !== "exited")) {
-      return Promise.resolve(false);
+    if (!thread || thread.startInFlight || thread.closeStarted) return false;
+    if (thread.status !== "exited" && thread.status !== "failed") return false;
+    if (thread.launch.launchKind === "coven-attach") {
+      var project = findProject(thread.projectId);
+      await refreshCovenSessions();
+      var stillExists = project
+        && covenDiscovery.phase === "ready"
+        && covenSessionsForProject(project).some(function (session) {
+          return session.id === thread.launch.covenSessionId;
+        });
+      if (!stillExists) {
+        setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+        return false;
+      }
     }
     return spawnPty(thread);
   }
@@ -1800,6 +1916,144 @@
     return "";
   }
 
+  function covenAttachKey(project, session) {
+    return project.root + "\n" + session.id;
+  }
+
+  function waitForTerminalLayout() {
+    return new Promise(function (resolve) { requestAnimationFrame(resolve); });
+  }
+
+  function findCovenAttachment(project, session, threadId) {
+    return state.threads.find(function (thread) {
+      return (!threadId || thread.id === threadId)
+        && thread.projectId === project.id
+        && thread.covenSessionId === session.id
+        && !thread.closeStarted;
+    }) || null;
+  }
+
+  function covenWorktreeForSession(project, session) {
+    var worktrees = project.worktrees || [];
+    var containing = worktrees.filter(function (candidate) {
+      return session.cwd && (
+        session.cwd === candidate.path
+        || session.cwd.indexOf(candidate.path + "/") === 0
+      );
+    }).sort(function (left, right) {
+      return right.path.length - left.path.length;
+    });
+    return containing[0] || worktrees.find(function (candidate) {
+      return session.projectRoot === candidate.path;
+    }) || selectedWorktree(project);
+  }
+
+  function openCovenSession(project, session) {
+    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
+      setStatus("Invalid Coven session", "error");
+      return Promise.resolve(null);
+    }
+    if (!state.env || !state.env.coven_path) {
+      setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+      return Promise.resolve(null);
+    }
+
+    var existing = findCovenAttachment(project, session);
+    if (existing) {
+      var existingId = existing.id;
+      return Promise.resolve().then(async function () {
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
+        if (!(await activateProjectWorktree(
+          project, existing.worktreePath, { ensureCoven: false }
+        ))) return null;
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
+        await waitForTerminalLayout();
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
+        if (existing.hidden && !reopenThread(existing.id)) return null;
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing || !(await focusThread(existing.id))) return null;
+        return findCovenAttachment(project, session, existingId);
+      });
+    }
+
+    var key = covenAttachKey(project, session);
+    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
+
+    var opening = Promise.resolve().then(async function () {
+      var worktree = covenWorktreeForSession(project, session);
+      if (!worktree || !worktree.path) return null;
+      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      await waitForTerminalLayout();
+      return createThread({
+        project: project,
+        name: session.title || "Coven " + session.id.slice(0, 8),
+        kind: "coven-attach",
+        command: state.env.coven_path,
+        args: ["attach", session.id],
+        projectRoot: project.root,
+        cwd: session.cwd || worktree.path,
+        worktreePath: worktree.path,
+        launchKind: "coven-attach",
+        covenSessionId: session.id,
+      });
+    }).finally(function () {
+      covenAttachInFlight.delete(key);
+    });
+    covenAttachInFlight.set(key, opening);
+    return opening;
+  }
+
+  function createCovenSessionRow(project, session) {
+    var presentation = PsycheSessions.statusPresentation(session.status);
+    var attached = state.threads.some(function (thread) {
+      return thread.projectId === project.id
+        && thread.covenSessionId === session.id
+        && !thread.closeStarted;
+    });
+    var row = document.createElement("button");
+    row.type = "button";
+    row.className = "session-coven-row";
+    row.dataset.sessionId = session.id;
+    row.title = attached ? "Focus attachment" : "Attach";
+    var title = document.createElement("span");
+    title.className = "session-coven-title";
+    title.textContent = session.title || session.id;
+    var meta = document.createElement("span");
+    meta.className = "session-coven-meta coven-tone-" + presentation.tone;
+    meta.textContent = [session.harness, presentation.label].filter(Boolean).join(" · ");
+    row.appendChild(title);
+    row.appendChild(meta);
+    if (presentation.label === "waiting") {
+      var badge = document.createElement("span");
+      badge.className = "session-attention-badge";
+      badge.textContent = "!";
+      badge.title = "Waiting for input";
+      row.appendChild(badge);
+    }
+    row.addEventListener("click", function () {
+      openCovenSession(project, session);
+    });
+    return row;
+  }
+
+  function covenToneClass(phase) {
+    if (phase === "error" || phase === "incompatible") return "coven-tone-danger";
+    if (phase === "unavailable") return "coven-tone-warn";
+    return "coven-tone-muted";
+  }
+
+  function covenInlineState(discovery) {
+    if (!discovery || discovery.phase === "idle" || discovery.phase === "ready") return null;
+    var message = discovery.phase === "loading"
+      ? "Loading Coven sessions"
+      : (discovery.message || "Coven sessions unavailable");
+    if (discovery.stale) message += " — showing last confirmed sessions";
+    return { message: message, className: covenToneClass(discovery.phase) };
+  }
+
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -1808,6 +2062,7 @@
     var currentSearchQuery = sessionFilter;
     var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
+    var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
     var onCanvasIds = canvasThreadIds();
 
@@ -1815,8 +2070,9 @@
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden;
       });
+      var remoteRows = covenSessionsForProject(project);
       var railModel = PsycheSessions.buildProjectRailModel(
-        project, localRows, [], currentSearchQuery
+        project, localRows, remoteRows, currentSearchQuery
       );
       var visibleWorktrees = railModel.worktrees.filter(function (entry) {
         return entry.rows.length > 0;
@@ -1864,7 +2120,12 @@
 
       visibleWorktrees.forEach(function (entry) {
         var worktree = entry.worktree;
-        var threads = entry.rows.map(function (row) { return row.value; });
+        var threads = entry.rows
+          .filter(function (row) { return row.source === "psyche"; })
+          .map(function (row) { return row.value; });
+        var covenSessions = entry.rows
+          .filter(function (row) { return row.source === "coven"; })
+          .map(function (row) { return row.value; });
 
         var worktreeGroup = document.createElement("div");
         worktreeGroup.className = "session-worktree-group" +
@@ -2071,11 +2332,30 @@
           worktreeGroup.appendChild(wrapper);
         });
 
+        if (!worktree.collapsed && covenSessions.length > 0) {
+          var covenLabel = document.createElement("div");
+          covenLabel.className = "session-subsection-label";
+          covenLabel.textContent = "Coven";
+          worktreeGroup.appendChild(covenLabel);
+        }
+
+        if (!worktree.collapsed) covenSessions.forEach(function (session) {
+          worktreeGroup.appendChild(createCovenSessionRow(project, session));
+        });
+
         group.appendChild(worktreeGroup);
       });
 
       sessionListEl.appendChild(group);
     });
+
+    if (inlineState) {
+      var inline = document.createElement("div");
+      inline.className = "session-inline-state " + inlineState.className;
+      inline.textContent = inlineState.message;
+      sessionListEl.appendChild(inline);
+      matched += 1;
+    }
 
     if (matched === 0) {
       var empty = document.createElement("div");
@@ -2132,7 +2412,8 @@
       if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
       var items = Array.prototype.filter.call(
         sessionListEl.querySelectorAll(
-          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, .session-close"
+          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, " +
+          ".session-coven-row, .session-close"
         ),
         function (item) { return item.offsetParent !== null; }
       );
@@ -2204,6 +2485,7 @@
       fileNavigationInFlight = false;
     }
     if (!canRemove) return false;
+    covenDiscovery = PsycheSessions.invalidateCovenRequests(covenDiscovery);
     // Close every thread that belongs to this project.
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
@@ -2219,6 +2501,7 @@
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
+    startCovenPolling();
     if (state.activeProjectId === id) {
       var next = state.projects[0] || null;
       // Force setActiveProject to do its restore work even though the id
@@ -4650,6 +4933,7 @@
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
+    startCovenPolling();
     return project;
   }
 
@@ -4848,6 +5132,7 @@
       restoreProjectLayout(project);
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
+    startCovenPolling();
   }
 
   invoke("app_environment")
