@@ -376,7 +376,11 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     controlPaneId,
     useHooks
   )
-  const covenSessionsState = useCovenSessions(sessionProjectRoot, sidebarProjects)
+  const covenSessionsState = useCovenSessions(
+    sessionProjectRoot,
+    sidebarProjects,
+    { includeUnscoped: true }
+  )
   const publishedCovenSessions = useMemo(
     () => normalizeCovenSessionsForPublication(covenSessionsState.sessions),
     [covenSessionsState.sessions]
