@@ -857,16 +857,24 @@ export class Connection {
         return;
       }
       case 'panes.meta': {
-        const outcome = await this.submitControl(this.buildCommand(
-          'pane.meta.update',
-          { paneId: msg.id, title: msg.title, agent: msg.agent },
-          { actorKind: 'human', idempotencyKey: randomUUID() },
-        ));
-        if (outcome.status === 'succeeded') {
-          this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-          await this.emitWorkspaceChanged();
-        } else {
-          this.sendControlError(msg.requestId, 'meta_failed', outcome);
+        try {
+          const outcome = await this.submitControl(this.buildCommand(
+            'pane.meta.update',
+            { paneId: msg.id, title: msg.title, agent: msg.agent },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          ));
+          if (outcome.status === 'succeeded') {
+            this.send({ type: 'ack', requestId: msg.requestId, ok: true });
+            await this.emitWorkspaceChanged();
+          } else {
+            this.sendControlError(msg.requestId, 'meta_failed', outcome);
+          }
+        } catch (e) {
+          // submit() itself can reject on runtime infrastructure failure (e.g. a
+          // journal append error) before producing an outcome. Preserve the v0
+          // wire behavior: a correlated meta_failed frame rather than letting
+          // dispatch throw into the connection-level internal_error backstop.
+          this.send({ type: 'error', requestId: msg.requestId, code: 'meta_failed', message: bridgeErrorMessage(e) });
         }
         return;
       }

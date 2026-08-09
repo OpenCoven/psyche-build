@@ -254,6 +254,21 @@ describe('daemon control adapter translation', () => {
     expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', requestId: 'm', ok: true });
   });
 
+  it('replies with a correlated meta_failed frame when submit rejects', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime();
+    // Simulate a runtime infrastructure failure (e.g. journal append error):
+    // submit() rejects rather than returning a failed outcome.
+    runtime.submit = vi.fn(async (_command: ControlCommand): Promise<CommandOutcome> => {
+      throw new Error('journal append failed');
+    }) as typeof runtime.submit;
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, { type: 'panes.meta', requestId: 'm', id: '%3', title: 'renamed' });
+
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'error', requestId: 'm', code: 'meta_failed' });
+  });
+
   it('translates spawn into a compatibility pane.spawn carrying the v0 request', async () => {
     const root = await projectWithPanes([]);
     const runtime = spyRuntime((command) =>
