@@ -48,6 +48,20 @@ struct CovenHealthResponse {
     api_version: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CovenProjectScope {
+    project_root: String,
+    #[serde(default)]
+    worktree_roots: Vec<String>,
+}
+
+#[derive(Debug)]
+struct CanonicalProjectScope {
+    project_root: String,
+    owned_roots: HashSet<PathBuf>,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct CovenSessionSummary {
@@ -196,11 +210,21 @@ pub(crate) fn is_safe_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+#[cfg(test)]
 fn load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
 ) -> CovenSessionsResponse {
-    match try_load_coven_sessions(endpoint, project_roots) {
+    let project_scopes = default_project_scopes(project_roots);
+    load_coven_sessions_with_scopes(endpoint, project_roots, &project_scopes)
+}
+
+fn load_coven_sessions_with_scopes(
+    endpoint: &CovenEndpoint,
+    project_roots: &[PathBuf],
+    project_scopes: &[CovenProjectScope],
+) -> CovenSessionsResponse {
+    match try_load_coven_sessions(endpoint, project_roots, project_scopes) {
         Ok(sessions) => CovenSessionsResponse {
             status: "ready".to_string(),
             sessions,
@@ -224,6 +248,7 @@ fn discover(
     env: &HashMap<String, String>,
     home: &Path,
     project_roots: Vec<String>,
+    project_scopes: Option<Vec<CovenProjectScope>>,
 ) -> CovenSessionsResponse {
     let endpoint = match resolve_endpoint(env, home) {
         Ok(endpoint) => endpoint,
@@ -233,12 +258,16 @@ fn discover(
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
+    let project_scopes = project_scopes.unwrap_or_else(|| default_project_scopes(&project_roots));
 
-    load_coven_sessions(&endpoint, &project_roots)
+    load_coven_sessions_with_scopes(&endpoint, &project_roots, &project_scopes)
 }
 
 #[tauri::command]
-pub(crate) async fn coven_sessions(project_roots: Vec<String>) -> CovenSessionsResponse {
+pub(crate) async fn coven_sessions(
+    project_roots: Vec<String>,
+    project_scopes: Option<Vec<CovenProjectScope>>,
+) -> CovenSessionsResponse {
     match tauri::async_runtime::spawn_blocking(move || {
         let env = match coven_environment([
             ("COVEN_SOCKET", std::env::var_os("COVEN_SOCKET")),
@@ -251,7 +280,7 @@ pub(crate) async fn coven_sessions(project_roots: Vec<String>) -> CovenSessionsR
         };
         let home = home_path(std::env::var_os("HOME"));
 
-        discover(&env, &home, project_roots)
+        discover(&env, &home, project_roots, project_scopes)
     })
     .await
     {
@@ -263,6 +292,7 @@ pub(crate) async fn coven_sessions(project_roots: Vec<String>) -> CovenSessionsR
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
+    project_scopes: &[CovenProjectScope],
 ) -> Result<Vec<CovenSessionSummary>, CovenAdapterError> {
     let deadline = Instant::now() + EXCHANGE_TIMEOUT;
     let health_body = request_endpoint(endpoint, "/api/v1/health", deadline)?;
@@ -275,7 +305,8 @@ fn try_load_coven_sessions(
     let sessions_body = request_endpoint(endpoint, "/api/v1/sessions", deadline)?;
     let sessions_value =
         serde_json::from_slice(&sessions_body).map_err(|_| CovenAdapterError::Failed)?;
-    normalize_sessions(sessions_value, project_roots).map_err(|_| CovenAdapterError::Failed)
+    normalize_sessions_with_scopes(sessions_value, project_roots, project_scopes)
+        .map_err(|_| CovenAdapterError::Failed)
 }
 
 fn request_endpoint(
@@ -829,9 +860,29 @@ fn is_valid_quoted_string(value: &str) -> bool {
     !escaped
 }
 
+#[cfg(test)]
 fn normalize_sessions(
     value: Value,
     requested_roots: &[PathBuf],
+) -> Result<Vec<CovenSessionSummary>, String> {
+    let project_scopes = default_project_scopes(requested_roots);
+    normalize_sessions_with_scopes(value, requested_roots, &project_scopes)
+}
+
+fn default_project_scopes(requested_roots: &[PathBuf]) -> Vec<CovenProjectScope> {
+    requested_roots
+        .iter()
+        .map(|root| CovenProjectScope {
+            project_root: root.to_string_lossy().into_owned(),
+            worktree_roots: Vec::new(),
+        })
+        .collect()
+}
+
+fn normalize_sessions_with_scopes(
+    value: Value,
+    requested_roots: &[PathBuf],
+    project_scopes: &[CovenProjectScope],
 ) -> Result<Vec<CovenSessionSummary>, String> {
     let sessions = match value {
         Value::Array(sessions) => sessions,
@@ -853,9 +904,10 @@ fn normalize_sessions(
     };
 
     let requested_roots = canonical_requested_roots(requested_roots);
+    let project_scopes = canonical_project_scopes(project_scopes, &requested_roots);
     Ok(sessions
         .iter()
-        .filter_map(|session| normalize_session(session, &requested_roots))
+        .filter_map(|session| normalize_session(session, &project_scopes))
         .collect())
 }
 
@@ -877,9 +929,39 @@ fn canonical_requested_roots(requested_roots: &[PathBuf]) -> HashMap<PathBuf, St
     canonical_roots
 }
 
+fn canonical_project_scopes(
+    project_scopes: &[CovenProjectScope],
+    requested_roots: &HashMap<PathBuf, String>,
+) -> HashMap<PathBuf, CanonicalProjectScope> {
+    let mut canonical_scopes = HashMap::new();
+    for scope in project_scopes {
+        let Ok(canonical_project_root) = Path::new(&scope.project_root).canonicalize() else {
+            continue;
+        };
+        let Some(project_root) = requested_roots.get(&canonical_project_root) else {
+            continue;
+        };
+        let canonical_scope = canonical_scopes
+            .entry(canonical_project_root.clone())
+            .or_insert_with(|| CanonicalProjectScope {
+                project_root: project_root.clone(),
+                owned_roots: HashSet::from([canonical_project_root]),
+            });
+        for worktree_root in &scope.worktree_roots {
+            let Ok(canonical_worktree_root) = Path::new(worktree_root).canonicalize() else {
+                continue;
+            };
+            if requested_roots.contains_key(&canonical_worktree_root) {
+                canonical_scope.owned_roots.insert(canonical_worktree_root);
+            }
+        }
+    }
+    canonical_scopes
+}
+
 fn normalize_session(
     value: &Value,
-    requested_roots: &HashMap<PathBuf, String>,
+    project_scopes: &HashMap<PathBuf, CanonicalProjectScope>,
 ) -> Option<CovenSessionSummary> {
     let fields = value.as_object()?;
     let id = required_string(fields, "id", "id")?;
@@ -891,25 +973,26 @@ fn normalize_session(
         return None;
     }
     let canonical_project_root = Path::new(project_root).canonicalize().ok()?;
-    let requested_project_root = requested_roots.get(&canonical_project_root)?;
+    let project_scope = project_scopes.get(&canonical_project_root)?;
 
     let cwd = match optional_string(fields, "cwd", "cwd")? {
         Some(cwd) => {
             let canonical_cwd = Path::new(&cwd).canonicalize().ok()?;
-            if !requested_roots
-                .keys()
-                .any(|requested_root| canonical_cwd.starts_with(requested_root))
+            if !project_scope
+                .owned_roots
+                .iter()
+                .any(|owned_root| canonical_cwd.starts_with(owned_root))
             {
                 return None;
             }
-            Some(cwd)
+            Some(canonical_cwd.to_string_lossy().into_owned())
         }
         None => None,
     };
 
     Some(CovenSessionSummary {
         id: id.to_string(),
-        project_root: requested_project_root.clone(),
+        project_root: project_scope.project_root.clone(),
         cwd,
         harness: optional_string(fields, "harness", "harness")?,
         title: optional_string(fields, "title", "title")?,
@@ -1556,6 +1639,18 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_project_scope_from_camel_case_command_fields() {
+        let scope: CovenProjectScope = serde_json::from_value(json!({
+            "projectRoot": "/project",
+            "worktreeRoots": ["/worktree"]
+        }))
+        .unwrap();
+
+        assert_eq!(scope.project_root, "/project");
+        assert_eq!(scope.worktree_roots, vec!["/worktree"]);
+    }
+
+    #[test]
     fn normalizes_list_and_object_envelopes() {
         let tree = TempTree::new("envelopes");
         let project = tree.directory("project");
@@ -1680,13 +1775,18 @@ mod tests {
         let linked_worktree = tree.directory("external-worktree");
         let outside = tree.directory("outside");
         let requested = vec![project.clone(), linked_worktree.clone()];
+        let project_scopes = vec![CovenProjectScope {
+            project_root: project.to_string_lossy().into_owned(),
+            worktree_roots: vec![linked_worktree.to_string_lossy().into_owned()],
+        }];
         let payload = json!([
             { "id": "inside", "projectRoot": project, "cwd": inside },
             { "id": "linked", "projectRoot": project, "cwd": linked_worktree },
             { "id": "outside", "projectRoot": project, "cwd": outside }
         ]);
 
-        let sessions = normalize_sessions(payload, &requested).unwrap();
+        let sessions =
+            normalize_sessions_with_scopes(payload, &requested, &project_scopes).unwrap();
         assert_eq!(
             sessions
                 .iter()
@@ -1696,11 +1796,65 @@ mod tests {
         );
         assert_eq!(
             sessions[0].cwd.as_deref(),
-            Some(inside.to_string_lossy().as_ref())
+            Some(inside.canonicalize().unwrap().to_string_lossy().as_ref())
         );
         assert_eq!(
             sessions[1].cwd.as_deref(),
-            Some(linked_worktree.to_string_lossy().as_ref())
+            Some(
+                linked_worktree
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_a_cwd_owned_by_another_requested_project() {
+        let tree = TempTree::new("cross-project-cwd");
+        let first = tree.directory("first");
+        let first_worktree = tree.directory("first-worktree");
+        let second = tree.directory("second");
+        let requested = vec![
+            CovenProjectScope {
+                project_root: first.to_string_lossy().into_owned(),
+                worktree_roots: vec![first_worktree.to_string_lossy().into_owned()],
+            },
+            CovenProjectScope {
+                project_root: second.to_string_lossy().into_owned(),
+                worktree_roots: vec![],
+            },
+        ];
+        let roots = vec![first, first_worktree.clone(), second.clone()];
+        let payload = json!([
+            { "id": "wrong-owner", "projectRoot": second, "cwd": first_worktree }
+        ]);
+
+        let sessions = normalize_sessions_with_scopes(payload, &roots, &requested).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn returns_canonical_owned_cwd_for_aliases() {
+        let tree = TempTree::new("canonical-cwd");
+        let project = tree.directory("project");
+        let cwd = tree.directory("project/worktree");
+        let cwd_alias = cwd.join("..").join("worktree");
+        let requested = vec![CovenProjectScope {
+            project_root: project.to_string_lossy().into_owned(),
+            worktree_roots: vec![],
+        }];
+        let roots = vec![project.clone()];
+        let payload = json!([
+            { "id": "canonical", "projectRoot": project, "cwd": cwd_alias }
+        ]);
+
+        let sessions = normalize_sessions_with_scopes(payload, &roots, &requested).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].cwd.as_deref(),
+            Some(cwd.canonicalize().unwrap().to_string_lossy().as_ref())
         );
     }
 
