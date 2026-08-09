@@ -112,9 +112,9 @@ function upsertProject(
     return;
   }
 
-  if (existing.title === fallbackProjectTitle(root) && normalizedTitle !== existing.title) {
-    existing.title = normalizedTitle;
-  }
+  if (existing.isPrimary) return;
+
+  existing.title = preferredProjectTitle(existing.title, normalizedTitle, root);
 }
 
 function readWorktreesForProject(
@@ -178,7 +178,8 @@ function projectCovenSessions(
 }
 
 function normalizeRoot(projectRoot: string): string {
-  return path.resolve(projectRoot);
+  const trimmed = projectRoot.trim();
+  return path.resolve(trimmed || projectRoot);
 }
 
 function normalizeProjectTitle(title: string | undefined, projectRoot: string): string {
@@ -219,8 +220,15 @@ function deduplicateCovenSessionsByProject(
 function normalizeCovenSession(session: CovenSessionSummary): CovenSessionSummary {
   return {
     ...session,
+    id: trimmedString(session.id) ?? session.id,
     projectRoot: normalizeRoot(session.projectRoot),
     cwd: session.cwd?.trim() ? normalizeRoot(session.cwd) : undefined,
+    title: trimmedString(session.title) ?? '',
+    harness: trimmedString(session.harness) ?? '',
+    status: (trimmedString(session.status) ?? '') as CovenSessionSummary['status'],
+    createdAt: normalizeCanonicalDateField(session.createdAt),
+    updatedAt: normalizeCanonicalDateField(session.updatedAt),
+    archivedAt: normalizeOptionalCanonicalDateField(session.archivedAt),
   };
 }
 
@@ -261,13 +269,40 @@ function normalizedCovenSessionFields(session: CovenSessionSummary) {
     id: session.id,
     projectRoot: session.projectRoot,
     cwd: session.cwd ?? '',
-    title: session.title.trim(),
-    harness: session.harness.trim(),
-    status: session.status.trim(),
-    createdAt: session.createdAt.trim(),
-    updatedAt: session.updatedAt.trim(),
-    archivedAt: session.archivedAt?.trim() ?? '',
+    title: session.title,
+    harness: session.harness,
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    archivedAt: session.archivedAt ?? '',
   };
+}
+
+function preferredProjectTitle(current: string, candidate: string, root: string): string {
+  const fallback = fallbackProjectTitle(root);
+  const currentRank = projectTitleRank(current, fallback);
+  const candidateRank = projectTitleRank(candidate, fallback);
+  if (candidateRank !== currentRank) return candidateRank < currentRank ? candidate : current;
+  return compareStrings(current, candidate) <= 0 ? current : candidate;
+}
+
+function projectTitleRank(title: string, fallback: string): number {
+  return title === fallback ? 1 : 0;
+}
+
+function normalizeCanonicalDateField(value: string): string {
+  return normalizeIsoDateString(value) ?? (trimmedString(value) ?? '');
+}
+
+function normalizeOptionalCanonicalDateField(value: string | undefined): string | undefined {
+  const trimmed = trimmedString(value);
+  if (!trimmed) return undefined;
+  return normalizeIsoDateString(trimmed);
+}
+
+function trimmedString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }
 
 function compareNumbersDescending(left: number, right: number): number {

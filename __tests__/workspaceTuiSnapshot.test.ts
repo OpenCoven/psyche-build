@@ -447,4 +447,119 @@ describe('TUI workspace snapshot adapter', () => {
     }));
     expect(sidebar.worktrees[1].panes.filter((candidate) => candidate.id === 'session-dup')).toHaveLength(0);
   });
+
+  it('emits byte-equivalent snapshots for whitespace-equivalent duplicate Coven records', () => {
+    const canonical = session({
+      id: 'session-dup',
+      projectRoot: '/repo/sidebar',
+      cwd: '/repo/sidebar/.psyche/worktrees/beta',
+      harness: 'claude',
+      title: 'Review lane',
+      status: 'waiting',
+      createdAt: '2026-08-09T00:00:00.000Z',
+      updatedAt: '2026-08-09T01:02:03.000Z',
+    });
+    const whitespaceEquivalent = session({
+      id: 'session-dup',
+      projectRoot: '  /repo/sidebar  ',
+      cwd: '  /repo/sidebar/.psyche/worktrees/beta  ',
+      harness: '  claude  ',
+      title: '  Review lane  ',
+      status: '  waiting  ' as CovenSessionSummary['status'],
+      createdAt: ' 2026-08-09T00:00:00+00:00 ',
+      updatedAt: ' 2026-08-09T03:02:03+02:00 ',
+      archivedAt: ' not-a-date ',
+    });
+
+    const build = (groupedSessions: Map<string, CovenSessionSummary[]>) => (
+      buildTuiWorkspaceSnapshot({
+        revision: 16,
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        sidebarProjects: [{ projectRoot: '/repo/sidebar', projectName: 'Sidebar' }],
+        panes: [],
+        covenSessionsByProject: groupedSessions,
+        worktreesByProjectRoot: new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/sidebar', [
+            worktree('/repo/sidebar', { isMain: true, branch: 'main' }),
+            worktree('/repo/sidebar/.psyche/worktrees/beta', { branch: 'beta' }),
+          ]],
+        ]),
+      })
+    );
+
+    const ordered = build(new Map([
+      ['/repo/sidebar', [whitespaceEquivalent, canonical]],
+    ]));
+    const reversed = build(new Map([
+      ['/repo/sidebar', [canonical, whitespaceEquivalent]],
+    ]));
+
+    expect(JSON.stringify(ordered)).toBe(JSON.stringify(reversed));
+
+    const sidebar = project(ordered, '/repo/sidebar');
+    expect(sidebar.worktrees[1].panes).toContainEqual(expect.objectContaining({
+      id: 'session-dup',
+      cwd: '/repo/sidebar/.psyche/worktrees/beta',
+      title: 'Review lane',
+      kind: 'coven-session',
+      agent: 'claude',
+      status: 'waiting',
+      needsAttention: true,
+      lastActivity: '2026-08-09T01:02:03.000Z',
+    }));
+  });
+
+  it('selects the same non-primary project title and ordering regardless of sidebar/pane order', () => {
+    const build = (sidebarProjects: SidebarProject[], panes: PsychePane[]) => (
+      buildTuiWorkspaceSnapshot({
+        revision: 17,
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        sidebarProjects,
+        panes,
+        worktreesByProjectRoot: new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/sidebar', [worktree('/repo/sidebar', { isMain: true, branch: 'main' })]],
+          ['/repo/zeta', [worktree('/repo/zeta', { isMain: true, branch: 'main' })]],
+        ]),
+      })
+    );
+
+    const ordered = build(
+      [
+        { projectRoot: '/repo/zeta', projectName: 'Zeta' },
+        { projectRoot: '/repo/sidebar', projectName: 'Zulu' },
+        { projectRoot: '/repo/primary', projectName: 'Primary duplicate' },
+      ],
+      [
+        pane({ id: 'sidebar-pane-a', slug: 'one', paneId: '%1', projectRoot: '/repo/sidebar', projectName: 'Alpha' }),
+        pane({ id: 'sidebar-pane-z', slug: 'two', paneId: '%3', projectRoot: '/repo/sidebar', projectName: 'Zulu' }),
+        pane({ id: 'primary-pane', slug: 'main', paneId: '%2', projectRoot: '/repo/primary', projectName: 'Wrong primary' }),
+      ],
+    );
+    const reversed = build(
+      [
+        { projectRoot: '/repo/primary', projectName: 'Primary duplicate' },
+        { projectRoot: '/repo/sidebar', projectName: 'Zulu' },
+        { projectRoot: '/repo/zeta', projectName: 'Zeta' },
+      ],
+      [
+        pane({ id: 'sidebar-pane-z', slug: 'two', paneId: '%3', projectRoot: '/repo/sidebar', projectName: 'Zulu' }),
+        pane({ id: 'primary-pane', slug: 'main', paneId: '%2', projectRoot: '/repo/primary', projectName: 'Wrong primary' }),
+        pane({ id: 'sidebar-pane-a', slug: 'one', paneId: '%1', projectRoot: '/repo/sidebar', projectName: 'Alpha' }),
+      ],
+    );
+
+    expect(ordered).toEqual(reversed);
+    expect(ordered.projects.map((candidate) => ({
+      root: candidate.root,
+      title: candidate.title,
+    }))).toEqual([
+      { root: '/repo/primary', title: 'Primary' },
+      { root: '/repo/sidebar', title: 'Alpha' },
+      { root: '/repo/zeta', title: 'Zeta' },
+    ]);
+  });
 });

@@ -72,6 +72,9 @@ export interface BuildWorkspaceSnapshotInput {
   projects: WorkspaceProjectInput[];
 }
 
+const ISO_DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_ZONED_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
 export function parseGitWorktreePorcelain(raw: string): GitWorktreeSnapshotInput[] {
   const blocks = raw
     .split(/\r?\n\r?\n/)
@@ -170,6 +173,37 @@ export function buildWorkspaceSnapshot(input: BuildWorkspaceSnapshotInput): Work
 export function normalizeIsoDateString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
+  if (ISO_DATE_ONLY.test(trimmed)) return undefined;
+
+  const match = ISO_ZONED_DATE_TIME.exec(trimmed);
+  if (!match) return undefined;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth(year, month)
+    || hour > 23
+    || minute > 59
+    || second > 59
+  ) {
+    return undefined;
+  }
+
+  if (offset !== 'Z') {
+    const offsetHour = Number(offset.slice(1, 3));
+    const offsetMinute = Number(offset.slice(4, 6));
+    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
+      return undefined;
+    }
+  }
 
   const date = new Date(trimmed);
   return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
@@ -228,14 +262,16 @@ function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
 }
 
 function covenSessionPane(session: CovenSessionSummary): PaneSnapshot {
+  const cwd = trimmedString(session.cwd);
+  const id = trimmedString(session.id);
   return {
-    id: session.id,
-    cwd: session.cwd ?? session.projectRoot,
-    title: session.title,
+    id: id ?? session.id,
+    cwd: cwd ? path.resolve(cwd) : path.resolve(session.projectRoot.trim()),
+    title: trimmedString(session.title) ?? '',
     kind: 'coven-session',
-    agent: session.harness,
-    status: session.status,
-    needsAttention: session.status === 'waiting',
+    agent: trimmedString(session.harness) ?? '',
+    status: trimmedString(session.status) ?? '',
+    needsAttention: trimmedString(session.status) === 'waiting',
     lastActivity: normalizeIsoDateString(session.updatedAt),
     recoverability: 'healthy',
   };
@@ -257,4 +293,17 @@ function isInsideOrEqual(parent: string, candidate: string): boolean {
 
 function isRunning(status: string): boolean {
   return ['starting', 'running', 'working', 'analyzing'].includes(status);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function trimmedString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }

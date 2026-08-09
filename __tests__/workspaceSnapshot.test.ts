@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildWorkspaceSnapshot,
+  normalizeIsoDateString,
   parseGitWorktreePorcelain,
   readProjectWorktrees,
 } from '../src/workspace/snapshot.js';
@@ -245,5 +246,13 @@ describe('workspace snapshot', () => {
         lastActivity: '2026-08-04T00:01:00.000Z',
       }),
     ]));
+  });
+
+  it('rejects timezone-less datetimes and normalizes explicit Z/offset timestamps identically', () => {
+    expect(normalizeIsoDateString(' 2026-08-04T00:01:00 ')).toBeUndefined();
+    expect(normalizeIsoDateString('2026-08-04T00:01:00Z'))
+      .toBe('2026-08-04T00:01:00.000Z');
+    expect(normalizeIsoDateString('2026-08-04T02:01:00+02:00'))
+      .toBe('2026-08-04T00:01:00.000Z');
   });
 });
