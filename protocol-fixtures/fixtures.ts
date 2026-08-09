@@ -3,6 +3,7 @@ import type {
   ServerMessage,
 } from '../src/services/bridge/wireProtocol.js';
 import type { ServerResponse } from '../src/daemon/protocol.js';
+import { PaneAction } from '../src/actions/types.js';
 
 /**
  * Typed source of truth for the wire-protocol fixtures.
@@ -144,6 +145,7 @@ export const SERVER_FIXTURES = {
       serverName: 'psyche-build',
       protocolVersion: 2,
       projectName: 'psyche-build',
+      supportedVersions: [2, 3],
     },
   },
   welcome_noProject: {
@@ -153,6 +155,7 @@ export const SERVER_FIXTURES = {
       serverName: 'psyche-build',
       protocolVersion: 2,
       projectName: null,
+      supportedVersions: [2, 3],
     },
   },
   paneList: { type: 'paneList', payload: [PANE] },
@@ -310,6 +313,217 @@ export const MOBILE_CONTROL_FIXTURES = {
       agent: 'coven-code',
       title: 'Implement mobile cockpit',
       prompt: 'Add the paired protocol-v3 control envelope.',
+    },
+  },
+  detachPane: {
+    type: 'control',
+    payload: {
+      type: 'panes.detach',
+      requestId: 'detach-1',
+      streamId: 'stream-1',
+    },
+  },
+  inputPane: {
+    type: 'control',
+    payload: {
+      type: 'panes.input',
+      requestId: 'input-1',
+      streamId: 'stream-1',
+      data: 'bHMgLWxhCg==',
+    },
+  },
+  resizePane: {
+    type: 'control',
+    payload: {
+      type: 'panes.resize',
+      requestId: 'resize-1',
+      streamId: 'stream-1',
+      cols: 120,
+      rows: 40,
+    },
+  },
+  killPane: {
+    type: 'control',
+    payload: {
+      type: 'panes.kill',
+      requestId: 'kill-1',
+      id: '%3',
+    },
+  },
+  paneMeta: {
+    type: 'control',
+    payload: {
+      type: 'panes.meta',
+      requestId: 'meta-1',
+      id: '%3',
+      title: 'Mobile cockpit',
+      agent: 'coven-code',
+    },
+  },
+  listFiles: {
+    type: 'control',
+    payload: {
+      type: 'files.list',
+      requestId: 'files-list-1',
+      paneId: '%3',
+    },
+  },
+  readFile: {
+    type: 'control',
+    payload: {
+      type: 'files.read',
+      requestId: 'files-read-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+    },
+  },
+  diffFile: {
+    type: 'control',
+    payload: {
+      type: 'files.diff',
+      requestId: 'files-diff-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+    },
+  },
+  startAction: {
+    type: 'control',
+    payload: {
+      type: 'actions.start',
+      requestId: 'action-start-1',
+      paneId: '%3',
+      action: PaneAction.VIEW,
+    },
+  },
+  respondToAction: {
+    type: 'control',
+    payload: {
+      type: 'actions.respond',
+      requestId: 'action-response-1',
+      paneId: '%3',
+      response: { type: 'confirm' },
+    },
+  },
+  ack: {
+    type: 'control',
+    payload: {
+      type: 'ack',
+      requestId: 'ack-1',
+      ok: true,
+    },
+  },
+  paneSpawned: {
+    type: 'control',
+    payload: {
+      type: 'panes.spawn.result',
+      requestId: 'spawn-1',
+      id: '%3',
+      pane: undefined,
+      worktreePath: '/repo/.psyche/worktrees/mobile-cockpit',
+      branch: 'mobile-cockpit',
+    },
+  },
+  streamExited: {
+    type: 'control',
+    payload: {
+      type: 'panes.stream.exit',
+      streamId: 'stream-1',
+      reason: 'pane exited',
+    },
+  },
+  controlError: {
+    type: 'control',
+    payload: {
+      type: 'error',
+      requestId: 'error-1',
+      code: 'pane_not_found',
+      message: 'pane is not registered',
+    },
+  },
+  workspaceSnapshotResult: {
+    type: 'control',
+    payload: {
+      type: 'mobile.workspace.snapshot.result',
+      requestId: 'workspace-1',
+      sequence: 7,
+      workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+    },
+  },
+  attachPaneResult: {
+    type: 'control',
+    payload: {
+      type: 'mobile.panes.attach.result',
+      requestId: 'attach-1',
+      streamId: 'stream-1',
+      id: '%3',
+      latestSeq: 12,
+      hasReplay: true,
+      replayMode: 'replace',
+    },
+  },
+  filesListResult: {
+    type: 'control',
+    payload: {
+      type: 'files.list.result',
+      requestId: 'files-list-1',
+      paneId: '%3',
+      snapshot: {
+        rootPath: '/repo',
+        files: [{
+          path: 'src/index.ts',
+          name: 'index.ts',
+          parentPath: 'src',
+          exists: true,
+          changed: true,
+          statusCode: 'M',
+          statusLabel: 'Modified',
+        }],
+      },
+    },
+  },
+  filesReadResult: {
+    type: 'control',
+    payload: {
+      type: 'files.read.result',
+      requestId: 'files-read-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+      content: 'export {};\n',
+    },
+  },
+  filesDiffResult: {
+    type: 'control',
+    payload: {
+      type: 'files.diff.result',
+      requestId: 'files-diff-1',
+      paneId: '%3',
+      path: 'src/index.ts',
+      diff: '@@ -0,0 +1 @@\n+export {};\n',
+    },
+  },
+  actionResult: {
+    type: 'control',
+    payload: {
+      type: 'actions.result',
+      requestId: 'action-start-1',
+      sessionId: undefined,
+      result: {
+        type: 'success',
+        message: 'Action completed',
+        title: undefined,
+        confirmLabel: undefined,
+        cancelLabel: undefined,
+        options: undefined,
+        placeholder: undefined,
+        defaultValue: undefined,
+        inputMaxVisibleLines: undefined,
+        progress: undefined,
+        targetPaneId: undefined,
+        reviewData: undefined,
+        data: undefined,
+        relatedFiles: undefined,
+        dismissable: undefined,
+      },
     },
   },
 } satisfies Record<string, MobileControlFixture>;

@@ -142,6 +142,7 @@ export interface WelcomePayload {
   serverName: string;
   protocolVersion: SupportedProtocolVersion;
   projectName: string | null;
+  supportedVersions?: readonly SupportedProtocolVersion[];
 }
 
 export interface PaneOutputPayload {
@@ -189,14 +190,22 @@ export type LegacyServerMessage =
 export type MobilePaneCreateKind = 'agent' | 'terminal' | 'coven-session';
 export type MobileTerminalReplayMode = 'append' | 'replace';
 
-type CanonicalMobileControlRequest = Exclude<
+type CanonicalMobileControlRequest = Extract<
   DaemonClientRequest,
-  { type: 'hello' } | { type: 'panes.attach' } | { type: 'panes.spawn' }
+  {
+    type:
+      | 'workspace.snapshot'
+      | 'panes.detach'
+      | 'panes.input'
+      | 'panes.resize'
+      | 'panes.kill'
+      | 'panes.meta';
+  }
 >;
 
-type CanonicalMobileControlResponse = Exclude<
+type CanonicalMobileControlResponse = Extract<
   DaemonServerResponse,
-  { type: 'workspace.snapshot.result' } | { type: 'panes.attach.result' } | { type: 'workspace.changed' }
+  { type: 'ack' | 'panes.spawn.result' | 'panes.stream.exit' | 'error' }
 >;
 
 export type MobilePaneSpawnRequest = {
@@ -367,6 +376,35 @@ export type ServerMessage =
 // Runtime type lists
 // ---------------------------------------------------------------------------
 
+export const MOBILE_CONTROL_REQUEST_TYPES = [
+  'workspace.snapshot',
+  'panes.detach',
+  'panes.input',
+  'panes.resize',
+  'panes.kill',
+  'panes.meta',
+  'panes.spawn',
+  'panes.attach',
+  'files.list',
+  'files.read',
+  'files.diff',
+  'actions.start',
+  'actions.respond',
+] as const;
+
+export const MOBILE_CONTROL_RESPONSE_TYPES = [
+  'ack',
+  'panes.spawn.result',
+  'panes.stream.exit',
+  'error',
+  'mobile.workspace.snapshot.result',
+  'mobile.panes.attach.result',
+  'files.list.result',
+  'files.read.result',
+  'files.diff.result',
+  'actions.result',
+] as const;
+
 export const CLIENT_MESSAGE_TYPES = [
   "hello",
   "listPanes",
@@ -411,8 +449,18 @@ const _serverTypesMatchUnion: MutuallyExhaustive<
   ServerMessage["type"],
   typeof SERVER_MESSAGE_TYPES[number]
 > = true;
+const _mobileControlRequestTypesMatchUnion: MutuallyExhaustive<
+  MobileControlRequest['type'],
+  typeof MOBILE_CONTROL_REQUEST_TYPES[number]
+> = true;
+const _mobileControlResponseTypesMatchUnion: MutuallyExhaustive<
+  MobileControlResponse['type'],
+  typeof MOBILE_CONTROL_RESPONSE_TYPES[number]
+> = true;
 void _clientTypesMatchUnion;
 void _serverTypesMatchUnion;
+void _mobileControlRequestTypesMatchUnion;
+void _mobileControlResponseTypesMatchUnion;
 
 // ---------------------------------------------------------------------------
 // stableStringify — mirrors Swift's .sortedKeys output formatting.

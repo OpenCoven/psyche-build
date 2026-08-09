@@ -53,6 +53,116 @@ class NoopPaneStreamHub extends PaneStreamHub {
 const noopHubFactory = (sessionName: string) => new NoopPaneStreamHub(sessionName);
 
 describe("BridgeDaemon", () => {
+  it("sends a legacy v2 welcome before hello and no duplicate welcome for v2", async () => {
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const welcomes: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "welcome") {
+          welcomes.push(message);
+        }
+        if (welcomes.length === 1 && message.type === "welcome") {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: {
+              clientId: "v2-client",
+              clientName: "v2",
+              protocolVersion: LEGACY_PROTOCOL_VERSION,
+              token: null,
+            },
+          }));
+          client.send(JSON.stringify({
+            type: "ping",
+            payload: { token: "v2-negotiated" },
+          }));
+        } else if (message.type === "pong") {
+          resolve();
+        }
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(welcomes).toEqual([{
+      type: "welcome",
+      payload: {
+        serverId: "test-srv",
+        serverName: "test",
+        protocolVersion: LEGACY_PROTOCOL_VERSION,
+        projectName: "psyche",
+        supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+      },
+    }]);
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("sends a negotiated v3 welcome after a v3 hello", async () => {
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const welcomes: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type !== "welcome") return;
+        welcomes.push(message);
+        if (welcomes.length === 1) {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: {
+              clientId: "v3-client",
+              clientName: "v3",
+              protocolVersion: PROTOCOL_VERSION,
+              token: null,
+            },
+          }));
+        } else {
+          resolve();
+        }
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(welcomes.map((message) => message.payload.protocolVersion)).toEqual([
+      LEGACY_PROTOCOL_VERSION,
+      PROTOCOL_VERSION,
+    ]);
+    expect(welcomes.every((message) =>
+      JSON.stringify(message.payload.supportedVersions) === JSON.stringify(SUPPORTED_PROTOCOL_VERSIONS)
+    )).toBe(true);
+
+    client.close();
+    await daemon.stop();
+  });
+
   it("requires authentication before listPanes/listProjects", async () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",

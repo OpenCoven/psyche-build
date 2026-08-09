@@ -1,5 +1,8 @@
 import { Bonjour } from "bonjour-service";
-import { PROTOCOL_VERSION } from "./wireProtocol.js";
+import {
+  LEGACY_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+} from "./wireProtocol.js";
 
 /**
  * Publishes the running daemon as `_psyche._tcp.local.` so iOS clients on
@@ -22,7 +25,8 @@ export class BridgeBonjour {
       port: opts.port,
       protocol: "tcp",
       txt: {
-        proto: String(PROTOCOL_VERSION),
+        proto: String(LEGACY_PROTOCOL_VERSION),
+        versions: SUPPORTED_PROTOCOL_VERSIONS.join(","),
         serverId: opts.serverId,
       },
     });

@@ -11,6 +11,8 @@ import { serialize } from '../../scripts/generate-protocol-fixtures.js';
 import {
   CLIENT_MESSAGE_TYPES,
   LEGACY_PROTOCOL_VERSION,
+  MOBILE_CONTROL_REQUEST_TYPES,
+  MOBILE_CONTROL_RESPONSE_TYPES,
   PROTOCOL_VERSION,
   SERVER_MESSAGE_TYPES,
   SUPPORTED_PROTOCOL_VERSIONS,
@@ -100,6 +102,46 @@ describe('mobile control protocol v3', () => {
         ok: true,
       },
     });
+  });
+
+  it('exports the complete supported nested mobile control contract', () => {
+    expect(MOBILE_CONTROL_REQUEST_TYPES).toEqual([
+      'workspace.snapshot',
+      'panes.detach',
+      'panes.input',
+      'panes.resize',
+      'panes.kill',
+      'panes.meta',
+      'panes.spawn',
+      'panes.attach',
+      'files.list',
+      'files.read',
+      'files.diff',
+      'actions.start',
+      'actions.respond',
+    ]);
+    expect(MOBILE_CONTROL_RESPONSE_TYPES).toEqual([
+      'ack',
+      'panes.spawn.result',
+      'panes.stream.exit',
+      'error',
+      'mobile.workspace.snapshot.result',
+      'mobile.panes.attach.result',
+      'files.list.result',
+      'files.read.result',
+      'files.diff.result',
+      'actions.result',
+    ]);
+  });
+
+  it('excludes unrelated daemon request and response families at compile time', () => {
+    // @ts-expect-error projects.list is not part of the mobile v3 contract
+    const unrelatedRequest: MobileControlRequest = { type: 'projects.list', requestId: 'project-1' };
+    // @ts-expect-error capture results are not part of the mobile v3 contract
+    const unrelatedResponse: MobileControlResponse = { type: 'panes.capture.result', requestId: 'capture-1', id: '%3', text: 'output', lines: 1 };
+
+    expect(unrelatedRequest.type).toBe('projects.list');
+    expect(unrelatedResponse.type).toBe('panes.capture.result');
   });
 
   it('keeps the mobile control fixtures in sync with generated JSON', () => {

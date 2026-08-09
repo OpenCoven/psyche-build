@@ -8,6 +8,7 @@ import {
   PaneSnapshot,
   Project,
   Ritual,
+  LEGACY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   isSupportedProtocolVersion,
@@ -157,15 +158,7 @@ export class BridgeDaemon {
   }
 
   private onConnect(s: Session) {
-    s.send({
-      type: "welcome",
-      payload: {
-        serverId: this.serverId,
-        serverName: this.serverName,
-        protocolVersion: PROTOCOL_VERSION,
-        projectName: this.opts.projectName ?? null,
-      },
-    });
+    this.sendWelcome(s, LEGACY_PROTOCOL_VERSION);
     // If a pair window is already open, send pairChallenge to the new session
     if (this.pairing.isOpen()) {
       const w = this.pairing.peek()!;
@@ -174,6 +167,19 @@ export class BridgeDaemon {
         payload: { expiresAt: w.expiresAt.toISOString(), codeLength: w.code.length },
       });
     }
+  }
+
+  private sendWelcome(s: Session, protocolVersion: typeof LEGACY_PROTOCOL_VERSION | typeof PROTOCOL_VERSION) {
+    s.send({
+      type: "welcome",
+      payload: {
+        serverId: this.serverId,
+        serverName: this.serverName,
+        protocolVersion,
+        projectName: this.opts.projectName ?? null,
+        supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
+      },
+    });
   }
 
   private async onMessage(s: Session, m: ClientMessage) {
@@ -188,6 +194,9 @@ export class BridgeDaemon {
         s.clientId = m.payload.clientId;
         s.clientName = m.payload.clientName;
         s.protocolVersion = m.payload.protocolVersion;
+        if (m.payload.protocolVersion === PROTOCOL_VERSION) {
+          this.sendWelcome(s, PROTOCOL_VERSION);
+        }
         if (m.payload.token) {
           const rec = await this.tokens.validate(m.payload.token);
           if (rec) {

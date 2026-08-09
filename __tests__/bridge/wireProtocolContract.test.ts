@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CLIENT_MESSAGE_TYPES,
+  MOBILE_CONTROL_REQUEST_TYPES,
+  MOBILE_CONTROL_RESPONSE_TYPES,
   SERVER_MESSAGE_TYPES,
   type ClientMessage,
   type ServerMessage,
@@ -42,6 +44,16 @@ function typesCovered(fixtures: Record<string, { type: string }>): Set<string> {
   return new Set(Object.values(fixtures).map((message) => message.type));
 }
 
+function nestedControlTypesCovered(
+  fixtures: Record<string, { type: string; payload: unknown }>,
+): Set<string> {
+  return new Set(
+    Object.values(fixtures)
+      .filter((message) => message.type === 'control')
+      .map((message) => (message.payload as { type: string }).type),
+  );
+}
+
 describe('wire protocol contract', () => {
   describe('fixture completeness', () => {
     // The anti-drift check. Add a case to the union and this names it as
@@ -73,6 +85,26 @@ describe('wire protocol contract', () => {
     it('has no mobile control fixture for an undeclared top-level type', () => {
       const declared = new Set<string>([...CLIENT_MESSAGE_TYPES, ...SERVER_MESSAGE_TYPES]);
       expect([...typesCovered(mobileControlFixtures)].filter((t) => !declared.has(t))).toEqual([]);
+    });
+
+    it('covers every supported nested mobile control request type', () => {
+      const covered = nestedControlTypesCovered(mobileControlFixtures);
+      expect(MOBILE_CONTROL_REQUEST_TYPES.filter((type) => !covered.has(type))).toEqual([]);
+    });
+
+    it('covers every supported nested mobile control response type', () => {
+      const covered = nestedControlTypesCovered(mobileControlFixtures);
+      expect(MOBILE_CONTROL_RESPONSE_TYPES.filter((type) => !covered.has(type))).toEqual([]);
+    });
+
+    it('has no unsupported nested mobile control fixture type', () => {
+      const declared = new Set<string>([
+        ...MOBILE_CONTROL_REQUEST_TYPES,
+        ...MOBILE_CONTROL_RESPONSE_TYPES,
+      ]);
+      expect(
+        [...nestedControlTypesCovered(mobileControlFixtures)].filter((type) => !declared.has(type)),
+      ).toEqual([]);
     });
   });
 

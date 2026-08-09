@@ -66,6 +66,74 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(response.requestID, "req-9")
     }
 
+    func testUnknownControlRequestsDecodeWithoutFailingTheStream() throws {
+        let message = try JSONDecoder().decode(
+            MobileClientMessage.self,
+            from: Data(#"{"type":"control","payload":{"type":"future.request","requestId":"req-10"}}"#.utf8)
+        )
+
+        guard case let .control(.unknown(request)) = message else {
+            return XCTFail("Expected unknown control request")
+        }
+        XCTAssertEqual(request.type, "future.request")
+        XCTAssertEqual(request.requestID, "req-10")
+    }
+
+    func testSupportedCanonicalControlFixturesDecodeToTypedCases() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        guard case .detachPane = try decodeRequestFixture("detachPane", fixtures: fixtures) else {
+            return XCTFail("Expected panes.detach")
+        }
+        guard case .inputPane = try decodeRequestFixture("inputPane", fixtures: fixtures) else {
+            return XCTFail("Expected panes.input")
+        }
+        guard case .resizePane = try decodeRequestFixture("resizePane", fixtures: fixtures) else {
+            return XCTFail("Expected panes.resize")
+        }
+        guard case .killPane = try decodeRequestFixture("killPane", fixtures: fixtures) else {
+            return XCTFail("Expected panes.kill")
+        }
+        guard case .paneMeta = try decodeRequestFixture("paneMeta", fixtures: fixtures) else {
+            return XCTFail("Expected panes.meta")
+        }
+
+        guard case .ack = try decodeResponseFixture("ack", fixtures: fixtures) else {
+            return XCTFail("Expected ack")
+        }
+        guard case .paneSpawned = try decodeResponseFixture("paneSpawned", fixtures: fixtures) else {
+            return XCTFail("Expected panes.spawn.result")
+        }
+        guard case .streamExited = try decodeResponseFixture("streamExited", fixtures: fixtures) else {
+            return XCTFail("Expected panes.stream.exit")
+        }
+        guard case .error = try decodeResponseFixture("controlError", fixtures: fixtures) else {
+            return XCTFail("Expected error")
+        }
+    }
+
+    private func decodeRequestFixture(
+        _ name: String,
+        fixtures: [String: Data]
+    ) throws -> MobileControlRequest {
+        let data = try XCTUnwrap(fixtures[name])
+        guard case let .control(request) = try JSONDecoder().decode(MobileClientMessage.self, from: data) else {
+            throw NSError(domain: "ControlMessagesTests", code: 1)
+        }
+        return request
+    }
+
+    private func decodeResponseFixture(
+        _ name: String,
+        fixtures: [String: Data]
+    ) throws -> MobileControlResponse {
+        let data = try XCTUnwrap(fixtures[name])
+        guard case let .control(response) = try JSONDecoder().decode(MobileServerMessage.self, from: data) else {
+            throw NSError(domain: "ControlMessagesTests", code: 2)
+        }
+        return response
+    }
+
     private func loadMobileControlFixtures() throws -> [String: Data] {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

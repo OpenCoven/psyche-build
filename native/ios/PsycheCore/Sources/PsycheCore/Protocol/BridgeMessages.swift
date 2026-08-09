@@ -382,16 +382,24 @@ public struct WelcomePayload: Codable, Sendable, Equatable {
     public let serverName: String
     public let protocolVersion: Int
     public let projectName: String?
+    public let supportedVersions: [Int]?
 
-    public init(serverID: String, serverName: String, protocolVersion: Int, projectName: String?) {
+    public init(
+        serverID: String,
+        serverName: String,
+        protocolVersion: Int,
+        projectName: String?,
+        supportedVersions: [Int]? = nil
+    ) {
         self.serverID = serverID
         self.serverName = serverName
         self.protocolVersion = protocolVersion
         self.projectName = projectName
+        self.supportedVersions = supportedVersions
     }
 
     enum CodingKeys: String, CodingKey {
-        case serverID = "serverId", serverName, protocolVersion, projectName
+        case serverID = "serverId", serverName, protocolVersion, projectName, supportedVersions
     }
 }
 

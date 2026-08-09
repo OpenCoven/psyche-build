@@ -69,22 +69,9 @@ public enum MobileServerMessage: Codable, Sendable, Equatable {
 
 public enum MobileControlRequest: Codable, Sendable, Equatable {
     case workspaceSnapshot(ControlRequestIDOnly)
-    case projectsList(ControlRequestIDOnly)
-    case projectsOpen(ProjectsOpenRequest)
-    case panesList(ControlRequestIDOnly)
-    case covenSessionsList(ControlRequestIDOnly)
-    case launchCovenSession(CovenSessionLaunchRequest)
-    case openCovenSession(CovenSessionOpenRequest)
-    case executeCovenCapability(CovenCapabilityExecuteRequest)
-    case desktopState(CovenDesktopStateRequest)
-    case desktopAction(CovenDesktopActionRequest)
     case spawnPane(MobilePaneSpawnRequest)
-    case spawnMany(PaneSpawnManyRequest)
-    case capturePane(PaneCaptureRequest)
-    case paneStatus(PaneStatusRequest)
     case attachPane(MobilePaneAttachRequest)
     case detachPane(PaneDetachRequest)
-    case focusPane(PaneFocusRequest)
     case inputPane(PaneInputRequest)
     case resizePane(PaneResizeRequest)
     case killPane(PaneIDControlRequest)
@@ -94,6 +81,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
     case diffFile(MobileFilesDiffRequest)
     case startAction(MobileActionStartRequest)
     case respondToAction(MobileActionRespondRequest)
+    case unknown(UnknownControlRequest)
 
     private enum CodingKeys: String, CodingKey { case type }
 
@@ -103,22 +91,9 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
 
         switch type {
         case "workspace.snapshot": self = .workspaceSnapshot(try ControlRequestIDOnly(from: decoder))
-        case "projects.list": self = .projectsList(try ControlRequestIDOnly(from: decoder))
-        case "projects.open": self = .projectsOpen(try ProjectsOpenRequest(from: decoder))
-        case "panes.list": self = .panesList(try ControlRequestIDOnly(from: decoder))
-        case "coven.sessions.list": self = .covenSessionsList(try ControlRequestIDOnly(from: decoder))
-        case "coven.sessions.launch": self = .launchCovenSession(try CovenSessionLaunchRequest(from: decoder))
-        case "coven.sessions.open": self = .openCovenSession(try CovenSessionOpenRequest(from: decoder))
-        case "coven.capabilities.execute": self = .executeCovenCapability(try CovenCapabilityExecuteRequest(from: decoder))
-        case "coven.desktop.state": self = .desktopState(try CovenDesktopStateRequest(from: decoder))
-        case "coven.desktop.action": self = .desktopAction(try CovenDesktopActionRequest(from: decoder))
         case "panes.spawn": self = .spawnPane(try MobilePaneSpawnRequest(from: decoder))
-        case "panes.spawnMany": self = .spawnMany(try PaneSpawnManyRequest(from: decoder))
-        case "panes.capture": self = .capturePane(try PaneCaptureRequest(from: decoder))
-        case "panes.status": self = .paneStatus(try PaneStatusRequest(from: decoder))
         case "panes.attach": self = .attachPane(try MobilePaneAttachRequest(from: decoder))
         case "panes.detach": self = .detachPane(try PaneDetachRequest(from: decoder))
-        case "panes.focus": self = .focusPane(try PaneFocusRequest(from: decoder))
         case "panes.input": self = .inputPane(try PaneInputRequest(from: decoder))
         case "panes.resize": self = .resizePane(try PaneResizeRequest(from: decoder))
         case "panes.kill": self = .killPane(try PaneIDControlRequest(from: decoder))
@@ -128,34 +103,31 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         case "files.diff": self = .diffFile(try MobileFilesDiffRequest(from: decoder))
         case "actions.start": self = .startAction(try MobileActionStartRequest(from: decoder))
         case "actions.respond": self = .respondToAction(try MobileActionRespondRequest(from: decoder))
-        default:
+        case "ack",
+             "panes.spawn.result",
+             "panes.stream.exit",
+             "error",
+             "mobile.workspace.snapshot.result",
+             "mobile.panes.attach.result",
+             "files.list.result",
+             "files.read.result",
+             "files.diff.result",
+             "actions.result":
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
                 in: container,
-                debugDescription: "Unsupported mobile control request type \(type)"
+                debugDescription: "Mobile control response \(type) cannot decode as a request"
             )
+        default: self = .unknown(try UnknownControlRequest(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
         switch self {
         case .workspaceSnapshot(let payload): try payload.encode(to: encoder)
-        case .projectsList(let payload): try payload.encode(to: encoder)
-        case .projectsOpen(let payload): try payload.encode(to: encoder)
-        case .panesList(let payload): try payload.encode(to: encoder)
-        case .covenSessionsList(let payload): try payload.encode(to: encoder)
-        case .launchCovenSession(let payload): try payload.encode(to: encoder)
-        case .openCovenSession(let payload): try payload.encode(to: encoder)
-        case .executeCovenCapability(let payload): try payload.encode(to: encoder)
-        case .desktopState(let payload): try payload.encode(to: encoder)
-        case .desktopAction(let payload): try payload.encode(to: encoder)
         case .spawnPane(let payload): try payload.encode(to: encoder)
-        case .spawnMany(let payload): try payload.encode(to: encoder)
-        case .capturePane(let payload): try payload.encode(to: encoder)
-        case .paneStatus(let payload): try payload.encode(to: encoder)
         case .attachPane(let payload): try payload.encode(to: encoder)
         case .detachPane(let payload): try payload.encode(to: encoder)
-        case .focusPane(let payload): try payload.encode(to: encoder)
         case .inputPane(let payload): try payload.encode(to: encoder)
         case .resizePane(let payload): try payload.encode(to: encoder)
         case .killPane(let payload): try payload.encode(to: encoder)
@@ -165,6 +137,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         case .diffFile(let payload): try payload.encode(to: encoder)
         case .startAction(let payload): try payload.encode(to: encoder)
         case .respondToAction(let payload): try payload.encode(to: encoder)
+        case .unknown(let payload): try payload.encode(to: encoder)
         }
     }
 }
@@ -1146,6 +1119,21 @@ public struct MobileProtocolErrorResponse: Codable, Sendable, Equatable, Error, 
 }
 
 public struct UnknownControlResponse: Codable, Sendable, Equatable {
+    public let type: String
+    public let requestID: String?
+
+    public init(type: String, requestID: String?) {
+        self.type = type
+        self.requestID = requestID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case requestID = "requestId"
+    }
+}
+
+public struct UnknownControlRequest: Codable, Sendable, Equatable {
     public let type: String
     public let requestID: String?
 
