@@ -58,6 +58,20 @@ export interface WorkspaceSnapshot {
   projects: ProjectSnapshot[];
 }
 
+export type DeepReadonly<T> =
+  T extends (...args: never[]) => unknown
+    ? T
+    : T extends readonly (infer Item)[]
+      ? readonly DeepReadonly<Item>[]
+      : T extends object
+        ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+        : T;
+
+export type ReadonlyPaneSnapshot = DeepReadonly<PaneSnapshot>;
+export type ReadonlyWorktreeSnapshot = DeepReadonly<WorktreeSnapshot>;
+export type ReadonlyProjectSnapshot = DeepReadonly<ProjectSnapshot>;
+export type ReadonlyWorkspaceSnapshot = DeepReadonly<WorkspaceSnapshot>;
+
 export interface WorkspaceProjectInput {
   id: string;
   root: string;

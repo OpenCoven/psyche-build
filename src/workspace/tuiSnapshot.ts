@@ -4,11 +4,13 @@ import type { CovenSessionSummary } from '../daemon/protocol.js';
 import type { PsychePane, SidebarProject } from '../types.js';
 import {
   buildWorkspaceSnapshot,
+  type DeepReadonly,
   normalizeIsoDateString,
   normalizeIsoEpochMilliseconds,
   normalizeWorkspaceRoot,
   readProjectWorktrees,
   type GitWorktreeSnapshotInput,
+  type ReadonlyWorkspaceSnapshot,
   type WorkspacePaneInput,
   type WorkspaceProjectInput,
   type WorkspaceSnapshot,
@@ -35,14 +37,14 @@ interface ProjectSeed {
 
 export class TuiWorkspaceState {
   #revision: number;
-  #snapshot: WorkspaceSnapshot | undefined;
+  #snapshot: ReadonlyWorkspaceSnapshot | undefined;
   #canonicalContent: string | undefined;
 
   constructor(options: { initialRevision?: number } = {}) {
     this.#revision = normalizeInitialRevision(options.initialRevision);
   }
 
-  snapshot(input: TuiWorkspaceSnapshotInput): WorkspaceSnapshot {
+  snapshot(input: TuiWorkspaceSnapshotInput): ReadonlyWorkspaceSnapshot {
     const canonicalSnapshot = buildTuiWorkspaceSnapshot({
       ...input,
       revision: 0,
@@ -64,7 +66,7 @@ export class TuiWorkspaceState {
     return snapshot;
   }
 
-  current(): WorkspaceSnapshot | undefined {
+  current(): ReadonlyWorkspaceSnapshot | undefined {
     return this.#snapshot;
   }
 }
@@ -384,12 +386,14 @@ function stableSerializeValue(value: unknown): unknown {
   return value;
 }
 
-function freezeDeep<T>(value: T): T {
-  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+function freezeDeep<T>(value: T): DeepReadonly<T> {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value as DeepReadonly<T>;
+  }
 
   Object.freeze(value);
   for (const nested of Object.values(value)) {
     freezeDeep(nested);
   }
-  return value;
+  return value as DeepReadonly<T>;
 }

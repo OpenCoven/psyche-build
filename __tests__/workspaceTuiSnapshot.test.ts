@@ -2,25 +2,50 @@ import { describe, expect, it } from 'vitest';
 
 import type { CovenSessionSummary } from '../src/daemon/protocol.js';
 import type { PsychePane, SidebarProject } from '../src/types.js';
-import type { GitWorktreeSnapshotInput, PaneSnapshot } from '../src/workspace/snapshot.js';
+import type {
+  GitWorktreeSnapshotInput,
+  PaneSnapshot,
+  ReadonlyWorkspaceSnapshot,
+  WorkspaceSnapshot,
+} from '../src/workspace/snapshot.js';
 import type { TuiWorkspaceSnapshotInput } from '../src/workspace/tuiSnapshot.js';
 import * as tuiSnapshotModule from '../src/workspace/tuiSnapshot.js';
 
-const { buildTuiWorkspaceSnapshot } = tuiSnapshotModule;
+const { buildTuiWorkspaceSnapshot, TuiWorkspaceState } = tuiSnapshotModule;
 
-type WorkspaceSnapshot = ReturnType<typeof buildTuiWorkspaceSnapshot>;
-type TuiWorkspaceStateLike = {
-  snapshot(input: TuiWorkspaceSnapshotInput): WorkspaceSnapshot;
-  current(): WorkspaceSnapshot | undefined;
-};
+type MutableWorkspaceSnapshot = ReturnType<typeof buildTuiWorkspaceSnapshot>;
 
-function createTuiWorkspaceState(options?: { initialRevision?: number }): TuiWorkspaceStateLike {
-  const TuiWorkspaceState = (tuiSnapshotModule as typeof tuiSnapshotModule & {
-    TuiWorkspaceState?: new (options?: { initialRevision?: number }) => TuiWorkspaceStateLike;
-  }).TuiWorkspaceState;
-
+function createTuiWorkspaceState(
+  options?: { initialRevision?: number },
+): InstanceType<typeof TuiWorkspaceState> {
   expect(typeof TuiWorkspaceState).toBe('function');
-  return new TuiWorkspaceState!(options);
+  return new TuiWorkspaceState(options);
+}
+
+function assertReadonlyTuiWorkspaceStateSnapshotTypes(): void {
+  const state = createTuiWorkspaceState();
+  const snapshot: ReadonlyWorkspaceSnapshot = state.snapshot(trackerInput());
+
+  void JSON.stringify(snapshot);
+
+  // @ts-expect-error TuiWorkspaceState snapshots are deeply readonly.
+  snapshot.revision = 99;
+  // @ts-expect-error TuiWorkspaceState snapshots are deeply readonly.
+  snapshot.projects.push(project(snapshot, '/repo/primary'));
+
+  const sidebar = project(snapshot, '/repo/sidebar');
+  // @ts-expect-error TuiWorkspaceState snapshots are deeply readonly.
+  sidebar.worktrees[1]!.branch = 'mutated';
+  // @ts-expect-error TuiWorkspaceState snapshots are deeply readonly.
+  sidebar.worktrees[1]!.panes[0]!.title = 'mutated';
+
+  const current: ReadonlyWorkspaceSnapshot | undefined = state.current();
+  if (!current) return;
+
+  void JSON.stringify(current);
+
+  // @ts-expect-error TuiWorkspaceState current snapshots are deeply readonly.
+  current.projects[0] = project(snapshot, '/repo/primary');
 }
 
 function worktree(
@@ -66,13 +91,16 @@ function session(
   };
 }
 
-function project(snapshot: ReturnType<typeof buildTuiWorkspaceSnapshot>, root: string) {
+function project<Snapshot extends { projects: readonly { root: string }[] }>(
+  snapshot: Snapshot,
+  root: string,
+): Snapshot['projects'][number] {
   const match = snapshot.projects.find((candidate) => candidate.root === root);
   expect(match).toBeDefined();
   return match!;
 }
 
-function worktreePaneIds(snapshotPanes: PaneSnapshot[]): string[] {
+function worktreePaneIds(snapshotPanes: readonly Pick<PaneSnapshot, 'id'>[]): string[] {
   return snapshotPanes.map((candidate) => candidate.id);
 }
 
@@ -531,9 +559,14 @@ describe('TUI workspace snapshot adapter', () => {
 
     it('freezes returned snapshots deeply', () => {
       const snapshot = createTuiWorkspaceState().snapshot(trackerInput());
+      // Test-only cast so runtime freeze assertions stay separate from the
+      // compile-time readonly assertions above.
+      const mutableSnapshot = snapshot as WorkspaceSnapshot;
       const sidebar = project(snapshot, '/repo/sidebar');
+      const mutableSidebar = project(mutableSnapshot, '/repo/sidebar');
       const reviewWorktree = sidebar.worktrees[1]!;
       const reviewPane = reviewWorktree.panes[0]!;
+      const mutableReviewWorktree = mutableSidebar.worktrees[1]!;
 
       expect(Object.isFrozen(snapshot)).toBe(true);
       expect(Object.isFrozen(snapshot.projects)).toBe(true);
@@ -544,16 +577,16 @@ describe('TUI workspace snapshot adapter', () => {
       expect(Object.isFrozen(reviewPane)).toBe(true);
 
       expect(() => {
-        snapshot.revision = 99;
+        mutableSnapshot.revision = 99;
       }).toThrow(TypeError);
       expect(() => {
-        snapshot.projects.push(project(snapshot, '/repo/primary'));
+        mutableSnapshot.projects.push(project(mutableSnapshot, '/repo/primary'));
       }).toThrow(TypeError);
       expect(() => {
-        reviewWorktree.branch = 'mutated';
+        mutableReviewWorktree.branch = 'mutated';
       }).toThrow(TypeError);
       expect(() => {
-        reviewWorktree.panes[0]!.title = 'mutated';
+        mutableReviewWorktree.panes[0]!.title = 'mutated';
       }).toThrow(TypeError);
     });
 
