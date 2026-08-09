@@ -829,6 +829,36 @@ export async function mutateBridgeConfig<T>(
 }
 
 /**
+ * Patch a pane's metadata in the project config.
+ *
+ * Goes through `mutateBridgeConfig` rather than doing its own
+ * read-parse-write. That gives it three things it did not have: serialization
+ * against concurrent spawns (an inline read-modify-write here dropped panes
+ * that a spawn appended between the read and the write), an atomic write
+ * (a plain `writeFile` truncates first, so a crash left a torn registry), and
+ * a read that refuses to fall back to an empty config when the file exists but
+ * cannot be parsed.
+ *
+ * Lives here (not in the daemon entrypoint) so the control handler can reach
+ * it without importing `index.ts`, keeping pane.meta.update on the same
+ * runtime-authority path as every other pane mutation.
+ */
+export async function updatePaneMeta(
+  projectRoot: string,
+  paneId: string,
+  patch: { title?: string; agent?: string },
+): Promise<void> {
+  await mutateBridgeConfig(projectRoot, (config) => {
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const pane = panes.find((p) => p.id === paneId || p.paneId === paneId);
+    if (!pane) throw new Error(`pane ${paneId} not found`);
+    if (patch.title !== undefined) pane.title = patch.title;
+    if (patch.agent !== undefined) pane.agent = patch.agent;
+    config.panes = panes;
+  });
+}
+
+/**
  * Date.now() alone collides when several panes are created inside one
  * millisecond, which concurrent lanes do routinely.
  */

@@ -9,6 +9,7 @@ import {
   launchProjectCovenSession,
   openProjectCovenSession,
   routeProjectCovenSessionCapability,
+  updatePaneMeta,
   defaultSpawnDeps,
   type BridgeSpawnRequest,
   type BridgeSpawnResult,
@@ -102,7 +103,12 @@ export function createDaemonControlHandlers(deps: DaemonControlHandlerDeps): Con
     respawnPane: notSupported('pane.respawn'),
     openConflictPane: notSupported('pane.conflict.open'),
     updatePaneOption: notSupported('pane.option.update'),
-    updatePaneMeta: notSupported('pane.meta.update'),
+    async updatePaneMeta(payload): Promise<void> {
+      await updatePaneMeta(deps.projectRoot, payload.paneId, {
+        title: payload.title,
+        agent: payload.agent,
+      });
+    },
     launchRitual: notSupported('ritual.launch'),
 
     async launchCovenSession(payload) {
