@@ -110,8 +110,8 @@ Run this section when Coven is installed locally and you want to verify the opti
 ### Native Coven physical panes
 
 1. Launch the unsigned macOS app with `coven` available on the augmented PATH.
-2. Open a repository with a linked worktree and select that worktree.
-3. Confirm project open creates one `coven chat` PTY in that worktree.
+2. Open the linked-worktree path itself as the project.
+3. Confirm project open creates one `coven chat` PTY owned by that linked worktree.
 4. Press Command-T twice and confirm three simultaneous physical panes.
 5. Type distinct input in each pane and confirm focus/input isolation.
 6. Drag a divider and use its arrow-key controls; confirm all visible PTYs resize.
@@ -126,9 +126,9 @@ Run this section when Coven is installed locally and you want to verify the opti
 Expected:
 
 - `coven doctor` and the local Coven daemon/status command report a usable runtime.
-- When Coven is running for the same project, the sidebar shows matching `☾ Coven sessions` entries.
-- Pressing `o` on the active project opens the latest matching session as a visible psyche pane with `coven attach <session-id>`.
-- When Coven is not installed or not running, the active project shows the compact unavailable hint and psyche keeps running.
+- When Coven is running for the same project, the sidebar shows matching rows in a `Coven` subsection.
+- Clicking a durable Coven row opens one visible native pane with `coven attach <session-id>`; clicking it again focuses that attachment.
+- When Coven is unavailable, the rail shows one global unavailable or stale-discovery state and psyche keeps running.
 
 ## Merge / PR smoke
 
