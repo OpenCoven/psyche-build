@@ -138,17 +138,54 @@ export function createTuiWorkspaceProvider(
       sidebarProjects,
       covenSessionsByProject,
     };
-    const worktreesByProjectRoot = providedWorktreesByProjectRoot
+    const primaryRoot = normalizeRoot(workspaceInput.primaryProjectRoot);
+    const publishedProjects = collectPublishedProjects(
+      { ...workspaceInput, revision: 0 },
+      primaryRoot,
+    );
+    let worktreesByProjectRoot = providedWorktreesByProjectRoot
       ?? await loadProviderWorktrees(
-        workspaceInput,
+        publishedProjects.map((project) => project.root),
         loadWorktrees,
         worktreeCache,
         worktreeCacheTtlMs,
         options.onWorktreeReadError,
       );
+    const associatedCovenSessions = deduplicateCovenSessionsByProject(
+      associateCovenSessionsWithPublishedProjects(
+        covenSessionsByProject,
+        publishedProjects,
+        worktreesByProjectRoot,
+      ),
+    );
+
+    if (!providedWorktreesByProjectRoot) {
+      const allProjects = collectProjects(
+        { ...workspaceInput, revision: 0 },
+        primaryRoot,
+        associatedCovenSessions,
+      );
+      const missingRoots = allProjects
+        .map((project) => project.root)
+        .filter((projectRoot) => !getResolvedMapValue(worktreesByProjectRoot, projectRoot));
+      if (missingRoots.length > 0) {
+        const additionalWorktrees = await loadProviderWorktrees(
+          missingRoots,
+          loadWorktrees,
+          worktreeCache,
+          worktreeCacheTtlMs,
+          options.onWorktreeReadError,
+        );
+        worktreesByProjectRoot = new Map([
+          ...worktreesByProjectRoot,
+          ...additionalWorktrees,
+        ]);
+      }
+    }
 
     return state.snapshot({
       ...workspaceInput,
+      covenSessionsByProject: associatedCovenSessions,
       worktreesByProjectRoot,
     });
   };
@@ -208,7 +245,7 @@ export function groupCovenSessionsByProject(
 }
 
 async function loadProviderWorktrees(
-  input: Omit<BuildTuiWorkspaceSnapshotInput, 'revision' | 'worktreesByProjectRoot'>,
+  projectRoots: readonly string[],
   loadWorktrees: (
     projectRoot: string,
   ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>,
@@ -219,17 +256,7 @@ async function loadProviderWorktrees(
   cacheTtlMs: number,
   onError: ((projectRoot: string, error: unknown) => void) | undefined,
 ): Promise<Map<string, readonly GitWorktreeSnapshotInput[]>> {
-  const primaryRoot = normalizeRoot(input.primaryProjectRoot);
-  const covenSessionsByProject = deduplicateCovenSessionsByProject(
-    input.covenSessionsByProject,
-  );
-  const roots = collectProjects(
-    { ...input, revision: 0 },
-    primaryRoot,
-    covenSessionsByProject,
-  ).map((project) => project.root);
-
-  const entries = await Promise.all(roots.map(async (projectRoot) => {
+  const entries = await Promise.all(projectRoots.map(async (projectRoot) => {
     const cached = cache.get(projectRoot);
     if (cached && cached.expiresAt > Date.now()) {
       return [projectRoot, cached.value] as const;
@@ -259,7 +286,20 @@ export function buildTuiWorkspaceSnapshot(
   input: BuildTuiWorkspaceSnapshotInput,
 ): WorkspaceSnapshot {
   const primaryRoot = normalizeRoot(input.primaryProjectRoot);
-  const covenSessionsByProject = deduplicateCovenSessionsByProject(input.covenSessionsByProject);
+  const publishedProjects = collectPublishedProjects(input, primaryRoot);
+  const discoveredWorktrees = new Map<string, readonly GitWorktreeSnapshotInput[]>(
+    publishedProjects.map((project) => [
+      project.root,
+      readWorktreesForProject(project.root, input),
+    ]),
+  );
+  const covenSessionsByProject = deduplicateCovenSessionsByProject(
+    associateCovenSessionsWithPublishedProjects(
+      input.covenSessionsByProject,
+      publishedProjects,
+      discoveredWorktrees,
+    ),
+  );
   const projects = collectProjects(input, primaryRoot, covenSessionsByProject);
 
   return buildWorkspaceSnapshot({
@@ -268,7 +308,10 @@ export function buildTuiWorkspaceSnapshot(
       id: project.root,
       root: project.root,
       title: project.title,
-      worktrees: readWorktreesForProject(project.root, input),
+      worktrees: [
+        ...(getResolvedMapValue(discoveredWorktrees, project.root)
+          ?? readWorktreesForProject(project.root, input)),
+      ],
       panes: projectPanes(project.root, input.panes, primaryRoot),
       covenSessions: projectCovenSessions(project.root, covenSessionsByProject),
     })),
@@ -279,6 +322,22 @@ function collectProjects(
   input: BuildTuiWorkspaceSnapshotInput,
   primaryRoot: string,
   covenSessionsByProject: ReadonlyMap<string, readonly CovenSessionSummary[]>,
+): ProjectSeed[] {
+  const seeds = new Map(
+    collectPublishedProjects(input, primaryRoot)
+      .map((project) => [project.root, project]),
+  );
+
+  for (const projectRoot of covenSessionsByProject.keys()) {
+    upsertProject(seeds, normalizeRoot(projectRoot), undefined, false);
+  }
+
+  return sortProjects(seeds);
+}
+
+function collectPublishedProjects(
+  input: BuildTuiWorkspaceSnapshotInput,
+  primaryRoot: string,
 ): ProjectSeed[] {
   const seeds = new Map<string, ProjectSeed>();
   const primaryTitle = normalizeProjectTitle(input.primaryProjectName, primaryRoot);
@@ -308,10 +367,10 @@ function collectProjects(
     );
   }
 
-  for (const projectRoot of covenSessionsByProject.keys()) {
-    upsertProject(seeds, normalizeRoot(projectRoot), undefined, false);
-  }
+  return sortProjects(seeds);
+}
 
+function sortProjects(seeds: ReadonlyMap<string, ProjectSeed>): ProjectSeed[] {
   return [...seeds.values()].sort((left, right) => {
     if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
     return compareStrings(left.title, right.title) || compareStrings(left.root, right.root);
@@ -419,26 +478,124 @@ function deduplicateCovenSessionsByProject(
   grouped: ReadonlyMap<string, readonly CovenSessionSummary[]> | undefined,
 ): Map<string, CovenSessionSummary[]> {
   if (!grouped) return new Map<string, CovenSessionSummary[]>();
-  const winners = new Map<string, CovenSessionSummary>();
+  const winners = new Map<string, {
+    ownerRoot: string;
+    session: CovenSessionSummary;
+  }>();
 
-  for (const sessions of grouped.values()) {
+  for (const [ownerRoot, sessions] of grouped) {
+    const normalizedOwnerRoot = normalizeRoot(ownerRoot);
     for (const session of sessions) {
       const normalized = normalizeCovenSession(session);
       const current = winners.get(normalized.id);
-      if (!current || compareCovenSessionDuplicates(normalized, current) < 0) {
-        winners.set(normalized.id, normalized);
+      const duplicateOrder = current
+        ? compareCovenSessionDuplicates(normalized, current.session)
+        : -1;
+      if (
+        !current
+        || duplicateOrder < 0
+        || (
+          duplicateOrder === 0
+          && compareStrings(normalizedOwnerRoot, current.ownerRoot) < 0
+        )
+      ) {
+        winners.set(normalized.id, {
+          ownerRoot: normalizedOwnerRoot,
+          session: normalized,
+        });
       }
     }
   }
 
   const byProject = new Map<string, CovenSessionSummary[]>();
-  for (const session of [...winners.values()].sort((left, right) => compareStrings(left.id, right.id))) {
-    const projectSessions = byProject.get(session.projectRoot) ?? [];
+  for (const winner of [...winners.values()].sort(
+    (left, right) => compareStrings(left.session.id, right.session.id),
+  )) {
+    const projectSessions = byProject.get(winner.ownerRoot) ?? [];
+    const session = winner.session;
     projectSessions.push(session);
-    byProject.set(session.projectRoot, projectSessions);
+    byProject.set(winner.ownerRoot, projectSessions);
   }
 
   return byProject;
+}
+
+function associateCovenSessionsWithPublishedProjects(
+  grouped: ReadonlyMap<string, readonly CovenSessionSummary[]> | undefined,
+  projects: readonly ProjectSeed[],
+  worktreesByProjectRoot: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>,
+): Map<string, CovenSessionSummary[]> {
+  if (!grouped) return new Map<string, CovenSessionSummary[]>();
+
+  const owners = projects.flatMap((project) => {
+    const worktreePaths = new Set([
+      project.root,
+      ...(getResolvedMapValue(worktreesByProjectRoot, project.root) ?? [])
+        .map((worktree) => normalizeRoot(worktree.path)),
+    ]);
+    return [...worktreePaths].map((worktreePath) => ({
+      projectRoot: project.root,
+      worktreePath,
+    }));
+  });
+  const associated = new Map<string, CovenSessionSummary[]>();
+
+  for (const [groupedRoot, sessions] of grouped) {
+    for (const session of sessions) {
+      const ownerRoot = mostSpecificCovenSessionOwner(session, owners)
+        ?? normalizeRoot(groupedRoot);
+      const projectSessions = associated.get(ownerRoot) ?? [];
+      projectSessions.push(session);
+      associated.set(ownerRoot, projectSessions);
+    }
+  }
+
+  return associated;
+}
+
+function mostSpecificCovenSessionOwner(
+  session: CovenSessionSummary,
+  owners: readonly { projectRoot: string; worktreePath: string }[],
+): string | undefined {
+  const sessionPaths = [session.cwd, session.projectRoot]
+    .flatMap((candidate) => candidate?.trim() ? [normalizeRoot(candidate)] : []);
+  let winner: { projectRoot: string; worktreePath: string } | undefined;
+
+  for (const owner of owners) {
+    if (!sessionPaths.some((sessionPath) => (
+      isPathInsideOrEqual(owner.worktreePath, sessionPath)
+    ))) continue;
+
+    if (!winner || compareWorktreeOwners(owner, winner) < 0) {
+      winner = owner;
+    }
+  }
+
+  return winner?.projectRoot;
+}
+
+function compareWorktreeOwners(
+  left: { projectRoot: string; worktreePath: string },
+  right: { projectRoot: string; worktreePath: string },
+): number {
+  const depthDifference = pathDepth(right.worktreePath) - pathDepth(left.worktreePath);
+  if (depthDifference) return depthDifference;
+
+  const lengthDifference = right.worktreePath.length - left.worktreePath.length;
+  if (lengthDifference) return lengthDifference;
+
+  return compareStrings(left.projectRoot, right.projectRoot)
+    || compareStrings(left.worktreePath, right.worktreePath);
+}
+
+function pathDepth(value: string): number {
+  return normalizeRoot(value).split(path.sep).filter(Boolean).length;
+}
+
+function isPathInsideOrEqual(parent: string, candidate: string): boolean {
+  const relative = path.relative(normalizeRoot(parent), normalizeRoot(candidate));
+  return relative === ''
+    || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function normalizeCovenSession(session: CovenSessionSummary): CovenSessionSummary {

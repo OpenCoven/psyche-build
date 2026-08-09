@@ -926,6 +926,130 @@ describe('TUI workspace snapshot adapter', () => {
     ]);
   });
 
+  it('associates child and external Coven worktree sessions with their owning project', () => {
+    const childWorktree = '/repo/primary/.psyche/worktrees/feature';
+    const externalWorktree = '/external/primary-review';
+    const snapshot = buildTuiWorkspaceSnapshot({
+      revision: 14,
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: [],
+      covenSessionsByProject: new Map([
+        [childWorktree, [
+          session({
+            id: 'child-session',
+            projectRoot: childWorktree,
+            cwd: `${childWorktree}/packages/app`,
+          }),
+        ]],
+        [externalWorktree, [
+          session({
+            id: 'external-session',
+            projectRoot: externalWorktree,
+            cwd: `${externalWorktree}/packages/app`,
+          }),
+        ]],
+      ]),
+      worktreesByProjectRoot: new Map([
+        ['/repo/primary', [
+          worktree('/repo/primary', { isMain: true, branch: 'main' }),
+          worktree(childWorktree, { branch: 'feature' }),
+          worktree(externalWorktree, { branch: 'review' }),
+        ]],
+      ]),
+      readWorktrees: () => [],
+    });
+
+    expect(snapshot.projects.map((candidate) => candidate.root)).toEqual(['/repo/primary']);
+    const primary = project(snapshot, '/repo/primary');
+    expect(primary.worktrees.find((candidate) => candidate.path === childWorktree)?.panes)
+      .toContainEqual(expect.objectContaining({ id: 'child-session', kind: 'coven-session' }));
+    expect(primary.worktrees.find((candidate) => candidate.path === externalWorktree)?.panes)
+      .toContainEqual(expect.objectContaining({ id: 'external-session', kind: 'coven-session' }));
+  });
+
+  it('uses the most-specific published worktree owner for Coven sessions', () => {
+    const snapshot = buildTuiWorkspaceSnapshot({
+      revision: 14,
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      sidebarProjects: [
+        { projectRoot: '/external/shared/nested', projectName: 'Nested' },
+      ],
+      panes: [],
+      covenSessionsByProject: new Map([
+        ['/external/shared', [
+          session({
+            id: 'nested-session',
+            projectRoot: '/external/shared',
+            cwd: '/external/shared/nested/packages/app',
+          }),
+        ]],
+      ]),
+      worktreesByProjectRoot: new Map([
+        ['/repo/primary', [
+          worktree('/repo/primary', { isMain: true, branch: 'main' }),
+          worktree('/external/shared', { branch: 'shared' }),
+        ]],
+        ['/external/shared/nested', [
+          worktree('/external/shared/nested', { isMain: true, branch: 'main' }),
+        ]],
+      ]),
+      readWorktrees: () => [],
+    });
+
+    expect(project(snapshot, '/repo/primary').worktrees[1].panes).toEqual([]);
+    expect(project(snapshot, '/external/shared/nested').worktrees[0].panes)
+      .toContainEqual(expect.objectContaining({ id: 'nested-session', kind: 'coven-session' }));
+  });
+
+  it('uses provider worktree discovery for ownership without rescanning owned worktrees', async () => {
+    const externalWorktree = '/external/primary-review';
+    const loadedRoots: string[] = [];
+    const provider = createTuiWorkspaceProvider({
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: () => [],
+      covenSessionsByProject: () => new Map([
+        [externalWorktree, [
+          session({
+            id: 'external-session',
+            projectRoot: externalWorktree,
+            cwd: `${externalWorktree}/packages/app`,
+          }),
+        ]],
+        ['/repo/coven-only', [
+          session({
+            id: 'coven-only-session',
+            projectRoot: '/repo/coven-only',
+          }),
+        ]],
+      ]),
+      loadWorktrees: async (projectRoot) => {
+        loadedRoots.push(projectRoot);
+        if (projectRoot === '/repo/primary') {
+          return [
+            worktree('/repo/primary', { isMain: true, branch: 'main' }),
+            worktree(externalWorktree, { branch: 'review' }),
+          ];
+        }
+        return [];
+      },
+    });
+
+    const snapshot = await provider();
+
+    expect(snapshot.projects.map((candidate) => candidate.root)).toEqual([
+      '/repo/primary',
+      '/repo/coven-only',
+    ]);
+    expect(project(snapshot, '/repo/primary').worktrees[1].panes)
+      .toContainEqual(expect.objectContaining({ id: 'external-session', kind: 'coven-session' }));
+    expect(project(snapshot, '/repo/coven-only').projectPanes)
+      .toContainEqual(expect.objectContaining({ id: 'coven-only-session', kind: 'coven-session' }));
+    expect(loadedRoots).toEqual(['/repo/primary', '/repo/coven-only']);
+  });
+
   it('deduplicates supplied Coven sessions and remains deterministic across input ordering', () => {
     const sessions = [
       session({
