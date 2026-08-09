@@ -80,6 +80,7 @@
   var paneLayouts = new Map();
   var covenEnsureFlights = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
@@ -205,20 +206,25 @@
   function commitPanePlacement(placement) {
     paneLayouts.set(placement.key, placement.value);
   }
+  function covenDiscoveryScopes() {
+    return state.projects.map(function (project) {
+      var worktreeRoots = (project.worktrees || [])
+        .filter(function (worktree) {
+          return !worktree.missing && !worktree.prunable && !worktree.bare &&
+            worktree.path && worktree.path !== project.root;
+        })
+        .map(function (worktree) { return worktree.path; })
+        .filter(function (root, index, roots) { return roots.indexOf(root) === index; });
+      return { projectRoot: project.root, worktreeRoots: worktreeRoots };
+    });
+  }
   function covenDiscoveryRoots() {
-    var roots = [];
-    state.projects.forEach(function (project) {
-      [project.root].concat(
-        (project.worktrees || [])
-          .filter(function (worktree) {
-            return !worktree.missing && !worktree.prunable && !worktree.bare;
-          })
-          .map(function (worktree) { return worktree.path; })
-      ).forEach(function (root) {
+    return covenDiscoveryScopes().reduce(function (roots, scope) {
+      [scope.projectRoot].concat(scope.worktreeRoots).forEach(function (root) {
         if (root && roots.indexOf(root) === -1) roots.push(root);
       });
-    });
-    return roots;
+      return roots;
+    }, []);
   }
   function covenSessionsForProject(project) {
     var roots = [project.root].concat(
@@ -229,26 +235,52 @@
     }, []);
   }
   async function refreshCovenSessions() {
+    if (document.visibilityState === "hidden" || state.projects.length === 0) {
+      return covenDiscovery;
+    }
     var roots = covenDiscoveryRoots();
+    var projectScopes = covenDiscoveryScopes();
+    var requestKey = JSON.stringify(projectScopes.map(function (scope) {
+      return {
+        projectRoot: scope.projectRoot,
+        worktreeRoots: scope.worktreeRoots.slice().sort(),
+      };
+    }).sort(function (left, right) {
+      return left.projectRoot < right.projectRoot ? -1 :
+        (left.projectRoot > right.projectRoot ? 1 : 0);
+    }));
+    if (covenDiscoveryFlight && covenDiscoveryFlight.key === requestKey) {
+      return covenDiscoveryFlight.promise;
+    }
     var started = PsycheSessions.beginCovenRequest(covenDiscovery);
     covenDiscovery = started.state;
     renderSessionList();
-    try {
-      var response = await invoke("coven_sessions", { projectRoots: roots });
-      covenDiscovery = PsycheSessions.applyCovenResponse(
-        covenDiscovery,
-        started.requestId,
-        response
-      );
-    } catch (_) {
-      covenDiscovery = PsycheSessions.applyCovenResponse(
-        covenDiscovery,
-        started.requestId,
-        { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
-      );
-    }
-    renderSessionList();
-    return covenDiscovery;
+    var flight = { key: requestKey, promise: null };
+    covenDiscoveryFlight = flight;
+    flight.promise = (async function () {
+      try {
+        var response = await invoke("coven_sessions", {
+          projectRoots: roots,
+          projectScopes: projectScopes,
+        });
+        covenDiscovery = PsycheSessions.applyCovenResponse(
+          covenDiscovery,
+          started.requestId,
+          response
+        );
+      } catch (_) {
+        covenDiscovery = PsycheSessions.applyCovenResponse(
+          covenDiscovery,
+          started.requestId,
+          { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
+        );
+      } finally {
+        if (covenDiscoveryFlight === flight) covenDiscoveryFlight = null;
+      }
+      renderSessionList();
+      return covenDiscovery;
+    })();
+    return flight.promise;
   }
   function stopCovenPolling() {
     if (covenPollTimer) clearInterval(covenPollTimer);
