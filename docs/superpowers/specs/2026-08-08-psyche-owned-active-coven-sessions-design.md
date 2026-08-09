@@ -54,10 +54,13 @@ copy arbitrary environment text into daemon labels.
 
 ### Coven daemon and CLI
 
-The external-session registration request accepts a bounded array of labels,
-validates it with the daemon's existing label rules, and persists it on the
-session record. Idempotent registration retains the labels already stored for
-an existing external session and must not overwrite a daemon-managed session.
+The external-session registration request accepts an optional `labels` array.
+It rejects non-array or non-string values, more than 16 labels, duplicate
+labels, empty labels, labels longer than 64 ASCII bytes, and characters outside
+`[A-Za-z0-9._:-]` with `400 invalid_request`. A missing array is equivalent to
+an empty array. Valid labels are persisted on the session record. Idempotent
+registration retains the labels already stored for an existing external
+session and must not overwrite a daemon-managed session.
 
 The existing scoped sessions response returns the persisted labels in both
 snake-case daemon JSON and the camel-case native response consumed by Psyche.
