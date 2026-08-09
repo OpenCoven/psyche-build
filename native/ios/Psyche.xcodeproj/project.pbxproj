@@ -12,6 +12,7 @@
 		7063996B4489396D0B070A6A /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		77624181EF84DC60C7D0099B /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */; };
+		82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */; };
 		834FD0F2CEF75F2B4DED623D /* DemoStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */; };
 		875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */; };
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
@@ -20,6 +21,7 @@
 		C47E0519F01CE5BF77E873F8 /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		D1B3875E9E7646C48D686F83 /* PsycheAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A406BA96351072FC1292B9B0 /* PsycheAppUITests.swift */; };
 		E78D840B1348810820259800 /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D412D06D4B9BE4902586CC /* ControlMessages.swift */; };
 		FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25C571EEFFA869223BF5924 /* ConnectionManager.swift */; };
 /* End PBXBuildFile section */
 
@@ -87,6 +89,8 @@
 		A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManagerTests.swift; sourceTree = "<group>"; };
 		B25C571EEFFA869223BF5924 /* ConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManager.swift; sourceTree = "<group>"; };
 		D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
+		F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessagesTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -211,6 +215,7 @@
 			children = (
 				7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */,
 				A474688E992B73C52AC99E85 /* ConnectionManagerTests.swift */,
+				F82FFAD02EDDF3155266ACD4 /* ControlMessagesTests.swift */,
 				158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */,
 			);
 			path = PsycheCoreTests;
@@ -229,6 +234,7 @@
 			isa = PBXGroup;
 			children = (
 				0899D0A654BB447D7D88380A /* BridgeMessages.swift */,
+				D9D412D06D4B9BE4902586CC /* ControlMessages.swift */,
 			);
 			path = Protocol;
 			sourceTree = "<group>";
@@ -364,6 +370,7 @@
 			files = (
 				04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */,
 				FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */,
+				ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */,
 				AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -374,6 +381,7 @@
 			files = (
 				7DEED3179790CC8695C0AB79 /* BridgeMessagesTests.swift in Sources */,
 				875BFDD977CDD12127F8E5EA /* ConnectionManagerTests.swift in Sources */,
+				82F26E4C170DE2FB9134595C /* ControlMessagesTests.swift in Sources */,
 				C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

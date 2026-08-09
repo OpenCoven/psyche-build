@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   decodeClientMessage,
   encodeServerMessage,
+  LEGACY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../src/services/bridge/wireProtocol";
 
 describe("wireProtocol", () => {
-  it("PROTOCOL_VERSION matches main's BridgeProtocol.version", () => {
-    expect(PROTOCOL_VERSION).toBe(2);
+  it("pins the legacy and current bridge protocol versions", () => {
+    expect(LEGACY_PROTOCOL_VERSION).toBe(2);
+    expect(PROTOCOL_VERSION).toBe(3);
   });
 
   it("decodes a hello with token", () => {

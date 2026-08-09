@@ -46,6 +46,10 @@ type CompleteMessage<M> = M extends { type: infer T; payload: infer P }
 
 export type ClientFixture = CompleteMessage<ClientMessage>;
 export type ServerFixture = CompleteMessage<ServerMessage>;
+export type MobileControlFixture = CompleteMessage<
+  Extract<ClientMessage, { type: 'control' }>
+  | Extract<ServerMessage, { type: 'control' | 'workspaceChanged' }>
+>;
 type CompleteDaemonMessage<M> = M extends { type: infer T }
   ? { [K in keyof M]-?: Complete<M[K]> } & { type: T }
   : never;
@@ -263,3 +267,49 @@ export const WORKSPACE_SNAPSHOT_FIXTURE = {
     }],
   },
 } satisfies WorkspaceSnapshotFixture;
+
+export const MOBILE_CONTROL_FIXTURES = {
+  workspaceSnapshotRequest: {
+    type: 'control',
+    payload: {
+      type: 'workspace.snapshot',
+      requestId: 'workspace-1',
+    },
+  },
+  workspaceChanged: {
+    type: 'workspaceChanged',
+    payload: {
+      revision: 42,
+      sequence: 7,
+      workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+    },
+  },
+  attachAgentPane: {
+    type: 'control',
+    payload: {
+      type: 'panes.attach',
+      requestId: 'attach-1',
+      id: '%3',
+      cols: 100,
+      rows: 32,
+      sinceSeq: 12,
+    },
+  },
+  spawnAgentPane: {
+    type: 'control',
+    payload: {
+      type: 'panes.spawn',
+      requestId: 'spawn-1',
+      idempotencyKey: 'spawn-agent-1',
+      kind: 'agent',
+      projectId: '/repo',
+      cwd: '/repo',
+      branch: undefined,
+      startPointBranch: undefined,
+      existingWorktree: undefined,
+      agent: 'coven-code',
+      title: 'Implement mobile cockpit',
+      prompt: 'Add the paired protocol-v3 control envelope.',
+    },
+  },
+} satisfies Record<string, MobileControlFixture>;

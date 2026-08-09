@@ -163,6 +163,34 @@ final class WireProtocolContractTests: XCTestCase {
         }
     }
 
+
+    func testMobileControlFixturesDecodeAndRoundTrip() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        for (name, data) in try loadFixtures("mobile-control.json") {
+            if let decodedClient = try? JSONDecoder().decode(MobileClientMessage.self, from: data) {
+                XCTAssertEqual(
+                    try comparableJSON(encoder.encode(decodedClient)),
+                    try comparableJSON(data),
+                    "Mobile client fixture \(name) did not survive a round-trip"
+                )
+                continue
+            }
+
+            if let decodedServer = try? JSONDecoder().decode(MobileServerMessage.self, from: data) {
+                XCTAssertEqual(
+                    try comparableJSON(encoder.encode(decodedServer)),
+                    try comparableJSON(data),
+                    "Mobile server fixture \(name) did not survive a round-trip"
+                )
+                continue
+            }
+
+            XCTFail("Mobile control fixture \(name) did not decode as either client or server")
+        }
+    }
+
     func testWorkspaceSnapshotFixtureDecodesAndRoundTrips() throws {
         let data = try Data(
             contentsOf: Self.fixtureDirectory.appendingPathComponent("workspace-snapshot.json")
