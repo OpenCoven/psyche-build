@@ -76,6 +76,7 @@
   };
   var paneLayouts = new Map();
   var covenEnsureFlights = new Map();
+  var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
@@ -1020,11 +1021,22 @@
     });
   }
 
-  function retryThread(id) {
+  async function retryThread(id) {
     var thread = findThread(id);
-    if (!isLiveThread(thread) || thread.startInFlight || thread.closeStarted ||
-        (thread.status !== "failed" && thread.status !== "exited")) {
-      return Promise.resolve(false);
+    if (!thread || thread.startInFlight || thread.closeStarted) return false;
+    if (thread.status !== "exited" && thread.status !== "failed") return false;
+    if (thread.launch.launchKind === "coven-attach") {
+      var project = findProject(thread.projectId);
+      await refreshCovenSessions();
+      var stillExists = project
+        && covenDiscovery.phase === "ready"
+        && covenSessionsForProject(project).some(function (session) {
+          return session.id === thread.launch.covenSessionId;
+        });
+      if (!stillExists) {
+        setStatus("Coven session is no longer available; refresh the rail before retrying", "warn");
+        return false;
+      }
     }
     return spawnPty(thread);
   }
@@ -1772,6 +1784,74 @@
     return "";
   }
 
+  function covenAttachKey(project, session) {
+    return project.root + "\n" + session.id;
+  }
+
+  function openCovenSession(project, session) {
+    if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
+      setStatus("Invalid Coven session", "error");
+      return Promise.resolve(null);
+    }
+    if (!state.env || !state.env.coven_path) {
+      setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+      return Promise.resolve(null);
+    }
+
+    var existing = state.threads.find(function (thread) {
+      return thread.projectId === project.id
+        && thread.covenSessionId === session.id
+        && !thread.closeStarted;
+    });
+    if (existing) {
+      return Promise.resolve().then(async function () {
+        if (!(await showTerminalView())) return null;
+        if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
+          return null;
+        }
+        await waitForTerminalLayout();
+        if (existing.hidden && !reopenThread(existing.id)) return null;
+        await focusThread(existing.id);
+        return existing;
+      });
+    }
+
+    var key = covenAttachKey(project, session);
+    if (covenAttachInFlight.has(key)) return covenAttachInFlight.get(key);
+
+    var opening = Promise.resolve().then(async function () {
+      if (!(await showTerminalView())) return null;
+      if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
+        return null;
+      }
+      await waitForTerminalLayout();
+      var worktree = (project.worktrees || []).find(function (candidate) {
+        return session.cwd && (
+          session.cwd === candidate.path
+          || session.cwd.indexOf(candidate.path + "/") === 0
+        );
+      }) || (project.worktrees || []).find(function (candidate) {
+        return session.projectRoot === candidate.path;
+      }) || selectedWorktree(project);
+      return createThread({
+        project: project,
+        name: session.title || "Coven " + session.id.slice(0, 8),
+        kind: "coven-attach",
+        command: state.env.coven_path,
+        args: ["attach", session.id],
+        projectRoot: project.root,
+        cwd: session.cwd || worktree.path,
+        worktreePath: worktree.path,
+        launchKind: "coven-attach",
+        covenSessionId: session.id,
+      });
+    }).finally(function () {
+      covenAttachInFlight.delete(key);
+    });
+    covenAttachInFlight.set(key, opening);
+    return opening;
+  }
+
   function createCovenSessionRow(project, session) {
     var presentation = PsycheSessions.statusPresentation(session.status);
     var attached = state.threads.some(function (thread) {
@@ -1800,7 +1880,7 @@
       row.appendChild(badge);
     }
     row.addEventListener("click", function () {
-      if (typeof openCovenSession === "function") openCovenSession(project, session);
+      openCovenSession(project, session);
     });
     return row;
   }

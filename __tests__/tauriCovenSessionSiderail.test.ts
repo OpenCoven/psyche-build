@@ -289,7 +289,6 @@ function createRenderer(options: {
   activeProjectId?: string | null;
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
-  attachAvailable?: boolean;
   realEdit?: boolean;
 } = {}) {
   const document = new FakeDocument();
@@ -375,7 +374,7 @@ function createRenderer(options: {
     hideThread,
     renameThread,
     editLabelInlineImpl,
-    options.attachAvailable === false ? undefined : openCovenSession,
+    openCovenSession,
     setStatus,
   ) as {
     render: () => void;
@@ -469,20 +468,8 @@ describe('Tauri Coven session project rail', () => {
       expect.objectContaining({ id: 'alpha' }),
       expect.objectContaining({ id: 'remote' }),
     );
-  });
-
-  it('keeps rendered attach rows safe until the native attachment task supplies its handler', async () => {
-    const renderer = createRenderer({
-      sessions: [{ id: 'remote', projectRoot: '/alpha', status: 'running' }],
-      attachAvailable: false,
-    });
-
-    renderer.render();
-    await expect(renderer.sessionListEl.querySelector('.session-coven-row')?.emit('click'))
-      .resolves.toBeInstanceOf(FakeEvent);
-    expect(renderer.openCovenSession).not.toHaveBeenCalled();
     expect(extractFunctionSource(mainJs, 'createCovenSessionRow'))
-      .toContain('typeof openCovenSession === "function"');
+      .not.toContain('typeof openCovenSession');
   });
 
   it('keeps stale rows visible with one discovery status line', () => {
