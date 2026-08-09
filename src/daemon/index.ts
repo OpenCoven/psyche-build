@@ -26,7 +26,6 @@ import {
   listProjectCovenSessions,
   listScopedProjects,
   createCovenClient,
-  mutateBridgeConfig,
   readPaneStatus,
   resolveConfiguredPaneId,
   tmuxPaneExists,
@@ -858,12 +857,16 @@ export class Connection {
         return;
       }
       case 'panes.meta': {
-        try {
-          await updatePaneMeta(this.deps.projectRoot, msg.id, { title: msg.title, agent: msg.agent });
+        const outcome = await this.submitControl(this.buildCommand(
+          'pane.meta.update',
+          { paneId: msg.id, title: msg.title, agent: msg.agent },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (outcome.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
           await this.emitWorkspaceChanged();
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'meta_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'meta_failed', outcome);
         }
         return;
       }
@@ -1055,30 +1058,11 @@ export function tokensMatch(expected: string, supplied: unknown): boolean {
 }
 
 /**
- * Patch a pane's metadata in the project config.
- *
- * Goes through `mutateBridgeConfig` rather than doing its own
- * read-parse-write. That gives it three things it did not have: serialization
- * against concurrent spawns (an inline read-modify-write here dropped panes
- * that a spawn appended between the read and the write), an atomic write
- * (a plain `writeFile` truncates first, so a crash left a torn registry), and
- * a read that refuses to fall back to an empty config when the file exists but
- * cannot be parsed.
+ * Re-exported from `./bridge.js`, where it lives so the control handler can
+ * reach it without importing this daemon entrypoint. Kept here for existing
+ * importers (tests).
  */
-export async function updatePaneMeta(
-  projectRoot: string,
-  paneId: string,
-  patch: { title?: string; agent?: string },
-): Promise<void> {
-  await mutateBridgeConfig(projectRoot, (config) => {
-    const panes = Array.isArray(config.panes) ? config.panes : [];
-    const pane = panes.find((p) => p.id === paneId || p.paneId === paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found`);
-    if (patch.title !== undefined) pane.title = patch.title;
-    if (patch.agent !== undefined) pane.agent = patch.agent;
-    config.panes = panes;
-  });
-}
+export { updatePaneMeta } from './bridge.js';
 
 function findGitRoot(): string | null {
   try {

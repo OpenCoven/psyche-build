@@ -241,6 +241,19 @@ describe('daemon control adapter translation', () => {
     expect(kills[0].payload).toMatchObject({ paneId: '%3' });
   });
 
+  it('translates meta into a canonical pane.meta.update', async () => {
+    const root = await projectWithPanes([{ id: 'psyche-1', paneId: '%3' }]);
+    const runtime = spyRuntime();
+    const { ws } = buildConnection(root, runtime);
+
+    await request(ws, { type: 'panes.meta', requestId: 'm', id: '%3', title: 'renamed', agent: 'claude' });
+
+    const metas = runtime.submitted.filter((c) => c.kind === 'pane.meta.update');
+    expect(metas).toHaveLength(1);
+    expect(metas[0].payload).toMatchObject({ paneId: '%3', title: 'renamed', agent: 'claude' });
+    expect(ws.sent.at(-1)).toMatchObject({ type: 'ack', requestId: 'm', ok: true });
+  });
+
   it('translates spawn into a compatibility pane.spawn carrying the v0 request', async () => {
     const root = await projectWithPanes([]);
     const runtime = spyRuntime((command) =>
@@ -378,7 +391,7 @@ describe('daemon pane-mutation source boundary', () => {
     const indexPath = fileURLToPath(new URL('../../src/daemon/index.ts', import.meta.url));
     const source = await readFile(indexPath, 'utf8');
     const forbidden =
-      /this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(/;
+      /this\.deps\.tmux\.(sendKeysHex|resizePane|selectPane|killPane)|spawnBridgePane\(|updatePaneMeta\(/;
     expect(source).not.toMatch(forbidden);
   });
 
