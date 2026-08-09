@@ -54,7 +54,7 @@ export class BridgeDaemon {
   private readonly mobileGateway?: MobileControlGateway;
   private workspaceSequence = 0;
   private lastBroadcastWorkspaceRevision: number | undefined;
-  private workspaceBroadcastQueue: Promise<void> = Promise.resolve();
+  private workspaceOperationQueue: Promise<void> = Promise.resolve();
   readonly serverId: string;
   readonly serverName: string;
 
@@ -65,8 +65,7 @@ export class BridgeDaemon {
     this.pairing = opts.pairingFlow ?? new PairingFlow();
     this.mobileGateway = opts.workspaceProvider
       ? new MobileControlGateway({
-        workspaceProvider: opts.workspaceProvider,
-        workspaceSequence: () => this.readWorkspaceSequence(),
+        workspaceSnapshot: () => this.readWorkspaceSnapshot(),
       })
       : undefined;
     this.pairing.on("open", (w: { code: string; expiresAt: Date }) => this.broadcastPairChallenge(w));
@@ -366,7 +365,7 @@ export class BridgeDaemon {
   }
 
   private broadcastWorkspaceChanged(): Promise<void> {
-    const broadcast = this.workspaceBroadcastQueue.then(async () => {
+    return this.enqueueWorkspaceOperation(async () => {
       if (!this.listener || !this.opts.workspaceProvider) return;
 
       const workspace = await this.opts.workspaceProvider();
@@ -392,18 +391,29 @@ export class BridgeDaemon {
         }
       }
     });
-
-    this.workspaceBroadcastQueue = broadcast.catch(() => {});
-    return broadcast;
   }
 
-  private readWorkspaceSequence(): Promise<number> {
-    const read = this.workspaceBroadcastQueue.then(() => this.workspaceSequence);
-    this.workspaceBroadcastQueue = read.then(
+  private readWorkspaceSnapshot(): Promise<{
+    workspace: ReadonlyWorkspaceSnapshot;
+    sequence: number;
+  }> {
+    return this.enqueueWorkspaceOperation(async () => {
+      const provider = this.opts.workspaceProvider;
+      if (!provider) {
+        throw new Error("workspace provider is not available");
+      }
+      const workspace = await provider();
+      return { workspace, sequence: this.workspaceSequence };
+    });
+  }
+
+  private enqueueWorkspaceOperation<T>(operation: () => T | Promise<T>): Promise<T> {
+    const result = this.workspaceOperationQueue.then(operation);
+    this.workspaceOperationQueue = result.then(
       () => undefined,
       () => undefined,
     );
-    return read;
+    return result;
   }
 
   private async readLegacyState(): Promise<{ panes: PaneSnapshot[]; projects: Project[] }> {

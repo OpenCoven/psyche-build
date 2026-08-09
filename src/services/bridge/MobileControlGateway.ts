@@ -6,8 +6,13 @@ import type {
 } from './wireProtocol.js';
 
 export interface MobileControlGatewayOptions {
-  workspaceProvider: () => ReadonlyWorkspaceSnapshot | Promise<ReadonlyWorkspaceSnapshot>;
-  workspaceSequence: () => number | Promise<number>;
+  workspaceSnapshot: () => {
+    workspace: ReadonlyWorkspaceSnapshot;
+    sequence: number;
+  } | Promise<{
+    workspace: ReadonlyWorkspaceSnapshot;
+    sequence: number;
+  }>;
 }
 
 export interface MobileControlGatewayContext {
@@ -38,8 +43,7 @@ export class MobileControlGateway {
 
     switch (request.type) {
       case 'workspace.snapshot': {
-        const workspace = await this.options.workspaceProvider();
-        const sequence = await this.options.workspaceSequence();
+        const { workspace, sequence } = await this.options.workspaceSnapshot();
         return {
           type: 'mobile.workspace.snapshot.result',
           requestId,

@@ -30,8 +30,7 @@ describe('MobileControlGateway', () => {
       WORKSPACE_SNAPSHOT_FIXTURE.workspace,
     )) as ReadonlyWorkspaceSnapshot;
     const gateway = new MobileControlGateway({
-      workspaceProvider: () => workspace,
-      workspaceSequence: () => 7,
+      workspaceSnapshot: () => ({ workspace, sequence: 7 }),
     });
 
     const result = await gateway.handle(
@@ -54,11 +53,10 @@ describe('MobileControlGateway', () => {
     expect(Object.isFrozen(result.workspace.projects[0])).toBe(true);
   });
 
-  it('supports an async workspace provider', async () => {
+  it('supports an async workspace snapshot', async () => {
     const workspace = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace) as ReadonlyWorkspaceSnapshot;
     const gateway = new MobileControlGateway({
-      workspaceProvider: async () => workspace,
-      workspaceSequence: () => 11,
+      workspaceSnapshot: async () => ({ workspace, sequence: 11 }),
     });
 
     await expect(gateway.handle(
@@ -74,8 +72,10 @@ describe('MobileControlGateway', () => {
 
   it('rejects nested hello control requests instead of renegotiating', async () => {
     const gateway = new MobileControlGateway({
-      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
-      workspaceSequence: () => 0,
+      workspaceSnapshot: () => ({
+        workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        sequence: 0,
+      }),
     });
 
     await expect(gateway.handle({
@@ -95,8 +95,10 @@ describe('MobileControlGateway', () => {
 
   it('rejects a missing requestId at runtime', async () => {
     const gateway = new MobileControlGateway({
-      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
-      workspaceSequence: () => 0,
+      workspaceSnapshot: () => ({
+        workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        sequence: 0,
+      }),
     });
 
     await expect(gateway.handle(
@@ -110,8 +112,10 @@ describe('MobileControlGateway', () => {
 
   it('rejects unsupported mobile commands with command_not_supported', async () => {
     const gateway = new MobileControlGateway({
-      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
-      workspaceSequence: () => 0,
+      workspaceSnapshot: () => ({
+        workspace: WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        sequence: 0,
+      }),
     });
 
     await expect(gateway.handle({

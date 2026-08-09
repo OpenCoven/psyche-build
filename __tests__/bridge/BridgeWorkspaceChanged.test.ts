@@ -168,7 +168,7 @@ describe("BridgeDaemon workspace change broadcasts", () => {
     });
   });
 
-  it("does not return an old snapshot sequence when a broadcast completes during the provider read", async () => {
+  it("serializes snapshots with broadcasts so workspace and sequence stay consistent", async () => {
     let providerCalls = 0;
     let markSnapshotReadStarted!: () => void;
     const snapshotReadStarted = new Promise<void>((resolve) => {
@@ -178,14 +178,18 @@ describe("BridgeDaemon workspace change broadcasts", () => {
     const snapshotReadRelease = new Promise<void>((resolve) => {
       releaseSnapshotRead = resolve;
     });
-    const workspace = workspaceAtRevision(5);
+    const oldWorkspace = workspaceAtRevision(4);
+    oldWorkspace.projects[0]!.title = "old workspace";
+    const newWorkspace = workspaceAtRevision(5);
+    newWorkspace.projects[0]!.title = "new workspace";
     const provider = vi.fn(async () => {
       const call = providerCalls++;
       if (call === 0) {
         markSnapshotReadStarted();
         await snapshotReadRelease;
+        return oldWorkspace;
       }
-      return workspace;
+      return newWorkspace;
     });
     const session = createSession("authenticated", PROTOCOL_VERSION);
     const daemon = createDaemon(provider);
@@ -197,21 +201,33 @@ describe("BridgeDaemon workspace change broadcasts", () => {
     });
     await snapshotReadStarted;
 
-    await (daemon as any).broadcastWorkspaceChanged();
-    expect((daemon as any).workspaceSequence).toBe(1);
+    const broadcast = (daemon as any).broadcastWorkspaceChanged();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect((daemon as any).workspaceSequence).toBe(0);
 
     releaseSnapshotRead();
-    await snapshotRequest;
+    await Promise.all([snapshotRequest, broadcast]);
 
-    expect(session.send).toHaveBeenLastCalledWith({
-      type: "control",
-      payload: {
-        type: "mobile.workspace.snapshot.result",
-        requestId: "snapshot-race",
-        sequence: 1,
-        workspace,
+    expect(session.send.mock.calls.map(([message]) => message)).toEqual([
+      {
+        type: "control",
+        payload: {
+          type: "mobile.workspace.snapshot.result",
+          requestId: "snapshot-race",
+          sequence: 0,
+          workspace: oldWorkspace,
+        },
       },
-    });
+      {
+        type: "workspaceChanged",
+        payload: {
+          revision: 5,
+          sequence: 1,
+          workspace: newWorkspace,
+        },
+      },
+    ]);
   });
 
   it("logs rejected provider reads without producing an unhandled rejection", async () => {
