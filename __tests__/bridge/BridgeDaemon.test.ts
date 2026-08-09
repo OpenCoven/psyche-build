@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BridgeDaemon } from "../../src/services/bridge/BridgeDaemon";
 import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow } from "../../src/services/bridge/PairingFlow";
@@ -53,6 +53,38 @@ class NoopPaneStreamHub extends PaneStreamHub {
 const noopHubFactory = (sessionName: string) => new NoopPaneStreamHub(sessionName);
 
 describe("BridgeDaemon", () => {
+  it("passes the active TLS fingerprint to Bonjour publication", async () => {
+    const bonjour = {
+      publish: vi.fn(),
+      stop: vi.fn(async () => {}),
+    };
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test-host",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      bonjourFactory: () => bonjour,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+
+    try {
+      const started = await daemon.start();
+
+      expect(bonjour.publish).toHaveBeenCalledWith({
+        name: "test-host",
+        port: started.port,
+        serverId: "test-srv",
+        fingerprint: started.fingerprint,
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
   it("sends a legacy v2 welcome before hello and no duplicate welcome for v2", async () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",

@@ -39,13 +39,14 @@ export interface BridgeDaemonOptions {
   launchRitual: (projectId: string, ritualId: string, params: Record<string, string>) => Promise<void>;
   tokenStore?: TokenStore;       // for tests; production creates a fresh one
   pairingFlow?: PairingFlow;     // for tests; same
+  bonjourFactory?: () => Pick<BridgeBonjour, "publish" | "stop">;
 }
 
 export class BridgeDaemon {
   private listener?: WSSListener;
   private tls?: TLSMaterial;
   private hub?: PaneStreamHub;
-  private bonjour?: BridgeBonjour;
+  private bonjour?: Pick<BridgeBonjour, "publish" | "stop">;
   private paneSubscribers = new Map<string, Set<Session>>();
   private tokens: TokenStore;
   private pairing: PairingFlow;
@@ -65,7 +66,7 @@ export class BridgeDaemon {
     this.mobileGateway = opts.workspaceProvider
       ? new MobileControlGateway({
         workspaceProvider: opts.workspaceProvider,
-        workspaceSequence: () => this.workspaceSequence,
+        workspaceSequence: () => this.readWorkspaceSequence(),
       })
       : undefined;
     this.pairing.on("open", (w: { code: string; expiresAt: Date }) => this.broadcastPairChallenge(w));
@@ -122,7 +123,7 @@ export class BridgeDaemon {
     });
     const { port } = await this.listener.start();
     try {
-      this.bonjour = new BridgeBonjour();
+      this.bonjour = this.opts.bonjourFactory?.() ?? new BridgeBonjour();
       this.bonjour.publish({
         name: this.serverName,
         port,
@@ -394,6 +395,15 @@ export class BridgeDaemon {
 
     this.workspaceBroadcastQueue = broadcast.catch(() => {});
     return broadcast;
+  }
+
+  private readWorkspaceSequence(): Promise<number> {
+    const read = this.workspaceBroadcastQueue.then(() => this.workspaceSequence);
+    this.workspaceBroadcastQueue = read.then(
+      () => undefined,
+      () => undefined,
+    );
+    return read;
   }
 
   private async readLegacyState(): Promise<{ panes: PaneSnapshot[]; projects: Project[] }> {

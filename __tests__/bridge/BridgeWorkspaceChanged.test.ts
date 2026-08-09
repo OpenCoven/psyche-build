@@ -168,6 +168,52 @@ describe("BridgeDaemon workspace change broadcasts", () => {
     });
   });
 
+  it("does not return an old snapshot sequence when a broadcast completes during the provider read", async () => {
+    let providerCalls = 0;
+    let markSnapshotReadStarted!: () => void;
+    const snapshotReadStarted = new Promise<void>((resolve) => {
+      markSnapshotReadStarted = resolve;
+    });
+    let releaseSnapshotRead!: () => void;
+    const snapshotReadRelease = new Promise<void>((resolve) => {
+      releaseSnapshotRead = resolve;
+    });
+    const workspace = workspaceAtRevision(5);
+    const provider = vi.fn(async () => {
+      const call = providerCalls++;
+      if (call === 0) {
+        markSnapshotReadStarted();
+        await snapshotReadRelease;
+      }
+      return workspace;
+    });
+    const session = createSession("authenticated", PROTOCOL_VERSION);
+    const daemon = createDaemon(provider);
+    installSessions(daemon, [session]);
+
+    const snapshotRequest = (daemon as any).handleControl(session, {
+      type: "workspace.snapshot",
+      requestId: "snapshot-race",
+    });
+    await snapshotReadStarted;
+
+    await (daemon as any).broadcastWorkspaceChanged();
+    expect((daemon as any).workspaceSequence).toBe(1);
+
+    releaseSnapshotRead();
+    await snapshotRequest;
+
+    expect(session.send).toHaveBeenLastCalledWith({
+      type: "control",
+      payload: {
+        type: "mobile.workspace.snapshot.result",
+        requestId: "snapshot-race",
+        sequence: 1,
+        workspace,
+      },
+    });
+  });
+
   it("logs rejected provider reads without producing an unhandled rejection", async () => {
     const providerError = new Error("workspace unavailable");
     const daemon = createDaemon(async () => {

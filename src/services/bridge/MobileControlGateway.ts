@@ -7,7 +7,7 @@ import type {
 
 export interface MobileControlGatewayOptions {
   workspaceProvider: () => ReadonlyWorkspaceSnapshot | Promise<ReadonlyWorkspaceSnapshot>;
-  workspaceSequence: () => number;
+  workspaceSequence: () => number | Promise<number>;
 }
 
 export interface MobileControlGatewayContext {
@@ -37,13 +37,16 @@ export class MobileControlGateway {
     const requestId = requireRequestId(request);
 
     switch (request.type) {
-      case 'workspace.snapshot':
+      case 'workspace.snapshot': {
+        const workspace = await this.options.workspaceProvider();
+        const sequence = await this.options.workspaceSequence();
         return {
           type: 'mobile.workspace.snapshot.result',
           requestId,
-          sequence: this.options.workspaceSequence(),
-          workspace: await this.options.workspaceProvider(),
+          sequence,
+          workspace,
         };
+      }
       case 'hello':
         throw new MobileControlGatewayError(
           'invalid_control_request',

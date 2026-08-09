@@ -21,6 +21,37 @@ export interface PsycheState {
   toastQueuePosition: number | null;
 }
 
+export interface WorkspaceChangeNotifier {
+  notifyWorkspaceChanged(): void;
+}
+
+export interface WorkspacePublicationState {
+  daemon: WorkspaceChangeNotifier | undefined;
+  ready: boolean;
+}
+
+export function synchronizeWorkspacePublication(
+  stateManager: Pick<StateManager, 'updatePanes'>,
+  panes: PsychePane[],
+  bridgeDaemon: WorkspaceChangeNotifier | undefined,
+  isLoading: boolean,
+  state: WorkspacePublicationState,
+): WorkspacePublicationState {
+  const current = state.daemon === bridgeDaemon
+    ? state
+    : { daemon: bridgeDaemon, ready: false };
+
+  if (!bridgeDaemon || isLoading) return current;
+
+  stateManager.updatePanes(panes);
+  if (!current.ready) {
+    return { daemon: bridgeDaemon, ready: true };
+  }
+
+  bridgeDaemon.notifyWorkspaceChanged();
+  return current;
+}
+
 export class StateManager extends EventEmitter {
   private static instance: StateManager;
   private state: PsycheState;

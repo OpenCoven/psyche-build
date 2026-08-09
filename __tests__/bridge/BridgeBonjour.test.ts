@@ -24,13 +24,17 @@ describe('BridgeBonjour', () => {
       fingerprint: 'AA:BB:CC:DD',
     });
 
-    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+    expect(publish).toHaveBeenCalledWith({
+      name: 'test-host',
+      type: 'psyche',
+      port: 8443,
+      protocol: 'tcp',
       txt: {
         proto: '2',
         versions: '2,3',
         serverId: 'server-1',
         fingerprint: 'AA:BB:CC:DD',
       },
-    }));
+    });
   });
 });

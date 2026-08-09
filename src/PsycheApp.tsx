@@ -25,7 +25,11 @@ import useCovenDesktopUse from "./hooks/useCovenDesktopUse.js"
 // Utils
 import { SIDEBAR_WIDTH } from "./utils/layoutManager.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
-import { StateManager } from "./shared/StateManager.js"
+import {
+  StateManager,
+  synchronizeWorkspacePublication,
+  type WorkspacePublicationState,
+} from "./shared/StateManager.js"
 import {
   ANIMATION_DELAY,
   STATUS_MESSAGE_DURATION_SHORT,
@@ -372,19 +376,18 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     useHooks
   )
 
-  const workspaceNotificationsReady = useRef(false)
-  const workspaceNotificationDaemon = useRef(bridgeDaemon)
+  const workspacePublicationState = useRef<WorkspacePublicationState>({
+    daemon: bridgeDaemon,
+    ready: false,
+  })
   useEffect(() => {
-    if (workspaceNotificationDaemon.current !== bridgeDaemon) {
-      workspaceNotificationDaemon.current = bridgeDaemon
-      workspaceNotificationsReady.current = false
-    }
-    if (!bridgeDaemon || isLoading) return
-    if (!workspaceNotificationsReady.current) {
-      workspaceNotificationsReady.current = true
-      return
-    }
-    bridgeDaemon.notifyWorkspaceChanged()
+    workspacePublicationState.current = synchronizeWorkspacePublication(
+      StateManager.getInstance(),
+      panes,
+      bridgeDaemon,
+      isLoading,
+      workspacePublicationState.current,
+    )
   }, [bridgeDaemon, isLoading, panes, sidebarProjects])
 
   // Check for tmux hooks preference on startup
@@ -607,10 +610,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       statusDetector.off("status-updated", handleStatusUpdate)
     }
   }, [setPanes])
-
-  // Note: No need to sync panes with StateManager here.
-  // The ConfigWatcher automatically updates StateManager when the config file changes.
-  // This prevents unnecessary SSE broadcasts on every local state update.
 
   // Sync settings with StateManager
   useEffect(() => {
