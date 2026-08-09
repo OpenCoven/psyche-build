@@ -9,6 +9,7 @@ import {
   normalizeIsoDateString,
   normalizeIsoEpochMilliseconds,
   normalizeWorkspaceRoot,
+  normalizeWorkspaceWorktrees,
   readProjectWorktrees,
   readProjectWorktreesAsync,
   type GitWorktreeSnapshotInput,
@@ -151,23 +152,15 @@ export function createTuiWorkspaceProvider(
         worktreeCacheTtlMs,
         options.onWorktreeReadError,
       );
-    const associatedCovenSessions = deduplicateCovenSessionsByProject(
-      associateCovenSessionsWithPublishedProjects(
-        covenSessionsByProject,
-        publishedProjects,
-        worktreesByProjectRoot,
-      ),
+    const covenOnlyCandidateRoots = collectCovenOnlyCandidateRoots(
+      covenSessionsByProject,
+      publishedProjects,
+      worktreesByProjectRoot,
     );
 
     if (!providedWorktreesByProjectRoot) {
-      const allProjects = collectProjects(
-        { ...workspaceInput, revision: 0 },
-        primaryRoot,
-        associatedCovenSessions,
-      );
-      const missingRoots = allProjects
-        .map((project) => project.root)
-        .filter((projectRoot) => !getResolvedMapValue(worktreesByProjectRoot, projectRoot));
+      const missingRoots = covenOnlyCandidateRoots
+        .filter((projectRoot) => !hasResolvedMapKey(worktreesByProjectRoot, projectRoot));
       if (missingRoots.length > 0) {
         const additionalWorktrees = await loadProviderWorktrees(
           missingRoots,
@@ -176,17 +169,32 @@ export function createTuiWorkspaceProvider(
           worktreeCacheTtlMs,
           options.onWorktreeReadError,
         );
-        worktreesByProjectRoot = new Map([
+        worktreesByProjectRoot = mergeWorktreesByProjectRoot([
           ...worktreesByProjectRoot,
           ...additionalWorktrees,
         ]);
       }
     }
 
+    const canonicalCovenOwnership = canonicalizeCovenOnlyWorktrees(
+      worktreesByProjectRoot,
+      covenOnlyCandidateRoots,
+    );
+    const associatedCovenSessions = deduplicateCovenSessionsByProject(
+      associateCovenSessionsWithPublishedProjects(
+        covenSessionsByProject,
+        mergeProjectSeeds(
+          publishedProjects,
+          canonicalCovenOwnership.canonicalRoots,
+        ),
+        canonicalCovenOwnership.worktreesByProjectRoot,
+      ),
+    );
+
     return state.snapshot({
       ...workspaceInput,
       covenSessionsByProject: associatedCovenSessions,
-      worktreesByProjectRoot,
+      worktreesByProjectRoot: canonicalCovenOwnership.worktreesByProjectRoot,
     });
   };
 
@@ -287,17 +295,30 @@ export function buildTuiWorkspaceSnapshot(
 ): WorkspaceSnapshot {
   const primaryRoot = normalizeRoot(input.primaryProjectRoot);
   const publishedProjects = collectPublishedProjects(input, primaryRoot);
-  const discoveredWorktrees = new Map<string, readonly GitWorktreeSnapshotInput[]>(
-    publishedProjects.map((project) => [
+  const discoveredWorktrees = mergeWorktreesByProjectRoot([
+    ...(input.worktreesByProjectRoot ?? []),
+    ...publishedProjects.map((project) => [
       project.root,
       readWorktreesForProject(project.root, input),
-    ]),
+    ] as const),
+  ]);
+  const covenOnlyCandidateRoots = collectCovenOnlyCandidateRoots(
+    input.covenSessionsByProject,
+    publishedProjects,
+    discoveredWorktrees,
+  );
+  const canonicalCovenOwnership = canonicalizeCovenOnlyWorktrees(
+    discoveredWorktrees,
+    covenOnlyCandidateRoots,
   );
   const covenSessionsByProject = deduplicateCovenSessionsByProject(
     associateCovenSessionsWithPublishedProjects(
       input.covenSessionsByProject,
-      publishedProjects,
-      discoveredWorktrees,
+      mergeProjectSeeds(
+        publishedProjects,
+        canonicalCovenOwnership.canonicalRoots,
+      ),
+      canonicalCovenOwnership.worktreesByProjectRoot,
     ),
   );
   const projects = collectProjects(input, primaryRoot, covenSessionsByProject);
@@ -309,7 +330,10 @@ export function buildTuiWorkspaceSnapshot(
       root: project.root,
       title: project.title,
       worktrees: [
-        ...(getResolvedMapValue(discoveredWorktrees, project.root)
+        ...(getResolvedMapValue(
+          canonicalCovenOwnership.worktreesByProjectRoot,
+          project.root,
+        )
           ?? readWorktreesForProject(project.root, input)),
       ],
       panes: projectPanes(project.root, input.panes, primaryRoot),
@@ -426,6 +450,159 @@ function getResolvedMapValue<Value>(
     }
   }
   return undefined;
+}
+
+function hasResolvedMapKey<Value>(
+  entries: ReadonlyMap<string, Value>,
+  key: string,
+): boolean {
+  for (const candidateKey of entries.keys()) {
+    if (normalizeRoot(candidateKey) === key) return true;
+  }
+  return false;
+}
+
+function collectCovenOnlyCandidateRoots(
+  grouped: ReadonlyMap<string, readonly CovenSessionSummary[]> | undefined,
+  publishedProjects: readonly ProjectSeed[],
+  worktreesByProjectRoot: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>,
+): string[] {
+  const publishedRoots = new Set(publishedProjects.map((project) => project.root));
+  return [...associateCovenSessionsWithPublishedProjects(
+    grouped,
+    publishedProjects,
+    worktreesByProjectRoot,
+  ).keys()]
+    .map(normalizeRoot)
+    .filter((projectRoot) => !publishedRoots.has(projectRoot))
+    .sort(compareStrings);
+}
+
+function mergeProjectSeeds(
+  publishedProjects: readonly ProjectSeed[],
+  covenOnlyRoots: readonly string[],
+): ProjectSeed[] {
+  const seeds = new Map(
+    publishedProjects.map((project) => [project.root, { ...project }]),
+  );
+  for (const projectRoot of covenOnlyRoots) {
+    upsertProject(seeds, projectRoot, undefined, false);
+  }
+  return sortProjects(seeds);
+}
+
+function mergeWorktreesByProjectRoot(
+  entries: Iterable<readonly [string, readonly GitWorktreeSnapshotInput[]]>,
+): Map<string, readonly GitWorktreeSnapshotInput[]> {
+  const worktreesByRoot = new Map<string, GitWorktreeSnapshotInput[]>();
+  for (const [projectRoot, worktrees] of entries) {
+    const normalizedRoot = normalizeRoot(projectRoot);
+    const combined = worktreesByRoot.get(normalizedRoot) ?? [];
+    combined.push(...worktrees.map((worktree) => ({ ...worktree })));
+    worktreesByRoot.set(normalizedRoot, combined);
+  }
+
+  return new Map(
+    [...worktreesByRoot.entries()]
+      .sort(([left], [right]) => compareStrings(left, right))
+      .map(([projectRoot, worktrees]) => {
+        const reportedMainRoots = uniqueSortedStrings(
+          worktrees
+            .filter((worktree) => worktree.isMain)
+            .map((worktree) => normalizeRoot(worktree.path)),
+        );
+        const normalizationRoot = reportedMainRoots.length === 1
+          ? reportedMainRoots[0]
+          : projectRoot;
+        return [
+          projectRoot,
+          normalizeWorkspaceWorktrees(normalizationRoot, worktrees),
+        ] as const;
+      }),
+  );
+}
+
+function canonicalizeCovenOnlyWorktrees(
+  worktreesByProjectRoot: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>,
+  candidateRoots: readonly string[],
+): {
+  canonicalRoots: string[];
+  worktreesByProjectRoot: Map<string, readonly GitWorktreeSnapshotInput[]>;
+} {
+  const normalizedWorktrees = mergeWorktreesByProjectRoot(worktreesByProjectRoot);
+  const entries = [...normalizedWorktrees.entries()].map(([projectRoot, worktrees]) => ({
+    projectRoot,
+    worktrees,
+    signature: worktreeSetSignature(worktrees),
+  }));
+  const canonicalRootByCandidate = new Map<string, string>();
+  const canonicalRootsBySignature = new Map<string, Set<string>>();
+
+  for (const candidateRoot of uniqueSortedStrings(candidateRoots.map(normalizeRoot))) {
+    const matchingEntries = entries.filter((entry) => (
+      entry.projectRoot === candidateRoot
+      || entry.worktrees.some((worktree) => normalizeRoot(worktree.path) === candidateRoot)
+    ));
+    const mainRoots = uniqueSortedStrings(
+      matchingEntries.flatMap((entry) => (
+        entry.worktrees
+          .filter((worktree) => worktree.isMain)
+          .map((worktree) => normalizeRoot(worktree.path))
+      )),
+    );
+    const canonicalRoot = mainRoots.length === 1 ? mainRoots[0] : candidateRoot;
+    canonicalRootByCandidate.set(candidateRoot, canonicalRoot);
+
+    for (const entry of matchingEntries) {
+      if (!entry.signature) continue;
+      const roots = canonicalRootsBySignature.get(entry.signature) ?? new Set<string>();
+      roots.add(canonicalRoot);
+      canonicalRootsBySignature.set(entry.signature, roots);
+    }
+  }
+
+  const canonicalRootBySignature = new Map(
+    [...canonicalRootsBySignature.entries()]
+      .flatMap(([signature, roots]) => {
+        const canonicalRoot = roots.size === 1
+          ? roots.values().next().value
+          : undefined;
+        return canonicalRoot ? [[signature, canonicalRoot] as const] : [];
+      }),
+  );
+  const rekeyedEntries: Array<readonly [string, readonly GitWorktreeSnapshotInput[]]> = [];
+  for (const entry of entries) {
+    const signatureCanonicalRoot = entry.signature
+      ? canonicalRootBySignature.get(entry.signature)
+      : undefined;
+    rekeyedEntries.push([
+      signatureCanonicalRoot
+        ?? canonicalRootByCandidate.get(entry.projectRoot)
+        ?? entry.projectRoot,
+      entry.worktrees,
+    ]);
+  }
+  const canonicalWorktrees = mergeWorktreesByProjectRoot(rekeyedEntries);
+
+  return {
+    canonicalRoots: uniqueSortedStrings(
+      [...canonicalRootByCandidate.values()],
+    ),
+    worktreesByProjectRoot: canonicalWorktrees,
+  };
+}
+
+function worktreeSetSignature(
+  worktrees: readonly GitWorktreeSnapshotInput[],
+): string | undefined {
+  const paths = uniqueSortedStrings(
+    worktrees.map((worktree) => normalizeRoot(worktree.path)),
+  );
+  return paths.length > 0 ? JSON.stringify(paths) : undefined;
+}
+
+function uniqueSortedStrings(values: readonly string[]): string[] {
+  return [...new Set(values)].sort(compareStrings);
 }
 
 function projectPanes(
