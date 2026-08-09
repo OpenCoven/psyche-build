@@ -95,6 +95,23 @@ function compileOpenCovenSession<T extends (...args: never[]) => unknown>(
   )(...values) as T;
 }
 
+function compileOpenWithProjectActivation<T extends (...args: never[]) => unknown>(
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict";
+     ${functionSource(mainJs, 'waitForTerminalLayout')}
+     ${functionSource(mainJs, 'findCovenAttachment')}
+     ${functionSource(mainJs, 'covenWorktreeForSession')}
+     ${functionSource(mainJs, 'setActiveProject')}
+     ${functionSource(mainJs, 'activateProjectWorktree')}
+     return (${functionSource(mainJs, 'openCovenSession')});`,
+  )(...values) as T;
+}
+
 function discoveryHarness(
   projects: Array<Record<string, unknown>>,
   visibilityState = 'visible',
@@ -295,7 +312,7 @@ describe('macOS Coven session lifecycle boundary', () => {
 
   it('coalesces attach calls before project switching or pane creation begins', async () => {
     const project = {
-      id: 'alpha', root: '/alpha',
+      id: 'alpha', root: '/alpha', selectedWorktreePath: '/alpha',
       worktrees: [{ path: '/alpha', is_main: true }],
     };
     const session = {
@@ -319,9 +336,9 @@ describe('macOS Coven session lifecycle boundary', () => {
       PsycheSessions,
       state,
       setStatus: () => undefined,
-      showTerminalView: async () => true,
-      setActiveProject: () => {
+      activateProjectWorktree: (_project: typeof project, path: string) => {
         projectSwitches += 1;
+        project.selectedWorktreePath = path;
         return new Promise<boolean>((resolve) => { resolveProject = resolve; });
       },
       requestAnimationFrame: (callback: () => void) => callback(),
@@ -381,7 +398,10 @@ describe('macOS Coven session lifecycle boundary', () => {
       PsycheSessions,
       state: { env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [] },
       setStatus: () => undefined,
-      showTerminalView: async () => true,
+      activateProjectWorktree: async (_project: typeof project, path: string) => {
+        project.selectedWorktreePath = path;
+        return true;
+      },
       requestAnimationFrame: (callback: () => void) => callback(),
       covenAttachKey: () => 'alpha\nremote',
       covenAttachInFlight: new Map(),
@@ -504,6 +524,105 @@ describe('macOS Coven session lifecycle boundary', () => {
     });
 
     await expect(openCovenSession(project, session)).resolves.toBeNull();
+  });
+
+  it('does not launch default Coven while selecting an inactive hidden attachment', async () => {
+    const project = {
+      id: 'alpha', root: '/alpha', selectedWorktreePath: '/alpha',
+      worktrees: [{ path: '/alpha' }, { path: '/alpha-feature' }],
+    };
+    const session = { id: 'remote', projectRoot: '/alpha' };
+    const existing = {
+      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
+      closeStarted: false, worktreePath: '/alpha-feature',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
+      threads: [existing],
+    };
+    let defaultLaunches = 0;
+    const openCovenSession = compileOpenWithProjectActivation<(
+      p: typeof project, s: typeof session,
+    ) => Promise<unknown>>({
+      PsycheSessions,
+      state,
+      setStatus: () => undefined,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
+      focusThread: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncProjectBrowser: () => undefined,
+      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
+      saveWorkspaceSoon: () => undefined,
+      activatePaneLayoutFocus: () => undefined,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      requestAnimationFrame: (callback: () => void) => callback(),
+      reopenThread: () => true,
+      covenAttachKey: () => 'unused',
+      covenAttachInFlight: new Map(),
+    });
+
+    await expect(openCovenSession(project, session)).resolves.toBe(existing);
+    expect(project.selectedWorktreePath).toBe('/alpha-feature');
+    expect(defaultLaunches).toBe(0);
+  });
+
+  it('does not launch default Coven while creating an attachment in an inactive project', async () => {
+    const project = {
+      id: 'alpha', root: '/repo', selectedWorktreePath: '/repo',
+      worktrees: [{ path: '/repo' }, { path: '/repo/feature' }],
+    };
+    const session = {
+      id: 'remote', projectRoot: '/repo', cwd: '/repo/feature/packages/app',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
+      threads: [],
+    };
+    let defaultLaunches = 0;
+    let createdOptions: Record<string, unknown> | null = null;
+    const openCovenSession = compileOpenWithProjectActivation<(
+      p: typeof project, s: typeof session,
+    ) => Promise<unknown>>({
+      PsycheSessions,
+      state,
+      setStatus: () => undefined,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
+      focusThread: async () => true,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncProjectBrowser: () => undefined,
+      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
+      saveWorkspaceSoon: () => undefined,
+      activatePaneLayoutFocus: () => undefined,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      requestAnimationFrame: (callback: () => void) => callback(),
+      reopenThread: () => true,
+      covenAttachKey: () => 'alpha\nremote',
+      covenAttachInFlight: new Map(),
+      selectedWorktree: () => project.worktrees[0],
+      createThread: (options: Record<string, unknown>) => {
+        createdOptions = options;
+        return { id: 'attached' };
+      },
+    });
+
+    await expect(openCovenSession(project, session)).resolves.toEqual({ id: 'attached' });
+    expect(project.selectedWorktreePath).toBe('/repo/feature');
+    expect(createdOptions).toMatchObject({ worktreePath: '/repo/feature' });
+    expect(defaultLaunches).toBe(0);
   });
 
   it('rejects invalid or unavailable attach targets before reservation', async () => {
