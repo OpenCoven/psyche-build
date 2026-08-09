@@ -3,7 +3,25 @@ import { describe, expect, it } from 'vitest';
 import type { CovenSessionSummary } from '../src/daemon/protocol.js';
 import type { PsychePane, SidebarProject } from '../src/types.js';
 import type { GitWorktreeSnapshotInput, PaneSnapshot } from '../src/workspace/snapshot.js';
-import { buildTuiWorkspaceSnapshot } from '../src/workspace/tuiSnapshot.js';
+import type { TuiWorkspaceSnapshotInput } from '../src/workspace/tuiSnapshot.js';
+import * as tuiSnapshotModule from '../src/workspace/tuiSnapshot.js';
+
+const { buildTuiWorkspaceSnapshot } = tuiSnapshotModule;
+
+type WorkspaceSnapshot = ReturnType<typeof buildTuiWorkspaceSnapshot>;
+type TuiWorkspaceStateLike = {
+  snapshot(input: TuiWorkspaceSnapshotInput): WorkspaceSnapshot;
+  current(): WorkspaceSnapshot | undefined;
+};
+
+function createTuiWorkspaceState(options?: { initialRevision?: number }): TuiWorkspaceStateLike {
+  const TuiWorkspaceState = (tuiSnapshotModule as typeof tuiSnapshotModule & {
+    TuiWorkspaceState?: new (options?: { initialRevision?: number }) => TuiWorkspaceStateLike;
+  }).TuiWorkspaceState;
+
+  expect(typeof TuiWorkspaceState).toBe('function');
+  return new TuiWorkspaceState!(options);
+}
 
 function worktree(
   worktreePath: string,
@@ -56,6 +74,172 @@ function project(snapshot: ReturnType<typeof buildTuiWorkspaceSnapshot>, root: s
 
 function worktreePaneIds(snapshotPanes: PaneSnapshot[]): string[] {
   return snapshotPanes.map((candidate) => candidate.id);
+}
+
+function trackerInput(
+  overrides: Partial<TuiWorkspaceSnapshotInput> = {},
+): TuiWorkspaceSnapshotInput {
+  return {
+    primaryProjectRoot: '/repo/primary',
+    primaryProjectName: 'Primary',
+    sidebarProjects: [
+      { projectRoot: '/repo/sidebar', projectName: 'Sidebar' },
+      { projectRoot: '/repo/zeta', projectName: 'Zeta' },
+    ],
+    panes: [
+      pane({
+        id: 'primary-shell',
+        slug: 'primary-shell',
+        paneId: '%2',
+        projectRoot: '/repo/primary',
+        worktreePath: '/repo/primary/.psyche/worktrees/feature',
+        type: 'shell',
+      }),
+      pane({
+        id: 'sidebar-review',
+        slug: 'sidebar-review',
+        paneId: '%9',
+        projectRoot: '/repo/sidebar',
+        worktreePath: '/repo/sidebar/.psyche/worktrees/review',
+        displayName: 'Sidebar Review',
+        agent: 'codex',
+        agentStatus: 'working',
+        needsAttention: true,
+        lastAgentCheck: Date.parse('2026-08-09T05:00:00.000Z'),
+      }),
+    ],
+    covenSessionsByProject: new Map([
+      ['/repo/primary', [
+        session({
+          id: 'session-a',
+          projectRoot: '/repo/primary',
+          cwd: '/repo/primary',
+          title: 'Primary Session',
+          harness: 'codex',
+          status: 'running',
+          updatedAt: '2026-08-09T00:00:01.000Z',
+        }),
+      ]],
+      ['/repo/sidebar', [
+        session({
+          id: 'session-b',
+          projectRoot: '/repo/sidebar',
+          cwd: '/repo/sidebar/.psyche/worktrees/review',
+          title: 'Sidebar Session',
+          harness: 'claude',
+          status: 'waiting',
+          updatedAt: '2026-08-09T00:00:02.000Z',
+        }),
+        session({
+          id: 'session-c',
+          projectRoot: '/repo/sidebar',
+          cwd: '/repo/sidebar',
+          title: 'Sidebar Shell Session',
+          harness: 'codex',
+          status: 'running',
+          updatedAt: '2026-08-09T00:00:03.000Z',
+        }),
+      ]],
+    ]),
+    worktreesByProjectRoot: new Map([
+      ['/repo/primary', [
+        worktree('/repo/primary', { isMain: true, branch: 'main' }),
+        worktree('/repo/primary/.psyche/worktrees/feature', { branch: 'feature' }),
+      ]],
+      ['/repo/sidebar', [
+        worktree('/repo/sidebar', { isMain: true, branch: 'main' }),
+        worktree('/repo/sidebar/.psyche/worktrees/review', { branch: 'review' }),
+      ]],
+      ['/repo/zeta', [
+        worktree('/repo/zeta', { isMain: true, branch: 'main' }),
+      ]],
+    ]),
+    ...overrides,
+  };
+}
+
+function reorderedEquivalentTrackerInput(): TuiWorkspaceSnapshotInput {
+  return trackerInput({
+    primaryProjectRoot: '/repo/primary/./',
+    sidebarProjects: [
+      { projectRoot: '/repo/zeta/./', projectName: 'Zeta' },
+      { projectRoot: '/repo/sidebar/../sidebar', projectName: 'Sidebar' },
+    ],
+    panes: [
+      pane({
+        id: 'sidebar-review',
+        slug: 'sidebar-review',
+        paneId: '%9',
+        projectRoot: '/repo/sidebar/../sidebar',
+        worktreePath: '/repo/sidebar/.psyche/worktrees/review/../review',
+        displayName: 'Sidebar Review',
+        agent: 'codex',
+        agentStatus: 'working',
+        needsAttention: true,
+        lastAgentCheck: Date.parse('2026-08-09T05:00:00.000Z'),
+      }),
+      pane({
+        id: 'primary-shell',
+        slug: 'primary-shell',
+        paneId: '%2',
+        projectRoot: '/repo/primary/./',
+        worktreePath: '/repo/primary/.psyche/worktrees/feature/./',
+        type: 'shell',
+      }),
+    ],
+    covenSessionsByProject: new Map([
+      ['/repo/sidebar/../sidebar', [
+        session({
+          id: 'session-c',
+          projectRoot: '/repo/sidebar/../sidebar',
+          cwd: '/repo/sidebar',
+          title: 'Sidebar Shell Session',
+          harness: 'codex',
+          status: 'running',
+          updatedAt: '2026-08-09T00:00:03.000Z',
+        }),
+        session({
+          id: 'session-b',
+          projectRoot: '/repo/sidebar',
+          cwd: '/repo/sidebar/.psyche/worktrees/review',
+          title: 'Sidebar Session',
+          harness: 'claude',
+          status: 'waiting',
+          updatedAt: '2026-08-09T00:00:02.000Z',
+        }),
+      ]],
+      ['/repo/primary/./', [
+        session({
+          id: 'session-a',
+          projectRoot: '/repo/primary/./',
+          cwd: '/repo/primary',
+          title: 'Primary Session',
+          harness: 'codex',
+          status: 'running',
+          updatedAt: '2026-08-09T00:00:01.000Z',
+        }),
+      ]],
+    ]),
+    worktreesByProjectRoot: new Map([
+      ['/repo/zeta/./', [
+        worktree('/repo/zeta', { isMain: true, branch: 'main' }),
+      ]],
+      ['/repo/sidebar/../sidebar', [
+        worktree('/repo/sidebar/.psyche/worktrees/review/./', {
+          branch: 'review',
+          head: 'head:/repo/sidebar/.psyche/worktrees/review',
+        }),
+        worktree('/repo/sidebar', { isMain: true, branch: 'main' }),
+      ]],
+      ['/repo/primary/./', [
+        worktree('/repo/primary/.psyche/worktrees/feature/./', {
+          branch: 'feature',
+          head: 'head:/repo/primary/.psyche/worktrees/feature',
+        }),
+        worktree('/repo/primary', { isMain: true, branch: 'main' }),
+      ]],
+    ]),
+  });
 }
 
 describe('TUI workspace snapshot adapter', () => {
@@ -199,6 +383,187 @@ describe('TUI workspace snapshot adapter', () => {
       status: 'waiting',
       needsAttention: true,
       lastActivity: new Date(validLastAgentCheck).toISOString(),
+    });
+  });
+
+  describe('TUI workspace snapshot revision tracker', () => {
+    it('starts at revision 0 and returns revision 1 for the first snapshot', () => {
+      const state = createTuiWorkspaceState();
+
+      expect(state.current()).toBeUndefined();
+
+      const snapshot = state.snapshot({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: [],
+        worktreesByProjectRoot: new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+        ]),
+      });
+
+      expect(snapshot.revision).toBe(1);
+      expect(state.current()).toBe(snapshot);
+    });
+
+    it('reuses the same frozen snapshot object for identical and canonically equivalent content', () => {
+      const state = createTuiWorkspaceState();
+
+      const first = state.snapshot(trackerInput());
+      const repeated = state.snapshot(trackerInput());
+      const reorderedEquivalent = state.snapshot(reorderedEquivalentTrackerInput());
+
+      expect(repeated).toBe(first);
+      expect(reorderedEquivalent).toBe(first);
+      expect(reorderedEquivalent.revision).toBe(1);
+    });
+
+    it('increments exactly once when canonical content changes and then stays stable across reads', () => {
+      const state = createTuiWorkspaceState();
+
+      const first = state.snapshot(trackerInput());
+      const changed = state.snapshot(trackerInput({
+        panes: [
+          pane({
+            id: 'primary-shell',
+            slug: 'primary-shell',
+            paneId: '%2',
+            projectRoot: '/repo/primary',
+            worktreePath: '/repo/primary/.psyche/worktrees/feature',
+            type: 'shell',
+          }),
+          pane({
+            id: 'sidebar-review',
+            slug: 'sidebar-review',
+            paneId: '%9',
+            projectRoot: '/repo/sidebar',
+            worktreePath: '/repo/sidebar/.psyche/worktrees/review',
+            displayName: 'Sidebar Review',
+            agent: 'codex',
+            agentStatus: 'waiting',
+            needsAttention: true,
+            lastAgentCheck: Date.parse('2026-08-09T05:00:00.000Z'),
+          }),
+        ],
+      }));
+      const repeatedChanged = state.snapshot(trackerInput({
+        panes: [
+          pane({
+            id: 'sidebar-review',
+            slug: 'sidebar-review',
+            paneId: '%9',
+            projectRoot: '/repo/sidebar',
+            worktreePath: '/repo/sidebar/.psyche/worktrees/review',
+            displayName: 'Sidebar Review',
+            agent: 'codex',
+            agentStatus: 'waiting',
+            needsAttention: true,
+            lastAgentCheck: Date.parse('2026-08-09T05:00:00.000Z'),
+          }),
+          pane({
+            id: 'primary-shell',
+            slug: 'primary-shell',
+            paneId: '%2',
+            projectRoot: '/repo/primary',
+            worktreePath: '/repo/primary/.psyche/worktrees/feature',
+            type: 'shell',
+          }),
+        ],
+      }));
+
+      expect(changed).not.toBe(first);
+      expect(changed.revision).toBe(2);
+      expect(repeatedChanged).toBe(changed);
+      expect(repeatedChanged.revision).toBe(2);
+    });
+
+    it('current does not build or increment before or after snapshots', () => {
+      const state = createTuiWorkspaceState();
+
+      expect(state.current()).toBeUndefined();
+      expect(state.current()).toBeUndefined();
+
+      const first = state.snapshot(trackerInput());
+      expect(state.current()).toBe(first);
+      expect(state.current()?.revision).toBe(1);
+
+      const second = state.snapshot(trackerInput({
+        primaryProjectName: 'Primary Workspace',
+      }));
+      expect(second.revision).toBe(2);
+      expect(state.current()).toBe(second);
+      expect(state.current()?.revision).toBe(2);
+    });
+
+    it('isolates current state from caller mutation after snapshot', () => {
+      const state = createTuiWorkspaceState();
+      const input = trackerInput();
+
+      const snapshot = state.snapshot(input);
+
+      (input.sidebarProjects as SidebarProject[]).push({
+        projectRoot: '/repo/after',
+        projectName: 'After',
+      });
+      input.panes[0].slug = 'mutated-slug';
+      input.panes[0].displayName = 'Mutated';
+      const sidebarSessions = input.covenSessionsByProject?.get('/repo/sidebar');
+      if (sidebarSessions?.[0]) sidebarSessions[0].title = 'Mutated session';
+      const sidebarWorktrees = input.worktreesByProjectRoot?.get('/repo/sidebar');
+      if (sidebarWorktrees?.[0]) sidebarWorktrees[0].branch = 'mutated-branch';
+
+      const current = state.current();
+
+      expect(current).toBe(snapshot);
+      expect(current?.projects.map((candidate) => candidate.root)).toEqual([
+        '/repo/primary',
+        '/repo/sidebar',
+        '/repo/zeta',
+      ]);
+      expect(project(current!, '/repo/primary').worktrees[1].panes[0]?.title).toBe('primary-shell');
+      expect(project(current!, '/repo/sidebar').worktrees[0].branch).toBe('main');
+      expect(project(current!, '/repo/sidebar').worktrees[1].panes).toContainEqual(
+        expect.objectContaining({
+          id: 'session-b',
+          title: 'Sidebar Session',
+        }),
+      );
+    });
+
+    it('freezes returned snapshots deeply', () => {
+      const snapshot = createTuiWorkspaceState().snapshot(trackerInput());
+      const sidebar = project(snapshot, '/repo/sidebar');
+      const reviewWorktree = sidebar.worktrees[1]!;
+      const reviewPane = reviewWorktree.panes[0]!;
+
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot.projects)).toBe(true);
+      expect(Object.isFrozen(sidebar)).toBe(true);
+      expect(Object.isFrozen(sidebar.worktrees)).toBe(true);
+      expect(Object.isFrozen(reviewWorktree)).toBe(true);
+      expect(Object.isFrozen(reviewWorktree.panes)).toBe(true);
+      expect(Object.isFrozen(reviewPane)).toBe(true);
+
+      expect(() => {
+        snapshot.revision = 99;
+      }).toThrow(TypeError);
+      expect(() => {
+        snapshot.projects.push(project(snapshot, '/repo/primary'));
+      }).toThrow(TypeError);
+      expect(() => {
+        reviewWorktree.branch = 'mutated';
+      }).toThrow(TypeError);
+      expect(() => {
+        reviewWorktree.panes[0]!.title = 'mutated';
+      }).toThrow(TypeError);
+    });
+
+    it('throws a clear error when a change would exceed Number.MAX_SAFE_INTEGER', () => {
+      const state = createTuiWorkspaceState({ initialRevision: Number.MAX_SAFE_INTEGER });
+
+      expect(() => state.snapshot(trackerInput())).toThrowError(
+        'TuiWorkspaceState revision overflow: cannot exceed Number.MAX_SAFE_INTEGER.',
+      );
+      expect(state.current()).toBeUndefined();
     });
   });
 

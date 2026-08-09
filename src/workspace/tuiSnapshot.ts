@@ -25,10 +25,48 @@ export interface BuildTuiWorkspaceSnapshotInput {
   readWorktrees?: (projectRoot: string) => GitWorktreeSnapshotInput[];
 }
 
+export type TuiWorkspaceSnapshotInput = Omit<BuildTuiWorkspaceSnapshotInput, 'revision'>;
+
 interface ProjectSeed {
   root: string;
   title: string;
   isPrimary: boolean;
+}
+
+export class TuiWorkspaceState {
+  #revision: number;
+  #snapshot: WorkspaceSnapshot | undefined;
+  #canonicalContent: string | undefined;
+
+  constructor(options: { initialRevision?: number } = {}) {
+    this.#revision = normalizeInitialRevision(options.initialRevision);
+  }
+
+  snapshot(input: TuiWorkspaceSnapshotInput): WorkspaceSnapshot {
+    const canonicalSnapshot = buildTuiWorkspaceSnapshot({
+      ...input,
+      revision: 0,
+    });
+    const canonicalContent = stableSerialize(canonicalSnapshot);
+
+    if (this.#snapshot && this.#canonicalContent === canonicalContent) {
+      return this.#snapshot;
+    }
+
+    const snapshot = freezeDeep({
+      ...canonicalSnapshot,
+      revision: nextRevision(this.#revision),
+    });
+
+    this.#revision = snapshot.revision;
+    this.#snapshot = snapshot;
+    this.#canonicalContent = canonicalContent;
+    return snapshot;
+  }
+
+  current(): WorkspaceSnapshot | undefined {
+    return this.#snapshot;
+  }
 }
 
 export function buildTuiWorkspaceSnapshot(
@@ -312,4 +350,46 @@ function compareNumbersDescending(left: number, right: number): number {
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function normalizeInitialRevision(value: number | undefined): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('TuiWorkspaceState initialRevision must be a non-negative safe integer.');
+  }
+  return value;
+}
+
+function nextRevision(currentRevision: number): number {
+  if (currentRevision >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('TuiWorkspaceState revision overflow: cannot exceed Number.MAX_SAFE_INTEGER.');
+  }
+  return currentRevision + 1;
+}
+
+function stableSerialize(value: unknown): string {
+  return JSON.stringify(stableSerializeValue(value));
+}
+
+function stableSerializeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableSerializeValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => compareStrings(left, right))
+        .map(([key, entry]) => [key, stableSerializeValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function freezeDeep<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+
+  Object.freeze(value);
+  for (const nested of Object.values(value)) {
+    freezeDeep(nested);
+  }
+  return value;
 }
