@@ -103,6 +103,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
+    expect(mainJs).toContain('".session-coven-row, .session-close"');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
   });

@@ -498,6 +498,23 @@ describe('Tauri Coven session project rail', () => {
     expect(badges.at(-1)?.title).toBe('Waiting for input');
   });
 
+  it('deduplicates the project root from its hydrated main worktree', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [{
+          path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false,
+        }],
+      }],
+      sessions: [{ id: 'remote', projectRoot: '/alpha', status: 'waiting' }],
+    });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-attention-badge')))
+      .toEqual(['1', '1', '!']);
+  });
+
   it('labels unattached daemon rows and opens their distinct Coven identity', async () => {
     const renderer = createRenderer({
       sessions: [{
@@ -546,13 +563,57 @@ describe('Tauri Coven session project rail', () => {
       .toContain('coven-tone-warn');
   });
 
-  it('renders loading state without a contradictory empty-state message', () => {
-    const renderer = createRenderer({ phase: 'loading' });
+  it('renders one global loading state across filtered nonmatching projects', () => {
+    const renderer = createRenderer({
+      projects: [
+        { id: 'alpha', name: 'Alpha', root: '/alpha' },
+        { id: 'beta', name: 'Beta', root: '/beta' },
+      ],
+      phase: 'loading',
+      filter: 'not-a-project',
+    });
 
     renderer.render();
+    expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
     expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
       .toBe('Loading Coven sessions');
+    expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
+  });
+
+  it('renders one global error across filtered nonmatching projects', () => {
+    const renderer = createRenderer({
+      projects: [
+        { id: 'alpha', name: 'Alpha', root: '/alpha' },
+        { id: 'beta', name: 'Beta', root: '/beta' },
+      ],
+      phase: 'error',
+      message: 'Discovery failed',
+      filter: 'not-a-project',
+    });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
+      .toBe('Discovery failed');
+    expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
+  });
+
+  it('treats idle discovery as silent and preserves the filtered empty state', () => {
+    const renderer = createRenderer({
+      projects: [
+        { id: 'alpha', name: 'Alpha', root: '/alpha' },
+        { id: 'beta', name: 'Beta', root: '/beta' },
+      ],
+      phase: 'idle',
+      filter: 'not-a-project',
+    });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelector('.session-inline-state')).toBeNull();
+    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
+      .toBe('No sessions match “not-a-project”');
   });
 
   it('hides selected empty worktrees while preserving populated worktree ownership and attention', () => {
