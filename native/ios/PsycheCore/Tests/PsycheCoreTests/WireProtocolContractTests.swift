@@ -255,6 +255,10 @@ final class WireProtocolContractTests: XCTestCase {
         XCTAssertEqual(snapshot.workspace.revision, 42)
         XCTAssertEqual(snapshot.workspace.projects.first?.worktrees.count, 2)
         XCTAssertEqual(
+            snapshot.workspace.projects.first?.worktrees.first?.panes.first?.lastActivity,
+            "2026-08-03T02:12:00.000Z"
+        )
+        XCTAssertEqual(
             snapshot.workspace.projects.first?.projectPanes.first?.recoverability,
             "missing-worktree"
         )

@@ -140,6 +140,7 @@ public struct WorkspacePaneSnapshot: Codable, Sendable, Equatable, Identifiable 
     public let agent: String?
     public let status: String
     public let needsAttention: Bool?
+    public let lastActivity: String?
     public let recoverability: String
 }
 

@@ -174,7 +174,12 @@ describe('workspace snapshot', () => {
       attentionCount: 1,
       panes: [
         { id: '%2', kind: 'agent', agent: 'codex' },
-        { id: 'coven-1', kind: 'coven-session', agent: 'claude' },
+        {
+          id: 'coven-1',
+          kind: 'coven-session',
+          agent: 'claude',
+          lastActivity: '2026-08-04T00:01:00Z',
+        },
       ],
     });
     expect(snapshot.projects[0].projectPanes).toEqual([
