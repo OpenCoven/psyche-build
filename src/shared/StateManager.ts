@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import type { CovenSessionSummary } from '../daemon/protocol.js';
 import type { PsychePane, ProjectSettings, LogEntry } from '../types.js';
 import { ConfigWatcher } from '../services/ConfigWatcher.js';
 import { LogService } from '../services/LogService.js';
@@ -6,6 +7,7 @@ import { ToastService, type Toast } from '../services/ToastService.js';
 
 export interface PsycheState {
   panes: PsychePane[];
+  covenSessions: CovenSessionSummary[];
   projectName: string;
   sessionName: string;
   projectRoot: string;
@@ -31,10 +33,11 @@ export interface WorkspacePublicationState {
 }
 
 export function synchronizeWorkspacePublication(
-  stateManager: Pick<StateManager, 'updatePanes'>,
+  stateManager: Pick<StateManager, 'updatePanes' | 'updateCovenSessions'>,
   panes: PsychePane[],
   bridgeDaemon: WorkspaceChangeNotifier | undefined,
   isLoading: boolean,
+  covenSessions: readonly CovenSessionSummary[],
   state: WorkspacePublicationState,
 ): WorkspacePublicationState {
   const current = state.daemon === bridgeDaemon
@@ -44,12 +47,9 @@ export function synchronizeWorkspacePublication(
   if (!bridgeDaemon || isLoading) return current;
 
   stateManager.updatePanes(panes);
-  if (!current.ready) {
-    return { daemon: bridgeDaemon, ready: true };
-  }
-
+  stateManager.updateCovenSessions(covenSessions);
   bridgeDaemon.notifyWorkspaceChanged();
-  return current;
+  return current.ready ? current : { daemon: bridgeDaemon, ready: true };
 }
 
 export class StateManager extends EventEmitter {
@@ -67,6 +67,7 @@ export class StateManager extends EventEmitter {
     this.toastService = ToastService.getInstance();
     this.state = {
       panes: [],
+      covenSessions: [],
       projectName: '',
       sessionName: '',
       projectRoot: '',
@@ -122,11 +123,19 @@ export class StateManager extends EventEmitter {
   }
 
   getState(): PsycheState {
-    return { ...this.state };
+    return {
+      ...this.state,
+      covenSessions: this.state.covenSessions.map((session) => ({ ...session })),
+    };
   }
 
   updatePanes(panes: PsychePane[]): void {
     this.state.panes = [...panes];
+    this.notifyListeners();
+  }
+
+  updateCovenSessions(sessions: readonly CovenSessionSummary[]): void {
+    this.state.covenSessions = sessions.map((session) => ({ ...session }));
     this.notifyListeners();
   }
 
@@ -177,6 +186,10 @@ export class StateManager extends EventEmitter {
 
   getPanes(): PsychePane[] {
     return [...this.state.panes];
+  }
+
+  getCovenSessions(): CovenSessionSummary[] {
+    return this.state.covenSessions.map((session) => ({ ...session }));
   }
 
   subscribe(callback: (state: PsycheState) => void): () => void {
@@ -370,6 +383,7 @@ export class StateManager extends EventEmitter {
 
     this.state = {
       panes: [],
+      covenSessions: [],
       projectName: '',
       sessionName: '',
       projectRoot: '',

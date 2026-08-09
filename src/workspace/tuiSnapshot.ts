@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type { CovenSessionSummary } from '../daemon/protocol.js';
 import type { PsychePane, SidebarProject } from '../types.js';
+import type { CovenSessionVisibility } from '../utils/covenSessions.js';
 import {
   buildWorkspaceSnapshot,
   type DeepReadonly,
@@ -56,6 +57,18 @@ interface ProjectSeed {
   title: string;
   isPrimary: boolean;
 }
+
+const COVEN_SESSION_STATUSES = new Set<CovenSessionSummary['status']>([
+  'starting',
+  'running',
+  'waiting',
+  'completed',
+  'failed',
+  'killed',
+  'orphaned',
+  'created',
+  'archived',
+]);
 
 export class TuiWorkspaceState {
   #revision: number;
@@ -148,6 +161,50 @@ export function createTuiWorkspaceProvider(
     );
     return result;
   };
+}
+
+export function normalizeCovenSessionsForPublication(
+  sessions: readonly CovenSessionVisibility[],
+): CovenSessionSummary[] {
+  return sessions.flatMap((session) => {
+    const id = session.id.trim();
+    const projectRoot = session.projectRoot.trim();
+    if (!id || !projectRoot) return [];
+
+    const archivedAt = normalizeIsoDateString(session.archivedAt);
+    const createdAt = normalizeIsoDateString(session.createdAt);
+    const updatedAt = normalizeIsoDateString(session.updatedAt);
+    const normalizedStatus = session.status?.trim();
+    const status = archivedAt
+      ? 'archived'
+      : COVEN_SESSION_STATUSES.has(normalizedStatus as CovenSessionSummary['status'])
+        ? normalizedStatus as CovenSessionSummary['status']
+        : 'created';
+
+    return [{
+      id,
+      projectRoot: normalizeRoot(projectRoot),
+      cwd: session.cwd?.trim() ? normalizeRoot(session.cwd) : undefined,
+      harness: session.harness?.trim() ?? '',
+      title: session.title?.trim() || id,
+      status,
+      createdAt: createdAt || updatedAt || archivedAt || '',
+      updatedAt: updatedAt || archivedAt || createdAt || '',
+      archivedAt: archivedAt || undefined,
+    }];
+  });
+}
+
+export function groupCovenSessionsByProject(
+  sessions: readonly CovenSessionSummary[],
+): Map<string, CovenSessionSummary[]> {
+  const grouped = new Map<string, CovenSessionSummary[]>();
+  for (const session of normalizeCovenSessionsForPublication(sessions)) {
+    const projectSessions = grouped.get(session.projectRoot) ?? [];
+    projectSessions.push(session);
+    grouped.set(session.projectRoot, projectSessions);
+  }
+  return grouped;
 }
 
 async function loadProviderWorktrees(

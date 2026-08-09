@@ -84,7 +84,10 @@ import { BridgeDaemon } from './services/bridge/BridgeDaemon.js';
 import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtocol.js';
 import { tmuxSessionNameForRoot } from './services/tmuxControl.js';
 import { listAvailableRituals } from './utils/rituals.js';
-import { createTuiWorkspaceProvider } from './workspace/tuiSnapshot.js';
+import {
+  createTuiWorkspaceProvider,
+  groupCovenSessionsByProject,
+} from './workspace/tuiSnapshot.js';
 import os from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -673,6 +676,9 @@ class Psyche {
         primaryProjectRoot: this.projectRoot,
         primaryProjectName: this.projectName,
         panes: () => this.stateManager.getPanes(),
+        covenSessionsByProject: () => groupCovenSessionsByProject(
+          this.stateManager.getCovenSessions(),
+        ),
         sidebarProjects: async () => {
           const rawConfig = await fs.readFile(this.panesFile, 'utf8');
           const config = JSON.parse(rawConfig) as Partial<PsycheConfig>;

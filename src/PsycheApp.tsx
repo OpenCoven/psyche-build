@@ -30,6 +30,7 @@ import {
   synchronizeWorkspacePublication,
   type WorkspacePublicationState,
 } from "./shared/StateManager.js"
+import { normalizeCovenSessionsForPublication } from "./workspace/tuiSnapshot.js"
 import {
   ANIMATION_DELAY,
   STATUS_MESSAGE_DURATION_SHORT,
@@ -375,6 +376,11 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     controlPaneId,
     useHooks
   )
+  const covenSessionsState = useCovenSessions(sessionProjectRoot, sidebarProjects)
+  const publishedCovenSessions = useMemo(
+    () => normalizeCovenSessionsForPublication(covenSessionsState.sessions),
+    [covenSessionsState.sessions]
+  )
 
   const workspacePublicationState = useRef<WorkspacePublicationState>({
     daemon: bridgeDaemon,
@@ -386,9 +392,10 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       panes,
       bridgeDaemon,
       isLoading,
+      publishedCovenSessions,
       workspacePublicationState.current,
     )
-  }, [bridgeDaemon, isLoading, panes, sidebarProjects])
+  }, [bridgeDaemon, isLoading, panes, publishedCovenSessions, sidebarProjects])
 
   // Check for tmux hooks preference on startup
   useEffect(() => {
@@ -669,7 +676,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     ),
     [panes, sidebarProjects, sessionProjectRoot, projectName]
   )
-  const covenSessionsState = useCovenSessions(sessionProjectRoot, sidebarProjects)
   const desktopUseStates = useCovenDesktopUse(panes)
   const selectedPane = useMemo(() => {
     for (const group of projectActionLayout.groups) {

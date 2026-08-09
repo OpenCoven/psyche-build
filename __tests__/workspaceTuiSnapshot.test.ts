@@ -419,6 +419,82 @@ describe('TUI workspace snapshot adapter', () => {
   });
 
   describe('TUI workspace snapshot revision tracker', () => {
+    it('normalizes incomplete live Coven visibility records for publication', () => {
+      const normalizeCovenSessionsForPublication = (
+        tuiSnapshotModule as Record<string, unknown>
+      ).normalizeCovenSessionsForPublication as
+        | ((sessions: readonly Record<string, unknown>[]) => CovenSessionSummary[])
+        | undefined;
+      expect(typeof normalizeCovenSessionsForPublication).toBe('function');
+      if (!normalizeCovenSessionsForPublication) return;
+
+      expect(normalizeCovenSessionsForPublication([{
+        id: ' coven-live ',
+        projectRoot: ' /repo/coven-only ',
+        harness: ' ',
+        title: ' ',
+        status: 'unexpected',
+        createdAt: 'not-a-date',
+        updatedAt: '2026-08-09T00:01:00Z',
+      }])).toEqual([{
+        id: 'coven-live',
+        projectRoot: '/repo/coven-only',
+        harness: '',
+        title: 'coven-live',
+        status: 'created',
+        createdAt: '2026-08-09T00:01:00.000Z',
+        updatedAt: '2026-08-09T00:01:00.000Z',
+      }]);
+    });
+
+    it('groups live StateManager Coven sessions into a Coven-only provider project', async () => {
+      const groupCovenSessionsByProject = (
+        tuiSnapshotModule as Record<string, unknown>
+      ).groupCovenSessionsByProject as
+        | ((sessions: readonly CovenSessionSummary[]) => Map<string, CovenSessionSummary[]>)
+        | undefined;
+      expect(typeof groupCovenSessionsByProject).toBe('function');
+      if (!groupCovenSessionsByProject) return;
+
+      const liveSession = session({
+        id: 'coven-only-session',
+        projectRoot: '/repo/coven-only',
+        title: 'Coven-only work',
+        status: 'waiting',
+      });
+      const runningSession = session({
+        id: 'coven-only-running',
+        projectRoot: '/repo/coven-only',
+        title: 'Coven-only running work',
+      });
+      const provider = createTuiWorkspaceProvider({
+        primaryProjectRoot: '/repo/primary',
+        primaryProjectName: 'Primary',
+        panes: () => [],
+        covenSessionsByProject: () => groupCovenSessionsByProject([
+          liveSession,
+          runningSession,
+        ]),
+        worktreesByProjectRoot: () => new Map([
+          ['/repo/primary', [worktree('/repo/primary', { isMain: true, branch: 'main' })]],
+          ['/repo/coven-only', []],
+        ]),
+      });
+
+      const snapshot = await provider();
+      const covenOnly = project(snapshot, '/repo/coven-only');
+
+      expect(covenOnly.worktrees).toEqual([]);
+      expect(covenOnly.runningCount).toBe(1);
+      expect(covenOnly.attentionCount).toBe(1);
+      expect(covenOnly.projectPanes).toContainEqual(expect.objectContaining({
+        id: 'coven-only-session',
+        title: 'Coven-only work',
+        agent: 'coven-code',
+        status: 'waiting',
+      }));
+    });
+
     it('creates the stable canonical provider used by the production bridge', async () => {
       let panes: PsychePane[] = [];
       let sidebarProjects: SidebarProject[] = [
