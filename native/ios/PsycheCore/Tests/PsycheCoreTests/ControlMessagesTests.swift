@@ -21,6 +21,31 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(payload(from: object)["id"] as? String, "%3")
     }
 
+    func testWorkspaceSnapshotCaseOverridesDiscriminatorDecodedIntoPayload() throws {
+        let decodedPayload = try JSONDecoder().decode(
+            ControlRequestIDOnly.self,
+            from: Data(#"{"type":"panes.kill","requestId":"workspace-2"}"#.utf8)
+        )
+        let message = MobileClientMessage.control(.workspaceSnapshot(decodedPayload))
+        let object = try encodedJSONObject(of: message)
+
+        XCTAssertEqual(payload(from: object)["type"] as? String, "workspace.snapshot")
+        XCTAssertEqual(payload(from: object)["requestId"] as? String, "workspace-2")
+    }
+
+    func testKillPaneCaseOverridesDiscriminatorDecodedIntoPayload() throws {
+        let decodedPayload = try JSONDecoder().decode(
+            PaneIDControlRequest.self,
+            from: Data(#"{"type":"workspace.snapshot","requestId":"kill-2","id":"%4"}"#.utf8)
+        )
+        let message = MobileClientMessage.control(.killPane(decodedPayload))
+        let object = try encodedJSONObject(of: message)
+
+        XCTAssertEqual(payload(from: object)["type"] as? String, "panes.kill")
+        XCTAssertEqual(payload(from: object)["requestId"] as? String, "kill-2")
+        XCTAssertEqual(payload(from: object)["id"] as? String, "%4")
+    }
+
     func testDecodesWorkspaceSnapshotRequest() throws {
         let message = try JSONDecoder().decode(
             MobileClientMessage.self,
@@ -31,6 +56,22 @@ final class ControlMessagesTests: XCTestCase {
             return XCTFail("Expected workspace snapshot control request")
         }
         XCTAssertEqual(request.requestID, "workspace-1")
+    }
+
+    func testRawKillPaneDiscriminatorDecodesAndRoundTripsAsKillPane() throws {
+        let raw = Data(
+            #"{"type":"control","payload":{"type":"panes.kill","requestId":"kill-3","id":"%5"}}"#.utf8
+        )
+        let message = try JSONDecoder().decode(MobileClientMessage.self, from: raw)
+
+        guard case let .control(.killPane(request)) = message else {
+            return XCTFail("Expected panes.kill to select the killPane case")
+        }
+        XCTAssertEqual(request.requestID, "kill-3")
+        XCTAssertEqual(request.paneID, "%5")
+
+        let object = try encodedJSONObject(of: message)
+        XCTAssertEqual(payload(from: object)["type"] as? String, "panes.kill")
     }
 
     func testDecodesWorkspaceChangedFixture() throws {

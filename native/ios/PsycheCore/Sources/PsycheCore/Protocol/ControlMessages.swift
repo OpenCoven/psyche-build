@@ -86,7 +86,11 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
     case respondToAction(MobileActionRespondRequest)
     case unknown(UnknownControlRequest)
 
-    private enum CodingKeys: String, CodingKey { case type }
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case requestID = "requestId"
+        case paneID = "id"
+    }
     private enum MessageType: String, CaseIterable {
         case workspaceSnapshot = "workspace.snapshot"
         case detachPane = "panes.detach"
@@ -108,13 +112,22 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         let type = try container.decode(String.self, forKey: .type)
 
         switch type {
-        case "workspace.snapshot": self = .workspaceSnapshot(try ControlRequestIDOnly(from: decoder))
+        case "workspace.snapshot":
+            self = .workspaceSnapshot(
+                ControlRequestIDOnly(requestID: try container.decode(String.self, forKey: .requestID))
+            )
         case "panes.spawn": self = .spawnPane(try MobilePaneSpawnRequest(from: decoder))
         case "panes.attach": self = .attachPane(try MobilePaneAttachRequest(from: decoder))
         case "panes.detach": self = .detachPane(try PaneDetachRequest(from: decoder))
         case "panes.input": self = .inputPane(try PaneInputRequest(from: decoder))
         case "panes.resize": self = .resizePane(try PaneResizeRequest(from: decoder))
-        case "panes.kill": self = .killPane(try PaneIDControlRequest(from: decoder))
+        case "panes.kill":
+            self = .killPane(
+                PaneIDControlRequest(
+                    requestID: try container.decode(String.self, forKey: .requestID),
+                    paneID: try container.decode(String.self, forKey: .paneID)
+                )
+            )
         case "panes.meta": self = .paneMeta(try PaneMetaRequest(from: decoder))
         case "files.list": self = .listFiles(try MobileFilesListRequest(from: decoder))
         case "files.read": self = .readFile(try MobileFilesReadRequest(from: decoder))
@@ -142,13 +155,20 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
 
     public func encode(to encoder: Encoder) throws {
         switch self {
-        case .workspaceSnapshot(let payload): try payload.encode(to: encoder)
+        case .workspaceSnapshot(let payload):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(MessageType.workspaceSnapshot.rawValue, forKey: .type)
+            try container.encode(payload.requestID, forKey: .requestID)
         case .spawnPane(let payload): try payload.encode(to: encoder)
         case .attachPane(let payload): try payload.encode(to: encoder)
         case .detachPane(let payload): try payload.encode(to: encoder)
         case .inputPane(let payload): try payload.encode(to: encoder)
         case .resizePane(let payload): try payload.encode(to: encoder)
-        case .killPane(let payload): try payload.encode(to: encoder)
+        case .killPane(let payload):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(MessageType.killPane.rawValue, forKey: .type)
+            try container.encode(payload.requestID, forKey: .requestID)
+            try container.encode(payload.paneID, forKey: .paneID)
         case .paneMeta(let payload): try payload.encode(to: encoder)
         case .listFiles(let payload): try payload.encode(to: encoder)
         case .readFile(let payload): try payload.encode(to: encoder)
@@ -421,16 +441,13 @@ public enum JSONValue: Codable, Sendable, Equatable {
 }
 
 public struct ControlRequestIDOnly: Codable, Sendable, Equatable {
-    public let type: String
     public let requestID: String
 
     public init(requestID: String) {
-        self.type = "workspace.snapshot"
         self.requestID = requestID
     }
 
     enum CodingKeys: String, CodingKey {
-        case type
         case requestID = "requestId"
     }
 }
@@ -682,18 +699,15 @@ public struct PaneResizeRequest: Codable, Sendable, Equatable {
 }
 
 public struct PaneIDControlRequest: Codable, Sendable, Equatable {
-    public let type: String
     public let requestID: String
     public let paneID: String
 
     public init(requestID: String, paneID: String) {
-        self.type = "panes.kill"
         self.requestID = requestID
         self.paneID = paneID
     }
 
     enum CodingKeys: String, CodingKey {
-        case type
         case requestID = "requestId"
         case paneID = "id"
     }
