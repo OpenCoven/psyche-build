@@ -284,10 +284,12 @@ function createRenderer(options: {
   sessions?: RemoteSession[];
   phase?: string;
   message?: string | null;
+  stale?: boolean;
   filter?: string;
   activeProjectId?: string | null;
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
+  attachAvailable?: boolean;
   realEdit?: boolean;
 } = {}) {
   const document = new FakeDocument();
@@ -305,6 +307,7 @@ function createRenderer(options: {
     message: options.message ?? null,
     requestId: 1,
     refreshedAt: 1,
+    stale: options.stale ?? false,
   };
   const setActiveProject = vi.fn().mockResolvedValue(true);
   const focusThread = vi.fn().mockResolvedValue(undefined);
@@ -330,8 +333,10 @@ function createRenderer(options: {
   const setStatus = vi.fn();
 
   const sources = [
-    'function covenInlineState() { return null; }',
-    'function covenToneClass() { return ""; }',
+    extractFunctionSource(mainJs, 'covenSessionsForProject'),
+    extractFunctionSource(mainJs, 'covenInlineState'),
+    extractFunctionSource(mainJs, 'covenToneClass'),
+    extractFunctionSource(mainJs, 'createCovenSessionRow'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
@@ -370,7 +375,7 @@ function createRenderer(options: {
     hideThread,
     renameThread,
     editLabelInlineImpl,
-    openCovenSession,
+    options.attachAvailable === false ? undefined : openCovenSession,
     setStatus,
   ) as {
     render: () => void;
@@ -400,51 +405,93 @@ function textOf(elements: FakeElement[]) {
 }
 
 describe('Tauri Coven session project rail', () => {
-  it('renders local threads in input order without empty project headers', () => {
+  it('renders local and daemon sessions as distinct subsections and identities', () => {
     const renderer = createRenderer({
-      projects: [
-        { id: 'alpha', name: 'Alpha', root: '/alpha' },
-        { id: 'beta', name: 'Beta', root: '/beta' },
-      ],
-      threads: [
-        { id: 'local', projectId: 'alpha', name: 'Local plan', status: 'running' },
-        {
-          id: 'attached', projectId: 'alpha', name: 'Existing attachment', status: 'running',
-          kind: 'coven', covenSessionId: 'alpha-daemon',
-        },
-      ],
-      sessions: [
-        { id: 'alpha-daemon', projectRoot: '/alpha', title: 'Alpha daemon', status: 'running' },
-        { id: 'beta-daemon', projectRoot: '/beta', title: 'Beta daemon', status: 'waiting' },
-      ],
+      threads: [{
+        id: 'attached',
+        projectId: 'alpha',
+        name: 'Attached locally',
+        status: 'running',
+        kind: 'coven-attach',
+        covenSessionId: 'remote',
+        worktreePath: '/alpha',
+      }],
+      sessions: [{
+        id: 'remote',
+        projectRoot: '/alpha',
+        title: 'Durable session',
+        status: 'waiting',
+      }],
     });
 
     renderer.render();
-
-    const groups = renderer.sessionListEl.querySelectorAll('.session-group');
-    expect(groups).toHaveLength(1);
     expect(textOf(renderer.sessionListEl.querySelectorAll('.session-subsection-label')))
-      .toEqual(['Psyche']);
-    expect(groups[0].querySelectorAll('.session-row').map((row) => row.dataset.threadId))
-      .toEqual(['local', 'attached']);
-    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(0);
-    expect(renderer.sessionListEl.textContent).not.toContain('Alpha daemon');
-    expect(renderer.sessionListEl.textContent).not.toContain('Beta daemon');
+      .toEqual(['Psyche', 'Coven']);
+    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId)
+      .toBe('attached');
+    const covenRow = renderer.sessionListEl.querySelector('.session-coven-row');
+    expect(covenRow?.dataset.sessionId).toBe('remote');
+    expect(covenRow?.title).toBe('Focus attachment');
+    const badges = renderer.sessionListEl.querySelectorAll('.session-attention-badge');
+    expect(badges).not.toHaveLength(0);
+    expect(badges.at(-1)?.title).toBe('Waiting for input');
   });
 
-  it('does not render a daemon-only project as an empty worktree', () => {
+  it('labels unattached daemon rows and opens their distinct Coven identity', async () => {
     const renderer = createRenderer({
-      sessions: [{ id: 'daemon', projectRoot: '/alpha', title: 'Remote', status: 'running' }],
+      sessions: [{
+        id: 'remote', projectRoot: '/alpha', title: 'Durable session', status: 'running',
+      }],
     });
 
     renderer.render();
+    const row = renderer.sessionListEl.querySelector('.session-coven-row');
+    expect(row?.title).toBe('Attach');
+    await row?.emit('click');
+    expect(renderer.openCovenSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'alpha' }),
+      expect.objectContaining({ id: 'remote' }),
+    );
+  });
 
-    expect(renderer.sessionListEl.querySelector('.session-coven-row')).toBeNull();
-    expect(renderer.sessionListEl.textContent).not.toContain('Remote');
-    expect(renderer.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
-    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No matching projects, worktrees, or panes.');
+  it('keeps rendered attach rows safe until the native attachment task supplies its handler', async () => {
+    const renderer = createRenderer({
+      sessions: [{ id: 'remote', projectRoot: '/alpha', status: 'running' }],
+      attachAvailable: false,
+    });
+
+    renderer.render();
+    await expect(renderer.sessionListEl.querySelector('.session-coven-row')?.emit('click'))
+      .resolves.toBeInstanceOf(FakeEvent);
     expect(renderer.openCovenSession).not.toHaveBeenCalled();
+    expect(extractFunctionSource(mainJs, 'createCovenSessionRow'))
+      .toContain('typeof openCovenSession === "function"');
+  });
+
+  it('keeps stale rows visible with one discovery status line', () => {
+    const renderer = createRenderer({
+      sessions: [{ id: 'remote', projectRoot: '/alpha', title: 'Remote', status: 'running' }],
+      phase: 'unavailable',
+      message: 'Daemon offline',
+      stale: true,
+    });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelector('.session-coven-row')).not.toBeNull();
+    expect(renderer.sessionListEl.querySelectorAll('.session-inline-state')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
+      .toContain('Daemon offline');
+    expect(renderer.sessionListEl.querySelector('.session-inline-state')?.className)
+      .toContain('coven-tone-warn');
+  });
+
+  it('renders loading state without a contradictory empty-state message', () => {
+    const renderer = createRenderer({ phase: 'loading' });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelector('.session-inline-state')?.textContent)
+      .toBe('Loading Coven sessions');
+    expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
 
   it('hides selected empty worktrees while preserving populated worktree ownership and attention', () => {
@@ -470,10 +517,11 @@ describe('Tauri Coven session project rail', () => {
     expect(worktrees).toHaveLength(1);
     expect(worktrees[0].querySelector('.session-row')?.dataset.threadId).toBe('local-feature');
     const badges = renderer.sessionListEl.querySelectorAll('.session-attention-badge');
-    expect(textOf(badges)).toEqual(['1', '1']);
-    expect(badges[0].getAttribute('aria-label')).toBe('1 sessions need attention');
+    expect(textOf(badges)).toEqual(['2', '2', '!']);
+    expect(badges[0].getAttribute('aria-label')).toBe('2 sessions need attention');
     expect(badges[1].getAttribute('aria-label'))
-      .toBe('1 sessions need attention in this worktree');
+      .toBe('2 sessions need attention in this worktree');
+    expect(badges[2].title).toBe('Waiting for input');
   });
 
   it('omits a project when its only worktree session is hidden', () => {
@@ -537,7 +585,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('orphan');
   });
 
-  it('searches only local thread metadata', () => {
+  it('searches local and daemon session metadata', () => {
     const renderer = createRenderer({
       threads: [{ id: 'local', projectId: 'alpha', name: 'Review locally', status: 'running' }],
       sessions: [{
@@ -547,9 +595,8 @@ describe('Tauri Coven session project rail', () => {
 
     renderer.setFilter('ship');
     renderer.render();
-    expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
-    expect(renderer.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No sessions match “ship”');
+    expect(renderer.sessionListEl.querySelector('.session-coven-row')?.dataset.sessionId)
+      .toBe('daemon');
 
     renderer.setFilter('review');
     renderer.render();
@@ -693,7 +740,7 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.document.activeElement).toBe(cancelledActivation);
   });
 
-  it('keeps local row controls and a local-only render path', () => {
+  it('keeps local row controls and scoped mixed-source styles', () => {
     expect(styles).toMatch(/\.session-subsection-label\s*\{[^}]*text-transform:\s*uppercase;[^}]*letter-spacing:/s);
     expect(styles).toMatch(/\.session-row-wrap\s*\{[^}]*position:\s*relative;/s);
     expect(styles).toMatch(/\.session-row\.inline-edit-hidden\s*\{[^}]*visibility:\s*hidden;/s);
@@ -705,15 +752,14 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toMatch(/\.session-row-wrap\s*\{[^}]*position:\s*relative;/s);
     expect(styles).toMatch(/\.session-row\.inline-edit-hidden\s*\{[^}]*visibility:\s*hidden;/s);
     expect(styles).toMatch(/\.session-row-wrap\s*>\s*\.inline-edit\s*\{[^}]*position:\s*absolute;/s);
-    expect(styles).not.toContain('session-coven');
-    expect(styles).not.toContain('coven-tone');
-    expect(styles).not.toContain('session-inline-state');
+    expect(styles).toContain('.session-coven-row');
+    expect(styles).toContain('.coven-tone-ok');
+    expect(styles).toContain('.session-inline-state');
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
     expect(rendererSource).toContain('PsycheSessions.buildProjectRailModel');
-    expect(rendererSource).toContain('project, localRows, [], currentSearchQuery');
-    expect(rendererSource).not.toContain('covenDiscovery');
-    expect(rendererSource).not.toContain('openCovenSession');
-    expect(rendererSource).not.toContain('statusPresentation');
+    expect(rendererSource).toContain('project, localRows, remoteRows, currentSearchQuery');
+    expect(rendererSource).toContain('covenDiscovery');
+    expect(rendererSource).toContain('createCovenSessionRow');
     expect(rendererSource).not.toContain('treeitem');
     expect(rendererSource).not.toContain('aria-selected');
   });

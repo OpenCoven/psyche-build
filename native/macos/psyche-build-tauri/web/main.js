@@ -1770,6 +1770,54 @@
     return "";
   }
 
+  function createCovenSessionRow(project, session) {
+    var presentation = PsycheSessions.statusPresentation(session.status);
+    var attached = state.threads.some(function (thread) {
+      return thread.projectId === project.id
+        && thread.covenSessionId === session.id
+        && !thread.closeStarted;
+    });
+    var row = document.createElement("button");
+    row.type = "button";
+    row.className = "session-coven-row";
+    row.dataset.sessionId = session.id;
+    row.title = attached ? "Focus attachment" : "Attach";
+    var title = document.createElement("span");
+    title.className = "session-coven-title";
+    title.textContent = session.title || session.id;
+    var meta = document.createElement("span");
+    meta.className = "session-coven-meta coven-tone-" + presentation.tone;
+    meta.textContent = [session.harness, presentation.label].filter(Boolean).join(" · ");
+    row.appendChild(title);
+    row.appendChild(meta);
+    if (presentation.label === "waiting") {
+      var badge = document.createElement("span");
+      badge.className = "session-attention-badge";
+      badge.textContent = "!";
+      badge.title = "Waiting for input";
+      row.appendChild(badge);
+    }
+    row.addEventListener("click", function () {
+      if (typeof openCovenSession === "function") openCovenSession(project, session);
+    });
+    return row;
+  }
+
+  function covenToneClass(phase) {
+    if (phase === "error" || phase === "incompatible") return "coven-tone-danger";
+    if (phase === "unavailable") return "coven-tone-warn";
+    return "coven-tone-muted";
+  }
+
+  function covenInlineState(discovery) {
+    if (!discovery || discovery.phase === "ready") return null;
+    var message = discovery.phase === "loading"
+      ? "Loading Coven sessions"
+      : (discovery.message || "Coven sessions unavailable");
+    if (discovery.stale) message += " — showing last confirmed sessions";
+    return { message: message, className: covenToneClass(discovery.phase) };
+  }
+
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -1783,9 +1831,11 @@
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden;
       });
+      var remoteRows = covenSessionsForProject(project);
       var railModel = PsycheSessions.buildProjectRailModel(
-        project, localRows, [], currentSearchQuery
+        project, localRows, remoteRows, currentSearchQuery
       );
+      var inlineState = covenInlineState(covenDiscovery);
       var visibleWorktrees = railModel.worktrees.filter(function (entry) {
         return entry.rows.length > 0;
       });
@@ -1804,10 +1854,10 @@
           rows: railModel.projectRows,
         });
       }
-      if (visibleWorktrees.length === 0) return;
+      if (visibleWorktrees.length === 0 && !inlineState) return;
       matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
         return count + entry.rows.length;
-      }, 0);
+      }, 0) + (inlineState ? 1 : 0);
 
       var group = document.createElement("div");
       group.className = "session-group";
@@ -1832,7 +1882,12 @@
 
       visibleWorktrees.forEach(function (entry) {
         var worktree = entry.worktree;
-        var threads = entry.rows.map(function (row) { return row.value; });
+        var threads = entry.rows
+          .filter(function (row) { return row.source === "psyche"; })
+          .map(function (row) { return row.value; });
+        var covenSessions = entry.rows
+          .filter(function (row) { return row.source === "coven"; })
+          .map(function (row) { return row.value; });
 
         var worktreeGroup = document.createElement("div");
         worktreeGroup.className = "session-worktree-group" +
@@ -2002,8 +2057,26 @@
           worktreeGroup.appendChild(wrapper);
         });
 
+        if (!worktree.collapsed && covenSessions.length > 0) {
+          var covenLabel = document.createElement("div");
+          covenLabel.className = "session-subsection-label";
+          covenLabel.textContent = "Coven";
+          worktreeGroup.appendChild(covenLabel);
+        }
+
+        if (!worktree.collapsed) covenSessions.forEach(function (session) {
+          worktreeGroup.appendChild(createCovenSessionRow(project, session));
+        });
+
         group.appendChild(worktreeGroup);
       });
+
+      if (inlineState) {
+        var inline = document.createElement("div");
+        inline.className = "session-inline-state " + inlineState.className;
+        inline.textContent = inlineState.message;
+        group.appendChild(inline);
+      }
 
       sessionListEl.appendChild(group);
     });
