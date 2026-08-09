@@ -126,6 +126,63 @@ describe('workspace snapshot', () => {
     ]));
   });
 
+  it('globally bounds concurrent async Git calls across repositories', async () => {
+    const projectRoots = ['/repo-a', '/repo-b'];
+    const worktreePaths = new Map(projectRoots.map((projectRoot) => [
+      projectRoot,
+      Array.from({ length: 6 }, (_, index) => `${projectRoot}/worktree-${index}`),
+    ]));
+    let activeCalls = 0;
+    let maxActiveCalls = 0;
+    let startedListCalls = 0;
+    let markBothListsStarted = () => {};
+    const bothListsStarted = new Promise<void>((resolve) => {
+      markBothListsStarted = resolve;
+    });
+    let releaseCalls = () => {};
+    const callGate = new Promise<void>((resolve) => {
+      releaseCalls = resolve;
+    });
+
+    const runGit = async (cwd: string, args: string[]): Promise<string> => {
+      activeCalls += 1;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      if (args.join(' ') === 'worktree list --porcelain') {
+        startedListCalls += 1;
+        if (startedListCalls === projectRoots.length) markBothListsStarted();
+      }
+
+      await callGate;
+      activeCalls -= 1;
+
+      if (args.join(' ') === 'worktree list --porcelain') {
+        return worktreePaths.get(cwd)!.map((worktreePath, index) => [
+          `worktree ${worktreePath}`,
+          `HEAD ${String(index).padStart(40, '0')}`,
+          `branch refs/heads/feature-${index}`,
+          '',
+        ].join('\n')).join('\n');
+      }
+      if (cwd === '/repo-b/worktree-3') throw new Error('missing worktree');
+      return cwd.endsWith('/worktree-2') ? ' M src/index.ts\n' : '';
+    };
+
+    const pendingReads = Promise.all(
+      projectRoots.map((projectRoot) => readProjectWorktreesAsync(projectRoot, runGit)),
+    );
+    await bothListsStarted;
+    releaseCalls();
+    const results = await pendingReads;
+
+    expect(maxActiveCalls).toBeLessThanOrEqual(4);
+    expect(maxActiveCalls).toBeGreaterThan(1);
+    expect(results.map((worktrees) => worktrees.map((worktree) => worktree.path))).toEqual(
+      projectRoots.map((projectRoot) => worktreePaths.get(projectRoot)),
+    );
+    expect(results[0][2]).toMatchObject({ dirty: true, missing: false });
+    expect(results[1][3]).toMatchObject({ dirty: false, missing: true });
+  });
+
   it('groups local panes and Coven sessions under the most specific worktree', () => {
     const snapshot = buildWorkspaceSnapshot({
       revision: 7,

@@ -147,6 +147,10 @@ export function parseGitWorktreePorcelain(raw: string): GitWorktreeSnapshotInput
 export type GitRunner = (cwd: string, args: string[]) => string;
 export type AsyncGitRunner = (cwd: string, args: string[]) => Promise<string>;
 
+const ASYNC_GIT_CONCURRENCY = 4;
+let activeAsyncGitCalls = 0;
+const asyncGitWaiters: Array<() => void> = [];
+
 export function readProjectWorktrees(
   projectRoot: string,
   runGit: GitRunner = defaultGitRunner,
@@ -175,13 +179,13 @@ export async function readProjectWorktreesAsync(
   runGit: AsyncGitRunner = defaultAsyncGitRunner,
 ): Promise<GitWorktreeSnapshotInput[]> {
   const worktrees = parseGitWorktreePorcelain(
-    await runGit(projectRoot, ['worktree', 'list', '--porcelain']),
+    await runGitWithPermit(runGit, projectRoot, ['worktree', 'list', '--porcelain']),
   );
 
   return Promise.all(worktrees.map(async (worktree) => {
     if (worktree.prunable || worktree.bare) return worktree;
     try {
-      const status = await runGit(worktree.path, [
+      const status = await runGitWithPermit(runGit, worktree.path, [
         'status',
         '--porcelain=v1',
         '--untracked-files=normal',
@@ -191,6 +195,39 @@ export async function readProjectWorktreesAsync(
       return { ...worktree, missing: true };
     }
   }));
+}
+
+async function runGitWithPermit(
+  runGit: AsyncGitRunner,
+  cwd: string,
+  args: string[],
+): Promise<string> {
+  await acquireAsyncGitPermit();
+  try {
+    return await runGit(cwd, args);
+  } finally {
+    releaseAsyncGitPermit();
+  }
+}
+
+function acquireAsyncGitPermit(): Promise<void> {
+  if (activeAsyncGitCalls < ASYNC_GIT_CONCURRENCY) {
+    activeAsyncGitCalls += 1;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    asyncGitWaiters.push(resolve);
+  });
+}
+
+function releaseAsyncGitPermit(): void {
+  const next = asyncGitWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  activeAsyncGitCalls -= 1;
 }
 
 function defaultGitRunner(cwd: string, args: string[]): string {
