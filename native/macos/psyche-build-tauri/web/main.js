@@ -1918,6 +1918,34 @@
     return project.root + "\n" + session.id;
   }
 
+  function waitForTerminalLayout() {
+    return new Promise(function (resolve) { requestAnimationFrame(resolve); });
+  }
+
+  function findCovenAttachment(project, session, threadId) {
+    return state.threads.find(function (thread) {
+      return (!threadId || thread.id === threadId)
+        && thread.projectId === project.id
+        && thread.covenSessionId === session.id
+        && !thread.closeStarted;
+    }) || null;
+  }
+
+  function covenWorktreeForSession(project, session) {
+    var worktrees = project.worktrees || [];
+    var containing = worktrees.filter(function (candidate) {
+      return session.cwd && (
+        session.cwd === candidate.path
+        || session.cwd.indexOf(candidate.path + "/") === 0
+      );
+    }).sort(function (left, right) {
+      return right.path.length - left.path.length;
+    });
+    return containing[0] || worktrees.find(function (candidate) {
+      return session.projectRoot === candidate.path;
+    }) || selectedWorktree(project);
+  }
+
   function openCovenSession(project, session) {
     if (!project || !session || !PsycheSessions.isSafeCovenSessionId(session.id)) {
       setStatus("Invalid Coven session", "error");
@@ -1928,21 +1956,22 @@
       return Promise.resolve(null);
     }
 
-    var existing = state.threads.find(function (thread) {
-      return thread.projectId === project.id
-        && thread.covenSessionId === session.id
-        && !thread.closeStarted;
-    });
+    var existing = findCovenAttachment(project, session);
     if (existing) {
+      var existingId = existing.id;
       return Promise.resolve().then(async function () {
-        if (!(await showTerminalView())) return null;
-        if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) {
-          return null;
-        }
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
+        if (!(await activateProjectWorktree(project, existing.worktreePath))) return null;
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
         await waitForTerminalLayout();
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing) return null;
         if (existing.hidden && !reopenThread(existing.id)) return null;
-        await focusThread(existing.id);
-        return existing;
+        existing = findCovenAttachment(project, session, existingId);
+        if (!existing || !(await focusThread(existing.id))) return null;
+        return findCovenAttachment(project, session, existingId);
       });
     }
 
@@ -1955,14 +1984,7 @@
         return null;
       }
       await waitForTerminalLayout();
-      var worktree = (project.worktrees || []).find(function (candidate) {
-        return session.cwd && (
-          session.cwd === candidate.path
-          || session.cwd.indexOf(candidate.path + "/") === 0
-        );
-      }) || (project.worktrees || []).find(function (candidate) {
-        return session.projectRoot === candidate.path;
-      }) || selectedWorktree(project);
+      var worktree = covenWorktreeForSession(project, session);
       return createThread({
         project: project,
         name: session.title || "Coven " + session.id.slice(0, 8),
