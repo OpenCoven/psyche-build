@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import { ServerMessage, encodeServerMessage } from "./wireProtocol.js";
+import { ServerMessage, encodeServerMessage, type SupportedProtocolVersion } from "./wireProtocol.js";
 
 export type SessionState = "unauthenticated" | "authenticated";
 
@@ -13,6 +13,7 @@ export class Session {
   state: SessionState = "unauthenticated";
   clientId: string | null = null;
   clientName: string | null = null;
+  protocolVersion: SupportedProtocolVersion | null = null;
   token: string | null = null;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();

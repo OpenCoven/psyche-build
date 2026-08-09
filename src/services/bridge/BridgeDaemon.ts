@@ -9,6 +9,8 @@ import {
   Project,
   Ritual,
   PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  isSupportedProtocolVersion,
 } from "./wireProtocol.js";
 import { PaneStreamHub } from "./PaneStreamHub.js";
 import { TokenStore, DeviceRecord } from "./TokenStore.js";
@@ -177,12 +179,15 @@ export class BridgeDaemon {
   private async onMessage(s: Session, m: ClientMessage) {
     switch (m.type) {
       case "hello": {
-        if (m.payload.protocolVersion !== PROTOCOL_VERSION) {
-          s.close(`protocol mismatch: client=${m.payload.protocolVersion} server=${PROTOCOL_VERSION}`);
+        if (!isSupportedProtocolVersion(m.payload.protocolVersion)) {
+          s.close(
+            `protocol mismatch: client=${String(m.payload.protocolVersion)} supported=${SUPPORTED_PROTOCOL_VERSIONS.join(",")}`
+          );
           return;
         }
         s.clientId = m.payload.clientId;
         s.clientName = m.payload.clientName;
+        s.protocolVersion = m.payload.protocolVersion;
         if (m.payload.token) {
           const rec = await this.tokens.validate(m.payload.token);
           if (rec) {

@@ -18,6 +18,7 @@ describe("Session", () => {
     const sock = new FakeSocket();
     const s = new Session({ socket: sock as any, remoteAddress: "127.0.0.1" });
     expect(s.state).toBe("unauthenticated");
+    expect(s.protocolVersion).toBeNull();
     expect(s.subscribedPaneIds.size).toBe(0);
     expect(s.subscriptionTeardowns.size).toBe(0);
   });

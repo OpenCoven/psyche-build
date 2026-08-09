@@ -36,6 +36,12 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [LEGACY_PROTOCOL_VERSION, PROTOCOL_VE
 export type SupportedProtocolVersion = typeof SUPPORTED_PROTOCOL_VERSIONS[number];
 export const BONJOUR_SERVICE_TYPE = "_psyche._tcp";
 
+export function isSupportedProtocolVersion(value: unknown): value is SupportedProtocolVersion {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && (SUPPORTED_PROTOCOL_VERSIONS as readonly number[]).includes(value);
+}
+
 // ---------------------------------------------------------------------------
 // Shared legacy v2 types
 // ---------------------------------------------------------------------------

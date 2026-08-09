@@ -4,7 +4,9 @@ import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow } from "../../src/services/bridge/PairingFlow";
 import { WebSocket } from "ws";
 import {
+  LEGACY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
   type PaneSnapshot,
   type Project,
   type Ritual,
@@ -90,54 +92,59 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
-  it("answers listPanes/listProjects for authenticated clients", async () => {
-    const tokenStore = new FakeTokenStore() as any;
-    const knownToken = "list-test-token";
-    tokenStore.records = [{
-      token: knownToken,
-      clientId: "c",
-      clientName: "c",
-      pairedAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
-    }];
+  it.each([LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION])(
+    "answers listPanes/listProjects for authenticated hello protocol v%s clients",
+    async (protocolVersion) => {
+      const tokenStore = new FakeTokenStore() as any;
+      const knownToken = `list-test-token-v${protocolVersion}`;
+      tokenStore.records = [{
+        token: knownToken,
+        clientId: "c",
+        clientName: "c",
+        pairedAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      }];
 
-    const daemon = new BridgeDaemon({
-      serverId: "test-srv",
-      serverName: "test",
-      projectName: "psyche",
-      sessionName: "test-session",
-      hubFactory: noopHubFactory,
-      paneProvider: () => { throw new Error("legacy pane provider should not run"); },
-      projectProvider: () => { throw new Error("legacy project provider should not run"); },
-      workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
-      ...noopRituals,
-      tokenStore,
-    });
-    const { port } = await daemon.start();
-    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
-    const received: any[] = [];
-    await new Promise<void>((resolve, reject) => {
-      client.on("open", () => {
-        client.send(JSON.stringify({
-          type: "hello",
-          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
-        }));
-        client.send(JSON.stringify({ type: "listPanes", payload: {} }));
-        client.send(JSON.stringify({ type: "listProjects", payload: {} }));
+      const daemon = new BridgeDaemon({
+        serverId: "test-srv",
+        serverName: "test",
+        projectName: "psyche",
+        sessionName: "test-session",
+        hubFactory: noopHubFactory,
+        paneProvider: () => { throw new Error("legacy pane provider should not run"); },
+        projectProvider: () => { throw new Error("legacy project provider should not run"); },
+        workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
+        ...noopRituals,
+        tokenStore,
       });
-      client.on("message", (raw) => {
-        const m = JSON.parse(raw.toString("utf8"));
-        received.push(m);
-        if (m.type === "projectList") resolve();
+      const { port } = await daemon.start();
+      const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+      const received: any[] = [];
+      await new Promise<void>((resolve, reject) => {
+        client.on("open", () => {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: { clientId: "c", clientName: "c", protocolVersion, token: knownToken },
+          }));
+          client.send(JSON.stringify({ type: "listPanes", payload: {} }));
+          client.send(JSON.stringify({ type: "listProjects", payload: {} }));
+        });
+        client.on("message", (raw) => {
+          const m = JSON.parse(raw.toString("utf8"));
+          received.push(m);
+          if (m.type === "projectList") resolve();
+        });
+        client.on("close", (_code, reason) => reject(new Error(`unexpected close: ${reason.toString()}`)));
+        client.on("error", reject);
+        setTimeout(() => reject(new Error("timeout")), 2000);
       });
-      client.on("error", reject);
-      setTimeout(() => reject(new Error("timeout")), 2000);
-    });
-    expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(3);
-    expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("project-1");
-    client.close();
-    await daemon.stop();
-  });
+      expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(3);
+      expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("project-1");
+      expect([...((daemon as any).listener.activeSessions as Set<any>)][0]?.protocolVersion).toBe(protocolVersion);
+      client.close();
+      await daemon.stop();
+    }
+  );
 
   it("answers listRituals for authenticated clients", async () => {
     const tokenStore = new FakeTokenStore() as any;
@@ -357,6 +364,9 @@ describe("BridgeDaemon", () => {
     });
     const { port } = await daemon.start();
     const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+    const mismatch = `protocol mismatch: client=99 supported=${SUPPORTED_PROTOCOL_VERSIONS.join(",")}`;
+    let closeReason = "";
     await new Promise<void>((resolve, reject) => {
       client.on("open", () => {
         client.send(JSON.stringify({
@@ -364,9 +374,21 @@ describe("BridgeDaemon", () => {
           payload: { clientId: "c", clientName: "c", protocolVersion: 99, token: null },
         }));
       });
-      client.on("close", () => resolve());
+      client.on("message", (raw) => {
+        received.push(JSON.parse(raw.toString("utf8")));
+      });
+      client.on("close", (_code, reason) => {
+        closeReason = reason.toString();
+        resolve();
+      });
+      client.on("error", reject);
       setTimeout(() => reject(new Error("expected close")), 2000);
     });
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "closing", message: mismatch },
+    });
+    expect(closeReason).toBe(mismatch);
     await daemon.stop();
   });
 
