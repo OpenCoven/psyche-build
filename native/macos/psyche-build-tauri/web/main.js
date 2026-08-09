@@ -55,6 +55,9 @@
    * threads = ordered list of { id, projectId, name, kind, command, args, env,
    *                             status: 'starting'|'running'|'exited',
    *                             term, fit, host, lastBytes }
+   *   `pane` is the thread's framed pane in the canvas; `host` is the xterm
+   *   container inside it. Placement lives in the per-worktree pane tree
+   *   (`paneLayouts`), not on the thread.
    * projects = ordered list of { id, name, root, collapsed }
    */
   var state = {
@@ -540,6 +543,41 @@
   var browserPane = document.querySelector(".browser-pane");
   var activeSurface = "terminal";
 
+  var appEl = document.getElementById("app");
+  var sidebarEl = document.getElementById("sidebar");
+  var sidebarMiniEl = document.getElementById("sidebar-mini");
+  var sidebarResizeEl = document.getElementById("sidebar-resize");
+  var dockMiniEl = document.getElementById("rail-right");
+  var newPaneMenuEl = document.getElementById("new-pane-menu");
+  var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
+  var toastEl = document.getElementById("toast");
+  var helpOverlayEl = document.getElementById("help-overlay");
+  var helpGridEl = document.getElementById("help-grid");
+  var daemonStatusEl = document.getElementById("daemon-status");
+  var daemonLabelEl = document.getElementById("daemon-label");
+  var scopeBtnEl = document.getElementById("scope-btn");
+  var scopeLabelEl = document.getElementById("scope-label");
+  var scopeMenuEl = document.getElementById("scope-menu");
+  var composerSendEl = document.getElementById("composer-send");
+  var composerSendHintEl = document.getElementById("composer-send-hint");
+  var composerMicEl = document.getElementById("composer-mic");
+  var dockGitCountEl = document.getElementById("dock-git-count");
+
+  // ---- Toast ----
+  // Short-lived confirmation for actions whose effect happens off-screen
+  // (a pane spawned behind a maximised pane, a dock panel switched, …).
+  var toastTimer = 0;
+  function toast(message) {
+    if (!toastEl) return;
+    toastEl.textContent = message;
+    toastEl.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toastEl.hidden = true;
+      toastTimer = 0;
+    }, 2600);
+  }
+
   function markActiveSurface(surface) {
     activeSurface = surface === "browser" ? "browser" : "terminal";
     if (detail) detail.dataset.activeSurface = activeSurface;
@@ -565,6 +603,31 @@
     if (statusLevel === "ok") setStatus("Coven is ready", "ok");
     else if (statusLevel === "") setStatus(project ? project.name : "ready", "");
     else setStatus(project ? project.name : "ready", statusLevel);
+  }
+
+  /**
+   * Titlebar runtime light. It reports the focused pane's actual PTY state —
+   * running / starting / exited / no pane — rather than a remote connection,
+   * because every session this app owns is a local Tauri-managed process.
+   */
+  function syncDaemonStatus() {
+    if (!daemonStatusEl) return;
+    var thread = findThread(state.activeThreadId);
+    var project = activeProject();
+    var stateName = "idle";
+    var label = "psyche · local";
+    if (thread) {
+      stateName = thread.spawning || thread.status === "starting"
+        ? "starting"
+        : thread.status === "exited" ? "exited" : "running";
+      label = "psyche · " + (stateName === "running" ? "local" : stateName);
+    } else if (!project) {
+      label = "psyche · no project";
+    } else {
+      label = "psyche · no pane";
+    }
+    daemonStatusEl.dataset.state = stateName;
+    if (daemonLabelEl) daemonLabelEl.textContent = label;
   }
 
   // ============================================================
@@ -614,7 +677,12 @@
   }
   function ensureProjectLayout(project) {
     if (!project) return null;
-    if (!project.layout) project.layout = { mode: "terminal", side: "right", splitFrac: 0.6 };
+    // A new project opens with the tools dock showing Git: the dock is a
+    // first-class surface now, not an occasional overlay. Saved projects keep
+    // whatever layout they were left in.
+    if (!project.layout) {
+      project.layout = { mode: "split", side: "right", splitFrac: 0.62, panel: "git" };
+    }
     return project.layout;
   }
   function rememberProjectLayout(project) {
@@ -663,11 +731,21 @@
       var isHorizontalDivider = side === "bottom" || side === "top";
       splitterEl.setAttribute("aria-orientation", isHorizontalDivider ? "horizontal" : "vertical");
     }
+    syncDockChrome();
     handlePanelLayoutTransition(previousLayout, layout);
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
       syncBrowserBounds();
     });
+  }
+
+  // The dock is "open" in any layout that shows it — split, and browser-only.
+  // Collapsed, it hands its column to a mini rail whose buttons reopen it on
+  // the panel they name.
+  function syncDockChrome() {
+    var open = currentLayout() !== "terminal";
+    if (appEl) appEl.dataset.dock = open ? "open" : "collapsed";
+    if (dockMiniEl) dockMiniEl.hidden = open;
   }
 
   function handlePanelLayoutTransition(previousLayout, nextLayout) {
@@ -755,6 +833,14 @@
         applyLayout("split");
         if (panelWasVisible) renderPanel(name);
       });
+      // Right-click cycles which edge the dock sits on, as it did on the old
+      // titlebar toggle.
+      if (btn.dataset.panelBtn === "browser") {
+        btn.addEventListener("contextmenu", function (e) {
+          e.preventDefault();
+          cycleBrowserSide(e.shiftKey ? -1 : 1);
+        });
+      }
     }
   );
 
@@ -1155,11 +1241,21 @@
     pane.dataset.threadId = thread.id;
     var header = document.createElement("header");
     header.className = "terminal-pane-header";
+    // Kind glyph + worktree meta, so a wall of panes stays legible at a glance.
+    var glyph = document.createElement("span");
+    glyph.className = "terminal-pane-glyph " +
+      ((thread.kind || "shell") === "shell" ? "is-term" : "is-agent");
+    glyph.textContent = paneGlyphFor(thread.kind);
+    glyph.setAttribute("aria-hidden", "true");
     var title = document.createElement("span");
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
     pane.setAttribute("aria-labelledby", title.id);
+    var meta = document.createElement("span");
+    meta.className = "terminal-pane-meta";
+    var spacer = document.createElement("span");
+    spacer.className = "terminal-pane-spacer";
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
     status.textContent = thread.status;
@@ -1183,7 +1279,10 @@
       event.stopPropagation();
       closeThread(thread.id);
     });
+    header.appendChild(glyph);
     header.appendChild(title);
+    header.appendChild(meta);
+    header.appendChild(spacer);
     header.appendChild(status);
     header.appendChild(retry);
     header.appendChild(close);
@@ -1201,6 +1300,7 @@
     thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
+    thread.paneMeta = meta;
     thread.paneStatus = status;
     thread.paneRetry = retry;
     thread.paneClose = close;
@@ -1445,7 +1545,14 @@
   function syncThreadPaneMetadata(thread) {
     if (!thread) return;
     if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
-    if (thread.paneStatus) thread.paneStatus.textContent = thread.status;
+    if (thread.paneMeta) {
+      thread.paneMeta.textContent = (thread.kind || "shell") + " · " +
+        shortenRoot(thread.worktreePath || "");
+    }
+    if (thread.paneStatus) {
+      thread.paneStatus.textContent = thread.status;
+      thread.paneStatus.className = "terminal-pane-status " + (thread.status || "");
+    }
     if (thread.paneRetry) {
       thread.paneRetry.hidden = thread.startInFlight ||
         (thread.status !== "failed" && thread.status !== "exited");
@@ -1751,7 +1858,13 @@
   //    continue to update the surviving project tab strip.
   // ============================================================
 
-  function refreshSidebar() { refreshTabs(); renderSessionList(); renderTerminalEmptyState(); }
+  function refreshSidebar() {
+    refreshTabs();
+    renderSessionList();
+    renderPaneWorkspace();
+    syncComposerChrome();
+    syncDaemonStatus();
+  }
 
   // ============================================================
   // 7b. Sessions sidebar
@@ -1777,6 +1890,23 @@
     if (path.length <= 32 || parts.length <= 3) return path;
     var head = path.charAt(0) === "~" ? "~/" : "/";
     return head + "…/" + parts.slice(-2).join("/");
+  }
+
+  /** Thread ids that currently own a leaf in the active worktree's pane tree. */
+  function canvasThreadIds() {
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) return [];
+    return PsychePanes.leafIds(layout.root).map(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      return leaf ? leaf.threadId : null;
+    }).filter(Boolean);
+  }
+
+  /** Sidebar and menu glyph for a pane kind. */
+  function paneGlyphFor(kind) {
+    if (kind === "shell") return "❯_";
+    if (kind === "web") return "◍";
+    return "✳";
   }
 
   function sessionStatusClass(thread) {
@@ -1933,6 +2063,8 @@
     var needle = currentSearchQuery.trim().toLowerCase();
     var matched = 0;
     var inlineState = covenInlineState(covenDiscovery);
+    // Walked once per render: every row tests membership against this list.
+    var onCanvasIds = canvasThreadIds();
 
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
@@ -2074,31 +2206,64 @@
         }
         worktreeGroup.appendChild(worktreeHead);
 
-        if (!worktree.collapsed && threads.length > 0) {
-          var psycheLabel = document.createElement("div");
-          psycheLabel.className = "session-subsection-label";
-          psycheLabel.textContent = "Psyche";
-          worktreeGroup.appendChild(psycheLabel);
-        }
+        // Rows are grouped by what the pane actually is, so a worktree with a
+        // mix of agent harnesses and plain shells reads at a glance.
+        var groupedThreads = [];
+        [["Agents", function (t) { return (t.kind || "shell") !== "shell"; }],
+         ["Shells", function (t) { return (t.kind || "shell") === "shell"; }]]
+          .forEach(function (kindGroup) {
+            var hits = threads.filter(kindGroup[1]);
+            if (!hits.length) return;
+            groupedThreads.push({ label: kindGroup[0] });
+            hits.forEach(function (thread) { groupedThreads.push({ thread: thread }); });
+          });
 
-        if (!worktree.collapsed) threads.forEach(function (thread) {
+        if (!worktree.collapsed) groupedThreads.forEach(function (entry) {
+          if (entry.label) {
+            var kindLabel = document.createElement("div");
+            kindLabel.className = "session-subsection-label";
+            kindLabel.textContent = entry.label;
+            worktreeGroup.appendChild(kindLabel);
+            return;
+          }
+          var thread = entry.thread;
+          var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
           var wrapper = document.createElement("div");
           wrapper.className = "session-row-wrap";
           var row = document.createElement("button");
           row.type = "button";
+          var kind = thread.kind || "shell";
           row.className = "session-row " + sessionStatusClass(thread) +
+            " kind-" + (kind === "shell" ? "shell" : "agent") +
             (state.activeThreadId === thread.id ? " active" : "");
           row.dataset.threadId = thread.id;
           if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
-          row.title = thread.name + " — " + worktree.path;
+          row.title = thread.name + " — " + worktree.path +
+            (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
+            " · double-click to rename";
+          var chipMarkup = "";
+          if (thread.status === "exited") {
+            chipMarkup = '<span class="session-chip muted">exited</span>';
+          } else if (thread.spawning || thread.status === "starting") {
+            chipMarkup = '<span class="session-chip">starting</span>';
+          }
           row.innerHTML =
-            '<span class="session-dot"></span>' +
+            '<span class="session-glyph">' + escapeHtml(paneGlyphFor(kind)) + "</span>" +
             '<span class="session-text">' +
-              '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
-              '<span class="session-sub">' +
-                escapeHtml((thread.kind || "shell") + " · " + shortenRoot(worktree.path)) +
+              '<span class="session-title-row">' +
+                '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
+                (onCanvas
+                  ? '<span class="session-oncanvas" title="On the canvas" aria-label="On the canvas">' +
+                      '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">' +
+                      '<rect x="1" y="1" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+                      '<rect x="3.2" y="3.2" width="5.6" height="5.6" rx="1" fill="currentColor"/></svg></span>'
+                  : "") +
               "</span>" +
-            "</span>";
+              '<span class="session-sub">' +
+                escapeHtml(kind + " · " + shortenRoot(worktree.path)) +
+              "</span>" +
+            "</span>" +
+            '<span class="session-state"><span class="session-dot"></span>' + chipMarkup + "</span>";
 
           row.addEventListener("click", async function () {
             if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
@@ -2151,8 +2316,12 @@
           var close = document.createElement("button");
           close.type = "button";
           close.className = "session-close";
-          close.title = "Hide session";
-          close.setAttribute("aria-label", "Hide session");
+          // × detaches the pane's leaf from the tree and hides the row. The
+          // PTY keeps running — the worktree menu reopens hidden sessions.
+          close.title = onCanvas
+            ? "Hide the pane — the session keeps running"
+            : "Hide session";
+          close.setAttribute("aria-label", close.title);
           close.textContent = "×";
           close.addEventListener("click", function (e) {
             e.stopPropagation();
@@ -2260,14 +2429,44 @@
     });
   }
 
+  /**
+   * The canvas' zero state. It is also the fastest route back into work, so
+   * it carries the same three launchers the new-pane menu offers.
+   */
   function renderTerminalEmptyState() {
-    var existing = terminalHost.querySelector(".terminal-empty");
+    var existing = terminalHost.querySelector(".canvas-empty");
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
     var layout = activePaneLayout();
     if (layout && layout.root) return;
+    var project = activeProject();
     var empty = document.createElement("div");
-    empty.className = "terminal-empty";
-    empty.textContent = activeProject() ? "No terminal pane yet — opening Coven…" : "Drop/open a project to begin";
+    empty.className = "canvas-empty";
+    empty.innerHTML =
+      '<div class="canvas-empty-mark">PSYCHE</div>' +
+      '<div class="canvas-empty-title">' +
+        (project ? "No panes open in " + escapeHtml(project.name) : "No project open") + "</div>" +
+      '<div class="canvas-empty-sub">' +
+        (project
+          ? "Launch a lane — Coven, a shell, or a browser, each in its own pane on the selected worktree."
+          : "Open a project folder (⌘O) to start a pane.") +
+      "</div>" +
+      '<div class="canvas-empty-actions">' +
+        '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
+          '<span class="glyph mono">❯_</span>Shell<span class="key">/new-shell</span></button>' +
+        '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘T</span></button>' +
+        '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
+          '<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span></button>' +
+      "</div>";
+    empty.addEventListener("click", function (event) {
+      var button = event.target.closest("[data-empty-action]");
+      if (!button) return;
+      if (!activeProject()) { openProjectPicker(); return; }
+      var action = button.dataset.emptyAction;
+      if (action === "term") runNewShellCommand();
+      else if (action === "agent") runNewThreadCommand();
+      else openBlankBrowserTab();
+    });
     terminalHost.appendChild(empty);
   }
 
@@ -2918,15 +3117,9 @@
     tabStripEl.innerHTML = "";
     var files = projectFiles();
 
-    if (files.length === 0) {
-      var empty = document.createElement("div");
-      empty.className = "tab-empty";
-      empty.textContent = activeProject()
-        ? "No files open — pick one from the Files panel"
-        : "Drop/open a project to begin";
-      tabStripEl.appendChild(empty);
-      return;
-    }
+    // Left empty on purpose: `.tab-strip:empty` collapses the row so the pane
+    // canvas owns the full height until a file is actually open.
+    if (files.length === 0) return;
 
     files.forEach(function (file, idx) {
       var isActive = state.activeFileId === file.id;
@@ -3193,12 +3386,43 @@
     });
   }
 
+  /** `!line` runs in the nearest shell pane regardless of composer scope. */
+  function runShellSigil(line) {
+    if (!line) return;
+    var focused = findThread(state.activeThreadId);
+    var target = focused && (focused.kind || "shell") === "shell"
+      ? focused
+      : activeProjectThreads().find(function (thread) {
+          return (thread.kind || "shell") === "shell" && thread.status !== "exited";
+        });
+    if (!target) { toast("No shell pane open — ⌘T opens one"); return; }
+    rememberCommand("!" + line);
+    focusThread(target.id);
+    sendToThread(target, line + "\n");
+    toast("Ran in " + target.name);
+  }
+
+  /** `%name` jumps to a pane by name, putting it back on the canvas. */
+  function runPaneSigil(query) {
+    var needle = String(query || "").trim().toLowerCase();
+    var candidates = activeProjectThreads();
+    var match = needle
+      ? candidates.find(function (thread) {
+          return thread.name.toLowerCase().indexOf(needle) !== -1;
+        })
+      : candidates[0];
+    if (!match) { toast("No pane matches “" + query + "”"); return; }
+    focusThread(match.id);
+  }
+
   function runCommand(line) {
     var trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
+    if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
-      // Not a slash command — pipe to the active terminal as a typed command.
-      sendToActive(trimmed + "\n");
+      // Not a slash command — pipe it to whatever the composer scope names.
+      sendToScope(trimmed + "\n");
       return;
     }
     commandHistory.push(trimmed);
@@ -3235,6 +3459,116 @@
     var thread = findThread(state.activeThreadId);
     if (!thread) return;
     sendToThread(thread, text);
+  }
+
+  // ---- Composer scope ----
+  //
+  // Plain text needs an explicit destination once several panes are visible at
+  // once, so the composer carries a scope chip: the focused pane, every pane in
+  // the project, or only the agent panes.
+  var composerScope = "pane";
+  var SCOPE_LABELS = { pane: "Pane", project: "Project", agents: "All agents" };
+
+  function scopeTargets() {
+    var project = activeProject();
+    if (composerScope === "pane") {
+      var focused = findThread(state.activeThreadId);
+      return focused ? [focused] : [];
+    }
+    return state.threads.filter(function (thread) {
+      if (!project || thread.projectId !== project.id) return false;
+      if (thread.hidden || thread.status === "exited") return false;
+      if (composerScope === "agents") return (thread.kind || "shell") !== "shell";
+      return true;
+    });
+  }
+
+  function sendToScope(text) {
+    var targets = scopeTargets();
+    if (!targets.length) {
+      toast(composerScope === "pane" ? "No focused pane to send to" : "No pane matches this scope");
+      return;
+    }
+    targets.forEach(function (thread) { sendToThread(thread, text); });
+    if (targets.length > 1) toast("Sent to " + targets.length + " panes");
+  }
+
+  function syncComposerChrome() {
+    var project = activeProject();
+    var focused = findThread(state.activeThreadId);
+    if (scopeBtnEl) scopeBtnEl.dataset.scope = composerScope;
+    if (scopeLabelEl) {
+      scopeLabelEl.textContent = composerScope === "pane"
+        ? "Pane · " + (focused ? focused.name : "—")
+        : composerScope === "project"
+          ? "Project · " + (project ? project.name : "—")
+          : "All agents · " + scopeTargets().length;
+    }
+    var paneDesc = document.getElementById("scope-desc-pane");
+    if (paneDesc) {
+      paneDesc.textContent = focused
+        ? "Typed into " + focused.name
+        : "Typed into the focused pane";
+    }
+    var projectDesc = document.getElementById("scope-desc-project");
+    if (projectDesc && project) projectDesc.textContent = "Every pane in " + project.name;
+    if (scopeMenuEl) {
+      Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
+        item.setAttribute("aria-checked", item.dataset.scope === composerScope ? "true" : "false");
+      });
+    }
+    var value = commandInput ? commandInput.value.trim() : "";
+    if (composerSendEl) {
+      composerSendEl.hidden = value.length === 0;
+      composerSendEl.firstChild.textContent = value[0] === "/" ? "Run " : "Send ";
+    }
+    if (composerMicEl) composerMicEl.hidden = value.length > 0;
+    if (composerSendHintEl) {
+      composerSendHintEl.textContent = !value
+        ? ""
+        : value[0] === "/" ? "runs command"
+        : value[0] === "!" ? "runs in the focused terminal"
+        : value[0] === "%" ? "jumps to a pane"
+        : "→ " + (SCOPE_LABELS[composerScope] || "pane").toLowerCase();
+    }
+  }
+
+  function closeScopeMenu() {
+    if (scopeMenuEl) scopeMenuEl.hidden = true;
+    if (scopeBtnEl) scopeBtnEl.setAttribute("aria-expanded", "false");
+  }
+  if (scopeBtnEl && scopeMenuEl) {
+    scopeBtnEl.addEventListener("click", function () {
+      var open = scopeMenuEl.hidden;
+      if (open) { closeNewPaneMenu(); hidePalette(); syncComposerChrome(); }
+      scopeMenuEl.hidden = !open;
+      scopeBtnEl.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
+      item.addEventListener("click", function () {
+        composerScope = item.dataset.scope;
+        closeScopeMenu();
+        syncComposerChrome();
+      });
+    });
+  }
+  if (composerSendEl) {
+    composerSendEl.addEventListener("click", function () {
+      var line = commandInput.value;
+      if (!line.trim()) return;
+      runCommand(line);
+      commandInput.value = "";
+      hidePalette();
+      syncComposerChrome();
+      commandInput.focus();
+    });
+  }
+  if (composerMicEl) {
+    composerMicEl.addEventListener("click", function () {
+      // Dictation is a system service, not something this shell implements.
+      toast("Dictation is a macOS service — press fn twice with the composer focused");
+      commandInput.focus();
+    });
   }
   function sendToThread(thread, text) {
     var bytes = Array.from(new TextEncoder().encode(text));
@@ -3288,17 +3622,63 @@
     });
   }
 
-  function paletteCorpus() {
+  var PALETTE_SIGILS = "/!%";
+
+  /** `%` lists the project's panes so the composer can jump between them. */
+  function panePaletteEntries() {
+    var onCanvas = canvasThreadIds();
+    return activeProjectThreads().map(function (thread) {
+      return {
+        cmd: "%" + thread.name,
+        desc: (thread.kind || "shell") + " · " + shortenRoot(thread.worktreePath || ""),
+        badge: onCanvas.indexOf(thread.id) !== -1
+          ? (thread.id === state.activeThreadId ? "focused" : "on canvas")
+          : "off canvas",
+        kind: "pane",
+        group: "Panes — jump",
+        hint: "↵",
+      };
+    });
+  }
+
+  /** `!` recalls shell lines already run through the composer. */
+  function shellPaletteEntries(rest) {
+    var entries = [];
+    if (rest) {
+      entries.push({
+        cmd: "!" + rest,
+        desc: "Run now in the focused terminal",
+        badge: "shell",
+        kind: "shell",
+        group: "Shell",
+        hint: "↵",
+        pinned: true,
+      });
+    }
+    recentCommands.filter(function (cmd) { return cmd[0] === "!"; }).forEach(function (cmd) {
+      entries.push({ cmd: cmd, desc: "Recent shell line", badge: "recent", kind: "shell", group: "Shell", hint: "↵" });
+    });
+    return entries;
+  }
+
+  function paletteCorpus(sigil, rest) {
+    if (sigil === "%") return panePaletteEntries();
+    if (sigil === "!") return shellPaletteEntries(rest);
     return recentPaletteEntries().concat(builtinPaletteEntries(), agentSkillPaletteEntries());
   }
 
   function openPalette(query, force) {
-    if (!force && commandInput.value.trim()[0] !== "/") {
+    var raw = (query || commandInput.value).trim();
+    var sigil = raw[0] || "/";
+    if (!force && PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) === -1) {
       hidePalette();
       return;
     }
-    var q = (query || commandInput.value).trim().toLowerCase();
-    paletteFiltered = paletteCorpus().filter(function (c) {
+    if (PALETTE_SIGILS.indexOf(sigil) === -1) sigil = "/";
+    var rest = raw.slice(1).trim();
+    var q = sigil === "/" ? raw.toLowerCase() : rest.toLowerCase();
+    paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
+      if (c.pinned) return true;
       var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
       return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
     });
@@ -3318,15 +3698,19 @@
   }
   function runPalettePick(pick, mode) {
     if (!pick) return;
-    if (pick.kind === "agent" || pick.kind === "recent" || mode === "run") {
+    var runsImmediately = pick.kind === "agent" || pick.kind === "recent" ||
+      pick.kind === "pane" || pick.kind === "shell" || mode === "run";
+    if (runsImmediately) {
       runCommand(pick.cmd);
       commandInput.value = "";
       hidePalette();
+      syncComposerChrome();
       commandInput.focus();
       return;
     }
     commandInput.value = pick.cmd + " ";
     hidePalette();
+    syncComposerChrome();
     commandInput.focus();
   }
 
@@ -3364,8 +3748,9 @@
   }
 
   commandInput.addEventListener("input", function () {
-    if (commandInput.value.trim()[0] === "/") openPalette();
+    if (PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) !== -1) openPalette();
     else hidePalette();
+    syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
     if (paletteVisible) {
@@ -3389,12 +3774,15 @@
     }
     if (e.key === "Enter") {
       var line = commandInput.value;
-      if (paletteVisible && line.trim()[0] === "/" && line.indexOf(" ") === -1) {
+      var sigil = line.trim()[0];
+      if (paletteVisible && (sigil === "/" || sigil === "%") && line.indexOf(" ") === -1 &&
+          paletteFiltered[paletteIndex]) {
         line = paletteFiltered[paletteIndex].cmd;
       }
       runCommand(line);
       commandInput.value = "";
       hidePalette();
+      syncComposerChrome();
       e.preventDefault();
     }
   });
@@ -3750,6 +4138,17 @@
     }
     if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
     if (e.key === "\\") { toggleBrowser(); e.preventDefault(); return; }
+    // ⌘B collapses the sessions sidebar.
+    if (e.code === "KeyB" && !e.altKey && !e.shiftKey) { toggleSidebar(); e.preventDefault(); return; }
+    // ⌃1–9 addresses the panes on the canvas; ⌘1–9 stays on file tabs.
+    if (e.ctrlKey && !e.metaKey) {
+      var paneIndex = parseInt(e.key, 10);
+      if (Number.isInteger(paneIndex) && paneIndex >= 1) {
+        var paneId = canvasThreadIds()[paneIndex - 1];
+        if (paneId) { await focusThread(paneId); e.preventDefault(); }
+        return;
+      }
+    }
     // ⌘⌥B toggles browser; ⌘⇧B cycles side. We match by `code` so option-B
     // (which produces ∫ on macOS) still resolves to KeyB.
     if (e.code === "KeyB" && e.altKey)   { toggleBrowser(); e.preventDefault(); return; }
@@ -3778,9 +4177,168 @@
     var el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   }
-  onRailClick("rail-new-tab", async function () { await createContextualTab(); });
+  onRailClick("rail-new-tab", function () { toggleNewPaneMenu(); });
   onRailClick("rail-open-project", function () { openProjectPicker(); });
   onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
+
+  // ============================================================
+  // 11a. Shell chrome — sidebar, dock, new-pane menu, help
+  // ============================================================
+
+  function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  function setSidebarOpen(open) {
+    if (!appEl) return;
+    appEl.dataset.sidebar = open ? "open" : "collapsed";
+    if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+    if (!open) closeNewPaneMenu();
+    requestAnimationFrame(function () {
+      scheduleVisiblePaneFit();
+      syncBrowserBounds();
+    });
+  }
+  function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
+
+  onRailClick("sidebar-collapse", function () { setSidebarOpen(false); });
+  onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
+  if (sidebarMiniEl) {
+    sidebarMiniEl.addEventListener("click", function (event) {
+      if (event.target.closest("#sidebar-expand")) return;
+      setSidebarOpen(true);
+    });
+  }
+  onRailClick("dock-collapse", function () { applyLayout("terminal"); });
+
+  // Sidebar width is a CSS custom property so the grid, the rails and the
+  // splitter clamps all read one number.
+  if (sidebarResizeEl) {
+    sidebarResizeEl.addEventListener("pointerdown", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var startX = event.clientX;
+      var startWidth = sidebarEl ? sidebarEl.getBoundingClientRect().width : 276;
+      sidebarResizeEl.classList.add("dragging");
+      function move(moveEvent) {
+        var next = Math.min(440, Math.max(210, startWidth + (moveEvent.clientX - startX)));
+        document.documentElement.style.setProperty("--sidebar-w", next + "px");
+      }
+      function up() {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        sidebarResizeEl.classList.remove("dragging");
+        requestAnimationFrame(function () { scheduleVisiblePaneFit(); syncBrowserBounds(); });
+      }
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+  }
+
+  function closeNewPaneMenu() {
+    if (newPaneMenuEl) newPaneMenuEl.hidden = true;
+    var trigger = document.getElementById("rail-new-tab");
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  }
+  function toggleNewPaneMenu() {
+    if (!newPaneMenuEl) { createContextualTab(); return; }
+    var open = newPaneMenuEl.hidden;
+    if (open) {
+      var project = activeProject();
+      var worktree = project ? selectedWorktree(project) : null;
+      if (newPaneMenuHeadEl) {
+        newPaneMenuHeadEl.textContent = worktree && worktree.branch
+          ? "New pane on " + worktree.branch
+          : project ? "New pane in " + project.name : "New pane";
+      }
+      closeScopeMenu();
+    }
+    newPaneMenuEl.hidden = !open;
+    var trigger = document.getElementById("rail-new-tab");
+    if (trigger) trigger.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  function onMenuClick(id, handler) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
+  }
+  onMenuClick("new-pane-term", async function () {
+    await runNewShellCommand();
+    toast("Shell pane opened");
+  });
+  onMenuClick("new-pane-agent", async function () {
+    await runNewThreadCommand();
+    toast("Agent pane opened — coven chat");
+  });
+  onMenuClick("new-pane-web", function () {
+    openBlankBrowserTab();
+    toast("Browser opened in the tools dock");
+  });
+  onMenuClick("new-pane-project", function () { openProjectPicker(); });
+
+  document.addEventListener("pointerdown", function (event) {
+    if (newPaneMenuEl && !newPaneMenuEl.hidden &&
+        !newPaneMenuEl.contains(event.target) &&
+        !event.target.closest("#rail-new-tab")) {
+      closeNewPaneMenu();
+    }
+    if (scopeMenuEl && !scopeMenuEl.hidden &&
+        !scopeMenuEl.contains(event.target) &&
+        !event.target.closest("#scope-btn")) {
+      closeScopeMenu();
+    }
+  });
+
+  // ---- Keyboard shortcuts overlay ----
+  var HELP_ROWS = [
+    ["Open the composer", "⌘K"],
+    ["Toggle the sessions sidebar", "⌘B"],
+    ["Toggle the tools dock", "⌘⌥B"],
+    ["Focus a pane on the canvas", "⌃1–9"],
+    ["Resize a pane split", "drag the divider"],
+    ["New shell pane", "/new-shell"],
+    ["New agent pane (coven chat)", "⌘T"],
+    ["New browser tab", "⌘⌥B then +"],
+    ["Close the focused file / project", "⌘W"],
+    ["Rename a session", "double-click"],
+    ["Cycle file tabs", "⌘[ · ⌘]"],
+    ["Save the open file", "⌘S"],
+    ["Cycle the dock side", "⌘⇧B"],
+    ["This overlay", "?"],
+  ];
+  function renderHelpRows() {
+    if (!helpGridEl || helpGridEl.childElementCount) return;
+    HELP_ROWS.forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "help-row";
+      row.innerHTML =
+        '<span class="help-row-what">' + escapeHtml(entry[0]) + "</span>" +
+        '<span class="help-row-key">' + escapeHtml(entry[1]) + "</span>";
+      helpGridEl.appendChild(row);
+    });
+  }
+  function setHelpOpen(open) {
+    if (!helpOverlayEl) return;
+    if (open) renderHelpRows();
+    helpOverlayEl.hidden = !open;
+  }
+  function toggleHelp() { setHelpOpen(helpOverlayEl ? helpOverlayEl.hidden : false); }
+  onRailClick("help-toggle", toggleHelp);
+  if (helpOverlayEl) {
+    helpOverlayEl.addEventListener("click", function () { setHelpOpen(false); });
+  }
+
+  // `?` is only a shortcut when nothing text-like has focus.
+  document.addEventListener("keydown", function (event) {
+    var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
+    var typing = tag === "input" || tag === "textarea" || tag === "select" ||
+      (event.target && event.target.isContentEditable);
+    if (event.key === "Escape") {
+      if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
+      closeNewPaneMenu();
+      closeScopeMenu();
+      return;
+    }
+    if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === "?") { toggleHelp(); event.preventDefault(); }
+  });
 
   // ============================================================
   // 11b. Right-pane panels: files, diffs, git
@@ -3797,6 +4355,12 @@
   var diffMetadataEl = document.getElementById("diff-metadata");
   var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
+  /** Working-tree file count, mirrored onto the dock's Git tab. */
+  function setDockGitCount(count) {
+    if (!dockGitCountEl) return;
+    dockGitCountEl.textContent = String(count || 0);
+    dockGitCountEl.hidden = !count;
+  }
   var gitViewEl = document.getElementById("git-view");
   var gitBranchEl = document.getElementById("git-branch");
   var gitOpenRemoteBtn = document.getElementById("git-open-remote");
@@ -4021,6 +4585,7 @@
         ? status.files.length + " changed"
         : "clean";
     }
+    setDockGitCount(status.files.length);
     if (status.files.length === 0) {
       panelMessage(diffFilesEl, "No uncommitted changes.");
       clearDiffSelection("");
@@ -4115,6 +4680,7 @@
     gitRemoteWebUrl = status.web_url || null;
     if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = !gitRemoteWebUrl;
     if (gitBranchEl) gitBranchEl.textContent = status.branch || "(detached)";
+    setDockGitCount((status.files || []).length);
 
     var head = document.createElement("div");
     head.className = "git-branch-line";
@@ -4358,7 +4924,8 @@
     if (!(await showTerminalView())) return null;
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
-    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], layout: { mode: "terminal", side: "right", splitFrac: 0.6 }, browsersByWorktree: {} };
+    var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
+    ensureProjectLayout(project);
     state.projects.push(project);
     state.activeProjectId = project.id;
     restoreProjectLayout(project);

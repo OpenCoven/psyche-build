@@ -48,16 +48,25 @@
   --error: #f87171;
 
   /* Geometry */
-  --titlebar-h: 38px;
+  --titlebar-h: 40px;
   --titlebar-pad-l: 78px;   /* leaves room for traffic lights */
   --rail-w: 44px;
-  --sidebar-w: 268px;
-  --tab-h: 34px;
+  --sidebar-w: 276px;
+  --mini-rail-w: 46px;
+  --tab-h: 30px;
   --command-h: 46px;
+  --composer-h: 54px;
+  --dock-tabs-h: 40px;
+  --pane-head-h: 32px;
+  --pane-gap: 2px;
   --browser-bar-h: 38px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
   --splitter-grip-h: 42px;
+
+  /* Pane canvas split fractions, driven by the canvas splitters. */
+  --pane-col-frac: 0.5;
+  --pane-row-frac: 0.52;
 
   /* Type */
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
@@ -93,24 +102,37 @@ kbd {
 
 /* -------- App grid -------- */
 
+/* Three stacked bands: titlebar, workbench, composer. The workbench splits
+   into sidebar | canvas | dock. The titlebar and composer span the full
+   window so the shell reads as one frame rather than three columns. */
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr var(--rail-w);
-  grid-template-rows: var(--titlebar-h) 1fr;
-  grid-template-areas:
-    "rail-l title  rail-r"
-    "rail-l detail rail-r";
+  grid-template-columns: 1fr;
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) var(--composer-h);
   height: 100vh;
   background: transparent;
 }
 
-/* -------- Side rails --------
-   Full-height chrome columns flanking the titlebar + detail. Content is pushed
-   below --titlebar-h so the left rail never sits under the macOS traffic
-   lights (Overlay titleBarStyle floats them over the top-left of the window).
-   The rails live outside .detail on purpose: the browser preview is a native
-   child webview positioned from preview.getBoundingClientRect(), so keeping
-   the rails out of that subtree lets the existing bounds sync stay correct. */
+.workbench {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0px;
+  min-height: 0;
+  overflow: hidden;
+}
+.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) 0px; }
+.app[data-dock="collapsed"] .workbench { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w); }
+.app[data-sidebar="collapsed"][data-dock="collapsed"] .workbench {
+  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w);
+}
+.app[data-sidebar="collapsed"] .sidebar { display: none; }
+.app[data-sidebar="open"] .sidebar-mini { display: none; }
+
+/* -------- Sessions sidebar --------
+   The sidebar lives outside .detail on purpose: the browser preview is a
+   native child webview positioned from preview.getBoundingClientRect(), so
+   keeping chrome out of that subtree lets the existing bounds sync stay
+   correct. */
 
 .rail {
   position: relative;
@@ -118,31 +140,63 @@ kbd {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: calc(var(--titlebar-h) + 8px) 0 10px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.45));
+  padding: 0 0 6px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-app-region: drag;
+  user-select: none;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+.sidebar { align-items: stretch; min-height: 0; }
+
+/* Collapsed rails — one click anywhere brings the surface back. */
+.mini-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
   user-select: none;
   overflow: hidden;
 }
-.rail > * { -webkit-app-region: no-drag; }
-.sidebar    { grid-area: rail-l; align-items: stretch; padding: calc(var(--titlebar-h) + 6px) 0 6px; }
-.rail-right { grid-area: rail-r; }
-
-/* Divider is a pseudo-element rather than a border so it can start below the
-   titlebar. A full-height border would draw a vertical line straight through
-   the macOS traffic lights, which float over the window's top-left corner. */
-.rail::after {
-  content: "";
-  position: absolute;
-  top: var(--titlebar-h);
-  bottom: 0;
-  width: 1px;
-  background: var(--border);
+.mini-rail[hidden] { display: none; }
+.sidebar-mini { border-right: 1px solid var(--border); justify-content: flex-end; }
+.dock-mini { border-left: 1px solid var(--border); }
+.mini-rail-btn {
+  position: relative;
+  width: 32px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
-.sidebar::after    { right: 0; }
-.rail-right::after { left: 0; }
+.mini-rail-btn:hover { background: var(--surface-3); color: var(--text); }
+.mini-rail-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+/* Drag handle sits just past the sidebar's own edge so it never eats a click
+   meant for a session row. */
+.sidebar-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -5px;
+  width: 10px;
+  z-index: 30;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resize:hover,
+.sidebar-resize.dragging { background: rgba(var(--rgb-accent), 0.12); }
 
 /* -------- Sessions sidebar --------
    Rows are threads (state.threads) grouped under their project. Rendered by
@@ -318,7 +372,8 @@ kbd {
 .coven-tone-neutral,
 .coven-tone-muted { color: var(--muted); }
 
-.session-row {
+.session-row,
+.session-coven-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -476,36 +531,58 @@ kbd {
 }
 .rail-btn[aria-pressed="true"] .panel-fill { opacity: 0.85; }
 
+/* The titlebar now spans the whole window, so it owns the traffic-light
+   gutter again — .traffic-gutter reserves it without drawing anything. */
 .titlebar {
-  grid-area: title;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.45));
+  gap: 10px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-bottom: 1px solid var(--border);
-  /* The sidebar column (--sidebar-w) already clears the traffic lights, so the
-     titlebar no longer needs its own --titlebar-pad-l gutter. */
-  padding: 0 14px;
+  padding: 0 10px 0 12px;
   -webkit-app-region: drag;
   user-select: none;
 }
 .titlebar > * { -webkit-app-region: no-drag; }
-.titlebar-left { display: flex; align-items: baseline; gap: 8px; }
-.titlebar-center { display: flex; gap: 4px; justify-content: center; }
-.titlebar-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+.traffic-gutter { flex: none; width: calc(var(--titlebar-pad-l) - 24px); height: 1px; -webkit-app-region: drag; }
+.titlebar-spacer { flex: 1 1 auto; -webkit-app-region: drag; }
+.titlebar-sep { flex: none; width: 1px; height: 16px; background: var(--border-strong); }
 
 .brand {
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13.5px;
   letter-spacing: -0.01em;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.brand-sub { color: var(--muted); font-size: 11px; }
+
+/* Local runtime indicator. The dot mirrors the focused pane's real PTY
+   state — it is not a remote-connection light. */
+.daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+.daemon-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--muted);
+}
+.daemon-status[data-state="running"] .daemon-dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
+.daemon-status[data-state="starting"] .daemon-dot { background: var(--warn); box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); animation: session-dot-pulse 1.4s ease-in-out infinite; }
+.daemon-status[data-state="exited"] .daemon-dot { background: var(--error); box-shadow: 0 0 6px rgba(248, 113, 113, 0.5); }
+.daemon-status[data-state="idle"] .daemon-dot { background: transparent; border: 1.5px solid var(--muted); }
+.help-btn { font-size: 12px; font-weight: 600; }
 
 /* Modern collapse trigger — single button replaces the old 3-button group */
 .chrome-btn {
@@ -576,9 +653,10 @@ kbd {
 /* -------- Detail -------- */
 
 .detail {
-  grid-area: detail;
   display: grid;
-  height: calc(100vh - var(--titlebar-h));
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
   /* Pane mins are relaxed from the old 360/320 so a narrow window can't push
      the terminal under the painted child webview (which is z-ordered above
@@ -772,13 +850,16 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 .terminal-area {
   display: grid;
-  grid-template-rows: var(--tab-h) 1fr var(--command-h);
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  background: var(--surface-solid);
+  background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.55));
   position: relative;
   border-radius: 0;
 }
+/* The file-tab strip only earns its row once a file is open. Explicit
+   grid-row assignments live with the file view, further down. */
+.tab-strip:empty { display: none; }
 
 .tab-strip {
   display: flex;
@@ -859,16 +940,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   transition: background var(--transition-fast), color var(--transition-fast);
 }
 .tab-add:hover { background: var(--surface-2); color: var(--text); }
-.tab-empty {
-  display: flex;
-  align-items: center;
-  height: var(--tab-h);
-  padding: 0 14px;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.02em;
-}
-
 .inline-edit {
   background: var(--surface-3);
   border: 1px solid var(--accent);
@@ -883,11 +954,19 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.18);
 }
 
+/* -------- Pane canvas --------
+   Every live PTY owns a framed pane; the canvas tiles the panes that are on
+   the canvas right now (up to four) and hides the rest. Grid placement is
+   written from JS (layoutPanes) because span/maximise change both the track
+   list and the per-pane placement together. */
+
 .terminal-host {
-  position: relative;
   /* Transparent on purpose: .terminal-area paints the tint. Painting here too
      stacked two translucent layers and squared the opacity. */
+  position: relative;
   background: transparent;
+  display: grid;
+  gap: var(--pane-gap);
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -980,32 +1059,204 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   outline-offset: -2px;
 }
 
-.command-bar {
+/* -------- Pane frame, design pass --------
+   The canvas geometry belongs to the pane tree (PsychePanes); these rules only
+   restyle the frames it lays out to match the workspace redesign. */
+
+.terminal-pane {
+  grid-template-rows: var(--pane-head-h) minmax(0, 1fr);
+  border-radius: 4px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.86));
+}
+.terminal-pane.focused { border-color: var(--accent-line); }
+.terminal-pane-header {
+  gap: 8px;
+  padding: 0 6px 0 8px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 12.5px;
+  user-select: none;
+}
+.terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
+.terminal-pane-glyph {
+  flex: none;
+  width: 19px;
+  height: 19px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.terminal-pane-glyph.is-agent { color: var(--accent); }
+.terminal-pane-glyph.is-term { font-size: 8px; }
+.terminal-pane-title {
+  flex: 0 1 auto;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.terminal-pane-meta {
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.terminal-pane-spacer { flex: 1 1 auto; }
+.terminal-pane-status {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ok);
+}
+.terminal-pane-status.starting { color: var(--warn); }
+.terminal-pane-status.exited { color: var(--muted); }
+.terminal-pane-retry,
+.terminal-pane-close {
+  width: 22px;
+  height: 20px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.terminal-pane-retry:hover,
+.terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
+.terminal-pane-divider {
+  background: transparent;
+  border-color: transparent;
+  transition: background var(--transition-fast);
+}
+.terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
+
+/* -------- Empty canvas -------- */
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+  padding: 24px;
+}
+.canvas-empty-mark {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+  letter-spacing: 0.35em;
+}
+.canvas-empty-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.canvas-empty-sub { font-size: 12px; color: var(--muted); max-width: 340px; line-height: 1.55; }
+.canvas-empty-actions { display: flex; gap: 10px; margin-top: 4px; }
+.canvas-empty-action {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: 0 14px;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.82));
+  width: 120px;
+  padding: 14px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12.5px;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.canvas-empty-action:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.canvas-empty-action .glyph { color: var(--accent); font-size: 16px; }
+.canvas-empty-action .key { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+/* -------- Command composer --------
+   Window-wide footer: a scope chip that says where text lands, the input
+   itself, and the voice/send affordances. The palette and scope menu open
+   upward from here. */
+
+.composer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.9));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--border);
-  height: var(--command-h);
+  height: var(--composer-h);
+}
+.scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex: none;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.scope-btn:hover { border-color: var(--accent-line); color: var(--text); }
+.scope-kicker {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.scope-label { font-weight: 600; color: var(--text); }
+.scope-caret { color: var(--muted); font-size: 9px; }
+.scope-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--accent);
+}
+.scope-dot-project { background: var(--ok); }
+.scope-dot-agents { background: var(--warn); }
+.scope-btn[data-scope="project"] .scope-dot { background: var(--ok); }
+.scope-btn[data-scope="agents"] .scope-dot { background: var(--warn); }
+
+.composer-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 .command-prompt {
+  position: absolute;
+  left: 12px;
   color: var(--accent);
   font-family: var(--font-mono);
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: 13px;
+  pointer-events: none;
 }
 #command-input {
-  flex: 1;
+  width: 100%;
+  height: 34px;
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 96px 0 30px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 12.5px;
   outline: none;
   transition: border-color var(--transition-fast), background var(--transition-fast),
               box-shadow var(--transition-fast);
@@ -1016,12 +1267,121 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.16);
 }
 #command-input::placeholder { color: var(--muted); }
+.composer-send-hint {
+  position: absolute;
+  right: 10px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 45%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.composer-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.composer-btn svg { display: block; }
+.composer-btn:hover { color: var(--text); border-color: var(--accent-line); }
+.composer-btn.listening {
+  width: auto;
+  gap: 7px;
+  padding: 0 12px;
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.1);
+  color: #f4a6a6;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.composer-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.composer-send[hidden] { display: none; }
+.composer-send:hover { background: rgba(var(--rgb-accent), 0.24); }
+.composer-send-key { font-size: 10px; opacity: 0.8; }
+.mono { font-family: var(--font-mono); }
+
+/* -------- Menus that open upward from the composer -------- */
+
+.scope-menu {
+  position: absolute;
+  left: 12px;
+  bottom: calc(var(--composer-h) - 4px);
+  z-index: 60;
+  min-width: 262px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(28px) saturate(1.2);
+  -webkit-backdrop-filter: blur(28px) saturate(1.2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  animation: menu-rise 140ms ease-out;
+}
+.scope-menu[hidden] { display: none; }
+.scope-menu-head,
+.new-pane-menu-head {
+  padding: 6px 9px 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.scope-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+.scope-item:hover { background: var(--accent-soft); }
+.scope-item[aria-checked="true"] { background: var(--accent-soft); }
+.scope-item-text { flex: 1; min-width: 0; }
+.scope-item-desc { display: block; font-size: 10.5px; color: var(--muted); }
+.scope-item-key { font-size: 10px; color: var(--muted); }
+@keyframes menu-rise {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scope-menu, .new-pane-menu, .toast, .help-overlay { animation: none; }
+}
 
 .palette {
   position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: calc(var(--command-h) + 6px);
+  left: 12px;
+  width: calc(100% - 24px);
+  max-width: 780px;
+  bottom: calc(var(--composer-h) - 4px);
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.92));
   backdrop-filter: blur(28px) saturate(1.2);
   -webkit-backdrop-filter: blur(28px) saturate(1.2);
@@ -1081,21 +1441,62 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Browser pane -------- */
 
-/* The right pane hosts four stacked panels (browser / files / diffs / git);
-   the rail picks which one is visible via .detail[data-panel]. They share one
-   grid cell so switching never reflows the pane. */
+/* The tools dock hosts four stacked panels (files / git / diffs / browser)
+   under one tab row; the tabs pick which one is visible via
+   .detail[data-panel]. The panels share one grid cell so switching never
+   reflows the dock. */
 .browser-pane {
   display: grid;
-  grid-template-rows: 1fr;
+  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
   grid-template-columns: 1fr;
   min-width: 0;
   min-height: 0;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.50));
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid var(--border);
 }
-.panel {
+.dock-tabs {
   grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 4px;
+  min-width: 0;
+}
+.dock-tabs .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
+.dock-tab {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.dock-tab:hover { color: var(--text); background: var(--surface-2); }
+.dock-tab[aria-pressed="true"] {
+  color: var(--text);
+  box-shadow: inset 0 -1.5px 0 0 var(--accent);
+}
+.dock-tab-count {
+  font-size: 8.5px;
+  font-weight: 700;
+  color: var(--warn);
+  transform: translateY(-3px);
+}
+.dock-tab-count[hidden] { display: none; }
+.panel {
+  grid-area: 2 / 1;
   display: none;
   min-width: 0;
   min-height: 0;
@@ -1184,7 +1585,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .tab-strip     { grid-row: 1; }
 .terminal-host { grid-row: 2; }
 .file-view     { grid-row: 2; }
-.command-bar   { grid-row: 3; }
 
 .file-view[hidden] { display: none; }
 .file-view {
@@ -1715,17 +2115,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .side-trigger { color: var(--accent); }
 .ghost-btn { color: var(--muted); }
 
-.terminal-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  font-size: 12px;
-  pointer-events: none;
-  background: radial-gradient(circle at 50% 42%, rgba(184,157,255,0.08), transparent 34%);
-}
 .palette-section {
   padding: 8px 10px 4px;
   color: var(--muted);
@@ -1751,11 +2140,8 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Native/window + hierarchy polish -------- */
 .titlebar,
-.titlebar-left,
-.titlebar-center,
-.titlebar-right,
 .brand,
-.brand-sub,
+.daemon-status,
 .status-pill {
   -webkit-app-region: drag;
 }
@@ -1765,14 +2151,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   -webkit-app-region: no-drag;
 }
 .titlebar {
-  min-height: 40px;
-  padding-left: 80px;
-  padding-right: 12px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.54));
+  min-height: var(--titlebar-h);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
 }
-.titlebar-left,
-.titlebar-right { height: 100%; align-items: center; }
-.brand-sub { transform: translateY(0.5px); }
 .status-pill.ok {
   color: rgba(245, 242, 251, 0.72);
   border-color: rgba(255,255,255,0.07);
@@ -1828,7 +2209,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   from { opacity: 0.35; transform: scale(0.985); }
   to { opacity: 1; transform: scale(1); }
 }
-.command-bar {
+.composer {
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.88));
   border-top-color: rgba(255,255,255,0.08);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
@@ -1873,11 +2254,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .preview-placeholder.loading .preview-empty {
   opacity: 0;
 }
-.titlebar > .titlebar-left,
-.titlebar > .titlebar-center,
-.titlebar > .titlebar-right,
 .titlebar .brand,
-.titlebar .brand-sub,
+.titlebar .titlebar-spacer,
+.titlebar .traffic-gutter,
 .titlebar .status-pill {
   -webkit-app-region: drag !important;
 }
@@ -1892,28 +2271,14 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   --titlebar-h: 42px;
 }
 .titlebar {
-  grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr);
   align-items: center;
-  padding-left: 74px;
-  padding-right: 12px;
   min-height: var(--titlebar-h);
-}
-.titlebar-left {
-  align-items: center;
-  gap: 7px;
-  height: var(--titlebar-h);
 }
 .brand {
   line-height: var(--titlebar-h);
 }
-.brand-sub {
-  line-height: var(--titlebar-h);
-  transform: none;
-}
-.titlebar-right {
-  height: var(--titlebar-h);
-  align-items: center;
-}
+/* The runtime dot in the titlebar already reports session health; the pill is
+   kept in the DOM for its status text but stays out of the chrome. */
 .titlebar .status-pill {
   display: none !important;
 }
@@ -1923,12 +2288,13 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border-radius: 8px;
 }
 
-/* The pane is a single cell that all four panels share; the bar/tabs/preview
-   areas belong to the browser panel, which is the only one that has them. */
+/* The dock's second row is a single cell that all four panels share; the
+   bar/tabs/preview areas belong to the browser panel, which is the only one
+   that has them. */
 .browser-pane {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.56));
+  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
 }
 .panel-browser {
   grid-template-columns: minmax(0, 1fr);
@@ -2230,8 +2596,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 :root[data-surface="solid"] body { background: rgb(var(--rgb-term)); }
 :root[data-surface="solid"] .titlebar,
 :root[data-surface="solid"] .rail,
+:root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
-:root[data-surface="solid"] .command-bar,
+:root[data-surface="solid"] .composer,
 :root[data-surface="solid"] .browser-pane,
 :root[data-surface="solid"] .browser-bar,
 :root[data-surface="solid"] .panel-bar,
@@ -2274,3 +2641,213 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   user-select: none;
 }
 .solid-toggle input { accent-color: var(--accent); margin: 0; }
+
+/* ============================================================
+   Redesign: sidebar chrome, dock rails, overlays
+   ============================================================ */
+
+.sidebar-head { padding: 10px 10px 8px; gap: 6px; }
+.sidebar-head .rail-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+.session-search { height: 28px; font-size: 12px; }
+
+.sidebar-foot {
+  flex: none;
+  padding: 8px 10px 4px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sidebar-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.sidebar-settings > summary {
+  list-style: none;
+  cursor: default;
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 2px 0;
+}
+.sidebar-settings > summary::-webkit-details-marker { display: none; }
+.sidebar-settings > summary:hover { color: var(--text-soft); }
+.sidebar-settings[open] > summary { color: var(--text-soft); }
+.theme-row { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; }
+.bg-opacity-row { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+.bg-opacity-label { flex: none; color: var(--muted); font-size: 11px; }
+.bg-opacity-slider { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.bg-opacity-value {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* New-pane menu — anchored under the sidebar's + button. */
+.new-pane-menu {
+  position: absolute;
+  top: 44px;
+  left: 8px;
+  right: 8px;
+  z-index: 60;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(28px) saturate(1.2);
+  -webkit-backdrop-filter: blur(28px) saturate(1.2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  animation: menu-rise 140ms ease-out;
+}
+.new-pane-menu[hidden] { display: none; }
+.new-pane-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 12.5px;
+}
+.new-pane-item:hover { background: var(--accent-soft); }
+.new-pane-glyph { flex: none; color: var(--accent); }
+.new-pane-key {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.new-pane-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
+/* Session rows gain a kind glyph, an on-canvas marker, and a state chip. */
+.session-glyph {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.session-row.kind-agent .session-glyph { color: var(--accent); }
+.session-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-oncanvas { flex: none; color: var(--accent); display: inline-flex; }
+.session-state {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.session-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.session-chip.muted { background: rgba(255, 255, 255, 0.07); color: var(--muted); }
+
+/* -------- Toast -------- */
+
+.toast {
+  position: absolute;
+  right: 16px;
+  bottom: calc(var(--composer-h) + 12px);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--text);
+  animation: menu-rise 160ms ease-out;
+  max-width: 60vw;
+}
+.toast[hidden] { display: none; }
+
+/* -------- Keyboard overlay -------- */
+
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 5, 8, 0.6);
+  animation: menu-rise 140ms ease-out;
+}
+.help-overlay[hidden] { display: none; }
+.help-card {
+  width: 620px;
+  max-width: calc(100% - 60px);
+  max-height: 80%;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  padding: 22px 24px;
+}
+.help-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+.help-title { font-size: 15px; font-weight: 700; }
+.help-sub { font-size: 11px; color: var(--muted); }
+.help-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  font-size: 12px;
+}
+.help-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.help-row-what { flex: 1; color: var(--text-soft); }
+.help-row-key {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
