@@ -59,6 +59,11 @@ interface ProjectSeed {
   isPrimary: boolean;
 }
 
+interface WorktreeCacheEntry {
+  expiresAt: number;
+  value: readonly GitWorktreeSnapshotInput[];
+}
+
 const COVEN_SESSION_STATUSES = new Set<CovenSessionSummary['status']>([
   'starting',
   'running',
@@ -111,10 +116,7 @@ export function createTuiWorkspaceProvider(
   options: TuiWorkspaceProviderOptions,
 ): () => Promise<ReadonlyWorkspaceSnapshot> {
   const state = options.state ?? new TuiWorkspaceState();
-  const worktreeCache = new Map<string, {
-    expiresAt: number;
-    value: readonly GitWorktreeSnapshotInput[];
-  }>();
+  const worktreeCache = new Map<string, WorktreeCacheEntry>();
   const worktreeCacheTtlMs = Math.max(0, options.worktreeCacheTtlMs ?? 1_000);
   const loadWorktrees = options.loadWorktrees ?? readProjectWorktreesAsync;
   let providerQueue: Promise<void> = Promise.resolve();
@@ -257,37 +259,76 @@ async function loadProviderWorktrees(
   loadWorktrees: (
     projectRoot: string,
   ) => MaybePromise<readonly GitWorktreeSnapshotInput[]>,
-  cache: Map<string, {
-    expiresAt: number;
-    value: readonly GitWorktreeSnapshotInput[];
-  }>,
+  cache: Map<string, WorktreeCacheEntry>,
   cacheTtlMs: number,
   onError: ((projectRoot: string, error: unknown) => void) | undefined,
 ): Promise<Map<string, readonly GitWorktreeSnapshotInput[]>> {
-  const entries = await Promise.all(projectRoots.map(async (projectRoot) => {
-    const cached = cache.get(projectRoot);
-    if (cached && cached.expiresAt > Date.now()) {
-      return [projectRoot, cached.value] as const;
+  const entries: Array<readonly [string, readonly GitWorktreeSnapshotInput[]]> = [];
+  const batchCache = new Map<string, readonly GitWorktreeSnapshotInput[]>();
+  const requestedRoots = new Set<string>();
+
+  for (const candidateRoot of projectRoots) {
+    const projectRoot = normalizeRoot(candidateRoot);
+    if (requestedRoots.has(projectRoot)) continue;
+    requestedRoots.add(projectRoot);
+
+    let cachedValue = batchCache.get(projectRoot);
+    if (!cachedValue) {
+      const cached = cache.get(projectRoot);
+      if (cached && cached.expiresAt > Date.now()) {
+        cachedValue = cached.value;
+        cacheWorktreeAliases(batchCache, projectRoot, cachedValue);
+      }
     }
 
-    let value: readonly GitWorktreeSnapshotInput[];
-    try {
-      value = await loadWorktrees(projectRoot);
-    } catch (error) {
-      if (!onError) throw error;
-      onError(projectRoot, error);
-      value = [];
+    if (!cachedValue) {
+      let value: readonly GitWorktreeSnapshotInput[];
+      try {
+        value = await loadWorktrees(projectRoot);
+      } catch (error) {
+        if (!onError) throw error;
+        onError(projectRoot, error);
+        value = [];
+      }
+
+      cachedValue = value.map((worktree) => ({
+        ...worktree,
+        path: normalizeRoot(worktree.path),
+      }));
+      const entry = {
+        expiresAt: Date.now() + cacheTtlMs,
+        value: cachedValue,
+      };
+      for (const aliasRoot of worktreeAliasRoots(projectRoot, cachedValue)) {
+        batchCache.set(aliasRoot, cachedValue);
+        cache.set(aliasRoot, entry);
+      }
     }
 
-    const cachedValue = value.map((worktree) => ({ ...worktree }));
-    cache.set(projectRoot, {
-      expiresAt: Date.now() + cacheTtlMs,
-      value: cachedValue,
-    });
-    return [projectRoot, cachedValue] as const;
-  }));
+    entries.push([projectRoot, cachedValue]);
+  }
 
   return new Map(entries);
+}
+
+function cacheWorktreeAliases(
+  cache: Map<string, readonly GitWorktreeSnapshotInput[]>,
+  projectRoot: string,
+  worktrees: readonly GitWorktreeSnapshotInput[],
+): void {
+  for (const aliasRoot of worktreeAliasRoots(projectRoot, worktrees)) {
+    cache.set(aliasRoot, worktrees);
+  }
+}
+
+function worktreeAliasRoots(
+  projectRoot: string,
+  worktrees: readonly GitWorktreeSnapshotInput[],
+): string[] {
+  return uniqueSortedStrings([
+    normalizeRoot(projectRoot),
+    ...worktrees.map((worktree) => normalizeRoot(worktree.path)),
+  ]);
 }
 
 export function buildTuiWorkspaceSnapshot(
@@ -295,7 +336,7 @@ export function buildTuiWorkspaceSnapshot(
 ): WorkspaceSnapshot {
   const primaryRoot = normalizeRoot(input.primaryProjectRoot);
   const publishedProjects = collectPublishedProjects(input, primaryRoot);
-  const discoveredWorktrees = mergeWorktreesByProjectRoot([
+  let discoveredWorktrees = mergeWorktreesByProjectRoot([
     ...(input.worktreesByProjectRoot ?? []),
     ...publishedProjects.map((project) => [
       project.root,
@@ -307,6 +348,13 @@ export function buildTuiWorkspaceSnapshot(
     publishedProjects,
     discoveredWorktrees,
   );
+  for (const candidateRoot of covenOnlyCandidateRoots) {
+    if (hasWorktreeDiscoveryForRoot(discoveredWorktrees, candidateRoot)) continue;
+    discoveredWorktrees = mergeWorktreesByProjectRoot([
+      ...discoveredWorktrees,
+      [candidateRoot, readWorktreesForProject(candidateRoot, input)],
+    ]);
+  }
   const canonicalCovenOwnership = canonicalizeCovenOnlyWorktrees(
     discoveredWorktrees,
     covenOnlyCandidateRoots,
@@ -340,6 +388,20 @@ export function buildTuiWorkspaceSnapshot(
       covenSessions: projectCovenSessions(project.root, covenSessionsByProject),
     })),
   });
+}
+
+function hasWorktreeDiscoveryForRoot(
+  worktreesByProjectRoot: ReadonlyMap<string, readonly GitWorktreeSnapshotInput[]>,
+  projectRoot: string,
+): boolean {
+  const normalizedRoot = normalizeRoot(projectRoot);
+  for (const [candidateRoot, worktrees] of worktreesByProjectRoot) {
+    if (normalizeRoot(candidateRoot) === normalizedRoot) return true;
+    if (worktrees.some((worktree) => normalizeRoot(worktree.path) === normalizedRoot)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function collectProjects(

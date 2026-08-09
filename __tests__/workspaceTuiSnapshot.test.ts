@@ -1078,6 +1078,58 @@ describe('TUI workspace snapshot adapter', () => {
       });
   });
 
+  it('discovers and reuses Coven-only linked-worktree ownership without an explicit worktree map', () => {
+    const mainRoot = '/repo-main';
+    const linkedWorktree = '/repo-wt';
+    const readRoots: string[] = [];
+    const snapshot = buildTuiWorkspaceSnapshot({
+      revision: 14,
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      panes: [],
+      covenSessionsByProject: new Map([
+        [linkedWorktree, [
+          session({
+            id: 'linked-session',
+            projectRoot: linkedWorktree,
+            cwd: `${linkedWorktree}/packages/app`,
+          }),
+        ]],
+      ]),
+      readWorktrees: (projectRoot) => {
+        readRoots.push(projectRoot);
+        if (projectRoot === '/repo/primary') {
+          return [worktree('/repo/primary', { isMain: true, branch: 'main' })];
+        }
+        if (projectRoot === linkedWorktree) {
+          return [
+            worktree(mainRoot, { isMain: true, branch: 'main' }),
+            worktree(linkedWorktree, { branch: 'feature' }),
+          ];
+        }
+        throw new Error(`redundant worktree scan: ${projectRoot}`);
+      },
+    });
+
+    expect(snapshot.projects.map((candidate) => candidate.root)).toEqual([
+      '/repo/primary',
+      mainRoot,
+    ]);
+    expect(snapshot.projects.some((candidate) => candidate.root === linkedWorktree)).toBe(false);
+    expect(project(snapshot, mainRoot).worktrees).toEqual([
+      expect.objectContaining({
+        path: mainRoot,
+        isMain: true,
+      }),
+      expect.objectContaining({
+        path: linkedWorktree,
+        isMain: false,
+        panes: [expect.objectContaining({ id: 'linked-session' })],
+      }),
+    ]);
+    expect(readRoots).toEqual(['/repo/primary', linkedWorktree]);
+  });
+
   it('uses the most-specific published worktree owner for Coven sessions', () => {
     const snapshot = buildTuiWorkspaceSnapshot({
       revision: 14,
@@ -1219,12 +1271,103 @@ describe('TUI workspace snapshot adapter', () => {
       .toContainEqual(expect.objectContaining({ id: 'child-session' }));
     expect(covenOnly.worktrees.find((candidate) => candidate.path === externalWorktree)?.panes)
       .toContainEqual(expect.objectContaining({ id: 'external-session' }));
-    expect([...loadedRoots].sort()).toEqual([
-      '/repo/primary',
+    expect(loadedRoots).toEqual(['/repo/primary', externalWorktree]);
+  });
+
+  it('bounds provider discovery fan-out across aliases while loading unrelated roots', async () => {
+    const mainRoot = '/repo/coven-only';
+    const aliasRoots = [
       mainRoot,
-      childWorktree,
-      externalWorktree,
-    ].sort());
+      ...Array.from(
+        { length: 8 },
+        (_, index) => `${mainRoot}/.psyche/worktrees/feature-${index}`,
+      ),
+      '/external/coven-only-review',
+    ];
+    const unrelatedRoots = ['/repo/other-a', '/repo/other-b'];
+    const loadedRoots: string[] = [];
+    const provider = createTuiWorkspaceProvider({
+      primaryProjectRoot: '/repo/primary',
+      primaryProjectName: 'Primary',
+      sidebarProjects: () => [
+        { projectRoot: '/repo/sidebar', projectName: 'Sidebar' },
+      ],
+      panes: () => [],
+      covenSessionsByProject: () => new Map([
+        ...aliasRoots.map((projectRoot, index) => [
+          projectRoot,
+          [session({
+            id: `alias-session-${index}`,
+            projectRoot,
+            cwd: `${projectRoot}/packages/app`,
+          })],
+        ] as const),
+        ...unrelatedRoots.map((projectRoot, index) => [
+          projectRoot,
+          [session({
+            id: `unrelated-session-${index}`,
+            projectRoot,
+          })],
+        ] as const),
+      ]),
+      loadWorktrees: async (projectRoot) => {
+        loadedRoots.push(projectRoot);
+        if (projectRoot === '/repo/primary' || projectRoot === '/repo/sidebar') {
+          return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+        }
+        if (aliasRoots.includes(projectRoot)) {
+          return [
+            worktree(mainRoot, { isMain: true, branch: 'main' }),
+            ...aliasRoots.slice(1).map((worktreeRoot) => worktree(worktreeRoot, {
+              branch: 'feature',
+            })),
+            worktree('/external/coven-only-review', {
+              branch: 'review',
+              locked: true,
+              lockReason: 'manual review',
+            }),
+            worktree('/external/coven-only-review', {
+              branch: 'review',
+              bare: true,
+              dirty: true,
+              missing: true,
+            }),
+          ];
+        }
+        if (unrelatedRoots.includes(projectRoot)) {
+          return [worktree(projectRoot, { isMain: true, branch: 'main' })];
+        }
+        throw new Error(`unexpected worktree scan: ${projectRoot}`);
+      },
+      worktreeCacheTtlMs: 1_000,
+    });
+
+    const first = await provider();
+    const repeated = await provider();
+
+    expect(repeated).toBe(first);
+    expect(first.projects.map((candidate) => candidate.root)).toEqual([
+      '/repo/primary',
+      '/repo/sidebar',
+      mainRoot,
+      ...unrelatedRoots,
+    ]);
+    expect(loadedRoots.filter((projectRoot) => aliasRoots.includes(projectRoot))).toHaveLength(1);
+    expect(loadedRoots).toEqual(expect.arrayContaining([
+      '/repo/primary',
+      '/repo/sidebar',
+      ...unrelatedRoots,
+    ]));
+    expect(loadedRoots).toHaveLength(5);
+    expect(project(first, mainRoot).worktrees.find(
+      (candidate) => candidate.path === '/external/coven-only-review',
+    )).toMatchObject({
+      bare: true,
+      locked: true,
+      lockReason: 'manual review',
+      dirty: true,
+      missing: true,
+    });
   });
 
   it('keeps undiscoverable Coven-only roots standalone and recoverable', async () => {
