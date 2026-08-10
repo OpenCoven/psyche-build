@@ -269,6 +269,7 @@ describe('Tauri physical terminal panes', () => {
       'requestAnimationFrame',
       'terminalHost',
       'activePaneLayout',
+      'effectivePaneRoot',
       'PsychePanes',
       'measuredTerminalHost',
       'PANE_MINIMUMS',
@@ -283,6 +284,7 @@ describe('Tauri physical terminal panes', () => {
       raf: (callback: () => void) => number,
       host: typeof terminalHost,
       activeLayout: () => typeof layout,
+      effectiveRoot: (value: typeof layout) => unknown,
       panes: { layoutRects: () => { leaves: Array<{ threadId: string }> } },
       measure: () => Record<string, number>,
       minimums: Record<string, number>,
@@ -293,6 +295,7 @@ describe('Tauri physical terminal panes', () => {
       (callback) => { queued.push(callback); return queued.length; },
       terminalHost,
       () => layout,
+      (value) => value && value.root,
       {
         layoutRects: () => ({
           leaves: [
@@ -345,7 +348,7 @@ describe('Tauri physical terminal panes', () => {
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
     expect(mainJs).toMatch(/var paneCounter = 0;/);
-    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 320, height: 120, separator: 6 \};/);
+    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 200, height: 110, separator: 6 \};/);
     expect(functionSource('paneLayoutKey')).toMatch(/projectId[\s\S]*worktreePath/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.createLeaf/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.insertBelow/);
@@ -385,7 +388,10 @@ describe('Tauri physical terminal panes', () => {
     const thread = { id: 'thread-a' };
     const bodyTarget = { id: 'body-target' };
     const closeTarget = { id: 'close-target' };
-    const headerTarget = { id: 'header-target' };
+    const headerTarget = { id: 'header-target', closest: () => null };
+    // Any other header button — focusing on its pointerdown would detach the
+    // pane before pointerup and swallow the click it was about to receive.
+    const spanTarget = { id: 'span-target', closest: (sel: string) => sel === 'button' ? spanTarget : null };
     const body = { contains: (target: unknown) => target === bodyTarget };
     const close = { contains: (target: unknown) => target === closeTarget };
     const state = { activeThreadId: 'thread-b' };
@@ -402,6 +408,7 @@ describe('Tauri physical terminal panes', () => {
 
     handlePanePointerDown(thread, body, close, { target: bodyTarget });
     handlePanePointerDown(thread, body, close, { target: closeTarget });
+    handlePanePointerDown(thread, body, close, { target: spanTarget });
     expect(focused).toEqual([]);
     handlePanePointerDown(thread, body, close, { target: headerTarget });
     expect(focused).toEqual([thread.id]);
@@ -519,7 +526,16 @@ describe('Tauri physical terminal panes', () => {
     );
     const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
       functionSource('syncThreadPaneMetadata'),
-      { applyPaneStatus },
+      {
+        applyPaneStatus,
+        threadLaneLabel: () => 'main',
+        // No pane tree in this harness: the span/maximise controls have nothing
+        // to reflect, which is exactly the detached-pane case.
+        paneLayoutForThread: () => null,
+        PsychePanes: { findLeafByThreadId: () => null },
+        syncPaneSpanControl: () => undefined,
+        syncPaneMaxControl: () => undefined,
+      },
     );
     // Running is shown as a dot, so the label moves to the class and aria-label
     // and the visible text goes away.
@@ -630,6 +646,7 @@ describe('Tauri physical terminal panes', () => {
     const thread = createThread({ project, command: '/bin/zsh' });
     pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers,
@@ -697,6 +714,7 @@ describe('Tauri physical terminal panes', () => {
     const starting = spawnPty(thread);
     expect(thread.startInFlight).toBe(true);
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers,
@@ -906,5 +924,260 @@ describe('Tauri physical terminal panes', () => {
     );
     await expect(runNewPsycheCommand()).resolves.toBeNull();
     expect(spawned).toBe(0);
+  });
+
+  describe('span and focus modes', () => {
+    type Leaf = { type: 'leaf'; id: string; threadId: string };
+    type Layout = {
+      root: Record<string, unknown>;
+      focusedLeafId: string | null;
+      spanMode?: string | null;
+      spanRoot?: unknown;
+      spanSignature?: string | null;
+      maximizedLeafId?: string | null;
+      activeSetId?: string | null;
+    };
+
+    function tree(): Record<string, unknown> {
+      return {
+        type: 'split', id: 'split-1', orientation: 'column', ratio: 0.5,
+        first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-b' },
+      };
+    }
+
+    type FocusSet = { id: string; index: number; name: string; key: string; threadIds: string[] };
+
+    function compileModeHelpers(
+      layout: Layout,
+      extras: Record<string, unknown> = {},
+      sets: FocusSet[] = [],
+    ) {
+      const factory = Function(
+        'PsychePanes', 'activePaneLayout', 'paneLayoutFor', 'state',
+        'focusThread', 'renderPaneWorkspace', 'seedSets',
+        `"use strict";
+         var SPAN_ORIENTATION = { column: "row", row: "column" };
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         var scopedPaneRoot = ${functionSource('scopedPaneRoot')};
+         var spanSignature = ${functionSource('spanSignature')};
+         var effectivePaneRoot = ${functionSource('effectivePaneRoot')};
+         var paneLayoutForThread = ${functionSource('paneLayoutForThread')};
+         var cyclePaneSpan = ${functionSource('cyclePaneSpan')};
+         var togglePaneMaximize = ${functionSource('togglePaneMaximize')};
+         var exitPaneMaximize = ${functionSource('exitPaneMaximize')};
+         return { effectivePaneRoot, scopedPaneRoot, cyclePaneSpan, togglePaneMaximize,
+                  exitPaneMaximize };`,
+      );
+      return factory(
+        PsychePanes,
+        () => layout,
+        () => layout,
+        { activeThreadId: 'thread-a', ...(extras.state as object ?? {}) },
+        extras.focusThread ?? (() => undefined),
+        extras.renderPaneWorkspace ?? (() => undefined),
+        sets,
+      ) as {
+        effectivePaneRoot: (value: Layout) => Record<string, unknown> | null;
+        scopedPaneRoot: (value: Layout) => Record<string, unknown> | null;
+        cyclePaneSpan: (thread: { id: string }) => void;
+        togglePaneMaximize: (thread: { id: string }) => void;
+        exitPaneMaximize: () => boolean;
+      };
+    }
+
+    it('cycles tiled → full column → full row → tiled without editing the tiled tree', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+      const snapshot = JSON.stringify(layout.root);
+      const helpers = compileModeHelpers(layout);
+
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('column');
+      // Mode "column" means the pane gets a column, so the top split runs across.
+      expect(helpers.effectivePaneRoot(layout)).toMatchObject({ orientation: 'row' });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('row');
+      expect(helpers.effectivePaneRoot(layout)).toMatchObject({ orientation: 'column' });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBeNull();
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      expect(JSON.stringify(layout.root)).toBe(snapshot);
+    });
+
+    it('restarts the cycle when a different pane is spanned', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+      const helpers = compileModeHelpers(layout, { state: { activeThreadId: 'thread-a' } });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('row');
+
+      // Spanning a different pane starts from the first mode again rather than
+      // inheriting where the previous pane had got to — otherwise one click on
+      // a fresh pane could land it straight back in tiled.
+      helpers.cyclePaneSpan({ id: 'thread-b' });
+      expect(layout.spanMode).toBe('column');
+      expect(layout.focusedLeafId).toBe('leaf-b');
+    });
+
+    it('caches the derived tree until membership or the spanned pane changes', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', spanMode: 'column' };
+      const helpers = compileModeHelpers(layout);
+
+      const first = helpers.effectivePaneRoot(layout);
+      // Same inputs: the same object, so a divider drag on it survives a render.
+      expect(helpers.effectivePaneRoot(layout)).toBe(first);
+
+      layout.focusedLeafId = 'leaf-b';
+      expect(helpers.effectivePaneRoot(layout)).not.toBe(first);
+    });
+
+    it('renders only the maximised pane and restores the tiling on exit', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+      const helpers = compileModeHelpers(layout);
+
+      helpers.togglePaneMaximize({ id: 'thread-b' });
+      expect(layout.maximizedLeafId).toBe('leaf-b');
+      const maximized = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+      expect(maximized.type).toBe('leaf');
+      expect(maximized.threadId).toBe('thread-b');
+
+      expect(helpers.exitPaneMaximize()).toBe(true);
+      expect(layout.maximizedLeafId).toBeNull();
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      // Nothing to leave: esc must fall through to the next cascade step.
+      expect(helpers.exitPaneMaximize()).toBe(false);
+    });
+
+    it('drops a maximised pane that is no longer in the tree', () => {
+      const layout: Layout = {
+        root: tree(), focusedLeafId: 'leaf-a', maximizedLeafId: 'leaf-gone',
+      };
+      const helpers = compileModeHelpers(layout);
+
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
+    it('maximising wins over spanning, so focus mode is always one pane', () => {
+      const layout: Layout = {
+        root: tree(), focusedLeafId: 'leaf-a', spanMode: 'column', maximizedLeafId: 'leaf-a',
+      };
+      const helpers = compileModeHelpers(layout);
+
+      expect((helpers.effectivePaneRoot(layout) as unknown as Leaf).type).toBe('leaf');
+    });
+
+    it('resizes the derived tree while spanning so visible dividers move', () => {
+      expect(functionSource('updateActiveSplit'))
+        .toMatch(/var spanning = Boolean\(layout\.spanMode\)[\s\S]*if \(spanning\) layout\.spanRoot = nextRoot;/);
+    });
+
+    describe('focus-set scoping', () => {
+      const set = (threadIds: string[]): FocusSet => ({
+        id: 'set-1', index: 1, name: 'Set 1', key: 'k', threadIds,
+      });
+
+      it('draws only the set\'s panes without editing the tiling', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const snapshot = JSON.stringify(layout.root);
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-b'])]);
+
+        const scoped = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+        expect(scoped.type).toBe('leaf');
+        expect(scoped.threadId).toBe('thread-b');
+        expect(JSON.stringify(layout.root)).toBe(snapshot);
+      });
+
+      it('stops scoping when the set has lost every pane', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const helpers = compileModeHelpers(layout, {}, [set([])]);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('stops scoping when the set names panes that are no longer tiled', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-gone'])]);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('ignores an activeSetId that names no set at all', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'ghost' };
+        const helpers = compileModeHelpers(layout, {}, []);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('spans within the set, not around it', () => {
+        // Three panes, two of them in the set: spanning inside the set must
+        // stack only the set's other member beside the spanned pane.
+        const root = PsychePanes.insertBelow(
+          tree(), 'leaf-b', PsychePanes.createLeaf('leaf-c', 'thread-c'), 'split-2',
+        );
+        const layout: Layout = {
+          root, focusedLeafId: 'leaf-a', spanMode: 'column', activeSetId: 'set-1',
+        };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-a', 'thread-c'])]);
+
+        const spanned = helpers.effectivePaneRoot(layout);
+        expect(PsychePanes.leafIds(spanned)).toEqual(['leaf-a', 'leaf-c']);
+      });
+
+      it('keeps focus mode above scoping — one pane means one pane', () => {
+        const layout: Layout = {
+          root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1', maximizedLeafId: 'leaf-a',
+        };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-b'])]);
+
+        const shown = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+        expect(shown.threadId).toBe('thread-a');
+      });
+    });
+  });
+
+  describe('pane frame', () => {
+    it('gives the header six tracks so its buttons never clip', () => {
+      expect(stylesCss).toMatch(
+        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto;/s,
+      );
+      expect(functionSource('mountTerminal')).toMatch(
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+      );
+    });
+
+    it('degrades on its own width rather than the window\'s', () => {
+      expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*container-type:\s*inline-size;[^}]*container-name:\s*pane;/s);
+      expect(stylesCss).toMatch(/@container pane \(max-width: 460px\)\s*\{\s*\.terminal-pane-meta\s*\{\s*display:\s*none;/);
+      expect(stylesCss).toMatch(/@container pane \(max-width: 300px\)/);
+    });
+
+    it('keeps the CSS pane floor and the tree\'s minimums in agreement', () => {
+      expect(stylesCss).toMatch(/--pane-min-w:\s*200px;/);
+      expect(stylesCss).toMatch(/--pane-min-h:\s*110px;/);
+      expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*min-width:\s*var\(--pane-min-w\);[^}]*min-height:\s*var\(--pane-min-h\);/s);
+    });
+
+    it('words every status but running, which stays a static dot', () => {
+      expect(stylesCss).toMatch(/\.terminal-pane-status\s*\{[^}]*border-radius:\s*999px;/s);
+      expect(stylesCss).toMatch(/\.terminal-pane-status\.running\s*\{[^}]*border-radius:\s*50%;/s);
+      // Board 5 gives the only pulse to "needs you"; running is steady.
+      expect(stylesCss).not.toMatch(/\.terminal-pane-status\.running\s*\{[^}]*animation:/s);
+    });
+
+    it('double-clicking the header enters focus mode, but not on its buttons', () => {
+      expect(functionSource('mountTerminal')).toMatch(
+        /header\.addEventListener\("dblclick"[\s\S]*closest\("button"\)\) return;[\s\S]*togglePaneMaximize\(thread\)/,
+      );
+    });
   });
 });

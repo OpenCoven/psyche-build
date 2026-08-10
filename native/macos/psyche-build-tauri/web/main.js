@@ -86,7 +86,10 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
-  var PANE_MINIMUMS = { width: 320, height: 120, separator: 6 };
+  // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
+  // own CSS floor have to agree, or a layout the tree calls valid renders
+  // overflowing. 200x110 is the density the redesign tiles at.
+  var PANE_MINIMUMS = { width: 200, height: 110, separator: 6 };
 
   function handleVisibilityChange() {
     if (document.visibilityState === "hidden") {
@@ -146,6 +149,52 @@
   function activePaneLayout() {
     var project = activeProject();
     return project ? paneLayoutFor(project.id, activeWorkspaceRoot(project)) : null;
+  }
+  function activePaneLayoutKey() {
+    var project = activeProject();
+    return project ? paneLayoutKey(project.id, activeWorkspaceRoot(project)) : null;
+  }
+
+  // -------- Focus sets --------
+  // A set is a named, colour-coded subset of the panes on one canvas. It scopes
+  // what the canvas draws; it never changes the tiling underneath, and it never
+  // gains or loses a pane except when the user says so.
+  //
+  // Sets are keyed by pane layout (project + worktree) for the same reason the
+  // tiling is: a set that spanned two worktrees would have no single canvas to
+  // scope. They live for the session — restoring them is a follow-up.
+  var focusSets = [];
+  var setPicking = null;
+  var SET_COLOR_COUNT = 4;
+
+  function setsForKey(key) {
+    return focusSets.filter(function (set) { return set.key === key; });
+  }
+
+  /** The sets a pane belongs to, for its row's membership swatches. */
+  function setsForThread(thread) {
+    if (!thread) return [];
+    var key = paneLayoutKey(thread.projectId, thread.worktreePath);
+    return focusSets.filter(function (set) {
+      return set.key === key && set.threadIds.indexOf(thread.id) !== -1;
+    });
+  }
+
+  function findFocusSet(id) {
+    for (var i = 0; i < focusSets.length; i++) {
+      if (focusSets[i].id === id) return focusSets[i];
+    }
+    return null;
+  }
+
+  /** The set scoping the active canvas, if it still has members. */
+  function activeFocusSet() {
+    var layout = activePaneLayout();
+    if (!layout || !layout.activeSetId) return null;
+    var set = findFocusSet(layout.activeSetId);
+    if (set && set.threadIds.length) return set;
+    layout.activeSetId = null;
+    return null;
   }
   function activatePaneLayoutFocus(project, worktreePath) {
     project.selectedWorktreePath = worktreePath;
@@ -1267,6 +1316,10 @@
       ((thread.kind || "shell") === "shell" ? "is-term" : "is-agent");
     glyph.textContent = paneGlyphFor(thread.kind);
     glyph.setAttribute("aria-hidden", "true");
+    // Title and meta share one grid track so they ellipsize against each other
+    // instead of against the buttons.
+    var label = document.createElement("span");
+    label.className = "terminal-pane-label";
     var title = document.createElement("span");
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
@@ -1274,11 +1327,25 @@
     pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
-    var spacer = document.createElement("span");
-    spacer.className = "terminal-pane-spacer";
+    label.appendChild(title);
+    label.appendChild(meta);
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
     applyPaneStatus(status, thread.status);
+    var span = document.createElement("button");
+    span.type = "button";
+    span.className = "terminal-pane-span";
+    span.addEventListener("click", function (event) {
+      event.stopPropagation();
+      cyclePaneSpan(thread);
+    });
+    var maximize = document.createElement("button");
+    maximize.type = "button";
+    maximize.className = "terminal-pane-max";
+    maximize.addEventListener("click", function (event) {
+      event.stopPropagation();
+      togglePaneMaximize(thread);
+    });
     var close = document.createElement("button");
     close.type = "button";
     close.className = "terminal-pane-close";
@@ -1297,11 +1364,18 @@
       startPaneReposition(thread, event);
     });
     header.appendChild(glyph);
-    header.appendChild(title);
-    header.appendChild(meta);
-    header.appendChild(spacer);
+    header.appendChild(label);
     header.appendChild(status);
+    header.appendChild(span);
+    header.appendChild(maximize);
     header.appendChild(close);
+    // Double-clicking the header is the mouse route into focus mode, mirroring
+    // the maximise button so the gesture and the control agree.
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(thread);
+    });
     // Retry lost its header button, so the pane's own context menu carries it.
     // The sidebar row cannot: PR #54 hides exited rows, and exited is exactly
     // the state you retry from.
@@ -1335,6 +1409,8 @@
     thread.paneTitle = title;
     thread.paneMeta = meta;
     thread.paneStatus = status;
+    thread.paneSpan = span;
+    thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
     renderPaneWorkspace();
@@ -1402,9 +1478,10 @@
     thread.fit = fit;
   }
 
-  // "running" is the steady state of nearly every pane, so spelling it out in
-  // every header is noise. Running panes get a live dot instead; the states you
-  // actually need to read - starting, exited, failed - keep their word.
+  // Status never travels as colour alone: starting, exited and failed are
+  // worded chips. Running is the one exception, and only because it is the
+  // steady state of nearly every pane — it gets a static green dot, and the
+  // word stays in the title and aria-label so nothing is lost without colour.
   function applyPaneStatus(element, status) {
     if (!element) return;
     var label = status || "";
@@ -1417,6 +1494,11 @@
   function handlePanePointerDown(thread, body, close, event) {
     var target = event.target;
     if ((body && body.contains(target)) || (close && close.contains(target))) return;
+    // Every header button re-renders the canvas, and renderPaneWorkspace
+    // detaches and re-appends the panes — a target that leaves the document
+    // between pointerdown and pointerup never gets its click. Focusing here
+    // would therefore swallow the first press of span, maximise and close.
+    if (target && target.closest && target.closest("button")) return;
     if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
@@ -1655,12 +1737,283 @@
     if (!Number.isFinite(ratio)) return false;
     var layout = activePaneLayout();
     if (!layout || !layout.root || (expectedLayout && layout !== expectedLayout)) return false;
-    var nextRoot = PsychePanes.resizeSplit(layout.root, splitId, ratio);
-    if (nextRoot === layout.root) return false;
-    layout.root = nextRoot;
+    // While spanning, the dividers on screen belong to the derived tree — the
+    // drag has to land there or it would resize a split nobody can see.
+    var spanning = Boolean(layout.spanMode) && Boolean(layout.spanRoot) &&
+      !layout.maximizedLeafId && layout.spanRoot !== layout.root;
+    var current = spanning ? layout.spanRoot : layout.root;
+    var nextRoot = PsychePanes.resizeSplit(current, splitId, ratio);
+    if (nextRoot === current) return false;
+    if (spanning) layout.spanRoot = nextRoot;
+    else layout.root = nextRoot;
     renderPaneWorkspace();
     if (restoreFocus) focusPaneDivider(splitId);
     return true;
+  }
+
+  // Span cycle: ▦ tiled → ▥ the pane takes a full column, the others stack to
+  // its side → ▤ it takes a full row, the others line up below → tiled again.
+  // The mode is named for what the spanned pane gets; the top-level split runs
+  // along the other axis, which is what SPAN_ORIENTATION translates.
+  var SPAN_ORIENTATION = { column: "row", row: "column" };
+
+  function spanSignature(layout, base) {
+    return layout.spanMode + "|" + layout.focusedLeafId + "|" +
+      PsychePanes.leafIds(base).join(",");
+  }
+
+  /**
+   * The tiled tree narrowed to the set scoping this canvas, or the tiled tree
+   * itself. A set whose panes have all gone stops scoping rather than leaving
+   * an empty canvas behind.
+   */
+  function scopedPaneRoot(layout) {
+    if (!layout.activeSetId) return layout.root;
+    var set = findFocusSet(layout.activeSetId);
+    if (!set || !set.threadIds.length) {
+      layout.activeSetId = null;
+      return layout.root;
+    }
+    var scoped = PsychePanes.retainThreads(layout.root, set.threadIds);
+    if (!scoped) {
+      layout.activeSetId = null;
+      return layout.root;
+    }
+    return scoped;
+  }
+
+  /**
+   * The tree the canvas actually draws. Maximise and span are presentation
+   * modes, so neither one edits the tiled tree — leaving them restores exactly
+   * the layout you had, and a pane opened or closed mid-mode still lands in the
+   * tiling underneath. The derived tree is cached against a signature so that
+   * dragging its dividers keeps the ratios instead of rebuilding them away.
+   */
+  function effectivePaneRoot(layout) {
+    if (!layout || !layout.root) return null;
+    // Focus mode is one pane by definition, so it outranks both other modes.
+    if (layout.maximizedLeafId) {
+      var maximized = PsychePanes.findLeafById(layout.root, layout.maximizedLeafId);
+      if (maximized) return maximized;
+      layout.maximizedLeafId = null;
+    }
+    // Scope first, then span: spanning re-tiles whatever the canvas is showing,
+    // which inside a set is the set.
+    var base = scopedPaneRoot(layout);
+    if (!layout.spanMode) return base;
+    var signature = spanSignature(layout, base);
+    if (!layout.spanRoot || layout.spanSignature !== signature) {
+      layout.spanRoot = PsychePanes.spanLayout(
+        base,
+        layout.focusedLeafId,
+        SPAN_ORIENTATION[layout.spanMode],
+        "span"
+      );
+      layout.spanSignature = signature;
+    }
+    return layout.spanRoot;
+  }
+
+  function paneLayoutForThread(thread) {
+    return thread ? paneLayoutFor(thread.projectId, thread.worktreePath) : null;
+  }
+
+  // -------- Focus-set interactions --------
+
+  /** Enter multi-select. The set is only created when the user confirms. */
+  function beginSetPicking() {
+    var key = activePaneLayoutKey();
+    var layout = activePaneLayout();
+    if (!key || !layout || !layout.root) {
+      toast("Open some panes first — a focus set is a subset of them");
+      return false;
+    }
+    setPicking = { key: key, picked: [] };
+    refreshSidebar();
+    return true;
+  }
+
+  function cancelSetPicking() {
+    if (!setPicking) return false;
+    setPicking = null;
+    refreshSidebar();
+    return true;
+  }
+
+  function isPicked(threadId) {
+    return Boolean(setPicking) && setPicking.picked.indexOf(threadId) !== -1;
+  }
+
+  function toggleSetPick(threadId) {
+    if (!setPicking) return;
+    var at = setPicking.picked.indexOf(threadId);
+    if (at === -1) setPicking.picked.push(threadId);
+    else setPicking.picked.splice(at, 1);
+    refreshSidebar();
+  }
+
+  function createFocusSet() {
+    if (!setPicking || !setPicking.picked.length) return null;
+    var key = setPicking.key;
+    // Colours cycle through the four set swatches; a fifth set on one canvas
+    // reuses the first colour rather than inventing an unnamed one.
+    var index = (setsForKey(key).length % SET_COLOR_COUNT) + 1;
+    var set = {
+      id: nextPaneId("set"),
+      index: index,
+      name: "Set " + (setsForKey(key).length + 1),
+      key: key,
+      threadIds: setPicking.picked.slice(),
+    };
+    focusSets.push(set);
+    setPicking = null;
+    activateFocusSet(set.id);
+    toast(set.name + " — " + set.threadIds.length + " panes");
+    return set;
+  }
+
+  function activateFocusSet(setId) {
+    var layout = activePaneLayout();
+    if (!layout) return false;
+    var set = findFocusSet(setId);
+    if (!set || !set.threadIds.length) return false;
+    layout.activeSetId = setId;
+    // A set is a different canvas; the modes that framed the old one do not
+    // carry over.
+    layout.maximizedLeafId = null;
+    layout.spanRoot = null;
+    layout.spanSignature = null;
+    refreshSidebar();
+    return true;
+  }
+
+  function clearFocusSet() {
+    var layout = activePaneLayout();
+    if (!layout || !layout.activeSetId) return false;
+    layout.activeSetId = null;
+    layout.spanRoot = null;
+    layout.spanSignature = null;
+    refreshSidebar();
+    return true;
+  }
+
+  /**
+   * Board 8's rule: clicking a member scopes the canvas to its set, and
+   * clicking anything that is not in a set returns to all panes. Selection
+   * flows through the rows themselves rather than a standing chip bar.
+   */
+  function applySetScopeForThread(thread) {
+    var sets = setsForThread(thread);
+    if (!sets.length) return clearFocusSet();
+    var layout = paneLayoutForThread(thread);
+    if (layout && layout.activeSetId === sets[0].id) return false;
+    return activateFocusSet(sets[0].id);
+  }
+
+  function removeFromFocusSet(setId, threadId) {
+    var set = findFocusSet(setId);
+    if (!set) return false;
+    var at = set.threadIds.indexOf(threadId);
+    if (at === -1) return false;
+    set.threadIds.splice(at, 1);
+    var layout = activePaneLayout();
+    if (!set.threadIds.length && layout && layout.activeSetId === setId) {
+      layout.activeSetId = null;
+      toast(set.name + " is empty — showing all panes");
+    }
+    if (layout) { layout.spanRoot = null; layout.spanSignature = null; }
+    refreshSidebar();
+    return true;
+  }
+
+  /** Drop a closed pane out of every set, so no set points at a dead thread. */
+  function forgetThreadInSets(threadId) {
+    focusSets.forEach(function (set) {
+      var at = set.threadIds.indexOf(threadId);
+      if (at !== -1) set.threadIds.splice(at, 1);
+    });
+    focusSets = focusSets.filter(function (set) { return set.threadIds.length > 0; });
+  }
+
+  function cyclePaneSpan(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout || !layout.root) return;
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    if (!leaf) return;
+    // Spanning a different pane restarts the cycle rather than continuing the
+    // previous pane's position in it.
+    var continuing = layout.spanMode && layout.focusedLeafId === leaf.id;
+    layout.spanMode = !continuing
+      ? "column"
+      : layout.spanMode === "column" ? "row" : null;
+    layout.focusedLeafId = leaf.id;
+    layout.maximizedLeafId = null;
+    layout.spanRoot = null;
+    layout.spanSignature = null;
+    if (state.activeThreadId !== thread.id) {
+      focusThread(thread.id);
+      return;
+    }
+    renderPaneWorkspace();
+  }
+
+  function togglePaneMaximize(thread) {
+    var layout = paneLayoutForThread(thread);
+    if (!layout || !layout.root) return;
+    var leaf = PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    if (!leaf) return;
+    layout.maximizedLeafId = layout.maximizedLeafId === leaf.id ? null : leaf.id;
+    layout.focusedLeafId = leaf.id;
+    if (state.activeThreadId !== thread.id) {
+      focusThread(thread.id);
+      return;
+    }
+    renderPaneWorkspace();
+  }
+
+  /** Leave focus mode; reports whether there was one to leave (esc cascade). */
+  function exitPaneMaximize() {
+    var layout = activePaneLayout();
+    if (!layout || !layout.maximizedLeafId) return false;
+    layout.maximizedLeafId = null;
+    renderPaneWorkspace();
+    return true;
+  }
+
+  var SPAN_GLYPHS = { column: "▥", row: "▤" };
+  var SPAN_TITLES = {
+    tiled: "Span this pane — full column (⇥ full row, ⇥ tiled)",
+    column: "Spanning a full column — click for a full row",
+    row: "Spanning a full row — click to return to tiled",
+  };
+
+  function syncPaneSpanControl(thread, layout, leaf) {
+    if (!thread.paneSpan) return;
+    var spanned = Boolean(leaf) && layout.spanMode && layout.focusedLeafId === leaf.id;
+    var mode = spanned ? layout.spanMode : "tiled";
+    thread.paneSpan.textContent = spanned ? SPAN_GLYPHS[layout.spanMode] : "▦";
+    thread.paneSpan.title = SPAN_TITLES[mode];
+    thread.paneSpan.setAttribute("aria-label", SPAN_TITLES[mode]);
+    thread.paneSpan.setAttribute("aria-pressed", spanned ? "true" : "false");
+  }
+
+  var MAX_ICON =
+    '<svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">' +
+    '<path d="M5.5 2H2v3.5M8.5 12H12V8.5" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var RESTORE_ICON =
+    '<svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">' +
+    '<path d="M2 5.5h3.5V2M12 8.5H8.5V12" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  function syncPaneMaxControl(thread, layout, leaf) {
+    if (!thread.paneMax) return;
+    var maxed = Boolean(leaf) && layout.maximizedLeafId === leaf.id;
+    var label = maxed ? "Restore the tiling (esc)" : "Focus this pane";
+    thread.paneMax.innerHTML = maxed ? RESTORE_ICON : MAX_ICON;
+    thread.paneMax.title = label;
+    thread.paneMax.setAttribute("aria-label", label);
+    thread.paneMax.setAttribute("aria-pressed", maxed ? "true" : "false");
   }
 
   function renderPaneNode(node, splitRatios) {
@@ -1695,8 +2048,9 @@
       renderTerminalEmptyState();
       return;
     }
+    var root = effectivePaneRoot(layout);
     var projected = PsychePanes.layoutRects(
-      layout.root,
+      root,
       measuredTerminalHost(),
       PANE_MINIMUMS
     );
@@ -1704,14 +2058,164 @@
     projected.splits.forEach(function (split) {
       splitRatios.set(split.splitId, split.ratio);
     });
-    terminalHost.appendChild(renderPaneNode(layout.root, splitRatios));
-    projected.leaves.forEach(function (leaf) {
-      var thread = findThread(leaf.threadId);
+    terminalHost.appendChild(renderPaneNode(root, splitRatios));
+    // Span and maximise change what every *other* pane's controls should say,
+    // so the whole tiled tree is synced, not just the panes on screen.
+    PsychePanes.leafIds(layout.root).forEach(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      var thread = leaf && findThread(leaf.threadId);
       if (!thread || !thread.pane) return;
       thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
+      syncPanePicking(thread);
       syncThreadPaneMetadata(thread);
     });
+    renderSetPickBar();
+    renderPaneMinimap(layout);
     scheduleVisiblePaneFit();
+  }
+
+  /**
+   * While picking, a tile is a checkbox. The overlay takes the click so the
+   * gesture never reaches the terminal underneath — a stray keystroke into a
+   * live shell is not an acceptable cost for selecting a pane.
+   */
+  function syncPanePicking(thread) {
+    var pane = thread.pane;
+    var picking = Boolean(setPicking);
+    pane.classList.toggle("is-picking", picking);
+    pane.classList.toggle("is-picked", picking && isPicked(thread.id));
+    var overlay = pane.querySelector(".pane-pick-overlay");
+    if (!picking) {
+      if (overlay) overlay.remove();
+      return;
+    }
+    if (!overlay) {
+      overlay = document.createElement("button");
+      overlay.type = "button";
+      overlay.className = "pane-pick-overlay";
+      overlay.addEventListener("click", function (event) {
+        event.stopPropagation();
+        toggleSetPick(thread.id);
+      });
+      pane.appendChild(overlay);
+    }
+    var picked = isPicked(thread.id);
+    overlay.textContent = picked ? "✓" : "";
+    overlay.title = (picked ? "Remove " : "Include ") + thread.name + " in the set";
+    overlay.setAttribute("aria-label", overlay.title);
+    overlay.setAttribute("aria-pressed", picked ? "true" : "false");
+  }
+
+  /**
+   * The pick bar is the only chrome a focus set ever gets, and it only exists
+   * while you are picking — Board 10's "zero standing chrome". Built here
+   * rather than in index.html for the same reason.
+   */
+  function renderSetPickBar() {
+    if (!terminalArea) return;
+    var bar = terminalArea.querySelector(".set-pick-bar");
+    if (!setPicking) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.className = "set-pick-bar";
+      bar.setAttribute("role", "toolbar");
+      bar.setAttribute("aria-label", "Focus set selection");
+      terminalArea.insertBefore(bar, terminalHost);
+    }
+    var count = setPicking.picked.length;
+    bar.replaceChildren();
+
+    var hint = document.createElement("span");
+    hint.className = "set-pick-hint";
+    hint.title = "Click tiles or sidebar rows to include them — the set shows only what you pick";
+    var dot = document.createElement("span");
+    dot.className = "set-pick-dot";
+    hint.appendChild(dot);
+    hint.appendChild(document.createTextNode("Pick panes"));
+
+    var create = document.createElement("button");
+    create.type = "button";
+    create.className = "set-pick-create";
+    create.textContent = "Create · " + count;
+    create.disabled = count === 0;
+    create.title = count
+      ? "Create the set — the canvas will show only these panes"
+      : "Pick at least one pane";
+    create.addEventListener("click", function () { createFocusSet(); });
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "set-pick-cancel";
+    cancel.textContent = "×";
+    cancel.title = "Cancel (esc)";
+    cancel.setAttribute("aria-label", "Cancel picking");
+    cancel.addEventListener("click", function () { cancelSetPicking(); });
+
+    bar.appendChild(hint);
+    bar.appendChild(create);
+    bar.appendChild(cancel);
+  }
+
+  /**
+   * Focus mode hides every pane but one, so the minimap is how the others stay
+   * reachable — a carousel of the panes the canvas is no longer drawing.
+   */
+  function renderPaneMinimap(layout) {
+    if (!terminalArea) return;
+    var rail = terminalArea.querySelector(".pane-minimap");
+    if (!layout || !layout.maximizedLeafId) {
+      if (rail) rail.remove();
+      return;
+    }
+    if (!rail) {
+      rail = document.createElement("aside");
+      rail.className = "pane-minimap";
+      rail.setAttribute("aria-label", "Pane minimap");
+      terminalArea.appendChild(rail);
+    }
+    rail.replaceChildren();
+    var scopedIds = PsychePanes.leafIds(scopedPaneRoot(layout));
+    scopedIds.forEach(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      var thread = leaf && findThread(leaf.threadId);
+      if (!thread) return;
+      var entry = document.createElement("button");
+      entry.type = "button";
+      entry.className = "minimap-pane" +
+        (layout.maximizedLeafId === leafId ? " is-current" : "");
+      entry.title = thread.name + " — " + (thread.status || "") +
+        " · click to focus this pane";
+      entry.setAttribute("aria-label", entry.title);
+
+      var head = document.createElement("span");
+      head.className = "minimap-head";
+      var glyph = document.createElement("span");
+      glyph.className = "minimap-glyph";
+      glyph.textContent = paneGlyphFor(thread.kind);
+      var dot = document.createElement("span");
+      dot.className = "minimap-dot " + sessionStatusClass(thread);
+      head.appendChild(glyph);
+      head.appendChild(dot);
+
+      var body = document.createElement("span");
+      body.className = "minimap-body";
+      var name = document.createElement("span");
+      name.className = "minimap-name";
+      name.textContent = thread.name;
+
+      entry.appendChild(head);
+      entry.appendChild(body);
+      entry.appendChild(name);
+      entry.addEventListener("click", function () {
+        layout.maximizedLeafId = leafId;
+        layout.focusedLeafId = leafId;
+        focusThread(thread.id);
+      });
+      rail.appendChild(entry);
+    });
   }
 
   async function focusThread(id) {
@@ -1755,10 +2259,18 @@
     if (thread.paneTitle) thread.paneTitle.textContent = thread.name;
     if (thread.paneMeta) {
       thread.paneMeta.textContent = (thread.kind || "shell") + " · " +
-        shortenRoot(thread.worktreePath || "");
+        threadLaneLabel(thread);
     }
     if (thread.paneStatus) {
       applyPaneStatus(thread.paneStatus, thread.status);
+    }
+    var layout = paneLayoutForThread(thread);
+    var leaf = layout && layout.root
+      ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
+      : null;
+    if (layout) {
+      syncPaneSpanControl(thread, layout, leaf);
+      syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
       thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
@@ -1792,6 +2304,9 @@
     thread.closeStarted = true;
     thread.closing = true;
     pendingDataBuffers.delete(id);
+    // A set must never point at a thread that no longer exists, or scoping the
+    // canvas to it would silently show fewer panes than it claims.
+    forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
     if (!thread.startInFlight) stopThreadPty(thread);
     if (thread.term && thread.term.dispose) {
@@ -1938,7 +2453,7 @@
     var layout = activePaneLayout();
     if (!layout || !layout.root) return;
     var projected = PsychePanes.layoutRects(
-      layout.root,
+      effectivePaneRoot(layout),
       measuredTerminalHost(),
       PANE_MINIMUMS
     );
@@ -2142,6 +2657,102 @@
     return "✳";
   }
 
+  /**
+   * The row's leading glyph. It reports the lane's git state rather than the
+   * pane's kind, because "has this lane got uncommitted work in it" is the
+   * question the sidebar gets scanned for — the kind is one line below.
+   * Colour is never the only carrier: the glyph shape and the tooltip both
+   * say the same thing.
+   */
+  function sessionGitState(worktree) {
+    if (worktree && worktree.dirty) {
+      return { glyph: "±", className: "git-dirty", tip: "Uncommitted changes" };
+    }
+    return { glyph: "⎇", className: "git-clean", tip: "Clean working tree" };
+  }
+
+  /** Meta line's second half: the branch if there is one, else the path. */
+  function sessionLaneLabel(worktree) {
+    if (!worktree) return "";
+    return worktree.branch || shortenRoot(worktree.path);
+  }
+
+  /**
+   * The same lane label from a thread, so a pane header and its sidebar row
+   * never disagree about which lane the pane is in.
+   */
+  function threadLaneLabel(thread) {
+    var path = (thread && thread.worktreePath) || "";
+    var project = thread && findProject(thread.projectId);
+    var worktrees = (project && project.worktrees) || [];
+    for (var i = 0; i < worktrees.length; i++) {
+      if (worktrees[i].path === path) return sessionLaneLabel(worktrees[i]);
+    }
+    return shortenRoot(path);
+  }
+
+  /**
+   * Focus-set membership swatches. Squares, in the set's colour, so they can't
+   * be read as a status light. A pane in no set renders nothing.
+   */
+  function sessionSetSwatches(thread) {
+    var sets = setsForThread(thread);
+    if (!sets.length) return "";
+    return '<span class="session-sets">' + sets.map(function (set) {
+      var index = Math.min(4, Math.max(1, Number(set.index) || 1));
+      var name = "In " + (set.name || "a focus set");
+      return '<span class="session-set-swatch" data-set="' + index +
+        '" title="' + escapeHtml(name) + '" aria-label="' + escapeHtml(name) + '"></span>';
+    }).join("") + "</span>";
+  }
+
+  var SESSION_CLOSE_SECONDS = 3;
+  /** The armed row's teardown, so a second row disarms the first. */
+  var armedSessionClose = null;
+
+  function disarmSessionClose() {
+    if (!armedSessionClose) return;
+    var armed = armedSessionClose;
+    armedSessionClose = null;
+    clearInterval(armed.timer);
+    armed.confirm.remove();
+    if (armed.close.isConnected) armed.close.hidden = false;
+  }
+
+  /**
+   * Closing a pane stops a process, so it never happens on a single click. The
+   * × swaps for a countdown pill that has to be clicked again, and that cancels
+   * itself when the timer runs out — the guard costs nothing if you meant it
+   * and everything if you didn't.
+   */
+  function armSessionClose(wrapper, close, thread) {
+    disarmSessionClose();
+    var left = SESSION_CLOSE_SECONDS;
+    var confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "session-close-confirm";
+    confirm.title = "Click to confirm — auto-cancels when the timer runs out";
+    function paint() {
+      confirm.textContent = "Close · " + left;
+      confirm.setAttribute("aria-label", "Confirm closing " + thread.name);
+    }
+    paint();
+    confirm.addEventListener("click", function (event) {
+      event.stopPropagation();
+      disarmSessionClose();
+      closeThread(thread.id);
+    });
+    close.hidden = true;
+    wrapper.appendChild(confirm);
+    var timer = setInterval(function () {
+      left -= 1;
+      if (left <= 0) { disarmSessionClose(); return; }
+      paint();
+    }, 1000);
+    armedSessionClose = { timer: timer, confirm: confirm, close: close };
+    confirm.focus();
+  }
+
   function sessionStatusClass(thread) {
     if (thread.spawning || thread.status === "starting") return "starting";
     if (thread.status === "running") return "running";
@@ -2290,6 +2901,9 @@
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    // A re-render would strand an armed confirm on a row that no longer exists,
+    // and an armed confirm is a question the user has not answered — drop it.
+    disarmSessionClose();
     sessionListEl.innerHTML = "";
 
     var currentSearchQuery = sessionFilter;
@@ -2348,7 +2962,12 @@
         projectBadge.setAttribute("aria-label", projectAttention + " sessions need attention");
         head.appendChild(projectBadge);
       }
-      head.addEventListener("click", function () { setActiveProject(project.id); });
+      // The project header is the "show me everything again" affordance: it is
+      // the one row that is above any set.
+      head.addEventListener("click", function () {
+        clearFocusSet();
+        setActiveProject(project.id);
+      });
       group.appendChild(head);
 
       visibleWorktrees.forEach(function (entry) {
@@ -2466,22 +3085,30 @@
           var row = document.createElement("button");
           row.type = "button";
           var kind = thread.kind || "shell";
+          var picking = Boolean(setPicking);
+          var picked = picking && isPicked(thread.id);
           row.className = "session-row " + sessionStatusClass(thread) +
             " kind-" + (kind === "shell" ? "shell" : "agent") +
-            (state.activeThreadId === thread.id ? " active" : "");
+            (state.activeThreadId === thread.id ? " active" : "") +
+            (picking ? " is-picking" : "") + (picked ? " is-picked" : "");
           row.dataset.threadId = thread.id;
           if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
-          row.title = thread.name + " — " + worktree.path +
-            (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
-            " · double-click to rename";
+          if (picking) row.setAttribute("aria-pressed", picked ? "true" : "false");
+          row.title = picking
+            ? (picked ? "Remove " : "Include ") + thread.name + " in the set"
+            : thread.name + " — " + worktree.path +
+              (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
+              " · double-click to rename";
           var chipMarkup = "";
           if (thread.status === "exited") {
             chipMarkup = '<span class="session-chip muted">exited</span>';
           } else if (thread.spawning || thread.status === "starting") {
             chipMarkup = '<span class="session-chip">starting</span>';
           }
+          var git = sessionGitState(worktree);
           row.innerHTML =
-            '<span class="session-glyph">' + escapeHtml(paneGlyphFor(kind)) + "</span>" +
+            '<span class="session-glyph ' + git.className + '" title="' + escapeHtml(git.tip) +
+              '" aria-label="' + escapeHtml(git.tip) + '">' + escapeHtml(git.glyph) + "</span>" +
             '<span class="session-text">' +
               '<span class="session-title-row">' +
                 '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
@@ -2491,15 +3118,20 @@
                       '<rect x="1" y="1" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
                       '<rect x="3.2" y="3.2" width="5.6" height="5.6" rx="1" fill="currentColor"/></svg></span>'
                   : "") +
+                sessionSetSwatches(thread) +
               "</span>" +
               '<span class="session-sub">' +
-                escapeHtml(kind + " · " + shortenRoot(worktree.path)) +
+                escapeHtml(kind + " · " + sessionLaneLabel(worktree)) +
               "</span>" +
             "</span>" +
             '<span class="session-state"><span class="session-dot"></span>' + chipMarkup + "</span>";
 
           row.addEventListener("click", async function () {
+            // While picking, a row is a checkbox — it must not also focus the
+            // pane, or selecting would keep yanking the canvas around.
+            if (setPicking) { toggleSetPick(thread.id); return; }
             if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
+            applySetScopeForThread(thread);
             await focusThread(thread.id);
           });
           var titleEl = row.querySelector(".session-title");
@@ -2530,8 +3162,19 @@
             beginSessionRename(e);
           });
           row.addEventListener("contextmenu", function (event) {
+            var memberships = setsForThread(thread);
             openSessionContextMenu(event, [
               { label: "Focus", run: function () { focusThread(thread.id); } },
+              memberships.length
+                ? { label: "Show only " + memberships[0].name, run: function () {
+                    activateFocusSet(memberships[0].id);
+                  } }
+                : null,
+              memberships.length
+                ? { label: "Remove from " + memberships[0].name, run: function () {
+                    removeFromFocusSet(memberships[0].id, thread.id);
+                  } }
+                : null,
               { label: "Rename…", run: function () {
                 beginSessionRename({ stopPropagation: function () {} });
               } },
@@ -2542,23 +3185,38 @@
                 ? { label: "Interrupt", run: function () { sendToThread(thread, "\x03"); } }
                 : null,
               { label: "Hide", run: function () { hideThread(thread.id); } },
-              { label: "Stop and close", danger: true, run: function () { closeThread(thread.id); } },
+              // Stopping a session kills a process, so it never lands on one
+              // click: the row arms a countdown that has to be confirmed and
+              // cancels itself if it isn't.
+              { label: "Stop and close", danger: true, run: function () {
+                armSessionClose(wrapper, close, thread);
+              } },
             ]);
           });
 
           var close = document.createElement("button");
           close.type = "button";
           close.className = "session-close";
-          // × detaches the pane's leaf from the tree and hides the row. The
-          // PTY keeps running — the worktree menu reopens hidden sessions.
-          close.title = onCanvas
-            ? "Hide the pane — the session keeps running"
-            : "Hide session";
+          // Inside a set, × means "not part of this set" — the narrower, more
+          // likely intent when the canvas is already scoped. Outside one it
+          // detaches the pane's leaf from the tree and hides the row; the PTY
+          // keeps running and the worktree menu reopens it. Both are reversible
+          // and frequent, so both stay a single click. The timed confirm guards
+          // "Stop and close", which is neither.
+          var scopingSet = activeFocusSet();
+          var inScopingSet = Boolean(scopingSet) &&
+            scopingSet.threadIds.indexOf(thread.id) !== -1;
+          close.title = inScopingSet
+            ? "Remove from " + scopingSet.name + " — the pane stays open"
+            : onCanvas
+              ? "Hide the pane — the session keeps running"
+              : "Hide session";
           close.setAttribute("aria-label", close.title);
           close.textContent = "×";
           close.addEventListener("click", function (e) {
             e.stopPropagation();
-            hideThread(thread.id);
+            if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
+            else hideThread(thread.id);
           });
           wrapper.appendChild(row);
           wrapper.appendChild(close);
@@ -4535,6 +5193,7 @@
     openBlankBrowserTab();
     toast("Browser opened in the tools dock");
   });
+  onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
 
   document.addEventListener("pointerdown", function (event) {
@@ -4594,10 +5253,19 @@
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
+    // Esc cascade — one key, most-transient layer first, so it never skips
+    // past something the user is looking at to undo something they aren't:
+    // help → menus → set picking → armed confirm → focus mode.
     if (event.key === "Escape") {
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
+      var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
+        (scopeMenuEl && !scopeMenuEl.hidden);
       closeNewPaneMenu();
       closeScopeMenu();
+      if (menuWasOpen) return;
+      if (cancelSetPicking()) return;
+      if (armedSessionClose) { disarmSessionClose(); return; }
+      if (!typing && exitPaneMaximize()) return;
       return;
     }
     if (typing || event.metaKey || event.ctrlKey || event.altKey) return;

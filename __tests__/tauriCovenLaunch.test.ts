@@ -890,6 +890,7 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
@@ -921,6 +922,7 @@ describe('native Coven launch routing', () => {
     const state = { threads: [thread], activeThreadId: thread.id };
     let stopCalls = 0;
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
@@ -995,6 +997,7 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => state.threads.find((value) => value.id === thread.id) || null,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
