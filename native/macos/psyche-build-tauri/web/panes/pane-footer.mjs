@@ -10,8 +10,17 @@ export const FOOTER_TIERS = Object.freeze({
   COMPACT: "compact",
 });
 
+const AGENT_PANE_KINDS = Object.freeze([
+  "coven-chat",
+  "coven-attach",
+  "agent-copilot",
+  "agent-codex",
+  "agent-anthropic",
+  "agent-grok-build",
+]);
+
 export function isAgentPaneKind(kind) {
-  return kind !== "shell" && kind !== "web";
+  return AGENT_PANE_KINDS.includes(kind);
 }
 
 export function footerTier(width) {

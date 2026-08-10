@@ -19,7 +19,7 @@ const {
 } = footerModule;
 
 describe('pane footer model', () => {
-  it('uses only core controls for shell and Web panes', () => {
+  it('uses only core controls for non-agent panes', () => {
     const base = {
       branch: 'feat/footer',
       worktreeLabel: 'footer-pane',
@@ -31,9 +31,25 @@ describe('pane footer model', () => {
       .toEqual(['branch', 'worktree', 'pane']);
     expect(footerItems({ ...base, kind: 'web' }).map((item: { key: string }) => item.key))
       .toEqual(['branch', 'worktree', 'pane']);
+    expect(footerItems({ ...base, kind: 'git' }).map((item: { key: string }) => item.key))
+      .toEqual(['branch', 'worktree', 'pane']);
+    expect(footerItems({ ...base, kind: 'psyche' }).map((item: { key: string }) => item.key))
+      .toEqual(['branch', 'worktree', 'pane']);
     expect(isAgentPaneKind('shell')).toBe(false);
     expect(isAgentPaneKind('web')).toBe(false);
-    expect(isAgentPaneKind('coven-chat')).toBe(true);
+    expect(isAgentPaneKind('git')).toBe(false);
+    expect(isAgentPaneKind('psyche')).toBe(false);
+  });
+
+  it('treats only allowlisted pane kinds as agent-backed', () => {
+    expect([
+      'coven-chat',
+      'coven-attach',
+      'agent-copilot',
+      'agent-codex',
+      'agent-anthropic',
+      'agent-grok-build',
+    ].every((kind) => isAgentPaneKind(kind))).toBe(true);
   });
 
   it('orders agent controls and formats unavailable metrics', () => {
