@@ -395,27 +395,57 @@ final class TerminalSessionRegistryTests: XCTestCase {
         let failedSend = Task {
             await registry.send(Data("first".utf8), toPane: "%1")
         }
-        await client.waitUntilSendStarts(streamID: "stream-%1")
+        await client.waitUntilSendStarts(input: "first")
         let successfulSend = Task {
             await registry.send(Data("second".utf8), toPane: "%2")
         }
-        await client.waitUntilSendStarts(streamID: "stream-%2")
+        await client.waitUntilSendStarts(input: "second")
 
         await client.completeSend(
-            streamID: "stream-%1",
+            input: "first",
             throwing: TerminalControlError.unexpectedResponse
         )
         let failedAccepted = await failedSend.value
         XCTAssertFalse(failedAccepted)
         let paneOneError = registry.sendErrorMessage(forPane: "%1")
 
-        await client.completeSend(streamID: "stream-%2")
+        await client.completeSend(input: "second")
         let successfulAccepted = await successfulSend.value
         XCTAssertTrue(successfulAccepted)
 
         XCTAssertEqual(registry.sendErrorMessage(forPane: "%1"), paneOneError)
         XCTAssertNil(registry.sendErrorMessage(forPane: "%2"))
         XCTAssertEqual(registry.lastErrorMessage, paneOneError)
+    }
+
+    func testOlderSamePaneSuccessCannotClearANewerSendFailure() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1")
+        await client.enableControlledSends()
+
+        let olderSend = Task {
+            await registry.send(Data("older".utf8), toPane: "%1")
+        }
+        await client.waitUntilSendStarts(input: "older")
+        let newerSend = Task {
+            await registry.send(Data("newer".utf8), toPane: "%1")
+        }
+        await client.waitUntilSendStarts(input: "newer")
+
+        await client.completeSend(
+            input: "newer",
+            throwing: TerminalControlError.inputRejected
+        )
+        let newerAccepted = await newerSend.value
+        XCTAssertFalse(newerAccepted)
+        let newerError = registry.sendErrorMessage(forPane: "%1")
+
+        await client.completeSend(input: "older")
+        let olderAccepted = await olderSend.value
+        XCTAssertTrue(olderAccepted)
+
+        XCTAssertEqual(registry.sendErrorMessage(forPane: "%1"), newerError)
     }
 
     func testSendWithNoAttachedTargetReportsFailureRatherThanSuccess() async {
@@ -505,7 +535,7 @@ private actor FakeTerminalClient: TerminalControlling {
     private var attachFailure: (any Error)?
     private var sendFailure: (any Error)?
     private var controlsSends = false
-    private var startedSendStreamIDs: Set<String> = []
+    private var startedSendInputs: Set<String> = []
     private var sendStartWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var sendCompletions: [String: CheckedContinuation<Void, any Error>] = [:]
 
@@ -543,10 +573,11 @@ private actor FakeTerminalClient: TerminalControlling {
 
     func send(_ data: Data, toStream streamID: String) async throws {
         if controlsSends {
-            startedSendStreamIDs.insert(streamID)
-            sendStartWaiters.removeValue(forKey: streamID)?.forEach { $0.resume() }
+            let input = String(decoding: data, as: UTF8.self)
+            startedSendInputs.insert(input)
+            sendStartWaiters.removeValue(forKey: input)?.forEach { $0.resume() }
             try await withCheckedThrowingContinuation { continuation in
-                sendCompletions[streamID] = continuation
+                sendCompletions[input] = continuation
             }
         }
         if let sendFailure { throw sendFailure }
@@ -562,15 +593,15 @@ private actor FakeTerminalClient: TerminalControlling {
         frames
     }
 
-    func waitUntilSendStarts(streamID: String) async {
-        if startedSendStreamIDs.contains(streamID) { return }
+    func waitUntilSendStarts(input: String) async {
+        if startedSendInputs.contains(input) { return }
         await withCheckedContinuation { continuation in
-            sendStartWaiters[streamID, default: []].append(continuation)
+            sendStartWaiters[input, default: []].append(continuation)
         }
     }
 
-    func completeSend(streamID: String, throwing error: (any Error)? = nil) {
-        guard let continuation = sendCompletions.removeValue(forKey: streamID) else {
+    func completeSend(input: String, throwing error: (any Error)? = nil) {
+        guard let continuation = sendCompletions.removeValue(forKey: input) else {
             return
         }
         if let error {
