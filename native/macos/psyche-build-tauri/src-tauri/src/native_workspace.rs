@@ -98,16 +98,13 @@ fn save_workspace_to_inner<F, G, H>(
     value: &Value,
     before_rename: F,
     mut sync_parent_directory: G,
-    restore_workspace_backup: H,
+    mut restore_workspace_backup: H,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
     G: FnMut(&Path) -> Result<(), String>,
-    H: FnOnce(&Path, &Path) -> Result<(), String>,
+    H: FnMut(&Path, &Path) -> Result<(), String>,
 {
-    validate_workspace(value)
-        .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
-
     let parent = path
         .parent()
         .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
@@ -134,6 +131,22 @@ where
         .to_string();
     let temp_path = workspace_temp_path(parent, &file_name);
     let recovery_path = workspace_recovery_path(parent, &file_name);
+
+    if recovery_path.exists() {
+        restore_workspace_backup(recovery_path.as_path(), path).map_err(|e| {
+            format!(
+                "restore pending workspace recovery '{}' to '{}': {}",
+                recovery_path.display(),
+                path.display(),
+                e
+            )
+        })?;
+        sync_parent_directory(parent)?;
+    }
+
+    validate_workspace(value)
+        .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
+
     let mut temp_file = open_temp_file(&temp_path)?;
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
     let mut rollback_guard = if workspace_file_exists(path)? {
@@ -182,7 +195,7 @@ where
             path,
             recovery_path.as_path(),
             rollback_guard.as_mut(),
-            restore_workspace_backup,
+            &mut restore_workspace_backup,
         ) {
             if let Some(guard) = rollback_guard.as_mut() {
                 guard.preserve();
@@ -324,7 +337,7 @@ fn rollback_workspace_after_sync_failure(
     path: &Path,
     rollback_path: &Path,
     rollback_guard: Option<&mut RollbackBackupGuard>,
-    restore_workspace_backup: impl FnOnce(&Path, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
     if rollback_guard.is_some() {
         restore_workspace_backup(rollback_path, path)?;
@@ -503,7 +516,7 @@ fn workspace_save_to_test_hook<F, G, H>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
     G: FnMut(&Path) -> Result<(), String>,
-    H: FnOnce(&Path, &Path) -> Result<(), String>,
+    H: FnMut(&Path, &Path) -> Result<(), String>,
 {
     save_workspace_to_inner(
         path,
@@ -827,6 +840,136 @@ mod tests {
                 .expect("load replacement")
                 .expect("replacement exists"),
             updated
+        );
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_recovers_recovery_copy_before_later_save() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_value();
+        let original_bytes = serde_json::to_vec(&original).expect("serialize original");
+        fs::write(&path, &original_bytes).expect("write original workspace");
+        let first_update = workspace_with_project("first");
+        let later_update = workspace_with_project("later");
+        let recovery = recovery_path(&path);
+
+        workspace_save_to_test_hook(
+            &path,
+            &first_update,
+            |_| Ok(()),
+            |_| Err("parent sync failed".to_string()),
+            |backup, destination| {
+                assert_eq!(backup, recovery);
+                assert_eq!(destination, path);
+                Err("injected restore failure".to_string())
+            },
+        )
+        .expect_err("restore failure should fail");
+
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load failed save")
+                .expect("workspace exists"),
+            first_update
+        );
+        assert_eq!(
+            fs::read(&recovery).expect("retained recovery copy"),
+            original_bytes
+        );
+
+        workspace_save_to_test_hook(
+            &path,
+            &later_update,
+            |temp| {
+                assert!(temp
+                    .file_name()
+                    .expect("temp file name")
+                    .to_string_lossy()
+                    .contains(".psyche-save-"));
+                assert_eq!(
+                    fs::read(&path).expect("workspace restored before save"),
+                    original_bytes
+                );
+                Ok(())
+            },
+            sync_parent_directory,
+            restore_workspace_backup,
+        )
+        .expect("later save should recover and succeed");
+
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load recovered save")
+                .expect("workspace exists"),
+            later_update
+        );
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+        assert!(!recovery.exists());
+    }
+
+    #[test]
+    fn native_workspace_tests_repeated_restore_failure_keeps_recovery_copy() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_value();
+        let original_bytes = serde_json::to_vec(&original).expect("serialize original");
+        fs::write(&path, &original_bytes).expect("write original workspace");
+        let first_update = workspace_with_project("first");
+        let second_update = workspace_with_project("second");
+        let recovery = recovery_path(&path);
+
+        workspace_save_to_test_hook(
+            &path,
+            &first_update,
+            |_| Ok(()),
+            |_| Err("parent sync failed".to_string()),
+            |backup, destination| {
+                assert_eq!(backup, recovery);
+                assert_eq!(destination, path);
+                Err("injected restore failure".to_string())
+            },
+        )
+        .expect_err("restore failure should fail");
+
+        let first_restore_error = workspace_save_to_test_hook(
+            &path,
+            &second_update,
+            |_| Ok(()),
+            |_| Ok(()),
+            |backup, destination| {
+                assert_eq!(backup, recovery);
+                assert_eq!(destination, path);
+                Err("injected restore failure".to_string())
+            },
+        )
+        .expect_err("second restore failure should fail");
+        assert!(first_restore_error.contains("restore pending workspace recovery"));
+        assert!(first_restore_error.contains("injected restore failure"));
+
+        let second_restore_error = workspace_save_to_test_hook(
+            &path,
+            &second_update,
+            |_| Ok(()),
+            |_| Ok(()),
+            |backup, destination| {
+                assert_eq!(backup, recovery);
+                assert_eq!(destination, path);
+                Err("injected restore failure".to_string())
+            },
+        )
+        .expect_err("repeated restore failure should still fail");
+        assert!(second_restore_error.contains("restore pending workspace recovery"));
+        assert!(second_restore_error.contains("injected restore failure"));
+
+        assert_eq!(
+            fs::read(&recovery).expect("retained recovery copy"),
+            original_bytes
+        );
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load blocked save")
+                .expect("workspace exists"),
+            first_update
         );
         assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
     }
