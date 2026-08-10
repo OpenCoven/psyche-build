@@ -107,6 +107,20 @@ describe('Tauri footer status bar shell', () => {
     );
   });
 
+  it('adds a footer-specific narrow breakpoint for the detail header and actions', () => {
+    const section = footerSection(stylesCss);
+
+    expect(section).toMatch(
+      /\.status-bar-trailing\s*\{[^}]*flex:\s*none;[^}]*min-width:\s*max-content;/s
+    );
+    expect(section).toMatch(
+      /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\.status-detail-head\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;[^}]*height:\s*auto;[^}]*min-height:\s*34px;[^}]*padding:\s*4px 10px;[^}]*row-gap:\s*6px;/s
+    );
+    expect(section).toMatch(
+      /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\.status-detail-actions\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;[^}]*justify-content:\s*flex-start;[^}]*flex-wrap:\s*wrap;/s
+    );
+  });
+
   it('keeps the footer CSS section minimal and semantic', () => {
     const section = footerSection(stylesCss);
 

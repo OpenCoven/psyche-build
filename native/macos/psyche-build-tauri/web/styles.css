@@ -2091,6 +2091,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   align-items: center;
   gap: 6px;
   flex: none;
+  min-width: max-content;
   margin-left: auto;
 }
 
@@ -2220,6 +2221,23 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   outline: none;
   border-color: var(--accent-line);
   box-shadow: var(--focus-ring);
+}
+
+@media (max-width: 760px) {
+  .status-detail-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    height: auto;
+    min-height: 34px;
+    padding: 4px 10px;
+    row-gap: 6px;
+  }
+
+  .status-detail-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
 }
 
 .status-live,
