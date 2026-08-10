@@ -40,8 +40,6 @@ instance.
 The implementation uses:
 
 - `scripts/build-macos-app.mjs` for orchestration;
-- `native/macos/psyche-build-tauri/src-tauri/tauri.dev.conf.json` for the
-  dev-only Tauri identity overlay;
 - `__tests__/macosBuildChannels.test.ts` for focused build-channel contracts.
 
 ## Channel identities
@@ -53,11 +51,13 @@ The existing Tauri configuration remains the production source of truth:
 | Stable | `Psyche Build` | `dev.opencoven.psyche` | `~/Applications/Psyche Build.app` |
 | Development | `Psyche Build Dev` | `dev.opencoven.psyche.dev` | `~/Applications/Psyche Build Dev.app` |
 
-Add a Tauri dev-channel config overlay containing only the product name,
-window title, and bundle identifier overrides. Tauri merges that overlay with
-the production config during the dev build. Build settings, security policy,
-icons, minimum macOS version, and application behavior continue to come from
-the production config.
+The builder reads the production Tauri config, deep-clones it, changes only the
+product name, main-window title, and bundle identifier, and writes that
+effective dev config to a temporary file. Tauri config overrides use JSON Merge
+Patch semantics, where an `app.windows` override would replace the complete
+window array, so a partial committed overlay would silently lose production
+window settings. Generating the complete effective config preserves every
+production build setting while avoiding a duplicate config that can drift.
 
 The distinct bundle identifiers give each app separate WebView storage,
 preferences, caches, window restoration, and other identifier-scoped macOS
@@ -122,12 +122,16 @@ The development command runs in the current checkout:
 pnpm --dir native/macos/psyche-build-tauri build:web
 pnpm --dir native/macos/psyche-build-tauri exec tauri build \
   --bundles app \
-  --config src-tauri/tauri.dev.conf.json
+  --config "$generated_dev_config"
 ```
 
 This flow intentionally avoids the full stable gate so rebuilding the
 experimental app remains fast. Compilation, web bundling, and Tauri packaging
 must still succeed before the installed dev app changes.
+
+The generated config is removed after success or failure. Tests compare it
+against the production config and require every value except the three approved
+identity changes to remain equal.
 
 The builder validates that the resulting bundle has product name
 `Psyche Build Dev` and identifier `dev.opencoven.psyche.dev`. A production
@@ -212,7 +216,8 @@ fixture app bundles, and stub command runners. Cover:
 - exact Git-ref resolution and rejection of invalid refs;
 - stable command ordering and full-gate fail-closed behavior;
 - stable isolation from a dirty active checkout;
-- dev overlay contents and production/dev identity separation;
+- generated dev config and production/dev identity separation;
+- generated dev-config cleanup after success and failure;
 - dirty-source provenance for the dev channel;
 - rejection of missing, duplicate, or incorrectly identified app bundles;
 - stable launch-smoke success, early exit, timeout, and exact-process cleanup;
