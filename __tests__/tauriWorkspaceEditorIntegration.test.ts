@@ -512,7 +512,8 @@ describe('native CodeMirror workspace editor surface', () => {
 
   it('gives CodeMirror one bounded scroll surface using the workspace palette', () => {
     expect(stylesCss).toMatch(
-      /\.file-view\s*\{[\s\S]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto;/
+      // tab strip · toolbar · path · editor · status
+      /\.file-view\s*\{[\s\S]*grid-template-rows:\s*auto auto auto minmax\(0, 1fr\) auto;/
     );
     expect(stylesCss).toMatch(/\.file-editor-host\s*\{[\s\S]*overflow:\s*hidden;/);
     expect(stylesCss).toMatch(/\.file-editor-host \.cm-editor\s*\{[\s\S]*height:\s*100%;/);

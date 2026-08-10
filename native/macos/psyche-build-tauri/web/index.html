@@ -80,7 +80,22 @@
             </button>
           </div>
 
+          <div class="sidebar-tabs" role="tablist" aria-label="Sidebar sections">
+            <button class="sidebar-tab is-active" data-sidebar-tab="sessions" type="button" role="tab" aria-selected="true">Sessions</button>
+            <button class="sidebar-tab" data-sidebar-tab="files" type="button" role="tab" aria-selected="false">Files</button>
+          </div>
+
           <div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project"></div>
+
+          <div class="sidebar-files" id="sidebar-files" hidden>
+            <div class="sidebar-subbar">
+              <span class="panel-crumb" id="files-crumb"></span>
+              <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <div class="file-tree" id="file-tree" role="tree" aria-label="Project files"></div>
+          </div>
 
           <div class="sidebar-foot">
             <div class="sidebar-hints">
@@ -134,9 +149,9 @@
 
         <main class="detail" id="detail" data-layout="terminal" data-browser-side="right" data-panel="browser">
           <section class="terminal-area">
-            <div class="tab-strip" id="tab-strip"></div>
             <div class="terminal-host" id="terminal-host"></div>
             <div class="file-view" id="file-view" hidden>
+              <div class="tab-strip" id="tab-strip"></div>
               <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
                 <span class="file-language" id="file-language">Plain Text</span>
                 <span class="file-view-title" id="file-view-title">No file selected</span>
@@ -194,7 +209,6 @@
                   <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
-              <button class="dock-tab" data-panel-btn="files" type="button" aria-pressed="false" title="Files" aria-label="File tree panel">Files</button>
               <button class="dock-tab" data-panel-btn="git" type="button" aria-pressed="false" title="Git, GitHub and diffs" aria-label="Git and diffs panel">Git<span class="dock-tab-count" id="dock-git-count" hidden></span></button>
               <button class="dock-tab" data-panel-btn="browser" type="button" aria-pressed="false" title="Browser (⌘⌥B). Right-click to cycle which side the dock sits on." aria-label="Browser panel">Web</button>
             </div>
@@ -219,19 +233,6 @@
               <div id="browser-tab-strip" class="browser-tab-strip"></div>
               <div id="preview" class="preview-placeholder">
                 <div class="preview-empty">No browser tab yet — type a URL above or press +</div>
-              </div>
-            </div>
-
-            <div class="panel panel-files">
-              <header class="pane-header panel-bar">
-                <span class="panel-title">Files</span>
-                <span class="panel-crumb" id="files-crumb"></span>
-                <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-              </header>
-              <div class="panel-body">
-                <div class="file-tree" id="file-tree" role="tree" aria-label="Project files"></div>
               </div>
             </div>
 
@@ -272,13 +273,6 @@
 
         <nav class="mini-rail dock-mini" id="rail-right" hidden
              role="toolbar" aria-orientation="vertical" aria-label="Panels">
-          <button class="mini-rail-btn" data-panel-btn="files" type="button" aria-pressed="false"
-                  title="Files" aria-label="File tree panel">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <path d="M2.25 4.4c0-.9.7-1.6 1.6-1.6h2.3l1.3 1.5h4.6c.9 0 1.6.7 1.6 1.6v5.7c0 .9-.7 1.6-1.6 1.6H3.85c-.9 0-1.6-.7-1.6-1.6z"
-                    fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
-            </svg>
-          </button>
           <button class="mini-rail-btn" data-panel-btn="git" type="button" aria-pressed="false"
                   title="Git / GitHub" aria-label="Git panel">
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
