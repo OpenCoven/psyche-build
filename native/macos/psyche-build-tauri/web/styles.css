@@ -4,22 +4,29 @@
   color-scheme: dark;
 
   /* Brand — themes below override --rgb-accent plus the two hex stops. The
-     soft/line/glow derivations stay put so a theme only states its colour. */
-  --rgb-accent: 184, 157, 255;
-  --accent: #b89dff;
-  --accent-strong: #9d80f0;
+     soft/line/glow derivations stay put so a theme only states its colour.
+
+     Violet has exactly one job: it marks where keyboard input goes. Focus
+     rings, the focused pane's header tint, the composer caret. It is never a
+     selection fill and never a status — those are neutral and semantic
+     respectively, so the three never get confused for one another. */
+  --rgb-accent: 167, 139, 250;
+  --accent: #a78bfa;
+  --accent-strong: #8f6ff0;
   --accent-soft: rgba(var(--rgb-accent), 0.14);
   --accent-line: rgba(var(--rgb-accent), 0.28);
   --accent-glow: rgba(var(--rgb-accent), 0.55);
+  --focus-ring: 0 0 0 3px rgba(var(--rgb-accent), 0.15);
 
   /* Surface ramp, darkest to lightest. Every translucent chrome background in
      the file resolves to one of these five, so a theme restyles the whole
-     window by restating them. */
-  --rgb-deep: 13, 11, 22;   /* titlebar, rails, panel bars */
-  --rgb-s1:   20, 18, 30;   /* tab strip, command bar, panes */
-  --rgb-s2:   28, 25, 42;   /* hover fills */
-  --rgb-s3:   38, 33, 56;   /* raised fills */
-  --rgb-term: 13, 12, 20;   /* terminal + file view */
+     window by restating them. The default ramp is neutral by design: colour
+     in the chrome competes with the colour that carries meaning. */
+  --rgb-deep: 11, 11, 13;   /* bg/0 — titlebar, rails, panel bars */
+  --rgb-s1:   16, 16, 20;   /* bg/1 — tab strip, command bar, panes */
+  --rgb-s2:   23, 23, 27;   /* bg/2 — inputs, hover fills */
+  --rgb-s3:   30, 30, 36;   /* bg/3 — raised fills, selection */
+  --rgb-term:  8,  8, 10;   /* terminal + file view */
 
   /* Surfaces — translucent over the macOS HudWindow vibrancy material */
   /* Master background-opacity multiplier. 1 reproduces the original design;
@@ -37,28 +44,43 @@
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
 
-  /* Text */
-  --text: #f5f2fb;
-  --text-soft: #c8c2d8;
-  --muted: #8a8499;
+  /* Text — contrast measured on bg/1. --faint is decorative only; nothing a
+     user has to read is allowed to land on it. */
+  --text: #ededf0;        /* ~15.2:1 — titles, values */
+  --text-soft: #b6b6bf;   /*  ~8.7:1 — body, transcript */
+  --muted: #8b8b96;       /*  ~5.2:1 — meta, >= 10.5px */
+  --faint: #6e6e79;       /*  ~3.4:1 — decorative hints */
 
-  /* Semantic */
-  --ok: #7be3b3;
+  /* Semantic — operational truth. Always paired with a word, count or shape,
+     never colour alone. */
+  --ok: #34d399;
   --warn: #fbbf24;
   --error: #f87171;
+
+  /* Focus-set membership. Squares, never dots, so a set swatch can't be
+     mistaken for a round status light. */
+  --set-1: #5eead4;
+  --set-2: #f0abfc;
+  --set-3: #93c5fd;
+  --set-4: #bef264;
 
   /* Geometry */
   --titlebar-h: 40px;
   --titlebar-pad-l: 78px;   /* leaves room for traffic lights */
   --rail-w: 44px;
   --sidebar-w: 276px;
+  --sidebar-min: 220px;
+  --sidebar-max: 420px;
   --mini-rail-w: 46px;
   --tab-h: 30px;
   --command-h: 46px;
   --composer-h: 54px;
   --dock-tabs-h: 40px;
+  --session-row-h: 44px;
   --pane-head-h: 32px;
   --pane-gap: 2px;
+  --pane-min-w: 200px;
+  --pane-min-h: 110px;
   --browser-bar-h: 38px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
@@ -377,10 +399,10 @@ kbd {
 .session-coven-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   width: 100%;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-soft);
@@ -388,6 +410,9 @@ kbd {
   position: relative;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
+/* Border-box 44px: the row is a fixed rhythm the eye can scan down, and the
+   two-line text column is what sets it. */
+.session-row { min-height: var(--session-row-h); }
 .session-row:hover { background: var(--surface-2); color: var(--text); }
 .session-row-wrap {
   position: relative;
@@ -404,9 +429,14 @@ kbd {
   transform: translateY(-50%);
 }
 .session-row-wrap:hover .session-row:not(.active) { background: var(--surface-2); color: var(--text); }
+
+/* Selection is deliberately colourless — a neutral raised fill (bg/3). The
+   violet is a separate signal layered on top: the 2px bar means "this row is
+   the pane the keyboard is talking to", which is why it can coexist with the
+   fill instead of replacing it. */
 .session-row.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-line);
+  background: var(--surface-3);
+  border-color: transparent;
   color: var(--text);
 }
 .session-row.active::before {
@@ -416,45 +446,49 @@ kbd {
   top: 50%;
   transform: translateY(-50%);
   width: 2px;
-  height: 18px;
+  height: 22px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  background: var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
 }
-.session-row:focus-visible { outline: none; border-color: var(--accent-line); }
+.session-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 .session-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
   border-radius: 999px;
   background: var(--muted);
   transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 .session-row.running .dot,
-.session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
+.session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
 .session-row.exited  .session-dot { background: var(--error); }
 .session-row.starting .session-dot { background: var(--warn); animation: session-dot-pulse 1.1s ease-in-out infinite; }
 @keyframes session-dot-pulse { 50% { opacity: 0.35; } }
 
+/* No gap: the two line-heights plus the row's padding come to just under 44px,
+   so min-height lands the row on exactly the designed 44 instead of 45. */
 .session-text {
   min-width: 0;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
 }
 .session-title {
   display: block;
-  font-size: 13.5px;
-  line-height: 1.35;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .session-sub {
   display: block;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
   line-height: 1.3;
   color: var(--muted);
   white-space: nowrap;
@@ -851,7 +885,8 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 .terminal-area {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.55));
@@ -988,8 +1023,8 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane {
   display: grid;
   grid-template-rows: 24px minmax(0, 1fr);
-  min-width: 320px;
-  min-height: 120px;
+  min-width: var(--pane-min-w);
+  min-height: var(--pane-min-h);
   height: 100%;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -1022,14 +1057,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   flex: none;
   text-transform: lowercase;
 }
-.terminal-pane-retry,
 .terminal-pane-close {
   flex: none;
   border: 0;
   background: transparent;
   color: var(--muted);
 }
-.terminal-pane-retry:hover,
 .terminal-pane-close:hover {
   color: var(--text);
 }
@@ -1068,9 +1101,27 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   grid-template-rows: var(--pane-head-h) minmax(0, 1fr);
   border-radius: 4px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.86));
+  /* Panes degrade on their own width, not the window's: a pane can be narrow
+     in a wide window and wide in a narrow one, and it is the pane's width that
+     decides whether its meta line still fits. */
+  container-type: inline-size;
+  container-name: pane;
 }
-.terminal-pane.focused { border-color: var(--accent-line); }
+
+/* The focused pane is the one place violet fills anything. Ring plus header
+   tint, matched by the 2px bar on its sidebar row. */
+.terminal-pane.focused {
+  border-color: rgba(var(--rgb-accent), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.22);
+}
+
+/* Six tracks: glyph · label · status · span · maximise · close. The label is
+   the only flexible one, so the buttons keep their footprint at any width
+   instead of being squeezed out of the row. */
 .terminal-pane-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
   background: rgba(255, 255, 255, 0.025);
@@ -1078,6 +1129,16 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   user-select: none;
 }
 .terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
+
+/* Title and meta share one track and ellipsize independently: the title gives
+   up space last (flex 0 1) and the meta first (flex 0 4). */
+.terminal-pane-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
 .terminal-pane-glyph {
   flex: none;
   width: 19px;
@@ -1095,6 +1156,11 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-glyph.is-term { font-size: 8px; }
 .terminal-pane-title {
   flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
   font-size: 12.5px;
   font-weight: 600;
 }
@@ -1108,28 +1174,84 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   font-size: 10.5px;
   color: var(--muted);
 }
-.terminal-pane-spacer { flex: 1 1 auto; }
+
+/* Status is a worded chip, never a bare colour. Running is the exception and
+   only because it is the steady state of nearly every pane: a static green dot
+   carries it, and the word stays in the aria-label. */
 .terminal-pane-status {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
   font-size: 10px;
-  font-weight: 600;
-  color: var(--ok);
+  font-weight: 700;
+  white-space: nowrap;
 }
-.terminal-pane-status.starting { color: var(--warn); }
-.terminal-pane-status.exited { color: var(--muted); }
-.terminal-pane-retry,
+.terminal-pane-status:empty { display: none; }
+.terminal-pane-status.starting {
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--warn);
+}
+.terminal-pane-status.failed {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--error);
+}
+.terminal-pane-status.exited {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+}
+.terminal-pane-status.running {
+  display: block;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+  align-self: center;
+}
+
+/* Header controls: span cycle, maximise, close. Identical footprint so the
+   three read as one group and the row never reflows as states change. */
+.terminal-pane-span,
+.terminal-pane-max,
 .terminal-pane-close {
+  flex: none;
   width: 22px;
   height: 20px;
+  border: 0;
   border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 11px;
   line-height: 1;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
-.terminal-pane-retry:hover,
+.terminal-pane-close { font-size: 13px; }
+.terminal-pane-span:hover,
+.terminal-pane-max:hover,
 .terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
+.terminal-pane-span:focus-visible,
+.terminal-pane-max:focus-visible,
+.terminal-pane-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* An engaged span or maximise is a mode you are currently in, and violet is
+   how this app says "here". */
+.terminal-pane-span[aria-pressed="true"],
+.terminal-pane-max[aria-pressed="true"] { color: var(--accent); }
+
+/* Pane tiers. Information drops in reverse order of usefulness: the meta line
+   is repeated in the sidebar, the status word is not. */
+@container pane (max-width: 460px) {
+  .terminal-pane-meta { display: none; }
+}
+@container pane (max-width: 300px) {
+  .terminal-pane-status:not(.running) { display: none; }
+  .terminal-pane-header { gap: 4px; padding: 0 4px 0 6px; }
+}
 .terminal-pane-divider {
   background: transparent;
   border-color: transparent;
@@ -1182,6 +1304,167 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 @media (prefers-reduced-motion: reduce) {
   .pane-drop-indicator { transition: none; }
+}
+
+/* -------- Focus sets --------
+   A set is a colour-coded subset of the panes on one canvas. Membership shows
+   as a square swatch on the row; the only chrome a set ever gets is the pick
+   bar, and that exists only while you are picking. */
+
+.set-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+  animation: menu-rise 140ms ease-out;
+}
+.set-pick-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 650;
+  color: #d6c8ff;
+}
+.set-pick-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: session-dot-pulse 1.4s ease-in-out infinite;
+}
+.set-pick-create {
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: #d6c8ff;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 3px 11px;
+  transition: background var(--transition-fast);
+}
+.set-pick-create:hover:not(:disabled) { background: rgba(var(--rgb-accent), 0.26); }
+/* Disabled rather than hidden: the count is the feedback that picking works. */
+.set-pick-create:disabled { opacity: 0.35; }
+.set-pick-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.set-pick-cancel:hover { color: var(--text); }
+.set-pick-create:focus-visible,
+.set-pick-cancel:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* Picking dims the canvas and rings the picks. The overlay is a real button so
+   the click never reaches the terminal underneath. */
+.terminal-pane { position: relative; }
+.terminal-pane.is-picking { opacity: 0.55; }
+.terminal-pane.is-picked {
+  opacity: 1;
+  border-color: rgba(var(--rgb-accent), 0.7);
+}
+.pane-pick-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.terminal-pane.is-picked .pane-pick-overlay { background: rgba(var(--rgb-accent), 0.10); }
+.pane-pick-overlay:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+
+.session-row.is-picking { opacity: 0.7; }
+.session-row.is-picked {
+  opacity: 1;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-pick-bar { animation: none; }
+  .set-pick-dot { animation: none; }
+}
+
+/* -------- Pane minimap --------
+   Focus mode draws one pane, so the minimap is how the rest stay reachable. */
+
+.pane-minimap {
+  width: 78px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  padding: 8px 6px 4px 0;
+  scrollbar-width: none;
+}
+.pane-minimap::-webkit-scrollbar { display: none; }
+.minimap-pane {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.8));
+  opacity: 0.75;
+  transition: opacity var(--transition-fast), border-color var(--transition-fast);
+}
+.minimap-pane:hover { opacity: 1; border-color: var(--accent-line); }
+.minimap-pane.is-current {
+  opacity: 1;
+  border-color: rgba(var(--rgb-accent), 0.55);
+  background: rgba(var(--rgb-accent), 0.08);
+}
+.minimap-pane:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.minimap-head { display: flex; align-items: center; gap: 4px; width: 100%; }
+.minimap-glyph {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--muted);
+}
+.minimap-dot {
+  margin-left: auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.minimap-dot.running { background: var(--ok); }
+.minimap-dot.starting { background: var(--warn); }
+.minimap-dot.exited { background: var(--error); }
+/* A blank slab, not a live preview: it reads as "a pane is here" at 66px wide
+   without paying to render a second terminal. */
+.minimap-body {
+  height: 26px;
+  border-radius: 3px;
+  background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.9));
+}
+.minimap-name {
+  width: 100%;
+  font-size: 9px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
 }
 
 /* -------- Empty canvas -------- */
@@ -1630,9 +1913,14 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    terminal's grid row. An author `display` beats the hidden attribute's UA
    rule, so [hidden] has to be restored explicitly. */
 
-.tab-strip     { grid-row: 1; }
-.terminal-host { grid-row: 2; }
-.file-view     { grid-row: 2; }
+/* Row 2 and column 2 are the transient ones: the focus-set pick bar and the
+   focus-mode minimap. Both tracks are `auto`, so an absent element costs
+   nothing rather than reserving a gap. */
+.tab-strip     { grid-row: 1; grid-column: 1 / -1; }
+.set-pick-bar  { grid-row: 2; grid-column: 1 / -1; }
+.terminal-host { grid-row: 3; grid-column: 1; }
+.file-view     { grid-row: 3; grid-column: 1 / -1; }
+.pane-minimap  { grid-row: 3; grid-column: 2; }
 
 .file-view[hidden] { display: none; }
 .file-view {
@@ -2786,7 +3074,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .new-pane-sep { height: 1px; background: var(--border); margin: 4px 6px; }
 
-/* Session rows gain a kind glyph, an on-canvas marker, and a state chip. */
+/* Session row anatomy, left to right: git-state glyph · name (+ on-canvas mark,
+   + set swatches) over meta · status dot + worded chip · slide-out close. */
+
+/* The leading glyph reports the worktree's git state, not the pane's kind —
+   the kind is already in the meta line, and "does this lane have work in it"
+   is the question you actually scan the sidebar for. */
 .session-glyph {
   flex: none;
   width: 20px;
@@ -2798,11 +3091,27 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   background: rgba(255, 255, 255, 0.05);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
 }
-.session-row.kind-agent .session-glyph { color: var(--accent); }
+.session-glyph.git-dirty  { color: var(--warn); }
+.session-glyph.git-staged { color: var(--ok); }
+.session-glyph.git-clean  { color: var(--muted); }
 .session-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .session-oncanvas { flex: none; color: var(--accent); display: inline-flex; }
+
+/* Set membership is a square in the set's colour. Square vs. round is the
+   whole distinction from a status dot, so it must never be rounded past 2px. */
+.session-sets { flex: none; display: inline-flex; align-items: center; gap: 3px; }
+.session-set-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--set-1);
+}
+.session-set-swatch[data-set="2"] { background: var(--set-2); }
+.session-set-swatch[data-set="3"] { background: var(--set-3); }
+.session-set-swatch[data-set="4"] { background: var(--set-4); }
+
 .session-state {
   flex: none;
   display: flex;
@@ -2821,6 +3130,39 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   white-space: nowrap;
 }
 .session-chip.muted { background: rgba(255, 255, 255, 0.07); color: var(--muted); }
+
+/* Closing a pane kills a process, so one click can't do it. The × swaps for a
+   countdown pill that cancels itself — the fast path stays one gesture, but
+   the destructive half needs a second, deliberate one. */
+.session-close-confirm {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  border-radius: 6px;
+  background: rgba(40, 18, 20, 0.98);
+  color: #f4a6a6;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  animation: close-confirm-slide 170ms ease-out;
+}
+.session-close-confirm:hover { background: rgba(248, 113, 113, 0.2); color: #ffd7d7; }
+.session-close-confirm:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+@keyframes close-confirm-slide {
+  from { opacity: 0; transform: translateY(-50%) translateX(12px); }
+  to   { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-close-confirm { animation: none; }
+}
 
 /* -------- Toast -------- */
 

@@ -890,6 +890,7 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
@@ -921,6 +922,7 @@ describe('native Coven launch routing', () => {
     const state = { threads: [thread], activeThreadId: thread.id };
     let stopCalls = 0;
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
@@ -995,6 +997,7 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => state.threads.find((value) => value.id === thread.id) || null,
       detachThreadPane: () => null,
       pendingDataBuffers: new Map(),
@@ -1107,37 +1110,24 @@ describe('native Coven launch routing', () => {
     },
   );
 
-  it('shows one retry control only for failed and exited panes', () => {
-    const retry = { hidden: false, setAttribute: () => undefined };
-    const attributes = new Map<string, string>();
-    const thread = {
-      name: 'Coven', status: 'starting', paneTitle: { textContent: '' },
-      paneStatus: { textContent: '' }, paneRetry: retry,
-      paneClose: { setAttribute: (key: string, value: string) => attributes.set(key, value) },
-    };
-    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
-      functionSource('syncThreadPaneMetadata'), {},
-    );
-    syncThreadPaneMetadata(thread);
-    expect(retry.hidden).toBe(true);
-    thread.status = 'failed';
-    syncThreadPaneMetadata(thread);
-    expect(retry.hidden).toBe(false);
-    thread.status = 'running';
-    syncThreadPaneMetadata(thread);
-    expect(retry.hidden).toBe(true);
-    thread.status = 'exited';
-    (thread as typeof thread & { startInFlight: boolean }).startInFlight = true;
-    syncThreadPaneMetadata(thread);
-    expect(retry.hidden).toBe(true);
-    (thread as typeof thread & { startInFlight: boolean }).startInFlight = false;
-    syncThreadPaneMetadata(thread);
-    expect(retry.hidden).toBe(false);
-    expect(attributes.get('aria-label')).toBe('Stop and close Coven');
+  it('offers retry from the pane menu only for failed and exited panes', () => {
+    const source = functionSource('mountTerminal');
 
-    const mount = functionSource('mountTerminal');
-    expect(mount.match(/className = "terminal-pane-retry"/g)).toHaveLength(1);
-    expect(mount).toMatch(/retry\.addEventListener\("click", function \(event\) \{[\s\S]*event\.stopPropagation\(\);[\s\S]*retryThread\(thread\.id\)/);
+    // The header dropped its retry button, so the pane's context menu is the
+    // only place the action can live - the sidebar row cannot carry it, since
+    // exited rows are hidden from the rail.
+    expect(source).not.toContain('terminal-pane-retry');
+    expect(source).toMatch(
+      /thread\.status === "exited" \|\| thread\.status === "failed"[\s\S]*label: "Retry"/
+    );
+    expect(source).toMatch(/label: "Retry"[\s\S]*retryThread\(thread\.id\)/);
+
+    // The in-flight guard that the old hidden-button logic enforced still lives
+    // in retryThread itself, which its own lifecycle tests cover.
+    expect(functionSource('retryThread')).toMatch(/thread\.startInFlight \|\| thread\.closeStarted/);
+    expect(functionSource('retryThread')).toMatch(
+      /thread\.status !== "exited" && thread\.status !== "failed"/
+    );
   });
 
   it('routes native defaults to Coven while retaining explicit shell and Psyche commands', () => {

@@ -25,6 +25,8 @@ describe('Tauri physical pane tree', () => {
       'moveLeaf',
       'removeLeaf',
       'resizeSplit',
+      'retainThreads',
+      'spanLayout',
       'splitOrientation',
     ]);
   });
@@ -437,6 +439,135 @@ describe('Tauri pane tree 2D tiling', () => {
     expect(panes.moveLeaf(tree, 'leaf-a', 'leaf-b', 'nowhere', 's')).toBe(tree);
     expect(panes.moveLeaf(lone, 'leaf-a', 'leaf-a', 'left', 's')).toBe(lone);
     expect(panes.moveLeaf(null, 'leaf-a', 'leaf-b', 'left', 's')).toBe(null);
+  });
+
+  describe('retainThreads', () => {
+    const trio = () => panes.insertBelow(
+      column(), 'leaf-b', panes.createLeaf('leaf-c', 'thread-c'), 'split-2',
+    );
+
+    test('keeps the named panes and collapses the splits left holding one child', () => {
+      const kept = panes.retainThreads(trio(), ['thread-a', 'thread-c']);
+
+      expect(panes.leafIds(kept)).toEqual(['leaf-a', 'leaf-c']);
+      // split-2 lost leaf-b, so it collapses instead of leaving an empty slot.
+      expect(JSON.stringify(kept)).not.toContain('split-2');
+    });
+
+    test('accepts a Set as readily as an array', () => {
+      const kept = panes.retainThreads(trio(), new Set(['thread-b']));
+
+      expect(kept).toMatchObject({ type: 'leaf', id: 'leaf-b' });
+    });
+
+    test('returns null when nothing survives, so callers can tell empty from all', () => {
+      expect(panes.retainThreads(trio(), [])).toBeNull();
+      expect(panes.retainThreads(trio(), ['thread-gone'])).toBeNull();
+      expect(panes.retainThreads(null, ['thread-a'])).toBeNull();
+    });
+
+    test('returns the same root when every pane is kept', () => {
+      const tree = trio();
+
+      expect(panes.retainThreads(tree, ['thread-a', 'thread-b', 'thread-c'])).toBe(tree);
+    });
+
+    test('leaves the tiled tree untouched', () => {
+      const tree = trio();
+      const snapshot = JSON.stringify(tree);
+
+      panes.retainThreads(tree, ['thread-a']);
+
+      expect(JSON.stringify(tree)).toBe(snapshot);
+    });
+
+    test('produces a layout the rect maths can place', () => {
+      const kept = panes.retainThreads(trio(), ['thread-a', 'thread-c']);
+      const result = panes.layoutRects(kept, { x: 0, y: 0, width: 900, height: 600 }, minimums);
+
+      expect(result.leaves).toHaveLength(2);
+      for (const geometry of result.leaves) {
+        expect(geometry.height).toBeGreaterThanOrEqual(minimums.height);
+      }
+    });
+  });
+
+  describe('spanLayout', () => {
+    // Three panes, so there is a genuine "the others" to stack.
+    const trio = () => panes.insertBelow(
+      column(), 'leaf-b', panes.createLeaf('leaf-c', 'thread-c'), 'split-2',
+    );
+
+    test('gives the spanned pane a full column and stacks the rest beside it', () => {
+      const spanned = panes.spanLayout(trio(), 'leaf-b', 'row', 'span');
+
+      expect(spanned.orientation).toBe('row');
+      expect(spanned.first).toMatchObject({ type: 'leaf', id: 'leaf-b' });
+      // The others keep their order and stack along the opposite axis.
+      expect(spanned.second.orientation).toBe('column');
+      expect(panes.leafIds(spanned.second)).toEqual(['leaf-a', 'leaf-c']);
+      expect(panes.leafIds(spanned)).toEqual(['leaf-b', 'leaf-a', 'leaf-c']);
+    });
+
+    test('gives the spanned pane a full row and lines the rest up below', () => {
+      const spanned = panes.spanLayout(trio(), 'leaf-a', 'column', 'span');
+
+      expect(spanned.orientation).toBe('column');
+      expect(spanned.first).toMatchObject({ type: 'leaf', id: 'leaf-a' });
+      expect(spanned.second.orientation).toBe('row');
+      expect(panes.leafIds(spanned.second)).toEqual(['leaf-b', 'leaf-c']);
+    });
+
+    test('splits the remainder into equal shares rather than halving away', () => {
+      const four = panes.insertBelow(
+        trio(), 'leaf-c', panes.createLeaf('leaf-d', 'thread-d'), 'split-3',
+      );
+      const spanned = panes.spanLayout(four, 'leaf-a', 'row', 'span');
+
+      // Three others: the first divider gives away 1/3, the next 1/2 of what
+      // is left — three equal shares.
+      expect(spanned.second.ratio).toBeCloseTo(1 / 3);
+      expect(spanned.second.second.ratio).toBeCloseTo(1 / 2);
+    });
+
+    test('is deterministic, so a rebuild keeps the ids its dividers resized', () => {
+      const first = panes.spanLayout(trio(), 'leaf-b', 'row', 'span');
+      const second = panes.spanLayout(trio(), 'leaf-b', 'row', 'span');
+
+      expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+      expect(first.id).toBe('span-main');
+    });
+
+    test('leaves the tiled tree untouched', () => {
+      const tree = trio();
+      const snapshot = JSON.stringify(tree);
+
+      panes.spanLayout(tree, 'leaf-b', 'row', 'span');
+
+      expect(JSON.stringify(tree)).toBe(snapshot);
+    });
+
+    test('returns the original root when there is nothing to span', () => {
+      const tree = trio();
+      const lone = panes.createLeaf('leaf-a', 'thread-a');
+
+      expect(panes.spanLayout(tree, 'missing', 'row', 'span')).toBe(tree);
+      expect(panes.spanLayout(lone, 'leaf-a', 'row', 'span')).toBe(lone);
+      expect(panes.spanLayout(null, 'leaf-a', 'row', 'span')).toBe(null);
+    });
+
+    test('produces a layout the rect maths can place', () => {
+      const spanned = panes.spanLayout(trio(), 'leaf-b', 'row', 'span');
+      const rect = { x: 0, y: 0, width: 1200, height: 700 };
+
+      const result = panes.layoutRects(spanned, rect, minimums);
+
+      expect(result.leaves).toHaveLength(3);
+      for (const geometry of result.leaves) {
+        expect(geometry.width).toBeGreaterThanOrEqual(minimums.width);
+        expect(geometry.height).toBeGreaterThanOrEqual(minimums.height);
+      }
+    });
   });
 
   test('keeps mixed row-and-column layouts inside their rect', () => {

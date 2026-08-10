@@ -122,6 +122,83 @@ export function moveLeaf(root, leafId, targetLeafId, position, splitId) {
   return insertRelative(pruned, targetLeafId, { ...moving }, splitId, position);
 }
 
+/**
+ * Keep only the leaves whose threadId is in `threadIds`, collapsing any split
+ * left holding a single child. Used to scope the canvas to a focus set without
+ * touching the tiled tree — the panes that drop out are still in the layout,
+ * they are simply not drawn.
+ *
+ * Returns null when nothing survives, so the caller can tell "this set is
+ * empty" from "this set is everything".
+ */
+export function retainThreads(root, threadIds) {
+  if (!root) return null;
+  const keep = threadIds instanceof Set ? threadIds : new Set(threadIds || []);
+  if (root.type === "leaf") return keep.has(root.threadId) ? root : null;
+
+  const first = retainThreads(root.first, keep);
+  const second = retainThreads(root.second, keep);
+  if (!first) return second;
+  if (!second) return first;
+  if (first === root.first && second === root.second) return root;
+  return { ...root, first, second };
+}
+
+/**
+ * Re-tile the whole canvas around one pane. `orientation` is the axis of the
+ * top-level split, so ROW gives the pane a full column with the others stacked
+ * beside it, and COLUMN gives it a full row with the others lined up below.
+ *
+ * The result is a *derived* tree — the caller keeps its tiled root untouched
+ * and rebuilds this one whenever the membership or the spanned pane changes.
+ * That is why the split ids are deterministic (`<idPrefix>-0`, `-1`, …): a
+ * rebuild has to land on the same ids or every divider would lose its ratio.
+ *
+ * Returns the original root when there is nothing to span — no pane, an
+ * unknown pane, or a canvas of one.
+ */
+export function spanLayout(root, leafId, orientation, idPrefix) {
+  if (!root) return root;
+  const target = findLeafById(root, leafId);
+  if (!target) return root;
+
+  const others = leafIds(root)
+    .filter((id) => id !== leafId)
+    .map((id) => findLeafById(root, id))
+    .filter(Boolean);
+  if (!others.length) return root;
+
+  const primaryAxis = orientation === ROW ? ROW : COLUMN;
+  // The others stack along the opposite axis: a pane holding a full column
+  // leaves a column beside it, which is filled top to bottom.
+  const crossAxis = primaryAxis === ROW ? COLUMN : ROW;
+  const prefix = idPrefix || "span";
+
+  // Right-leaning chain with descending ratios, so n panes end up n equal
+  // shares rather than halving away to nothing.
+  let rest = { ...others[others.length - 1] };
+  for (let index = others.length - 2; index >= 0; index -= 1) {
+    const remaining = others.length - index;
+    rest = {
+      type: "split",
+      id: `${prefix}-${index}`,
+      orientation: crossAxis,
+      ratio: 1 / remaining,
+      first: { ...others[index] },
+      second: rest,
+    };
+  }
+
+  return {
+    type: "split",
+    id: `${prefix}-main`,
+    orientation: primaryAxis,
+    ratio: 0.5,
+    first: { ...target },
+    second: rest,
+  };
+}
+
 function nonNegativeFinite(value) {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
