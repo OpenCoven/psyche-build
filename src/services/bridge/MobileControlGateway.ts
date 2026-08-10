@@ -1,9 +1,10 @@
-import type { StreamId } from '../../daemon/protocol.js';
+import type { PaneSpawnResult, StreamId } from '../../daemon/protocol.js';
 import { decodeBase64Payload } from '../../utils/base64.js';
 import type { ReadonlyWorkspaceSnapshot } from '../../workspace/snapshot.js';
 import type {
   MobileControlRequest,
   MobileControlResponse,
+  MobilePaneSpawnRequest,
   MobileTerminalReplayMode,
 } from './wireProtocol.js';
 
@@ -40,6 +41,17 @@ export interface MobileControlGatewayOptions {
     cols: number,
     rows: number,
   ) => Promise<void>;
+  spawnPane?: (request: MobilePaneSpawnRequest) => Promise<PaneSpawnResult>;
+  killPane?: (paneId: string) => Promise<void>;
+  updatePaneMeta?: (
+    paneId: string,
+    meta: { title?: string; agent?: string },
+  ) => Promise<void>;
+  /**
+   * Invoked only once a mutation actually changed host state, so a replayed
+   * idempotent request does not announce a change that did not happen.
+   */
+  onWorkspaceChanged?: () => void;
 }
 
 export interface MobileControlGatewayContext {
@@ -59,7 +71,14 @@ export class MobileControlGatewayError extends Error {
   }
 }
 
+const MAX_REMEMBERED_SPAWNS = 128;
+
 export class MobileControlGateway {
+  private readonly spawnByKey = new Map<string, {
+    fingerprint: string;
+    execution: Promise<PaneSpawnResult>;
+  }>();
+
   constructor(private readonly options: MobileControlGatewayOptions) {}
 
   async handle(
@@ -132,6 +151,61 @@ export class MobileControlGateway {
         );
         return { type: 'ack', requestId, ok: true };
       }
+      case 'panes.spawn': {
+        const spawnPane = this.require(this.options.spawnPane, requestId);
+        const spawn = request as MobilePaneSpawnRequest;
+        const key = requireNonEmpty(field(request, 'idempotencyKey'), 'idempotencyKey', requestId);
+        const projectId = requireNonEmpty(field(request, 'projectId'), 'projectId', requestId);
+        const cwd = requireNonEmpty(field(request, 'cwd'), 'cwd', requestId);
+
+        await this.requireScope(requestId, (workspace) =>
+          workspace.projects.some((project) =>
+            project.id === projectId
+            && (project.root === cwd
+              || project.worktrees.some((worktree) => worktree.path === cwd))),
+          'launch target is not a published project or worktree');
+
+        const { result, replayed } = await this.runSpawnOnce(
+          key,
+          requestId,
+          spawn,
+          () => spawnPane(spawn),
+        );
+        if (!replayed) this.options.onWorkspaceChanged?.();
+        return {
+          type: 'panes.spawn.result',
+          requestId,
+          id: result.id,
+          pane: result.pane,
+          worktreePath: result.worktreePath,
+          branch: result.branch,
+        };
+      }
+      case 'panes.kill': {
+        const killPane = this.require(this.options.killPane, requestId);
+        const paneId = requireNonEmpty(field(request, 'id'), 'id', requestId);
+        await this.requirePublishedPane(requestId, paneId);
+        await killPane(paneId);
+        this.options.onWorkspaceChanged?.();
+        return { type: 'ack', requestId, ok: true };
+      }
+      case 'panes.meta': {
+        const updatePaneMeta = this.require(this.options.updatePaneMeta, requestId);
+        const paneId = requireNonEmpty(field(request, 'id'), 'id', requestId);
+        const title = optionalString(field(request, 'title'), 'title', requestId);
+        const agent = optionalString(field(request, 'agent'), 'agent', requestId);
+        if (title === undefined && agent === undefined) {
+          throw new MobileControlGatewayError(
+            'invalid_control_request',
+            'panes.meta needs a title or an agent to change',
+            requestId,
+          );
+        }
+        await this.requirePublishedPane(requestId, paneId);
+        await updatePaneMeta(paneId, { title, agent });
+        this.options.onWorkspaceChanged?.();
+        return { type: 'ack', requestId, ok: true };
+      }
       case 'hello':
         throw new MobileControlGatewayError(
           'invalid_control_request',
@@ -145,6 +219,72 @@ export class MobileControlGateway {
           requestId,
         );
     }
+  }
+
+  /**
+   * One execution per idempotency key. A retry after a dropped reply replays
+   * the first outcome rather than spawning a second pane; the same key with a
+   * different payload is a client bug and is refused instead of silently
+   * returning something the caller did not ask for.
+   */
+  private async runSpawnOnce(
+    key: string,
+    requestId: string,
+    request: MobilePaneSpawnRequest,
+    launch: () => Promise<PaneSpawnResult>,
+  ): Promise<{ result: PaneSpawnResult; replayed: boolean }> {
+    const fingerprint = spawnFingerprint(request);
+    const prior = this.spawnByKey.get(key);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) {
+        throw new MobileControlGatewayError(
+          'idempotency_conflict',
+          'idempotency key reused with a different payload',
+          requestId,
+        );
+      }
+      return { result: await prior.execution, replayed: true };
+    }
+
+    const execution = launch();
+    this.spawnByKey.set(key, { fingerprint, execution });
+    // Bounded: the map would otherwise grow for the life of the daemon.
+    if (this.spawnByKey.size > MAX_REMEMBERED_SPAWNS) {
+      const oldest = this.spawnByKey.keys().next().value;
+      if (oldest !== undefined) this.spawnByKey.delete(oldest);
+    }
+
+    try {
+      return { result: await execution, replayed: false };
+    } catch (error) {
+      // A failure is not an outcome worth replaying — the client must be able
+      // to retry the same key once the cause is fixed.
+      this.spawnByKey.delete(key);
+      throw error;
+    }
+  }
+
+  /** Nothing mutates a target the workspace does not publish. */
+  private async requireScope(
+    requestId: string,
+    predicate: (workspace: ReadonlyWorkspaceSnapshot) => boolean,
+    message: string,
+  ): Promise<void> {
+    const { workspace } = await this.options.workspaceSnapshot();
+    if (!predicate(workspace)) {
+      throw new MobileControlGatewayError('unknown_target', message, requestId);
+    }
+  }
+
+  private requirePublishedPane(requestId: string, paneId: string): Promise<void> {
+    return this.requireScope(
+      requestId,
+      (workspace) => workspace.projects.some((project) =>
+        project.projectPanes.some((pane) => pane.id === paneId)
+        || project.worktrees.some((worktree) =>
+          worktree.panes.some((pane) => pane.id === paneId))),
+      'pane is not published by this host',
+    );
   }
 
   /** A command the host did not wire up is unsupported, never a crash. */
@@ -199,6 +339,29 @@ function requireDimension(value: unknown, field: string, requestId: string): num
     );
   }
   return value;
+}
+
+function optionalString(value: unknown, field: string, requestId: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw new MobileControlGatewayError(
+      'invalid_control_request',
+      `${field} must be a string`,
+      requestId,
+    );
+  }
+  return value;
+}
+
+/**
+ * The launch itself, without the envelope. requestId changes on every retry
+ * and must not make an otherwise identical launch look different.
+ */
+function spawnFingerprint(request: MobilePaneSpawnRequest): string {
+  const { requestId, idempotencyKey, type, ...launch } = request as Record<string, unknown>;
+  return JSON.stringify(
+    Object.keys(launch).sort().map((key) => [key, launch[key]]),
+  );
 }
 
 function requireRequestId(request: { requestId?: unknown }): string {

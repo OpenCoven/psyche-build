@@ -313,3 +313,193 @@ describe('MobileControlGateway terminal streams', () => {
     }
   });
 });
+
+describe('MobileControlGateway pane mutations', () => {
+  const PUBLISHED_PANE = '%3';
+
+  function workspace() {
+    return structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace) as ReadonlyWorkspaceSnapshot;
+  }
+
+  function projectTarget() {
+    const project = workspace().projects[0];
+    return { projectId: project.id, cwd: project.root };
+  }
+
+  function mutationGateway(overrides: Record<string, unknown> = {}) {
+    return new MobileControlGateway({
+      workspaceSnapshot: () => ({ workspace: workspace(), sequence: 1 }),
+      spawnPane: async () => ({ id: '%99', worktreePath: '/repo/wt', branch: 'feat/x' }),
+      killPane: async () => {},
+      updatePaneMeta: async () => {},
+      ...overrides,
+    });
+  }
+
+  function spawnRequest(extra: Record<string, unknown> = {}) {
+    const { projectId, cwd } = projectTarget();
+    return {
+      type: 'panes.spawn' as const,
+      requestId: 'spawn-1',
+      idempotencyKey: 'mobile:spawn:1',
+      kind: 'agent' as const,
+      projectId,
+      cwd,
+      ...extra,
+    };
+  }
+
+  it('runs one execution for a repeated idempotency key and payload', async () => {
+    let launches = 0;
+    const changes: number[] = [];
+    const gateway = mutationGateway({
+      spawnPane: async () => {
+        launches += 1;
+        return { id: '%99' };
+      },
+      onWorkspaceChanged: () => changes.push(1),
+    });
+
+    const first = await gateway.handle(spawnRequest(), context());
+    const second = await gateway.handle(
+      spawnRequest({ requestId: 'spawn-retry' }),
+      context(),
+    );
+
+    expect(launches).toBe(1);
+    expect(first).toMatchObject({ type: 'panes.spawn.result', id: '%99' });
+    expect(second).toMatchObject({ type: 'panes.spawn.result', id: '%99' });
+    // A replay changed nothing, so it must not announce a change.
+    expect(changes).toHaveLength(1);
+  });
+
+  it('refuses the same key with a different payload', async () => {
+    const gateway = mutationGateway();
+    await gateway.handle(spawnRequest(), context());
+
+    await expect(gateway.handle(
+      spawnRequest({ requestId: 'spawn-2', title: 'different' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'idempotency_conflict' });
+  });
+
+  it('lets a failed spawn be retried with the same key', async () => {
+    let attempts = 0;
+    const gateway = mutationGateway({
+      spawnPane: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('worktree busy');
+        return { id: '%100' };
+      },
+    });
+
+    await expect(gateway.handle(spawnRequest(), context())).rejects.toThrow('worktree busy');
+    await expect(gateway.handle(spawnRequest(), context()))
+      .resolves.toMatchObject({ type: 'panes.spawn.result', id: '%100' });
+    expect(attempts).toBe(2);
+  });
+
+  it('rejects a launch target the workspace does not publish', async () => {
+    const gateway = mutationGateway();
+
+    await expect(gateway.handle(
+      spawnRequest({ projectId: 'nope' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    await expect(gateway.handle(
+      spawnRequest({ cwd: '/somewhere/else' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+  });
+
+  it('does not mutate when the target is out of scope', async () => {
+    let launches = 0;
+    const gateway = mutationGateway({
+      spawnPane: async () => {
+        launches += 1;
+        return { id: '%99' };
+      },
+    });
+
+    await expect(gateway.handle(
+      spawnRequest({ projectId: 'nope' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(launches).toBe(0);
+  });
+
+  it('kills a published pane and announces the change', async () => {
+    const killed: string[] = [];
+    const changes: number[] = [];
+    const gateway = mutationGateway({
+      killPane: async (paneId: string) => { killed.push(paneId); },
+      onWorkspaceChanged: () => changes.push(1),
+    });
+
+    await expect(gateway.handle(
+      { type: 'panes.kill', requestId: 'kill-1', id: PUBLISHED_PANE },
+      context(),
+    )).resolves.toEqual({ type: 'ack', requestId: 'kill-1', ok: true });
+
+    expect(killed).toEqual([PUBLISHED_PANE]);
+    expect(changes).toHaveLength(1);
+  });
+
+  it('refuses to kill a pane the workspace does not publish', async () => {
+    const killed: string[] = [];
+    const gateway = mutationGateway({
+      killPane: async (paneId: string) => { killed.push(paneId); },
+    });
+
+    await expect(gateway.handle(
+      { type: 'panes.kill', requestId: 'kill-1', id: '%404' },
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(killed).toEqual([]);
+  });
+
+  it('updates pane metadata and announces the change', async () => {
+    const updates: Array<{ paneId: string; meta: unknown }> = [];
+    const gateway = mutationGateway({
+      updatePaneMeta: async (paneId: string, meta: unknown) => {
+        updates.push({ paneId, meta });
+      },
+    });
+
+    await expect(gateway.handle(
+      { type: 'panes.meta', requestId: 'meta-1', id: PUBLISHED_PANE, title: 'Renamed' },
+      context(),
+    )).resolves.toEqual({ type: 'ack', requestId: 'meta-1', ok: true });
+
+    expect(updates).toEqual([
+      { paneId: PUBLISHED_PANE, meta: { title: 'Renamed', agent: undefined } },
+    ]);
+  });
+
+  it('refuses a metadata request that changes nothing', async () => {
+    const gateway = mutationGateway();
+
+    await expect(gateway.handle(
+      { type: 'panes.meta', requestId: 'meta-1', id: PUBLISHED_PANE },
+      context(),
+    )).rejects.toMatchObject({ code: 'invalid_control_request' });
+  });
+
+  it('reports mutations as unsupported when the host did not wire them', async () => {
+    const gateway = new MobileControlGateway({
+      workspaceSnapshot: () => ({ workspace: workspace(), sequence: 1 }),
+    });
+
+    for (const request of [
+      spawnRequest(),
+      { type: 'panes.kill' as const, requestId: 'k', id: PUBLISHED_PANE },
+      { type: 'panes.meta' as const, requestId: 'm', id: PUBLISHED_PANE, title: 'x' },
+    ]) {
+      await expect(gateway.handle(request as any, context()))
+        .rejects.toMatchObject({ code: 'command_not_supported' });
+    }
+  });
+});

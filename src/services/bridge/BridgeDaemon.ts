@@ -26,12 +26,21 @@ import { TokenStore, DeviceRecord } from "./TokenStore.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
+import type { PaneSpawnResult } from "../../daemon/protocol.js";
+import type { MobilePaneSpawnRequest } from "./wireProtocol.js";
 
 /**
  * Two visible terminals is what the mobile workspace renders; the extra
  * headroom covers a reattach landing before the old stream is detached.
  */
 const MAX_CONTROL_STREAMS_PER_CONNECTION = 4;
+
+/** Pane mutations the TUI performs on the daemon's behalf. */
+export interface MobilePaneExecutors {
+  spawn: (request: MobilePaneSpawnRequest) => Promise<PaneSpawnResult>;
+  kill: (paneId: string) => Promise<void>;
+  updateMeta: (paneId: string, meta: { title?: string; agent?: string }) => Promise<void>;
+}
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
@@ -57,6 +66,7 @@ export class BridgeDaemon {
   private listener?: WSSListener;
   private tls?: TLSMaterial;
   private hub?: PaneStreamHub;
+  private mobilePaneExecutors?: MobilePaneExecutors;
   private bonjour?: Pick<BridgeBonjour, "publish" | "stop">;
   private paneSubscribers = new Map<string, Set<Session>>();
   private tokens: TokenStore;
@@ -85,6 +95,12 @@ export class BridgeDaemon {
           this.sendPaneStreamInput(connectionId, streamId, data),
         resizePane: (connectionId, streamId, cols, rows) =>
           this.resizePaneStream(connectionId, streamId, cols, rows),
+        spawnPane: (request) => this.requireMobileExecutors().spawn(request),
+        killPane: (paneId) => this.requireMobileExecutors().kill(paneId),
+        updatePaneMeta: (paneId, meta) => this.requireMobileExecutors().updateMeta(paneId, meta),
+        // Only reached for a mutation that actually changed state, so a
+        // replayed idempotent spawn does not announce a change twice.
+        onWorkspaceChanged: () => this.notifyWorkspaceChanged(),
       })
       : undefined;
     this.pairing.on("open", (w: { code: string; expiresAt: Date }) => this.broadcastPairChallenge(w));
@@ -585,6 +601,24 @@ export class BridgeDaemon {
    * connection up by id rather than trusting the caller keeps one client from
    * detaching or typing into another's stream.
    */
+  /**
+   * The TUI owns pane creation and lifecycle; the daemon only forwards. Until
+   * it registers, a mutation is unsupported rather than a crash.
+   */
+  setMobilePaneExecutors(executors: MobilePaneExecutors | null): void {
+    this.mobilePaneExecutors = executors ?? undefined;
+  }
+
+  private requireMobileExecutors(): MobilePaneExecutors {
+    if (!this.mobilePaneExecutors) {
+      throw new MobileControlGatewayError(
+        "command_not_supported",
+        "this host cannot create or change panes yet",
+      );
+    }
+    return this.mobilePaneExecutors;
+  }
+
   private sessionForConnection(connectionId: string): Session {
     for (const s of this.listener?.activeSessions ?? []) {
       if (s.connectionId === connectionId && s.state === "authenticated") return s;
