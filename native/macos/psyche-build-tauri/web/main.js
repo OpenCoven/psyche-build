@@ -5397,9 +5397,9 @@
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
 
-  function diffCacheKey(projectId, workspaceRoot, path, staged) {
+  function diffCacheKey(projectId, workspaceRoot, path, staged, context) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
-      (staged ? "staged" : "unstaged");
+      (staged ? "staged" : "unstaged") + "\0" + (context === undefined || context === null ? "default" : context);
   }
 
   function invalidateProjectDiffs(projectId) {
@@ -5556,6 +5556,10 @@
     });
   }
 
+  // Context lines the viewer last asked git for. null means git's default (3),
+  // which is what every diff starts at.
+  var diffContext = null;
+
   function diffSeparatorRow(row) {
     var separator = document.createElement("div");
     separator.className = "diff-sep";
@@ -5566,6 +5570,28 @@
     label.textContent = row.hidden + " unmodified line" + (row.hidden === 1 ? "" : "s");
     separator.appendChild(mark);
     separator.appendChild(label);
+    var spacer = document.createElement("span");
+    spacer.className = "diff-sep-spacer";
+    separator.appendChild(spacer);
+    var expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "diff-sep-expand";
+    expand.textContent = "expand";
+    expand.title = "Show the " + row.hidden + " hidden line" +
+      (row.hidden === 1 ? "" : "s") + " around this change";
+    expand.addEventListener("click", function () {
+      // Ask for enough context to close the largest remaining gap, so one
+      // click opens the file rather than creeping toward it.
+      var widest = row.hidden;
+      parsedDiffFiles.forEach(function (file) {
+        PsycheDiffs.stackedRows(file).forEach(function (each) {
+          if (each.type === "separator" && each.hidden > widest) widest = each.hidden;
+        });
+      });
+      diffContext = Math.min(2000, widest + 3);
+      refreshSelectedDiff();
+    });
+    separator.appendChild(expand);
     return separator;
   }
 
@@ -5739,7 +5765,7 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f));
+      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext);
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
@@ -5751,16 +5777,28 @@
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f)) === selectedDiffKey;
+      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
     }) || status.files[0];
     showDiff(project, target);
   }
 
-  async function showDiff(project, entry) {
+  var shownDiffTarget = null;
+
+  /** Re-fetch whatever is on screen, at the current context width. */
+  function refreshSelectedDiff() {
+    if (!shownDiffTarget) return;
+    showDiff(shownDiffTarget.project, shownDiffTarget.entry, { keepContext: true });
+  }
+
+  async function showDiff(project, entry, options) {
     if (!project || !entry || !diffRowsEl) return;
+    // A new file starts narrow again: an expansion belongs to the view you
+    // expanded, not to the panel.
+    if (!(options && options.keepContext)) diffContext = null;
+    shownDiffTarget = { project: project, entry: entry };
     if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged);
+    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged, diffContext);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
@@ -5779,6 +5817,7 @@
         root: activeWorkspaceRoot(project),
         path: entry.path,
         staged: staged,
+        context: diffContext,
       });
       if (!currentDiffRequestMatches(project.id, key, generation)) return;
       diffCache.set(key, result);

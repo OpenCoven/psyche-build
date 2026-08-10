@@ -2052,11 +2052,15 @@ fn bounded_diff(text: String) -> GitDiffResult {
     }
 }
 
+/// Upper bound on `-U` context lines a caller may request.
+const MAX_DIFF_CONTEXT: u32 = 2000;
+
 #[tauri::command]
 fn git_diff(
     root: String,
     path: Option<String>,
     staged: Option<bool>,
+    context: Option<u32>,
 ) -> Result<GitDiffResult, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
@@ -2065,6 +2069,12 @@ fn git_diff(
         "--no-color".into(),
         "--relative".into(),
     ];
+    // Context lines, for expanding a hunk in place. Clamped rather than passed
+    // through: the value reaches a subprocess argument, and an unbounded one
+    // would let the caller ask git to render an arbitrarily large diff.
+    if let Some(lines) = context {
+        args.push(format!("-U{}", lines.min(MAX_DIFF_CONTEXT)));
+    }
     if staged.unwrap_or(false) {
         args.push("--cached".into());
     }

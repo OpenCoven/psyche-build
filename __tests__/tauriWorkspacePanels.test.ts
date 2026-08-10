@@ -198,4 +198,33 @@ describe('Tauri workspace panels', () => {
       expect(stylesCss).toMatch(/\.appearance-swatch\s*\{[^}]*background: var\(--accent\);/s);
     });
   });
+
+  describe('hunk expansion', () => {
+    it('lets a caller widen the diff, with the width clamped', () => {
+      expect(tauriLib).toMatch(/fn git_diff\([\s\S]*context: Option<u32>/);
+      expect(tauriLib).toMatch(/args\.push\(format!\("-U\{\}", lines\.min\(MAX_DIFF_CONTEXT\)\)\)/);
+      // The value reaches a subprocess argument, so it is bounded rather than
+      // passed through.
+      expect(tauriLib).toMatch(/const MAX_DIFF_CONTEXT: u32 = \d+;/);
+    });
+
+    it('caches a widened diff apart from the narrow one', () => {
+      // Same file at 3 lines of context and at 400 are different documents;
+      // sharing a key would re-serve the narrow one after expanding.
+      expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged, context\)/);
+      expect(mainJs).toMatch(/\(context === undefined \|\| context === null \? "default" : context\)/);
+    });
+
+    it('expands from the separator and re-fetches at the new width', () => {
+      expect(mainJs).toMatch(/expand\.className = "diff-sep-expand"/);
+      expect(mainJs).toMatch(/diffContext = Math\.min\(2000, widest \+ 3\)/);
+      expect(mainJs).toMatch(/expand\.addEventListener\("click"[\s\S]*?refreshSelectedDiff\(\)/);
+      expect(mainJs).toMatch(/context: diffContext,/);
+    });
+
+    it('starts every newly selected file narrow again', () => {
+      // An expansion belongs to the view you expanded, not to the panel.
+      expect(mainJs).toMatch(/if \(!\(options && options\.keepContext\)\) diffContext = null;/);
+    });
+  });
 });

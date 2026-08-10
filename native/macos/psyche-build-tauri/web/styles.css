@@ -3635,4 +3635,16 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-size: 10px;
 }
 .diff-sep-mark { letter-spacing: 2px; }
+.diff-sep-spacer { flex: 1 1 auto; }
+.diff-sep-expand {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: inherit;
+}
+.diff-sep-expand:hover { color: #c4b5fd; }
+.diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
 .diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }

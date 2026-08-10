@@ -326,7 +326,7 @@ describe('native CodeMirror workspace editor surface', () => {
   it('coordinates structured diff responses with exact cache and request identity', () => {
     expect(mainJs).toContain('window.PsycheCodeEditor.createLruCache(6)');
     expect(mainJs).toContain('window.PsycheCodeEditor.createRequestGate()');
-    expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged\)/);
+    expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged, context\)/);
     expect(mainJs).toContain('projectId + "\\0" + workspaceRoot + "\\0" + path + "\\0" +');
     expect(mainJs).toContain('key.startsWith(projectId + "\\0")');
     expect(mainJs).toMatch(/diffCache\.get\(key\)[\s\S]*invoke\("git_diff"/);
@@ -419,7 +419,9 @@ describe('native CodeMirror workspace editor surface', () => {
       panelIsVisible: () => true,
       activeWorkspaceRoot: (owner: typeof project) => owner.root,
       stagedDiffFor: () => false,
-      diffCacheKey: () => 'p1\0src/a.ts\0unstaged',
+      diffCacheKey: () => 'p1\0src/a.ts\0unstaged\0default',
+      diffContext: null,
+      shownDiffTarget: null,
       diffRequestGate: { next: () => 1 },
       selectedDiffPath: null,
       selectedDiffKey: null,
