@@ -363,11 +363,48 @@ function buildSample(overrides: Record<string, unknown> = {}): StatusControllerS
   } as StatusControllerSample;
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function buildNativeSnapshot(overrides: Record<string, unknown> = {}) {
+  const input = { ...overrides };
+  const workspace = {
+    cpuPercent: 12,
+    memoryBytes: 256 * 1024 * 1024,
+    ...(overrides.workspace as Record<string, unknown> | undefined),
+  };
+  delete input.workspace;
+  return {
+    sampledAtMs: 1_700_000_000_000,
+    workspace,
+    usedMemoryBytes: 512 * 1024 * 1024,
+    totalMemoryBytes: 1024 * 1024 * 1024,
+    memoryPressurePercent: 50,
+    processes: [],
+    ...input,
+  };
+}
+
 function createHarness(options: {
   hidden?: boolean;
   barWidth?: number;
   copyText?: (text: string) => Promise<void>;
-  fetchMetrics?: () => Promise<unknown>;
+  fetchMetrics?: (scope?: { threadId?: string }) => Promise<unknown>;
+  getContext?: () => {
+    activeThreadId?: string | null;
+    threads?: unknown[];
+    covenSessions?: unknown[];
+  };
+  nativePollTimeoutMs?: number;
+  nowMs?: number;
+  performanceMs?: number;
 } = {}) {
   FakeResizeObserver.instances = [];
   const doc = new FakeDocument();
@@ -425,26 +462,42 @@ function createHarness(options: {
   footer.append(detail, bar, moreMenu, live, alert);
 
   const storageState = new Map<string, string>();
-  const timers = new Map<number, () => void>();
+  const timers = new Map<number, { callback: () => void; delay: number; dueAt: number }>();
   const frames = new Map<number, (at: number) => void>();
   let nextTimerId = 1;
   let nextFrameId = 1;
   const copyText = options.copyText ?? (async () => {});
   const fetchMetrics = options.fetchMetrics ?? (() => new Promise(() => {}));
-  const now = (() => {
-    let current = 1_700_000_000_000;
-    return () => {
-      current += 50;
-      return current;
-    };
-  })();
-  const performanceNow = (() => {
-    let current = 0;
-    return () => {
-      current += 5;
-      return current;
-    };
-  })();
+  let nowMs = options.nowMs ?? 1_700_000_000_000;
+  let performanceMs = options.performanceMs ?? 0;
+
+  const advanceClock = async (milliseconds: number) => {
+    const target = nowMs + milliseconds;
+    while (true) {
+      let nextTimerIdToRun: number | null = null;
+      let nextTimerDueAt = Number.POSITIVE_INFINITY;
+      for (const [id, timer] of timers) {
+        if (timer.dueAt < nextTimerDueAt) {
+          nextTimerDueAt = timer.dueAt;
+          nextTimerIdToRun = id;
+        }
+      }
+      if (nextTimerIdToRun == null || nextTimerDueAt > target) break;
+
+      const step = nextTimerDueAt - nowMs;
+      nowMs = nextTimerDueAt;
+      performanceMs += step;
+      const timer = timers.get(nextTimerIdToRun);
+      timers.delete(nextTimerIdToRun);
+      timer?.callback();
+      await flushMicrotasks();
+    }
+
+    const remaining = target - nowMs;
+    nowMs = target;
+    performanceMs += remaining;
+    await flushMicrotasks();
+  };
 
   const controller = createStatusController({
     document: doc,
@@ -478,13 +531,14 @@ function createHarness(options: {
       },
     },
     copyText,
+    nativePollTimeoutMs: options.nativePollTimeoutMs,
     fetchMetrics,
-    getContext: () => ({
+    getContext: options.getContext ?? (() => ({
       activeThreadId: null,
       threads: [],
       covenSessions: [],
-    }),
-    now,
+    })),
+    now: () => nowMs,
     requestFrame: (callback: (at: number) => void) => {
       const id = nextFrameId;
       nextFrameId += 1;
@@ -494,17 +548,21 @@ function createHarness(options: {
     cancelFrame: (id: number) => {
       frames.delete(id);
     },
-    setTimer: (callback: () => void) => {
+    setTimer: (callback: () => void, delay: number) => {
       const id = nextTimerId;
       nextTimerId += 1;
-      timers.set(id, callback);
+      timers.set(id, {
+        callback,
+        delay,
+        dueAt: nowMs + Math.max(0, delay),
+      });
       return id;
     },
     clearTimer: (id: number) => {
       timers.delete(id);
     },
     performance: {
-      now: performanceNow,
+      now: () => performanceMs,
     },
     ResizeObserver: FakeResizeObserver,
   });
@@ -526,6 +584,11 @@ function createHarness(options: {
     },
     frames,
     timers,
+    clock: {
+      advance: advanceClock,
+      now: () => nowMs,
+      performance: () => performanceMs,
+    },
     resizeObserver: FakeResizeObserver.instances[0],
   };
 }
@@ -548,7 +611,7 @@ describe('tauri status controller', () => {
 
     expect(elements.more.listenerCount('click')).toBe(1);
     expect(doc.listenerCount('keydown')).toBe(1);
-    expect(timers.size).toBe(1);
+    expect(timers.size).toBe(2);
     expect(frames.size).toBe(1);
     expect(resizeObserver.observed).toEqual([elements.bar]);
 
@@ -570,7 +633,7 @@ describe('tauri status controller', () => {
     controller.start();
     expect(elements.more.listenerCount('click')).toBe(1);
     expect(doc.listenerCount('keydown')).toBe(1);
-    expect(timers.size).toBe(1);
+    expect(timers.size).toBe(2);
     expect(frames.size).toBe(1);
 
     elements.more.dispatch('click');
@@ -635,6 +698,151 @@ describe('tauri status controller', () => {
     expect(failure.elements.alert.textContent).toBe(
       'Unable to copy diagnostics: Clipboard unavailable',
     );
+  });
+
+  it('times out hung native polls, keeps one controller poll active, and ignores late completions', async () => {
+    const firstSnapshot = buildNativeSnapshot({
+      sampledAtMs: 1_700_000_000_000,
+      workspace: {
+        cpuPercent: 12,
+        memoryBytes: 256 * 1024 * 1024,
+      },
+    });
+    const recoveredSnapshot = buildNativeSnapshot({
+      sampledAtMs: 1_700_000_011_000,
+      workspace: {
+        cpuPercent: 77,
+        memoryBytes: 768 * 1024 * 1024,
+      },
+      usedMemoryBytes: 800 * 1024 * 1024,
+      memoryPressurePercent: 78,
+    });
+    const lateSnapshot = buildNativeSnapshot({
+      sampledAtMs: 1_700_000_012_000,
+      workspace: {
+        cpuPercent: 3,
+        memoryBytes: 64 * 1024 * 1024,
+      },
+    });
+    const hanging = createDeferred<unknown>();
+    let fetchCount = 0;
+    const fetchMetrics = () => {
+      fetchCount += 1;
+      if (fetchCount === 1) return Promise.resolve(firstSnapshot);
+      if (fetchCount === 2) return hanging.promise;
+      if (fetchCount === 3) return Promise.resolve(recoveredSnapshot);
+      return Promise.resolve(lateSnapshot);
+    };
+    const { controller, clock } = createHarness({ fetchMetrics });
+
+    controller.start();
+    await flushMicrotasks();
+    await clock.advance(0);
+    expect(fetchCount).toBe(1);
+    expect(controller.render()?.labels.connection).toBe('ready');
+
+    await clock.advance(1_000);
+    expect(fetchCount).toBe(2);
+
+    const pending = controller.refresh();
+    const queued = controller.refresh();
+    expect(queued).toBe(pending);
+    expect(fetchCount).toBe(2);
+
+    await clock.advance(10_000);
+    const timedOutView = await pending;
+    expect(timedOutView?.labels.connection).toBe('degrd');
+    expect(fetchCount).toBe(3);
+
+    await flushMicrotasks();
+    const recoveredView = controller.render();
+    expect(recoveredView?.labels.connection).toBe('ready');
+    expect(recoveredView?.labels.performance).toBe('77% 768M');
+
+    hanging.resolve(lateSnapshot);
+    await flushMicrotasks();
+    expect(controller.render()?.labels.performance).toBe('77% 768M');
+  });
+
+  it('degrades at 10s stale age and disconnects at 30s even while a native poll stays hung', async () => {
+    const hanging = createDeferred<unknown>();
+    let fetchCount = 0;
+    const fetchMetrics = () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return Promise.resolve(buildNativeSnapshot({
+          sampledAtMs: 1_700_000_000_000,
+        }));
+      }
+      return hanging.promise;
+    };
+    const { controller, clock } = createHarness({
+      fetchMetrics,
+      nativePollTimeoutMs: 60_000,
+    });
+
+    controller.start();
+    await flushMicrotasks();
+    await clock.advance(0);
+    await clock.advance(1_000);
+
+    await clock.advance(8_999);
+    expect(controller.render()?.labels.connection).toBe('ready');
+
+    await clock.advance(1);
+    expect(controller.render()?.labels.connection).toBe('degrd');
+
+    await clock.advance(20_000);
+    expect(controller.render()?.labels.connection).toBe('down');
+  });
+
+  it('renders stale age and last refresh, and never substitutes unavailable age with zero', () => {
+    const stale = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+    stale.controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot(),
+      nativeHealth: {
+        reconnects: 1,
+        latencyMs: 22,
+        lastSuccessAt: 1_700_000_017_655,
+        error: 'Native metrics timed out after 10s',
+      },
+    }));
+    stale.controller.toggleMetric('connection');
+
+    const staleMeta = classTexts(stale.elements.detailBody, 'status-row-meta')[0] ?? '';
+    expect(staleMeta).toContain('Reconnects 1');
+    expect(staleMeta).toContain('Stale 12s');
+    expect(staleMeta).toContain('Last refresh');
+    expect(staleMeta).not.toContain('Stale 0s');
+
+    const unavailable = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+    unavailable.controller.render(buildSample({
+      nativeHealth: {
+        reconnects: 0,
+        latencyMs: 18,
+        lastSuccessAt: null,
+        failureAt: [
+          1_700_000_001_000,
+          1_700_000_005_000,
+          1_700_000_010_000,
+          1_700_000_015_000,
+          1_700_000_020_000,
+        ],
+        error: 'Native metrics timed out after 10s',
+      },
+    }));
+    unavailable.controller.toggleMetric('connection');
+
+    const unavailableMeta = classTexts(unavailable.elements.detailBody, 'status-row-meta')[0] ?? '';
+    expect(unavailableMeta).toContain('Stale age unavailable');
+    expect(unavailableMeta).toContain('Last refresh unavailable');
+    expect(unavailableMeta).not.toContain('Stale 0s');
   });
 
   it('hides FPS until a real frame interval exists and shows zero dropped frames once sampled', () => {

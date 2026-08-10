@@ -26,7 +26,9 @@ export type StatusControllerHealth = {
   reconnects?: number;
   latencyMs?: number | null;
   lastSuccessAt?: number | string | null;
+  staleAgeMs?: number | null;
   refreshedAt?: number | string | null;
+  failureAt?: Array<number | string | null>;
   error?: string;
 };
 
@@ -82,6 +84,7 @@ export type StatusControllerOptions = {
     setItem(key: string, value: string): void;
   };
   copyText?: (text: string) => Promise<void>;
+  nativePollTimeoutMs?: number;
   fetchMetrics: (scope?: { threadId?: string }) => Promise<unknown>;
   getContext: () => StatusControllerContext;
 };

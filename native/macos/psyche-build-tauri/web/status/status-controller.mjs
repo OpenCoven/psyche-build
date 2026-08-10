@@ -25,6 +25,7 @@ const FAILURE_DEGRADED_WINDOW_MS = 10_000;
 const FAILURE_DEGRADED_COUNT = 2;
 const FAILURE_DISCONNECTED_WINDOW_MS = 30_000;
 const FAILURE_DISCONNECTED_COUNT = 5;
+const DEFAULT_NATIVE_POLL_TIMEOUT_MS = 10_000;
 const METRIC_WIDTH_FALLBACKS = Object.freeze({
   connection: 76,
   agents: 62,
@@ -189,6 +190,11 @@ function formatRuntime(milliseconds) {
   return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
+function formatStaleAge(milliseconds) {
+  const value = finiteNumber(milliseconds);
+  return value == null ? '' : formatRuntime(value);
+}
+
 function formatTokens(tokens) {
   if (!tokens || (!Number.isFinite(tokens.input) && !Number.isFinite(tokens.output))) {
     return '';
@@ -207,6 +213,56 @@ function formatTokens(tokens) {
 function formatTime(value) {
   const at = parseTimestamp(value);
   return at == null ? '' : new Date(at).toLocaleTimeString();
+}
+
+function nativeFailureWindows(health, sampledAt) {
+  const failures = Array.isArray(health?.failureAt)
+    ? health.failureAt.filter((at) => finiteNumber(at) != null)
+    : [];
+  const recentFailures = failures.filter((at) => sampledAt - at <= FAILURE_DISCONNECTED_WINDOW_MS);
+
+  return {
+    recentFailures,
+    degradedCount: recentFailures.filter((at) => sampledAt - at <= FAILURE_DEGRADED_WINDOW_MS).length,
+    disconnectedCount: recentFailures.length,
+  };
+}
+
+function staleAgeMs(health, sampledAt) {
+  const lastSuccessAt = parseTimestamp(health?.lastSuccessAt);
+  return lastSuccessAt == null ? null : Math.max(0, sampledAt - lastSuccessAt);
+}
+
+function resolveNativeHealthStatus(health, sampledAt) {
+  const { degradedCount, disconnectedCount } = nativeFailureWindows(health, sampledAt);
+  const ageMs = staleAgeMs(health, sampledAt);
+
+  if (ageMs != null && ageMs >= FAILURE_DISCONNECTED_WINDOW_MS) return 'disconnected';
+  if (disconnectedCount >= FAILURE_DISCONNECTED_COUNT) return 'disconnected';
+  if (ageMs != null && ageMs >= FAILURE_DEGRADED_WINDOW_MS) return 'degraded';
+  if (degradedCount >= FAILURE_DEGRADED_COUNT) return 'degraded';
+  return ageMs == null ? 'starting' : 'ready';
+}
+
+function nextNativeHealthTransitionDelay(health, sampledAt) {
+  const ageMs = staleAgeMs(health, sampledAt);
+  if (ageMs == null) return null;
+  if (ageMs < FAILURE_DEGRADED_WINDOW_MS) {
+    return FAILURE_DEGRADED_WINDOW_MS - ageMs;
+  }
+  if (ageMs < FAILURE_DISCONNECTED_WINDOW_MS) {
+    return FAILURE_DISCONNECTED_WINDOW_MS - ageMs;
+  }
+  return null;
+}
+
+function createNativePollTimeoutError(timeoutMs) {
+  const seconds = timeoutMs % 1000 === 0
+    ? `${Math.round(timeoutMs / 1000)}s`
+    : `${timeoutMs}ms`;
+  const error = new Error(`Native metrics timed out after ${seconds}`);
+  error.name = 'NativeMetricsTimeoutError';
+  return error;
 }
 
 function createEmptyActivitySample() {
@@ -838,15 +894,24 @@ function renderActivity(body, doc, activity, trends, spikes, agentToolCalls) {
 function serviceRow(doc, service) {
   const row = doc.createElement('div');
   row.className = 'status-service-row';
+  const refreshedAt = parseTimestamp(service.refreshedAt);
   row.append(
     appendTextCell(doc, 'status-row-name', service.name),
     appendTextCell(doc, 'status-row-state', service.status),
     appendTextCell(doc, 'status-row-runtime', service.latencyMs != null ? `${Math.round(service.latencyMs)} ms` : ''),
   );
 
+  const showStaleAge = service.status === 'degraded' || service.status === 'disconnected';
   const note = [
     `Reconnects ${service.reconnects}`,
-    service.refreshedAt ? `Refreshed ${formatTime(service.refreshedAt)}` : '',
+    showStaleAge
+      ? (service.staleAgeMs != null
+        ? `Stale ${formatStaleAge(service.staleAgeMs)}`
+        : 'Stale age unavailable')
+      : '',
+    refreshedAt != null
+      ? `Last refresh ${formatTime(refreshedAt)}`
+      : (showStaleAge ? 'Last refresh unavailable' : ''),
   ].filter(Boolean).join(' · ');
   appendOptionalRowText(doc, row, 'status-row-meta', note);
   appendOptionalRowText(doc, row, 'status-row-task', service.error ?? '');
@@ -862,6 +927,7 @@ function renderConnection(body, doc, nativeHealth, covenHealth) {
       status: nativeHealth.status,
       latencyMs: nativeHealth.latencyMs,
       reconnects: nativeHealth.reconnects,
+      staleAgeMs: nativeHealth.staleAgeMs,
       refreshedAt: nativeHealth.lastSuccessAt,
       error: nativeHealth.error,
     }),
@@ -965,12 +1031,13 @@ function renderMoreMenuState({
   elements.more.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
 }
 
-function nativeHealthView(health) {
+function nativeHealthView(health, sampledAt = Date.now()) {
   return {
-    status: health.status,
+    status: resolveNativeHealthStatus(health, sampledAt),
     reconnects: health.reconnects,
     latencyMs: health.latencyMs,
     lastSuccessAt: health.lastSuccessAt,
+    staleAgeMs: staleAgeMs(health, sampledAt),
     error: health.error,
   };
 }
@@ -1027,6 +1094,10 @@ export function createStatusController(options = {}) {
   const storage = resolveStorage(source.storage);
   const copyText = resolveCopyText(source.copyText);
   const fetchMetrics = assertFunction('fetchMetrics', source.fetchMetrics);
+  const nativePollTimeoutMs = (() => {
+    const value = finiteNumber(source.nativePollTimeoutMs);
+    return value != null && value > 0 ? value : DEFAULT_NATIVE_POLL_TIMEOUT_MS;
+  })();
   const getContext = assertFunction('getContext', source.getContext);
   const scopeButtons = collectScopeButtons(elementsInput);
 
@@ -1081,9 +1152,12 @@ export function createStatusController(options = {}) {
 
   let running = false;
   let timerId = null;
+  let nativeHealthTimerId = null;
   let frameId = null;
   let pollInFlight = null;
   let refreshQueued = false;
+  let nativePollGeneration = 0;
+  let nativeRequestTimeoutIds = new Set();
   let lifecycleToken = 0;
   let lastFrameFlushAt = now();
   let lastSuccessfulSnapshot = null;
@@ -1114,6 +1188,77 @@ export function createStatusController(options = {}) {
     refreshedAt: null,
     error: '',
   };
+
+  function clearNativeHealthTimer() {
+    if (nativeHealthTimerId == null) return;
+    clearTimer(nativeHealthTimerId);
+    nativeHealthTimerId = null;
+  }
+
+  function scheduleNativeHealthTransition(at = now()) {
+    clearNativeHealthTimer();
+    if (!running) return;
+
+    const delay = nextNativeHealthTransitionDelay(nativeHealth, at);
+    if (delay == null) return;
+
+    nativeHealthTimerId = setTimer(() => {
+      nativeHealthTimerId = null;
+      if (!running) return;
+      render();
+    }, delay);
+  }
+
+  function liveHealthSample(sample, at = now()) {
+    return {
+      ...sample,
+      nativeHealth: nativeHealthView(nativeHealth, at),
+      covenHealth: covenHealthView(covenHealth),
+    };
+  }
+
+  function requestNativeMetrics(requestedScope) {
+    const generation = nativePollGeneration + 1;
+    nativePollGeneration = generation;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeoutId = null;
+      const settle = (result) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId != null) {
+          clearTimer(timeoutId);
+          nativeRequestTimeoutIds.delete(timeoutId);
+          timeoutId = null;
+        }
+        resolve({ generation, ...result });
+      };
+
+      // Tauri invoke is not cancellable, so a timed-out generation may still
+      // settle later. Only the first settlement for this generation is allowed
+      // to reach the controller; late results are ignored.
+      Promise.resolve()
+        .then(() => fetchMetrics(requestedScope))
+        .then(
+          (snapshot) => settle({ ok: true, snapshot }),
+          (error) => settle({ ok: false, error }),
+        );
+
+      timeoutId = setTimer(() => {
+        if (timeoutId != null) {
+          nativeRequestTimeoutIds.delete(timeoutId);
+          timeoutId = null;
+        }
+        settle({
+          ok: false,
+          error: createNativePollTimeoutError(nativePollTimeoutMs),
+          timedOut: true,
+        });
+      }, nativePollTimeoutMs);
+      nativeRequestTimeoutIds.add(timeoutId);
+    });
+  }
 
   function recordTrend(name, value) {
     const trend = trends[name];
@@ -1263,7 +1408,8 @@ export function createStatusController(options = {}) {
   }
 
   function updateNativeHealthFromSuccess(snapshot, latencyMs, sampledAt) {
-    const recovered = nativeHealth.status === 'degraded' || nativeHealth.status === 'disconnected';
+    const previousStatus = resolveNativeHealthStatus(nativeHealth, sampledAt);
+    const recovered = previousStatus === 'degraded' || previousStatus === 'disconnected';
     nativeHealth = {
       status: 'ready',
       reconnects: nativeHealth.reconnects + (recovered ? 1 : 0),
@@ -1273,29 +1419,21 @@ export function createStatusController(options = {}) {
       failureAt: [],
     };
     lastSuccessfulSnapshot = snapshot;
+    scheduleNativeHealthTransition(sampledAt);
   }
 
   function updateNativeHealthFromFailure(error, latencyMs, sampledAt) {
-    const recent = [...nativeHealth.failureAt, sampledAt].filter((at) => sampledAt - at <= FAILURE_DISCONNECTED_WINDOW_MS);
-    const degradedCount = recent.filter((at) => sampledAt - at <= FAILURE_DEGRADED_WINDOW_MS).length;
-    const disconnectedCount = recent.length;
-
-    let status = nativeHealth.status;
-    if (disconnectedCount >= FAILURE_DISCONNECTED_COUNT) {
-      status = 'disconnected';
-    } else if (degradedCount >= FAILURE_DEGRADED_COUNT) {
-      status = 'degraded';
-    } else if (nativeHealth.lastSuccessAt == null) {
-      status = 'starting';
-    }
+    const recent = [...nativeHealth.failureAt, sampledAt]
+      .filter((at) => sampledAt - at <= FAILURE_DISCONNECTED_WINDOW_MS);
 
     nativeHealth = {
       ...nativeHealth,
-      status,
+      status: resolveNativeHealthStatus({ ...nativeHealth, failureAt: recent }, sampledAt),
       latencyMs,
       error: formatError(error),
       failureAt: recent,
     };
+    scheduleNativeHealthTransition(sampledAt);
   }
 
   function recordSpikes(metricSeverity, sampledAt) {
@@ -1374,13 +1512,19 @@ export function createStatusController(options = {}) {
   function renderView(sample = lastSampleContext) {
     if (!sample) return null;
 
+    const renderedAt = now();
+    const liveSample = liveHealthSample(sample, renderedAt);
     const focusToken = captureFocusToken(doc, elements);
-    const labels = buildMetricLabels(sample);
-    const { focusedAvailable, scopeName } = sample.scopeState ?? effectiveScopeForContext(sample.context ?? {});
-    sample.scopeState = { focusedAvailable, scopeName, activeThreadId: sample.context?.activeThreadId ?? null };
+    const labels = buildMetricLabels(liveSample);
+    const { focusedAvailable, scopeName } = liveSample.scopeState ?? effectiveScopeForContext(liveSample.context ?? {});
+    liveSample.scopeState = {
+      focusedAvailable,
+      scopeName,
+      activeThreadId: liveSample.context?.activeThreadId ?? null,
+    };
 
     const availableMetrics = new Set(['connection', 'agents', 'shells', 'tasks', 'activity']);
-    if (labels.performance != null && sample.nativeSnapshot) {
+    if (labels.performance != null && liveSample.nativeSnapshot) {
       availableMetrics.add('performance');
     }
     if (labels.fps != null) {
@@ -1451,24 +1595,24 @@ export function createStatusController(options = {}) {
     if (panelId == null) {
       resetNode(elements.detailBody);
     } else if (panelId === 'agents') {
-      renderAgents(elements.detailBody, doc, sample.summary);
+      renderAgents(elements.detailBody, doc, liveSample.summary);
     } else if (panelId === 'shells') {
-      renderShells(elements.detailBody, doc, sample.summary, sample.nativeSnapshot, sample.activity);
+      renderShells(elements.detailBody, doc, liveSample.summary, liveSample.nativeSnapshot, liveSample.activity);
     } else if (panelId === 'tasks') {
-      renderTasks(elements.detailBody, doc, sample.summary);
+      renderTasks(elements.detailBody, doc, liveSample.summary);
     } else if (panelId === 'performance') {
-      renderPerformance(elements.detailBody, doc, sample, trends);
+      renderPerformance(elements.detailBody, doc, liveSample, trends);
     } else if (panelId === 'activity') {
       renderActivity(
         elements.detailBody,
         doc,
-        sample.activity,
+        liveSample.activity,
         trends,
         spikes,
-        Number.isFinite(sample.context?.agentToolCalls) ? sample.context.agentToolCalls : null,
+        Number.isFinite(liveSample.context?.agentToolCalls) ? liveSample.context.agentToolCalls : null,
       );
     } else if (panelId === 'connection') {
-      renderConnection(elements.detailBody, doc, sample.nativeHealth, sample.covenHealth);
+      renderConnection(elements.detailBody, doc, liveSample.nativeHealth, liveSample.covenHealth);
     }
 
     renderMoreMenuState({
@@ -1483,7 +1627,7 @@ export function createStatusController(options = {}) {
     });
 
     const effectiveDiagnosticsScope = scopeName === 'focused' ? 'focused' : 'workspace';
-    lastRenderedDiagnostics = buildDiagnostics(sample, effectiveDiagnosticsScope, trends);
+    lastRenderedDiagnostics = buildDiagnostics(liveSample, effectiveDiagnosticsScope, trends);
     lastView = {
       activeMetric: activeTriggerMetric,
       activePanel: activePanelId,
@@ -1547,11 +1691,21 @@ export function createStatusController(options = {}) {
       const requestedScope = scopeState.scopeName === 'focused'
         ? { threadId: scopeState.activeThreadId }
         : undefined;
-      const snapshot = await fetchMetrics(requestedScope);
+      const result = await requestNativeMetrics(requestedScope);
       const latencyMs = performanceApi.now() - startedAt;
-      updateNativeHealthFromSuccess(snapshot, latencyMs, now());
+      if (token !== lifecycleToken) {
+        return lastView;
+      }
+      if (result.ok) {
+        updateNativeHealthFromSuccess(result.snapshot, latencyMs, now());
+      } else {
+        updateNativeHealthFromFailure(result.error, latencyMs, now());
+      }
     } catch (error) {
       const latencyMs = performanceApi.now() - startedAt;
+      if (token !== lifecycleToken) {
+        return lastView;
+      }
       updateNativeHealthFromFailure(error, latencyMs, now());
     }
 
@@ -1577,7 +1731,7 @@ export function createStatusController(options = {}) {
       }),
       scopeState,
       nativeSnapshot: lastSuccessfulSnapshot,
-      nativeHealth: nativeHealthView(nativeHealth),
+      nativeHealth: nativeHealthView(nativeHealth, sampledAt),
       activity: activitySample,
       frame: frameSample,
       covenHealth: covenHealthView(covenHealth),
@@ -1787,6 +1941,39 @@ export function createStatusController(options = {}) {
       const sampledAt = finiteNumber(sample.sampledAt) ?? now();
       const context = sample.context ?? getContext();
       const scopeState = sample.scopeState ?? effectiveScopeForContext(context);
+      if (Object.prototype.hasOwnProperty.call(sample, 'nativeSnapshot')) {
+        lastSuccessfulSnapshot = sample.nativeSnapshot;
+      }
+      if (sample.nativeHealth) {
+        const input = asObject(sample.nativeHealth);
+        nativeHealth = {
+          ...nativeHealth,
+          status: typeof input.status === 'string' ? input.status : nativeHealth.status,
+          reconnects: finiteNumber(input.reconnects) ?? nativeHealth.reconnects,
+          latencyMs: finiteNumber(input.latencyMs),
+          lastSuccessAt: parseTimestamp(input.lastSuccessAt),
+          error: input.error ? formatError(input.error) : '',
+          failureAt: Array.isArray(input.failureAt)
+            ? input.failureAt
+              .map((value) => parseTimestamp(value))
+              .filter((value) => value != null)
+            : [],
+        };
+      }
+      if (sample.covenHealth) {
+        const input = asObject(sample.covenHealth);
+        covenHealth = {
+          phase: typeof input.phase === 'string'
+            ? input.phase
+            : typeof input.status === 'string'
+              ? input.status
+              : covenHealth.phase,
+          reconnects: finiteNumber(input.reconnects) ?? covenHealth.reconnects,
+          latencyMs: finiteNumber(input.latencyMs),
+          refreshedAt: parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt),
+          error: input.error ? formatError(input.error) : '',
+        };
+      }
       lastSampleContext = {
         sampledAt,
         context,
@@ -1798,7 +1985,7 @@ export function createStatusController(options = {}) {
         }),
         scopeState,
         nativeSnapshot: sample.nativeSnapshot ?? lastSuccessfulSnapshot,
-        nativeHealth: sample.nativeHealth ?? nativeHealthView(nativeHealth),
+        nativeHealth: sample.nativeHealth ?? nativeHealthView(nativeHealth, sampledAt),
         activity: sample.activity ?? lastActivitySample,
         frame: sample.frame ?? lastFrameSample,
         covenHealth: sample.covenHealth ?? covenHealthView(covenHealth),
@@ -1817,13 +2004,14 @@ export function createStatusController(options = {}) {
         }),
         scopeState: effectiveScopeForContext(context),
         nativeSnapshot: lastSuccessfulSnapshot,
-        nativeHealth: nativeHealthView(nativeHealth),
+        nativeHealth: nativeHealthView(nativeHealth, sampledAt),
         activity: lastActivitySample,
         frame: lastFrameSample,
         covenHealth: covenHealthView(covenHealth),
       };
     }
 
+    scheduleNativeHealthTransition();
     return renderView(lastSampleContext);
   }
 
@@ -1847,18 +2035,29 @@ export function createStatusController(options = {}) {
     resizeObserver.observe(elements.bar);
     pushCleanup(() => resizeObserver.disconnect());
     ensureFrameLoop();
+    scheduleNativeHealthTransition();
     handleVisibilityChange();
     return controller;
   }
 
   function stop() {
-    if (!running && !cleanupCallbacks.length && timerId == null && frameId == null) {
+    if (!running
+      && !cleanupCallbacks.length
+      && timerId == null
+      && nativeHealthTimerId == null
+      && nativeRequestTimeoutIds.size === 0
+      && frameId == null) {
       return controller;
     }
     running = false;
     lifecycleToken += 1;
     refreshQueued = false;
     pollInFlight = null;
+    clearNativeHealthTimer();
+    for (const timeoutId of nativeRequestTimeoutIds) {
+      clearTimer(timeoutId);
+    }
+    nativeRequestTimeoutIds = new Set();
     if (timerId != null) {
       clearTimer(timerId);
       timerId = null;
