@@ -2951,6 +2951,7 @@ mod workspace_panel_tests {
             path_text(&project).to_string(),
             Some("inside.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         assert!(diff.text.contains("+inside changed"));
@@ -3007,6 +3008,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("large.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -3038,6 +3040,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("untracked.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -3060,6 +3063,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("notes.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         let expected = "--- /dev/null\n+++ b/notes.txt\n+one\n+two\n";
@@ -3068,6 +3072,49 @@ mod workspace_panel_tests {
         assert_eq!(diff.bytes, expected.len() as u64);
         assert_eq!(diff.lines, expected.lines().count() as u64);
         assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_diff_widens_context_and_clamps_the_request() {
+        let tree = TempTree::new("git-diff-context");
+        run_git(path_text(&tree.root), &["init", "--quiet"]).unwrap();
+        let mut body = String::new();
+        for index in 0..40 {
+            body.push_str(&format!("line {}\n", index));
+        }
+        std::fs::write(tree.root.join("wide.txt"), &body).unwrap();
+        run_git(path_text(&tree.root), &["add", "-A"]).unwrap();
+        run_git(path_text(&tree.root), &["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-m", "seed", "--quiet"]).unwrap();
+        let edited = body.replace("line 20\n", "line twenty\n");
+        std::fs::write(tree.root.join("wide.txt"), edited).unwrap();
+
+        let narrow = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+        let wide = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(30),
+        )
+        .unwrap();
+        // More context means more surrounding lines for the same one-line edit.
+        assert!(wide.text.lines().count() > narrow.text.lines().count());
+
+        // Beyond the cap the request is clamped, not honoured: the argument
+        // reaches a subprocess and an unbounded one is not ours to forward.
+        let clamped = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(u32::MAX),
+        )
+        .unwrap();
+        assert!(clamped.text.contains("line twenty"));
     }
 
     #[test]
