@@ -855,7 +855,7 @@
     return PANELS.indexOf(p) === -1 ? "browser" : p;
   }
   function syncPanelButtons() {
-    var open = currentLayout() === "split";
+    var open = currentLayout() !== "terminal";
     var panel = currentPanel();
     Array.prototype.forEach.call(
       document.querySelectorAll("[data-panel-btn]"),

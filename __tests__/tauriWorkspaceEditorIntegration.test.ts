@@ -487,6 +487,57 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(visibleOps).toEqual(['set:browser:false', 'layout:split', 'render:browser']);
   });
 
+  it('keeps the active dock button pressed in every dock-visible layout', () => {
+    type PanelButton = {
+      dataset: { panelBtn: string };
+      attrs: Record<string, string>;
+      setAttribute: (name: string, value: string) => void;
+    };
+
+    function makeButtons(): PanelButton[] {
+      return ['browser', 'files', 'git'].map((panel) => ({
+        dataset: { panelBtn: panel },
+        attrs: {} as Record<string, string>,
+        setAttribute(name: string, value: string) {
+          this.attrs[name] = value;
+        },
+      }));
+    }
+
+    function pressedState(layout: string, panel: string) {
+      const buttons = makeButtons();
+      const syncPanelButtons = compileFunction<() => void>(
+        extractFunctionSource(mainJs, 'syncPanelButtons'),
+        {
+          currentLayout: () => layout,
+          currentPanel: () => panel,
+          document: { querySelectorAll: () => buttons },
+          Array,
+        },
+      );
+      syncPanelButtons();
+      return Object.fromEntries(
+        buttons.map((button) => [button.dataset.panelBtn, button.attrs['aria-pressed']]),
+      );
+    }
+
+    expect(pressedState('split', 'git')).toEqual({
+      browser: 'false',
+      files: 'false',
+      git: 'true',
+    });
+    expect(pressedState('browser', 'browser')).toEqual({
+      browser: 'true',
+      files: 'false',
+      git: 'false',
+    });
+    expect(pressedState('terminal', 'git')).toEqual({
+      browser: 'false',
+      files: 'false',
+      git: 'false',
+    });
+  });
+
   it('coordinates structured diff responses with exact cache and request identity', () => {
     expect(mainJs).toContain('window.PsycheCodeEditor.createLruCache(6)');
     expect(mainJs).toContain('window.PsycheCodeEditor.createRequestGate()');
