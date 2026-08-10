@@ -48,6 +48,22 @@ function asObject(value) {
   return value && typeof value === 'object' ? value : {};
 }
 
+function parentNodeOf(node) {
+  return node?.parentNode ?? node?.parentElement ?? null;
+}
+
+function findMatchingNode(start, boundary, predicate) {
+  let node = start && typeof start === 'object' ? start : null;
+
+  while (node) {
+    if (predicate(node)) return node;
+    if (node === boundary) break;
+    node = parentNodeOf(node);
+  }
+
+  return null;
+}
+
 function finiteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -73,6 +89,10 @@ function maxTone(...tones) {
 
 function metricDisplayName(id) {
   return PANEL_TITLES[METRICS[id]?.panel] ?? METRICS[id]?.label ?? 'Metric';
+}
+
+function metricAnnouncementLabel(id) {
+  return METRICS[id]?.label ?? 'Metric';
 }
 
 function metricCandidates(preferences, severity, availableMetrics) {
@@ -203,9 +223,9 @@ function createEmptyActivitySample() {
 
 function createEmptyFrameSample() {
   return {
-    fps: 0,
-    renderLatencyMs: 0,
-    droppedFrames: 0,
+    fps: null,
+    renderLatencyMs: null,
+    droppedFrames: null,
   };
 }
 
@@ -258,7 +278,7 @@ function collectScopeButtons(elements) {
   const explicit = Array.isArray(elements.scopeButtons)
     ? elements.scopeButtons
     : Array.from(elements.scopeButtons ?? []);
-  if (explicit.length) return explicit.filter(Boolean);
+  if (explicit.length) return [...new Set(explicit.filter(Boolean))];
 
   const roots = [elements.bar, elements.detail].filter(Boolean);
   const buttons = [];
@@ -675,6 +695,9 @@ function renderPerformance(body, doc, sample, trends) {
   const grid = doc.createElement('div');
   grid.className = 'status-performance-grid';
   let cellCount = 0;
+  const hasFrameSample = Number.isFinite(sample.frame?.fps)
+    && Number.isFinite(sample.frame?.renderLatencyMs)
+    && Number.isFinite(sample.frame?.droppedFrames);
 
   if (sample.nativeSnapshot) {
     const workspace = sample.nativeSnapshot.workspace ?? {};
@@ -709,21 +732,23 @@ function renderPerformance(body, doc, sample, trends) {
     cellCount += 1;
   }
 
-  grid.appendChild(performanceCell(
-    doc,
-    'Frame rate',
-    `${Math.round(sample.frame.fps)} FPS`,
-    `${sample.frame.renderLatencyMs.toFixed(1)} ms`,
-    trends.fps.values,
-  ));
-  grid.appendChild(performanceCell(
-    doc,
-    'Dropped',
-    String(Math.round(sample.frame.droppedFrames)),
-    `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
-    trends.droppedFrames.values,
-  ));
-  cellCount += 2;
+  if (hasFrameSample) {
+    grid.appendChild(performanceCell(
+      doc,
+      'Frame rate',
+      `${Math.round(sample.frame.fps)} FPS`,
+      `${sample.frame.renderLatencyMs.toFixed(1)} ms`,
+      trends.fps.values,
+    ));
+    grid.appendChild(performanceCell(
+      doc,
+      'Dropped',
+      String(Math.round(sample.frame.droppedFrames)),
+      `Peak ${Math.round(peakValue(trends.droppedFrames) ?? sample.frame.droppedFrames)} / sample`,
+      trends.droppedFrames.values,
+    ));
+    cellCount += 2;
+  }
 
   if (!cellCount) {
     appendEmpty(body, doc, 'No active performance metrics.');
@@ -777,10 +802,20 @@ function renderActivity(body, doc, activity, trends, spikes, agentToolCalls) {
       doc,
       'Errors',
       String(Math.round(activity.workspace.errors ?? 0)),
-      agentToolCalls != null ? `${Math.round(agentToolCalls)} agent tool calls` : 'Instrumented native calls',
+      'Native call failures',
       trends.outputLinesPerSecond.values,
     ),
   );
+
+  if (Number.isFinite(agentToolCalls)) {
+    grid.appendChild(activityCell(
+      doc,
+      'Agent tools',
+      String(Math.round(agentToolCalls)),
+      'Structured Coven events only',
+      [],
+    ));
+  }
 
   body.appendChild(grid);
 
@@ -850,14 +885,15 @@ function renderMoreMenuState({
   overflowed,
   preferences,
   currentTriggerMetric,
-  onOpenMetric,
-  onMoveMetric,
-  onToggleVisible,
 }) {
   resetNode(body);
+  body.setAttribute('role', 'dialog');
+  body.setAttribute('aria-modal', 'false');
+  body.setAttribute('aria-labelledby', 'status-more-title');
 
   const head = doc.createElement('div');
   head.className = 'status-more-head';
+  head.id = 'status-more-title';
   head.textContent = 'Status options';
   body.appendChild(head);
 
@@ -870,14 +906,11 @@ function renderMoreMenuState({
     open.className = 'status-more-item status-more-open';
     open.dataset.focusKey = `more-open:${id}`;
     open.dataset.metric = id;
+    open.dataset.moreAction = 'open-metric';
     open.dataset.severity = currentMetricSeverity[id] ?? 'neutral';
     open.textContent = METRICS[id].label;
     open.title = METRICS[id].tooltip;
     open.setAttribute('aria-expanded', currentTriggerMetric === id ? 'true' : 'false');
-    open.setAttribute('role', 'menuitem');
-    open.addEventListener('click', () => {
-      onOpenMetric(id);
-    });
 
     const toggle = doc.createElement('label');
     toggle.className = 'status-more-toggle';
@@ -886,10 +919,9 @@ function renderMoreMenuState({
     checkbox.checked = id === 'connection' || preferences.visible.includes(id);
     checkbox.disabled = id === 'connection';
     checkbox.dataset.focusKey = `more-show:${id}`;
+    checkbox.dataset.metric = id;
+    checkbox.dataset.moreAction = 'toggle-visible';
     checkbox.setAttribute('aria-label', `Show ${METRICS[id].label}`);
-    checkbox.addEventListener('change', () => {
-      onToggleVisible(id, checkbox.checked);
-    });
     toggle.append(
       checkbox,
       appendTextCell(doc, 'status-more-toggle-label', 'Show'),
@@ -909,21 +941,21 @@ function renderMoreMenuState({
     earlier.type = 'button';
     earlier.className = 'status-more-move';
     earlier.dataset.focusKey = `more-earlier:${id}`;
+    earlier.dataset.metric = id;
+    earlier.dataset.moreAction = 'move-earlier';
     earlier.textContent = 'Earlier';
     earlier.setAttribute('aria-label', `Move ${METRICS[id].label} earlier`);
-    earlier.setAttribute('role', 'menuitem');
     earlier.disabled = preferences.order.indexOf(id) <= 0;
-    earlier.addEventListener('click', () => onMoveMetric(id, -1));
 
     const later = doc.createElement('button');
     later.type = 'button';
     later.className = 'status-more-move';
     later.dataset.focusKey = `more-later:${id}`;
+    later.dataset.metric = id;
+    later.dataset.moreAction = 'move-later';
     later.textContent = 'Later';
     later.setAttribute('aria-label', `Move ${METRICS[id].label} later`);
-    later.setAttribute('role', 'menuitem');
     later.disabled = preferences.order.indexOf(id) >= preferences.order.length - 1;
-    later.addEventListener('click', () => onMoveMetric(id, 1));
 
     controls.append(earlier, later);
     row.append(open, toggle, meta, controls);
@@ -1019,6 +1051,30 @@ export function createStatusController(options = {}) {
       renderView();
     }
   });
+  let cleanupCallbacks = [];
+
+  function pushCleanup(callback) {
+    cleanupCallbacks.push(callback);
+    return callback;
+  }
+
+  function drainCleanup() {
+    while (cleanupCallbacks.length) {
+      const callback = cleanupCallbacks.pop();
+      callback?.();
+    }
+  }
+
+  function registerListener(target, type, handler, options) {
+    if (!target || typeof target.addEventListener !== 'function' || typeof target.removeEventListener !== 'function') {
+      return;
+    }
+
+    target.addEventListener(type, handler, options);
+    pushCleanup(() => {
+      target.removeEventListener(type, handler, options);
+    });
+  }
 
   activity.lastFlushAt = now();
   seedMetricNodes(doc, elements.metrics, metricNodeCache);
@@ -1179,10 +1235,18 @@ export function createStatusController(options = {}) {
     if (!id || !METRICS[id]) return;
 
     const pinned = new Set(preferencesState.value.pinned);
-    if (pinned.has(id)) pinned.delete(id);
-    else pinned.add(id);
+    let announcement = '';
+    if (pinned.has(id)) {
+      pinned.delete(id);
+      announcement = `Unpinned ${metricAnnouncementLabel(id)}`;
+    } else {
+      pinned.add(id);
+      announcement = `Pinned ${metricAnnouncementLabel(id)}`;
+    }
     writePreferences({ ...preferencesState.value, pinned: [...pinned] });
     renderView();
+    elements.live.textContent = announcement;
+    elements.alert.textContent = '';
   }
 
   async function copyDiagnostics() {
@@ -1193,6 +1257,7 @@ export function createStatusController(options = {}) {
       elements.live.textContent = 'Diagnostics copied';
       elements.alert.textContent = '';
     } catch (error) {
+      elements.live.textContent = '';
       elements.alert.textContent = `Unable to copy diagnostics: ${formatError(error)}`;
     }
   }
@@ -1314,9 +1379,12 @@ export function createStatusController(options = {}) {
     const { focusedAvailable, scopeName } = sample.scopeState ?? effectiveScopeForContext(sample.context ?? {});
     sample.scopeState = { focusedAvailable, scopeName, activeThreadId: sample.context?.activeThreadId ?? null };
 
-    const availableMetrics = new Set(['connection', 'agents', 'shells', 'tasks', 'fps', 'activity']);
+    const availableMetrics = new Set(['connection', 'agents', 'shells', 'tasks', 'activity']);
     if (labels.performance != null && sample.nativeSnapshot) {
       availableMetrics.add('performance');
+    }
+    if (labels.fps != null) {
+      availableMetrics.add('fps');
     }
 
     const visiblePreference = preferencesState.value.visible.filter((id) => availableMetrics.has(id));
@@ -1412,9 +1480,6 @@ export function createStatusController(options = {}) {
       overflowed,
       preferences: preferencesState.value,
       currentTriggerMetric: activeTriggerMetric,
-      onOpenMetric: (id) => openMetric(id, true),
-      onMoveMetric: moveMetric,
-      onToggleVisible: toggleVisibleMetric,
     });
 
     const effectiveDiagnosticsScope = scopeName === 'focused' ? 'focused' : 'workspace';
@@ -1528,18 +1593,21 @@ export function createStatusController(options = {}) {
     }
 
     const token = lifecycleToken;
-    pollInFlight = runPoll(token)
-      .finally(() => {
+    const request = runPoll(token);
+    const trackedRequest = request.finally(() => {
+      if (pollInFlight === trackedRequest) {
         pollInFlight = null;
-        if (refreshQueued) {
-          refreshQueued = false;
-          refresh();
-          return;
-        }
-        if (running && token === lifecycleToken) {
-          schedulePoll();
-        }
-      });
+      }
+      if (refreshQueued) {
+        refreshQueued = false;
+        refresh();
+        return;
+      }
+      if (running && token === lifecycleToken) {
+        schedulePoll();
+      }
+    });
+    pollInFlight = trackedRequest;
 
     return pollInFlight;
   }
@@ -1561,15 +1629,96 @@ export function createStatusController(options = {}) {
 
   function handleKeydown(event) {
     noteActivity();
+    if (event.key === 'Escape' && !elements.moreMenu.hidden) {
+      event.preventDefault();
+      closeMoreMenu({ restoreFocus: true });
+      return;
+    }
     if (event.key === 'Escape' && activeTriggerMetric) {
       event.preventDefault();
       closePanel();
       return;
     }
-    if (event.key === 'Escape' && !elements.moreMenu.hidden) {
-      event.preventDefault();
-      closeMoreMenu({ restoreFocus: true });
+  }
+
+  function handleMetricsClick(event) {
+    noteActivity();
+    const trigger = findMatchingNode(
+      event?.target,
+      elements.metrics,
+      (node) => typeof node?.dataset?.metric === 'string' && METRICS[node.dataset.metric],
+    );
+    if (!trigger) return;
+    toggleMetric(trigger.dataset.metric);
+  }
+
+  function handleMoreClick() {
+    noteActivity();
+    const willOpen = elements.moreMenu.hidden;
+    elements.moreMenu.hidden = !willOpen;
+    elements.more.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    if (willOpen) {
+      renderView();
     }
+  }
+
+  function handleMoreMenuClick(event) {
+    noteActivity();
+    const control = findMatchingNode(
+      event?.target,
+      elements.moreMenu,
+      (node) => typeof node?.dataset?.moreAction === 'string',
+    );
+    if (!control) return;
+
+    const id = control.dataset.metric;
+    if (!id || !METRICS[id]) return;
+
+    if (control.dataset.moreAction === 'open-metric') {
+      openMetric(id, true);
+      return;
+    }
+    if (control.dataset.moreAction === 'move-earlier') {
+      moveMetric(id, -1);
+      return;
+    }
+    if (control.dataset.moreAction === 'move-later') {
+      moveMetric(id, 1);
+    }
+  }
+
+  function handleMoreMenuChange(event) {
+    noteActivity();
+    const control = findMatchingNode(
+      event?.target,
+      elements.moreMenu,
+      (node) => node?.dataset?.moreAction === 'toggle-visible',
+    );
+    if (!control) return;
+
+    const id = control.dataset.metric;
+    if (!id || !METRICS[id]) return;
+    toggleVisibleMetric(id, control.checked === true);
+  }
+
+  function handlePinClick() {
+    noteActivity();
+    togglePinnedMetric(activeTriggerMetric);
+  }
+
+  function handleCopyClick() {
+    noteActivity();
+    void copyDiagnostics();
+  }
+
+  function handleCloseClick() {
+    noteActivity();
+    closePanel();
+  }
+
+  function handleScopeClick(event) {
+    const scopeName = buttonScopeValue(event?.currentTarget ?? event?.target);
+    setScope(scopeName);
   }
 
   function notePtyData(threadId, bytes, at = now()) {
@@ -1680,53 +1829,43 @@ export function createStatusController(options = {}) {
 
   function start() {
     if (running) return controller;
+    drainCleanup();
     running = true;
     lifecycleToken += 1;
-    doc.addEventListener('visibilitychange', handleVisibilityChange);
-    doc.addEventListener('keydown', handleKeydown);
+    registerListener(doc, 'visibilitychange', handleVisibilityChange);
+    registerListener(doc, 'keydown', handleKeydown);
+    registerListener(elements.metrics, 'click', handleMetricsClick);
+    registerListener(elements.more, 'click', handleMoreClick);
+    registerListener(elements.moreMenu, 'click', handleMoreMenuClick);
+    registerListener(elements.moreMenu, 'change', handleMoreMenuChange);
+    registerListener(elements.pin, 'click', handlePinClick);
+    registerListener(elements.copy, 'click', handleCopyClick);
+    registerListener(elements.close, 'click', handleCloseClick);
+    for (const button of scopeButtons) {
+      registerListener(button, 'click', handleScopeClick);
+    }
     resizeObserver.observe(elements.bar);
+    pushCleanup(() => resizeObserver.disconnect());
     ensureFrameLoop();
     handleVisibilityChange();
     return controller;
   }
 
   function stop() {
-    if (!running) return controller;
+    if (!running && !cleanupCallbacks.length && timerId == null && frameId == null) {
+      return controller;
+    }
     running = false;
     lifecycleToken += 1;
+    refreshQueued = false;
+    pollInFlight = null;
     if (timerId != null) {
       clearTimer(timerId);
       timerId = null;
     }
     stopFrameLoop();
-    doc.removeEventListener('visibilitychange', handleVisibilityChange);
-    doc.removeEventListener('keydown', handleKeydown);
-    resizeObserver.disconnect();
+    drainCleanup();
     return controller;
-  }
-
-  elements.more.addEventListener('click', () => {
-    const willOpen = elements.moreMenu.hidden;
-    elements.moreMenu.hidden = !willOpen;
-    elements.more.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
-    if (willOpen) {
-      renderView();
-    }
-  });
-  elements.pin.addEventListener('click', () => togglePinnedMetric(activeTriggerMetric));
-  elements.copy.addEventListener('click', () => {
-    void copyDiagnostics();
-  });
-  elements.close.addEventListener('click', closePanel);
-  for (const button of scopeButtons) {
-    button.addEventListener('click', () => {
-      const scopeName = buttonScopeValue(button);
-      setScope(scopeName);
-    });
-  }
-  for (const id of DEFAULT_METRIC_ORDER) {
-    const record = createMetricNode(doc, metricNodeCache, id);
-    record.button.addEventListener('click', () => toggleMetric(id));
   }
 
   const controller = {

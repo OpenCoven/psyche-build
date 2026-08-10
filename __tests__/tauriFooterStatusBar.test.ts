@@ -33,7 +33,7 @@ describe('Tauri footer status bar shell', () => {
 
     expect(order).toEqual([...order].sort((left, right) => left - right));
     expect(indexHtml).toMatch(
-      /<div class="footer-stack" id="footer-stack">[\s\S]*<footer class="composer" id="composer">[\s\S]*<section class="status-detail" id="status-detail"[\s\S]*<div class="status-bar" id="status-bar"[\s\S]*<div class="status-more-menu" id="status-more-menu"[\s\S]*<div class="status-live" id="status-live"[\s\S]*<div class="status-alert" id="status-alert"/
+      /<div class="footer-stack" id="footer-stack">[\s\S]*<footer class="composer" id="composer">[\s\S]*<section class="status-detail" id="status-detail"[\s\S]*<div class="status-bar" id="status-bar"[\s\S]*<div[\s\S]*class="status-more-menu"[\s\S]*id="status-more-menu"[\s\S]*<div class="status-live" id="status-live"[\s\S]*<div class="status-alert" id="status-alert"/
     );
   });
 
@@ -76,11 +76,12 @@ describe('Tauri footer status bar shell', () => {
       /id="status-scope-focused"[^>]*aria-pressed="false"[^>]*>Focused<\/button>/
     );
     expect(indexHtml).toMatch(
-      /id="status-more-button"[^>]*aria-haspopup="menu"[^>]*aria-expanded="false"[^>]*aria-controls="status-more-menu"/
+      /id="status-more-button"[^>]*aria-haspopup="dialog"[^>]*aria-expanded="false"[^>]*aria-controls="status-more-menu"/
     );
     expect(indexHtml).toMatch(
-      /<div class="status-more-menu" id="status-more-menu" role="menu" aria-label="Status options" hidden>/
+      /<div[\s\S]*class="status-more-menu"[\s\S]*id="status-more-menu"[\s\S]*role="dialog"[\s\S]*aria-modal="false"[\s\S]*aria-labelledby="status-more-title"[\s\S]*hidden[\s\S]*>/
     );
+    expect(indexHtml).toMatch(/id="status-more-title"[^>]*>Status options<\/div>/);
   });
 
   it('defines the exact 26px footer rail CSS contract', () => {
@@ -218,18 +219,24 @@ describe('Tauri footer status bar shell', () => {
     ]);
   });
 
-  it('ships controller source contracts for persistence, copy failures, Escape, and focused scope fallback', () => {
+  it('ships controller source contracts for persistence, announcements, Escape, and focused scope fallback', () => {
     const controller = readFileSync(join(statusRoot, 'status-controller.mjs'), 'utf8');
 
     expect(controller).toContain('createStatusController');
     expect(controller).toContain('ResizeObserver');
+    expect(controller).toContain('registerListener');
+    expect(controller).toContain('drainCleanup');
     expect(controller).toContain('psyche.tauri.status.v1');
     expect(controller).toContain('Unable to copy diagnostics');
     expect(controller).toMatch(/event\.key === ['"]Escape['"]/);
     expect(controller).toMatch(/=== ['"]focused['"] && !focusedAvailable/);
     expect(controller).toMatch(/setAttribute\(['"]aria-expanded['"]/);
-    expect(controller).toMatch(/setAttribute\(['"]role['"],\s*['"]menuitem['"]\)/);
     expect(controller).toContain('Diagnostics copied');
+    expect(controller).toContain('Pinned ');
+    expect(controller).toContain('Unpinned ');
+    expect(controller).toContain('Agent tools');
+    expect(controller).toContain('Structured Coven events only');
+    expect(controller).not.toContain('menuitem');
     expect(controller).not.toContain('innerHTML');
   });
 

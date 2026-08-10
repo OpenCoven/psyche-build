@@ -155,9 +155,9 @@ export type SeverityState = {
 };
 
 export type FrameSample = {
-  fps: number;
-  renderLatencyMs: number;
-  droppedFrames: number;
+  fps: number | null;
+  renderLatencyMs: number | null;
+  droppedFrames: number | null;
 };
 
 export type FrameSampler = {
@@ -169,6 +169,8 @@ export type DiagnosticsMetrics = {
   cpuPercent?: number | null;
   memoryBytes?: number | null;
   fps?: number | null;
+  renderLatencyMs?: number | null;
+  droppedFrames?: number | null;
   linesPerSecond?: number | null;
   outputLinesPerSecond?: number | null;
 };
@@ -177,6 +179,8 @@ export type DiagnosticsPeaks = {
   cpuPercent?: number | null;
   memoryBytes?: number | null;
   fps?: number | null;
+  renderLatencyMs?: number | null;
+  droppedFrames?: number | null;
   linesPerSecond?: number | null;
   outputLinesPerSecond?: number | null;
 };

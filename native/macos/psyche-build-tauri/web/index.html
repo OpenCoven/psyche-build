@@ -452,18 +452,22 @@
               class="status-more-btn"
               id="status-more-button"
               type="button"
-              aria-haspopup="menu"
+              aria-haspopup="dialog"
               aria-expanded="false"
               aria-controls="status-more-menu"
             >More</button>
           </div>
         </div>
 
-        <div class="status-more-menu" id="status-more-menu" role="menu" aria-label="Status options" hidden>
-          <div class="status-more-head">Status options</div>
-          <button class="status-more-item" type="button" role="menuitem">Show all metrics</button>
-          <button class="status-more-item" type="button" role="menuitem">Pin current metric</button>
-          <button class="status-more-item" type="button" role="menuitem">Copy diagnostics</button>
+        <div
+          class="status-more-menu"
+          id="status-more-menu"
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="status-more-title"
+          hidden
+        >
+          <div class="status-more-head" id="status-more-title">Status options</div>
         </div>
 
         <div class="status-live" id="status-live" aria-live="polite" aria-atomic="true"></div>

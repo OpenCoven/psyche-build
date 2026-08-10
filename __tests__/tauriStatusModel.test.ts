@@ -595,12 +595,32 @@ describe('tauri footer status model', () => {
     expect(Array.from(text).length).toBe(16_384);
   });
 
-  test('uses adaptive sampling and counts dropped frames from 60Hz intervals', () => {
+  test('uses adaptive sampling and leaves frame fields unavailable until a real interval exists', () => {
     expect(samplingDelay({ hidden: false, idleForMs: 5_000 })).toBe(1_000);
     expect(samplingDelay({ hidden: false, idleForMs: 30_000 })).toBe(5_000);
     expect(samplingDelay({ hidden: true, idleForMs: 0 })).toBeNull();
 
     const sampler = createFrameSampler();
+    expect(sampler.flush(1_000)).toEqual({
+      fps: null,
+      renderLatencyMs: null,
+      droppedFrames: null,
+    });
+
+    sampler.frame(0);
+    expect(sampler.flush(1_000)).toEqual({
+      fps: null,
+      renderLatencyMs: null,
+      droppedFrames: null,
+    });
+
+    const zeroDropSampler = createFrameSampler();
+    [0, 16.7, 33.4].forEach((time) => zeroDropSampler.frame(time));
+    const zeroDropSample = zeroDropSampler.flush(1_000);
+    expect(zeroDropSample.fps).toBe(3);
+    expect(zeroDropSample.droppedFrames).toBe(0);
+    expect(zeroDropSample.renderLatencyMs).toBeCloseTo(16.7, 1);
+
     [0, 16.7, 33.4, 83.4, 100.1].forEach((time) => sampler.frame(time));
     const sample = sampler.flush(1_000);
 

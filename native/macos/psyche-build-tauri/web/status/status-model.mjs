@@ -582,11 +582,17 @@ export function createFrameSampler() {
     },
     flush(windowMs) {
       const duration = Math.max(1, finiteNumber(windowMs) ?? 0);
-      const sample = {
-        fps: Math.round((frames * 1000) / duration),
-        renderLatencyMs: intervals > 0 ? totalIntervalMs / intervals : 0,
-        droppedFrames,
-      };
+      const sample = intervals > 0
+        ? {
+            fps: Math.round((frames * 1000) / duration),
+            renderLatencyMs: totalIntervalMs / intervals,
+            droppedFrames,
+          }
+        : {
+            fps: null,
+            renderLatencyMs: null,
+            droppedFrames: null,
+          };
 
       previousAt = null;
       frames = 0;
