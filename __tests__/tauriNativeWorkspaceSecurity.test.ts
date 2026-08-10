@@ -117,23 +117,25 @@ describe('Tauri native workspace security contract', () => {
     expect(functionBody(source, 'workspace_directory_entries')).toContain('libc::fdopendir');
   });
 
-  test('places the publication fault boundary after the final temp inode check', async () => {
+  test('keeps distinct publication fault boundaries around the final temp inode check', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const save = functionBody(source, 'save_workspace_to_inner');
     const publish = functionBody(source, 'publish_opened_workspace_file');
 
     const tempSync = save.indexOf('.sync_all()');
     const publication = save.indexOf('publish_opened_workspace_file');
-    const faultHook = publish.indexOf('before_publication(source)');
+    const prevalidationHook = publish.indexOf('before_publication(source)');
     const revalidation = publish.indexOf('verify_opened_regular_file');
+    const postvalidationHook = publish.indexOf('run_post_verification_pre_rename_fault(source)');
     const rename = publish.indexOf('rename(workspace_dir, source, destination)');
     const installedValidation = publish.indexOf('verify_opened_regular_file', revalidation + 1);
 
     expect(tempSync).toBeGreaterThanOrEqual(0);
     expect(publication).toBeGreaterThan(tempSync);
-    expect(faultHook).toBeGreaterThanOrEqual(0);
-    expect(faultHook).toBeGreaterThan(revalidation);
-    expect(rename).toBeGreaterThan(faultHook);
+    expect(prevalidationHook).toBeGreaterThanOrEqual(0);
+    expect(prevalidationHook).toBeLessThan(revalidation);
+    expect(postvalidationHook).toBeGreaterThan(revalidation);
+    expect(rename).toBeGreaterThan(postvalidationHook);
     expect(installedValidation).toBeGreaterThan(rename);
     expect(save.slice(tempSync, publication)).not.toContain('drop(temp_file)');
     expect(publish.slice(revalidation, rename)).not.toContain('regular_file_exists');
