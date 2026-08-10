@@ -1896,6 +1896,16 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   min-height: 0;
 }
 
+.footer-stack > .composer { grid-row: 1; }
+
+.footer-stack > .status-detail { grid-row: 2; }
+
+.footer-stack > .status-bar { grid-row: 3; }
+
+.footer-stack > .status-more-menu,
+.footer-stack > .status-live,
+.footer-stack > .status-alert { grid-row: 1 / -1; }
+
 .status-detail[hidden],
 .status-more-menu[hidden] { display: none; }
 
@@ -2237,6 +2247,27 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
     grid-column: 1 / -1;
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 700px) {
+  .status-metric[data-metric="performance"]:not([data-severity="warn"]):not([data-severity="danger"]),
+  .status-metric[data-metric="fps"]:not([data-severity="warn"]):not([data-severity="danger"]),
+  .status-metric[data-metric="activity"]:not([data-severity="warn"]):not([data-severity="danger"]) {
+    display: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .status-metric[data-metric="shells"]:not([data-severity="warn"]):not([data-severity="danger"]),
+  .status-metric[data-metric="tasks"]:not([data-severity="warn"]):not([data-severity="danger"]) {
+    display: none;
+  }
+}
+
+@media (max-width: 540px) {
+  .status-metric[data-metric="agents"]:not([data-severity="warn"]):not([data-severity="danger"]) {
+    display: none;
   }
 }
 

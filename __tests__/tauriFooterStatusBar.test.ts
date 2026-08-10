@@ -31,7 +31,7 @@ describe('Tauri footer status bar shell', () => {
 
     expect(order).toEqual([...order].sort((left, right) => left - right));
     expect(indexHtml).toMatch(
-      /<div class="footer-stack" id="footer-stack">[\s\S]*<footer class="composer" id="composer">[\s\S]*<section class="status-detail" id="status-detail"[\s\S]*<footer class="status-bar" id="status-bar"[\s\S]*<div class="status-more-menu" id="status-more-menu"[\s\S]*<div class="status-live" id="status-live"[\s\S]*<div class="status-alert" id="status-alert"/
+      /<div class="footer-stack" id="footer-stack">[\s\S]*<footer class="composer" id="composer">[\s\S]*<section class="status-detail" id="status-detail"[\s\S]*<div class="status-bar" id="status-bar"[\s\S]*<div class="status-more-menu" id="status-more-menu"[\s\S]*<div class="status-live" id="status-live"[\s\S]*<div class="status-alert" id="status-alert"/
     );
   });
 
@@ -63,7 +63,7 @@ describe('Tauri footer status bar shell', () => {
 
   it('ships workspace status semantics, compact scope controls, and the more menu host', () => {
     expect(indexHtml).toMatch(
-      /<footer class="status-bar" id="status-bar" aria-label="Workspace status">/
+      /<div class="status-bar" id="status-bar" role="group" aria-label="Workspace status">/
     );
     expect(indexHtml).toContain('id="status-metrics"');
     expect(indexHtml).toMatch(/id="status-scope"[^>]*role="group"[^>]*aria-label="Status scope"/);
@@ -107,6 +107,19 @@ describe('Tauri footer status bar shell', () => {
     );
   });
 
+  it('pins explicit footer stack rows so the hidden detail track collapses cleanly', () => {
+    const section = footerSection(stylesCss);
+
+    expect(section).toMatch(/\.footer-stack\s*>\s*\.composer\s*\{[^}]*grid-row:\s*1;/s);
+    expect(section).toMatch(/\.footer-stack\s*>\s*\.status-detail\s*\{[^}]*grid-row:\s*2;/s);
+    expect(section).toMatch(/\.footer-stack\s*>\s*\.status-bar\s*\{[^}]*grid-row:\s*3;/s);
+    expect(section).toMatch(
+      /\.status-detail\[hidden\],\s*\.status-more-menu\[hidden\]\s*\{[^}]*display:\s*none;/s
+    );
+    expect(section).toMatch(/\.status-more-menu\s*\{[^}]*position:\s*absolute;/s);
+    expect(section).toMatch(/\.status-live,\s*\.status-alert\s*\{[^}]*position:\s*absolute;/s);
+  });
+
   it('adds a footer-specific narrow breakpoint for the detail header and actions', () => {
     const section = footerSection(stylesCss);
 
@@ -118,6 +131,23 @@ describe('Tauri footer status bar shell', () => {
     );
     expect(section).toMatch(
       /@media \(max-width:\s*760px\)\s*\{[\s\S]*?\.status-detail-actions\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;[^}]*justify-content:\s*flex-start;[^}]*flex-wrap:\s*wrap;/s
+    );
+  });
+
+  it('adds narrow CSS fallback hiding only healthy low-priority metrics', () => {
+    const section = footerSection(stylesCss);
+
+    for (const metric of ['performance', 'fps', 'activity', 'shells', 'tasks', 'agents']) {
+      expect(section).toContain(
+        `.status-metric[data-metric="${metric}"]:not([data-severity="warn"]):not([data-severity="danger"])`
+      );
+    }
+
+    expect(section).toMatch(/@media \(max-width:\s*700px\)\s*\{[\s\S]*display:\s*none;/s);
+    expect(section).toMatch(/@media \(max-width:\s*620px\)\s*\{[\s\S]*display:\s*none;/s);
+    expect(section).toMatch(/@media \(max-width:\s*540px\)\s*\{[\s\S]*display:\s*none;/s);
+    expect(section).not.toContain(
+      '.status-metric[data-metric="connection"]:not([data-severity="warn"]):not([data-severity="danger"])'
     );
   });
 
