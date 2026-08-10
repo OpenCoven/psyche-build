@@ -512,6 +512,127 @@ describe('pane footer native action helpers', () => {
 });
 
 describe('pane footer interaction behavior', () => {
+  it('wraps ArrowUp/ArrowDown and jumps Home/End across enabled menu items', () => {
+    const document = { activeElement: null as object | null };
+    const paneFooterMenuItems = compileFunction<
+      (menu: { querySelectorAll: (selector: string) => unknown[] }) => Array<{
+        disabled?: boolean;
+        focus: () => void;
+      }>
+    >(functionSource(mainJs, 'paneFooterMenuItems'), {});
+    const movePaneFooterMenuFocus = compileFunction<
+      (
+        menu: { querySelectorAll: (selector: string) => unknown[] },
+        key: string,
+      ) => boolean
+    >(functionSource(mainJs, 'movePaneFooterMenuFocus'), {
+      document,
+      paneFooterMenuItems,
+    });
+
+    const focused: string[] = [];
+    function createButton(name: string, disabled = false) {
+      const button = {
+        disabled,
+        focus: () => {
+          focused.push(name);
+          document.activeElement = button;
+        },
+      };
+      return button;
+    }
+
+    const first = createButton('first');
+    const disabled = createButton('disabled', true);
+    const last = createButton('last');
+    const menu = {
+      querySelectorAll: (selector: string) => (
+        selector === '[role="menuitem"]' ? [first, disabled, last] : []
+      ),
+    };
+
+    document.activeElement = last;
+    expect(movePaneFooterMenuFocus(menu, 'ArrowDown')).toBe(true);
+    expect(focused.at(-1)).toBe('first');
+
+    document.activeElement = first;
+    expect(movePaneFooterMenuFocus(menu, 'ArrowUp')).toBe(true);
+    expect(focused.at(-1)).toBe('last');
+
+    document.activeElement = first;
+    expect(movePaneFooterMenuFocus(menu, 'End')).toBe(true);
+    expect(focused.at(-1)).toBe('last');
+
+    document.activeElement = last;
+    expect(movePaneFooterMenuFocus(menu, 'Home')).toBe(true);
+    expect(focused.at(-1)).toBe('first');
+  });
+
+  it('closes Escape-restored menus back to the overflow trigger', () => {
+    const calls: string[] = [];
+    const closePaneFooterMenu = compileFunction<
+      (
+        threadValue: {
+          paneFooterMenuCleanup: (() => void) | null;
+          paneFooterMenu: { parentNode: { removeChild: (value: unknown) => void } } | null;
+          paneFooterOverflow: {
+            setAttribute: (name: string, value: string) => void;
+            focus: () => void;
+          } | null;
+        },
+        restoreFocus: boolean,
+      ) => void
+    >(functionSource(mainJs, 'closePaneFooterMenu'), {});
+    const handlePaneFooterMenuKeyDown = compileFunction<
+      (
+        threadValue: {
+          paneFooterMenuCleanup: (() => void) | null;
+          paneFooterMenu: { parentNode: { removeChild: (value: unknown) => void } } | null;
+          paneFooterOverflow: {
+            setAttribute: (name: string, value: string) => void;
+            focus: () => void;
+          } | null;
+        },
+        menu: unknown,
+        event: {
+          key: string;
+          preventDefault: () => void;
+          stopPropagation: () => void;
+        },
+      ) => boolean
+    >(functionSource(mainJs, 'handlePaneFooterMenuKeyDown'), {
+      closePaneFooterMenu,
+      movePaneFooterMenuFocus: () => false,
+    });
+
+    const thread = {
+      paneFooterMenuCleanup: () => { calls.push('cleanup'); },
+      paneFooterMenu: {
+        parentNode: {
+          removeChild: () => { calls.push('remove-menu'); },
+        },
+      },
+      paneFooterOverflow: {
+        setAttribute: (name: string, value: string) => { calls.push(`${name}:${value}`); },
+        focus: () => { calls.push('focus-trigger'); },
+      },
+    };
+
+    expect(handlePaneFooterMenuKeyDown(thread, {}, {
+      key: 'Escape',
+      preventDefault: () => { calls.push('prevent-default'); },
+      stopPropagation: () => { calls.push('stop-propagation'); },
+    })).toBe(true);
+    expect(calls).toEqual([
+      'prevent-default',
+      'stop-propagation',
+      'cleanup',
+      'remove-menu',
+      'aria-expanded:false',
+      'focus-trigger',
+    ]);
+  });
+
   it('focuses footer chrome on pointerdown but defers inactive button focus until after click action dispatch', () => {
     const thread = { id: 'thread-a' };
     const state = { activeThreadId: 'thread-b' };
@@ -540,7 +661,9 @@ describe('pane footer interaction behavior', () => {
       item: Record<string, unknown>,
       event: { stopPropagation: () => void },
     ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
-      closePaneFooterMenu: () => { calls.push('close-menu'); },
+      closePaneFooterMenu: (_thread: typeof thread, restoreFocus: boolean) => {
+        calls.push(`close-menu:${restoreFocus}`);
+      },
       runPaneFooterAction: () => {
         calls.push('run-action');
         return true;
@@ -580,8 +703,8 @@ describe('pane footer interaction behavior', () => {
     expect(calls).toEqual([
       'stop:button',
       'stop:click',
-      'close-menu',
       'run-action',
+      'close-menu:true',
       'schedule-focus',
       'queue-focus',
     ]);
@@ -593,8 +716,8 @@ describe('pane footer interaction behavior', () => {
     expect(calls).toEqual([
       'stop:button',
       'stop:click',
-      'close-menu',
       'run-action',
+      'close-menu:true',
       'schedule-focus',
       'queue-focus',
       'focus:thread-a',
@@ -606,9 +729,9 @@ describe('pane footer integration contract', () => {
   it('mounts one footer in every physical pane path, including Git', () => {
     expect(mainJs).toMatch(/function createPaneFooter\(thread\)/);
     expect(mainJs).toMatch(/function syncPaneFooter\(thread\)/);
-    expect(mainJs).toMatch(/function mountToolPane\(thread\)[\s\S]*createPaneFooter\(thread\)/);
-    expect(mainJs).toMatch(/function mountTerminal\(thread\)[\s\S]*createPaneFooter\(thread\)/);
-    expect(mainJs).toMatch(/function mountBrowserPane\(thread\)[\s\S]*createPaneFooter\(thread\)/);
+    expect(functionSource(mainJs, 'mountToolPane')).toContain('createPaneFooter(thread)');
+    expect(functionSource(mainJs, 'mountTerminal')).toContain('createPaneFooter(thread)');
+    expect(functionSource(mainJs, 'mountBrowserPane')).toContain('createPaneFooter(thread)');
   });
 
   it('uses a fixed third pane row without wrapping and raises the pane floor', () => {
@@ -672,6 +795,8 @@ describe('pane footer integration contract', () => {
 
   it('keeps collapsed controls keyboard reachable in a real overflow menu', () => {
     const sync = functionSource(mainJs, 'syncPaneFooter');
+    const moveFocus = functionSource(mainJs, 'movePaneFooterMenuFocus');
+    const onMenuKeyDown = functionSource(mainJs, 'handlePaneFooterMenuKeyDown');
 
     expect(sync).toMatch(/PsychePanes\.footerItems\(paneFooterState\(thread\)\)/);
     expect(sync).toMatch(/PsychePanes\.hiddenFooterKeys\(currentTier, isAgentPaneKind\)/);
@@ -680,10 +805,15 @@ describe('pane footer integration contract', () => {
     expect(sync).toMatch(/thread\.createPaneFooterButton\(item, "menuitem"\)/);
     expect(functionSource(mainJs, 'createPaneFooter'))
       .toMatch(/handlePaneFooterItemClick\(thread, item, event\)/);
-    expect(sync).toMatch(/event\.key === "Escape"/);
+    expect(moveFocus).toMatch(/key === "ArrowUp"/);
+    expect(moveFocus).toMatch(/key === "ArrowDown"/);
+    expect(moveFocus).toMatch(/key === "Home"/);
+    expect(moveFocus).toMatch(/key === "End"/);
+    expect(onMenuKeyDown).toMatch(/event\.key === "Escape"/);
+    expect(onMenuKeyDown).toMatch(/closePaneFooterMenu\(thread,\s*true\)/);
     expect(sync).toMatch(/document\.addEventListener\("pointerdown", onOutsidePointerDown, true\)/);
     expect(sync).toMatch(/document\.addEventListener\("keydown", onMenuKeyDown, true\)/);
-    expect(sync).toMatch(/event\.key === "Escape"[\s\S]*event\.stopPropagation\(\)/);
+    expect(sync).toMatch(/function onOutsidePointerDown[\s\S]*closePaneFooterMenu\(thread,\s*false\)/);
   });
 
   it('syncs and releases footer resources with the pane lifecycle', () => {

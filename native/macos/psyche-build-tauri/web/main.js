@@ -3467,8 +3467,8 @@
 
   function handlePaneFooterItemClick(thread, item, event) {
     event.stopPropagation();
-    closePaneFooterMenu(thread, false);
     var result = runPaneFooterAction(thread, item);
+    closePaneFooterMenu(thread, true);
     focusPaneAfterFooterAction(thread);
     return result;
   }
@@ -3487,6 +3487,54 @@
       thread.paneFooterOverflow.setAttribute("aria-expanded", "false");
       if (restoreFocus) thread.paneFooterOverflow.focus();
     }
+  }
+
+  function paneFooterMenuItems(menu) {
+    if (!menu || !menu.querySelectorAll) return [];
+    return Array.prototype.filter.call(
+      menu.querySelectorAll('[role="menuitem"]'),
+      function (button) {
+        return !button.disabled;
+      }
+    );
+  }
+
+  function movePaneFooterMenuFocus(menu, key) {
+    var buttons = paneFooterMenuItems(menu);
+    if (!buttons.length) return false;
+    var current = document.activeElement;
+    var currentIndex = buttons.indexOf(current);
+    var nextIndex = 0;
+    if (key === "Home") {
+      nextIndex = 0;
+    } else if (key === "End") {
+      nextIndex = buttons.length - 1;
+    } else if (key === "ArrowUp") {
+      nextIndex = currentIndex === -1
+        ? buttons.length - 1
+        : (currentIndex + buttons.length - 1) % buttons.length;
+    } else if (key === "ArrowDown") {
+      nextIndex = currentIndex === -1
+        ? 0
+        : (currentIndex + 1) % buttons.length;
+    } else {
+      return false;
+    }
+    buttons[nextIndex].focus();
+    return true;
+  }
+
+  function handlePaneFooterMenuKeyDown(thread, menu, event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterMenu(thread, true);
+      return true;
+    }
+    if (!movePaneFooterMenuFocus(menu, event.key)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
   }
 
   function createPaneFooter(thread) {
@@ -3607,11 +3655,7 @@
       closePaneFooterMenu(thread, false);
     }
     function onMenuKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        closePaneFooterMenu(thread, true);
-      }
+      handlePaneFooterMenuKeyDown(thread, menu, event);
     }
     document.addEventListener("pointerdown", onOutsidePointerDown, true);
     document.addEventListener("keydown", onMenuKeyDown, true);
@@ -3619,7 +3663,7 @@
       document.removeEventListener("pointerdown", onOutsidePointerDown, true);
       document.removeEventListener("keydown", onMenuKeyDown, true);
     };
-    var first = menu.querySelector("button");
+    var first = paneFooterMenuItems(menu)[0];
     if (first) first.focus();
   }
 
