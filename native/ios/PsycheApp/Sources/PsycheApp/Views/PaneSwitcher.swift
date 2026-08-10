@@ -42,7 +42,36 @@ struct PaneSwitcher: View {
         let isSecondary = pane.id == secondaryPaneID
         let isShown = isPrimary || isSecondary
 
-        return Button {
+        return HStack(spacing: 4) {
+            selectButton(for: pane, isPrimary: isPrimary, isSecondary: isSecondary, isShown: isShown)
+            // A visible control rather than a long press. Opening a pane beside
+            // another is the whole point of the split, and a hidden gesture
+            // makes it undiscoverable.
+            if canSplit, !isShown {
+                Button {
+                    onSplit(pane.id)
+                } label: {
+                    Image(systemName: "rectangle.split.2x1")
+                        .font(.caption)
+                        .frame(
+                            minWidth: PsycheTheme.minimumTapTarget,
+                            minHeight: PsycheTheme.minimumTapTarget
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(pane.title) beside")
+                .accessibilityIdentifier("pane-split-\(pane.id)")
+            }
+        }
+    }
+
+    private func selectButton(
+        for pane: PaneChoice,
+        isPrimary: Bool,
+        isSecondary: Bool,
+        isShown: Bool
+    ) -> some View {
+        Button {
             onSelect(pane.id)
         } label: {
             HStack(spacing: 6) {
@@ -65,11 +94,6 @@ struct PaneSwitcher: View {
         .accessibilityIdentifier("pane-chip-\(pane.id)")
         .accessibilityLabel(chipLabel(pane, isPrimary: isPrimary, isSecondary: isSecondary))
         .accessibilityAddTraits(isShown ? [.isSelected] : [])
-        .contextMenu {
-            if canSplit, !isShown {
-                Button("Open beside") { onSplit(pane.id) }
-            }
-        }
     }
 
     private func chipLabel(_ pane: PaneChoice, isPrimary: Bool, isSecondary: Bool) -> String {

@@ -24,7 +24,11 @@ struct PaneWorkspaceView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let showsSplit = supportsSplit(proxy.size)
+            // Room for two and having two are different questions. Conflating
+            // them made the split control depend on a secondary already being
+            // chosen, so it could never appear.
+            let hasRoomForTwo = hasRoomForTwo(proxy.size)
+            let showsSplit = hasRoomForTwo && secondaryPane != nil
             VStack(spacing: 0) {
                 if let primary = primaryPane {
                     // The terminals are the greedy part; the switcher and the
@@ -43,7 +47,7 @@ struct PaneWorkspaceView: View {
                         panes: choices,
                         primaryPaneID: store.primaryPaneID,
                         secondaryPaneID: showsSplit ? store.secondaryPaneID : nil,
-                        canSplit: showsSplit,
+                        canSplit: hasRoomForTwo,
                         onSelect: select,
                         onSplit: splitBeside
                     )
@@ -166,10 +170,9 @@ struct PaneWorkspaceView: View {
         return panes.first { $0.id == paneID }
     }
 
-    /// Two terminals need real width. Regular width always qualifies; compact
-    /// only does in landscape, where the window is wider than it is tall.
-    private func supportsSplit(_ size: CGSize) -> Bool {
-        guard store.secondaryPaneID != nil else { return false }
+    /// Two terminals need real width. Regular width qualifies; compact only
+    /// does in landscape, where the window is wider than it is tall.
+    private func hasRoomForTwo(_ size: CGSize) -> Bool {
         if horizontalSizeClass == .regular { return size.width >= 700 }
         return size.width > size.height && size.width >= 640
     }

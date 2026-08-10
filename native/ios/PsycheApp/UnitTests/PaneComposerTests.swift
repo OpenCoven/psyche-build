@@ -34,7 +34,7 @@ final class PaneComposerTests: XCTestCase {
         XCTAssertEqual(store.drafts["ios-cockpit"], "keep this")
     }
 
-    func testFailedSubmissionRetainsTheExactDraftAndExposesTheError() async {
+    func testMismatchedResponseRetainsTheExactDraftAndExposesThePaneError() async {
         let client = ComposerTerminalClient(sendError: TerminalControlError.unexpectedResponse)
         let registry = TerminalSessionRegistry(client: client)
         let store = makeLiveStore()
@@ -51,7 +51,33 @@ final class PaneComposerTests: XCTestCase {
         await task?.value
 
         XCTAssertEqual(store.drafts["web-home"], "  echo keep spacing  ")
-        XCTAssertNotNil(registry.lastErrorMessage)
+        XCTAssertEqual(
+            model.errorMessage(forPane: "web-home", registry: registry),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
+    }
+
+    func testNegativeAcknowledgementRetainsTheExactDraftAndExposesThePaneError() async {
+        let client = ComposerTerminalClient(sendError: TerminalControlError.inputRejected)
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home")
+        store.drafts["web-home"] = "do not lose this"
+
+        let task = model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        )
+        await task?.value
+
+        XCTAssertEqual(store.drafts["web-home"], "do not lose this")
+        XCTAssertEqual(
+            model.errorMessage(forPane: "web-home", registry: registry),
+            "The host rejected the terminal input."
+        )
     }
 
     func testStaleOrUnfocusedComposerDoesNotSendTextOrKeys() async {
@@ -133,6 +159,36 @@ final class PaneComposerTests: XCTestCase {
         XCTAssertEqual(sends.first?.streamID, "stream-web-home")
         XCTAssertNil(store.drafts["web-home"])
         XCTAssertEqual(store.drafts["ios-cockpit"], "second")
+    }
+
+    func testFocusChangeDuringFailedSendDoesNotMoveTheErrorToTheNewPane() async {
+        let client = ComposerTerminalClient(
+            sendError: TerminalControlError.unexpectedResponse,
+            gateSends: true
+        )
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home", secondary: "ios-cockpit")
+        registry.focus("web-home")
+        store.drafts["web-home"] = "fail here"
+
+        let task = try! XCTUnwrap(model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts()
+        registry.focus("ios-cockpit")
+        await client.releaseSend()
+        await task.value
+
+        XCTAssertNil(model.errorMessage(forPane: "ios-cockpit", registry: registry))
+        XCTAssertEqual(
+            model.errorMessage(forPane: "web-home", registry: registry),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
     }
 
     func testSuccessfulSendDoesNotClearNewerTextInTheInitiatingPane() async {
@@ -261,10 +317,46 @@ final class PaneComposerTests: XCTestCase {
         XCTAssertFalse(model.armedControl)
         XCTAssertFalse(model.armedAlt)
 
-        model.dismissError(registry: registry)
+        model.dismissError(forPane: "web-home", registry: registry)
 
         XCTAssertNil(model.inputErrorMessage)
         XCTAssertNil(registry.lastErrorMessage)
+    }
+
+    func testDismissingTheFocusedPanesErrorLeavesAnotherPanesErrorVisible() async {
+        let client = ComposerTerminalClient(sendError: TerminalControlError.unexpectedResponse)
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home", secondary: "ios-cockpit")
+        store.drafts = [
+            "web-home": "first",
+            "ios-cockpit": "second",
+        ]
+
+        let first = model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        )
+        await first?.value
+        registry.focus("ios-cockpit")
+        let second = model.submit(
+            targetPaneID: "ios-cockpit",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        )
+        await second?.value
+
+        model.dismissError(forPane: "ios-cockpit", registry: registry)
+
+        XCTAssertNil(model.errorMessage(forPane: "ios-cockpit", registry: registry))
+        XCTAssertEqual(
+            model.errorMessage(forPane: "web-home", registry: registry),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
     }
 
     private func makeLiveStore() -> WorkspaceStore {

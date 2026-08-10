@@ -18,6 +18,7 @@ public final class TerminalSessionRegistry: ObservableObject {
     @Published public private(set) var focusedPaneID: String?
     @Published public private(set) var outputByPaneID: [String: Data] = [:]
     @Published public private(set) var lastErrorMessage: String?
+    @Published public private(set) var sendErrorMessagesByPaneID: [String: String] = [:]
 
     private let client: any TerminalControlling
     private let outputLimit: Int
@@ -28,6 +29,11 @@ public final class TerminalSessionRegistry: ObservableObject {
     /// sends as `sinceSequence`.
     private var latestSequenceByPaneID: [String: UInt64] = [:]
     private var frameTask: Task<Void, Never>?
+    private var latestSendAttemptByPaneID: [String: UInt64] = [:]
+    private var nextSendAttempt: UInt64 = 0
+    private var sendErrorRecordsByPaneID: [String: ErrorRecord] = [:]
+    private var generalErrorRecord: ErrorRecord?
+    private var nextErrorSequence: UInt64 = 0
 
     public init(
         client: any TerminalControlling,
@@ -49,6 +55,10 @@ public final class TerminalSessionRegistry: ObservableObject {
 
     public func resumeSequence(forPane paneID: String) -> UInt64? {
         latestSequenceByPaneID[paneID]
+    }
+
+    public func sendErrorMessage(forPane paneID: String) -> String? {
+        sendErrorMessagesByPaneID[paneID]
     }
 
     public func start() {
@@ -106,16 +116,21 @@ public final class TerminalSessionRegistry: ObservableObject {
     /// never made it out rather than clearing the field on a failed send.
     @discardableResult
     public func send(_ data: Data, toPane paneID: String) async -> Bool {
+        let attempt = beginSendAttempt(forPane: paneID)
         guard let session = sessions[paneID] else {
-            lastErrorMessage = TerminalControlError.notAttached(paneID).localizedDescription
+            publishSendError(
+                TerminalControlError.notAttached(paneID).localizedDescription,
+                forPane: paneID,
+                attempt: attempt
+            )
             return false
         }
         do {
             try await client.send(data, toStream: session.streamID)
-            lastErrorMessage = nil
+            clearSendError(forPane: paneID, attempt: attempt)
             return true
         } catch {
-            lastErrorMessage = error.localizedDescription
+            publishSendError(error.localizedDescription, forPane: paneID, attempt: attempt)
             return false
         }
     }
@@ -125,7 +140,7 @@ public final class TerminalSessionRegistry: ObservableObject {
         do {
             try await client.resize(streamID: session.streamID, columns: columns, rows: rows)
         } catch {
-            lastErrorMessage = error.localizedDescription
+            publishGeneralError(error.localizedDescription)
         }
     }
 
@@ -139,7 +154,16 @@ public final class TerminalSessionRegistry: ObservableObject {
     }
 
     public func clearError() {
-        lastErrorMessage = nil
+        generalErrorRecord = nil
+        sendErrorRecordsByPaneID.removeAll()
+        sendErrorMessagesByPaneID.removeAll()
+        refreshLastErrorMessage()
+    }
+
+    public func clearSendError(forPane paneID: String) {
+        sendErrorRecordsByPaneID.removeValue(forKey: paneID)
+        sendErrorMessagesByPaneID.removeValue(forKey: paneID)
+        refreshLastErrorMessage()
     }
 
     // MARK: - Internals
@@ -164,7 +188,7 @@ public final class TerminalSessionRegistry: ObservableObject {
             // the replay frame carrying that sequence has not arrived yet, and
             // seeding the cursor with it would make us drop the replay itself.
         } catch {
-            lastErrorMessage = error.localizedDescription
+            publishGeneralError(error.localizedDescription)
         }
     }
 
@@ -176,8 +200,46 @@ public final class TerminalSessionRegistry: ObservableObject {
         do {
             try await client.detach(streamID: session.streamID)
         } catch {
-            lastErrorMessage = error.localizedDescription
+            publishGeneralError(error.localizedDescription)
         }
+    }
+
+    private func beginSendAttempt(forPane paneID: String) -> UInt64 {
+        nextSendAttempt &+= 1
+        latestSendAttemptByPaneID[paneID] = nextSendAttempt
+        return nextSendAttempt
+    }
+
+    private func publishSendError(_ message: String, forPane paneID: String, attempt: UInt64) {
+        guard latestSendAttemptByPaneID[paneID] == attempt else { return }
+        nextErrorSequence &+= 1
+        sendErrorMessagesByPaneID[paneID] = message
+        sendErrorRecordsByPaneID[paneID] = ErrorRecord(
+            message: message,
+            sequence: nextErrorSequence
+        )
+        refreshLastErrorMessage()
+    }
+
+    private func clearSendError(forPane paneID: String, attempt: UInt64) {
+        guard latestSendAttemptByPaneID[paneID] == attempt else { return }
+        clearSendError(forPane: paneID)
+    }
+
+    private func publishGeneralError(_ message: String) {
+        nextErrorSequence &+= 1
+        generalErrorRecord = ErrorRecord(message: message, sequence: nextErrorSequence)
+        refreshLastErrorMessage()
+    }
+
+    private func refreshLastErrorMessage() {
+        var latest = generalErrorRecord
+        for record in sendErrorRecordsByPaneID.values {
+            if latest.map({ record.sequence > $0.sequence }) ?? true {
+                latest = record
+            }
+        }
+        lastErrorMessage = latest?.message
     }
 
     private func receive(_ frame: TerminalBinaryFrame) {
@@ -194,4 +256,9 @@ public final class TerminalSessionRegistry: ObservableObject {
         }
         outputByPaneID[paneID] = buffer
     }
+}
+
+private struct ErrorRecord {
+    let message: String
+    let sequence: UInt64
 }

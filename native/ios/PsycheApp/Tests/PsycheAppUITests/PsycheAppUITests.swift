@@ -302,6 +302,95 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
     }
 
+    // MARK: - Split layout and focus
+
+    /// Regular width has room for two terminals, and both must be live rather
+    /// than one being a picture of the other.
+    func testRegularOpensASecondTerminalBesideTheFirst() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+        openWebHomePane(in: app)
+
+        splitBeside("ios-cockpit", in: app)
+
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+    }
+
+    /// Only one terminal owns the keystrokes, and tapping the other has to
+    /// move that ownership — visibly.
+    func testFocusMovesToWhicheverTerminalIsTapped() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+        openWebHomePane(in: app)
+        splitBeside("ios-cockpit", in: app)
+
+        let first = element("terminal-pane-web-home", in: app)
+        let second = element("terminal-pane-ios-cockpit", in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        XCTAssertTrue(first.isSelected, "The pane that was opened should start focused")
+
+        second.tap()
+
+        XCTAssertTrue(
+            element("terminal-focus-badge-ios-cockpit", in: app).waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(app.otherElements["terminal-focus-badge-web-home"].exists)
+    }
+
+    /// The cap is the point: a third terminal replaces one rather than joining.
+    func testAThirdPaneReplacesOneOfTheTwoOnScreen() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+        openWebHomePane(in: app)
+        splitBeside("ios-cockpit", in: app)
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+
+        // Selecting a third pane takes the primary slot.
+        let third = row("pane-chip-bridge-protocol", in: app)
+        XCTAssertTrue(third.waitForExistence(timeout: 10))
+        third.tap()
+
+        XCTAssertTrue(
+            element("terminal-pane-bridge-protocol", in: app).waitForExistence(timeout: 10)
+        )
+        XCTAssertFalse(
+            app.otherElements["terminal-pane-web-home"].exists,
+            "A third terminal must replace one, not join it"
+        )
+        XCTAssertEqual(renderedTerminalCount(in: app), 2, "More than two terminals are rendered")
+    }
+
+    /// Portrait has no room for two, but the choice is hidden rather than
+    /// thrown away, so turning back restores the split.
+    func testCompactSplitsInLandscapeAndCollapsesInPortrait() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+        openWebHomePane(in: app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+        splitBeside("ios-cockpit", in: app)
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).exists)
+
+        XCUIDevice.shared.orientation = .portrait
+        try waitForPortrait(app)
+
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+        XCTAssertEqual(renderedTerminalCount(in: app), 1, "Portrait must show a single terminal")
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+
+        XCTAssertTrue(
+            element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10),
+            "The secondary pane should have been hidden, not discarded"
+        )
+    }
+
     // MARK: - Regular width (iPad)
 
     func testRegularUsesASidebarRatherThanTabs() throws {
@@ -380,6 +469,40 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func splitBeside(_ paneID: String, in app: XCUIApplication) {
+        let split = row("pane-split-\(paneID)", in: app)
+        XCTAssertTrue(split.waitForExistence(timeout: 10), "No split control for \(paneID)")
+        split.tap()
+    }
+
+    /// Counts live terminals, which is how the two-session cap is observed
+    /// from outside.
+    private func renderedTerminalCount(in app: XCUIApplication) -> Int {
+        ["web-home", "ios-cockpit", "bridge-protocol"].filter {
+            app.otherElements["terminal-pane-\($0)"].exists
+        }.count
+    }
+
+    private func waitForPortrait(
+        _ app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let window = app.windows.firstMatch
+        let portrait = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in window.frame.height > window.frame.width },
+            object: window
+        )
+        guard XCTWaiter.wait(for: [portrait], timeout: 30) == .completed else {
+            XCTFail(
+                "Device never returned to portrait within 30s; last frame \(window.frame).",
+                file: file,
+                line: line
+            )
+            return
+        }
+    }
 
     /// Reaches the terminal workspace from whichever shell is on screen.
     private func openWebHomePane(in app: XCUIApplication) {

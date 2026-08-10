@@ -25,12 +25,15 @@ public struct TerminalSession: Sendable, Equatable {
 
 public enum TerminalControlError: Error, Sendable, Equatable, LocalizedError {
     case unexpectedResponse
+    case inputRejected
     case notAttached(String)
 
     public var errorDescription: String? {
         switch self {
         case .unexpectedResponse:
             "The host answered a terminal request with something else."
+        case .inputRejected:
+            "The host rejected the terminal input."
         case .notAttached(let paneID):
             "Pane \(paneID) is not attached."
         }
@@ -89,11 +92,17 @@ public actor TerminalControlClient: TerminalControlling {
         let requestID = await requests.nextRequestID()
         // The host decodes this with a strict base64 reader and refuses
         // anything it cannot read, rather than typing mangled bytes.
-        _ = try await requests.send(.inputPane(PaneInputRequest(
+        let response = try await requests.send(.inputPane(PaneInputRequest(
             requestID: requestID,
             streamID: streamID,
             data: data.base64EncodedString()
         )))
+        guard case let .ack(ack) = response else {
+            throw TerminalControlError.unexpectedResponse
+        }
+        guard ack.ok else {
+            throw TerminalControlError.inputRejected
+        }
     }
 
     public func resize(streamID: String, columns: Int, rows: Int) async throws {

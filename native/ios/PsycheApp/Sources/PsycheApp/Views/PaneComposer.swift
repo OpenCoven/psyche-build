@@ -22,9 +22,18 @@ final class PaneComposerModel: ObservableObject {
         inputErrorMessage = nil
     }
 
-    func dismissError(registry: TerminalSessionRegistry) {
+    func errorMessage(
+        forPane paneID: String?,
+        registry: TerminalSessionRegistry
+    ) -> String? {
+        inputErrorMessage ?? paneID.flatMap(registry.sendErrorMessage(forPane:))
+    }
+
+    func dismissError(forPane paneID: String?, registry: TerminalSessionRegistry) {
         inputErrorMessage = nil
-        registry.clearError()
+        if let paneID {
+            registry.clearSendError(forPane: paneID)
+        }
     }
 
     @discardableResult
@@ -142,7 +151,7 @@ struct PaneComposer: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let message = model.inputErrorMessage ?? registry.lastErrorMessage {
+            if let message = model.errorMessage(forPane: targetPaneID, registry: registry) {
                 errorBanner(message)
             }
             CodingKeyRow(
@@ -217,7 +226,9 @@ struct PaneComposer: View {
                 .font(.caption)
                 .lineLimit(2)
             Spacer(minLength: 0)
-            Button("Dismiss") { model.dismissError(registry: registry) }
+            Button("Dismiss") {
+                model.dismissError(forPane: targetPaneID, registry: registry)
+            }
                 .font(.caption.weight(.semibold))
                 .accessibilityIdentifier("pane-composer-error-dismiss")
         }

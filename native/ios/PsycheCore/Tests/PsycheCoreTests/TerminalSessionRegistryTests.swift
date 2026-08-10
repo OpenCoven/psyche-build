@@ -365,7 +365,57 @@ final class TerminalSessionRegistryTests: XCTestCase {
         // A composer clears its draft on true and keeps it on false, so this
         // is the difference between losing what someone typed and not.
         XCTAssertFalse(refused)
-        XCTAssertNotNil(registry.lastErrorMessage)
+        XCTAssertEqual(
+            registry.sendErrorMessage(forPane: "%1"),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
+    }
+
+    func testNegativeAcknowledgementPublishesPaneScopedErrorAndReturnsFalse() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1")
+        await client.setSendFailure(TerminalControlError.inputRejected)
+
+        let accepted = await registry.send(Data("lost\r".utf8), toPane: "%1")
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(
+            registry.sendErrorMessage(forPane: "%1"),
+            "The host rejected the terminal input."
+        )
+    }
+
+    func testConcurrentSuccessForAnotherPaneDoesNotClearTheFailure() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1", secondary: "%2")
+        await client.enableControlledSends()
+
+        let failedSend = Task {
+            await registry.send(Data("first".utf8), toPane: "%1")
+        }
+        await client.waitUntilSendStarts(streamID: "stream-%1")
+        let successfulSend = Task {
+            await registry.send(Data("second".utf8), toPane: "%2")
+        }
+        await client.waitUntilSendStarts(streamID: "stream-%2")
+
+        await client.completeSend(
+            streamID: "stream-%1",
+            throwing: TerminalControlError.unexpectedResponse
+        )
+        let failedAccepted = await failedSend.value
+        XCTAssertFalse(failedAccepted)
+        let paneOneError = registry.sendErrorMessage(forPane: "%1")
+
+        await client.completeSend(streamID: "stream-%2")
+        let successfulAccepted = await successfulSend.value
+        XCTAssertTrue(successfulAccepted)
+
+        XCTAssertEqual(registry.sendErrorMessage(forPane: "%1"), paneOneError)
+        XCTAssertNil(registry.sendErrorMessage(forPane: "%2"))
+        XCTAssertEqual(registry.lastErrorMessage, paneOneError)
     }
 
     func testSendWithNoAttachedTargetReportsFailureRatherThanSuccess() async {
@@ -389,7 +439,26 @@ final class TerminalSessionRegistryTests: XCTestCase {
         let accepted = await registry.send(Data("ok".utf8), toPane: "%1")
 
         XCTAssertTrue(accepted)
+        XCTAssertNil(registry.sendErrorMessage(forPane: "%1"))
         XCTAssertNil(registry.lastErrorMessage)
+    }
+
+    func testDismissingOnePanesSendErrorDoesNotClearAnotherPanesError() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1", secondary: "%2")
+        await client.setSendFailure(TerminalControlError.unexpectedResponse)
+        _ = await registry.send(Data("one".utf8), toPane: "%1")
+        await client.setSendFailure(TerminalControlError.inputRejected)
+        _ = await registry.send(Data("two".utf8), toPane: "%2")
+
+        registry.clearSendError(forPane: "%1")
+
+        XCTAssertNil(registry.sendErrorMessage(forPane: "%1"))
+        XCTAssertEqual(
+            registry.sendErrorMessage(forPane: "%2"),
+            TerminalControlError.inputRejected.localizedDescription
+        )
     }
 
     // MARK: - Errors
@@ -435,6 +504,10 @@ private actor FakeTerminalClient: TerminalControlling {
     private var latestSequence: UInt64 = 0
     private var attachFailure: (any Error)?
     private var sendFailure: (any Error)?
+    private var controlsSends = false
+    private var startedSendStreamIDs: Set<String> = []
+    private var sendStartWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var sendCompletions: [String: CheckedContinuation<Void, any Error>] = [:]
 
     private let frames: AsyncStream<TerminalBinaryFrame>
     private let continuation: AsyncStream<TerminalBinaryFrame>.Continuation
@@ -449,6 +522,7 @@ private actor FakeTerminalClient: TerminalControlling {
     func setLatestSequence(_ sequence: UInt64) { latestSequence = sequence }
     func setAttachFailure(_ error: (any Error)?) { attachFailure = error }
     func setSendFailure(_ error: (any Error)?) { sendFailure = error }
+    func enableControlledSends() { controlsSends = true }
 
     func attach(paneID: String, sinceSequence: UInt64?) async throws -> TerminalSession {
         resumePoints.append(sinceSequence)
@@ -468,6 +542,13 @@ private actor FakeTerminalClient: TerminalControlling {
     }
 
     func send(_ data: Data, toStream streamID: String) async throws {
+        if controlsSends {
+            startedSendStreamIDs.insert(streamID)
+            sendStartWaiters.removeValue(forKey: streamID)?.forEach { $0.resume() }
+            try await withCheckedThrowingContinuation { continuation in
+                sendCompletions[streamID] = continuation
+            }
+        }
         if let sendFailure { throw sendFailure }
         lastInputStreamID = streamID
         lastInputText = String(decoding: data, as: UTF8.self)
@@ -479,6 +560,24 @@ private actor FakeTerminalClient: TerminalControlling {
 
     func incomingFrames() async -> AsyncStream<TerminalBinaryFrame> {
         frames
+    }
+
+    func waitUntilSendStarts(streamID: String) async {
+        if startedSendStreamIDs.contains(streamID) { return }
+        await withCheckedContinuation { continuation in
+            sendStartWaiters[streamID, default: []].append(continuation)
+        }
+    }
+
+    func completeSend(streamID: String, throwing error: (any Error)? = nil) {
+        guard let continuation = sendCompletions.removeValue(forKey: streamID) else {
+            return
+        }
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume()
+        }
     }
 
     func emit(streamID: String, sequence: UInt64, text: String) {

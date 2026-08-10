@@ -23,6 +23,7 @@
 		4A373F936E3C0BAC6C16B32A /* TerminalSessionRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31B908EB65EF4C2EA68E8A81 /* TerminalSessionRegistryTests.swift */; };
 		4AB0F1275B1595BBDFA089EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53CD9B827118A43330ED5907 /* SettingsView.swift */; };
 		4EE44BEAEF5AEA280FF40827 /* NowItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62AEDC0262461A3E2670DA01 /* NowItem.swift */; };
+		509543F3C2CDAA5EA28F8C05 /* TerminalControlClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66DD2F0B4265066CF3CF4F0C /* TerminalControlClientTests.swift */; };
 		509C226C8BAE7EC9489F375A /* PairedHostStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */; };
 		531AEC6890A3351A83127EAD /* PairedHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A997355FB217A6A644109877 /* PairedHost.swift */; };
 		57C00E3E569EB487C94E4297 /* PaneComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6840F19F5D15D082882D668C /* PaneComposer.swift */; };
@@ -153,6 +154,7 @@
 		587923E031AA726CC0A26E11 /* PaneSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneSwitcher.swift; sourceTree = "<group>"; };
 		5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostSheet.swift; sourceTree = "<group>"; };
 		62AEDC0262461A3E2670DA01 /* NowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowItem.swift; sourceTree = "<group>"; };
+		66DD2F0B4265066CF3CF4F0C /* TerminalControlClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalControlClientTests.swift; sourceTree = "<group>"; };
 		6840F19F5D15D082882D668C /* PaneComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneComposer.swift; sourceTree = "<group>"; };
 		6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -384,6 +386,7 @@
 				E98949BD17F265015F596B21 /* PairedHostStoreTests.swift */,
 				462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */,
 				E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */,
+				66DD2F0B4265066CF3CF4F0C /* TerminalControlClientTests.swift */,
 				31B908EB65EF4C2EA68E8A81 /* TerminalSessionRegistryTests.swift */,
 				4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */,
 				158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */,
@@ -615,6 +618,7 @@
 				7F12BD7FD42EFA5F47AF774F /* PairedHostStoreTests.swift in Sources */,
 				58653704CB87919CC55070A0 /* PinnedCertificateDelegateTests.swift in Sources */,
 				43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */,
+				509543F3C2CDAA5EA28F8C05 /* TerminalControlClientTests.swift in Sources */,
 				4A373F936E3C0BAC6C16B32A /* TerminalSessionRegistryTests.swift in Sources */,
 				C1186894FA78279D5FCDFE9B /* URLSessionControlTransportTests.swift in Sources */,
 				C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */,
