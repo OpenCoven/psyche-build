@@ -811,6 +811,93 @@ describe('macOS build channels', () => {
       await expect(install).rejects.toThrow(/rollback restore failed/);
     });
 
+    it('preserves the main failure when staging cleanup also fails', async () => {
+      const homeDir = createScratchDirectory('install-main-and-cleanup-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const finalPath = createAppBundle(applicationsDir, 'Psyche Build.app', 'known-good');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-main-and-cleanup-failure'),
+        'Psyche Build.app',
+        'replacement',
+      );
+      const stagingRoot = join(
+        applicationsDir,
+        '.install-Psyche Build.app.cleanup-failure.staging',
+      );
+      const cleanupError = new Error(`staging cleanup failed for ${stagingRoot}`);
+
+      const installError = await installBundleTransactional(candidatePath, channelConfig('stable'), {
+        homeDir,
+        copyBundle,
+        randomUUID: () => 'cleanup-failure',
+        validateInstalledBundle: async (appPath: string) => {
+          if (appPath === finalPath) {
+            throw new Error('final validation failed');
+          }
+        },
+        removePath: async (targetPath: string) => {
+          if (targetPath === stagingRoot) {
+            throw cleanupError;
+          }
+          rmSync(targetPath, { recursive: true, force: true });
+        },
+      }).then(
+        () => undefined,
+        (error) => error as Error & { cause?: unknown; errors?: unknown[] },
+      );
+
+      expect(installError).toBeDefined();
+      expect(installError?.message).toMatch(/^final validation failed/);
+      expect(installError?.message).toMatch(/staging cleanup failed/i);
+      expect(readAppMarker(finalPath)).toBe('known-good');
+
+      if (!installError) {
+        throw new Error('expected install to fail');
+      }
+
+      if (installError instanceof AggregateError) {
+        expect(installError.errors).toHaveLength(2);
+        expect((installError.errors[0] as Error).message).toBe('final validation failed');
+        expect((installError.errors[1] as Error).message).toBe(cleanupError.message);
+      }
+
+      if (installError.cause instanceof Error) {
+        expect(installError.cause.message).toBe('final validation failed');
+      }
+    });
+
+    it('fails the install when staging cleanup fails after a successful install', async () => {
+      const homeDir = createScratchDirectory('install-success-and-cleanup-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-success-and-cleanup-failure'),
+        'Psyche Build Dev.app',
+        'replacement',
+      );
+      const finalPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const stagingRoot = join(
+        applicationsDir,
+        '.install-Psyche Build Dev.app.cleanup-after-success.staging',
+      );
+
+      await expect(
+        installBundleTransactional(candidatePath, channelConfig('dev'), {
+          homeDir,
+          copyBundle,
+          randomUUID: () => 'cleanup-after-success',
+          validateInstalledBundle: async () => {},
+          removePath: async (targetPath: string) => {
+            if (targetPath === stagingRoot) {
+              throw new Error(`staging cleanup failed for ${stagingRoot}`);
+            }
+            rmSync(targetPath, { recursive: true, force: true });
+          },
+        }),
+      ).rejects.toThrow(/staging cleanup failed/i);
+
+      expect(readAppMarker(finalPath)).toBe('replacement');
+    });
+
     it('cleans up staging paths after a successful install', async () => {
       const homeDir = createScratchDirectory('install-staging-cleanup');
       const applicationsDir = join(homeDir, 'Applications');

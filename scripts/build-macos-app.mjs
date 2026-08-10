@@ -182,6 +182,7 @@ export async function installBundleTransactional(candidate, requestedChannelConf
   let backupCreated = false;
   let finalValidated = false;
   let finalInstalled = false;
+  let operationError;
 
   await mkdirPath(applicationsDir);
 
@@ -211,6 +212,8 @@ export async function installBundleTransactional(candidate, requestedChannelConf
 
     return finalPath;
   } catch (error) {
+    operationError = error;
+
     if (!finalValidated) {
       try {
         if (finalInstalled) {
@@ -226,15 +229,28 @@ export async function installBundleTransactional(candidate, requestedChannelConf
         const rollbackContext = backupCreated
           ? 'Rollback failed'
           : 'Failed to remove invalid installed app';
-        throw new Error(
+        operationError = new Error(
           `${describeError(error)}\n${rollbackContext}: ${describeError(rollbackError)}`,
+          { cause: error },
         );
       }
     }
 
-    throw error;
+    throw operationError;
   } finally {
-    await removePath(stagingRoot);
+    try {
+      await removePath(stagingRoot);
+    } catch (cleanupError) {
+      if (!operationError) {
+        throw cleanupError;
+      }
+
+      throw combineErrors(
+        operationError,
+        cleanupError,
+        'Failed to clean staging install directory',
+      );
+    }
   }
 }
 
@@ -520,6 +536,14 @@ function describeExit(exit) {
 
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function combineErrors(primaryError, secondaryError, secondaryContext) {
+  return new AggregateError(
+    [primaryError, secondaryError],
+    `${describeError(primaryError)}\n${secondaryContext}: ${describeError(secondaryError)}`,
+    { cause: primaryError },
+  );
 }
 
 function isEnoentError(error) {
