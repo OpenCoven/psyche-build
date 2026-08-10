@@ -68,9 +68,17 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('exposes the four right-rail panels', () => {
-    for (const panel of ['browser', 'files', 'diffs', 'git']) {
+  it('exposes the three right-rail panels, with diffs folded into git', () => {
+    for (const panel of ['browser', 'files', 'git']) {
       expect(indexHtml).toContain(`data-panel-btn="${panel}"`);
+    }
+    // Diffs is no longer a tab of its own...
+    expect(indexHtml).not.toContain('data-panel-btn="diffs"');
+    // ...but its markup still exists, inside the git panel, with the element
+    // ids the diff renderer writes into.
+    const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
+    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-editor-host']) {
+      expect(gitPanel).toContain(`id="${id}"`);
     }
   });
 

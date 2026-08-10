@@ -384,18 +384,15 @@ describe('Tauri physical terminal panes', () => {
   it('focuses from pane chrome without duplicating body focus or racing close', () => {
     const thread = { id: 'thread-a' };
     const bodyTarget = { id: 'body-target' };
-    const retryTarget = { id: 'retry-target' };
     const closeTarget = { id: 'close-target' };
     const headerTarget = { id: 'header-target' };
     const body = { contains: (target: unknown) => target === bodyTarget };
-    const retry = { contains: (target: unknown) => target === retryTarget };
     const close = { contains: (target: unknown) => target === closeTarget };
     const state = { activeThreadId: 'thread-b' };
     const focused: string[] = [];
     const handlePanePointerDown = compileFunction<(
       value: typeof thread,
       bodyElement: typeof body,
-      retryElement: typeof retry,
       closeElement: typeof close,
       event: { target: unknown },
     ) => void>(functionSource('handlePanePointerDown'), {
@@ -403,11 +400,10 @@ describe('Tauri physical terminal panes', () => {
       focusThread: (id: string) => { focused.push(id); },
     });
 
-    handlePanePointerDown(thread, body, retry, close, { target: bodyTarget });
-    handlePanePointerDown(thread, body, retry, close, { target: retryTarget });
-    handlePanePointerDown(thread, body, retry, close, { target: closeTarget });
+    handlePanePointerDown(thread, body, close, { target: bodyTarget });
+    handlePanePointerDown(thread, body, close, { target: closeTarget });
     expect(focused).toEqual([]);
-    handlePanePointerDown(thread, body, retry, close, { target: headerTarget });
+    handlePanePointerDown(thread, body, close, { target: headerTarget });
     expect(focused).toEqual([thread.id]);
   });
 
@@ -507,22 +503,36 @@ describe('Tauri physical terminal panes', () => {
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
     const attributes = new Map<string, string>();
+    const statusAttributes = new Map<string, string>();
     const thread = {
       id: 'thread-a', projectId: 'project', name: 'Psyche', status: 'starting',
       paneTitle: { textContent: '' },
-      paneStatus: { textContent: '' },
+      paneStatus: {
+        textContent: '', className: '', title: '',
+        setAttribute: (name: string, value: string) => statusAttributes.set(name, value),
+      },
       paneClose: { setAttribute: (name: string, value: string) => attributes.set(name, value) },
     };
-    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
-      functionSource('syncThreadPaneMetadata'),
+    const applyPaneStatus = compileFunction<(element: unknown, status: string) => void>(
+      functionSource('applyPaneStatus'),
       {},
     );
+    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
+      functionSource('syncThreadPaneMetadata'),
+      { applyPaneStatus },
+    );
+    // Running is shown as a dot, so the label moves to the class and aria-label
+    // and the visible text goes away.
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('running');
+    expect(thread.paneStatus.textContent).toBe('');
+    expect(thread.paneStatus.className).toBe('terminal-pane-status running');
+    expect(statusAttributes.get('aria-label')).toBe('running');
+    // Every other state keeps its word.
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
     expect(thread.paneStatus.textContent).toBe('exited');
+    expect(thread.paneStatus.className).toBe('terminal-pane-status exited');
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
