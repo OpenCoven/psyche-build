@@ -138,6 +138,90 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.workspace?.revision, 6)
     }
 
+    func testStaleGenerationSnapshotAndEventAreIgnoredAfterReconnect() {
+        let store = WorkspaceStore()
+        let firstGeneration = ConnectionGeneration(id: 1)
+        store.beginConnection(for: firstGeneration)
+        store.applySnapshot(
+            workspace: Fixtures.workspace(revision: 50),
+            sequence: 50,
+            for: firstGeneration
+        )
+
+        firstGeneration.invalidate()
+        let secondGeneration = ConnectionGeneration(id: 2)
+        store.beginConnection(for: secondGeneration)
+        store.applySnapshot(
+            workspace: Fixtures.workspace(revision: 99),
+            sequence: 99,
+            for: firstGeneration
+        )
+        store.applyEvent(
+            workspace: Fixtures.workspace(revision: 100),
+            sequence: 100,
+            for: firstGeneration
+        )
+
+        XCTAssertEqual(store.workspace?.revision, 50)
+        XCTAssertEqual(store.sequence, 0)
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+
+        store.applySnapshot(
+            workspace: Fixtures.workspace(revision: 1),
+            sequence: 1,
+            for: secondGeneration
+        )
+        store.applyEvent(
+            workspace: Fixtures.workspace(revision: 2),
+            sequence: 2,
+            for: secondGeneration
+        )
+
+        XCTAssertEqual(store.workspace?.revision, 2)
+        XCTAssertEqual(store.sequence, 2)
+        XCTAssertFalse(store.isStale)
+        XCTAssertFalse(store.needsFullSnapshot)
+    }
+
+    func testActiveGenerationRecoversGapWithAuthoritativeSnapshot() {
+        let store = WorkspaceStore()
+        let generation = ConnectionGeneration(id: 1)
+        store.beginConnection(for: generation)
+        store.applySnapshot(
+            workspace: Fixtures.workspace(revision: 1),
+            sequence: 1,
+            for: generation
+        )
+
+        store.applyEvent(
+            workspace: Fixtures.workspace(revision: 3),
+            sequence: 3,
+            for: generation
+        )
+
+        XCTAssertEqual(store.workspace?.revision, 1)
+        XCTAssertEqual(store.sequence, 1)
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+
+        store.applySnapshot(
+            workspace: Fixtures.workspace(revision: 3),
+            sequence: 3,
+            for: generation
+        )
+        store.applyEvent(
+            workspace: Fixtures.workspace(revision: 4),
+            sequence: 4,
+            for: generation
+        )
+
+        XCTAssertEqual(store.workspace?.revision, 4)
+        XCTAssertEqual(store.sequence, 4)
+        XCTAssertFalse(store.isStale)
+        XCTAssertFalse(store.needsFullSnapshot)
+    }
+
     // MARK: - Stale and last-confirmed state
 
     func testDisconnectKeepsStateButMarksItStale() {

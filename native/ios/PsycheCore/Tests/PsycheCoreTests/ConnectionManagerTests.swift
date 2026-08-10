@@ -42,7 +42,10 @@ final class ConnectionManagerTests: XCTestCase {
             certificateFingerprint: testCertificateFingerprint
         )
 
-        await manager.connect(to: endpoint)
+        let connectTask = Task {
+            await manager.connect(to: endpoint)
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
 
         let sent = await fake.sentMessages
@@ -63,6 +66,7 @@ final class ConnectionManagerTests: XCTestCase {
             protocolVersion: 3,
             projectName: nil
         ))))
+        await connectTask.value
         await fake.emit(.legacy(.welcome(WelcomePayload(
             serverID: "host",
             serverName: "Host",
@@ -116,8 +120,11 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
 
-        await manager.connect(to: testEndpoint())
+        try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(WelcomePayload(
             serverID: "host",
             serverName: "Host",
@@ -133,7 +140,6 @@ final class ConnectionManagerTests: XCTestCase {
             sequence: 1,
             workspace: makeWorkspace(revision: 1)
         )))
-        await manager.waitForEventDrain(after: 1)
         for _ in 0..<100 {
             await Task.yield()
         }
@@ -153,6 +159,7 @@ final class ConnectionManagerTests: XCTestCase {
                 PsycheProtocolVersion.current
             ]
         ))))
+        await connectTask.value
 
         _ = try await waitForSnapshotRequest(on: fake)
 
@@ -160,6 +167,62 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(state, .connected)
         let messages = await fake.sentMessages
         XCTAssertEqual(messages.filter(\.isWorkspaceSnapshotRequest).count, 1)
+    }
+
+    func testPreV3SnapshotAndEventAreIgnoredUntilNegotiationCompletes() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "host",
+            serverName: "Host",
+            protocolVersion: PsycheProtocolVersion.legacy,
+            projectName: "psyche",
+            supportedVersions: [
+                PsycheProtocolVersion.legacy,
+                PsycheProtocolVersion.current
+            ]
+        ))))
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: "pre-v3",
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 2,
+            sequence: 2,
+            workspace: makeWorkspace(revision: 2)
+        )))
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        XCTAssertNil(composition.workspaceStore.workspace)
+        XCTAssertEqual(composition.workspaceStore.sequence, 0)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+        let requestID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: requestID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 10)
+        ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 11,
+            sequence: 2,
+            workspace: makeWorkspace(revision: 11)
+        )))
+        try await waitForWorkspaceRevision(11, in: composition.workspaceStore)
+
+        XCTAssertEqual(composition.workspaceStore.sequence, 2)
+        XCTAssertFalse(composition.workspaceStore.isStale)
     }
 
     func testFailedTransportMovesToFailedState() async {
@@ -188,7 +251,10 @@ final class ConnectionManagerTests: XCTestCase {
             certificateFingerprint: testCertificateFingerprint
         )
 
-        await manager.connect(to: endpoint)
+        let connectTask = Task {
+            await manager.connect(to: endpoint)
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
 
         let helloOnly = await fake.sentMessages
@@ -205,6 +271,7 @@ final class ConnectionManagerTests: XCTestCase {
             protocolVersion: 3,
             projectName: nil
         ))))
+        await connectTask.value
         await manager.waitForEventDrain(after: 1)
         let hostsBeforeAcceptance = try await composition.pairedHostStore.hosts()
         XCTAssertEqual(hostsBeforeAcceptance, [])
@@ -245,13 +312,17 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let composition = makeComposition(transport: fake)
 
-        await composition.manager.connect(to: HostEndpoint(
-            host: "psyche.local",
-            port: 4242,
-            certificateFingerprint: testCertificateFingerprint
-        ))
+        let connectTask = Task {
+            await composition.manager.connect(to: HostEndpoint(
+                host: "psyche.local",
+                port: 4242,
+                certificateFingerprint: testCertificateFingerprint
+            ))
+        }
+        try await waitForHello(on: fake)
         await composition.manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "paired-token"))))
+        await connectTask.value
 
         await composition.manager.waitForState(.failed(
             ConnectionManagerError.missingWelcomeIdentity.localizedDescription
@@ -284,8 +355,12 @@ final class ConnectionManagerTests: XCTestCase {
             certificateFingerprint: testCertificateFingerprint
         )
 
-        await manager.connect(to: firstEndpoint)
+        let firstConnect = Task {
+            await manager.connect(to: firstEndpoint)
+        }
+        try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
         _ = try await waitForSnapshotRequest(on: fake)
 
         secureStore.blockNextRead()
@@ -297,6 +372,8 @@ final class ConnectionManagerTests: XCTestCase {
         }
         try await waitForConnectionAttempts(2, on: fake)
         secureStore.releaseRead()
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
         await reconnect.value
 
         let persistedHosts = try await pairedHostStore.hosts()
@@ -330,7 +407,10 @@ final class ConnectionManagerTests: XCTestCase {
         )
         try await composition.pairedHostStore.save(stored)
 
-        await composition.manager.connectToStoredHost()
+        let connectTask = Task {
+            await composition.manager.connectToStoredHost()
+        }
+        try await waitForHello(on: fake)
         await composition.manager.waitForMessageProcessorReadiness()
 
         let connectionAttempts = await fake.connectionAttempts
@@ -342,6 +422,8 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(hello.clientID, "original-client-id")
         XCTAssertEqual(hello.token, "issued-token")
         XCTAssertEqual(hello.protocolVersion, 3)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
     }
 
     func testAppCompositionSharesItsGraphAndStartsStoredHostReconnectOnlyOnce() async throws {
@@ -367,7 +449,10 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertTrue(composition.connectionManager.requestClient === composition.requestClient)
 
-        await composition.start()
+        let startTask = Task {
+            await composition.start()
+        }
+        try await waitForHello(on: fake)
         await composition.start()
 
         let attempts = await fake.connectionAttempts
@@ -379,9 +464,11 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(hello.clientID, stored.clientID)
         XCTAssertEqual(hello.token, stored.token)
         XCTAssertEqual(hello.protocolVersion, PsycheProtocolVersion.current)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await startTask.value
     }
 
-    func testReconnectCancelsPriorReaderBeforeProcessingNewStream() async {
+    func testReconnectCancelsPriorReaderBeforeProcessingNewStream() async throws {
         let fake = FakeTransport()
         let manager = makeComposition(transport: fake, token: "token").manager
         let firstEndpoint = HostEndpoint(
@@ -395,10 +482,18 @@ final class ConnectionManagerTests: XCTestCase {
             certificateFingerprint: testCertificateFingerprint
         )
 
-        await manager.connect(to: firstEndpoint)
-        await manager.waitForMessageProcessorReadiness()
-        await manager.connect(to: secondEndpoint)
-        await manager.waitForMessageProcessorReadiness()
+        let firstConnect = Task {
+            await manager.connect(to: firstEndpoint)
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
+        let secondConnect = Task {
+            await manager.connect(to: secondEndpoint)
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await secondConnect.value
 
         let connectionAttempts = await fake.connectionAttempts
         let disconnectCount = await fake.disconnectCount
@@ -409,7 +504,7 @@ final class ConnectionManagerTests: XCTestCase {
 
         await fake.emit(.legacy(.paneList([makePane(id: "stale")])), onConnection: 0)
         await fake.emit(.legacy(.paneList([makePane(id: "current")])), onConnection: 1)
-        await manager.waitForEventDrain(after: 1)
+        try await waitForPaneIDs(["current"], in: manager)
 
         let paneIDs = await manager.panes.map(\.id)
         XCTAssertEqual(paneIDs, ["current"])
@@ -420,11 +515,14 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: HostEndpoint(
-            host: "psyche.local",
-            port: 4242,
-            certificateFingerprint: testCertificateFingerprint
-        ))
+        let connectTask = Task {
+            await manager.connect(to: HostEndpoint(
+                host: "psyche.local",
+                port: 4242,
+                certificateFingerprint: testCertificateFingerprint
+            ))
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         let pending = Task {
             try await composition.requestClient.send(.killPane(PaneIDControlRequest(
@@ -434,6 +532,7 @@ final class ConnectionManagerTests: XCTestCase {
         }
         try await waitForPendingRequest(on: composition.requestClient)
         await fake.finishIncomingMessages()
+        await connectTask.value
 
         await manager.waitForState(.failed("Connection closed unexpectedly"))
 
@@ -456,13 +555,17 @@ final class ConnectionManagerTests: XCTestCase {
         let fake = FakeTransport()
         let manager = makeComposition(transport: fake, token: "token").manager
 
-        await manager.connect(to: HostEndpoint(
-            host: "psyche.local",
-            port: 4242,
-            certificateFingerprint: testCertificateFingerprint
-        ))
+        let connectTask = Task {
+            await manager.connect(to: HostEndpoint(
+                host: "psyche.local",
+                port: 4242,
+                certificateFingerprint: testCertificateFingerprint
+            ))
+        }
+        try? await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.error(ProtocolError(code: "unauthorized", message: "token rejected"))))
+        await connectTask.value
 
         await manager.waitForState(.failed("token rejected"))
 
@@ -505,6 +608,8 @@ final class ConnectionManagerTests: XCTestCase {
 
         async let first: Void = manager.connect(to: endpoint)
         async let second: Void = manager.connect(to: endpoint)
+        try? await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
         _ = await (first, second)
         await manager.waitForMessageProcessorReadiness()
 
@@ -545,8 +650,12 @@ final class ConnectionManagerTests: XCTestCase {
         let disconnectedState = await manager.state
         XCTAssertEqual(disconnectedState, .disconnected)
 
-        await manager.connect(to: testEndpoint())
+        let reconnectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnectTask.value
         _ = try await waitForSnapshotRequest(on: fake)
         let reconnectedState = await manager.state
         XCTAssertEqual(reconnectedState, .connected)
@@ -582,9 +691,111 @@ final class ConnectionManagerTests: XCTestCase {
         let cancelledState = await manager.state
         XCTAssertEqual(cancelledState, expectedCancellation)
 
-        await manager.connect(to: testEndpoint())
+        let reconnectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnectTask.value
         _ = try await waitForSnapshotRequest(on: fake)
+        let reconnectedState = await manager.state
+        XCTAssertEqual(reconnectedState, .connected)
+    }
+
+    func testCancellationAfterHelloBeforeWelcomeCleansUpAndAllowsReconnect() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        try await waitForHello(on: fake)
+        connectTask.cancel()
+        await connectTask.value
+        try await waitForDisconnectCount(1, on: fake)
+
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        let cancelledState = await manager.state
+        XCTAssertEqual(
+            cancelledState,
+            .failed(ConnectionManagerError.connectionCancelled.localizedDescription)
+        )
+
+        let reconnectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnectTask.value
+        _ = try await waitForSnapshotRequest(on: fake)
+
+        let reconnectedState = await manager.state
+        XCTAssertEqual(reconnectedState, .connected)
+    }
+
+    func testCancellationDuringProvisionalNegotiationCleansUpAndAllowsReconnect() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "host",
+            serverName: "Host",
+            protocolVersion: PsycheProtocolVersion.legacy,
+            projectName: "psyche",
+            supportedVersions: [
+                PsycheProtocolVersion.legacy,
+                PsycheProtocolVersion.current
+            ]
+        ))))
+        let provisionalState = await manager.state
+        XCTAssertEqual(provisionalState, .authenticating)
+
+        connectTask.cancel()
+        await connectTask.value
+        try await waitForDisconnectCount(1, on: fake)
+
+        let reconnectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnectTask.value
+        _ = try await waitForSnapshotRequest(on: fake)
+
+        let reconnectedState = await manager.state
+        XCTAssertEqual(reconnectedState, .connected)
+    }
+
+    func testCancellationAtSuccessfulHelloBoundaryCleansUpAndAllowsReconnect() async throws {
+        let fake = FakeTransport()
+        let helloGate = AsyncGate()
+        let transport = HelloCompletionGateTransport(base: fake, gate: helloGate)
+        let composition = makeComposition(transport: transport, token: "token")
+        let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        try await waitForHello(on: fake)
+        await helloGate.release()
+        connectTask.cancel()
+        await connectTask.value
+        try await waitForDisconnectCount(1, on: fake)
+
+        let reconnectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnectTask.value
+        _ = try await waitForSnapshotRequest(on: fake)
+
         let reconnectedState = await manager.state
         XCTAssertEqual(reconnectedState, .connected)
     }
@@ -599,11 +810,14 @@ final class ConnectionManagerTests: XCTestCase {
             clientName: "Psyche Tests"
         ).manager
 
-        await manager.connect(to: HostEndpoint(
-            host: "psyche.local",
-            port: 4242,
-            certificateFingerprint: testCertificateFingerprint
-        ))
+        let connectTask = Task {
+            await manager.connect(to: HostEndpoint(
+                host: "psyche.local",
+                port: 4242,
+                certificateFingerprint: testCertificateFingerprint
+            ))
+        }
+        try? await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await manager.pair(code: "123456")
 
@@ -614,6 +828,8 @@ final class ConnectionManagerTests: XCTestCase {
         }
         XCTAssertEqual(payload.clientID, "ios-device")
         XCTAssertEqual(payload.clientName, "Psyche Tests")
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
     }
 
     func testControlSnapshotAndOrderedWorkspaceEventsUpdateSharedStore() async throws {
@@ -621,9 +837,13 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: testEndpoint())
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
         let requestID = try await waitForSnapshotRequest(on: fake)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: requestID,
@@ -654,9 +874,13 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: testEndpoint())
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
         let initialID = try await waitForSnapshotRequest(on: fake)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: initialID,
@@ -705,9 +929,13 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: testEndpoint())
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
         let initialID = try await waitForSnapshotRequest(on: fake)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: initialID,
@@ -741,9 +969,13 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: testEndpoint())
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
         let firstID = try await waitForSnapshotRequest(on: fake)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: firstID,
@@ -753,9 +985,13 @@ final class ConnectionManagerTests: XCTestCase {
         await manager.waitForEventDrain(after: 2)
         await manager.disconnect()
 
-        await manager.connect(to: testEndpoint())
+        let secondConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
         await manager.waitForMessageProcessorReadiness()
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await secondConnect.value
 
         _ = try await waitForSnapshotRequest(on: fake, occurrence: 2)
         let messages = await fake.sentMessages
@@ -767,8 +1003,12 @@ final class ConnectionManagerTests: XCTestCase {
         let composition = makeComposition(transport: fake, token: "token")
         let manager = composition.manager
 
-        await manager.connect(to: testEndpoint())
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
         let firstID = try await waitForSnapshotRequest(on: fake)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: firstID,
@@ -781,8 +1021,12 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 50)
         XCTAssertTrue(composition.workspaceStore.isStale)
 
-        await manager.connect(to: testEndpoint())
+        let secondConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
         await fake.emit(.legacy(.welcome(makeWelcome())))
+        await secondConnect.value
         let secondID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
         await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
             requestID: secondID,
@@ -793,6 +1037,72 @@ final class ConnectionManagerTests: XCTestCase {
 
         XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
         XCTAssertEqual(composition.workspaceStore.sequence, 1)
+        XCTAssertFalse(composition.workspaceStore.isStale)
+        XCTAssertFalse(composition.workspaceStore.needsFullSnapshot)
+    }
+
+    func testStaleRecoverySnapshotFromPriorGenerationCannotMutateReconnect() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
+        let initialID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: initialID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        try await waitForWorkspaceRevision(1, in: composition.workspaceStore)
+
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 3,
+            sequence: 3,
+            workspace: makeWorkspace(revision: 3)
+        )))
+        let staleRecoveryID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+
+        await manager.disconnect()
+        let secondConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await secondConnect.value
+        let activeRequestID = try await waitForSnapshotRequest(on: fake, occurrence: 3)
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: staleRecoveryID,
+            sequence: 99,
+            workspace: makeWorkspace(revision: 99)
+        ))))
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertEqual(composition.workspaceStore.sequence, 0)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertTrue(composition.workspaceStore.needsFullSnapshot)
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: activeRequestID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 2)
+        ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 3,
+            sequence: 2,
+            workspace: makeWorkspace(revision: 3)
+        )))
+        try await waitForWorkspaceRevision(3, in: composition.workspaceStore)
+
+        XCTAssertEqual(composition.workspaceStore.sequence, 2)
         XCTAssertFalse(composition.workspaceStore.isStale)
         XCTAssertFalse(composition.workspaceStore.needsFullSnapshot)
     }
@@ -814,7 +1124,7 @@ final class ConnectionManagerTests: XCTestCase {
     }
 
     private func makeComposition(
-        transport: FakeTransport,
+        transport: any PsycheTransport,
         clientID: String = "test-client",
         clientName: String = "Psyche Tests",
         token: String? = nil,
@@ -883,6 +1193,66 @@ final class ConnectionManagerTests: XCTestCase {
         throw TestError.timedOut
     }
 
+    private func waitForHello(
+        on transport: FakeTransport,
+        occurrence: Int = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            let count = await transport.sentMessages.filter {
+                if case .legacy(.hello) = $0 { return true }
+                return false
+            }.count
+            if count >= occurrence { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for hello \(occurrence)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+    private func waitForDisconnectCount(
+        _ count: Int,
+        on transport: FakeTransport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            if await transport.disconnectCount >= count { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for disconnect \(count)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+    private func waitForWorkspaceRevision(
+        _ revision: Int,
+        in store: WorkspaceStore,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            if store.workspace?.revision == revision { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for workspace revision \(revision)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+    private func waitForPaneIDs(
+        _ paneIDs: [String],
+        in manager: ConnectionManager,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            if await manager.panes.map(\.id) == paneIDs { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for panes \(paneIDs)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
     private func waitForPendingRequest(
         on client: ControlRequestClient,
         file: StaticString = #filePath,
@@ -921,6 +1291,64 @@ private struct TestComposition {
 
 private enum TestError: Error {
     case timedOut
+}
+
+private actor AsyncGate {
+    private var isReleased = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            if isReleased {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func release() {
+        isReleased = true
+        let waiting = waiters
+        waiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+}
+
+private actor HelloCompletionGateTransport: PsycheTransport {
+    private let base: FakeTransport
+    private let gate: AsyncGate
+    private var shouldGateHello = true
+
+    init(base: FakeTransport, gate: AsyncGate) {
+        self.base = base
+        self.gate = gate
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        try await base.connect(to: endpoint)
+    }
+
+    func disconnect() async {
+        await base.disconnect()
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        try await base.send(message)
+        if shouldGateHello, case .legacy(.hello) = message {
+            shouldGateHello = false
+            await gate.wait()
+        }
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
+    }
 }
 
 private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {

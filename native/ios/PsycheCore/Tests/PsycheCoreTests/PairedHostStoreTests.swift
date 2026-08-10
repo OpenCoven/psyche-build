@@ -114,6 +114,27 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(loaded?.token, "token-2")
     }
 
+    func testInvalidatedGenerationCannotCommitAtTheSecureWriteBoundary() async throws {
+        let secureStore = SaveBoundarySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        let generation = ConnectionGeneration(id: 1)
+        let host = makeHost()
+
+        secureStore.blockNextRead()
+        let saveTask = Task {
+            try await store.save(host, for: generation)
+        }
+        try await secureStore.waitUntilReadBegins()
+
+        generation.invalidate()
+        secureStore.releaseRead()
+
+        let committed = try await saveTask.value
+        let hosts = try await store.hosts()
+        XCTAssertFalse(committed)
+        XCTAssertEqual(hosts, [])
+    }
+
     func testTokenRefreshDoesNotRequireRePairing() async throws {
         let store = PairedHostStore(secureStore: InMemorySecureStore())
         try await store.save(makeHost())
@@ -226,6 +247,72 @@ final class PairedHostStoreTests: XCTestCase {
             clientID: "client-1",
             token: token
         )
+    }
+}
+
+private enum SaveBoundaryTestError: Error {
+    case timedOut
+}
+
+private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var storage: [String: Data] = [:]
+    private var shouldBlockNextRead = false
+    private var readBegan = false
+    private var readReleased = false
+
+    func blockNextRead() {
+        condition.withLock {
+            shouldBlockNextRead = true
+            readBegan = false
+            readReleased = false
+        }
+    }
+
+    func waitUntilReadBegins(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            if condition.withLock({ readBegan }) { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for paired-host read", file: file, line: line)
+        throw SaveBoundaryTestError.timedOut
+    }
+
+    func releaseRead() {
+        condition.withLock {
+            readReleased = true
+            condition.broadcast()
+        }
+    }
+
+    func data(forKey key: String) throws -> Data? {
+        condition.lock()
+        if shouldBlockNextRead {
+            shouldBlockNextRead = false
+            readBegan = true
+            condition.broadcast()
+            while !readReleased {
+                condition.wait()
+            }
+        }
+        let data = storage[key]
+        condition.unlock()
+        return data
+    }
+
+    func set(_ data: Data, forKey key: String) throws {
+        condition.withLock {
+            storage[key] = data
+        }
+    }
+
+    func removeValue(forKey key: String) throws {
+        _ = condition.withLock {
+            storage.removeValue(forKey: key)
+        }
     }
 }
 

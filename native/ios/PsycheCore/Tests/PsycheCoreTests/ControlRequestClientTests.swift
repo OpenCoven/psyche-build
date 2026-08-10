@@ -282,6 +282,50 @@ final class ControlRequestClientTests: XCTestCase {
         XCTAssertEqual(value, .ack(ControlAckResponse(requestID: "req-1")))
     }
 
+    func testOldGenerationResponseCannotResolveReusedIDOnNewGeneration() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        let firstGeneration = ConnectionGeneration(id: 1)
+        let secondGeneration = ConnectionGeneration(id: 2)
+
+        await client.beginGeneration(firstGeneration)
+        let first = Task {
+            try await client.send(
+                .workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")),
+                for: firstGeneration
+            )
+        }
+        try await waitForPendingRequest(on: client)
+        await client.endGeneration(firstGeneration)
+        _ = try? await first.value
+
+        await client.beginGeneration(secondGeneration)
+        let second = Task {
+            try await client.send(
+                .workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")),
+                for: secondGeneration
+            )
+        }
+        try await waitForPendingRequest(on: client)
+
+        let staleHandled = await client.handle(
+            .ack(ControlAckResponse(requestID: "req-1")),
+            for: firstGeneration
+        )
+        XCTAssertFalse(staleHandled)
+        let pendingAfterStaleResponse = await client.pendingRequestCount
+        XCTAssertEqual(pendingAfterStaleResponse, 1)
+
+        let activeHandled = await client.handle(
+            .ack(ControlAckResponse(requestID: "req-1", ok: false)),
+            for: secondGeneration
+        )
+        XCTAssertTrue(activeHandled)
+        let response = try await second.value
+        XCTAssertEqual(response, .ack(ControlAckResponse(requestID: "req-1", ok: false)))
+    }
+
     func testDisconnectReleasesIDsBeforeFailedCallersResume() async throws {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())

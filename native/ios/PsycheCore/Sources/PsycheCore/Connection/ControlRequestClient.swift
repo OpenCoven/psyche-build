@@ -58,6 +58,7 @@ public actor ControlRequestClient: ControlRequesting {
     private var pending: [String: PendingRequest] = [:]
     private var reservations: [String: UInt64] = [:]
     private var nextToken: UInt64 = 0
+    private var activeGenerationID: UInt64?
 
     public init(
         transport: any PsycheTransport,
@@ -84,6 +85,23 @@ public actor ControlRequestClient: ControlRequesting {
     }
 
     public func send(_ request: MobileControlRequest) async throws -> MobileControlResponse {
+        try await send(request, generationID: activeGenerationID)
+    }
+
+    func send(
+        _ request: MobileControlRequest,
+        for generation: ConnectionGeneration
+    ) async throws -> MobileControlResponse {
+        guard activeGenerationID == generation.id else {
+            throw ControlRequestError.disconnected
+        }
+        return try await send(request, generationID: generation.id)
+    }
+
+    private func send(
+        _ request: MobileControlRequest,
+        generationID: UInt64?
+    ) async throws -> MobileControlResponse {
         try Task.checkCancellation()
         guard let id = request.requestID, !id.isEmpty else {
             throw ControlRequestError.missingRequestID
@@ -100,6 +118,7 @@ public actor ControlRequestClient: ControlRequesting {
             try await withCheckedThrowingContinuation { continuation in
                 pending[id] = PendingRequest(
                     token: token,
+                    generationID: generationID,
                     continuation: continuation
                 )
                 startTasks(for: request, id: id, token: token)
@@ -115,17 +134,50 @@ public actor ControlRequestClient: ControlRequesting {
     /// — so the caller can surface it instead of silently dropping it.
     @discardableResult
     public func handle(_ response: MobileControlResponse) -> Bool {
+        handle(response, generationID: nil)
+    }
+
+    @discardableResult
+    func handle(
+        _ response: MobileControlResponse,
+        for generation: ConnectionGeneration
+    ) -> Bool {
+        guard activeGenerationID == generation.id else { return false }
+        return handle(response, generationID: generation.id)
+    }
+
+    private func handle(
+        _ response: MobileControlResponse,
+        generationID: UInt64?
+    ) -> Bool {
         guard let id = response.requestID else { return false }
 
         if case .error(let payload) = response {
-            return resume(id, with: .failure(payload))
+            return resume(id, generationID: generationID, with: .failure(payload))
         }
-        return resume(id, with: .success(response))
+        return resume(id, generationID: generationID, with: .success(response))
+    }
+
+    func beginGeneration(_ generation: ConnectionGeneration) {
+        _ = generation.withValidity {
+            activeGenerationID = generation.id
+        }
+    }
+
+    func endGeneration(_ generation: ConnectionGeneration) {
+        guard activeGenerationID == generation.id else { return }
+        activeGenerationID = nil
+        failAllPending(with: ControlRequestError.disconnected)
     }
 
     /// Fails every waiter at once. Called on disconnect so no request outlives
     /// the connection that could have answered it.
     public func failAll(with error: any Error = ControlRequestError.disconnected) {
+        activeGenerationID = nil
+        failAllPending(with: error)
+    }
+
+    private func failAllPending(with error: any Error) {
         let waiting = pending
         pending.removeAll()
 
@@ -192,10 +244,14 @@ public actor ControlRequestClient: ControlRequesting {
     @discardableResult
     private func resume(
         _ id: String,
+        generationID: UInt64?,
         with result: Result<MobileControlResponse, any Error>
     ) -> Bool {
+        if let generationID, pending[id]?.generationID != generationID {
+            return false
+        }
         // The host answered, so this ID is settled and free to reuse.
-        finish(id, with: result, releasingID: true)
+        return finish(id, with: result, releasingID: true)
     }
 
     @discardableResult
@@ -222,6 +278,7 @@ public actor ControlRequestClient: ControlRequesting {
 
     private struct PendingRequest {
         let token: UInt64
+        let generationID: UInt64?
         let continuation: CheckedContinuation<MobileControlResponse, any Error>
         var transmission: Task<Void, Never>?
         var timeout: Task<Void, Never>?

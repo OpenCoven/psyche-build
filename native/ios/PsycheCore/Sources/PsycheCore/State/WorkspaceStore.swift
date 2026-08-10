@@ -38,6 +38,7 @@ public final class WorkspaceStore: ObservableObject {
     private let controlRequests: (any ControlRequesting)?
     private let now: @Sendable () -> Date
     private var isAwaitingConnectionSnapshot = false
+    private var activeConnectionGeneration: ConnectionGeneration?
 
     public init(
         controlRequests: (any ControlRequesting)? = nil,
@@ -51,6 +52,25 @@ public final class WorkspaceStore: ObservableObject {
     /// gap leaves the current state untouched while flagging that only a full
     /// snapshot can restore correctness.
     public func applyEvent(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
+        guard activeConnectionGeneration == nil else { return }
+        applyEventUnscoped(workspace: workspace, sequence: nextSequence)
+    }
+
+    func applyEvent(
+        workspace: WorkspaceSnapshot,
+        sequence nextSequence: UInt64,
+        for generation: ConnectionGeneration
+    ) {
+        guard activeConnectionGeneration === generation else { return }
+        _ = generation.withValidity {
+            applyEventUnscoped(workspace: workspace, sequence: nextSequence)
+        }
+    }
+
+    private func applyEventUnscoped(
+        workspace: WorkspaceSnapshot,
+        sequence nextSequence: UInt64
+    ) {
         guard !isAwaitingConnectionSnapshot else {
             isStale = true
             needsFullSnapshot = true
@@ -69,6 +89,25 @@ public final class WorkspaceStore: ObservableObject {
     /// than a delta, so it may jump the sequence forward across a gap — that is
     /// exactly how a gap is recovered.
     public func applySnapshot(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
+        guard activeConnectionGeneration == nil else { return }
+        applySnapshotUnscoped(workspace: workspace, sequence: nextSequence)
+    }
+
+    func applySnapshot(
+        workspace: WorkspaceSnapshot,
+        sequence nextSequence: UInt64,
+        for generation: ConnectionGeneration
+    ) {
+        guard activeConnectionGeneration === generation else { return }
+        _ = generation.withValidity {
+            applySnapshotUnscoped(workspace: workspace, sequence: nextSequence)
+        }
+    }
+
+    private func applySnapshotUnscoped(
+        workspace: WorkspaceSnapshot,
+        sequence nextSequence: UInt64
+    ) {
         guard nextSequence >= sequence else { return }
         isAwaitingConnectionSnapshot = false
         accept(workspace: workspace, sequence: nextSequence)
@@ -87,7 +126,15 @@ public final class WorkspaceStore: ObservableObject {
         guard case let .workspaceSnapshot(result) = response else {
             throw WorkspaceStoreError.unexpectedResponse
         }
-        applySnapshot(workspace: result.workspace, sequence: result.sequence)
+        if let generation = activeConnectionGeneration {
+            applySnapshot(
+                workspace: result.workspace,
+                sequence: result.sequence,
+                for: generation
+            )
+        } else {
+            applySnapshot(workspace: result.workspace, sequence: result.sequence)
+        }
         return result.workspace
     }
 
@@ -95,6 +142,13 @@ public final class WorkspaceStore: ObservableObject {
     /// confirmed state and its timestamp are kept so the UI can say how old it
     /// is rather than blanking out.
     public func markDisconnected() {
+        activeConnectionGeneration = nil
+        isStale = true
+    }
+
+    func markDisconnected(for generation: ConnectionGeneration) {
+        guard activeConnectionGeneration === generation else { return }
+        activeConnectionGeneration = nil
         isStale = true
     }
 
@@ -102,6 +156,18 @@ public final class WorkspaceStore: ObservableObject {
     /// known workspace visible while making the next authoritative snapshot
     /// the new sequence baseline.
     public func beginConnection() {
+        activeConnectionGeneration = nil
+        beginConnectionState()
+    }
+
+    func beginConnection(for generation: ConnectionGeneration) {
+        _ = generation.withValidity {
+            activeConnectionGeneration = generation
+            beginConnectionState()
+        }
+    }
+
+    private func beginConnectionState() {
         sequence = 0
         isStale = true
         needsFullSnapshot = true

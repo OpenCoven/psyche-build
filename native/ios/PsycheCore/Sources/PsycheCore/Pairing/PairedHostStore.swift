@@ -63,6 +63,25 @@ public actor PairedHostStore {
         try write(records)
     }
 
+    func save(
+        _ host: PairedHost,
+        for generation: ConnectionGeneration
+    ) throws -> Bool {
+        let normalized = try normalize(host)
+        var records = try records()
+
+        if let existing = records[normalized.serverID],
+           existing.certificateFingerprint != normalized.certificateFingerprint {
+            throw PairedHostStoreError.identityChanged(serverID: normalized.serverID)
+        }
+
+        records[normalized.serverID] = normalized
+        return try generation.withValidity {
+            try write(records)
+            return true
+        } ?? false
+    }
+
     /// The explicit re-pair path. Accepts a new fingerprint for a known server
     /// ID, so only call this once the user has confirmed the new certificate.
     public func replace(_ host: PairedHost) throws {

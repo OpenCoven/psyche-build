@@ -1,5 +1,29 @@
 import Foundation
 
+final class ConnectionGeneration: @unchecked Sendable {
+    let id: UInt64
+
+    private let lock = NSLock()
+    private var isValid = true
+
+    init(id: UInt64) {
+        self.id = id
+    }
+
+    func invalidate() {
+        lock.withLock {
+            isValid = false
+        }
+    }
+
+    func withValidity<T>(_ operation: () throws -> T) rethrows -> T? {
+        try lock.withLock {
+            guard isValid else { return nil }
+            return try operation()
+        }
+    }
+}
+
 public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case missingWelcomeIdentity
     case unsupportedProtocolVersion(Int)
@@ -39,6 +63,8 @@ public actor ConnectionManager {
     private var welcomeIdentity: WelcomeIdentity?
     private var messageTask: Task<Void, Never>?
     private var snapshotRequestTask: Task<Void, Never>?
+    private var nextConnectionGeneration: UInt64 = 0
+    private var activeGeneration: ConnectionGeneration?
     private var activeConnectAttempt: UUID?
     private var activeMessageSession: UUID?
     private var activeSnapshotRequestID: String?
@@ -47,7 +73,10 @@ public actor ConnectionManager {
     private var requestedInitialSnapshot = false
     private var isSnapshotRecoveryInFlight = false
     private var isMessageProcessorReady = false
+    private var hasNegotiatedV3 = false
     private var messageProcessorReadyWaiters:
+        [UUID: [CheckedContinuation<Void, any Error>]] = [:]
+    private var negotiationWaiters:
         [UUID: [CheckedContinuation<Void, any Error>]] = [:]
     private var processedMessageCount = 0
     private var eventDrainWaiters: [UUID: (count: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
@@ -81,6 +110,11 @@ public actor ConnectionManager {
                 throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
             )
         }
+        for continuation in negotiationWaiters.values.flatMap({ $0 }) {
+            continuation.resume(
+                throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
+            )
+        }
     }
 
     public func connectToStoredHost() async {
@@ -103,9 +137,6 @@ public actor ConnectionManager {
         isConnectInFlight = true
         let attempt = UUID()
         defer {
-            if activeConnectAttempt == attempt {
-                activeConnectAttempt = nil
-            }
             isConnectInFlight = false
         }
 
@@ -114,6 +145,9 @@ public actor ConnectionManager {
             transition(to: .failed(ConnectionManagerError.connectionCancelled.localizedDescription))
             return
         }
+        nextConnectionGeneration &+= 1
+        let generation = ConnectionGeneration(id: nextConnectionGeneration)
+        activeGeneration = generation
         activeConnectAttempt = attempt
         transition(to: .connecting)
 
@@ -121,14 +155,17 @@ public actor ConnectionManager {
             try await withTaskCancellationHandler {
                 try Task.checkCancellation()
                 try await transport.connect(to: endpoint)
-                guard activeConnectAttempt == attempt else { return }
-                await workspaceStore.beginConnection()
-                guard activeConnectAttempt == attempt else { return }
+                guard isActive(attempt: attempt, generation: generation) else { return }
                 hasActiveTransport = true
+                try Task.checkCancellation()
+                await requestClient.beginGeneration(generation)
+                guard isActive(attempt: attempt, generation: generation) else { return }
+                await workspaceStore.beginConnection(for: generation)
+                guard isActive(attempt: attempt, generation: generation) else { return }
                 activeEndpoint = endpoint
                 transition(to: .authenticating)
                 let messages = await transport.incomingMessages()
-                guard activeConnectAttempt == attempt else { return }
+                guard isActive(attempt: attempt, generation: generation) else { return }
                 try Task.checkCancellation()
                 isMessageProcessorReady = false
                 let session = UUID()
@@ -137,26 +174,43 @@ public actor ConnectionManager {
                 messageTask = Task { [weak self, messageProcessorStart] in
                     await messageProcessorStart()
                     guard !Task.isCancelled else { return }
-                    await self?.markMessageProcessorReady(for: session)
+                    await self?.markMessageProcessorReady(
+                        for: session,
+                        generation: generation
+                    )
                     for await message in messages {
                         guard !Task.isCancelled else { return }
-                        guard let result = await self?.handle(message, for: session) else { return }
+                        guard let result = await self?.handle(
+                            message,
+                            for: session,
+                            generation: generation
+                        ) else { return }
                         if case let .failed(reason) = result {
-                            await self?.messageProcessingEnded(for: session, reason: reason)
+                            await self?.messageProcessingEnded(
+                                for: session,
+                                generation: generation,
+                                reason: reason
+                            )
                             return
                         }
                     }
                     guard !Task.isCancelled else { return }
                     await self?.messageProcessingEnded(
                         for: session,
+                        generation: generation,
                         reason: "Connection closed unexpectedly"
                     )
                 }
-                try await waitForMessageProcessorReadiness(for: session)
+                try await waitForMessageProcessorReadiness(
+                    for: session,
+                    generation: generation
+                )
                 try Task.checkCancellation()
-                guard activeConnectAttempt == attempt,
-                      activeMessageSession == session,
-                      hasActiveTransport else {
+                guard isActive(
+                    attempt: attempt,
+                    session: session,
+                    generation: generation
+                ), hasActiveTransport else {
                     throw ConnectionManagerError.messageProcessorEndedBeforeReady
                 }
                 try await transport.send(.legacy(.hello(HelloPayload(
@@ -165,19 +219,41 @@ public actor ConnectionManager {
                     protocolVersion: PsycheProtocolVersion.current,
                     token: token
                 ))))
+                try Task.checkCancellation()
+                try await waitForV3Negotiation(
+                    for: session,
+                    generation: generation
+                )
+                try Task.checkCancellation()
+                guard isActive(
+                    attempt: attempt,
+                    session: session,
+                    generation: generation
+                ),
+                      hasActiveTransport,
+                      hasNegotiatedV3 else {
+                    throw ConnectionManagerError.messageProcessorEndedBeforeReady
+                }
+                activeConnectAttempt = nil
             } onCancel: {
                 Task { [weak self] in
                     await self?.cancelConnectAttempt(attempt)
                 }
             }
         } catch is CancellationError {
-            guard activeConnectAttempt == attempt else { return }
+            guard isActive(attempt: attempt, generation: generation) else { return }
             let error = ConnectionManagerError.connectionCancelled
-            await tearDownActiveConnection(readinessError: error)
+            await tearDownActiveConnection(
+                generation: generation,
+                readinessError: error
+            )
             transition(to: .failed(error.localizedDescription))
         } catch {
-            guard activeConnectAttempt == attempt else { return }
-            await tearDownActiveConnection(readinessError: error)
+            guard isActive(attempt: attempt, generation: generation) else { return }
+            await tearDownActiveConnection(
+                generation: generation,
+                readinessError: error
+            )
             transition(to: .failed(error.localizedDescription))
         }
     }
@@ -215,8 +291,14 @@ public actor ConnectionManager {
     }
 
     func waitForMessageProcessorReadiness() async {
-        guard let session = activeMessageSession else { return }
-        try? await waitForMessageProcessorReadiness(for: session)
+        guard let session = activeMessageSession,
+              let generation = activeGeneration else {
+            return
+        }
+        try? await waitForMessageProcessorReadiness(
+            for: session,
+            generation: generation
+        )
     }
 
     func waitForEventDrain(after eventCount: Int) async {
@@ -235,15 +317,18 @@ public actor ConnectionManager {
         }
     }
 
-    private func waitForMessageProcessorReadiness(for session: UUID) async throws {
-        guard activeMessageSession == session else {
+    private func waitForMessageProcessorReadiness(
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async throws {
+        guard isActive(session: session, generation: generation) else {
             throw ConnectionManagerError.messageProcessorEndedBeforeReady
         }
         guard !isMessageProcessorReady else { return }
 
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, any Error>) in
-            guard activeMessageSession == session else {
+            guard isActive(session: session, generation: generation) else {
                 continuation.resume(
                     throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
                 )
@@ -257,31 +342,66 @@ public actor ConnectionManager {
         }
     }
 
-    private func markMessageProcessorReady(for session: UUID) {
-        guard activeMessageSession == session else { return }
+    private func markMessageProcessorReady(
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) {
+        guard isActive(session: session, generation: generation) else { return }
         isMessageProcessorReady = true
         completeMessageProcessorReadiness(for: session, with: .success(()))
     }
 
+    private func waitForV3Negotiation(
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async throws {
+        guard isActive(session: session, generation: generation) else {
+            throw ConnectionManagerError.messageProcessorEndedBeforeReady
+        }
+        guard !hasNegotiatedV3 else { return }
+
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            guard isActive(session: session, generation: generation) else {
+                continuation.resume(
+                    throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
+                )
+                return
+            }
+            guard !hasNegotiatedV3 else {
+                continuation.resume()
+                return
+            }
+            negotiationWaiters[session, default: []].append(continuation)
+        }
+    }
+
     private func handle(
         _ message: MobileServerMessage,
-        for session: UUID
+        for session: UUID,
+        generation: ConnectionGeneration
     ) async -> MessageHandlingResult {
-        guard activeMessageSession == session else { return .ignored }
+        guard isActive(session: session, generation: generation) else { return .ignored }
 
         let result: MessageHandlingResult
         switch message {
         case .legacy(let message):
-            result = await handle(message, for: session)
+            result = await handle(message, for: session, generation: generation)
         case .control(let response):
-            result = await handle(response, for: session)
+            result = await handle(response, for: session, generation: generation)
         case .workspaceChanged(let event):
+            guard hasNegotiatedV3 else { return .ignored }
             await workspaceStore.applyEvent(
                 workspace: event.workspace,
-                sequence: event.sequence
+                sequence: event.sequence,
+                for: generation
             )
+            guard isActive(session: session, generation: generation) else { return .ignored }
             if await workspaceStore.needsFullSnapshot {
-                await requestSnapshotIfNeeded(for: session)
+                await requestSnapshotIfNeeded(
+                    for: session,
+                    generation: generation
+                )
             }
             result = .processed
         }
@@ -294,9 +414,10 @@ public actor ConnectionManager {
 
     private func handle(
         _ message: ServerMessage,
-        for session: UUID
+        for session: UUID,
+        generation: ConnectionGeneration
     ) async -> MessageHandlingResult {
-        guard activeMessageSession == session else { return .ignored }
+        guard isActive(session: session, generation: generation) else { return .ignored }
 
         switch message {
         case .welcome(let payload):
@@ -315,8 +436,13 @@ public actor ConnectionManager {
                 serverID: payload.serverID,
                 serverName: payload.serverName
             )
+            hasNegotiatedV3 = true
             transition(to: .connected)
-            await requestInitialSnapshotIfAuthorized(for: session)
+            completeNegotiation(for: session, with: .success(()))
+            await requestInitialSnapshotIfAuthorized(
+                for: session,
+                generation: generation
+            )
         case .projectList(let projects):
             self.projects = projects
         case .paneList(let panes), .paneListChanged(let panes):
@@ -329,27 +455,33 @@ public actor ConnectionManager {
             guard let welcomeIdentity, let activeEndpoint else {
                 return .failed(ConnectionManagerError.missingWelcomeIdentity.localizedDescription)
             }
-            guard activeMessageSession == session, !Task.isCancelled else {
+            guard isActive(session: session, generation: generation),
+                  !Task.isCancelled else {
                 return .ignored
             }
             do {
-                try await pairedHostStore.save(PairedHost(
+                let committed = try await pairedHostStore.save(PairedHost(
                     serverID: welcomeIdentity.serverID,
                     serverName: welcomeIdentity.serverName,
                     endpoint: activeEndpoint,
                     clientID: clientID,
                     token: payload.token
-                ))
+                ), for: generation)
+                guard committed else { return .ignored }
             } catch is CancellationError {
                 return .ignored
             } catch {
                 return .failed(error.localizedDescription)
             }
-            guard activeMessageSession == session, !Task.isCancelled else {
+            guard isActive(session: session, generation: generation),
+                  !Task.isCancelled else {
                 return .ignored
             }
             token = payload.token
-            await requestInitialSnapshotIfAuthorized(for: session)
+            await requestInitialSnapshotIfAuthorized(
+                for: session,
+                generation: generation
+            )
         default:
             break
         }
@@ -358,21 +490,28 @@ public actor ConnectionManager {
 
     private func handle(
         _ response: MobileControlResponse,
-        for session: UUID
+        for session: UUID,
+        generation: ConnectionGeneration
     ) async -> MessageHandlingResult {
-        let wasHandled = await requestClient.handle(response)
-        guard activeMessageSession == session else { return .ignored }
+        guard isActive(session: session, generation: generation) else { return .ignored }
+        if case .workspaceSnapshot = response, !hasNegotiatedV3 {
+            return .ignored
+        }
+        let wasHandled = await requestClient.handle(response, for: generation)
+        guard isActive(session: session, generation: generation) else { return .ignored }
 
         switch response {
         case .workspaceSnapshot(let result):
-            if activeSnapshotRequestID == result.requestID {
-                isSnapshotRecoveryInFlight = false
-                activeSnapshotRequestID = nil
-                snapshotRequestTask = nil
+            guard activeSnapshotRequestID == result.requestID else {
+                return .ignored
             }
+            isSnapshotRecoveryInFlight = false
+            activeSnapshotRequestID = nil
+            snapshotRequestTask = nil
             await workspaceStore.applySnapshot(
                 workspace: result.workspace,
-                sequence: result.sequence
+                sequence: result.sequence,
+                for: generation
             )
         case .error(let error) where !wasHandled:
             return .failed(error.message)
@@ -382,14 +521,21 @@ public actor ConnectionManager {
         return .processed
     }
 
-    private func requestInitialSnapshotIfAuthorized(for session: UUID) async {
+    private func requestInitialSnapshotIfAuthorized(
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async {
+        guard isActive(session: session, generation: generation) else { return }
         guard token?.isEmpty == false, !requestedInitialSnapshot else { return }
         requestedInitialSnapshot = true
-        await requestSnapshotIfNeeded(for: session)
+        await requestSnapshotIfNeeded(for: session, generation: generation)
     }
 
-    private func requestSnapshotIfNeeded(for session: UUID) async {
-        guard activeMessageSession == session,
+    private func requestSnapshotIfNeeded(
+        for session: UUID,
+        generation: ConnectionGeneration
+    ) async {
+        guard isActive(session: session, generation: generation),
               hasActiveTransport,
               welcomeIdentity != nil,
               token?.isEmpty == false,
@@ -399,21 +545,26 @@ public actor ConnectionManager {
 
         isSnapshotRecoveryInFlight = true
         let requestID = await requestClient.nextRequestID()
-        guard activeMessageSession == session, hasActiveTransport else { return }
+        guard isActive(session: session, generation: generation),
+              hasActiveTransport else {
+            return
+        }
 
         activeSnapshotRequestID = requestID
         let requestClient = self.requestClient
         snapshotRequestTask = Task { [weak self, requestClient] in
             do {
-                _ = try await requestClient.send(.workspaceSnapshot(
-                    ControlRequestIDOnly(requestID: requestID)
-                ))
+                _ = try await requestClient.send(
+                    .workspaceSnapshot(ControlRequestIDOnly(requestID: requestID)),
+                    for: generation
+                )
             } catch is CancellationError {
                 return
             } catch {
                 await self?.snapshotRequestFailed(
                     requestID: requestID,
                     session: session,
+                    generation: generation,
                     error: error
                 )
             }
@@ -423,16 +574,17 @@ public actor ConnectionManager {
     private func snapshotRequestFailed(
         requestID: String,
         session: UUID,
+        generation: ConnectionGeneration,
         error: any Error
     ) async {
-        guard activeMessageSession == session,
+        guard isActive(session: session, generation: generation),
               activeSnapshotRequestID == requestID else {
             return
         }
         isSnapshotRecoveryInFlight = false
         activeSnapshotRequestID = nil
         snapshotRequestTask = nil
-        await tearDownActiveConnection()
+        await tearDownActiveConnection(generation: generation)
         transition(to: .failed(error.localizedDescription))
     }
 
@@ -448,23 +600,33 @@ public actor ConnectionManager {
     }
 
     private func tearDownActiveConnection(
+        generation expectedGeneration: ConnectionGeneration? = nil,
         readinessError: any Error = ConnectionManagerError.messageProcessorEndedBeforeReady
     ) async {
+        guard let generation = activeGeneration,
+              expectedGeneration == nil || generation === expectedGeneration else {
+            return
+        }
         let session = activeMessageSession
+        generation.invalidate()
+        activeGeneration = nil
         activeConnectAttempt = nil
         activeMessageSession = nil
         completeMessageProcessorReadiness(for: session, with: .failure(readinessError))
+        completeNegotiation(for: session, with: .failure(readinessError))
         messageTask?.cancel()
         messageTask = nil
         let shouldDisconnectTransport = hasActiveTransport
         hasActiveTransport = false
-        await resetPerConnectionState()
+        await resetPerConnectionState(generation: generation)
         if shouldDisconnectTransport {
             await transport.disconnect()
         }
     }
 
-    private func resetPerConnectionState() async {
+    private func resetPerConnectionState(
+        generation: ConnectionGeneration? = nil
+    ) async {
         snapshotRequestTask?.cancel()
         snapshotRequestTask = nil
         activeSnapshotRequestID = nil
@@ -473,14 +635,26 @@ public actor ConnectionManager {
         activeEndpoint = nil
         welcomeIdentity = nil
         isMessageProcessorReady = false
-        await workspaceStore.markDisconnected()
-        await requestClient.failAll(with: ControlRequestError.disconnected)
+        hasNegotiatedV3 = false
+        if let generation {
+            await workspaceStore.markDisconnected(for: generation)
+            await requestClient.endGeneration(generation)
+        } else {
+            await workspaceStore.markDisconnected()
+            await requestClient.failAll(with: ControlRequestError.disconnected)
+        }
     }
 
     private func cancelConnectAttempt(_ attempt: UUID) async {
-        guard activeConnectAttempt == attempt else { return }
+        guard activeConnectAttempt == attempt,
+              let generation = activeGeneration else {
+            return
+        }
         let error = ConnectionManagerError.connectionCancelled
-        await tearDownActiveConnection(readinessError: error)
+        await tearDownActiveConnection(
+            generation: generation,
+            readinessError: error
+        )
         transition(to: .failed(error.localizedDescription))
     }
 
@@ -495,24 +669,38 @@ public actor ConnectionManager {
         }
     }
 
-    private func messageProcessingEnded(for session: UUID, reason: String) async {
-        guard activeMessageSession == session else { return }
-
-        activeConnectAttempt = nil
-        activeMessageSession = nil
-        completeMessageProcessorReadiness(
-            for: session,
-            with: .failure(ConnectionManagerError.messageProcessorEndedBeforeReady)
-        )
-        messageTask = nil
-        transition(to: .disconnecting)
-        let shouldDisconnectTransport = hasActiveTransport
-        hasActiveTransport = false
-        await resetPerConnectionState()
-        if shouldDisconnectTransport {
-            await transport.disconnect()
+    private func completeNegotiation(
+        for session: UUID?,
+        with result: Result<Void, any Error>
+    ) {
+        let sessions = session.map { [$0] } ?? Array(negotiationWaiters.keys)
+        for session in sessions {
+            let continuations = negotiationWaiters.removeValue(forKey: session) ?? []
+            continuations.forEach { $0.resume(with: result) }
         }
+    }
+
+    private func messageProcessingEnded(
+        for session: UUID,
+        generation: ConnectionGeneration,
+        reason: String
+    ) async {
+        guard isActive(session: session, generation: generation) else { return }
+
+        transition(to: .disconnecting)
+        await tearDownActiveConnection(generation: generation)
         transition(to: .failed(reason))
+    }
+
+    private func isActive(
+        attempt: UUID? = nil,
+        session: UUID? = nil,
+        generation: ConnectionGeneration
+    ) -> Bool {
+        guard activeGeneration === generation else { return false }
+        if let attempt, activeConnectAttempt != attempt { return false }
+        if let session, activeMessageSession != session { return false }
+        return true
     }
 
     private func transition(to newState: ConnectionState) {
