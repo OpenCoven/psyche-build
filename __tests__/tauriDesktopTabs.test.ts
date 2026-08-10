@@ -10,6 +10,8 @@ const indexHtml = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/w
 const tauriConfig = JSON.parse(
   readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
+const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
+const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
 
 describe('Tauri desktop tab shortcuts', () => {
   it('routes Command+T to terminal panes globally', () => {
@@ -20,7 +22,7 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(mainJs).toMatch(
       /String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"[\s\S]*e\.preventDefault\(\);[\s\S]*await createTerminalPane\(\);/
     );
-    expect(mainJs).not.toMatch(/function\s+createContextualTab\(\)/);
+    expect(mainJs).not.toMatch(forbiddenContextualTabFn);
     expect(mainJs).not.toMatch(
       /if\s*\(\s*String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"\s*\)\s*\{[^}]*openBlankBrowserTab\(\)/
     );
@@ -58,7 +60,7 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('lets embedded browser webviews request a terminal pane with Command+T', () => {
     expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
-    expect(tauriLib).not.toMatch(/browser:shortcut-new-tab/);
+    expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
     expect(tauriLib).toMatch(/function\(browserLabel\)/);
     expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
