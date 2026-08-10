@@ -77,7 +77,7 @@ describe('Tauri native workspace security contract', () => {
     for (const mutation of [
       'SecureWorkspaceDir::prepare_for_save',
       'WorkspaceFileLock::exclusive',
-      'recover_pending_workspace',
+      'recover_pending_rollback_state',
       'cleanup_rollback_candidates',
       'open_temp_file_in',
     ]) {
@@ -115,5 +115,19 @@ describe('Tauri native workspace security contract', () => {
     expect(functionBody(source, 'hard_link_workspace_path')).toContain('libc::linkat');
     expect(functionBody(source, 'unlink_workspace_path')).toContain('libc::unlinkat');
     expect(functionBody(source, 'workspace_directory_entries')).toContain('libc::fdopendir');
+  });
+
+  test('pins and revalidates the synced temp inode immediately before publication', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const save = functionBody(source, 'save_workspace_to_inner');
+
+    const tempSync = save.indexOf('.sync_all()');
+    const revalidation = save.indexOf('verify_opened_regular_file');
+    const publication = save.indexOf('rename_regular_workspace_path');
+
+    expect(tempSync).toBeGreaterThanOrEqual(0);
+    expect(revalidation).toBeGreaterThan(tempSync);
+    expect(publication).toBeGreaterThan(revalidation);
+    expect(save.slice(tempSync, publication)).not.toContain('drop(temp_file)');
   });
 });

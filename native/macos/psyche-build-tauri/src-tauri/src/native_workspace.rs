@@ -84,6 +84,8 @@ where
         .to_string();
     let pending_path = workspace_rollback_pending_path(parent, &file_name);
     let committed_path = workspace_rollback_committed_path(parent, &file_name);
+    let absent_pending_path = workspace_absent_rollback_pending_path(parent, &file_name);
+    let absent_committed_path = workspace_absent_rollback_committed_path(parent, &file_name);
 
     let shared_lock = WorkspaceFileLock::shared(&workspace_dir, path)?;
     validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
@@ -91,8 +93,18 @@ where
         regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")?
             || regular_file_exists(
                 &workspace_dir,
+                &absent_pending_path,
+                "workspace absent pending rollback",
+            )?
+            || regular_file_exists(
+                &workspace_dir,
                 &committed_path,
                 "workspace committed rollback",
+            )?
+            || regular_file_exists(
+                &workspace_dir,
+                &absent_committed_path,
+                "workspace absent committed rollback",
             )?
             || rollback_candidates_exist(&workspace_dir, parent, &file_name)?;
     if !requires_recovery {
@@ -105,21 +117,27 @@ where
     validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
 
     let mut sync_directory = sync_workspace_directory;
-    if regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")? {
-        recover_pending_workspace(
-            &workspace_dir,
-            path,
-            parent,
-            pending_path.as_path(),
-            committed_path.as_path(),
-            &mut sync_directory,
-            &mut restore_workspace_backup_in,
-            &mut rename_workspace_path_in,
-        )?;
-    }
+    recover_pending_rollback_state(
+        &workspace_dir,
+        path,
+        parent,
+        pending_path.as_path(),
+        committed_path.as_path(),
+        absent_pending_path.as_path(),
+        absent_committed_path.as_path(),
+        &mut sync_directory,
+        &mut restore_workspace_backup_in,
+        &mut rename_workspace_path_in,
+    )?;
     cleanup_committed_rollback(
         &workspace_dir,
         committed_path.as_path(),
+        parent,
+        &mut sync_directory,
+    )?;
+    cleanup_committed_rollback(
+        &workspace_dir,
+        absent_committed_path.as_path(),
         parent,
         &mut sync_directory,
     )?;
@@ -207,22 +225,30 @@ where
 
     let pending_path = workspace_rollback_pending_path(parent, &file_name);
     let committed_path = workspace_rollback_committed_path(parent, &file_name);
+    let absent_pending_path = workspace_absent_rollback_pending_path(parent, &file_name);
+    let absent_committed_path = workspace_absent_rollback_committed_path(parent, &file_name);
 
-    if regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")? {
-        recover_pending_workspace(
-            &workspace_dir,
-            path,
-            parent,
-            pending_path.as_path(),
-            committed_path.as_path(),
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        )?;
-    }
+    recover_pending_rollback_state(
+        &workspace_dir,
+        path,
+        parent,
+        pending_path.as_path(),
+        committed_path.as_path(),
+        absent_pending_path.as_path(),
+        absent_committed_path.as_path(),
+        &mut sync_parent_directory,
+        &mut restore_workspace_backup,
+        &mut rename_workspace_path,
+    )?;
     cleanup_committed_rollback(
         &workspace_dir,
         committed_path.as_path(),
+        parent,
+        &mut sync_parent_directory,
+    )?;
+    cleanup_committed_rollback(
+        &workspace_dir,
+        absent_committed_path.as_path(),
         parent,
         &mut sync_parent_directory,
     )?;
@@ -255,20 +281,48 @@ where
     temp_file
         .sync_all()
         .map_err(|e| format!("sync workspace temp '{}': {}", temp_guard.path.display(), e))?;
-    drop(temp_file);
 
     before_rename(temp_guard.path.as_path())?;
 
     let had_workspace = workspace_file_exists_in(&workspace_dir, path)?;
-    if had_workspace {
+    let (transaction_pending_path, transaction_committed_path) = if had_workspace {
         create_rollback_backup(&workspace_dir, path, pending_path.as_path())?;
-        if let Err(error) = sync_parent_directory(&workspace_dir, parent) {
-            return Err(format!(
-                "publish pending workspace rollback '{}': {}",
-                pending_path.display(),
-                error
-            ));
+        (pending_path.as_path(), committed_path.as_path())
+    } else {
+        create_absent_rollback_marker_in(&workspace_dir, absent_pending_path.as_path())?;
+        (
+            absent_pending_path.as_path(),
+            absent_committed_path.as_path(),
+        )
+    };
+    if let Err(error) = sync_parent_directory(&workspace_dir, parent) {
+        return Err(format!(
+            "publish pending workspace rollback '{}': {}",
+            transaction_pending_path.display(),
+            error
+        ));
+    }
+
+    if let Err(identity_error) = verify_opened_regular_file(
+        &workspace_dir,
+        &temp_file,
+        temp_guard.path.as_path(),
+        "workspace temp",
+    ) {
+        let restore_error = rollback_workspace_after_failed_save(
+            &workspace_dir,
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            &mut sync_parent_directory,
+            &mut restore_workspace_backup,
+            &mut rename_workspace_path,
+        );
+        if let Err(restore_error) = restore_error {
+            return Err(format!("{identity_error}; {restore_error}"));
         }
+        return Err(identity_error);
     }
 
     if let Err(replace_error) = rename_regular_workspace_path(
@@ -279,20 +333,18 @@ where
         "workspace",
         &mut rename_workspace_path,
     ) {
-        if had_workspace {
-            let restore_error = rollback_workspace_after_failed_save(
-                &workspace_dir,
-                path,
-                parent,
-                pending_path.as_path(),
-                committed_path.as_path(),
-                &mut sync_parent_directory,
-                &mut restore_workspace_backup,
-                &mut rename_workspace_path,
-            );
-            if let Err(restore_error) = restore_error {
-                return Err(format!("{replace_error}; {restore_error}"));
-            }
+        let restore_error = rollback_workspace_after_failed_save(
+            &workspace_dir,
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            &mut sync_parent_directory,
+            &mut restore_workspace_backup,
+            &mut rename_workspace_path,
+        );
+        if let Err(restore_error) = restore_error {
+            return Err(format!("{replace_error}; {restore_error}"));
         }
         return Err(replace_error);
     }
@@ -303,8 +355,8 @@ where
             &workspace_dir,
             path,
             parent,
-            pending_path.as_path(),
-            committed_path.as_path(),
+            transaction_pending_path,
+            transaction_committed_path,
             &mut sync_parent_directory,
             &mut restore_workspace_backup,
             &mut rename_workspace_path,
@@ -314,17 +366,32 @@ where
         return Err(save_error);
     }
 
-    if had_workspace {
-        mark_rollback_committed(
-            &workspace_dir,
-            path,
-            pending_path.as_path(),
-            committed_path.as_path(),
-            parent,
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        )?;
+    if let Err(commit_error) = mark_rollback_committed(
+        &workspace_dir,
+        path,
+        transaction_pending_path,
+        transaction_committed_path,
+        parent,
+        &mut sync_parent_directory,
+        &mut restore_workspace_backup,
+        &mut rename_workspace_path,
+    ) {
+        if !had_workspace {
+            let restore_error = rollback_workspace_after_failed_save(
+                &workspace_dir,
+                path,
+                parent,
+                transaction_pending_path,
+                transaction_committed_path,
+                &mut sync_parent_directory,
+                &mut restore_workspace_backup,
+                &mut rename_workspace_path,
+            );
+            if let Err(restore_error) = restore_error {
+                return Err(format!("{commit_error}; {restore_error}"));
+            }
+        }
+        return Err(commit_error);
     }
     Ok(())
 }
@@ -817,6 +884,16 @@ fn validate_workspace_artifact_paths(
         &workspace_rollback_committed_path(parent, file_name),
         "workspace committed rollback",
     )?;
+    regular_file_exists(
+        workspace_dir,
+        &workspace_absent_rollback_pending_path(parent, file_name),
+        "workspace absent pending rollback",
+    )?;
+    regular_file_exists(
+        workspace_dir,
+        &workspace_absent_rollback_committed_path(parent, file_name),
+        "workspace absent committed rollback",
+    )?;
     validate_rollback_candidates(workspace_dir, parent, file_name)?;
     Ok(())
 }
@@ -1099,6 +1176,14 @@ fn workspace_rollback_committed_path(parent: &Path, file_name: &str) -> PathBuf 
     parent.join(format!(".{file_name}.psyche-rollback.committed"))
 }
 
+fn workspace_absent_rollback_pending_path(parent: &Path, file_name: &str) -> PathBuf {
+    parent.join(format!(".{file_name}.psyche-rollback.absent.pending"))
+}
+
+fn workspace_absent_rollback_committed_path(parent: &Path, file_name: &str) -> PathBuf {
+    parent.join(format!(".{file_name}.psyche-rollback.absent.committed"))
+}
+
 fn workspace_rollback_candidate_prefix(file_name: &str) -> String {
     format!(".{file_name}.psyche-rollback.candidate-")
 }
@@ -1119,12 +1204,15 @@ fn workspace_rollback_candidate_path(pending_path: &Path) -> Result<PathBuf, Str
             )
         })?
         .to_string_lossy();
-    let prefix = pending_name.strip_suffix("pending").ok_or_else(|| {
-        format!(
-            "workspace pending rollback has an unexpected name: {}",
-            pending_path.display()
-        )
-    })?;
+    let prefix = pending_name
+        .strip_suffix("absent.pending")
+        .or_else(|| pending_name.strip_suffix("pending"))
+        .ok_or_else(|| {
+            format!(
+                "workspace pending rollback has an unexpected name: {}",
+                pending_path.display()
+            )
+        })?;
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     Ok(parent.join(format!(
         "{prefix}candidate-{}-{}",
@@ -1381,6 +1469,29 @@ fn create_rollback_backup_in(
         hard_link_workspace_path,
         std::io::copy,
     )
+}
+
+fn create_absent_rollback_marker_in(
+    workspace_dir: &SecureWorkspaceDir,
+    marker_path: &Path,
+) -> Result<(), String> {
+    let marker = open_new_workspace_file(workspace_dir, marker_path, "absent rollback marker")?;
+    let mut marker_guard = TempFileGuard::new(workspace_dir, marker_path.to_path_buf());
+    marker.sync_all().map_err(|error| {
+        format!(
+            "sync absent workspace rollback marker '{}': {}",
+            marker_path.display(),
+            error
+        )
+    })?;
+    verify_opened_regular_file(
+        workspace_dir,
+        &marker,
+        marker_path,
+        "workspace absent rollback marker",
+    )?;
+    marker_guard.commit();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1687,6 +1798,58 @@ fn rename_workspace_path_in(
     })
 }
 
+fn recover_pending_rollback_state(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    absent_pending_path: &Path,
+    absent_committed_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let has_pending =
+        regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")?;
+    let has_absent_pending = regular_file_exists(
+        workspace_dir,
+        absent_pending_path,
+        "workspace absent pending rollback",
+    )?;
+    if has_pending && has_absent_pending {
+        return Err(format!(
+            "workspace has conflicting pending rollback states at '{}' and '{}'",
+            pending_path.display(),
+            absent_pending_path.display()
+        ));
+    }
+    if has_pending {
+        recover_pending_workspace(
+            workspace_dir,
+            path,
+            parent,
+            pending_path,
+            committed_path,
+            sync_parent_directory,
+            restore_workspace_backup,
+            rename_workspace_path,
+        )?;
+    } else if has_absent_pending {
+        recover_pending_workspace(
+            workspace_dir,
+            path,
+            parent,
+            absent_pending_path,
+            absent_committed_path,
+            sync_parent_directory,
+            restore_workspace_backup,
+            rename_workspace_path,
+        )?;
+    }
+    Ok(())
+}
+
 fn recover_pending_workspace(
     workspace_dir: &SecureWorkspaceDir,
     path: &Path,
@@ -1697,7 +1860,13 @@ fn recover_pending_workspace(
     restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
     rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    restore_workspace_backup(workspace_dir, pending_path, path).map_err(|error| {
+    restore_prior_workspace_state(
+        workspace_dir,
+        pending_path,
+        path,
+        restore_workspace_backup,
+    )
+    .map_err(|error| {
         format!(
             "restore pending workspace rollback '{}' to '{}': {}; pending rollback retained at '{}'",
             pending_path.display(),
@@ -1951,14 +2120,15 @@ fn restore_prior_workspace_after_uncertain_commit(
             ));
         };
 
-    restore_workspace_backup(workspace_dir, recovery_path, path).map_err(|error| {
-        format!(
-            "{failure}; restore prior workspace '{}' from '{}': {}",
-            path.display(),
-            recovery_path.display(),
-            error
-        )
-    })?;
+    restore_prior_workspace_state(workspace_dir, recovery_path, path, restore_workspace_backup)
+        .map_err(|error| {
+            format!(
+                "{failure}; restore prior workspace '{}' from '{}': {}",
+                path.display(),
+                recovery_path.display(),
+                error
+            )
+        })?;
     sync_parent_directory(workspace_dir, parent).map_err(|error| {
         format!(
             "{failure}; sync restored prior workspace '{}': {}",
@@ -1970,6 +2140,33 @@ fn restore_prior_workspace_after_uncertain_commit(
         "{failure}; prior workspace restored from '{}'",
         recovery_path.display()
     ))
+}
+
+fn restore_prior_workspace_state(
+    workspace_dir: &SecureWorkspaceDir,
+    recovery_path: &Path,
+    path: &Path,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if absent_rollback_marker_path(recovery_path) {
+        if regular_file_exists(workspace_dir, path, "workspace")? {
+            unlink_workspace_path(workspace_dir, path, "workspace").map_err(|error| {
+                format!("remove failed workspace '{}': {}", path.display(), error)
+            })?;
+        }
+        Ok(())
+    } else {
+        restore_workspace_backup(workspace_dir, recovery_path, path)
+    }
+}
+
+fn absent_rollback_marker_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".psyche-rollback.absent.pending")
+                || name.ends_with(".psyche-rollback.absent.committed")
+        })
 }
 
 fn verify_opened_regular_file(
@@ -2469,6 +2666,20 @@ mod tests {
         ))
     }
 
+    fn absent_pending_path(path: &Path) -> PathBuf {
+        path.parent().expect("parent").join(format!(
+            ".{}.psyche-rollback.absent.pending",
+            path.file_name().expect("file name").to_string_lossy()
+        ))
+    }
+
+    fn absent_committed_path(path: &Path) -> PathBuf {
+        path.parent().expect("parent").join(format!(
+            ".{}.psyche-rollback.absent.committed",
+            path.file_name().expect("file name").to_string_lossy()
+        ))
+    }
+
     fn rollback_candidate_path(path: &Path, suffix: &str) -> PathBuf {
         path.parent().expect("parent").join(format!(
             ".{}.psyche-rollback.candidate-{suffix}",
@@ -2483,6 +2694,14 @@ mod tests {
             "sessions": [],
             "paneLayouts": [],
         })
+    }
+
+    fn save_clean_workspace(path: &Path, value: &Value) {
+        save_workspace_to(path, value).expect("save workspace");
+        assert_eq!(
+            load_workspace_from(path).expect("finish committed workspace recovery"),
+            Some(value.clone())
+        );
     }
 
     #[cfg(unix)]
@@ -2802,6 +3021,48 @@ mod tests {
             .expect("temp metadata")
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_rejects_swapped_temp_inode_before_publication() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        let previous_bytes =
+            serde_json::to_vec_pretty(&previous).expect("serialize previous workspace");
+        fs::write(&path, &previous_bytes).expect("write previous workspace");
+        let attacker_bytes = serde_json::to_vec(&workspace_with_project("attacker"))
+            .expect("serialize attacker workspace");
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("attempted"),
+            |temp| {
+                fs::remove_file(temp).map_err(|error| error.to_string())?;
+                fs::write(temp, &attacker_bytes).map_err(|error| error.to_string())
+            },
+            sync_parent_directory,
+            restore_workspace_backup,
+        )
+        .expect_err("swapped temp inode must fail before publication");
+
+        assert!(error.contains("workspace temp"), "{error}");
+        assert!(error.contains("changed"), "{error}");
+        assert_ne!(
+            fs::read(&path).expect("read workspace after failed save"),
+            attacker_bytes
+        );
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("restart recovery")
+                .expect("previous workspace exists"),
+            previous
+        );
+        assert_eq!(
+            fs::read(&path).expect("read recovered workspace"),
+            previous_bytes
+        );
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
     }
 
     #[cfg(unix)]
@@ -3341,6 +3602,176 @@ mod tests {
     }
 
     #[test]
+    fn native_workspace_tests_initial_save_post_publication_error_restores_absence() {
+        let (_dir, path) = temp_workspace_path();
+
+        let error = workspace_save_to_test_hook_with_ops(
+            &path,
+            &workspace_with_project("attempted"),
+            |_| Ok(()),
+            sync_parent_directory,
+            restore_workspace_backup,
+            create_rollback_backup,
+            |source, destination| {
+                if destination == path
+                    && source
+                        .file_name()
+                        .expect("source file name")
+                        .to_string_lossy()
+                        .contains(".psyche-save-")
+                {
+                    fs::rename(source, destination).map_err(|error| error.to_string())?;
+                    return Err("injected post-publication failure".to_string());
+                }
+                Ok(())
+            },
+        )
+        .expect_err("reported publication failure must restore prior absence");
+
+        assert!(error.contains("injected post-publication failure"));
+        assert!(
+            !path.exists(),
+            "failed initial save must be absent in-process"
+        );
+        assert_eq!(
+            load_workspace_from(&path).expect("restart recovery"),
+            None,
+            "failed initial save must remain absent after restart"
+        );
+        let parent = path.parent().expect("parent");
+        assert!(cleanup_artifacts(parent).is_empty());
+        assert!(rollback_artifacts(parent).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_initial_save_marker_rename_failure_restores_absence() {
+        let (_dir, path) = temp_workspace_path();
+        let pending = absent_pending_path(&path);
+        let committed = absent_committed_path(&path);
+
+        let error = workspace_save_to_test_hook_with_ops(
+            &path,
+            &workspace_with_project("attempted"),
+            |_| Ok(()),
+            sync_parent_directory,
+            restore_workspace_backup,
+            create_rollback_backup,
+            |source, destination| {
+                if source == pending && destination == committed {
+                    return Err("injected initial marker rename failure".to_string());
+                }
+                Ok(())
+            },
+        )
+        .expect_err("initial marker rename failure must restore prior absence");
+
+        assert!(error.contains("injected initial marker rename failure"));
+        assert!(
+            !path.exists(),
+            "failed initial save must be absent in-process"
+        );
+        assert_eq!(
+            load_workspace_from(&path).expect("restart recovery"),
+            None,
+            "failed initial save must remain absent after restart"
+        );
+        let parent = path.parent().expect("parent");
+        assert!(cleanup_artifacts(parent).is_empty());
+        assert!(rollback_artifacts(parent).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_initial_save_marker_sync_failure_restores_absence() {
+        let (_dir, path) = temp_workspace_path();
+        let mut sync_calls = 0;
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("attempted"),
+            |_| Ok(()),
+            |_| {
+                sync_calls += 1;
+                if sync_calls == 3 {
+                    Err("injected initial marker sync failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            restore_workspace_backup,
+        )
+        .expect_err("initial marker sync failure must restore prior absence");
+
+        assert!(error.contains("injected initial marker sync failure"));
+        assert!(
+            !path.exists(),
+            "failed initial save must be absent in-process"
+        );
+        assert_eq!(
+            load_workspace_from(&path).expect("restart recovery"),
+            None,
+            "failed initial save must remain absent after restart"
+        );
+        let parent = path.parent().expect("parent");
+        assert!(cleanup_artifacts(parent).is_empty());
+        assert!(rollback_artifacts(parent).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_prior_bytes_cannot_alias_absent_rollback_state() {
+        let (_dir, path) = temp_workspace_path();
+        let previous_bytes = b"psyche-workspace-prior-absent-v1\n";
+        fs::write(&path, previous_bytes).expect("write prior bytes");
+
+        workspace_save_to_test_hook_with_ops(
+            &path,
+            &workspace_with_project("attempted"),
+            |_| Ok(()),
+            sync_parent_directory,
+            restore_workspace_backup,
+            create_rollback_backup,
+            |source, destination| {
+                if destination == path
+                    && source
+                        .file_name()
+                        .expect("source file name")
+                        .to_string_lossy()
+                        .contains(".psyche-save-")
+                {
+                    fs::rename(source, destination).map_err(|error| error.to_string())?;
+                    return Err("injected post-publication failure".to_string());
+                }
+                Ok(())
+            },
+        )
+        .expect_err("failed replacement must restore exact prior bytes");
+
+        assert_eq!(
+            fs::read(&path).expect("read restored prior bytes"),
+            previous_bytes
+        );
+        let restart_error =
+            load_workspace_from(&path).expect_err("restart must retain invalid prior bytes");
+        assert!(restart_error.contains("parse workspace"), "{restart_error}");
+        assert_eq!(
+            fs::read(&path).expect("read prior bytes after restart"),
+            previous_bytes
+        );
+    }
+
+    #[test]
+    fn native_workspace_tests_absent_rollback_candidates_remain_discoverable() {
+        let (_dir, path) = temp_workspace_path();
+        let candidate = workspace_rollback_candidate_path(&absent_pending_path(&path))
+            .expect("create absent rollback candidate path");
+
+        assert!(candidate
+            .file_name()
+            .expect("candidate file name")
+            .to_string_lossy()
+            .starts_with(&workspace_rollback_candidate_prefix("workspace-v3.json")));
+    }
+
+    #[test]
     fn native_workspace_tests_partial_candidate_is_removed_without_restore() {
         let (_dir, path) = temp_workspace_path();
         let current = workspace_with_project("current");
@@ -3368,7 +3799,7 @@ mod tests {
     fn native_workspace_tests_candidate_cleanup_sync_failure_blocks_save() {
         let (_dir, path) = temp_workspace_path();
         let original = workspace_with_project("original");
-        save_workspace_to(&path, &original).expect("save original");
+        save_clean_workspace(&path, &original);
         let candidate = rollback_candidate_path(&path, "stale");
         fs::write(&candidate, b"{partial").expect("write stale candidate");
         let mut sync_calls = 0;
@@ -3530,7 +3961,7 @@ mod tests {
     #[test]
     fn native_workspace_tests_successful_save_keeps_durable_commit_marker_until_restart() {
         let (_dir, path) = temp_workspace_path();
-        save_workspace_to(&path, &workspace_value()).expect("save original");
+        save_clean_workspace(&path, &workspace_value());
         let updated = workspace_with_project("committed");
 
         let mut sync_calls = 0;
@@ -3848,7 +4279,7 @@ mod tests {
     #[test]
     fn native_workspace_tests_serializes_rollback_before_later_save() {
         let (_dir, path) = temp_workspace_path();
-        save_workspace_to(&path, &workspace_value()).expect("save original");
+        save_clean_workspace(&path, &workspace_value());
         let first_value = workspace_with_project("first");
         let later_value = workspace_with_project("later");
         let first_path = path.clone();
@@ -3912,7 +4343,7 @@ mod tests {
     fn native_workspace_tests_concurrent_reader_recovers_failed_save_without_partial_json() {
         let (_dir, path) = temp_workspace_path();
         let original = workspace_value();
-        save_workspace_to(&path, &original).expect("save original");
+        save_clean_workspace(&path, &original);
         let writer_path = path.clone();
         let (at_sync_tx, at_sync_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -4224,7 +4655,7 @@ mod tests {
     fn native_workspace_tests_rollback_stays_on_pinned_inode_after_app_directory_replacement() {
         let (_dir, path) = temp_parent_workspace_path();
         let original = workspace_with_project("original");
-        save_workspace_to(&path, &original).expect("save original");
+        save_clean_workspace(&path, &original);
 
         let app = path.parent().expect("macos-app").to_path_buf();
         let psyche = app.parent().expect(".psyche");
@@ -4273,7 +4704,7 @@ mod tests {
     fn native_workspace_tests_rollback_stays_on_pinned_inode_after_psyche_symlink_replacement() {
         let (_dir, path) = temp_parent_workspace_path();
         let original = workspace_with_project("original");
-        save_workspace_to(&path, &original).expect("save original");
+        save_clean_workspace(&path, &original);
 
         let app = path.parent().expect("macos-app");
         let psyche = app.parent().expect(".psyche").to_path_buf();
