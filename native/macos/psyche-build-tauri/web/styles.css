@@ -3458,7 +3458,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   align-items: center;
   justify-content: center;
   padding: 30px;
-  background: rgba(5, 5, 8, 0.68);
+  background: rgba(5, 5, 8, 0.62);
   animation: menu-rise 140ms ease-out;
 }
 .agent-picker-overlay[hidden] { display: none; }
@@ -3467,17 +3467,17 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 14px;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
-  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(30px) saturate(1.2);
-  -webkit-backdrop-filter: blur(30px) saturate(1.2);
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
 }
 .agent-picker-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 16px;
+  padding: 4px 6px 12px;
 }
 .agent-picker-title {
   font-size: 15px;
@@ -3490,25 +3490,21 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .agent-picker-list {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   outline: none;
 }
 .agent-picker-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
   width: 100%;
   padding: 10px 11px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: var(--text-soft);
+  font: inherit;
   text-align: left;
-  transition:
-    border-color var(--transition-fast),
-    background var(--transition-fast),
-    color var(--transition-fast);
 }
 .agent-picker-option:hover,
 .agent-picker-option.is-selected {
@@ -3522,9 +3518,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .agent-picker-label {
   min-width: 0;
-  font-weight: 600;
 }
-.agent-picker-command {
+.agent-picker-option-command {
   flex: none;
   color: var(--muted);
   font-family: var(--font-mono);

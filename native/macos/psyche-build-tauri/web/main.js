@@ -6204,7 +6204,7 @@
       option.tabIndex = -1;
       option.innerHTML =
         '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
-        '<span class="agent-picker-command">' +
+        '<span class="agent-picker-option-command">' +
           escapeHtml(entry.id === "coven-code" ? "coven chat" : (entry.command || "")) +
         "</span>";
       option.addEventListener("pointermove", function () {

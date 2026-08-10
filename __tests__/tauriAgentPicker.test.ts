@@ -205,6 +205,40 @@ describe('Tauri agent picker', () => {
     expect(stylesCss).toContain('.agent-picker-option.is-selected');
   });
 
+  it('uses the planned picker command class and visual contract', () => {
+    expect(mainJs).toContain('<span class="agent-picker-option-command">');
+    expect(mainJs).not.toContain('agent-picker-command');
+    expect(stylesCss).not.toContain('.agent-picker-command');
+    expect(stylesCss).toMatch(
+      /\.agent-picker-overlay \{[\s\S]*position: fixed;[\s\S]*inset: 0;[\s\S]*z-index: 210;[\s\S]*display: flex;[\s\S]*align-items: center;[\s\S]*justify-content: center;[\s\S]*padding: 30px;[\s\S]*background: rgba\(5, 5, 8, 0\.62\);[\s\S]*animation: menu-rise 140ms ease-out;[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker \{[\s\S]*width: min\(440px, 100%\);[\s\S]*border: 1px solid var\(--border-strong\);[\s\S]*border-radius: 12px;[\s\S]*padding: 14px;[\s\S]*background: rgba\(var\(--rgb-s1\), calc\(var\(--bg-opacity\) \* 0\.99\)\);[\s\S]*box-shadow: 0 40px 100px rgba\(0, 0, 0, 0\.7\);[\s\S]*backdrop-filter: blur\(30px\);[\s\S]*-webkit-backdrop-filter: blur\(30px\);[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-head \{[\s\S]*display: flex;[\s\S]*align-items: baseline;[\s\S]*justify-content: space-between;[\s\S]*gap: 16px;[\s\S]*padding: 4px 6px 12px;[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-title \{[\s\S]*font-size: 15px;[\s\S]*font-weight: 700;[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-hint \{[\s\S]*font-size: 11px;[\s\S]*color: var\(--muted\);[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-list \{[\s\S]*display: grid;[\s\S]*gap: 4px;[\s\S]*outline: none;[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-option \{[\s\S]*display: flex;[\s\S]*align-items: center;[\s\S]*justify-content: space-between;[\s\S]*width: 100%;[\s\S]*padding: 10px 11px;[\s\S]*border: 1px solid transparent;[\s\S]*border-radius: 8px;[\s\S]*background: transparent;[\s\S]*color: var\(--text-soft\);[\s\S]*font: inherit;[\s\S]*text-align: left;[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-option:hover,[\s\S]*\.agent-picker-option\.is-selected \{[\s\S]*border-color: var\(--border-strong\);[\s\S]*background: var\(--surface-3\);[\s\S]*color: var\(--text\);[\s\S]*\}/,
+    );
+    expect(stylesCss).toMatch(
+      /\.agent-picker-option-command \{[\s\S]*color: var\(--muted\);[\s\S]*font-family: var\(--font-mono\);[\s\S]*font-size: 11px;[\s\S]*\}/,
+    );
+    expect(stylesCss).toContain('@media (prefers-reduced-motion: reduce) {\n  .agent-picker-overlay { animation: none; }\n}');
+  });
+
   it('wraps picker keyboard selection', () => {
     const nextAgentPickerIndex = compileFunction<
       (current: number, delta: number, count: number) => number
