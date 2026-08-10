@@ -1137,6 +1137,53 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
 
+/* -------- 2D tiling: row splits and drag-to-reposition --------
+   The pane tree lays out both axes; these rules turn a split's orientation into
+   the right flex direction, resize cursor, and drop affordance. */
+
+.terminal-pane-split.is-row { flex-direction: row; }
+
+/* The divider's flex-basis works on either axis; only the affordances flip. */
+.terminal-pane-divider.is-row {
+  cursor: col-resize;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+}
+
+/* The pane being carried recedes so the drop highlight is what reads. */
+.terminal-pane-header { cursor: grab; }
+body.is-pane-dragging { cursor: grabbing; user-select: none; }
+body.is-pane-dragging .terminal-pane-header { cursor: grabbing; }
+body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast); }
+.terminal-pane.is-dragging { opacity: 0.45; }
+
+/* Fixed to the viewport: the client rects are already viewport-space, so the
+   highlight needs no positioned ancestor and no pane's overflow can clip it.
+   It animates between targets rather than teleporting, which is what makes the
+   gesture feel continuous. */
+.pane-drop-indicator {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  border-radius: 6px;
+  border: 1.5px solid rgba(var(--rgb-accent), 0.9);
+  background: rgba(var(--rgb-accent), 0.16);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.18),
+    0 12px 32px -12px rgba(var(--rgb-accent), 0.55);
+  transition:
+    left var(--transition-fast),
+    top var(--transition-fast),
+    width var(--transition-fast),
+    height var(--transition-fast);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-drop-indicator { transition: none; }
+}
+
 /* -------- Empty canvas -------- */
 
 .canvas-empty {

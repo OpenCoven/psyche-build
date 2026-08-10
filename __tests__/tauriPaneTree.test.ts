@@ -19,10 +19,13 @@ describe('Tauri physical pane tree', () => {
       'findLeafById',
       'findLeafByThreadId',
       'insertBelow',
+      'insertRelative',
       'layoutRects',
       'leafIds',
+      'moveLeaf',
       'removeLeaf',
       'resizeSplit',
+      'splitOrientation',
     ]);
   });
 
@@ -45,6 +48,7 @@ describe('Tauri physical pane tree', () => {
     expect(firstTree).toEqual({
       type: 'split',
       id: 'split-1',
+      orientation: 'column',
       ratio: 0.5,
       first: leafA,
       second: leafB,
@@ -91,6 +95,7 @@ describe('Tauri physical pane tree', () => {
       root: {
         type: 'split',
         id: 'split-1',
+        orientation: 'column',
         ratio: 0.5,
         first: leafA,
         second: leafC,
@@ -186,6 +191,7 @@ describe('Tauri physical pane tree', () => {
       splits: [
         {
           splitId: 'split-1',
+          orientation: 'column',
           x: 10,
           y: 194,
           width: 800,
@@ -237,6 +243,7 @@ describe('Tauri physical pane tree', () => {
       splits: [
         {
           splitId: 'split-1',
+          orientation: 'column',
           x: 3,
           y: 97,
           width: 400,
@@ -301,6 +308,7 @@ describe('Tauri physical pane tree', () => {
         splits: [
           {
             splitId: 'split-1',
+            orientation: 'column',
             x: 10,
             y: 20 + firstHeight,
             width: 800,
@@ -324,4 +332,129 @@ describe('Tauri physical pane tree', () => {
       expect(result.splits[0].ratio).toBeLessThanOrEqual(1);
     },
   );
+});
+
+describe('Tauri pane tree 2D tiling', () => {
+  const minimums = { width: 320, height: 120, separator: 6 };
+
+  const column = () => panes.insertBelow(
+    panes.createLeaf('leaf-a', 'thread-a'),
+    'leaf-a',
+    panes.createLeaf('leaf-b', 'thread-b'),
+    'split-1',
+  );
+
+  test('treats a missing orientation as a column, so stored layouts still load', () => {
+    expect(panes.splitOrientation({ type: 'split' })).toBe('column');
+    expect(panes.splitOrientation({ type: 'split', orientation: 'row' })).toBe('row');
+    expect(panes.splitOrientation(null)).toBe('column');
+
+    const legacy = { type: 'split', id: 's', ratio: 0.5, first: panes.createLeaf('a', 't-a'), second: panes.createLeaf('b', 't-b') };
+    const laid = panes.layoutRects(legacy, { x: 0, y: 0, width: 800, height: 400 }, minimums);
+    expect(laid.splits[0].orientation).toBe('column');
+    // Stacked, not side by side: equal widths, different tops.
+    expect(laid.leaves.map((leaf: any) => leaf.width)).toEqual([800, 800]);
+    expect(laid.leaves[0].y).toBeLessThan(laid.leaves[1].y);
+  });
+
+  test('places a pane on any of the four edges', () => {
+    const leafA = panes.createLeaf('leaf-a', 'thread-a');
+    const leafB = panes.createLeaf('leaf-b', 'thread-b');
+
+    expect(panes.insertRelative(leafA, 'leaf-a', leafB, 's', 'right')).toEqual({
+      type: 'split', id: 's', orientation: 'row', ratio: 0.5, first: leafA, second: leafB,
+    });
+    expect(panes.insertRelative(leafA, 'leaf-a', leafB, 's', 'left')).toEqual({
+      type: 'split', id: 's', orientation: 'row', ratio: 0.5, first: leafB, second: leafA,
+    });
+    expect(panes.insertRelative(leafA, 'leaf-a', leafB, 's', 'above')).toEqual({
+      type: 'split', id: 's', orientation: 'column', ratio: 0.5, first: leafB, second: leafA,
+    });
+    expect(panes.insertRelative(leafA, 'leaf-a', leafB, 's', 'below').first).toBe(leafA);
+    expect(panes.insertRelative(leafA, 'leaf-a', leafB, 's', 'sideways')).toBe(leafA);
+  });
+
+  test('lays a row split out along the horizontal axis', () => {
+    const tree = panes.insertRelative(
+      panes.createLeaf('leaf-a', 'thread-a'),
+      'leaf-a',
+      panes.createLeaf('leaf-b', 'thread-b'),
+      'split-1',
+      'right',
+    );
+
+    const result = panes.layoutRects(tree, { x: 0, y: 0, width: 1000, height: 400 }, minimums);
+
+    expect(result.splits[0]).toEqual({
+      splitId: 'split-1', orientation: 'row', x: 497, y: 0, width: 6, height: 400, ratio: 497 / 994,
+    });
+    // Side by side: full height each, second starts past the separator.
+    expect(result.leaves.map((leaf: any) => leaf.height)).toEqual([400, 400]);
+    expect(result.leaves[0]).toMatchObject({ x: 0, width: 497 });
+    expect(result.leaves[1]).toMatchObject({ x: 503, width: 497 });
+  });
+
+  test('sums minimums along the split axis and shares them across it', () => {
+    const row = panes.insertRelative(
+      panes.createLeaf('leaf-a', 'thread-a'), 'leaf-a',
+      panes.createLeaf('leaf-b', 'thread-b'), 'split-1', 'right',
+    );
+
+    // Two 320-wide panes plus a 6px separator need 646 across, but only one
+    // pane's height down — the mirror of the column case.
+    expect(panes.canFit(row, { width: 646, height: 120 }, minimums)).toBe(true);
+    expect(panes.canFit(row, { width: 645, height: 120 }, minimums)).toBe(false);
+    expect(panes.canFit(column(), { width: 320, height: 246 }, minimums)).toBe(true);
+    expect(panes.canFit(column(), { width: 320, height: 245 }, minimums)).toBe(false);
+    expect(panes.canFit(null, { width: 0, height: 0 }, minimums)).toBe(true);
+  });
+
+  test('moves a pane beside another and collapses the branch it left', () => {
+    const tree = panes.insertBelow(column(), 'leaf-b', panes.createLeaf('leaf-c', 'thread-c'), 'split-2');
+    expect(panes.leafIds(tree)).toEqual(['leaf-a', 'leaf-b', 'leaf-c']);
+
+    const moved = panes.moveLeaf(tree, 'leaf-c', 'leaf-a', 'left', 'split-3');
+
+    expect(panes.leafIds(moved)).toEqual(['leaf-c', 'leaf-a', 'leaf-b']);
+    expect(moved.orientation).toBe('column');
+    expect(moved.first).toEqual({
+      type: 'split', id: 'split-3', orientation: 'row', ratio: 0.5,
+      first: { type: 'leaf', id: 'leaf-c', threadId: 'thread-c' },
+      second: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+    });
+    // split-2 held only leaf-b once leaf-c left, so it collapsed away.
+    expect(JSON.stringify(moved)).not.toContain('split-2');
+    expect(panes.leafIds(tree)).toEqual(['leaf-a', 'leaf-b', 'leaf-c']);
+  });
+
+  test('returns the same root for every move that cannot happen', () => {
+    const tree = column();
+    const lone = panes.createLeaf('leaf-a', 'thread-a');
+
+    expect(panes.moveLeaf(tree, 'leaf-a', 'leaf-a', 'left', 's')).toBe(tree);
+    expect(panes.moveLeaf(tree, 'leaf-a', 'missing', 'left', 's')).toBe(tree);
+    expect(panes.moveLeaf(tree, 'missing', 'leaf-a', 'left', 's')).toBe(tree);
+    expect(panes.moveLeaf(tree, 'leaf-a', 'leaf-b', 'nowhere', 's')).toBe(tree);
+    expect(panes.moveLeaf(lone, 'leaf-a', 'leaf-a', 'left', 's')).toBe(lone);
+    expect(panes.moveLeaf(null, 'leaf-a', 'leaf-b', 'left', 's')).toBe(null);
+  });
+
+  test('keeps mixed row-and-column layouts inside their rect', () => {
+    const tree = panes.moveLeaf(
+      panes.insertBelow(column(), 'leaf-b', panes.createLeaf('leaf-c', 'thread-c'), 'split-2'),
+      'leaf-c', 'leaf-a', 'right', 'split-3',
+    );
+    const rect = { x: 4, y: 9, width: 1200, height: 700 };
+
+    const result = panes.layoutRects(tree, rect, minimums);
+
+    expect(result.leaves).toHaveLength(3);
+    for (const geometry of [...result.leaves, ...result.splits]) {
+      expect(geometry.x).toBeGreaterThanOrEqual(rect.x);
+      expect(geometry.y).toBeGreaterThanOrEqual(rect.y);
+      expect(geometry.x + geometry.width).toBeLessThanOrEqual(rect.x + rect.width);
+      expect(geometry.y + geometry.height).toBeLessThanOrEqual(rect.y + rect.height);
+    }
+    expect(result.splits.map((split: any) => split.orientation).sort()).toEqual(['column', 'row']);
+  });
 });
