@@ -223,6 +223,12 @@
                 </button>
                 <span class="panel-title">Git</span>
                 <span class="dock-tab-count" id="dock-git-count" hidden></span>
+                <button id="git-pop-out" class="icon-btn ghost-btn" type="button"
+                        draggable="true"
+                        title="Open Git as a pane — or drag it onto the canvas"
+                        aria-label="Open Git as a pane">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
                 <span class="panel-crumb" id="git-branch"></span>
                 <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -231,7 +237,10 @@
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
               </header>
-              <div class="panel-body panel-git-body">
+              <div class="dock-popped-note" id="git-popped-note" hidden>
+                Git is open as a pane. <button id="git-dock-back" type="button">Return it to the dock</button>
+              </div>
+              <div class="panel-body panel-git-body" id="git-surface">
                 <div class="sidebar-tabs dock-tabs-segmented" role="tablist" aria-label="Git sections">
                   <button class="sidebar-tab is-active" data-git-tab="changes" type="button" role="tab" aria-selected="true">
                     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.5 11.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/><path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/></svg>
