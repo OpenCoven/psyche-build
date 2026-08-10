@@ -109,6 +109,26 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.sequence, 5)
     }
 
+    func testConnectionBoundaryWaitsForAuthoritativeSnapshot() {
+        let store = WorkspaceStore()
+        store.applySnapshot(workspace: Fixtures.workspace(revision: 50), sequence: 50)
+
+        store.beginConnection()
+        store.applyEvent(workspace: Fixtures.workspace(revision: 1), sequence: 1)
+
+        XCTAssertEqual(store.workspace?.revision, 50, "Last-known state stays readable")
+        XCTAssertEqual(store.sequence, 0, "Events cannot establish a new connection baseline")
+        XCTAssertTrue(store.isStale)
+        XCTAssertTrue(store.needsFullSnapshot)
+
+        store.applySnapshot(workspace: Fixtures.workspace(revision: 1), sequence: 1)
+
+        XCTAssertEqual(store.workspace?.revision, 1)
+        XCTAssertEqual(store.sequence, 1)
+        XCTAssertFalse(store.isStale)
+        XCTAssertFalse(store.needsFullSnapshot)
+    }
+
     func testSnapshotAtTheSameSequenceRefreshesState() {
         let store = WorkspaceStore()
         store.applySnapshot(workspace: Fixtures.workspace(revision: 5), sequence: 5)

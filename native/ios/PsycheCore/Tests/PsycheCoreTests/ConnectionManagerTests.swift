@@ -128,6 +128,21 @@ final class ConnectionManagerTests: XCTestCase {
                 PsycheProtocolVersion.current
             ]
         ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 1,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        )))
+        await manager.waitForEventDrain(after: 1)
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        let provisionalState = await manager.state
+        XCTAssertEqual(provisionalState, .authenticating)
+        let beforeNegotiatedWelcome = await fake.sentMessages
+        XCTAssertEqual(beforeNegotiatedWelcome.filter(\.isWorkspaceSnapshotRequest).count, 0)
+
         await fake.emit(.legacy(.welcome(WelcomePayload(
             serverID: "host",
             serverName: "Host",
@@ -516,7 +531,7 @@ final class ConnectionManagerTests: XCTestCase {
         let connectTask = Task {
             await manager.connect(to: testEndpoint())
         }
-        try await startGate.waitUntilEntered()
+        await startGate.waitUntilEntered()
 
         await manager.disconnect()
         let connectFinished = expectation(description: "connect completed after disconnect")
@@ -549,7 +564,7 @@ final class ConnectionManagerTests: XCTestCase {
         let connectTask = Task {
             await manager.connect(to: testEndpoint())
         }
-        try await startGate.waitUntilEntered()
+        await startGate.waitUntilEntered()
 
         connectTask.cancel()
         let connectFinished = expectation(description: "connect completed after cancellation")
@@ -560,11 +575,12 @@ final class ConnectionManagerTests: XCTestCase {
         await fulfillment(of: [connectFinished], timeout: 1)
         await startGate.release()
 
-        let cancelledState = await manager.state
-        XCTAssertEqual(
-            cancelledState,
-            .failed(ConnectionManagerError.connectionCancelled.localizedDescription)
+        let expectedCancellation = ConnectionState.failed(
+            ConnectionManagerError.connectionCancelled.localizedDescription
         )
+        await manager.waitForState(expectedCancellation)
+        let cancelledState = await manager.state
+        XCTAssertEqual(cancelledState, expectedCancellation)
 
         await manager.connect(to: testEndpoint())
         await fake.emit(.legacy(.welcome(makeWelcome())))
@@ -972,26 +988,29 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
 private actor MessageProcessorStartGate {
     private var isReleased = false
     private var didEnter = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
         didEnter = true
+        let entered = entryWaiters
+        entryWaiters.removeAll()
+        entered.forEach { $0.resume() }
         guard !isReleased else { return }
         await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }
     }
 
-    func waitUntilEntered(
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        for _ in 0..<1_000 {
-            if didEnter { return }
-            await Task.yield()
+    func waitUntilEntered() async {
+        guard !didEnter else { return }
+        await withCheckedContinuation { continuation in
+            if didEnter {
+                continuation.resume()
+            } else {
+                entryWaiters.append(continuation)
+            }
         }
-        XCTFail("Timed out waiting for message processor start", file: file, line: line)
-        throw TestError.timedOut
     }
 
     func release() {

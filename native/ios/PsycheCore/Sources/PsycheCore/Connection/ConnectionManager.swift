@@ -118,58 +118,66 @@ public actor ConnectionManager {
         transition(to: .connecting)
 
         do {
-            try await transport.connect(to: endpoint)
-            guard activeConnectAttempt == attempt else { return }
-            await workspaceStore.beginConnection()
-            guard activeConnectAttempt == attempt else { return }
-            hasActiveTransport = true
-            activeEndpoint = endpoint
-            transition(to: .authenticating)
-            let messages = await transport.incomingMessages()
-            isMessageProcessorReady = false
-            let session = UUID()
-            activeMessageSession = session
-            let messageProcessorStart = self.messageProcessorStart
-            messageTask = Task { [weak self, messageProcessorStart] in
-                await messageProcessorStart()
-                guard !Task.isCancelled else { return }
-                await self?.markMessageProcessorReady(for: session)
-                for await message in messages {
-                    guard !Task.isCancelled else { return }
-                    guard let result = await self?.handle(message, for: session) else { return }
-                    if case let .failed(reason) = result {
-                        await self?.messageProcessingEnded(for: session, reason: reason)
-                        return
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                await self?.messageProcessingEnded(
-                    for: session,
-                    reason: "Connection closed unexpectedly"
-                )
-            }
             try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await transport.connect(to: endpoint)
+                guard activeConnectAttempt == attempt else { return }
+                await workspaceStore.beginConnection()
+                guard activeConnectAttempt == attempt else { return }
+                hasActiveTransport = true
+                activeEndpoint = endpoint
+                transition(to: .authenticating)
+                let messages = await transport.incomingMessages()
+                guard activeConnectAttempt == attempt else { return }
+                try Task.checkCancellation()
+                isMessageProcessorReady = false
+                let session = UUID()
+                activeMessageSession = session
+                let messageProcessorStart = self.messageProcessorStart
+                messageTask = Task { [weak self, messageProcessorStart] in
+                    await messageProcessorStart()
+                    guard !Task.isCancelled else { return }
+                    await self?.markMessageProcessorReady(for: session)
+                    for await message in messages {
+                        guard !Task.isCancelled else { return }
+                        guard let result = await self?.handle(message, for: session) else { return }
+                        if case let .failed(reason) = result {
+                            await self?.messageProcessingEnded(for: session, reason: reason)
+                            return
+                        }
+                    }
+                    guard !Task.isCancelled else { return }
+                    await self?.messageProcessingEnded(
+                        for: session,
+                        reason: "Connection closed unexpectedly"
+                    )
+                }
                 try await waitForMessageProcessorReadiness(for: session)
+                try Task.checkCancellation()
+                guard activeConnectAttempt == attempt,
+                      activeMessageSession == session,
+                      hasActiveTransport else {
+                    throw ConnectionManagerError.messageProcessorEndedBeforeReady
+                }
+                try await transport.send(.legacy(.hello(HelloPayload(
+                    clientID: clientID,
+                    clientName: clientName,
+                    protocolVersion: PsycheProtocolVersion.current,
+                    token: token
+                ))))
             } onCancel: {
                 Task { [weak self] in
                     await self?.cancelConnectAttempt(attempt)
                 }
             }
-            try Task.checkCancellation()
-            guard activeConnectAttempt == attempt,
-                  activeMessageSession == session,
-                  hasActiveTransport else {
-                throw ConnectionManagerError.messageProcessorEndedBeforeReady
-            }
-            try await transport.send(.legacy(.hello(HelloPayload(
-                clientID: clientID,
-                clientName: clientName,
-                protocolVersion: PsycheProtocolVersion.current,
-                token: token
-            ))))
+        } catch is CancellationError {
+            guard activeConnectAttempt == attempt else { return }
+            let error = ConnectionManagerError.connectionCancelled
+            await tearDownActiveConnection(readinessError: error)
+            transition(to: .failed(error.localizedDescription))
         } catch {
             guard activeConnectAttempt == attempt else { return }
-            await tearDownActiveConnection()
+            await tearDownActiveConnection(readinessError: error)
             transition(to: .failed(error.localizedDescription))
         }
     }
@@ -383,6 +391,8 @@ public actor ConnectionManager {
     private func requestSnapshotIfNeeded(for session: UUID) async {
         guard activeMessageSession == session,
               hasActiveTransport,
+              welcomeIdentity != nil,
+              token?.isEmpty == false,
               !isSnapshotRecoveryInFlight else {
             return
         }

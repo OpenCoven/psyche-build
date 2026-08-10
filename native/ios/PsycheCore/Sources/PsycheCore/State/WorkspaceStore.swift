@@ -37,6 +37,7 @@ public final class WorkspaceStore: ObservableObject {
 
     private let controlRequests: (any ControlRequesting)?
     private let now: @Sendable () -> Date
+    private var isAwaitingConnectionSnapshot = false
 
     public init(
         controlRequests: (any ControlRequesting)? = nil,
@@ -50,6 +51,11 @@ public final class WorkspaceStore: ObservableObject {
     /// gap leaves the current state untouched while flagging that only a full
     /// snapshot can restore correctness.
     public func applyEvent(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
+        guard !isAwaitingConnectionSnapshot else {
+            isStale = true
+            needsFullSnapshot = true
+            return
+        }
         guard nextSequence > sequence else { return }
         guard sequence == 0 || nextSequence == sequence + 1 else {
             isStale = true
@@ -64,6 +70,7 @@ public final class WorkspaceStore: ObservableObject {
     /// exactly how a gap is recovered.
     public func applySnapshot(workspace: WorkspaceSnapshot, sequence nextSequence: UInt64) {
         guard nextSequence >= sequence else { return }
+        isAwaitingConnectionSnapshot = false
         accept(workspace: workspace, sequence: nextSequence)
     }
 
@@ -98,6 +105,7 @@ public final class WorkspaceStore: ObservableObject {
         sequence = 0
         isStale = true
         needsFullSnapshot = true
+        isAwaitingConnectionSnapshot = true
     }
 
     public func setDraft(_ draft: String?, forPane paneID: String) {
