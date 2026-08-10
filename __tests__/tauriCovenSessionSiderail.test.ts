@@ -56,6 +56,30 @@ function extractFunctionSource(source: string, name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function extractInlineFunctionSource(source: string, anchor: string) {
+  const anchorIndex = source.indexOf(anchor);
+  if (anchorIndex === -1) throw new Error(`missing anchor ${anchor}`);
+  const functionStart = source.indexOf('function (event)', anchorIndex);
+  if (functionStart === -1) throw new Error(`missing inline function for ${anchor}`);
+  const bodyStart = source.indexOf('{', functionStart);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(functionStart, index + 1);
+  }
+  throw new Error(`unterminated inline function for ${anchor}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 function decodeHtml(value: string) {
   return value
     .replaceAll('&lt;', '<')
@@ -1159,6 +1183,55 @@ describe('Tauri Coven session project rail', () => {
       .toBe('No matching projects, worktrees, or panes.');
   });
 
+  it('keeps tree arrow traversal on treeitems and out of close buttons', () => {
+    const renderer = createRenderer({
+      activeProjectId: 'alpha',
+      activeThreadId: 'first',
+      threads: [
+        { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
+        { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+      ],
+    });
+    renderer.render();
+
+    const handleSessionListKeydown = compileFunction<
+      (event: { key: string; preventDefault: () => void }) => void
+    >(
+      extractInlineFunctionSource(mainJs, 'sessionListEl.addEventListener("keydown"'),
+      {
+        document: renderer.document,
+        sessionListEl: renderer.sessionListEl,
+      },
+    );
+
+    const rows = renderer.sessionListEl.querySelectorAll('.session-row');
+    const first = rows.find((row) => row.dataset.threadId === 'first');
+    const second = rows.find((row) => row.dataset.threadId === 'second');
+    const firstClose = first?.parentNode?.querySelector('.session-close');
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(firstClose).toBeDefined();
+
+    first?.focus();
+    let prevented = 0;
+    handleSessionListKeydown({
+      key: 'ArrowDown',
+      preventDefault: () => { prevented += 1; },
+    });
+    expect(renderer.document.activeElement).toBe(second);
+    expect(renderer.document.activeElement).not.toBe(firstClose);
+    expect(prevented).toBe(1);
+
+    firstClose?.focus();
+    prevented = 0;
+    handleSessionListKeydown({
+      key: 'ArrowDown',
+      preventDefault: () => { prevented += 1; },
+    });
+    expect(renderer.document.activeElement).toBe(firstClose);
+    expect(prevented).toBe(0);
+  });
+
   it('marks rows that hold a pane-tree leaf and detaches them without killing the process', async () => {
     const renderer = createRenderer({
       activeThreadId: 'local',
@@ -1503,9 +1576,8 @@ describe('Tauri Coven session project rail', () => {
 
   it('keeps honest shell sequencing and promotes the rendered list to a tree', () => {
     expect(indexHtml).toContain(
-      '<div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project and branch"></div>',
+      '<div class="session-list" id="session-list" role="tree" aria-label="Sessions by project, branch, and category"></div>',
     );
-    expect(indexHtml).not.toMatch(/id="session-list"[^>]*role="tree"/);
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');
     expect(rendererSource).toContain('sessionListEl.setAttribute("role", "tree")');
     expect(extractFunctionSource(mainJs, 'createProjectGroup')).toContain('aria-level", "1');

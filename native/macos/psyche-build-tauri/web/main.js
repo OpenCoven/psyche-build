@@ -3956,11 +3956,12 @@
     sessionListEl.addEventListener("keydown", function (event) {
       if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
       var items = Array.prototype.filter.call(
-        sessionListEl.querySelectorAll("[data-tree-item], .session-close"),
+        sessionListEl.querySelectorAll("[data-tree-item]"),
         function (item) { return item.offsetParent !== null; }
       );
       if (!items.length) return;
       var current = items.indexOf(document.activeElement);
+      if (current === -1) return;
       var next = current;
       if (event.key === "Home") next = 0;
       else if (event.key === "End") next = items.length - 1;

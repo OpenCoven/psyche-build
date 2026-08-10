@@ -52,7 +52,7 @@ describe('Tauri project/worktree/pane rail', () => {
       /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">[\s\S]*class="session-legend-button has-tooltip"[\s\S]*<\/div>\s*<div class="sr-only" id="session-status-legend">/,
     );
     expect(indexHtml).toMatch(
-      /id="session-list"[^>]*role="navigation"[^>]*aria-label="Sessions grouped by project and branch"/,
+      /id="session-list"[^>]*role="tree"[^>]*aria-label="Sessions by project, branch, and category"/,
     );
     const renderSessionList = functionSource(mainJs, 'renderSessionList');
     expect(renderSessionList).toContain('sessionListEl.setAttribute("role", "tree")');
@@ -159,7 +159,9 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
-    expect(mainJs).toContain('"[data-tree-item], .session-close"');
+    expect(mainJs).toContain('"[data-tree-item]"');
+    expect(mainJs).not.toContain('"[data-tree-item], .session-close"');
+    expect(mainJs).toContain('if (current === -1) return;');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
   });
