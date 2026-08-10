@@ -353,7 +353,7 @@ describe('Tauri pane tree 2D tiling', () => {
     const laid = panes.layoutRects(legacy, { x: 0, y: 0, width: 800, height: 400 }, minimums);
     expect(laid.splits[0].orientation).toBe('column');
     // Stacked, not side by side: equal widths, different tops.
-    expect(laid.leaves.map((leaf) => leaf.width)).toEqual([800, 800]);
+    expect(laid.leaves.map((leaf: any) => leaf.width)).toEqual([800, 800]);
     expect(laid.leaves[0].y).toBeLessThan(laid.leaves[1].y);
   });
 
@@ -389,7 +389,7 @@ describe('Tauri pane tree 2D tiling', () => {
       splitId: 'split-1', orientation: 'row', x: 497, y: 0, width: 6, height: 400, ratio: 497 / 994,
     });
     // Side by side: full height each, second starts past the separator.
-    expect(result.leaves.map((leaf) => leaf.height)).toEqual([400, 400]);
+    expect(result.leaves.map((leaf: any) => leaf.height)).toEqual([400, 400]);
     expect(result.leaves[0]).toMatchObject({ x: 0, width: 497 });
     expect(result.leaves[1]).toMatchObject({ x: 503, width: 497 });
   });
@@ -455,6 +455,6 @@ describe('Tauri pane tree 2D tiling', () => {
       expect(geometry.x + geometry.width).toBeLessThanOrEqual(rect.x + rect.width);
       expect(geometry.y + geometry.height).toBeLessThanOrEqual(rect.y + rect.height);
     }
-    expect(result.splits.map((split) => split.orientation).sort()).toEqual(['column', 'row']);
+    expect(result.splits.map((split: any) => split.orientation).sort()).toEqual(['column', 'row']);
   });
 });
