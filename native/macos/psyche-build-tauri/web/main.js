@@ -329,6 +329,14 @@
     if (!p) return [];
     return state.threads.filter(function (t) { return t.projectId === p.id && !t.hidden; });
   }
+  // A pane whose process exited cleanly has nothing left to report, so its rail
+  // row is noise. Only the row goes: the pane stays on the canvas with its Retry
+  // button, and closing that pane drops the thread outright, so nothing is
+  // stranded. `failed` is deliberately not dormant — a crash should stay visible
+  // in the rail until it is dealt with.
+  function isDormantThread(thread) {
+    return Boolean(thread) && thread.status === "exited";
+  }
   async function setActiveProject(id, options) {
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
@@ -2068,7 +2076,7 @@
 
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
-        return t.projectId === project.id && !t.hidden;
+        return t.projectId === project.id && !t.hidden && !isDormantThread(t);
       });
       var remoteRows = covenSessionsForProject(project);
       var railModel = PsycheSessions.buildProjectRailModel(

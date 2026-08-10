@@ -362,6 +362,7 @@ function createRenderer(options: {
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
   const sources = [
+    extractFunctionSource(mainJs, 'isDormantThread'),
     extractFunctionSource(mainJs, 'covenSessionsForProject'),
     extractFunctionSource(mainJs, 'covenInlineState'),
     extractFunctionSource(mainJs, 'covenToneClass'),
@@ -539,6 +540,35 @@ describe('Tauri Coven session project rail', () => {
       .toBe('Loading Coven sessions');
     expect(renderer.sessionListEl.querySelector('.session-group')).toBeNull();
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
+  });
+
+  it('drops exited threads from the rail while keeping failed ones visible', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      threads: [
+        { id: 'live', projectId: 'alpha', name: 'Still running', status: 'running' },
+        { id: 'starting', projectId: 'alpha', name: 'Booting', status: 'starting' },
+        { id: 'crashed', projectId: 'alpha', name: 'Crashed', status: 'failed' },
+        { id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' },
+      ],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-row').map((row) => row.dataset.threadId))
+      .toEqual(['live', 'starting', 'crashed']);
+    expect(renderer.sessionListEl.textContent).not.toContain('Finished');
+  });
+
+  it('drops a project group whose threads have all exited', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      threads: [{ id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' }],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
   });
 
   it('groups local threads by pane kind, in input order, without empty project headers', () => {
