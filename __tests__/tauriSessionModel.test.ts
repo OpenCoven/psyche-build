@@ -103,15 +103,31 @@ describe('Tauri Coven session model', () => {
     expect(sessions).toEqual(original);
   });
 
-  test('groups only safe, project-scoped sessions into sorted copies', () => {
+  test('treats only attached harness statuses as live', () => {
+    for (const status of ['starting', 'running', 'waiting']) {
+      expect(model.isLiveCovenSession({ status })).toBe(true);
+    }
+    // `idle` is written when a run exits with a resumable conversation, so the
+    // harness is already gone; it belongs with the other terminal statuses.
+    for (const status of ['idle', 'completed', 'archived', 'failed', 'killed', 'orphaned', '']) {
+      expect(model.isLiveCovenSession({ status })).toBe(false);
+    }
+    expect(model.isLiveCovenSession({})).toBe(false);
+    expect(model.isLiveCovenSession()).toBe(false);
+  });
+
+  test('groups only safe, project-scoped, live sessions into sorted copies', () => {
     const sessions = [
-      { id: 'later', projectRoot: '/alpha', status: 'completed', updatedAt: '2026-01-01T00:00:00Z' },
+      { id: 'later', projectRoot: '/alpha', status: 'waiting', updatedAt: '2025-01-01T00:00:00Z' },
       { id: 'live', projectRoot: '/alpha', status: 'running', updatedAt: '2026-01-01T00:00:00Z' },
       { id: 'beta', projectRoot: '/beta', status: 'waiting' },
       { id: 'unsafe id', projectRoot: '/alpha', status: 'running' },
       { id: 'missing-root', status: 'running' },
       { projectRoot: '/alpha', status: 'running' },
       { id: 'empty-root', projectRoot: '', status: 'running' },
+      { id: 'finished', projectRoot: '/alpha', status: 'completed' },
+      { id: 'resumable', projectRoot: '/alpha', status: 'idle' },
+      { id: 'beta-orphan', projectRoot: '/beta', status: 'orphaned' },
     ];
 
     const grouped = model.groupCovenSessions(sessions);
@@ -119,7 +135,16 @@ describe('Tauri Coven session model', () => {
     expect([...grouped.keys()]).toEqual(['/alpha', '/beta']);
     expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'later']);
     expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['beta']);
-    expect(sessions).toHaveLength(7);
+    expect(sessions).toHaveLength(10);
+  });
+
+  test('drops a project whose sessions have all finished', () => {
+    const grouped = model.groupCovenSessions([
+      { id: 'done', projectRoot: '/alpha', status: 'completed' },
+      { id: 'gone', projectRoot: '/alpha', status: 'orphaned' },
+    ]);
+
+    expect([...grouped.keys()]).toEqual([]);
   });
 
   test('filters both local and remote sessions without mutating their inputs', () => {

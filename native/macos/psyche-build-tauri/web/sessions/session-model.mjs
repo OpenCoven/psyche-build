@@ -87,6 +87,17 @@ export function statusPresentation(status) {
   }
 }
 
+/**
+ * The daemon reports every session it has ever recorded, so an unfiltered rail
+ * is dominated by finished CLI runs. Only sessions whose harness is still
+ * attached are worth a row: `statusPresentation().live` is the single source of
+ * truth for that. Note `idle` is deliberately not live — Coven writes it when a
+ * run *exits* with a resumable conversation, so the process is already gone.
+ */
+export function isLiveCovenSession(session) {
+  return statusPresentation(session?.status).live;
+}
+
 export function sortCovenSessions(sessions) {
   return [...(Array.isArray(sessions) ? sessions : [])].sort((left, right) => {
     const liveDifference = Number(statusPresentation(right?.status).live)
@@ -105,7 +116,8 @@ export function groupCovenSessions(sessions) {
 
   for (const session of Array.isArray(sessions) ? sessions : []) {
     if (!session || !isSafeCovenSessionId(session.id)
-      || typeof session.projectRoot !== 'string' || !session.projectRoot) {
+      || typeof session.projectRoot !== 'string' || !session.projectRoot
+      || !isLiveCovenSession(session)) {
       continue;
     }
 
