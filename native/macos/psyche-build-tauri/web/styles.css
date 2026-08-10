@@ -1697,6 +1697,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .minimap-dot.running { background: var(--ok); }
 .minimap-dot.starting { background: var(--warn); }
 .minimap-dot.exited { background: var(--error); }
+.minimap-dot.file {
+  background: var(--accent);
+  box-shadow: 0 0 7px var(--accent-glow);
+}
 /* Focus mode draws one pane and hides the rest, so the minimap is the only
    place a waiting pane can still be seen. It wins over the status colour and
    grows a ring, because at 5px a hue swap alone is not a signal. */

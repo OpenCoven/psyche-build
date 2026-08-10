@@ -987,10 +987,74 @@ describe('Tauri physical terminal panes', () => {
       };
     }
 
-    it('cycles tiled → full column → full row → tiled without editing the tiled tree', () => {
-      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
-      const snapshot = JSON.stringify(layout.root);
-      const helpers = compileModeHelpers(layout);
+    it('lists the active file before pane entries in the minimap helper', () => {
+      const threads = new Map([
+        ['thread-a', { id: 'thread-a', name: 'Agent', status: 'running' }],
+        [
+          'thread-b',
+          {
+            id: 'thread-b',
+            name: 'Tests',
+            status: 'running',
+            needsAttention: true,
+            attentionReason: 'waiting-on-user',
+          },
+        ],
+      ]);
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-a', 'thread-a'),
+          'leaf-a',
+          PsychePanes.createLeaf('leaf-b', 'thread-b'),
+          'split-a',
+        ),
+        focusedLeafId: 'leaf-a',
+      };
+      const paneMinimapItems = compileFunction<
+        (value: Layout, activeFile: { id: string; name: string; rel: string } | null) => Array<unknown>
+      >(functionSource('paneMinimapItems'), {
+        scopedPaneRoot: (value: Layout) => value.root,
+        PsychePanes,
+        findThread: (id: string) => threads.get(id) || null,
+        PsycheSessions: { attentionLabel: () => 'Waiting for you' },
+      });
+
+      expect(paneMinimapItems(layout, {
+        id: 'file-a',
+        name: 'Button.tsx',
+        rel: 'src/Button.tsx',
+      })).toEqual([
+        {
+          kind: 'file',
+          id: 'file-a',
+          label: 'Button.tsx',
+          detail: 'src/Button.tsx',
+          current: true,
+          thread: null,
+        },
+        {
+          kind: 'pane',
+          id: 'thread-a',
+          label: 'Agent',
+          detail: 'running',
+          current: false,
+          thread: threads.get('thread-a'),
+        },
+        {
+          kind: 'pane',
+          id: 'thread-b',
+          label: 'Tests',
+          detail: 'running · Waiting for you',
+          current: false,
+          thread: threads.get('thread-b'),
+        },
+      ]);
+    });
+
+      it('cycles tiled → full column → full row → tiled without editing the tiled tree', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+        const snapshot = JSON.stringify(layout.root);
+        const helpers = compileModeHelpers(layout);
 
       expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
 

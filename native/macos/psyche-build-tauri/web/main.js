@@ -2841,7 +2841,7 @@
       syncThreadPaneMetadata(thread);
     });
     renderSetPickBar();
-    renderPaneMinimap(layout);
+    renderPaneMinimap(layout, findOpenFile(state.activeFileId));
     scheduleVisiblePaneFit();
     requestAnimationFrame(syncBrowserBounds);
   }
@@ -2935,10 +2935,43 @@
    * Focus mode hides every pane but one, so the minimap is how the others stay
    * reachable — a carousel of the panes the canvas is no longer drawing.
    */
-  function renderPaneMinimap(layout) {
+  function paneMinimapItems(layout, activeFile) {
+    var items = [];
+    if (activeFile) {
+      items.push({
+        kind: "file",
+        id: activeFile.id,
+        label: activeFile.name,
+        detail: activeFile.rel,
+        current: true,
+        thread: null,
+      });
+    }
+    if (!layout || !layout.root) return items;
+
+    PsychePanes.leafIds(scopedPaneRoot(layout)).forEach(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      var thread = leaf && findThread(leaf.threadId);
+      if (!thread) return;
+      items.push({
+        kind: "pane",
+        id: thread.id,
+        label: thread.name,
+        detail: (thread.status || "") +
+          (thread.needsAttention
+            ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
+            : ""),
+        current: !activeFile && layout.maximizedLeafId === leafId,
+        thread: thread,
+      });
+    });
+    return items;
+  }
+
+  function renderPaneMinimap(layout, activeFile) {
     if (!terminalArea) return;
     var rail = terminalArea.querySelector(".pane-minimap");
-    if (!layout || !layout.maximizedLeafId) {
+    if (!activeFile && (!layout || !layout.maximizedLeafId)) {
       if (rail) rail.remove();
       return;
     }
@@ -2949,33 +2982,28 @@
       terminalArea.appendChild(rail);
     }
     rail.replaceChildren();
-    var scopedIds = PsychePanes.leafIds(scopedPaneRoot(layout));
-    scopedIds.forEach(function (leafId) {
-      var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread) return;
+    paneMinimapItems(layout, activeFile).forEach(function (item) {
       var entry = document.createElement("button");
       entry.type = "button";
-      entry.dataset.threadId = thread.id;
       entry.className = "minimap-pane" +
-        (layout.maximizedLeafId === leafId ? " is-current" : "");
-      // Focus mode is exactly when a waiting pane is easiest to lose, so the
-      // minimap says it in the label too, not just in the dot's colour.
-      entry.title = thread.name + " — " + (thread.status || "") +
-        (thread.needsAttention
-          ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
-          : "") +
-        " · click to focus this pane";
+        (item.kind === "file" ? " is-file" : "") +
+        (item.current ? " is-current" : "");
+      if (item.kind === "pane") entry.dataset.threadId = item.thread.id;
+      entry.title = item.kind === "file"
+        ? item.detail + " · current file"
+        : item.label + " — " + item.detail + " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
       var head = document.createElement("span");
       head.className = "minimap-head";
       var glyph = document.createElement("span");
       glyph.className = "minimap-glyph";
-      glyph.textContent = paneGlyphFor(thread.kind);
+      glyph.textContent = item.kind === "file" ? "F" : paneGlyphFor(item.thread.kind);
       var dot = document.createElement("span");
-      dot.className = "minimap-dot " + sessionStatusClass(thread) +
-        (thread.needsAttention ? " attention" : "");
+      dot.className = item.kind === "file"
+        ? "minimap-dot file"
+        : "minimap-dot " + sessionStatusClass(item.thread) +
+          (item.thread.needsAttention ? " attention" : "");
       head.appendChild(glyph);
       head.appendChild(dot);
 
@@ -2983,16 +3011,36 @@
       body.className = "minimap-body";
       var name = document.createElement("span");
       name.className = "minimap-name";
-      name.textContent = thread.name;
+      name.textContent = item.label;
 
       entry.appendChild(head);
       entry.appendChild(body);
       entry.appendChild(name);
-      entry.addEventListener("click", function () {
-        layout.maximizedLeafId = leafId;
-        layout.focusedLeafId = leafId;
-        focusThread(thread.id);
-      });
+      if (item.kind === "file") {
+        entry.addEventListener("click", function () {
+          restoreFileEditorFocus();
+        });
+      } else {
+        entry.addEventListener("click", async function () {
+          var leaf = layout && layout.root
+            ? PsychePanes.findLeafByThreadId(layout.root, item.thread.id)
+            : null;
+          if (!leaf) return;
+          var previousMaximizedLeafId = layout.maximizedLeafId;
+          var previousFocusedLeafId = layout.focusedLeafId;
+          layout.maximizedLeafId = leaf.id;
+          layout.focusedLeafId = leaf.id;
+          if (activeFile) {
+            if (!(await focusThread(item.thread.id))) {
+              layout.maximizedLeafId = previousMaximizedLeafId;
+              layout.focusedLeafId = previousFocusedLeafId;
+              renderPaneMinimap(layout, findOpenFile(state.activeFileId));
+            }
+          } else {
+            focusThread(item.thread.id);
+          }
+        });
+      }
       rail.appendChild(entry);
     });
   }
