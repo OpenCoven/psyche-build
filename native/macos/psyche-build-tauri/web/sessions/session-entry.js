@@ -6,6 +6,7 @@ export {
   groupCovenSessions,
   buildProjectRailModel,
   invalidateCovenRequests,
+  isLiveCovenSession,
   isSafeCovenSessionId,
   sortCovenSessions,
   statusPresentation,
