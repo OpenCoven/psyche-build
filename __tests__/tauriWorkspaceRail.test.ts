@@ -136,8 +136,8 @@ describe('Tauri project/worktree/pane rail', () => {
     }
 
     const renderSessionList = functionSource(mainJs, 'renderSessionList');
-    const clickStart = renderSessionList.indexOf('branchParts.head.addEventListener("click"');
-    const clickEnd = renderSessionList.indexOf('branchParts.head.addEventListener("dblclick"');
+    const clickStart = renderSessionList.indexOf('branchParts.group.addEventListener("click"');
+    const clickEnd = renderSessionList.indexOf('branchParts.group.addEventListener("dblclick"');
     expect(renderSessionList.slice(clickStart, clickEnd)).toContain(
       'await activateProjectWorktree(project, worktree.path)',
     );
@@ -158,6 +158,8 @@ describe('Tauri project/worktree/pane rail', () => {
   it('supports keyboard traversal, collapse controls, and attention badges', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
+    expect(mainJs).toContain('event.target === treeItem && document.activeElement === treeItem');
+    expect(mainJs).toMatch(/event\.key === "Enter" \|\| event\.key === " " \|\| event\.key === "Spacebar"/);
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
     expect(mainJs).toContain('"[data-tree-item]"');
     expect(mainJs).not.toContain('"[data-tree-item], .session-close"');

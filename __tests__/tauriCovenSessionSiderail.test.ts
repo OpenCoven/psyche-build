@@ -775,6 +775,146 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.saveWorkspaceSoon).toHaveBeenCalledTimes(2);
   });
 
+  it('activates focused project treeitems on Enter and Space', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-wt',
+        worktrees: [{
+          path: '/repo/psyche-wt',
+          branch: 'feat/tree',
+          is_main: false,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-wt',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    expect(project).not.toBeNull();
+
+    project?.focus();
+    const enter = await project?.emit('keydown', { key: 'Enter' });
+    project?.focus();
+    const space = await project?.emit('keydown', { key: ' ' });
+
+    expect(enter?.defaultPrevented).toBe(true);
+    expect(space?.defaultPrevented).toBe(true);
+    expect(renderer.clearFocusSet).toHaveBeenCalledTimes(2);
+    expect(renderer.setActiveProject).toHaveBeenNthCalledWith(1, 'psyche');
+    expect(renderer.setActiveProject).toHaveBeenNthCalledWith(2, 'psyche');
+  });
+
+  it('toggles focused branch treeitems on Enter and Space', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-wt',
+        worktrees: [{
+          path: '/repo/psyche-wt',
+          branch: 'feat/tree',
+          is_main: false,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-wt',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const branch = renderer.sessionListEl.querySelector('.session-branch');
+    expect(branch).not.toBeNull();
+
+    branch?.focus();
+    const enter = await branch?.emit('keydown', { key: 'Enter' });
+    expect(enter?.defaultPrevented).toBe(true);
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(true);
+    expect(renderer.sessionListEl.querySelector('.session-branch')?.getAttribute('aria-expanded'))
+      .toBe('false');
+
+    const rerenderedBranch = renderer.sessionListEl.querySelector('.session-branch');
+    rerenderedBranch?.focus();
+    const space = await rerenderedBranch?.emit('keydown', { key: ' ' });
+    expect(space?.defaultPrevented).toBe(true);
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
+    expect(renderer.sessionListEl.querySelector('.session-branch')?.getAttribute('aria-expanded'))
+      .toBe('true');
+    expect(renderer.saveWorkspaceSoon).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores descendant ArrowLeft and ArrowRight on branch treeitems', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche',
+        name: 'PSYCHE-BUILD',
+        root: '/repo/psyche-build',
+        collapsed: false,
+        selectedWorktreePath: '/repo/psyche-wt',
+        worktrees: [{
+          path: '/repo/psyche-wt',
+          branch: 'feat/tree',
+          is_main: false,
+          collapsed: false,
+          dirty: false,
+          missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell',
+        projectId: 'psyche',
+        worktreePath: '/repo/psyche-wt',
+        name: 'shell',
+        kind: 'shell',
+        status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const branch = renderer.sessionListEl.querySelector('.session-branch');
+    const session = renderer.sessionListEl.querySelector('.session-row');
+    const category = renderer.sessionListEl.querySelector('.session-category');
+    expect(branch).not.toBeNull();
+    expect(session).not.toBeNull();
+    expect(category).not.toBeNull();
+
+    session?.focus();
+    const left = await branch?.emit('keydown', { target: session ?? undefined, key: 'ArrowLeft' });
+    expect(left?.defaultPrevented).toBe(false);
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
+
+    const right = await branch?.emit('keydown', {
+      target: category ?? undefined,
+      key: 'ArrowRight',
+    });
+    expect(right?.defaultPrevented).toBe(false);
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
+    expect(renderer.saveWorkspaceSoon).not.toHaveBeenCalled();
+  });
+
   it('renders local and daemon sessions as unified agent rows with distinct identities', () => {
     const renderer = createRenderer({
       threads: [{
@@ -1405,7 +1545,9 @@ describe('Tauri Coven session project rail', () => {
       const renderer = createRenderer({ threads, focusSets: [memberSet] });
       renderer.render();
 
-      await renderer.sessionListEl.querySelector('.session-group-head')?.emit('click');
+      const project = renderer.sessionListEl.querySelector('.session-project');
+      const head = renderer.sessionListEl.querySelector('.session-group-head');
+      await project?.emit('click', { target: head ?? undefined });
 
       expect(renderer.clearFocusSet).toHaveBeenCalled();
     });

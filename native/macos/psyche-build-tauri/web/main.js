@@ -3579,6 +3579,15 @@
     // A re-render would strand an armed confirm on a row that no longer exists,
     // and an armed confirm is a question the user has not answered — drop it.
     disarmSessionClose();
+    function targetWithin(event, element) {
+      for (var node = event && event.target; node; node = node.parentNode) {
+        if (node === element) return true;
+      }
+      return false;
+    }
+    function ownTreeItemKeydown(event, treeItem) {
+      return event.target === treeItem && document.activeElement === treeItem;
+    }
     var focusedKey = document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
       : "";
@@ -3630,7 +3639,16 @@
         refreshSidebar();
         saveWorkspaceSoon();
       });
-      projectParts.head.addEventListener("click", function () {
+      projectParts.group.addEventListener("click", function (event) {
+        if (!targetWithin(event, projectParts.head) ||
+            targetWithin(event, projectParts.disclosure)) return;
+        clearFocusSet();
+        setActiveProject(project.id);
+      });
+      projectParts.group.addEventListener("keydown", function (event) {
+        if (!ownTreeItemKeydown(event, projectParts.group) ||
+            (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar")) return;
+        event.preventDefault();
         clearFocusSet();
         setActiveProject(project.id);
       });
@@ -3650,11 +3668,15 @@
           refreshSidebar();
           saveWorkspaceSoon();
         });
-        branchParts.head.addEventListener("click", async function () {
+        branchParts.group.addEventListener("click", async function (event) {
+          if (!targetWithin(event, branchParts.head) ||
+              targetWithin(event, branchParts.disclosure)) return;
           if (worktree.virtual || worktree.missing) return;
           await activateProjectWorktree(project, worktree.path);
         });
-        branchParts.head.addEventListener("dblclick", function (event) {
+        branchParts.group.addEventListener("dblclick", function (event) {
+          if (!targetWithin(event, branchParts.head) ||
+              targetWithin(event, branchParts.disclosure)) return;
           if (worktree.virtual || worktree.missing) return;
           event.preventDefault();
           worktree.collapsed = !worktree.collapsed;
@@ -3663,7 +3685,15 @@
         });
         branchParts.group.addEventListener("keydown", function (event) {
           if (worktree.virtual || worktree.missing ||
-              (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+              !ownTreeItemKeydown(event, branchParts.group)) return;
+          if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+            event.preventDefault();
+            worktree.collapsed = !worktree.collapsed;
+            refreshSidebar();
+            saveWorkspaceSoon();
+            return;
+          }
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           var collapse = event.key === "ArrowLeft";
           if (worktree.collapsed === collapse) return;
           event.preventDefault();
