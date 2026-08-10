@@ -491,6 +491,7 @@ export async function writeBuildProvenance(record, overrides = {}) {
       sleep,
       nowMs,
       isProcessAlive,
+      randomUUID,
       ownerToken,
       ownerPid: process.pid,
       lockTimeoutMs,
@@ -1100,101 +1101,46 @@ async function acquireBuildProvenanceLock(lockPath, options) {
 }
 
 async function recoverStaleBuildProvenanceLock(lockPath, staleLock, options) {
-  const claimPath = buildStaleLockRecoveryClaimPath(
+  const quarantinePath = buildStaleLockRecoveryPath(
     lockPath,
-    staleLock.owner.token,
+    options.randomUUID(),
   );
-  let claimMayBelongToContender = false;
+  const currentTarget = await readBuildProvenanceLockTarget(
+    lockPath,
+    options.readlinkPath,
+  );
+  if (currentTarget !== staleLock.ownerTarget) {
+    return false;
+  }
 
   try {
-    await options.writeFileText(
-      claimPath,
-      `${JSON.stringify({
-        token: options.ownerToken,
-        pid: options.ownerPid,
-        createdAt: new Date(options.nowMs()).toISOString(),
-      })}\n`,
-      { exclusive: true },
-    );
-    claimMayBelongToContender = true;
+    await options.renamePath(lockPath, quarantinePath);
   } catch (error) {
-    if (isAlreadyExistsError(error)) {
+    if (isEnoentError(error) || isAlreadyExistsError(error)) {
       return false;
-    }
-
-    try {
-      await options.unlinkPath(claimPath);
-    } catch (cleanupError) {
-      if (!isEnoentError(cleanupError)) {
-        throw combineErrors(
-          error,
-          cleanupError,
-          'Failed to clean build provenance stale recovery claim',
-        );
-      }
     }
     throw error;
   }
 
-  let recovered = false;
-  let recoveryError;
-
-  try {
-    const currentTarget = await readBuildProvenanceLockTarget(
-      lockPath,
-      options.readlinkPath,
-    );
-    if (currentTarget === staleLock.ownerTarget) {
-      const quarantinePath = buildStaleLockQuarantinePath(
-        lockPath,
-        options.ownerToken,
-      );
-      let lockRenamed = false;
-      try {
-        await options.renamePath(lockPath, quarantinePath);
-        lockRenamed = true;
-      } catch (error) {
-        if (!isEnoentError(error) && !isAlreadyExistsError(error)) {
-          throw error;
-        }
-      }
-
-      if (lockRenamed) {
-        await options.unlinkPath(quarantinePath);
-        try {
-          await options.unlinkPath(staleLock.ownerPath);
-        } catch (error) {
-          if (!isEnoentError(error)) {
-            throw error;
-          }
-        }
-        recovered = true;
-      }
-    }
-  } catch (error) {
-    recoveryError = error;
-  }
-
-  if (claimMayBelongToContender) {
+  let cleanupError;
+  for (const targetPath of [quarantinePath, staleLock.ownerPath]) {
     try {
-      await options.unlinkPath(claimPath);
-    } catch (cleanupError) {
-      if (!isEnoentError(cleanupError)) {
-        recoveryError = recoveryError
+      await options.unlinkPath(targetPath);
+    } catch (error) {
+      if (!isEnoentError(error)) {
+        cleanupError = cleanupError
           ? combineErrors(
-              recoveryError,
               cleanupError,
-              'Failed to clean build provenance stale recovery claim',
+              error,
+              'Failed to clean recovered build provenance lock',
             )
-          : cleanupError;
+          : error;
       }
     }
   }
 
-  if (recoveryError) {
-    throw recoveryError;
-  }
-  return recovered;
+  if (cleanupError) throw cleanupError;
+  return true;
 }
 
 async function inspectStaleBuildProvenanceLock(lockPath, options) {
@@ -1250,12 +1196,8 @@ async function readBuildProvenanceLockTarget(lockPath, readlinkPath) {
   }
 }
 
-function buildStaleLockQuarantinePath(lockPath, ownerToken) {
-  return `${lockPath}.stale-${ownerToken}`;
-}
-
-function buildStaleLockRecoveryClaimPath(lockPath, staleOwnerToken) {
-  return `${lockPath}.recover-${staleOwnerToken}`;
+function buildStaleLockRecoveryPath(lockPath, recoveryToken) {
+  return `${lockPath}.recover-${recoveryToken}`;
 }
 
 async function releaseBuildProvenanceLock(lockPath, expectedOwner, options) {

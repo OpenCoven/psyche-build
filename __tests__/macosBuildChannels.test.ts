@@ -1985,6 +1985,92 @@ describe('macOS build channels', () => {
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
 
+    it('reclaims a dead stale lock despite an orphaned prior recovery artifact', async () => {
+      const homeDir = createScratchDirectory('provenance-orphaned-stale-recovery');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      const staleTime = new Date(Date.now() - 60_000);
+      const { ownerPath } = writeLockOwner(
+        lockPath,
+        'dead-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(ownerPath, staleTime, staleTime);
+      const orphanRecoveryPath = `${lockPath}.recover-dead-owner`;
+      writeFileSync(orphanRecoveryPath, 'orphaned recovery claim\n', 'utf8');
+      const tokens = ['new-owner', 'new-recovery-attempt'];
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => tokens.shift() ?? 'unexpected-token',
+          lockRetryMs: 1,
+          lockTimeoutMs: 50,
+          staleLockMs: 10,
+          isProcessAlive: async () => false,
+        }),
+      ).resolves.toBe(provenancePath);
+
+      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
+      expect(existsSync(ownerPath)).toBe(false);
+      expect(readFileSync(orphanRecoveryPath, 'utf8')).toBe('orphaned recovery claim\n');
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+    });
+
+    it('allows a successor after a stale recovery winner crashes before quarantine cleanup', async () => {
+      const homeDir = createScratchDirectory('provenance-stale-recovery-winner-crash');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      const staleTime = new Date(Date.now() - 60_000);
+      const { ownerPath } = writeLockOwner(
+        lockPath,
+        'dead-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(ownerPath, staleTime, staleTime);
+      const winnerTokens = ['recovery-winner', 'winner-attempt'];
+      let quarantinePath = '';
+
+      await expect(
+        writeBuildProvenance(stableRecord, {
+          homeDir,
+          randomUUID: () => winnerTokens.shift() ?? 'unexpected-winner-token',
+          lockRetryMs: 1,
+          lockTimeoutMs: 50,
+          staleLockMs: 10,
+          isProcessAlive: async () => false,
+          renamePath: async (sourcePath: string, destinationPath: string) => {
+            await renameAsync(sourcePath, destinationPath);
+            if (sourcePath === lockPath) {
+              quarantinePath = destinationPath;
+              throw new Error('simulated recovery winner crash');
+            }
+          },
+        }),
+      ).rejects.toThrow(/simulated recovery winner crash/);
+
+      expect(quarantinePath).toBe(`${lockPath}.recover-winner-attempt`);
+      expect(pathExistsIncludingDanglingSymlink(quarantinePath)).toBe(true);
+      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'successor',
+          lockRetryMs: 1,
+          lockTimeoutMs: 50,
+        }),
+      ).resolves.toBe(provenancePath);
+
+      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
+      expect(pathExistsIncludingDanglingSymlink(quarantinePath)).toBe(true);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+    });
+
     it.each(['malformed', 'missing'] as const)(
       'times out safely for an old lock with %s owner metadata',
       async (ownerState) => {
@@ -2051,7 +2137,6 @@ describe('macOS build channels', () => {
         await bothCheckingLiveness;
         return false;
       });
-      let recoveryClaimObserved = false;
       let oldTargetReads = 0;
       let releasePreRenameReads = () => {};
       const bothPreRenameReads = new Promise<void>((resolveReads) => {
@@ -2061,53 +2146,49 @@ describe('macOS build channels', () => {
         const target = await readlinkAsync(targetPath);
         if (targetPath === lockPath && target === ownerTarget) {
           oldTargetReads += 1;
-          if (!recoveryClaimObserved && oldTargetReads === 4) {
+          if (oldTargetReads === 4) {
             releasePreRenameReads();
           }
-          if (!recoveryClaimObserved && oldTargetReads > 2) {
+          if (oldTargetReads > 2) {
             await bothPreRenameReads;
           }
         }
         return target;
       };
-      let markFirstReacquired = () => {};
-      const firstReacquired = new Promise<void>((resolveReacquired) => {
-        markFirstReacquired = resolveReacquired;
+      let markFirstLockMoved = () => {};
+      let markSecondRenameAttempted = () => {};
+      const firstLockMoved = new Promise<void>((resolveMoved) => {
+        markFirstLockMoved = resolveMoved;
       });
-      const symlinkPath = async (target: string, targetPath: string) => {
-        await symlinkAsync(target, targetPath);
-        if (targetPath === lockPath && target !== ownerTarget) {
-          markFirstReacquired();
-        }
-      };
+      const secondRenameAttempted = new Promise<void>((resolveAttempted) => {
+        markSecondRenameAttempted = resolveAttempted;
+      });
       const renames: Array<[string, string]> = [];
       let quarantineRenameAttempts = 0;
       const renamePath = async (sourcePath: string, destinationPath: string) => {
         if (
           sourcePath === lockPath &&
-          destinationPath.includes('.stale-')
+          destinationPath.includes('.recover-')
         ) {
           quarantineRenameAttempts += 1;
-          if (quarantineRenameAttempts > 1) {
-            await firstReacquired;
+          if (quarantineRenameAttempts === 1) {
+            await renameAsync(sourcePath, destinationPath);
+            renames.push([sourcePath, destinationPath]);
+            markFirstLockMoved();
+            await secondRenameAttempted;
+            return;
           }
+          await firstLockMoved;
+          try {
+            await renameAsync(sourcePath, destinationPath);
+          } finally {
+            markSecondRenameAttempted();
+          }
+          renames.push([sourcePath, destinationPath]);
+          return;
         }
         await renameAsync(sourcePath, destinationPath);
         renames.push([sourcePath, destinationPath]);
-      };
-      const writeFileText = async (
-        filePath: string,
-        content: string,
-        options?: { exclusive?: boolean },
-      ) => {
-        if (filePath.includes('.recover-')) {
-          recoveryClaimObserved = true;
-        }
-        writeFileSync(filePath, content, {
-          encoding: 'utf8',
-          mode: 0o600,
-          ...(options?.exclusive ? { flag: 'wx' } : {}),
-        });
       };
 
       await Promise.all([
@@ -2119,8 +2200,6 @@ describe('macOS build channels', () => {
           staleLockMs: 10,
           isProcessAlive,
           readlinkPath,
-          symlinkPath,
-          writeFileText,
           renamePath,
         }),
         writeBuildProvenance(devRecord, {
@@ -2131,22 +2210,20 @@ describe('macOS build channels', () => {
           staleLockMs: 10,
           isProcessAlive,
           readlinkPath,
-          symlinkPath,
-          writeFileText,
           renamePath,
         }),
       ]);
 
       const quarantineRenames = renames.filter(
         ([sourcePath, destinationPath]) =>
-          sourcePath === lockPath && destinationPath.includes('.stale-'),
+          sourcePath === lockPath && destinationPath.includes('.recover-'),
       );
       expect(quarantineRenames).toHaveLength(1);
-      expect(quarantineRenameAttempts).toBe(1);
+      expect(quarantineRenameAttempts).toBe(2);
       expect(
         renames.some(
           ([sourcePath, destinationPath]) =>
-            sourcePath.includes('.stale-') && destinationPath === lockPath,
+            sourcePath.includes('.recover-') && destinationPath === lockPath,
         ),
       ).toBe(false);
       expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
