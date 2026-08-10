@@ -21,6 +21,8 @@ final class AppModel: ObservableObject {
     /// root incapable of talking to a host.
     let composition: MobileAppComposition?
     let fixtureName: String?
+    /// Owns the at-most-two attached terminals for whichever root is running.
+    let terminalRegistry: TerminalSessionRegistry
 
     private var hasStarted = false
 
@@ -33,11 +35,16 @@ final class AppModel: ObservableObject {
             let composition = MobileAppComposition.production()
             self.composition = composition
             workspaceStore = composition.workspaceStore
+            terminalRegistry = composition.terminalRegistry
             return
         }
 
         composition = nil
         workspaceStore = DemoStore.makeWorkspaceStore(fixture: fixture)
+        // A fixture terminal client, so the fixture shell renders real output
+        // through the real registry without opening a socket.
+        terminalRegistry = TerminalSessionRegistry(client: FixtureTerminalClient())
+        terminalRegistry.start()
         hostName = Self.fixtureHostName
     }
 

@@ -15,6 +15,7 @@ struct PsycheApp: App {
             CockpitView()
                 .environmentObject(model)
                 .environmentObject(model.workspaceStore)
+                .environmentObject(model.terminalRegistry)
                 .preferredColorScheme(.dark)
                 .task {
                     await model.start()

@@ -8,6 +8,7 @@ public final class MobileAppComposition: ObservableObject {
     public let workspaceStore: WorkspaceStore
     public let pairedHostStore: PairedHostStore
     public let connectionManager: ConnectionManager
+    public let terminalRegistry: TerminalSessionRegistry
 
     private var hasStarted = false
 
@@ -32,6 +33,9 @@ public final class MobileAppComposition: ObservableObject {
             clientID: clientID,
             clientName: clientName
         )
+        terminalRegistry = TerminalSessionRegistry(
+            client: TerminalControlClient(requests: requestClient, transport: transport)
+        )
     }
 
     public static func production() -> MobileAppComposition {
@@ -44,6 +48,7 @@ public final class MobileAppComposition: ObservableObject {
     public func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        terminalRegistry.start()
         await connectionManager.connectToStoredHost()
     }
 }
