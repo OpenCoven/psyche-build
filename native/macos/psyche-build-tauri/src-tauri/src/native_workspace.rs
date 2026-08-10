@@ -10,6 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const WORKSPACE_VERSION: i64 = 3;
 const WORKSPACE_FILE_RELATIVE: &str = ".psyche/macos-app/workspace-v3.json";
+const WORKSPACE_ROLLBACK_COPY_LIMIT: u64 = 16 * 1024 * 1024;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -63,12 +64,18 @@ pub(crate) fn load_workspace_from(path: &Path) -> Result<Option<Value>, String> 
 }
 
 pub(crate) fn save_workspace_to(path: &Path, value: &Value) -> Result<(), String> {
-    save_workspace_to_inner(path, value, |_| Ok(()))
+    save_workspace_to_inner(path, value, |_| Ok(()), sync_parent_directory)
 }
 
-fn save_workspace_to_inner<F>(path: &Path, value: &Value, before_rename: F) -> Result<(), String>
+fn save_workspace_to_inner<F, G>(
+    path: &Path,
+    value: &Value,
+    before_rename: F,
+    sync_parent_directory: G,
+) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
+    G: FnOnce(&Path) -> Result<(), String>,
 {
     validate_workspace(value)
         .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
@@ -95,8 +102,14 @@ where
         .to_string_lossy()
         .to_string();
     let temp_path = workspace_temp_path(parent, &file_name);
+    let rollback_path = workspace_rollback_path(parent, &file_name);
     let mut temp_file = open_temp_file(&temp_path)?;
-    let temp_guard = TempFileGuard::new(temp_path.clone());
+    let mut temp_guard = TempFileGuard::new(temp_path.clone());
+    let mut rollback_guard = if workspace_file_exists(path)? {
+        Some(create_rollback_backup(path, &rollback_path)?)
+    } else {
+        None
+    };
 
     let write_result = (|| -> Result<(), String> {
         let bytes = serde_json::to_vec(value)
@@ -133,18 +146,30 @@ where
         Err(err) => return Err(err),
     }
 
-    sync_parent_directory(parent)?;
+    if let Err(err) = sync_parent_directory(parent) {
+        rollback_workspace_after_sync_failure(
+            path,
+            rollback_path.as_path(),
+            rollback_guard.as_mut(),
+        )?;
+        temp_guard.commit();
+        return Err(err);
+    }
     Ok(())
 }
 
 #[cfg(unix)]
 fn open_temp_file(path: &Path) -> Result<File, String> {
+    open_new_workspace_file(path, "temp")
+}
+
+fn open_new_workspace_file(path: &Path, context: &str) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     options.mode(0o600);
     options
         .open(path)
-        .map_err(|e| format!("create workspace temp '{}': {}", path.display(), e))
+        .map_err(|e| format!("create workspace {context} '{}': {}", path.display(), e))
 }
 
 #[cfg(not(unix))]
@@ -164,6 +189,97 @@ fn workspace_temp_path(parent: &Path, file_name: &str) -> PathBuf {
         std::process::id(),
         counter
     ))
+}
+
+fn workspace_rollback_path(parent: &Path, file_name: &str) -> PathBuf {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".{}.psyche-rollback-{}-{}",
+        file_name,
+        std::process::id(),
+        counter
+    ))
+}
+
+fn workspace_file_exists(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("stat workspace '{}': {}", path.display(), e)),
+    }
+}
+
+fn create_rollback_backup(path: &Path, backup_path: &Path) -> Result<RollbackBackupGuard, String> {
+    match fs::hard_link(path, backup_path) {
+        Ok(()) => Ok(RollbackBackupGuard::new(backup_path.to_path_buf())),
+        Err(link_error) => {
+            copy_rollback_backup(path, backup_path).map_err(|copy_error| {
+                format!(
+                    "create rollback backup '{}' from '{}': {} (hard link failed: {})",
+                    backup_path.display(),
+                    path.display(),
+                    copy_error,
+                    link_error
+                )
+            })?;
+            Ok(RollbackBackupGuard::new(backup_path.to_path_buf()))
+        }
+    }
+}
+
+fn copy_rollback_backup(path: &Path, backup_path: &Path) -> Result<(), String> {
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("stat workspace '{}': {}", path.display(), e))?;
+    if metadata.len() > WORKSPACE_ROLLBACK_COPY_LIMIT {
+        return Err(format!(
+            "workspace '{}' is too large for rollback copy: {} bytes (limit {})",
+            path.display(),
+            metadata.len(),
+            WORKSPACE_ROLLBACK_COPY_LIMIT
+        ));
+    }
+
+    let mut source = File::open(path)
+        .map_err(|e| format!("open rollback source '{}': {}", path.display(), e))?;
+    let mut backup = open_new_workspace_file(backup_path, "rollback backup")?;
+    let copied = std::io::copy(&mut source, &mut backup)
+        .map_err(|e| format!("copy rollback backup '{}': {}", backup_path.display(), e))?;
+    if copied != metadata.len() {
+        return Err(format!(
+            "copy rollback backup '{}' truncated: copied {} of {} bytes",
+            backup_path.display(),
+            copied,
+            metadata.len()
+        ));
+    }
+    backup
+        .sync_all()
+        .map_err(|e| format!("sync rollback backup '{}': {}", backup_path.display(), e))?;
+    Ok(())
+}
+
+fn rollback_workspace_after_sync_failure(
+    path: &Path,
+    rollback_path: &Path,
+    rollback_guard: Option<&mut RollbackBackupGuard>,
+) -> Result<(), String> {
+    if rollback_guard.is_some() {
+        fs::rename(rollback_path, path).map_err(|e| {
+            format!(
+                "restore workspace from rollback backup '{}' to '{}': {}",
+                rollback_path.display(),
+                path.display(),
+                e
+            )
+        })?;
+        if let Some(guard) = rollback_guard {
+            guard.commit();
+        }
+    } else if path.exists() {
+        fs::remove_file(path)
+            .map_err(|e| format!("remove failed workspace '{}': {}", path.display(), e))?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -191,7 +307,7 @@ impl TempFileGuard {
         }
     }
 
-    fn commit(mut self) {
+    fn commit(&mut self) {
         self.committed = true;
     }
 }
@@ -204,16 +320,44 @@ impl Drop for TempFileGuard {
     }
 }
 
+struct RollbackBackupGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl RollbackBackupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RollbackBackupGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
-fn workspace_save_to_test_hook<F>(
+fn workspace_save_to_test_hook<F, G>(
     path: &Path,
     value: &Value,
     before_rename: F,
+    sync_parent_directory: G,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
+    G: FnOnce(&Path) -> Result<(), String>,
 {
-    save_workspace_to_inner(path, value, before_rename)
+    save_workspace_to_inner(path, value, before_rename, sync_parent_directory)
 }
 
 pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
@@ -226,8 +370,8 @@ pub(crate) fn workspace_load() -> Result<Option<Value>, String> {
 }
 
 #[tauri::command]
-pub(crate) fn workspace_save(value: Value) -> Result<(), String> {
-    save_workspace_to(&workspace_default_path()?, &value)
+pub(crate) fn workspace_save(workspace: Value) -> Result<(), String> {
+    save_workspace_to(&workspace_default_path()?, &workspace)
 }
 
 #[cfg(test)]
@@ -387,20 +531,59 @@ mod tests {
         let (_dir, path) = temp_workspace_path();
         let value = workspace_value();
 
-        let err = workspace_save_to_test_hook(&path, &value, |temp| {
-            assert!(temp
-                .file_name()
-                .expect("temp file name")
-                .to_string_lossy()
-                .contains(".psyche-save-"));
-            Err("controlled failure".to_string())
-        })
+        let err = workspace_save_to_test_hook(
+            &path,
+            &value,
+            |temp| {
+                assert!(temp
+                    .file_name()
+                    .expect("temp file name")
+                    .to_string_lossy()
+                    .contains(".psyche-save-"));
+                Err("controlled failure".to_string())
+            },
+            sync_parent_directory,
+        )
         .expect_err("hook should fail");
 
         assert_eq!(err, "controlled failure");
         assert!(temp_files(path.parent().expect("parent"))
             .iter()
-            .all(|name| !name.contains(".psyche-save-")));
+            .all(|name| !name.contains(".psyche-save-") && !name.contains(".psyche-rollback-")));
+    }
+
+    #[test]
+    fn native_workspace_tests_restores_previous_file_on_parent_sync_failure() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_value();
+        fs::write(&path, serde_json::to_vec(&original).expect("serialize"))
+            .expect("write original workspace");
+        let updated = serde_json::json!({
+            "version": 3,
+            "projects": [{"id": "updated"}],
+            "sessions": [],
+            "paneLayouts": [],
+        });
+
+        let err = workspace_save_to_test_hook(
+            &path,
+            &updated,
+            |_| Ok(()),
+            |_| Err("parent sync failed".to_string()),
+        )
+        .expect_err("sync failure should fail");
+
+        assert_eq!(err, "parent sync failed");
+
+        let restored = load_workspace_from(&path)
+            .expect("load")
+            .expect("workspace still exists");
+        assert_eq!(restored, original);
+
+        let parent = path.parent().expect("parent");
+        assert!(temp_files(parent)
+            .iter()
+            .all(|name| !name.contains(".psyche-save-") && !name.contains(".psyche-rollback-")));
     }
 
     #[test]
