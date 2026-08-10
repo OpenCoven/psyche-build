@@ -184,7 +184,7 @@ describe('Tauri sidebar model', () => {
         launch: { command: '/opt/homebrew/bin/pnpm', args: ['dev', '--host'] },
       },
     )).toBe(
-      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 8\u0000pnpm dev',
+      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 8\u0000pnpm dev\u0000shell-api',
     );
     expect(localSidebarSelectionKey(
       { root: '/repo/psyche-build' },
@@ -195,7 +195,7 @@ describe('Tauri sidebar model', () => {
         worktreePath: '/repo/psyche-build-wt',
       },
     )).toBe(
-      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 7\u0000shell-no-command',
+      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 7\u0000shell-no-command\u0000shell-no-command',
     );
   });
 
@@ -303,6 +303,10 @@ describe('Tauri sidebar model', () => {
       'shell-a': 'shell 8 · pnpm dev · 1',
       'shell-z': 'shell 8 · pnpm dev · 2',
     });
+    expect(result.branches[0].categories[0].rows.map((row) => row.selectionKey)).toEqual([
+      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 8\u0000pnpm dev\u0000shell-a',
+      'psyche:/repo/psyche-build\u0000/repo/psyche-build-wt\u0000shell\u0000shell 8\u0000pnpm dev\u0000shell-z',
+    ]);
   });
 
   it('sorts selected, attention, busy, active, idle, exited, then recency and key', () => {
@@ -542,6 +546,30 @@ describe('Tauri sidebar model', () => {
 
     expect(branchResult.branches[0].title).toBe('feat/web-pane-attention');
     expect(branchResult.branches[0].titleMatches).toEqual([[5, 13]]);
+  });
+
+  it('adds exact highlight ranges for searchable status labels', () => {
+    const baseOptions = {
+      project: baseProject,
+      localSessions: [localSession('busy-shell', {
+        name: 'busy-shell',
+        status: 'starting',
+        spawning: true,
+      })],
+      covenSessions: [covenSession('reply-coven', {
+        title: 'reply-coven',
+        status: 'waiting',
+      })],
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    };
+
+    const busyResult = buildSidebarProjectModel({ ...baseOptions, covenSessions: [], query: 'busy' });
+    expect(busyResult.branches[0].categories[0].rows[0].statusMatches).toEqual([[0, 4]]);
+
+    const replyResult = buildSidebarProjectModel({ ...baseOptions, localSessions: [], query: 'reply' });
+    expect(replyResult.branches[0].categories[0].rows[0].statusMatches).toEqual([[0, 5]]);
   });
 
   it('temporarily expands matching collapsed groups without mutating the source project or worktree', () => {

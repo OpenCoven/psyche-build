@@ -96,10 +96,16 @@ export interface SidebarRowBase<T = unknown> {
   needsAttention: boolean;
   lastActiveAt: number;
   value: T;
+  /**
+   * Local rows include the live thread id as the final component so duplicate
+   * panes remain distinct within the current runtime, even though PTYs are not
+   * restored across relaunches.
+   */
   selectionKey: string;
   searchText: string;
   titleMatches: SidebarMatchRange[];
   metaMatches: SidebarMatchRange[];
+  statusMatches: SidebarMatchRange[];
 }
 
 export type SidebarRow<

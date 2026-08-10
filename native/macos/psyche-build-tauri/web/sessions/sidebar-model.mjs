@@ -189,6 +189,7 @@ function normalizeLocalRow(project, worktree, ownedRow, thread, now) {
   ]);
   row.titleMatches = [];
   row.metaMatches = [];
+  row.statusMatches = [];
   return row;
 }
 
@@ -222,6 +223,7 @@ function normalizeCovenRow(project, worktree, ownedRow, session) {
   ]);
   row.titleMatches = [];
   row.metaMatches = [];
+  row.statusMatches = [];
   return row;
 }
 
@@ -296,6 +298,7 @@ function buildCategory(label, icon, rows, query) {
       ...row,
       titleMatches: matchTextRanges(row.title, query),
       metaMatches: matchTextRanges(row.meta, query),
+      statusMatches: matchTextRanges(row.status.label, query),
     })),
   };
 }
@@ -352,6 +355,8 @@ export function sidebarSelectionKey(row) {
     text(row?.baseTitle || row?.title),
     '\u0000',
     text(row?.discriminator || row?.command || row?.id),
+    '\u0000',
+    text(row?.id),
   ].join('');
 }
 
