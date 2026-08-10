@@ -57,6 +57,7 @@ describe('committed web bundles', () => {
     // If a bundle stops being produced, the freshness checks below would have
     // nothing to compare and would quietly pass.
     expect(steps.map((step) => step.outfile).sort()).toEqual([
+      'web/diffs.bundle.js',
       'web/editor.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',

@@ -98,14 +98,14 @@ describe('Tauri workspace panels', () => {
     // ...but its markup still exists, inside the git panel, with the element
     // ids the diff renderer writes into.
     const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
-    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-editor-host']) {
+    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-rows']) {
       expect(gitPanel).toContain(`id="${id}"`);
     }
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
     expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js'
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js'
     );
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');

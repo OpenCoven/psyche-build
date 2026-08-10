@@ -5368,7 +5368,7 @@
   var fileTreeEl = document.getElementById("file-tree");
   var filesCrumbEl = document.getElementById("files-crumb");
   var diffFilesEl = document.getElementById("diff-files");
-  var diffEditorHostEl = document.getElementById("diff-editor-host");
+  var diffRowsEl = document.getElementById("diff-rows");
   var diffMetadataEl = document.getElementById("diff-metadata");
   var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
@@ -5396,7 +5396,6 @@
   var diffCache = window.PsycheCodeEditor.createLruCache(6);
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
-  var diffViewer = window.PsycheCodeEditor.createDiffViewer({ parent: diffEditorHostEl });
 
   function diffCacheKey(projectId, workspaceRoot, path, staged) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
@@ -5524,7 +5523,8 @@
   }
 
   function resetDiffDetail(message) {
-    diffViewer.clear();
+    parsedDiffFiles = [];
+    if (diffRowsEl) diffRowsEl.replaceChildren();
     if (diffMetadataEl) diffMetadataEl.textContent = message || "";
     if (diffTruncationEl) {
       diffTruncationEl.hidden = true;
@@ -5541,14 +5541,132 @@
     }
   }
 
+  // Split and stacked are two renderings of one parsed model, so switching is a
+  // redraw rather than a re-parse -- which is what lets the toggle keep its
+  // place and stay instant on a large diff.
+  var diffLayout = "split";
+  var parsedDiffFiles = [];
+
+  function diffSegmentsInto(target, segments) {
+    (segments || []).forEach(function (segment) {
+      var span = document.createElement("span");
+      if (segment.changed) span.className = "diff-word";
+      span.textContent = segment.text;
+      target.appendChild(span);
+    });
+  }
+
+  function diffSeparatorRow(row) {
+    var separator = document.createElement("div");
+    separator.className = "diff-sep";
+    var mark = document.createElement("span");
+    mark.className = "diff-sep-mark";
+    mark.textContent = "\u22ef";
+    var label = document.createElement("span");
+    label.textContent = row.hidden + " unmodified line" + (row.hidden === 1 ? "" : "s");
+    separator.appendChild(mark);
+    separator.appendChild(label);
+    return separator;
+  }
+
+  function renderStackedDiff(host, rows) {
+    rows.forEach(function (row) {
+      if (row.type === "separator") { host.appendChild(diffSeparatorRow(row)); return; }
+      var line = document.createElement("div");
+      line.className = "diff-row diff-" + row.kind;
+      var oldNo = document.createElement("span");
+      oldNo.className = "diff-gutter";
+      oldNo.textContent = row.oldNo === undefined ? "" : String(row.oldNo);
+      var newNo = document.createElement("span");
+      newNo.className = "diff-gutter diff-gutter-new";
+      newNo.textContent = row.newNo === undefined ? "" : String(row.newNo);
+      var marker = document.createElement("span");
+      marker.className = "diff-marker";
+      marker.textContent = row.kind === "add" ? "+" : row.kind === "delete" ? "\u2212" : "";
+      var text = document.createElement("span");
+      text.className = "diff-text";
+      diffSegmentsInto(text, row.segments);
+      line.appendChild(oldNo);
+      line.appendChild(newNo);
+      line.appendChild(marker);
+      line.appendChild(text);
+      host.appendChild(line);
+    });
+  }
+
+  function renderSplitDiff(host, rows) {
+    rows.forEach(function (row) {
+      if (row.type === "separator") { host.appendChild(diffSeparatorRow(row)); return; }
+      var line = document.createElement("div");
+      line.className = "diff-row diff-split-row";
+      [["left", row.left], ["right", row.right]].forEach(function (pair) {
+        var side = pair[1];
+        var gutter = document.createElement("span");
+        gutter.className = "diff-gutter";
+        var text = document.createElement("span");
+        // An empty cell opposite a pure add or delete is what keeps the two
+        // columns aligned; it is styled, not blank, so the gap reads as absence.
+        text.className = "diff-text diff-" + (side ? side.kind : "empty");
+        if (side) {
+          gutter.textContent = side.no === undefined ? "" : String(side.no);
+          gutter.classList.add("diff-" + side.kind);
+          diffSegmentsInto(text, side.segments);
+        }
+        line.appendChild(gutter);
+        line.appendChild(text);
+      });
+      host.appendChild(line);
+    });
+  }
+
+  function paintDiffRows() {
+    if (!diffRowsEl) return;
+    diffRowsEl.replaceChildren();
+    var file = parsedDiffFiles[0];
+    if (!file) return;
+    if (file.binary) {
+      var note = document.createElement("div");
+      note.className = "diff-empty";
+      note.textContent = "Binary file — no textual diff";
+      diffRowsEl.appendChild(note);
+      return;
+    }
+    var rows = diffLayout === "stacked"
+      ? PsycheDiffs.stackedRows(file)
+      : PsycheDiffs.splitRows(file);
+    diffRowsEl.dataset.layout = diffLayout;
+    if (diffLayout === "stacked") renderStackedDiff(diffRowsEl, rows);
+    else renderSplitDiff(diffRowsEl, rows);
+  }
+
+  function setDiffLayout(name) {
+    diffLayout = name === "stacked" ? "stacked" : "split";
+    [["diff-view-split", "split"], ["diff-view-stacked", "stacked"]].forEach(function (pair) {
+      var btn = document.getElementById(pair[0]);
+      if (!btn) return;
+      var active = pair[1] === diffLayout;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    paintDiffRows();
+    return diffLayout;
+  }
+
+  [["diff-view-split", "split"], ["diff-view-stacked", "stacked"]].forEach(function (pair) {
+    var btn = document.getElementById(pair[0]);
+    if (btn) btn.addEventListener("click", function () { setDiffLayout(pair[1]); });
+  });
+
   function renderDiffResult(result) {
     var text = result && typeof result.text === "string" ? result.text : "";
     var lines = Number(result && result.lines) || 0;
     var bytes = Number(result && result.bytes) || 0;
-    diffViewer.setDiff({ text: text });
+    parsedDiffFiles = PsycheDiffs.parseUnifiedDiff(text);
+    paintDiffRows();
     if (diffMetadataEl) {
+      var stat = PsycheDiffs.diffStat(parsedDiffFiles);
       diffMetadataEl.textContent = text.trim()
-        ? lines + " lines · " + formatDiffBytes(bytes)
+        ? "+" + stat.additions + " \u2212" + stat.deletions + " · " + lines + " lines · " + formatDiffBytes(bytes)
         : "No textual diff · " + lines + " lines · " + formatDiffBytes(bytes);
     }
     if (diffTruncationEl) {
@@ -5639,7 +5757,7 @@
   }
 
   async function showDiff(project, entry) {
-    if (!project || !entry || !diffEditorHostEl) return;
+    if (!project || !entry || !diffRowsEl) return;
     if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
     var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged);

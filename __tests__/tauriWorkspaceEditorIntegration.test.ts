@@ -64,7 +64,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
     expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
+      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/diffs\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
     );
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
@@ -307,50 +307,20 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toContain('head: main.head');
   });
 
-  it('provides one accessible virtualized read-only unified diff surface', async () => {
-    expect(indexHtml).toContain('id="diff-editor-host"');
+  it('renders diffs from the shared model rather than a CodeMirror document', async () => {
+    // The unified CodeMirror diff surface was retired: split and stacked are two
+    // renderings of one parsed model, which a read-only editor cannot express.
+    expect(indexHtml).toContain('id="diff-rows"');
     expect(indexHtml).toContain('id="diff-metadata"');
     expect(indexHtml).toContain('id="diff-truncation"');
-    expect(indexHtml).not.toContain('<pre class="diff-body" id="diff-body">');
+    expect(indexHtml).not.toContain('id="diff-editor-host"');
 
-    expect(editorEntry).toMatch(/export function createDiffViewer\s*\(/);
-    expect(editorEntry).toMatch(/export function createDiffViewerState\s*\(/);
-    expect(editorEntry).toContain('EditorView.editable.of(false)');
-    expect(editorEntry).toContain('EditorState.readOnly.of(true)');
-    expect(editorEntry).toMatch(
-      /EditorView\.contentAttributes\.of\(\{[\s\S]*'aria-label': 'Unified diff viewer',[\s\S]*'aria-readonly': 'true',[\s\S]*tabindex: '0'/
-    );
-    expect(editorEntry).toContain('ViewPlugin.fromClass');
-    expect(editorEntry).toContain('view.visibleRanges');
-    expect(editorEntry).toContain('update.viewportChanged');
-    expect(extractFunctionSource(editorEntry, 'createDiffViewerState')).not.toContain('basicSetup');
-
-    const editorModule = await import(
-      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
-    );
-    const diffState = editorModule.createDiffViewerState({
-      text: '@@ -1 +1 @@\n-old\n+new',
-      cspNonce: 'test-nonce',
-    });
-    const stateModule = await import(
-      pathToFileURL(requireFromTauri.resolve('@codemirror/state')).href
-    );
-    const viewModule = await import(
-      pathToFileURL(requireFromTauri.resolve('@codemirror/view')).href
-    );
-
-    expect(diffState.facet(stateModule.EditorState.readOnly)).toBe(true);
-    expect(diffState.facet(viewModule.EditorView.editable)).toBe(false);
-    expect(diffState.facet(viewModule.EditorView.contentAttributes)).toContainEqual({
-      'aria-label': 'Unified diff viewer',
-      'aria-readonly': 'true',
-      tabindex: '0',
-    });
-    expect(editorModule.diffClass('@@ -1 +1 @@')).toBe('cm-diff-hunk');
-    expect(editorModule.diffClass('+++ b/file')).toBe('cm-diff-meta');
-    expect(editorModule.diffClass('--- a/file')).toBe('cm-diff-meta');
-    expect(editorModule.diffClass('+added')).toBe('cm-diff-add');
-    expect(editorModule.diffClass('-deleted')).toBe('cm-diff-delete');
+    // Its implementation is gone too, not merely unreferenced.
+    expect(editorEntry).not.toContain('createDiffViewer');
+    expect(editorEntry).not.toContain('diffClass');
+    expect(editorEntry).not.toContain('workspaceDiffTheme');
+    // The file editor it shared a module with is untouched.
+    expect(editorEntry).toMatch(/export function createFileEditor\s*\(/);
   });
 
   it('coordinates structured diff responses with exact cache and request identity', () => {
@@ -442,7 +412,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const renderCalls: unknown[] = [];
     let invokeCalls = 0;
     const common = {
-      diffEditorHostEl: {},
+      diffRowsEl: { replaceChildren: () => undefined },
       activeProject: () => project,
       currentPanel: () => 'diffs',
       currentLayout: () => 'split',
