@@ -195,18 +195,18 @@ export function summarizeWorkspace(input) {
       .filter((session) => typeof session?.id === 'string' && session.id)
       .map((session) => [session.id, session]),
   );
+  const processThreads = threads.filter((thread) => thread?.processBacked === true);
+  const localAgentThreads = processThreads.filter((thread) => LOCAL_AGENT_KINDS.has(thread?.kind));
   const attachedSessionIds = new Set(
-    threads
+    localAgentThreads
       .map((thread) => (typeof thread?.covenSessionId === 'string' && thread.covenSessionId)
         ? thread.covenSessionId
         : null)
       .filter(Boolean),
   );
-  const processThreads = threads.filter((thread) => thread?.processBacked === true);
   const unattachedSessions = covenSessions.filter((session) => !attachedSessionIds.has(session?.id));
 
-  const agents = processThreads
-    .filter((thread) => LOCAL_AGENT_KINDS.has(thread?.kind))
+  const agents = localAgentThreads
     .map((thread) => {
       const remote = covenById.get(thread.covenSessionId) ?? null;
       const status = normalizeLocalStatus(thread);

@@ -159,6 +159,76 @@ describe('tauri footer status model', () => {
     expect(summary.tasks.find((task) => task.id === 'coven:session-3')?.runtimeMs).toBe(900_000);
   });
 
+  test('ignores non-counted pane session ids when deciding which remote sessions are attached', () => {
+    const summary = summarizeWorkspace({
+      now: 20_000,
+      threads: [
+        {
+          id: 'web-pane',
+          name: 'Dashboard',
+          kind: 'web',
+          status: 'running',
+          covenSessionId: 'session-web',
+          processBacked: false,
+        },
+        {
+          id: 'build-pane',
+          name: 'Build',
+          kind: 'exec',
+          status: 'running',
+          covenSessionId: 'session-exec',
+          processBacked: true,
+        },
+      ],
+      covenSessions: [
+        {
+          id: 'session-web',
+          title: 'Remote web session',
+          status: 'running',
+          currentTask: 'Streaming logs',
+          createdAt: 5_000,
+        },
+        {
+          id: 'session-exec',
+          title: 'Remote exec session',
+          status: 'waiting',
+          currentTask: 'Reviewing build',
+          createdAt: 7_000,
+        },
+      ],
+    });
+
+    expect(summary.agents).toEqual([
+      expect.objectContaining({
+        id: 'coven:session-web',
+        name: 'Remote web session',
+        status: 'running',
+      }),
+      expect.objectContaining({
+        id: 'coven:session-exec',
+        name: 'Remote exec session',
+        status: 'waiting',
+      }),
+    ]);
+    expect(summary.tasks).toEqual([
+      expect.objectContaining({
+        id: 'local:build-pane',
+        name: 'Build',
+        status: 'running',
+      }),
+      expect.objectContaining({
+        id: 'coven:session-web',
+        name: 'Remote web session',
+        status: 'running',
+      }),
+      expect.objectContaining({
+        id: 'coven:session-exec',
+        name: 'Remote exec session',
+        status: 'waiting',
+      }),
+    ]);
+  });
+
   test('keeps only running shell panes in the shell summary', () => {
     const summary = summarizeWorkspace({
       now: 5_000,
