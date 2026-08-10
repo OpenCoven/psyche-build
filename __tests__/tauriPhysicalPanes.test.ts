@@ -772,7 +772,11 @@ describe('Tauri physical terminal panes', () => {
   });
 
   it('retains file focus when closing the active underlying pane', () => {
-    const project = { id: 'project' };
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
     const threadA = {
       id: 'thread-a',
       kind: 'shell',
@@ -787,7 +791,7 @@ describe('Tauri physical terminal panes', () => {
       id: 'thread-b',
       kind: 'shell',
       projectId: project.id,
-      worktreePath: '/repo',
+      worktreePath: '/repo-next',
       closeStarted: false,
       closing: false,
       startInFlight: false,
@@ -800,8 +804,13 @@ describe('Tauri physical terminal panes', () => {
     };
     const fileFocus = { returnThreadId: threadA.id as string | null };
     const retainFileFocusAfterThreadRemoval = compileFunction<
-      (removedThreadId: string, nextThreadId: string | null) => boolean
-    >(functionSource('retainFileFocusAfterThreadRemoval'), { state, fileFocus });
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
     let renders = 0;
     let focused = 0;
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
@@ -826,23 +835,30 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeFileId).toBe('file-a');
     expect(state.activeThreadId).toBe(threadB.id);
     expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(project.lastActiveThreadId).toBe(threadB.id);
+    expect(project.selectedWorktreePath).toBe(threadB.worktreePath);
     expect(renders).toBe(1);
     expect(state.threads).toEqual([threadB]);
   });
 
   it('retains file focus when hiding the active underlying pane', () => {
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
     const threadA = {
       id: 'thread-a',
       kind: 'shell',
-      projectId: 'project',
+      projectId: project.id,
       worktreePath: '/repo',
       hidden: false,
     };
     const threadB = {
       id: 'thread-b',
       kind: 'shell',
-      projectId: 'project',
-      worktreePath: '/repo',
+      projectId: project.id,
+      worktreePath: '/repo-next',
       hidden: false,
     };
     const state = {
@@ -852,8 +868,13 @@ describe('Tauri physical terminal panes', () => {
     };
     const fileFocus = { returnThreadId: threadA.id as string | null };
     const retainFileFocusAfterThreadRemoval = compileFunction<
-      (removedThreadId: string, nextThreadId: string | null) => boolean
-    >(functionSource('retainFileFocusAfterThreadRemoval'), { state, fileFocus });
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
     let renders = 0;
     let focused = 0;
     const hideThread = compileFunction<(id: string) => boolean>(functionSource('hideThread'), {
@@ -873,8 +894,63 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeFileId).toBe('file-a');
     expect(state.activeThreadId).toBe(threadB.id);
     expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(project.lastActiveThreadId).toBe(threadB.id);
+    expect(project.selectedWorktreePath).toBe(threadB.worktreePath);
     expect(threadA.hidden).toBe(true);
     expect(renders).toBe(1);
+  });
+
+  it('clears file-focus project metadata when there is no replacement pane', () => {
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const state = {
+      threads: [threadA],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval,
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => Promise.resolve(true),
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: (id: string) => (id === project.id ? project : null),
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+
+    expect(closeThread(threadA.id)).toBe(true);
+    expect(state.activeThreadId).toBeNull();
+    expect(fileFocus.returnThreadId).toBeNull();
+    expect(project.lastActiveThreadId).toBeNull();
+    expect(project.selectedWorktreePath).toBe('/repo');
   });
 
   it('guards inactive-project hidden-session reopen behind dirty-file cancellation', async () => {

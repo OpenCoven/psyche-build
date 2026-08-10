@@ -3131,11 +3131,19 @@
     return closed;
   }
 
-  function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId) {
+  function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId, projectId) {
     if (!state.activeFileId) return false;
     state.activeThreadId = nextThreadId || null;
     if (fileFocus.returnThreadId === removedThreadId) {
       fileFocus.returnThreadId = nextThreadId || null;
+    }
+    var project = findProject(projectId);
+    if (project) {
+      project.lastActiveThreadId = nextThreadId || null;
+      if (nextThreadId) {
+        var nextThread = findThread(nextThreadId);
+        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+      }
     }
     return true;
   }
@@ -3163,7 +3171,7 @@
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
-      if (retainFileFocusAfterThreadRemoval(id, nextThreadId)) {
+      if (retainFileFocusAfterThreadRemoval(id, nextThreadId, closingProjectId)) {
         renderPaneWorkspace();
         if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
       } else if (nextThreadId && (!options || options.focus !== false)) {
@@ -3187,7 +3195,7 @@
     thread.hidden = true;
     if (state.activeThreadId === id) {
       state.activeThreadId = null;
-      if (!retainFileFocusAfterThreadRemoval(id, nextThreadId) && nextThreadId) {
+      if (!retainFileFocusAfterThreadRemoval(id, nextThreadId, thread.projectId) && nextThreadId) {
         focusThread(nextThreadId);
       }
     }
