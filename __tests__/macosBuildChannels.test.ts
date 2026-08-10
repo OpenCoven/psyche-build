@@ -573,6 +573,22 @@ describe('macOS build channels', () => {
     expect(macosTauriConfig.app.windows[0].title).toBe('Psyche Build');
   });
 
+  it('documents stable and dev local app workflows and their isolation boundary', () => {
+    const contributing = readFileSync(join(repositoryRoot, 'CONTRIBUTING.md'), 'utf8');
+
+    expect(contributing).toContain('pnpm app:stable -- <git-ref>');
+    expect(contributing).toContain('pnpm app:dev');
+    expect(contributing).toContain('~/Applications/Psyche Build.app');
+    expect(contributing).toContain('~/Applications/Psyche Build Dev.app');
+    expect(contributing).toContain('temporary detached worktree');
+    expect(contributing).toMatch(
+      /preferences, WebView data, caches, and\s+restored state isolated/,
+    );
+    expect(contributing).toContain(
+      'Local commands do not create a signed or notarized public release.',
+    );
+  });
+
   describe('parseBuildArguments', () => {
     it('parses stable builds with exactly one nonblank git ref after removing separators', () => {
       expect(parseBuildArguments(['stable', '--', 'origin/release/v1.2.3'])).toEqual({
