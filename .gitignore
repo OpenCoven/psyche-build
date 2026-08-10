@@ -23,6 +23,13 @@ native/macos/psyche-build-tauri/src-tauri/gen/schemas/
 **/xcuserdata/
 **/DerivedData/
 
+# The tauri app is a pnpm workspace member, so the root pnpm-lock.yaml is the
+# one pnpm reads and the one that pins its dependencies. A lockfile inside the
+# member is a leftover from running `pnpm install` in that directory: nothing
+# consumes it, and tracking it would give a second, silently drifting answer to
+# "which versions does the desktop app use?".
+native/macos/psyche-build-tauri/pnpm-lock.yaml
+
 .vercel/
 /.superpowers
 /.opencode
