@@ -16,8 +16,8 @@ function safeId(value) {
 }
 
 function normalizeKind(value) {
-  const kind = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return ALLOWED_KINDS.has(kind) ? kind : null;
+  const kind = safeString(value);
+  return kind && ALLOWED_KINDS.has(kind) ? kind : null;
 }
 
 function normalizeRatio(value) {
@@ -53,25 +53,23 @@ export function sanitizeSessionDescriptor(saved) {
   const id = safeId(saved.id);
   const projectId = safeString(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
-  const kind = normalizeKind(saved.kind);
+  const launchKind = normalizeKind(saved.launchKind);
 
-  if (!id || !projectId || !worktreePath || !kind) return null;
+  if (!id || !projectId || !worktreePath || !launchKind) return null;
 
   const descriptor = {
     id,
     projectId,
     worktreePath,
     hidden: Boolean(saved.hidden),
-    kind,
+    launchKind,
+    kind: normalizeKind(saved.kind) || launchKind,
   };
 
   const name = safeString(saved.name);
   if (name) descriptor.name = name;
 
-  const launchKind = safeString(saved.launchKind);
-  if (launchKind) descriptor.launchKind = launchKind;
-
-  if (kind === 'coven-attach') {
+  if (launchKind === 'coven-attach') {
     const covenSessionId = safeId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;
@@ -87,7 +85,7 @@ export function sanitizePaneTree(root, knownThreadIds, seenLeaves = new Set()) {
     if (!isObject(node) || typeof node.type !== 'string') return null;
 
     if (node.type === 'leaf') {
-      const id = safeString(node.id);
+      const id = safeId(node.id);
       const threadId = safeId(node.threadId);
       if (!id || !threadId || !known.has(threadId) || seenLeaves.has(threadId)) return null;
       seenLeaves.add(threadId);
@@ -102,11 +100,12 @@ export function sanitizePaneTree(root, knownThreadIds, seenLeaves = new Set()) {
     if (!first) return second;
     if (!second) return first;
 
-    const id = safeString(node.id);
+    const id = safeId(node.id);
+    if (!id) return first || second;
 
     return {
       type: 'split',
-      ...(id ? { id } : {}),
+      id,
       orientation: node.orientation === ROW ? ROW : COLUMN,
       ratio: normalizeRatio(node.ratio),
       first,

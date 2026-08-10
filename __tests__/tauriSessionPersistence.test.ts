@@ -19,6 +19,10 @@ const workspaceEntry = await import(
   pathToFileURL(join(workspaceRoot, 'workspace-entry.js')).href
 );
 
+function countOccurrences(source: string, needle: string) {
+  return source.split(needle).length - 1;
+}
+
 describe('Tauri workspace persistence model', () => {
   test('imports v2 state without inventing sessions or layouts', () => {
     expect(
@@ -46,8 +50,8 @@ describe('Tauri workspace persistence model', () => {
         projectId: 'project-a',
         worktreePath: '/repo',
         name: 'Shell',
-        kind: 'shell',
-        launchKind: 'spawn',
+        kind: 'not-a-real-kind',
+        launchKind: 'shell',
         hidden: true,
         command: 'rm -rf /',
         env: { SECRET: 'nope' },
@@ -58,7 +62,7 @@ describe('Tauri workspace persistence model', () => {
       worktreePath: '/repo',
       name: 'Shell',
       kind: 'shell',
-      launchKind: 'spawn',
+      launchKind: 'shell',
       hidden: true,
     });
 
@@ -77,6 +81,17 @@ describe('Tauri workspace persistence model', () => {
         projectId: 'project-a',
         worktreePath: '/repo',
         kind: 'coven-attach',
+        launchKind: 'spawn',
+      }),
+    ).toBeNull();
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'attach-1',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'coven-attach',
+        launchKind: 'shell',
         covenSessionId: 'coven-session-1',
       }),
     ).toEqual({
@@ -84,9 +99,19 @@ describe('Tauri workspace persistence model', () => {
       projectId: 'project-a',
       worktreePath: '/repo',
       kind: 'coven-attach',
+      launchKind: 'shell',
       hidden: false,
-      covenSessionId: 'coven-session-1',
     });
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'attach-2',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'shell',
+        launchKind: 'coven-attach',
+      }),
+    ).toBeNull();
   });
 
   test('collapses malformed, unknown, and duplicate pane leaves', () => {
@@ -137,6 +162,57 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
+  test('drops invalid leaf ids and collapses malformed split ids', () => {
+    expect(
+      workspaceModel.sanitizePaneTree(
+        {
+          type: 'split',
+          orientation: 'row',
+          first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+          second: { type: 'leaf', threadId: 'thread-b' },
+        },
+        new Set(['thread-a', 'thread-b']),
+      ),
+    ).toEqual({
+      type: 'leaf',
+      id: 'leaf-a',
+      threadId: 'thread-a',
+    });
+
+    expect(
+      workspaceModel.sanitizePaneTree(
+        {
+          type: 'split',
+          id: 'split invalid',
+          orientation: 'row',
+          first: { type: 'leaf', id: 'leaf-c', threadId: 'thread-c' },
+          second: { type: 'leaf', id: 'leaf-d', threadId: 'thread-d' },
+        },
+        new Set(['thread-c', 'thread-d']),
+      ),
+    ).toEqual({
+      type: 'leaf',
+      id: 'leaf-c',
+      threadId: 'thread-c',
+    });
+
+    expect(
+      workspaceModel.sanitizePaneTree(
+        {
+          type: 'split',
+          orientation: 'row',
+          first: { type: 'leaf', id: 'leaf-e', threadId: 'thread-e' },
+          second: { type: 'leaf', id: 'leaf-f', threadId: 'thread-f' },
+        },
+        new Set(['thread-e', 'thread-f']),
+      ),
+    ).toEqual({
+      type: 'leaf',
+      id: 'leaf-e',
+      threadId: 'thread-e',
+    });
+  });
+
   test('reconciles live, missing, and unknown sessions', () => {
     expect(
       workspaceModel.reconcileSessions(
@@ -147,13 +223,14 @@ describe('Tauri workspace persistence model', () => {
             worktreePath: '/repo',
             kind: 'psyche',
             name: 'Live',
+            launchKind: 'psyche',
           },
           {
             id: 'missing-1',
             projectId: 'project-a',
             worktreePath: '/repo',
             kind: 'shell',
-            launchKind: 'spawn',
+            launchKind: 'shell',
           },
         ],
         ['orphan-b', 'live-1', 'orphan-a', 'live-1'],
@@ -166,6 +243,7 @@ describe('Tauri workspace persistence model', () => {
           worktreePath: '/repo',
           name: 'Live',
           kind: 'psyche',
+          launchKind: 'psyche',
           hidden: false,
           status: 'running',
           persistentLive: true,
@@ -175,7 +253,7 @@ describe('Tauri workspace persistence model', () => {
           projectId: 'project-a',
           worktreePath: '/repo',
           kind: 'shell',
-          launchKind: 'spawn',
+          launchKind: 'shell',
           hidden: false,
           status: 'exited',
           persistentLive: false,
@@ -201,6 +279,7 @@ describe('Tauri workspace persistence model', () => {
             projectId: 'project-a',
             worktreePath: '/repo',
             kind: 'shell',
+            launchKind: 'shell',
             command: 'ignore-me',
             env: { SECRET: 'nope' },
           },
@@ -209,6 +288,7 @@ describe('Tauri workspace persistence model', () => {
             projectId: 'project-a',
             worktreePath: '/repo',
             kind: 'shell',
+            launchKind: 'shell',
             hidden: false,
           },
           {
@@ -216,6 +296,7 @@ describe('Tauri workspace persistence model', () => {
             projectId: 'project-b',
             worktreePath: '/repo-b',
             kind: 'psyche',
+            launchKind: 'psyche',
             hidden: false,
           },
         ],
@@ -257,6 +338,7 @@ describe('Tauri workspace persistence model', () => {
           projectId: 'project-a',
           worktreePath: '/repo',
           kind: 'shell',
+          launchKind: 'shell',
           hidden: false,
         },
         {
@@ -264,6 +346,7 @@ describe('Tauri workspace persistence model', () => {
           projectId: 'project-b',
           worktreePath: '/repo-b',
           kind: 'psyche',
+          launchKind: 'psyche',
           hidden: false,
         },
       ],
@@ -289,9 +372,14 @@ describe('Tauri workspace persistence model', () => {
     expect(packageJson.scripts['build:web']).toContain(
       'web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js',
     );
-    expect(indexHtml.indexOf('./workspace.bundle.js')).toBeGreaterThan(-1);
-    expect(indexHtml.indexOf('./main.js')).toBeGreaterThan(-1);
-    expect(indexHtml.indexOf('./workspace.bundle.js')).toBeLessThan(indexHtml.indexOf('./main.js'));
+    expect(countOccurrences(indexHtml, 'src="./editor.bundle.js"')).toBe(1);
+    expect(countOccurrences(indexHtml, 'src="./sessions.bundle.js"')).toBe(1);
+    expect(countOccurrences(indexHtml, 'src="./panes.bundle.js"')).toBe(1);
+    expect(countOccurrences(indexHtml, 'src="./workspace.bundle.js"')).toBe(1);
+    expect(countOccurrences(indexHtml, 'src="./main.js"')).toBe(1);
+    expect(indexHtml.indexOf('src="./workspace.bundle.js"')).toBeLessThan(
+      indexHtml.indexOf('src="./main.js"'),
+    );
     expect(Object.keys(workspaceEntry).sort()).toEqual([
       'importWorkspaceV2',
       'reconcileSessions',
