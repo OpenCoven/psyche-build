@@ -2107,6 +2107,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .status-more-btn {
   flex: none;
+  width: 60px;
+  min-width: 60px;
+  justify-content: center;
 }
 
 .status-metric:hover,
@@ -2176,6 +2179,58 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   text-align: left;
 }
 
+.status-more-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.status-more-open {
+  padding: 0;
+}
+
+.status-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-soft);
+}
+
+.status-more-toggle input {
+  margin: 0;
+}
+
+.status-more-meta {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+.status-more-controls {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.status-more-move {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 10px;
+}
+
 .status-agent-row,
 .status-shell-row,
 .status-service-row {
@@ -2195,6 +2250,18 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   gap: 6px;
 }
 
+.status-task-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-task-heading,
+.status-more-count {
+  color: var(--muted);
+}
+
 .status-performance-grid,
 .status-activity-grid {
   display: grid;
@@ -2205,6 +2272,50 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .status-performance-grid > *,
 .status-activity-grid > * {
   min-height: 28px;
+}
+
+.status-performance-cell,
+.status-activity-cell {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.status-cell-label {
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.status-cell-value {
+  color: var(--text);
+}
+
+.status-cell-meta,
+.status-row-meta {
+  color: var(--muted);
+}
+
+.status-row-name,
+.status-row-meta,
+.status-row-state,
+.status-row-runtime,
+.status-row-task,
+.status-cell-meta,
+.status-cell-label,
+.status-cell-value,
+.status-spike {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-row-meta,
+.status-row-task {
+  grid-column: 1 / -1;
 }
 
 .status-agent-row .status-row-name,
@@ -2221,13 +2332,43 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   white-space: nowrap;
 }
 
+.status-sparkline {
+  width: 72px;
+  height: 18px;
+  color: var(--accent);
+}
+
+.status-sparkline path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.status-spikes {
+  display: grid;
+  gap: 4px;
+}
+
+.status-empty {
+  min-height: 28px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--muted);
+}
+
 .status-metric:focus-visible,
 .status-scope-btn:focus-visible,
 .status-detail-scope-btn:focus-visible,
 .status-detail-btn:focus-visible,
 .status-detail-close:focus-visible,
 .status-more-btn:focus-visible,
-.status-more-item:focus-visible {
+.status-more-item:focus-visible,
+.status-more-move:focus-visible,
+.status-more-toggle input:focus-visible {
   outline: none;
   border-color: var(--accent-line);
   box-shadow: var(--focus-ring);

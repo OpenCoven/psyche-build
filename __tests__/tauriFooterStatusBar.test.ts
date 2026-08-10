@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const repoRoot = process.cwd();
 const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
+const statusRoot = join(webRoot, 'status');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 
@@ -193,5 +195,63 @@ describe('Tauri footer status bar shell', () => {
     expect(section).toContain('.status-detail-scope-btn:focus-visible');
     expect(section).toContain('.status-detail-close:focus-visible');
     expect(section).toContain('.status-more-btn:focus-visible');
+  });
+
+  it('exports the controller and public footer helpers through the browser entrypoint', async () => {
+    const entry = await import(pathToFileURL(join(statusRoot, 'status-entry.js')).href);
+
+    expect(Object.keys(entry).sort()).toEqual([
+      'DEFAULT_METRIC_ORDER',
+      'METRICS',
+      'chooseVisibleMetrics',
+      'createActivityTracker',
+      'createFrameSampler',
+      'createStatusController',
+      'evaluateSeverity',
+      'formatLiveDiagnostics',
+      'median',
+      'normalizePreferences',
+      'pushTrend',
+      'samplingDelay',
+      'sparklinePath',
+      'summarizeWorkspace',
+    ]);
+  });
+
+  it('ships controller source contracts for persistence, copy failures, Escape, and focused scope fallback', () => {
+    const controller = readFileSync(join(statusRoot, 'status-controller.mjs'), 'utf8');
+
+    expect(controller).toContain('createStatusController');
+    expect(controller).toContain('ResizeObserver');
+    expect(controller).toContain('psyche.tauri.status.v1');
+    expect(controller).toContain('Unable to copy diagnostics');
+    expect(controller).toMatch(/event\.key === ['"]Escape['"]/);
+    expect(controller).toMatch(/=== ['"]focused['"] && !focusedAvailable/);
+    expect(controller).toMatch(/setAttribute\(['"]aria-expanded['"]/);
+    expect(controller).toMatch(/setAttribute\(['"]role['"],\s*['"]menuitem['"]\)/);
+    expect(controller).toContain('Diagnostics copied');
+    expect(controller).not.toContain('innerHTML');
+  });
+
+  it('adds fixed more-button width plus generated menu and panel classes', () => {
+    const section = footerSection(stylesCss);
+
+    expect(section).toMatch(
+      /\.status-more-btn\s*\{[^}]*width:\s*60px;[^}]*min-width:\s*60px;[^}]*justify-content:\s*center;/s
+    );
+
+    for (const selector of [
+      '.status-more-row',
+      '.status-more-open',
+      '.status-more-toggle',
+      '.status-more-controls',
+      '.status-more-move',
+      '.status-performance-cell',
+      '.status-activity-cell',
+      '.status-sparkline',
+      '.status-empty',
+    ]) {
+      expect(section).toContain(selector);
+    }
   });
 });
