@@ -55,6 +55,19 @@ describe('Tauri native workspace security contract', () => {
     expect(openLock).toContain('0o600');
   });
 
+  test('acquires workspace locks before inspecting recovery artifacts', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const load = functionBody(source, 'load_workspace_from_inner');
+    const save = functionBody(source, 'save_workspace_to_inner');
+
+    expect(load.indexOf('WorkspaceFileLock::shared')).toBeLessThan(
+      load.indexOf('validate_workspace_artifact_paths'),
+    );
+    expect(save.indexOf('WorkspaceFileLock::exclusive')).toBeLessThan(
+      save.indexOf('validate_workspace_artifact_paths'),
+    );
+  });
+
   test('validates the complete workspace before filesystem mutation', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const save = functionBody(source, 'save_workspace_to_inner');
