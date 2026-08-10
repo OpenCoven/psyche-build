@@ -403,17 +403,70 @@ describe('Tauri workspace persistence model', () => {
         {
           projectId: 'project-a',
           worktreePath: '/repo',
-          root: {
-            type: 'split',
-            id: 'split-a',
-            orientation: 'column',
-            ratio: 0.5,
-            first: { type: 'leaf', id: 'leaf-a', threadId: 'live-1' },
-            second: { type: 'leaf', id: 'leaf-b', threadId: 'live-2' },
-          },
+          root: { type: 'leaf', id: 'leaf-a', threadId: 'live-1' },
           focusedLeafId: 'leaf-a',
         },
       ],
+    });
+  });
+
+  test('drops duplicate leaf ids across distinct sessions', () => {
+    expect(
+      workspaceModel.sanitizePaneTree(
+        {
+          type: 'split',
+          id: 'split-a',
+          orientation: 'row',
+          first: { type: 'leaf', id: 'leaf-shared', threadId: 'thread-a' },
+          second: { type: 'leaf', id: 'leaf-shared', threadId: 'thread-b' },
+        },
+        new Set(['thread-a', 'thread-b']),
+      ),
+    ).toEqual({
+      type: 'leaf',
+      id: 'leaf-shared',
+      threadId: 'thread-a',
+    });
+  });
+
+  test('collapses duplicate split ids across sibling branches', () => {
+    expect(
+      workspaceModel.sanitizePaneTree(
+        {
+          type: 'split',
+          id: 'split-root',
+          orientation: 'row',
+          first: {
+            type: 'split',
+            id: 'split-shared',
+            orientation: 'column',
+            first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+            second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-b' },
+          },
+          second: {
+            type: 'split',
+            id: 'split-shared',
+            orientation: 'column',
+            first: { type: 'leaf', id: 'leaf-c', threadId: 'thread-c' },
+            second: { type: 'leaf', id: 'leaf-d', threadId: 'thread-d' },
+          },
+        },
+        new Set(['thread-a', 'thread-b', 'thread-c', 'thread-d']),
+      ),
+    ).toEqual({
+      type: 'split',
+      id: 'split-root',
+      orientation: 'row',
+      ratio: 0.5,
+      first: {
+        type: 'split',
+        id: 'split-shared',
+        orientation: 'column',
+        ratio: 0.5,
+        first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-b' },
+      },
+      second: { type: 'leaf', id: 'leaf-c', threadId: 'thread-c' },
     });
   });
 
@@ -515,16 +568,6 @@ describe('Tauri workspace persistence model', () => {
           },
           focusedLeafId: 'leaf-a',
         },
-        {
-          projectId: 'project-b',
-          worktreePath: '/repo-b',
-          root: {
-            type: 'leaf',
-            id: 'leaf-c',
-            threadId: 'thread-a',
-          },
-          focusedLeafId: 'leaf-c',
-        },
       ],
     });
   });
@@ -618,13 +661,171 @@ describe('Tauri workspace persistence model', () => {
           },
           focusedLeafId: 'leaf-a',
         },
+      ],
+    });
+  });
+
+  test('rejects pane layouts whose owners are not saved projects', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'thread-a',
+        projects: [{ id: 'project-a', root: '/repo' }],
+        sessions: [
+          {
+            id: 'thread-a',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+        ],
+        paneLayouts: [
+          {
+            projectId: 'project-missing',
+            worktreePath: '/repo',
+            root: {
+              type: 'leaf',
+              id: 'leaf-a',
+              threadId: 'thread-a',
+            },
+            focusedLeafId: 'leaf-a',
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a',
+      projects: [{ id: 'project-a', root: '/repo' }],
+      sessions: [
+        {
+          id: 'thread-a',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [],
+    });
+  });
+
+  test('filters pane layouts to the matching project and worktree session scope', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'thread-a',
+        projects: [
+          { id: 'project-a', root: '/repo' },
+          { id: 'project-b', root: '/repo-b' },
+        ],
+        sessions: [
+          {
+            id: 'thread-a',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+          {
+            id: 'thread-b',
+            projectId: 'project-a',
+            worktreePath: '/repo-b',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+          {
+            id: 'thread-c',
+            projectId: 'project-b',
+            worktreePath: '/repo-b',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+        ],
+        paneLayouts: [
+          {
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            root: {
+              type: 'split',
+              id: 'split-a',
+              first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+              second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-b' },
+            },
+            focusedLeafId: 'leaf-a',
+          },
+          {
+            projectId: 'project-b',
+            worktreePath: '/repo-b',
+            root: {
+              type: 'leaf',
+              id: 'leaf-c',
+              threadId: 'thread-c',
+            },
+            focusedLeafId: 'leaf-c',
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a',
+      projects: [
+        { id: 'project-a', root: '/repo' },
+        { id: 'project-b', root: '/repo-b' },
+      ],
+      sessions: [
+        {
+          id: 'thread-a',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+        {
+          id: 'thread-b',
+          projectId: 'project-a',
+          worktreePath: '/repo-b',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+        {
+          id: 'thread-c',
+          projectId: 'project-b',
+          worktreePath: '/repo-b',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [
+        {
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          root: {
+            type: 'leaf',
+            id: 'leaf-a',
+            threadId: 'thread-a',
+          },
+          focusedLeafId: 'leaf-a',
+        },
         {
           projectId: 'project-b',
           worktreePath: '/repo-b',
           root: {
             type: 'leaf',
             id: 'leaf-c',
-            threadId: 'thread-a',
+            threadId: 'thread-c',
           },
           focusedLeafId: 'leaf-c',
         },

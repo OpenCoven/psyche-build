@@ -45,50 +45,87 @@ function findLeafById(root, leafId) {
   return findLeafById(root.first, leafId) || findLeafById(root.second, leafId);
 }
 
-function sanitizePaneTreeDetails(root, knownThreadIds, seenLeaves = new Set()) {
+function sanitizePaneTreeDetails(
+  root,
+  knownThreadIds,
+  seenThreadIds = new Set(),
+  seenNodeIds = new Set()
+) {
   const known =
     knownThreadIds instanceof Set
       ? knownThreadIds
       : new Set(Array.isArray(knownThreadIds) ? knownThreadIds : []);
-  const seed =
-    seenLeaves instanceof Set
-      ? new Set(seenLeaves)
-      : new Set(Array.isArray(seenLeaves) ? seenLeaves : []);
+  const threadSeed =
+    seenThreadIds instanceof Set
+      ? new Set(seenThreadIds)
+      : new Set(Array.isArray(seenThreadIds) ? seenThreadIds : []);
+  const nodeSeed =
+    seenNodeIds instanceof Set
+      ? new Set(seenNodeIds)
+      : new Set(Array.isArray(seenNodeIds) ? seenNodeIds : []);
 
-  function visit(node, seen) {
+  function visit(node, usedNodeIds, usedThreadIds) {
     if (!isObject(node) || typeof node.type !== 'string') return null;
 
     if (node.type === 'leaf') {
       const id = safeId(node.id);
       const threadId = safeId(node.threadId);
-      if (!id || !threadId || !known.has(threadId) || seen.has(threadId)) return null;
-      const threadIds = new Set([threadId]);
-      return { node: { type: 'leaf', id, threadId }, threadIds };
+      if (
+        !id ||
+        !threadId ||
+        !known.has(threadId) ||
+        usedNodeIds.has(id) ||
+        usedThreadIds.has(threadId)
+      ) {
+        return null;
+      }
+
+      return {
+        node: { type: 'leaf', id, threadId },
+        nodeIds: new Set([id]),
+        threadIds: new Set([threadId]),
+      };
     }
 
     if (node.type !== 'split') return null;
 
     const id = safeId(node.id);
 
-    if (!id) {
-      const first = visit(node.first, seen);
-      const second = visit(node.second, seen);
+    if (!id || usedNodeIds.has(id)) {
+      const first = visit(node.first, usedNodeIds, usedThreadIds);
+      const second = visit(node.second, usedNodeIds, usedThreadIds);
       return first || second;
     }
 
-    const first = visit(node.first, seen);
-    const seenForSecond = first
-      ? new Set([...seen, ...first.threadIds])
-      : seen;
-    const second = visit(node.second, seenForSecond);
+    const first = visit(node.first, usedNodeIds, usedThreadIds);
+    if (!first) {
+      return visit(node.second, usedNodeIds, usedThreadIds);
+    }
 
-    if (!first && !second) return null;
+    const nodeIdsForSecond = new Set(usedNodeIds);
+    for (const nodeId of first.nodeIds) {
+      nodeIdsForSecond.add(nodeId);
+    }
+
+    const threadIdsForSecond = new Set(usedThreadIds);
+    for (const threadId of first.threadIds) {
+      threadIdsForSecond.add(threadId);
+    }
+
+    const second = visit(node.second, nodeIdsForSecond, threadIdsForSecond);
+
     if (!first) return second;
     if (!second) return first;
+    if (first.nodeIds.has(id) || second.nodeIds.has(id)) return first;
 
+    const nodeIds = new Set(first.nodeIds);
+    nodeIds.add(id);
     const threadIds = new Set(first.threadIds);
     for (const threadId of second.threadIds) {
       threadIds.add(threadId);
+    }
+    for (const nodeId of second.nodeIds) {
+      nodeIds.add(nodeId);
     }
 
     return {
@@ -100,11 +137,12 @@ function sanitizePaneTreeDetails(root, knownThreadIds, seenLeaves = new Set()) {
         first: first.node,
         second: second.node,
       },
+      nodeIds,
       threadIds,
     };
   }
 
-  return visit(root, seed);
+  return visit(root, nodeSeed, threadSeed);
 }
 
 export function importWorkspaceV2(saved) {
@@ -149,12 +187,27 @@ export function sanitizeSessionDescriptor(saved) {
   return descriptor;
 }
 
-export function sanitizePaneTree(root, knownThreadIds, seenLeaves = new Set()) {
-  const sanitized = sanitizePaneTreeDetails(root, knownThreadIds, seenLeaves);
+export function sanitizePaneTree(
+  root,
+  knownThreadIds,
+  seenLeaves = new Set(),
+  seenNodeIds = new Set()
+) {
+  const sanitized = sanitizePaneTreeDetails(
+    root,
+    knownThreadIds,
+    seenLeaves,
+    seenNodeIds
+  );
   if (!sanitized) return null;
   if (seenLeaves instanceof Set) {
     for (const threadId of sanitized.threadIds) {
       seenLeaves.add(threadId);
+    }
+  }
+  if (seenNodeIds instanceof Set) {
+    for (const nodeId of sanitized.nodeIds) {
+      seenNodeIds.add(nodeId);
     }
   }
   return sanitized.node;
@@ -187,14 +240,25 @@ export function reconcileSessions(descriptors, liveIds) {
   };
 }
 
-function sanitizePaneLayout(saved, knownThreadIds, seenLeaves) {
+function sanitizePaneLayout(
+  saved,
+  knownThreadIds,
+  seenThreadIds,
+  seenNodeIds,
+  projectIds
+) {
   if (!isObject(saved)) return null;
 
   const projectId = safeString(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
-  if (!projectId || !worktreePath) return null;
+  if (!projectId || !worktreePath || !projectIds.has(projectId)) return null;
 
-  const sanitizedRoot = sanitizePaneTreeDetails(saved.root, knownThreadIds, seenLeaves);
+  const sanitizedRoot = sanitizePaneTreeDetails(
+    saved.root,
+    knownThreadIds,
+    seenThreadIds,
+    seenNodeIds
+  );
   if (!sanitizedRoot) return null;
 
   let focusedLeafId = safeString(saved.focusedLeafId);
@@ -207,6 +271,7 @@ function sanitizePaneLayout(saved, knownThreadIds, seenLeaves) {
     worktreePath,
     root: sanitizedRoot.node,
     focusedLeafId,
+    nodeIds: sanitizedRoot.nodeIds,
     threadIds: sanitizedRoot.threadIds,
   };
 }
@@ -217,12 +282,26 @@ export function sanitizeWorkspaceV3(saved) {
   const projects = Array.isArray(saved.projects) ? saved.projects.slice() : [];
   const sessions = [];
   const knownThreadIds = new Set();
+  const projectIds = new Set();
+  const sessionScopes = new Map();
+
+  for (const project of projects) {
+    const projectId = safeString(project && project.id);
+    if (projectId) {
+      projectIds.add(projectId);
+    }
+  }
 
   for (const descriptor of Array.isArray(saved.sessions) ? saved.sessions : []) {
     const session = sanitizeSessionDescriptor(descriptor);
     if (!session || knownThreadIds.has(session.id)) continue;
     knownThreadIds.add(session.id);
     sessions.push(session);
+
+    const scopeKey = `${session.projectId}\u0000${session.worktreePath}`;
+    const scopedThreadIds = sessionScopes.get(scopeKey) || new Set();
+    scopedThreadIds.add(session.id);
+    sessionScopes.set(scopeKey, scopedThreadIds);
   }
 
   const activeProjectId = safeString(saved.activeProjectId) && projects.some((project) => project && project.id === safeString(saved.activeProjectId))
@@ -233,7 +312,8 @@ export function sanitizeWorkspaceV3(saved) {
     : null;
 
   const seenLayouts = new Set();
-  const seenLeaves = new Set();
+  const seenThreadIds = new Set();
+  const seenNodeIds = new Set();
   const paneLayouts = [];
   const layouts = Array.isArray(saved.paneLayouts)
     ? saved.paneLayouts
@@ -242,16 +322,31 @@ export function sanitizeWorkspaceV3(saved) {
       : [];
 
   for (const layout of layouts) {
-    const sanitized = sanitizePaneLayout(layout, knownThreadIds, seenLeaves);
+    const layoutProjectId = safeString(layout && layout.projectId);
+    const layoutWorktreePath = safeString(layout && layout.worktreePath);
+    const scopedThreadIds =
+      layoutProjectId && layoutWorktreePath
+        ? sessionScopes.get(`${layoutProjectId}\u0000${layoutWorktreePath}`) || new Set()
+        : new Set();
+    const sanitized = sanitizePaneLayout(
+      layout,
+      scopedThreadIds,
+      seenThreadIds,
+      seenNodeIds,
+      projectIds
+    );
     if (!sanitized) continue;
 
     const key = `${sanitized.projectId}\u0000${sanitized.worktreePath}`;
     if (seenLayouts.has(key)) continue;
     seenLayouts.add(key);
-    for (const threadId of sanitized.threadIds) {
-      seenLeaves.add(threadId);
+    for (const nodeId of sanitized.nodeIds) {
+      seenNodeIds.add(nodeId);
     }
-    const { threadIds, ...layoutEntry } = sanitized;
+    for (const threadId of sanitized.threadIds) {
+      seenThreadIds.add(threadId);
+    }
+    const { nodeIds, threadIds, ...layoutEntry } = sanitized;
     paneLayouts.push(layoutEntry);
   }
 
