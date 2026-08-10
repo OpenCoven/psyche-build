@@ -81,6 +81,11 @@ describe('Tauri workspace metrics native contract', () => {
 
     const runBody = functionBody(libSource, 'run');
     expect(runBody).toContain('.manage(MetricsState::default())');
+    const metricsStateRegistrationIndex = runBody.indexOf('.manage(MetricsState::default())');
+    const invokeHandlerIndex = runBody.indexOf('.invoke_handler(');
+    expect(metricsStateRegistrationIndex).toBeGreaterThanOrEqual(0);
+    expect(invokeHandlerIndex).toBeGreaterThanOrEqual(0);
+    expect(metricsStateRegistrationIndex).toBeLessThan(invokeHandlerIndex);
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*git_log,\s*workspace_metrics,\s*[\s\S]*\]/,
     );
