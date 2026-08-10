@@ -49,6 +49,27 @@ Expected:
 - `healthy` may be `false` if only recommended setup warnings remain.
 - `npm pack --dry-run --json` includes the README and docs files intended for npm.
 
+## Local desktop launch smoke
+
+From the repository root, install the platform's documented Tauri prerequisites
+and the locked JavaScript dependencies, then launch the desktop app:
+
+```text
+pnpm install --frozen-lockfile
+pnpm dev:tauri
+```
+
+Run the same commands in Terminal on macOS, PowerShell on Windows, or a shell on
+Linux. Expect a native desktop window to open with working PTYs, files, Git,
+editor, and browser surfaces. macOS retains its platform-specific presentation;
+Windows and Linux use portable opaque, decorated windows.
+
+Windows Coven local-session discovery is unavailable because that integration
+uses a Unix-socket transport. This does not disable PTYs, files, Git, the editor,
+or the browser. These checks launch the app from source and do not describe
+Windows or Linux artifacts as released. Hosted CI checks portability only; it
+does not prove physical GPU acceleration.
+
 ## First-run onboarding smoke
 
 Use this check when touching setup, doctor, agent discovery, or Coven docs.

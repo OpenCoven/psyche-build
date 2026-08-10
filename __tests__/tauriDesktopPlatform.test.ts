@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
+const ciWorkflowPath = join(root, '.github/workflows/ci.yml');
 const libSourcePath = join(desktop, 'src-tauri/src/lib.rs');
 const covenSessionsSourcePath = join(desktop, 'src-tauri/src/coven_sessions.rs');
 const mainSourcePath = join(desktop, 'web/main.js');
@@ -45,6 +46,15 @@ function bracedItem(source: string, marker: string, start = 0): string {
   throw new Error(`Could not find the end of ${marker}`);
 }
 
+function workflowJob(source: string, name: string): string {
+  const marker = `  ${name}:\n`;
+  const start = source.indexOf(marker);
+  expect(start, `${name} job`).toBeGreaterThanOrEqual(0);
+  const remainder = source.slice(start + marker.length);
+  const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
+}
+
 describe('desktop Tauri layout', () => {
   it('owns the active app from the platform-neutral desktop path', () => {
     expect(existsSync(desktop)).toBe(true);
@@ -77,6 +87,57 @@ describe('desktop Tauri layout', () => {
     expect(configText).not.toMatch(
       /disable-gpu|disable-software-rasterizer|LIBGL_ALWAYS_SOFTWARE/i,
     );
+  });
+
+  it('checks the desktop runtime on exactly macOS, Windows, and Linux', () => {
+    const workflow = readFileSync(ciWorkflowPath, 'utf8');
+    const job = workflowJob(workflow, 'desktop-runtime');
+
+    expect(job).toContain('runs-on: ${{ matrix.os }}');
+    expect([...job.matchAll(/^\s{10}- (.+)$/gm)].map(([, runner]) => runner)).toEqual([
+      'macos-15',
+      'windows-2025',
+      'ubuntu-24.04',
+    ]);
+    expect(job).toContain('pnpm install --frozen-lockfile');
+    expect(job).toContain('pnpm --dir native/desktop/psyche-build-tauri build:web');
+    expect(job).toContain(
+      'cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check',
+    );
+    expect(job).toContain(
+      'cargo test --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
+    );
+    expect(job).toContain(
+      'cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
+    );
+    expect(job).toContain(
+      'pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts',
+    );
+    expect(job).not.toMatch(/^\s+run: .*tauri build(?:\s|$)/gmi);
+    expect(job).not.toMatch(/upload-artifact|signing|notarize|publish/i);
+  });
+
+  it('installs official Tauri prerequisites only on Linux with a target-safe shell', () => {
+    const workflow = readFileSync(ciWorkflowPath, 'utf8');
+    const job = workflowJob(workflow, 'desktop-runtime');
+
+    expect(job).toMatch(
+      /- name: Install Tauri Linux prerequisites\s*\n\s+if: runner\.os == 'Linux'\s*\n\s+shell: bash\s*\n\s+run: \|/,
+    );
+    for (const dependency of [
+      'libwebkit2gtk-4.1-dev',
+      'build-essential',
+      'curl',
+      'wget',
+      'file',
+      'libssl-dev',
+      'libayatana-appindicator3-dev',
+      'librsvg2-dev',
+    ]) {
+      expect(job).toContain(dependency);
+    }
+    expect(job.match(/shell: bash/g)).toHaveLength(1);
+    expect(job).not.toMatch(/\bMANIFEST=|\$MANIFEST|set -euo pipefail/);
   });
 
   it('keeps portable opaque defaults and macOS presentation in its overlay', () => {
