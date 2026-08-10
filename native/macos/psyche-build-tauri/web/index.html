@@ -321,63 +321,154 @@
         </div>
       </div>
 
-      <footer class="composer" id="composer">
-        <button
-          id="scope-btn"
-          class="scope-btn"
-          type="button"
-          aria-haspopup="menu"
-          aria-expanded="false"
-          title="Choose where the composer sends text: this pane, the whole project, or every agent pane"
-        >
-          <span class="scope-kicker">To</span>
-          <span class="scope-dot" id="scope-dot"></span>
-          <span class="scope-label" id="scope-label">Pane</span>
-          <span class="scope-caret" aria-hidden="true">▾</span>
-        </button>
+      <div class="footer-stack" id="footer-stack">
+        <footer class="composer" id="composer">
+          <button
+            id="scope-btn"
+            class="scope-btn"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            title="Choose where the composer sends text: this pane, the whole project, or every agent pane"
+          >
+            <span class="scope-kicker">To</span>
+            <span class="scope-dot" id="scope-dot"></span>
+            <span class="scope-label" id="scope-label">Pane</span>
+            <span class="scope-caret" aria-hidden="true">▾</span>
+          </button>
 
-        <div class="composer-field">
-          <span class="command-prompt" aria-hidden="true">›</span>
-          <input
-            id="command-input"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
-            aria-label="Command composer"
-          />
-          <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
+          <div class="composer-field">
+            <span class="command-prompt" aria-hidden="true">›</span>
+            <input
+              id="command-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
+              aria-label="Command composer"
+            />
+            <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
+          </div>
+
+          <button id="composer-mic" class="composer-btn" type="button" title="Dictate a prompt (voice input)" aria-label="Start voice input">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <rect x="6" y="1.8" width="4" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M3.6 7.8a4.4 4.4 0 0 0 8.8 0M8 12.4V14.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="composer-send" class="composer-send" type="button" hidden>Send <span class="composer-send-key mono">↵</span></button>
+
+          <div class="scope-menu" id="scope-menu" role="menu" aria-label="Commands go to" hidden>
+            <div class="scope-menu-head">Commands go to</div>
+            <button class="scope-item" type="button" role="menuitem" data-scope="pane">
+              <span class="scope-dot scope-dot-pane"></span>
+              <span class="scope-item-text">Focused pane<span class="scope-item-desc" id="scope-desc-pane">Text is typed into the focused pane</span></span>
+              <span class="scope-item-key mono">⌥1</span>
+            </button>
+            <button class="scope-item" type="button" role="menuitem" data-scope="project">
+              <span class="scope-dot scope-dot-project"></span>
+              <span class="scope-item-text">Project<span class="scope-item-desc" id="scope-desc-project">Every pane in the active project</span></span>
+              <span class="scope-item-key mono">⌥2</span>
+            </button>
+            <button class="scope-item" type="button" role="menuitem" data-scope="agents">
+              <span class="scope-dot scope-dot-agents"></span>
+              <span class="scope-item-text">All agents<span class="scope-item-desc" id="scope-desc-agents">Broadcast to every agent pane</span></span>
+              <span class="scope-item-key mono">⌥3</span>
+            </button>
+          </div>
+
+          <div class="palette" id="palette" hidden></div>
+        </footer>
+
+        <section class="status-detail" id="status-detail" aria-label="Workspace metrics" hidden>
+          <header class="status-detail-head">
+            <h2 class="status-detail-title" id="status-detail-title">Workspace metrics</h2>
+            <div class="status-detail-scope" id="status-detail-scope" role="group" aria-label="Workspace metric scope">
+              <button
+                class="status-detail-scope-btn"
+                id="status-detail-scope-workspace"
+                type="button"
+                aria-pressed="true"
+              >Workspace</button>
+              <button
+                class="status-detail-scope-btn"
+                id="status-detail-scope-focused"
+                type="button"
+                aria-pressed="false"
+              >Focused</button>
+            </div>
+            <div class="status-detail-actions">
+              <button class="status-detail-btn" id="status-detail-pin" type="button">Pin metric</button>
+              <button class="status-detail-btn" id="status-detail-copy" type="button">Copy diagnostics</button>
+              <button
+                class="status-detail-close"
+                id="status-detail-close"
+                type="button"
+                aria-label="Close workspace metrics"
+              >×</button>
+            </div>
+          </header>
+          <div class="status-detail-body" id="status-detail-body"></div>
+        </section>
+
+        <footer class="status-bar" id="status-bar" aria-label="Workspace status">
+          <div class="status-metrics" id="status-metrics" role="group" aria-label="Status metrics">
+            <button class="status-metric" type="button" data-metric="connection">
+              <span class="status-metric-label">Conn</span>
+              <span class="status-metric-value">local</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="agents">
+              <span class="status-metric-label">Agents</span>
+              <span class="status-metric-value">0</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="shells">
+              <span class="status-metric-label">Shells</span>
+              <span class="status-metric-value">0</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="tasks">
+              <span class="status-metric-label">Tasks</span>
+              <span class="status-metric-value">0</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="performance">
+              <span class="status-metric-label">Perf</span>
+              <span class="status-metric-value">--</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="fps">
+              <span class="status-metric-label">FPS</span>
+              <span class="status-metric-value">--</span>
+            </button>
+            <button class="status-metric" type="button" data-metric="activity">
+              <span class="status-metric-label">Output</span>
+              <span class="status-metric-value">idle</span>
+            </button>
+          </div>
+
+          <div class="status-bar-trailing">
+            <div class="status-scope" id="status-scope" role="group" aria-label="Status scope">
+              <button class="status-scope-btn" id="status-scope-workspace" type="button" aria-pressed="true">Workspace</button>
+              <button class="status-scope-btn" id="status-scope-focused" type="button" aria-pressed="false">Focused</button>
+            </div>
+            <button
+              class="status-more-btn"
+              id="status-more-button"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="status-more-menu"
+            >More</button>
+          </div>
+        </footer>
+
+        <div class="status-more-menu" id="status-more-menu" role="menu" aria-label="Status options" hidden>
+          <div class="status-more-head">Status options</div>
+          <button class="status-more-item" type="button" role="menuitem">Show all metrics</button>
+          <button class="status-more-item" type="button" role="menuitem">Pin current metric</button>
+          <button class="status-more-item" type="button" role="menuitem">Copy diagnostics</button>
         </div>
 
-        <button id="composer-mic" class="composer-btn" type="button" title="Dictate a prompt (voice input)" aria-label="Start voice input">
-          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-            <rect x="6" y="1.8" width="4" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
-            <path d="M3.6 7.8a4.4 4.4 0 0 0 8.8 0M8 12.4V14.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button id="composer-send" class="composer-send" type="button" hidden>Send <span class="composer-send-key mono">↵</span></button>
-
-        <div class="scope-menu" id="scope-menu" role="menu" aria-label="Commands go to" hidden>
-          <div class="scope-menu-head">Commands go to</div>
-          <button class="scope-item" type="button" role="menuitem" data-scope="pane">
-            <span class="scope-dot scope-dot-pane"></span>
-            <span class="scope-item-text">Focused pane<span class="scope-item-desc" id="scope-desc-pane">Text is typed into the focused pane</span></span>
-            <span class="scope-item-key mono">⌥1</span>
-          </button>
-          <button class="scope-item" type="button" role="menuitem" data-scope="project">
-            <span class="scope-dot scope-dot-project"></span>
-            <span class="scope-item-text">Project<span class="scope-item-desc" id="scope-desc-project">Every pane in the active project</span></span>
-            <span class="scope-item-key mono">⌥2</span>
-          </button>
-          <button class="scope-item" type="button" role="menuitem" data-scope="agents">
-            <span class="scope-dot scope-dot-agents"></span>
-            <span class="scope-item-text">All agents<span class="scope-item-desc" id="scope-desc-agents">Broadcast to every agent pane</span></span>
-            <span class="scope-item-key mono">⌥3</span>
-          </button>
-        </div>
-
-        <div class="palette" id="palette" hidden></div>
-      </footer>
+        <div class="status-live" id="status-live" aria-live="polite" aria-atomic="true"></div>
+        <div class="status-alert" id="status-alert" role="alert"></div>
+      </div>
 
       <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
