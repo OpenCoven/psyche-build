@@ -1957,6 +1957,8 @@
   window.addEventListener("resize", function () {
     scheduleVisiblePaneFit();
     syncBrowserBounds();
+    // Whether the strip overflows is a function of width, not of its contents.
+    syncTabStripOverflow();
   });
 
   // ============================================================
@@ -3315,6 +3317,24 @@
     return state.openFiles.filter(function (f) { return f.projectId === pid; });
   }
 
+  // The edge fade is only honest when the strip actually scrolls, so it is
+  // driven by measurement rather than applied unconditionally.
+  function syncTabStripOverflow() {
+    if (!tabStripEl) return false;
+    var overflowing = tabStripEl.scrollWidth > tabStripEl.clientWidth + 1;
+    tabStripEl.classList.toggle("is-overflowing", overflowing);
+    return overflowing;
+  }
+
+  // With overflow, the active tab can sit off-screen after a ⌘-number jump.
+  function scrollActiveTabIntoView() {
+    if (!tabStripEl) return false;
+    var active = tabStripEl.querySelector(".tab.active");
+    if (!active || typeof active.scrollIntoView !== "function") return false;
+    active.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return true;
+  }
+
   function refreshTabs() {
     if (editingContext && editingContext.surface === "tabs") return;
     tabStripEl.innerHTML = "";
@@ -3330,13 +3350,24 @@
       tab.className = "tab" + (isActive ? " active" : "");
       tab.dataset.fileId = file.id;
       tab.title = file.rel + (idx < 9 ? "  (\u2318" + (idx + 1) + ")" : "");
+      // Dot and close share one 16px slot so revealing the close button on
+      // hover cannot shift the strip sideways.
       tab.innerHTML =
         '<span class="label">' + escapeHtml(file.name) + "</span>" +
+        '<span class="tab-end">' +
         (file.dirty ? '<span class="dot dirty-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>' : "") +
-        '<button class="close" title="Close file (\u2318W)">\u00d7</button>';
+        '<button class="close" title="Close file (\u2318W)" aria-label="Close ' +
+        escapeHtml(file.name) + '">\u00d7</button>' +
+        "</span>";
       tab.addEventListener("click", async function (e) {
         if (e.target.classList.contains("close")) return;
         await activateFileTab(file.id);
+      });
+      // Middle-click closes, the way every other tab strip behaves.
+      tab.addEventListener("auxclick", async function (e) {
+        if (e.button !== 1) return;
+        e.preventDefault();
+        await closeFileTab(file.id);
       });
       tab.querySelector(".close").addEventListener("click", async function (e) {
         e.stopPropagation();
@@ -3344,6 +3375,8 @@
       });
       tabStripEl.appendChild(tab);
     });
+    syncTabStripOverflow();
+    scrollActiveTabIntoView();
   }
 
   // ============================================================

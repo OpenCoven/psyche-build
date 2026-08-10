@@ -880,6 +880,16 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
+  scroll-behavior: smooth;
+}
+/* Applied only when the strip really does scroll, so a half-tab reads as
+   "there is more" instead of looking clipped. */
+.tab-strip.is-overflowing {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-strip { scroll-behavior: auto; }
 }
 .tab {
   display: flex;
@@ -900,6 +910,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   color: #f8f5ff;
   background: rgba(255, 255, 255, 0.10);
 }
+.tab.active { border-right-color: transparent; }
+.tab:has(+ .tab.active) { border-right-color: transparent; }
+.tab:last-child { border-right: 0; }
 .tab.active::after {
   content: '';
   position: absolute;
@@ -908,19 +921,30 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   background: linear-gradient(90deg, var(--accent), var(--accent-strong));
   box-shadow: 0 0 6px var(--accent-glow);
 }
+/* Dot and close occupy the same slot: the dirty state is what you need at
+   rest, the close is what you need under the cursor, and swapping them in
+   place keeps the strip from reflowing on hover. */
+.tab-end {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .tab .dot {
+  position: absolute;
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--muted);
-  flex: 0 0 6px;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  background: var(--text-soft);
+  transition: opacity var(--transition-fast), background var(--transition-fast);
 }
-.tab.running .dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
-.tab.exited  .dot { background: var(--error); }
+.tab.active .dot { background: var(--accent); }
 .tab .close {
-  width: 16px;
-  height: 16px;
+  position: absolute;
+  inset: 0;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
@@ -930,10 +954,13 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border: 0;
   font-size: 14px;
   line-height: 1;
-  opacity: 0.6;
+  opacity: 0;
   transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
 }
+/* Hover reveals the close and retires the dot. The active tab keeps its dot,
+   because that is exactly the file whose unsaved state matters most. */
 .tab:hover .close { opacity: 1; }
+.tab:hover .dot { opacity: 0; }
 .tab .close:hover { background: var(--surface-3); color: var(--text); }
 .tab-add {
   display: inline-flex;
