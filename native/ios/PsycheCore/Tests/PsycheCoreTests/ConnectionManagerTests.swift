@@ -3,6 +3,7 @@ import XCTest
 
 private let testCertificateFingerprint = String(repeating: "a", count: 64)
 
+@MainActor
 final class ConnectionManagerTests: XCTestCase {
 
     /// Fails cleanly instead of trapping when a message list is shorter than a
@@ -26,14 +27,15 @@ final class ConnectionManagerTests: XCTestCase {
         }
         return true
     }
-    func testConnectSendsInitialRequestsAndCollectsSnapshots() async {
+    func testConnectSendsV3HelloThenRequestsOneCanonicalSnapshotAfterWelcome() async throws {
         let fake = FakeTransport()
-        let manager = ConnectionManager(
+        let composition = makeComposition(
             transport: fake,
             clientID: "ios-device",
             clientName: "Psyche Tests",
             token: "token"
         )
+        let manager = composition.manager
         let endpoint = HostEndpoint(
             host: "psyche.local",
             port: 4242,
@@ -44,24 +46,40 @@ final class ConnectionManagerTests: XCTestCase {
         await manager.waitForMessageProcessorReadiness()
 
         let sent = await fake.sentMessages
-        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(sent.count, 1)
         let attempts = await fake.connectionAttempts
         XCTAssertEqual(attempts, [endpoint])
-        guard requireCount(sent, 3, "connect handshake") else { return }
+        guard requireCount(sent, 1, "connect handshake") else { return }
         guard case let .legacy(.hello(hello)) = sent[0] else {
             return XCTFail("First request should be hello")
         }
         XCTAssertEqual(hello.clientID, "ios-device")
-        guard case .legacy(.listProjects) = sent[1],
-              case .legacy(.listPanes) = sent[2] else {
-            return XCTFail("Expected initial list requests")
-        }
+        XCTAssertEqual(hello.protocolVersion, 3)
+        XCTAssertEqual(hello.token, "token")
 
         await fake.emit(.legacy(.welcome(WelcomePayload(
             serverID: "host",
             serverName: "Host",
-            protocolVersion: 2,
+            protocolVersion: 3,
             projectName: nil
+        ))))
+        await fake.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "host",
+            serverName: "Host",
+            protocolVersion: 3,
+            projectName: nil
+        ))))
+        let snapshotRequestID = try await waitForSnapshotRequest(on: fake)
+        let afterWelcome = await fake.sentMessages
+        XCTAssertEqual(
+            afterWelcome.filter(\.isWorkspaceSnapshotRequest).count,
+            1,
+            "Repeated authorization messages must not duplicate bootstrap"
+        )
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: snapshotRequestID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
         ))))
         await fake.emit(.legacy(.projectList([
             Project(id: "project", displayName: "Psyche", attentionCount: 0)
@@ -76,7 +94,7 @@ final class ConnectionManagerTests: XCTestCase {
             agent: nil,
             status: .idle
         )])))
-        await manager.waitForEventDrain(after: 3)
+        await manager.waitForEventDrain(after: 5)
 
         let connectedState = await manager.state
         let projectIDs = await manager.projects.map(\.id)
@@ -84,6 +102,8 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(connectedState, .connected)
         XCTAssertEqual(projectIDs, ["project"])
         XCTAssertEqual(paneIDs, ["pane"])
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertFalse(composition.workspaceStore.isStale)
 
         await manager.disconnect()
         let disconnectedState = await manager.state
@@ -93,7 +113,9 @@ final class ConnectionManagerTests: XCTestCase {
     }
 
     func testFailedTransportMovesToFailedState() async {
-        let manager = ConnectionManager(transport: FakeTransport(shouldFailConnection: true))
+        let manager = makeComposition(
+            transport: FakeTransport(shouldFailConnection: true)
+        ).manager
 
         await manager.connect(to: HostEndpoint(
             host: "offline",
@@ -106,15 +128,17 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
-    func testTokenlessConnectionPairsBeforeRequestingSnapshots() async {
+    func testPairAcceptancePersistsHostAfterWelcomeThenRequestsSnapshot() async throws {
         let fake = FakeTransport()
-        let manager = ConnectionManager(transport: fake)
-
-        await manager.connect(to: HostEndpoint(
+        let composition = makeComposition(transport: fake)
+        let manager = composition.manager
+        let endpoint = HostEndpoint(
             host: "psyche.local",
             port: 4242,
             certificateFingerprint: testCertificateFingerprint
-        ))
+        )
+
+        await manager.connect(to: endpoint)
         await manager.waitForMessageProcessorReadiness()
 
         let helloOnly = await fake.sentMessages
@@ -125,7 +149,17 @@ final class ConnectionManagerTests: XCTestCase {
         }
         XCTAssertNil(hello.token)
 
-        await manager.pair(code: "123456", clientID: "pairing-device", clientName: "Psyche Pairing")
+        await fake.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "server-1",
+            serverName: "Host",
+            protocolVersion: 3,
+            projectName: nil
+        ))))
+        await manager.waitForEventDrain(after: 1)
+        let hostsBeforeAcceptance = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(hostsBeforeAcceptance, [])
+
+        await manager.pair(code: "123456")
 
         let pairingRequest = await fake.sentMessages
         XCTAssertEqual(pairingRequest.count, 2)
@@ -135,25 +169,86 @@ final class ConnectionManagerTests: XCTestCase {
         }
         XCTAssertEqual(payload, PairRequestPayload(
             code: "123456",
-            clientID: "pairing-device",
-            clientName: "Psyche Pairing"
+            clientID: "test-client",
+            clientName: "Psyche Tests"
         ))
 
         await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "paired-token"))))
-        await manager.waitForEventDrain(after: 1)
+        await manager.waitForEventDrain(after: 2)
+        _ = try await waitForSnapshotRequest(on: fake)
 
         let paired = await fake.sentMessages
-        XCTAssertEqual(paired.count, 4)
-        guard requireCount(paired, 4, "post-pair snapshot requests") else { return }
-        guard case .legacy(.listProjects) = paired[2],
-              case .legacy(.listPanes) = paired[3] else {
-            return XCTFail("Pair acceptance should request initial snapshots")
+        XCTAssertEqual(paired.filter(\.isWorkspaceSnapshotRequest).count, 1)
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(persistedHosts, [
+            PairedHost(
+                serverID: "server-1",
+                serverName: "Host",
+                endpoint: endpoint,
+                clientID: "test-client",
+                token: "paired-token"
+            )
+        ])
+    }
+
+    func testPairAcceptanceWithoutWelcomeFailsWithoutPersistingHost() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake)
+
+        await composition.manager.connect(to: HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        ))
+        await composition.manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "paired-token"))))
+
+        await composition.manager.waitForState(.failed(
+            ConnectionManagerError.missingWelcomeIdentity.localizedDescription
+        ))
+
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(persistedHosts, [])
+        XCTAssertTrue(composition.workspaceStore.isStale)
+    }
+
+    func testStoredHostReconnectRestoresClientIdentityAndToken() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            clientID: "new-install-id",
+            token: nil
+        )
+        let stored = PairedHost(
+            serverID: "server-1",
+            serverName: "Stored Host",
+            endpoint: HostEndpoint(
+                host: "stored.local",
+                port: 5151,
+                certificateFingerprint: testCertificateFingerprint
+            ),
+            clientID: "original-client-id",
+            token: "issued-token"
+        )
+        try await composition.pairedHostStore.save(stored)
+
+        await composition.manager.connectToStoredHost()
+        await composition.manager.waitForMessageProcessorReadiness()
+
+        let connectionAttempts = await fake.connectionAttempts
+        XCTAssertEqual(connectionAttempts, [stored.endpoint])
+        let messages = await fake.sentMessages
+        guard case let .legacy(.hello(hello)) = messages.first else {
+            return XCTFail("Stored host reconnect should send hello")
         }
+        XCTAssertEqual(hello.clientID, "original-client-id")
+        XCTAssertEqual(hello.token, "issued-token")
+        XCTAssertEqual(hello.protocolVersion, 3)
     }
 
     func testReconnectCancelsPriorReaderBeforeProcessingNewStream() async {
         let fake = FakeTransport()
-        let manager = ConnectionManager(transport: fake, token: "token")
+        let manager = makeComposition(transport: fake, token: "token").manager
         let firstEndpoint = HostEndpoint(
             host: "first",
             port: 4242,
@@ -185,9 +280,10 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(paneIDs, ["current"])
     }
 
-    func testUnexpectedIncomingMessageClosureFailsConnection() async {
+    func testUnexpectedIncomingMessageClosureFailsRequestsAndMarksWorkspaceStale() async throws {
         let fake = FakeTransport()
-        let manager = ConnectionManager(transport: fake, token: "token")
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
 
         await manager.connect(to: HostEndpoint(
             host: "psyche.local",
@@ -195,6 +291,13 @@ final class ConnectionManagerTests: XCTestCase {
             certificateFingerprint: testCertificateFingerprint
         ))
         await manager.waitForMessageProcessorReadiness()
+        let pending = Task {
+            try await composition.requestClient.send(.killPane(PaneIDControlRequest(
+                requestID: "pending-during-failure",
+                paneID: "pane"
+            )))
+        }
+        try await waitForPendingRequest(on: composition.requestClient)
         await fake.finishIncomingMessages()
 
         await manager.waitForState(.failed("Connection closed unexpectedly"))
@@ -205,11 +308,18 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(reason, "Connection closed unexpectedly")
         let disconnectCount = await fake.disconnectCount
         XCTAssertEqual(disconnectCount, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        do {
+            _ = try await pending.value
+            XCTFail("Transport failure should fail pending requests")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
     }
 
     func testProtocolFailureStopsReaderAndDisconnectsTransport() async {
         let fake = FakeTransport()
-        let manager = ConnectionManager(transport: fake, token: "token")
+        let manager = makeComposition(transport: fake, token: "token").manager
 
         await manager.connect(to: HostEndpoint(
             host: "psyche.local",
@@ -246,12 +356,12 @@ final class ConnectionManagerTests: XCTestCase {
     // replacement — two connections' worth of traffic on one transport.
     func testConcurrentConnectDoesNotDuplicateHandshake() async {
         let fake = FakeTransport()
-        let manager = ConnectionManager(
+        let manager = makeComposition(
             transport: fake,
             clientID: "ios-device",
             clientName: "Psyche Tests",
             token: "token"
-        )
+        ).manager
         let endpoint = HostEndpoint(
             host: "psyche.local",
             port: 4242,
@@ -278,11 +388,11 @@ final class ConnectionManagerTests: XCTestCase {
     // token to a clientID the server never saw in hello.
     func testPairDefaultsToTheIdentityAnnouncedInHello() async {
         let fake = FakeTransport()
-        let manager = ConnectionManager(
+        let manager = makeComposition(
             transport: fake,
             clientID: "ios-device",
             clientName: "Psyche Tests"
-        )
+        ).manager
 
         await manager.connect(to: HostEndpoint(
             host: "psyche.local",
@@ -301,6 +411,152 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(payload.clientName, "Psyche Tests")
     }
 
+    func testControlSnapshotAndOrderedWorkspaceEventsUpdateSharedStore() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+
+        await manager.connect(to: testEndpoint())
+        await manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        let requestID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: requestID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 2,
+            sequence: 2,
+            workspace: makeWorkspace(revision: 2)
+        )))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 3,
+            sequence: 3,
+            workspace: makeWorkspace(revision: 3)
+        )))
+        await manager.waitForEventDrain(after: 4)
+
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 3)
+        XCTAssertEqual(composition.workspaceStore.sequence, 3)
+        XCTAssertFalse(composition.workspaceStore.isStale)
+        let pendingRequestCount = await composition.requestClient.pendingRequestCount
+        XCTAssertEqual(pendingRequestCount, 0)
+    }
+
+    func testBurstOfGappedEventsCoalescesRecoveryUntilSnapshotArrives() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+
+        await manager.connect(to: testEndpoint())
+        await manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        let initialID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: initialID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await manager.waitForEventDrain(after: 2)
+
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 3,
+            sequence: 3,
+            workspace: makeWorkspace(revision: 3)
+        )))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 4,
+            sequence: 4,
+            workspace: makeWorkspace(revision: 4)
+        )))
+        await manager.waitForEventDrain(after: 4)
+        let recoveryID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        let messagesAfterGap = await fake.sentMessages
+        XCTAssertEqual(
+            messagesAfterGap.filter(\.isWorkspaceSnapshotRequest).count,
+            2,
+            "A burst of gaps should add only one recovery request"
+        )
+
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: recoveryID,
+            sequence: 4,
+            workspace: makeWorkspace(revision: 4)
+        ))))
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 6,
+            sequence: 6,
+            workspace: makeWorkspace(revision: 6)
+        )))
+        await manager.waitForEventDrain(after: 6)
+        _ = try await waitForSnapshotRequest(on: fake, occurrence: 3)
+        let messagesAfterRecovery = await fake.sentMessages
+        XCTAssertEqual(messagesAfterRecovery.filter(\.isWorkspaceSnapshotRequest).count, 3)
+    }
+
+    func testDisconnectFailsPendingRequestsAndMarksWorkspaceStale() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+
+        await manager.connect(to: testEndpoint())
+        await manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        let initialID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: initialID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await manager.waitForEventDrain(after: 2)
+
+        let pending = Task {
+            try await composition.requestClient.send(.killPane(PaneIDControlRequest(
+                requestID: "pending",
+                paneID: "pane"
+            )))
+        }
+        try await waitForPendingRequest(on: composition.requestClient)
+        await manager.disconnect()
+
+        do {
+            _ = try await pending.value
+            XCTFail("Disconnect should fail pending requests")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        let pendingRequestCount = await composition.requestClient.pendingRequestCount
+        XCTAssertEqual(pendingRequestCount, 0)
+    }
+
+    func testReconnectResetsBootstrapAndCanRequestSnapshotAgain() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake, token: "token")
+        let manager = composition.manager
+
+        await manager.connect(to: testEndpoint())
+        await manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        let firstID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: firstID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        await manager.waitForEventDrain(after: 2)
+        await manager.disconnect()
+
+        await manager.connect(to: testEndpoint())
+        await manager.waitForMessageProcessorReadiness()
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+
+        _ = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        let messages = await fake.sentMessages
+        XCTAssertEqual(messages.filter(\.isWorkspaceSnapshotRequest).count, 2)
+    }
+
     // Synthesized Codable throws on an unrecognized raw value, so one new
     // status on the host would fail the entire message decode on an older
     // client rather than degrading to .unknown.
@@ -317,4 +573,103 @@ final class ConnectionManagerTests: XCTestCase {
         }
     }
 
+    private func makeComposition(
+        transport: FakeTransport,
+        clientID: String = "test-client",
+        clientName: String = "Psyche Tests",
+        token: String? = nil
+    ) -> TestComposition {
+        let requestClient = ControlRequestClient(transport: transport)
+        let workspaceStore = WorkspaceStore(controlRequests: requestClient)
+        let pairedHostStore = PairedHostStore(secureStore: InMemorySecureStore())
+        let manager = ConnectionManager(
+            transport: transport,
+            workspaceStore: workspaceStore,
+            requestClient: requestClient,
+            pairedHostStore: pairedHostStore,
+            clientID: clientID,
+            clientName: clientName,
+            token: token
+        )
+        XCTAssertTrue(manager.requestClient === requestClient)
+        return TestComposition(
+            manager: manager,
+            workspaceStore: workspaceStore,
+            requestClient: requestClient,
+            pairedHostStore: pairedHostStore
+        )
+    }
+
+    private func testEndpoint() -> HostEndpoint {
+        HostEndpoint(
+            host: "psyche.local",
+            port: 4242,
+            certificateFingerprint: testCertificateFingerprint
+        )
+    }
+
+    private func makeWelcome() -> WelcomePayload {
+        WelcomePayload(
+            serverID: "host",
+            serverName: "Host",
+            protocolVersion: 3,
+            projectName: nil
+        )
+    }
+
+    private func makeWorkspace(revision: Int) -> WorkspaceSnapshot {
+        WorkspaceSnapshot(revision: revision, projects: [])
+    }
+
+    private func waitForSnapshotRequest(
+        on transport: FakeTransport,
+        occurrence: Int = 1,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> String {
+        for _ in 0..<1_000 {
+            let requests = await transport.sentMessages.compactMap { message -> String? in
+                guard case let .control(.workspaceSnapshot(payload)) = message else { return nil }
+                return payload.requestID
+            }
+            if requests.count >= occurrence {
+                return requests[occurrence - 1]
+            }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for snapshot request \(occurrence)", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+    private func waitForPendingRequest(
+        on client: ControlRequestClient,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<1_000 {
+            if await client.pendingRequestCount > 0 { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for pending request", file: file, line: line)
+        throw TestError.timedOut
+    }
+
+}
+
+private struct TestComposition {
+    let manager: ConnectionManager
+    let workspaceStore: WorkspaceStore
+    let requestClient: ControlRequestClient
+    let pairedHostStore: PairedHostStore
+}
+
+private enum TestError: Error {
+    case timedOut
+}
+
+private extension MobileClientMessage {
+    var isWorkspaceSnapshotRequest: Bool {
+        if case .control(.workspaceSnapshot) = self { return true }
+        return false
+    }
 }

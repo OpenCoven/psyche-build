@@ -1,21 +1,43 @@
 import Foundation
 
+public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
+    case missingWelcomeIdentity
+    case unsupportedProtocolVersion(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingWelcomeIdentity:
+            "The host accepted pairing before identifying itself."
+        case .unsupportedProtocolVersion(let version):
+            "The host selected unsupported mobile protocol version \(version)."
+        }
+    }
+}
+
 public actor ConnectionManager {
     public private(set) var state: ConnectionState = .disconnected
     public private(set) var stateHistory: [ConnectionState] = [.disconnected]
     public private(set) var projects: [Project] = []
     public private(set) var panes: [PaneSnapshot] = []
     public private(set) var latestOutputByPane: [String: PaneOutputPayload] = [:]
+    public nonisolated let requestClient: ControlRequestClient
 
     private let transport: any PsycheTransport
-    private let clientID: String
+    private let workspaceStore: WorkspaceStore
+    private let pairedHostStore: PairedHostStore
+    private var clientID: String
     private let clientName: String
     private var token: String?
+    private var activeEndpoint: HostEndpoint?
+    private var welcomeIdentity: WelcomeIdentity?
     private var messageTask: Task<Void, Never>?
+    private var snapshotRequestTask: Task<Void, Never>?
     private var activeMessageSession: UUID?
+    private var activeSnapshotRequestID: String?
     private var hasActiveTransport = false
     private var isConnectInFlight = false
-    private var requestedInitialSnapshots = false
+    private var requestedInitialSnapshot = false
+    private var isSnapshotRecoveryInFlight = false
     private var isMessageProcessorReady = false
     private var messageProcessorReadyWaiters: [CheckedContinuation<Void, Never>] = []
     private var processedMessageCount = 0
@@ -24,11 +46,17 @@ public actor ConnectionManager {
 
     public init(
         transport: any PsycheTransport,
+        workspaceStore: WorkspaceStore,
+        requestClient: ControlRequestClient,
+        pairedHostStore: PairedHostStore,
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS",
         token: String? = nil
     ) {
         self.transport = transport
+        self.workspaceStore = workspaceStore
+        self.requestClient = requestClient
+        self.pairedHostStore = pairedHostStore
         self.clientID = clientID
         self.clientName = clientName
         self.token = token
@@ -36,19 +64,24 @@ public actor ConnectionManager {
 
     deinit {
         messageTask?.cancel()
+        snapshotRequestTask?.cancel()
+    }
+
+    public func connectToStoredHost() async {
+        do {
+            guard let host = try await pairedHostStore.hosts().first else { return }
+            clientID = host.clientID
+            token = host.token
+            await connect(to: host.endpoint)
+        } catch {
+            await tearDownActiveConnection()
+            transition(to: .failed(error.localizedDescription))
+        }
     }
 
     public func connect(to endpoint: HostEndpoint) async {
         // Guard on execution, not on state. connect() keeps awaiting past the
-        // .authenticating transition (incomingMessages, hello, snapshots) and
-        // the actor yields at every await, so a second call can interleave,
-        // tear down the first one's transport, and leave the original sending
-        // hello onto the replacement.
-        //
-        // A state check cannot express this: .authenticating outlives the
-        // method — it persists until welcome arrives — so rejecting it would
-        // also block a deliberate later reconnect from a connection that hung
-        // mid-handshake, which is exactly when retrying matters.
+        // .authenticating transition and the actor yields at every await.
         guard !isConnectInFlight else { return }
         guard state != .disconnecting else { return }
         isConnectInFlight = true
@@ -60,7 +93,7 @@ public actor ConnectionManager {
         do {
             try await transport.connect(to: endpoint)
             hasActiveTransport = true
-            requestedInitialSnapshots = false
+            activeEndpoint = endpoint
             transition(to: .authenticating)
             let messages = await transport.incomingMessages()
             isMessageProcessorReady = false
@@ -70,23 +103,25 @@ public actor ConnectionManager {
                 await self?.markMessageProcessorReady()
                 for await message in messages {
                     guard !Task.isCancelled else { return }
-                    guard case let .legacy(legacyMessage) = message else { continue }
-                    guard let result = await self?.handle(legacyMessage, for: session) else { return }
+                    guard let result = await self?.handle(message, for: session) else { return }
                     if case let .failed(reason) = result {
                         await self?.messageProcessingEnded(for: session, reason: reason)
                         return
                     }
                 }
                 guard !Task.isCancelled else { return }
-                await self?.messageProcessingEnded(for: session, reason: "Connection closed unexpectedly")
+                await self?.messageProcessingEnded(
+                    for: session,
+                    reason: "Connection closed unexpectedly"
+                )
             }
             await waitForMessageProcessorReadiness()
             try await transport.send(.legacy(.hello(HelloPayload(
                 clientID: clientID,
                 clientName: clientName,
+                protocolVersion: PsycheProtocolVersion.current,
                 token: token
             ))))
-            try await requestInitialSnapshotsIfAuthorized()
         } catch {
             await tearDownActiveConnection()
             transition(to: .failed(error.localizedDescription))
@@ -94,7 +129,10 @@ public actor ConnectionManager {
     }
 
     public func disconnect() async {
-        guard state != .disconnected else { return }
+        guard state != .disconnected else {
+            await resetPerConnectionState()
+            return
+        }
         transition(to: .disconnecting)
         await tearDownActiveConnection()
         transition(to: .disconnected)
@@ -151,12 +189,54 @@ public actor ConnectionManager {
         messageProcessorReadyWaiters.removeAll()
     }
 
-    private func handle(_ message: ServerMessage, for session: UUID) async -> MessageHandlingResult {
+    private func handle(
+        _ message: MobileServerMessage,
+        for session: UUID
+    ) async -> MessageHandlingResult {
         guard activeMessageSession == session else { return .ignored }
 
+        let result: MessageHandlingResult
         switch message {
-        case .welcome:
+        case .legacy(let message):
+            result = await handle(message, for: session)
+        case .control(let response):
+            result = await handle(response, for: session)
+        case .workspaceChanged(let event):
+            await workspaceStore.applyEvent(
+                workspace: event.workspace,
+                sequence: event.sequence
+            )
+            if await workspaceStore.needsFullSnapshot {
+                await requestSnapshotIfNeeded(for: session)
+            }
+            result = .processed
+        }
+
+        if result == .processed {
+            recordProcessedMessage()
+        }
+        return result
+    }
+
+    private func handle(
+        _ message: ServerMessage,
+        for session: UUID
+    ) async -> MessageHandlingResult {
+        switch message {
+        case .welcome(let payload):
+            guard payload.protocolVersion == PsycheProtocolVersion.current else {
+                return .failed(
+                    ConnectionManagerError
+                        .unsupportedProtocolVersion(payload.protocolVersion)
+                        .localizedDescription
+                )
+            }
+            welcomeIdentity = WelcomeIdentity(
+                serverID: payload.serverID,
+                serverName: payload.serverName
+            )
             transition(to: .connected)
+            await requestInitialSnapshotIfAuthorized(for: session)
         case .projectList(let projects):
             self.projects = projects
         case .paneList(let panes), .paneListChanged(let panes):
@@ -166,43 +246,141 @@ public actor ConnectionManager {
         case .error(let error):
             return .failed(error.message)
         case .pairAccepted(let payload):
-            token = payload.token
+            guard let welcomeIdentity, let activeEndpoint else {
+                return .failed(ConnectionManagerError.missingWelcomeIdentity.localizedDescription)
+            }
             do {
-                try await requestInitialSnapshotsIfAuthorized()
+                try await pairedHostStore.save(PairedHost(
+                    serverID: welcomeIdentity.serverID,
+                    serverName: welcomeIdentity.serverName,
+                    endpoint: activeEndpoint,
+                    clientID: clientID,
+                    token: payload.token
+                ))
             } catch {
                 return .failed(error.localizedDescription)
             }
+            guard activeMessageSession == session else { return .ignored }
+            token = payload.token
+            await requestInitialSnapshotIfAuthorized(for: session)
         default:
             break
-        }
-        processedMessageCount += 1
-        let completedWaiters = eventDrainWaiters.filter { processedMessageCount >= $0.value.count }
-        completedWaiters.forEach { waiterID, waiter in
-            eventDrainWaiters.removeValue(forKey: waiterID)
-            waiter.continuation.resume()
         }
         return .processed
     }
 
-    private func requestInitialSnapshotsIfAuthorized() async throws {
-        guard token?.isEmpty == false, !requestedInitialSnapshots else { return }
-        try await transport.send(.legacy(.listProjects(EmptyPayload())))
-        try await transport.send(.legacy(.listPanes(EmptyPayload())))
-        requestedInitialSnapshots = true
+    private func handle(
+        _ response: MobileControlResponse,
+        for session: UUID
+    ) async -> MessageHandlingResult {
+        let wasHandled = await requestClient.handle(response)
+        guard activeMessageSession == session else { return .ignored }
+
+        switch response {
+        case .workspaceSnapshot(let result):
+            if activeSnapshotRequestID == result.requestID {
+                isSnapshotRecoveryInFlight = false
+                activeSnapshotRequestID = nil
+                snapshotRequestTask = nil
+            }
+            await workspaceStore.applySnapshot(
+                workspace: result.workspace,
+                sequence: result.sequence
+            )
+        case .error(let error) where !wasHandled:
+            return .failed(error.message)
+        default:
+            break
+        }
+        return .processed
+    }
+
+    private func requestInitialSnapshotIfAuthorized(for session: UUID) async {
+        guard token?.isEmpty == false, !requestedInitialSnapshot else { return }
+        requestedInitialSnapshot = true
+        await requestSnapshotIfNeeded(for: session)
+    }
+
+    private func requestSnapshotIfNeeded(for session: UUID) async {
+        guard activeMessageSession == session,
+              hasActiveTransport,
+              !isSnapshotRecoveryInFlight else {
+            return
+        }
+
+        isSnapshotRecoveryInFlight = true
+        let requestID = await requestClient.nextRequestID()
+        guard activeMessageSession == session, hasActiveTransport else { return }
+
+        activeSnapshotRequestID = requestID
+        let requestClient = self.requestClient
+        snapshotRequestTask = Task { [weak self, requestClient] in
+            do {
+                _ = try await requestClient.send(.workspaceSnapshot(
+                    ControlRequestIDOnly(requestID: requestID)
+                ))
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.snapshotRequestFailed(
+                    requestID: requestID,
+                    session: session,
+                    error: error
+                )
+            }
+        }
+    }
+
+    private func snapshotRequestFailed(
+        requestID: String,
+        session: UUID,
+        error: any Error
+    ) async {
+        guard activeMessageSession == session,
+              activeSnapshotRequestID == requestID else {
+            return
+        }
+        isSnapshotRecoveryInFlight = false
+        activeSnapshotRequestID = nil
+        snapshotRequestTask = nil
+        await tearDownActiveConnection()
+        transition(to: .failed(error.localizedDescription))
+    }
+
+    private func recordProcessedMessage() {
+        processedMessageCount += 1
+        let completedWaiters = eventDrainWaiters.filter {
+            processedMessageCount >= $0.value.count
+        }
+        completedWaiters.forEach { waiterID, waiter in
+            eventDrainWaiters.removeValue(forKey: waiterID)
+            waiter.continuation.resume()
+        }
     }
 
     private func tearDownActiveConnection() async {
         activeMessageSession = nil
-        let task = messageTask
+        messageTask?.cancel()
         messageTask = nil
-        task?.cancel()
-        if let task {
-            await task.value
-        }
-        if hasActiveTransport {
+        let shouldDisconnectTransport = hasActiveTransport
+        hasActiveTransport = false
+        await resetPerConnectionState()
+        if shouldDisconnectTransport {
             await transport.disconnect()
-            hasActiveTransport = false
         }
+    }
+
+    private func resetPerConnectionState() async {
+        snapshotRequestTask?.cancel()
+        snapshotRequestTask = nil
+        activeSnapshotRequestID = nil
+        requestedInitialSnapshot = false
+        isSnapshotRecoveryInFlight = false
+        activeEndpoint = nil
+        welcomeIdentity = nil
+        isMessageProcessorReady = false
+        await workspaceStore.markDisconnected()
+        await requestClient.failAll(with: ControlRequestError.disconnected)
     }
 
     private func messageProcessingEnded(for session: UUID, reason: String) async {
@@ -211,9 +389,11 @@ public actor ConnectionManager {
         activeMessageSession = nil
         messageTask = nil
         transition(to: .disconnecting)
-        if hasActiveTransport {
+        let shouldDisconnectTransport = hasActiveTransport
+        hasActiveTransport = false
+        await resetPerConnectionState()
+        if shouldDisconnectTransport {
             await transport.disconnect()
-            hasActiveTransport = false
         }
         transition(to: .failed(reason))
     }
@@ -228,7 +408,12 @@ public actor ConnectionManager {
         }
     }
 
-    private enum MessageHandlingResult {
+    private struct WelcomeIdentity {
+        let serverID: String
+        let serverName: String
+    }
+
+    private enum MessageHandlingResult: Equatable {
         case ignored
         case processed
         case failed(String)
