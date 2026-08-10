@@ -1205,7 +1205,7 @@
         (project && activeWorkspaceRoot(project)) || null,
       launchKind: sourceLaunch.launchKind || null,
       covenSessionId: sourceLaunch.covenSessionId || null,
-      metricsProvider: sourceLaunch.metricsProvider || null,
+      metricsProvider: sourceLaunch.metricsProvider || opts.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));

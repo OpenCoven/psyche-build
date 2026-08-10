@@ -419,6 +419,61 @@ describe('native Coven launch routing', () => {
     expect((invoked[0].options as Record<string, unknown>)).not.toHaveProperty('metricsProvider');
   });
 
+  it('falls back to opts.metricsProvider when launch omits it and preserves launch precedence', () => {
+    const createThread = compileFunction<(opts: Record<string, any>) => Record<string, any>>(
+      functionSource('createThread'),
+      {
+        makeThreadId: () => 'thread-1',
+        activeProject: () => null,
+        activeWorkspaceRoot: () => null,
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state: { threads: [], activeThreadId: null },
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        requestAnimationFrame: () => undefined,
+        isLiveThread: () => true,
+        spawnPty: () => undefined,
+      },
+    );
+
+    const fallbackThread = createThread({
+      project: { id: 'project' },
+      worktreePath: '/repo/wt',
+      metricsProvider: 'agent',
+      launch: {
+        command: '/bin/coven',
+        args: ['attach', COVEN_SESSION_ID],
+        env: {},
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-attach',
+        covenSessionId: COVEN_SESSION_ID,
+      },
+    });
+    expect(fallbackThread.launch.metricsProvider).toBe('agent');
+
+    const explicitThread = createThread({
+      project: { id: 'project' },
+      worktreePath: '/repo/wt',
+      metricsProvider: 'agent',
+      launch: {
+        command: '/bin/coven',
+        args: ['attach', COVEN_SESSION_ID],
+        env: {},
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-attach',
+        covenSessionId: COVEN_SESSION_ID,
+        metricsProvider: 'coven',
+      },
+    });
+    expect(explicitThread.launch.metricsProvider).toBe('coven');
+  });
+
   it('validates Coven before revealing or mutating the terminal workspace', async () => {
     const state = {
       env: { coven_path: null },
