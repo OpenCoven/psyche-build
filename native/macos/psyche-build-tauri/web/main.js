@@ -621,6 +621,88 @@
   var composerMicEl = document.getElementById("composer-mic");
   var dockGitCountEl = document.getElementById("dock-git-count");
 
+  // -------- Voice call bar --------
+  // Board 4's call bar. The bar, its timer and its mute state are real UI; what
+  // does not exist yet is a voice transport. There is no getUserMedia, no
+  // speech recogniser and no audio path to an agent anywhere in this app, so a
+  // call is a local session that shows the designed chrome and says plainly
+  // that it is not carrying audio. When a transport lands, `startCall` is where
+  // it attaches -- nothing below fakes a connection or a peer.
+
+  var callBarEl = document.getElementById("call-bar");
+  var callTargetEl = document.getElementById("call-target");
+  var callTimerEl = document.getElementById("call-timer");
+  var callNoteEl = document.getElementById("call-note");
+  var callMuteBtn = document.getElementById("call-mute");
+  var callEndBtn = document.getElementById("call-end");
+  var composerCallEl = document.getElementById("composer-call");
+
+  var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+
+  function formatCallTime(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var minutes = Math.floor(total / 60);
+    var seconds = total % 60;
+    return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+  }
+
+  function paintCallBar() {
+    if (!callBarEl) return;
+    callBarEl.hidden = !callState.active;
+    callBarEl.classList.toggle("is-muted", callState.muted);
+    if (composerCallEl) composerCallEl.setAttribute("aria-pressed", callState.active ? "true" : "false");
+    // Painted whether or not the bar is showing: leaving the control reading
+    // "Unmute" after a call ends would have the next call open mislabelled.
+    if (callMuteBtn) {
+      callMuteBtn.textContent = callState.muted ? "Unmute" : "Mute";
+      callMuteBtn.setAttribute("aria-pressed", callState.muted ? "true" : "false");
+    }
+    if (!callState.active) return;
+    if (callTimerEl) callTimerEl.textContent = formatCallTime(Date.now() - callState.startedAt);
+  }
+
+  function startCall() {
+    if (callState.active) return false;
+    var thread = findThread(state.activeThreadId);
+    callState.active = true;
+    callState.muted = false;
+    callState.startedAt = Date.now();
+    if (callTargetEl) callTargetEl.textContent = thread ? thread.name : "no pane focused";
+    // Say what is actually true rather than "the agent hears your terminal":
+    // nothing is listening, and a bar that implied otherwise would be a lie
+    // told in the UI.
+    if (callNoteEl) callNoteEl.textContent = "no voice transport yet — chrome only";
+    paintCallBar();
+    callState.timer = setInterval(paintCallBar, 1000);
+    return true;
+  }
+
+  function endCall() {
+    if (!callState.active) return false;
+    clearInterval(callState.timer);
+    callState.timer = 0;
+    callState.active = false;
+    callState.muted = false;
+    paintCallBar();
+    return true;
+  }
+
+  function toggleCallMute() {
+    if (!callState.active) return false;
+    callState.muted = !callState.muted;
+    paintCallBar();
+    return callState.muted;
+  }
+
+  if (composerCallEl) {
+    composerCallEl.addEventListener("click", function () {
+      if (callState.active) endCall();
+      else startCall();
+    });
+  }
+  if (callMuteBtn) callMuteBtn.addEventListener("click", toggleCallMute);
+  if (callEndBtn) callEndBtn.addEventListener("click", endCall);
+
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
   // (a pane spawned behind a maximised pane, a dock panel switched, …).
@@ -5918,6 +6000,9 @@
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
+      // A call is the most transient thing on screen after a menu, and ending
+      // it is always safe: nothing is transmitting.
+      if (endCall()) return;
       if (!typing && exitPaneMaximize()) return;
       return;
     }
