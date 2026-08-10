@@ -4,31 +4,31 @@ import { join } from 'node:path';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8'
 );
 const indexHtml = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'),
   'utf8'
 );
 const sessionsBundle = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/sessions.bundle.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/sessions.bundle.js'),
   'utf8'
 );
 const panesBundle = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/panes.bundle.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/panes.bundle.js'),
   'utf8'
 );
 const stylesCss = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8'
 );
 const tauriLib = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8'
 );
 const tauriPackage = JSON.parse(
-  readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/package.json'), 'utf8')
+  readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/package.json'), 'utf8')
 ) as {
   scripts: Record<string, string>;
   devDependencies: Record<string, string>;

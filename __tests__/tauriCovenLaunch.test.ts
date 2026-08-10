@@ -4,11 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const libRs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8',
 );
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 

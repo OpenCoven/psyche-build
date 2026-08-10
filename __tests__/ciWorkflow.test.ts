@@ -70,7 +70,7 @@ describe('pull request CI workflow contract', () => {
       'cargo fmt --manifest-path "$MANIFEST" --check',
       'cargo test --manifest-path "$MANIFEST" --locked',
       'cargo check --manifest-path "$MANIFEST" --locked',
-      'pnpm --dir native/macos/psyche-build-tauri build:web',
+      'pnpm --dir native/desktop/psyche-build-tauri build:web',
     ]) {
       expect(workflow).toContain(command);
     }

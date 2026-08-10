@@ -89,11 +89,11 @@ pnpm typecheck
 pnpm build
 pnpm smoke:pack
 
-MANIFEST=native/macos/psyche-build-tauri/src-tauri/Cargo.toml
+MANIFEST=native/desktop/psyche-build-tauri/src-tauri/Cargo.toml
 cargo fmt --manifest-path "$MANIFEST" --check
 cargo test --manifest-path "$MANIFEST" --locked
 cargo check --manifest-path "$MANIFEST" --locked
-pnpm --dir native/macos/psyche-build-tauri build:web
+pnpm --dir native/desktop/psyche-build-tauri build:web
 pnpm ios:project:check
 ```
 

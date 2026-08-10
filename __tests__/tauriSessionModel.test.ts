@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import * as model from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
+import * as model from '../native/desktop/psyche-build-tauri/web/sessions/session-model.mjs';
 
 describe('Tauri Coven session model', () => {
   test('accepts only safe Coven session identifiers', () => {

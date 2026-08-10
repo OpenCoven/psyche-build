@@ -4,11 +4,11 @@ import { describe, expect, test } from 'vitest';
 
 const covenSessionsSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
 );
 const libSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
 );
 
 function bracedBody(source: string, start: number): string {

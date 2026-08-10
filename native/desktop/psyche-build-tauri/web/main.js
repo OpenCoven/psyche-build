@@ -33,7 +33,7 @@
   if (!window.__TAURI__ || !window.__TAURI__.core || !window.__TAURI__.event) {
     showBootError(
       "Tauri global API is not present. This page was opened outside the Tauri runtime.\n\n" +
-        "Launch it with:\n  cd native/macos/psyche-build-tauri\n  pnpm dev\n\n" +
+        "Launch it with:\n  cd native/desktop/psyche-build-tauri\n  pnpm dev\n\n" +
         "Opening web/index.html as file:// or in a normal browser will not inject window.__TAURI__."
     );
     return;

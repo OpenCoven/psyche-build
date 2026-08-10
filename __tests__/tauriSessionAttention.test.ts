@@ -8,9 +8,9 @@ import {
   createAttentionTracker,
   hasWorkingIndicators,
   looksLikeQuestion,
-} from '../native/macos/psyche-build-tauri/web/sessions/attention.mjs';
+} from '../native/desktop/psyche-build-tauri/web/sessions/attention.mjs';
 
-const webRoot = join(process.cwd(), 'native/macos/psyche-build-tauri/web');
+const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri/web');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 const sessionEntry = readFileSync(join(webRoot, 'sessions/session-entry.js'), 'utf8');

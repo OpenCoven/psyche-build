@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it } from 'vitest';
  * package.json rather than restated here, so changing the build cannot leave
  * the check validating yesterday's command -- and compares the bytes.
  */
-const packageRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
+const packageRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
 const webRoot = join(packageRoot, 'web');
 
 /**
