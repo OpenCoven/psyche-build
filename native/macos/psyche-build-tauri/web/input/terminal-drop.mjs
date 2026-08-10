@@ -1,8 +1,13 @@
 const IMAGE_EXTENSION_RE =
   /\.(?:png|jpe?g|gif|webp|avif|heic|heif|tiff?|bmp|svg)$/i;
+const ASCII_C1_CONTROL_RE = /[\x00-\x1F\x7F-\x9F]/;
 
 export function isSupportedImagePath(path) {
-  return typeof path === 'string' && IMAGE_EXTENSION_RE.test(path);
+  return (
+    typeof path === 'string' &&
+    !ASCII_C1_CONTROL_RE.test(path) &&
+    IMAGE_EXTENSION_RE.test(path)
+  );
 }
 
 export function quotePosixPath(path) {

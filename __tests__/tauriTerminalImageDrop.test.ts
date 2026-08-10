@@ -79,6 +79,39 @@ describe('terminal image drop helpers', () => {
     expect(inputModule.isSupportedImagePath('/tmp/image.png.txt')).toBe(false);
   });
 
+  it('rejects control characters from otherwise supported image paths', () => {
+    const safePaths = [
+      '/tmp/雪 (final)! #1.png',
+      '/tmp/portrait—draft.jpg',
+    ];
+    const unsafePaths = [
+      '/tmp/new\nline.png',
+      '/tmp/carriage\rreturn.jpg',
+      '/tmp/interrupt\x03.png',
+      '/tmp/escape\x1b.jpg',
+      '/tmp/delete\x7f.png',
+      '/tmp/c1\x85.jpg',
+    ];
+
+    for (const path of unsafePaths) {
+      expect(inputModule.isSupportedImagePath(path)).toBe(false);
+    }
+
+    const insertion = inputModule.buildImageDropInsertion([
+      safePaths[0],
+      ...unsafePaths,
+      safePaths[1],
+    ]);
+
+    expect(insertion.accepted).toEqual(safePaths);
+    expect(insertion.skipped).toEqual(unsafePaths);
+    expect(insertion.text).toBe(
+      "'/tmp/雪 (final)! #1.png' '/tmp/portrait—draft.jpg'",
+    );
+    expect(insertion.accepted.join('')).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    expect(insertion.text).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+  });
+
   it('converts Tauri physical coordinates to CSS coordinates', () => {
     expect(inputModule.physicalToCssPosition({ x: 300, y: 180 }, 2)).toEqual({
       x: 150,
