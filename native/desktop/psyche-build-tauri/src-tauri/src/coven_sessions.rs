@@ -85,6 +85,21 @@ pub(crate) struct CovenSessionsResponse {
     message: Option<String>,
 }
 
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct CovenSessionsUnavailableResponse {
+    status: &'static str,
+    reason: &'static str,
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn windows_transport_unavailable_response() -> CovenSessionsUnavailableResponse {
+    CovenSessionsUnavailableResponse {
+        status: "unavailable",
+        reason: "local Coven Unix socket transport is unsupported on Windows",
+    }
+}
+
 fn error_response() -> CovenSessionsResponse {
     CovenSessionsResponse {
         status: "error".to_string(),
@@ -263,6 +278,7 @@ fn discover(
     load_coven_sessions_with_scopes(&endpoint, &project_roots, &project_scopes)
 }
 
+#[cfg(unix)]
 #[tauri::command]
 pub(crate) async fn coven_sessions(
     project_roots: Vec<String>,
@@ -287,6 +303,15 @@ pub(crate) async fn coven_sessions(
         Ok(response) => response,
         Err(_) => error_response(),
     }
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_sessions(
+    _project_roots: Vec<String>,
+    _project_scopes: Option<Vec<CovenProjectScope>>,
+) -> CovenSessionsUnavailableResponse {
+    windows_transport_unavailable_response()
 }
 
 fn try_load_coven_sessions(
@@ -1409,6 +1434,17 @@ mod tests {
         assert_eq!(response.status, status);
         assert!(response.sessions.is_empty());
         assert_eq!(response.message.as_deref(), message);
+    }
+
+    #[test]
+    fn windows_unavailable_response_has_only_status_and_reason() {
+        assert_eq!(
+            serde_json::to_value(windows_transport_unavailable_response()).unwrap(),
+            json!({
+                "status": "unavailable",
+                "reason": "local Coven Unix socket transport is unsupported on Windows"
+            })
+        );
     }
 
     #[test]

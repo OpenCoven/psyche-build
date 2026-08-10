@@ -20,6 +20,7 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod platform;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
@@ -52,7 +53,6 @@ struct PtySession {
 static SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static STARTING_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static AUGMENTED_PATH: Lazy<String> = Lazy::new(compute_augmented_path);
 
 #[derive(Debug)]
 struct PendingPtyStart {
@@ -103,30 +103,32 @@ struct OpenedPtyCwd {
     canonical_path: PathBuf,
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
 #[derive(Debug)]
 struct OpenedPtyCwd {
-    spawn_path: PathBuf,
+    project_root: String,
+    requested_cwd: String,
     canonical_path: PathBuf,
 }
 
 impl OpenedPtyCwd {
     fn configure_command_cwd(&self, command: &mut CommandBuilder) -> Result<(), String> {
         #[cfg(unix)]
-        if !locator_matches_open_directory(&self.spawn_path, &self._directory) {
-            return Err(format!(
-                "stable PTY cwd locator is unavailable: {}",
-                self.spawn_path.display()
-            ));
+        {
+            if !locator_matches_open_directory(&self.spawn_path, &self._directory) {
+                return Err(format!(
+                    "stable PTY cwd locator is unavailable: {}",
+                    self.spawn_path.display()
+                ));
+            }
+            command.cwd(&self.spawn_path);
         }
-        #[cfg(not(unix))]
-        if !self.spawn_path.is_dir() {
-            return Err(format!(
-                "stable PTY cwd locator is unavailable: {}",
-                self.spawn_path.display()
-            ));
+        #[cfg(target_os = "windows")]
+        {
+            let canonical_path =
+                canonical_windows_pty_cwd_for_spawn(&self.project_root, &self.requested_cwd)?;
+            command.cwd(canonical_path);
         }
-        command.cwd(&self.spawn_path);
         Ok(())
     }
 }
@@ -206,7 +208,11 @@ fn directory_path_from_handle(directory: &std::fs::File, cwd: &str) -> Result<Pa
 }
 
 #[cfg(unix)]
-fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, String> {
+fn open_pty_cwd_candidate(
+    candidate: &Path,
+    cwd: &str,
+    _project_root: &str,
+) -> Result<OpenedPtyCwd, String> {
     let directory =
         std::fs::File::open(candidate).map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
     let metadata = directory
@@ -238,8 +244,12 @@ fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, S
     })
 }
 
-#[cfg(not(unix))]
-fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, String> {
+#[cfg(target_os = "windows")]
+fn open_pty_cwd_candidate(
+    candidate: &Path,
+    cwd: &str,
+    project_root: &str,
+) -> Result<OpenedPtyCwd, String> {
     let canonical_path = candidate
         .canonicalize()
         .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
@@ -247,9 +257,34 @@ fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, S
         return Err(format!("PTY cwd is not a directory: {}", cwd));
     }
     Ok(OpenedPtyCwd {
-        spawn_path: canonical_path.clone(),
+        project_root: project_root.to_string(),
+        requested_cwd: cwd.to_string(),
         canonical_path,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn canonical_windows_pty_cwd_for_spawn(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    if !canonical_candidate.is_dir() {
+        return Err(format!("PTY cwd is not a directory: {}", cwd));
+    }
+    if canonical_candidate.starts_with(&canonical_root) {
+        return Ok(canonical_candidate);
+    }
+
+    let linked_worktrees = linked_worktree_roots(&canonical_root)?;
+    validate_opened_pty_cwd(
+        &canonical_root,
+        &canonical_candidate,
+        &linked_worktrees,
+        cwd,
+    )?;
+    Ok(canonical_candidate)
 }
 
 fn pty_cwd_candidate(canonical_root: &Path, cwd: &str) -> PathBuf {
@@ -272,7 +307,7 @@ fn open_pty_cwd_with_worktrees(
 ) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
     let candidate = pty_cwd_candidate(&canonical_root, cwd);
-    let opened = open_pty_cwd_candidate(&candidate, cwd)?;
+    let opened = open_pty_cwd_candidate(&candidate, cwd, project_root)?;
     validate_opened_pty_cwd(
         &canonical_root,
         &opened.canonical_path,
@@ -310,7 +345,7 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
 fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
     let candidate = pty_cwd_candidate(&canonical_root, cwd);
-    let opened = open_pty_cwd_candidate(&candidate, cwd)?;
+    let opened = open_pty_cwd_candidate(&candidate, cwd, project_root)?;
     if opened.canonical_path.starts_with(&canonical_root) {
         return Ok(opened);
     }
@@ -433,17 +468,12 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
 
-    let command = options.command.unwrap_or_else(|| "/bin/zsh".to_string());
-    let args = options.args.unwrap_or_else(|| vec!["-l".to_string()]);
+    let (default_command, default_args) = platform::default_shell();
+    let command = options.command.unwrap_or(default_command);
+    let args = options.args.unwrap_or(default_args);
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
-    resolved_cwd.configure_command_cwd(&mut cmd)?;
-    // Build a sane child environment. When the .app is launched from
-    // Finder/Dock, launchd hands us a stripped PATH that lacks
-    // /opt/homebrew/bin, so psyche can't find tmux/git/gh/etc. Augment PATH
-    // with the conventional locations, and provide reasonable defaults for
-    // TERM / COLORTERM / LANG so xterm.js renders unicode + truecolor.
-    cmd.env("PATH", augmented_path());
+    cmd.env("PATH", platform::augmented_path());
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("PSYCHE_TAURI", "1");
@@ -473,6 +503,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     cmd.env_remove("NPM_CONFIG_PREFIX");
     cmd.env_remove("PREFIX");
 
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(resolved_cwd);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -793,7 +824,7 @@ fn feature_flag_enabled(name: &str, default: bool) -> bool {
 #[tauri::command]
 fn app_environment() -> AppEnvironment {
     let home = std::env::var("HOME").ok();
-    let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let (default_shell, _) = platform::default_shell();
     let native_workspace_v2 = feature_flag_enabled("PSYCHE_NATIVE_WORKSPACE_V2", true);
 
     // Try to find a `node` on PATH. portable-pty inherits the parent env, so
@@ -1097,98 +1128,6 @@ fn truncate_oneline(s: &str) -> String {
     }
 }
 
-fn augmented_path() -> &'static str {
-    AUGMENTED_PATH.as_str()
-}
-
-fn compute_augmented_path() -> String {
-    let existing = std::env::var("PATH").unwrap_or_default();
-    let extras = [
-        "/opt/homebrew/bin",
-        "/opt/homebrew/sbin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ];
-    let mut parts: Vec<PathBuf> = Vec::new();
-    for p in std::env::split_paths(&existing) {
-        if !p.as_os_str().is_empty() && !parts.iter().any(|existing| existing == &p) {
-            parts.push(p);
-        }
-    }
-    for extra in extras {
-        let extra = PathBuf::from(extra);
-        if !parts.iter().any(|existing| existing == &extra) {
-            parts.push(extra);
-        }
-    }
-    // Plus common user-installed runtime managers on macOS.
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = Path::new(&home);
-        for suffix in [
-            ".cargo/bin",
-            ".local/bin",
-            ".volta/bin",
-            ".bun/bin",
-            ".rbenv/shims",
-            ".pyenv/shims",
-        ] {
-            push_path_if_dir(&mut parts, home_path.join(suffix));
-        }
-        if let Some(nvm_bin) = newest_nvm_node_bin(home_path) {
-            push_path_if_dir(&mut parts, nvm_bin);
-        }
-    }
-    std::env::join_paths(&parts)
-        .map(|joined| joined.to_string_lossy().to_string())
-        .unwrap_or_else(|_| existing.clone())
-}
-
-fn push_path_if_dir(parts: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !candidate.is_dir() {
-        return;
-    }
-    if !parts.iter().any(|p| p == &candidate) {
-        parts.push(candidate);
-    }
-}
-
-fn newest_nvm_node_bin(home: &Path) -> Option<PathBuf> {
-    let versions_dir = home.join(".nvm").join("versions").join("node");
-    let mut newest: Option<((u32, u32, u32), PathBuf)> = None;
-    for entry in std::fs::read_dir(versions_dir).ok()? {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(version) = parse_nvm_node_version(&name.to_string_lossy()) else {
-            continue;
-        };
-        if newest
-            .as_ref()
-            .map_or(true, |(current, _)| version > *current)
-        {
-            newest = Some((version, path));
-        }
-    }
-    newest.map(|(_, path)| path.join("bin"))
-}
-
-fn parse_nvm_node_version(name: &str) -> Option<(u32, u32, u32)> {
-    let trimmed = name.strip_prefix('v').unwrap_or(name);
-    let mut parts = trimmed.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().unwrap_or("0").parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
-}
-
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
@@ -1223,7 +1162,8 @@ fn which_on_path_with(binary: &str, path: &std::ffi::OsStr) -> Option<String> {
 }
 
 fn which_on_path(binary: &str) -> Option<String> {
-    for dir in std::env::split_paths(augmented_path()) {
+    let path = platform::augmented_path();
+    for dir in std::env::split_paths(&path) {
         if let Some(executable) = executable_in_dir(binary, &dir) {
             return Some(executable);
         }
@@ -2180,19 +2120,8 @@ pub fn run() {
             git_log,
         ])
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{
-                    apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
-                };
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = apply_vibrancy(
-                        &window,
-                        NSVisualEffectMaterial::HudWindow,
-                        Some(NSVisualEffectState::Active),
-                        Some(10.0),
-                    );
-                }
+            if let Err(error) = platform::configure_window(app) {
+                log::warn!("optional window configuration unavailable: {error}");
             }
             Ok(())
         })
