@@ -452,17 +452,93 @@ describe('pane footer native action helpers', () => {
   });
 });
 
-describe.skip('pane footer integration contract', () => {
-  it('mounts one footer in terminal and Web panes', () => {
+describe('pane footer integration contract', () => {
+  it('mounts one footer in every physical pane path, including Git', () => {
     expect(mainJs).toMatch(/function createPaneFooter\(thread\)/);
+    expect(mainJs).toMatch(/function syncPaneFooter\(thread\)/);
+    expect(mainJs).toMatch(/function mountToolPane\(thread\)[\s\S]*createPaneFooter\(thread\)/);
     expect(mainJs).toMatch(/function mountTerminal\(thread\)[\s\S]*createPaneFooter\(thread\)/);
     expect(mainJs).toMatch(/function mountBrowserPane\(thread\)[\s\S]*createPaneFooter\(thread\)/);
   });
 
-  it('uses a fixed third pane row without wrapping', () => {
+  it('uses a fixed third pane row without wrapping and raises the pane floor', () => {
+    expect(stylesCss).toMatch(/--pane-foot-h:\s*27px;/);
     expect(stylesCss).toMatch(
-      /\.terminal-pane\s*\{[\s\S]*grid-template-rows:\s*var\(--pane-head-h\)\s+minmax\(0,\s*1fr\)\s+27px/,
+      /\.terminal-pane\s*\{[\s\S]*grid-template-rows:\s*var\(--pane-head-h\)\s+minmax\(0,\s*1fr\)\s+var\(--pane-foot-h\)/,
     );
     expect(stylesCss).toMatch(/\.terminal-pane-footer\s*\{[\s\S]*flex-wrap:\s*nowrap/);
+    expect(stylesCss).toMatch(/--pane-min-w:\s*200px;/);
+    expect(stylesCss).toMatch(/--pane-min-h:\s*137px;/);
+    expect(mainJs).toMatch(
+      /var PANE_MINIMUMS = \{ width: 200, height: 137, separator: 6 \};/,
+    );
+  });
+
+  it('builds footer state from the exact worktree and truthful fallback metrics', () => {
+    const worktree = functionSource(mainJs, 'threadWorktree');
+    const state = functionSource(mainJs, 'paneFooterState');
+
+    expect(worktree).toMatch(/worktree\.path === thread\.worktreePath/);
+    expect(worktree).toMatch(/path:\s*thread\.worktreePath \|\| null/);
+    expect(worktree).toMatch(/branch:\s*null/);
+    expect(state).toMatch(/PsychePanes\.isAgentPaneKind\(thread\.kind\)/);
+    expect(state).toMatch(/thread\.launch\.metricsProvider \|\| "agent"/);
+    expect(state).toMatch(/thread\.launch\.covenSessionId/);
+    expect(state).toMatch(/phase:\s*"ready"/);
+    expect(state).toMatch(/costKind:\s*"unknown"/);
+    expect(state).toContain('Session metrics are not reported by this harness');
+    expect(state).toMatch(/canSwitchModel:\s*false/);
+    expect(state).not.toContain('"loading"');
+  });
+
+  it('uses one truthful dispatcher for all footer actions', () => {
+    const dispatcher = functionSource(mainJs, 'runPaneFooterAction');
+
+    expect(dispatcher).toMatch(/item\.action === "copy"[\s\S]*copyPaneFooterValue/);
+    expect(dispatcher).toMatch(/item\.action === "reveal"[\s\S]*revealPaneWorktree/);
+    expect(dispatcher).toMatch(/item\.action === "usage"[\s\S]*toast\(item\.label \+ " is not reported"\)/);
+    expect(dispatcher).toMatch(/item\.action === "switch-model"[\s\S]*toast\(item\.label \+ " is not reported"\)/);
+    expect(dispatcher).not.toMatch(/switchPaneFooterModel|showPaneUsage/);
+  });
+
+  it('creates accessible item buttons, observes pane width, and focuses chrome safely', () => {
+    const create = functionSource(mainJs, 'createPaneFooter');
+
+    expect(create).toMatch(/className = "terminal-pane-footer"/);
+    expect(create).toMatch(/setAttribute\("aria-label", "Pane details"\)/);
+    expect(create).toMatch(/className = "terminal-pane-footer-items"/);
+    expect(create).toMatch(/className = "terminal-pane-footer-overflow"/);
+    expect(create).toMatch(/data-footer-key|dataset\.footerKey/);
+    expect(create).toMatch(/runPaneFooterAction\(thread, item\)/);
+    expect(create).toMatch(/addEventListener\("pointerdown"[\s\S]*focusThread\(thread\.id\)[\s\S]*stopPropagation/);
+    expect(create).toMatch(/new ResizeObserver[\s\S]*PsychePanes\.footerTier/);
+    expect(create).toMatch(/observer\.observe\(thread\.pane \|\| footer\)/);
+    expect(create).toMatch(/thread\.paneFooter = footer/);
+    expect(create).toMatch(/thread\.paneFooterObserver = observer/);
+  });
+
+  it('keeps collapsed controls keyboard reachable in a real overflow menu', () => {
+    const sync = functionSource(mainJs, 'syncPaneFooter');
+
+    expect(sync).toMatch(/PsychePanes\.footerItems\(paneFooterState\(thread\)\)/);
+    expect(sync).toMatch(/PsychePanes\.hiddenFooterKeys\(currentTier, isAgentPaneKind\)/);
+    expect(sync).toMatch(/setAttribute\("role", "menu"\)/);
+    expect(sync).toMatch(/setAttribute\("role", "menuitem"\)/);
+    expect(sync).toMatch(/thread\.createPaneFooterButton\(item, "menuitem"\)/);
+    expect(functionSource(mainJs, 'createPaneFooter'))
+      .toMatch(/runPaneFooterAction\(thread, item\)/);
+    expect(sync).toMatch(/event\.key === "Escape"/);
+    expect(sync).toMatch(/document\.addEventListener\("pointerdown", onOutsidePointerDown, true\)/);
+    expect(sync).toMatch(/document\.addEventListener\("keydown", onMenuKeyDown, true\)/);
+    expect(sync).toMatch(/event\.key === "Escape"[\s\S]*event\.stopPropagation\(\)/);
+  });
+
+  it('syncs and releases footer resources with the pane lifecycle', () => {
+    expect(functionSource(mainJs, 'syncThreadPaneMetadata')).toMatch(/syncPaneFooter\(thread\)/);
+    const detach = functionSource(mainJs, 'detachThreadPane');
+    expect(detach).toMatch(/thread\.paneFooterObserver\.disconnect\(\)/);
+    expect(detach).toMatch(/thread\.paneFooter = null/);
+    expect(detach).toMatch(/thread\.paneFooterItems = null/);
+    expect(detach).toMatch(/thread\.paneFooterOverflow = null/);
   });
 });

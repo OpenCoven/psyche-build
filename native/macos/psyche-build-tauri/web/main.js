@@ -95,8 +95,8 @@
   var visiblePaneFitFrame = 0;
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
-  // overflowing. 200x110 is the density the redesign tiles at.
-  var PANE_MINIMUMS = { width: 200, height: 110, separator: 6 };
+  // overflowing. 200x137 includes the fixed 27px footer rail.
+  var PANE_MINIMUMS = { width: 200, height: 137, separator: 6 };
 
   function handleVisibilityChange() {
     if (document.visibilityState === "hidden") {
@@ -1635,6 +1635,7 @@
     pane.appendChild(header);
     pane.appendChild(body);
     thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     thread.host = body;
     thread.toolBody = body;
     thread.paneTitle = title;
@@ -1849,10 +1850,11 @@
     }, true);
     pane.appendChild(header);
     pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     pane.addEventListener("pointerdown", function (event) {
       handlePanePointerDown(thread, body, close, event);
     });
-    thread.pane = pane;
     thread.host = body;
     thread.browserBody = body;
     thread.paneTitle = title;
@@ -1969,10 +1971,11 @@
     body.appendChild(container);
     pane.appendChild(header);
     pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     pane.addEventListener("pointerdown", function (event) {
       handlePanePointerDown(thread, body, close, event);
     });
-    thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
@@ -2872,6 +2875,7 @@
     if (thread.paneStatus) {
       applyPaneStatus(thread.paneStatus, thread.status);
     }
+    if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
     var leaf = layout && layout.root
       ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
@@ -2890,6 +2894,13 @@
 
   function detachThreadPane(thread) {
     if (!thread) return null;
+    if (typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
+    if (thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
+    thread.paneFooterObserver = null;
+    thread.paneFooter = null;
+    thread.paneFooterItems = null;
+    thread.paneFooterOverflow = null;
+    thread.createPaneFooterButton = null;
     var key = paneLayoutKey(thread.projectId, thread.worktreePath);
     var layout = paneLayouts.get(key);
     if (!layout || !layout.root) return null;
@@ -2983,6 +2994,11 @@
     }
     thread.hidden = false;
     commitPanePlacement(placement);
+    if (thread.pane && !thread.paneFooter) {
+      var staleFooter = thread.pane.querySelector(".terminal-pane-footer");
+      if (staleFooter) staleFooter.remove();
+      thread.pane.appendChild(createPaneFooter(thread));
+    }
     project.lastActiveThreadId = thread.id;
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
@@ -3356,6 +3372,223 @@
       if (worktrees[i].path === path) return sessionLaneLabel(worktrees[i]);
     }
     return shortenRoot(path);
+  }
+
+  function threadWorktree(thread) {
+    var project = thread && findProject(thread.projectId);
+    var worktrees = (project && project.worktrees) || [];
+    var exact = worktrees.find(function (worktree) {
+      return worktree.path === thread.worktreePath;
+    });
+    if (exact) return exact;
+    return {
+      path: thread.worktreePath || null,
+      branch: null,
+    };
+  }
+
+  function paneFooterState(thread) {
+    var worktree = threadWorktree(thread);
+    var isAgent = PsychePanes.isAgentPaneKind(thread.kind);
+    var metrics = thread.metrics || null;
+    if (isAgent && !metrics) {
+      metrics = {
+        phase: "ready",
+        provider: thread.launch && thread.launch.metricsProvider || "agent",
+        sessionId: thread.launch && thread.launch.covenSessionId || null,
+        model: null,
+        contextUsed: null,
+        contextLimit: null,
+        spendUsd: null,
+        tokens: null,
+        costKind: "unknown",
+        updatedAt: null,
+        stale: false,
+        error: "Session metrics are not reported by this harness",
+        canSwitchModel: false,
+      };
+    }
+    return {
+      kind: thread.kind || "shell",
+      branch: worktree.branch || null,
+      worktreeLabel: shortenRoot(worktree.path || thread.worktreePath || ""),
+      worktreePath: worktree.path || null,
+      paneId: thread.id,
+      metrics: metrics,
+    };
+  }
+
+  function runPaneFooterAction(thread, item) {
+    if (!item) return false;
+    if (item.action === "copy") {
+      return copyPaneFooterValue(item.label, item.fullValue || item.value);
+    }
+    if (item.action === "reveal") {
+      return revealPaneWorktree(item.fullValue);
+    }
+    if (item.action === "usage" || item.action === "model-details") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    if (item.action === "switch-model") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    toast(item.label + " is not reported");
+    return false;
+  }
+
+  function closePaneFooterMenu(thread, restoreFocus) {
+    if (!thread) return;
+    if (thread.paneFooterMenuCleanup) {
+      thread.paneFooterMenuCleanup();
+      thread.paneFooterMenuCleanup = null;
+    }
+    if (thread.paneFooterMenu && thread.paneFooterMenu.parentNode) {
+      thread.paneFooterMenu.parentNode.removeChild(thread.paneFooterMenu);
+    }
+    thread.paneFooterMenu = null;
+    if (thread.paneFooterOverflow) {
+      thread.paneFooterOverflow.setAttribute("aria-expanded", "false");
+      if (restoreFocus) thread.paneFooterOverflow.focus();
+    }
+  }
+
+  function createPaneFooter(thread) {
+    var footer = document.createElement("footer");
+    footer.className = "terminal-pane-footer";
+    footer.setAttribute("aria-label", "Pane details");
+    footer.dataset.tier = PsychePanes.footerTier(0);
+
+    var itemsHost = document.createElement("div");
+    itemsHost.className = "terminal-pane-footer-items";
+    var overflow = document.createElement("button");
+    overflow.type = "button";
+    overflow.className = "terminal-pane-footer-overflow";
+    overflow.textContent = "\u2026";
+    overflow.title = "More pane details";
+    overflow.setAttribute("aria-label", "More pane details");
+    overflow.setAttribute("aria-haspopup", "menu");
+    overflow.setAttribute("aria-expanded", "false");
+    overflow.hidden = true;
+
+    thread.createPaneFooterButton = function (item, role) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = role === "menuitem"
+        ? "pane-footer-menu-item"
+        : "terminal-pane-footer-item";
+      button.dataset.footerKey = item.key;
+      var description = item.label + ": " + (item.fullValue || item.value || "not reported");
+      button.title = description;
+      button.setAttribute("aria-label", description);
+      if (role) button.setAttribute("role", role);
+      var label = document.createElement("span");
+      label.className = "pane-footer-item-label";
+      label.textContent = item.label;
+      var value = document.createElement("span");
+      value.className = "pane-footer-item-value";
+      value.textContent = item.value;
+      button.appendChild(label);
+      button.appendChild(value);
+      button.addEventListener("click", function (event) {
+        event.stopPropagation();
+        closePaneFooterMenu(thread, false);
+        runPaneFooterAction(thread, item);
+      });
+      return button;
+    };
+
+    footer.addEventListener("pointerdown", function (event) {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+      event.stopPropagation();
+    });
+    overflow.addEventListener("click", function (event) {
+      event.stopPropagation();
+      syncPaneFooter(thread, true);
+    });
+    footer.appendChild(itemsHost);
+    footer.appendChild(overflow);
+
+    thread.paneFooter = footer;
+    thread.paneFooterItems = itemsHost;
+    thread.paneFooterOverflow = overflow;
+    var observer = null;
+    if (typeof ResizeObserver === "function") {
+      observer = new ResizeObserver(function (entries) {
+        var width = entries[0] && entries[0].contentRect
+          ? entries[0].contentRect.width
+          : footer.getBoundingClientRect().width;
+        footer.dataset.tier = PsychePanes.footerTier(width);
+        syncPaneFooter(thread);
+      });
+      observer.observe(thread.pane || footer);
+    }
+    thread.paneFooterObserver = observer;
+    syncPaneFooter(thread);
+    return footer;
+  }
+
+  function syncPaneFooter(thread) {
+    if (!thread || !thread.paneFooter || !thread.paneFooterItems) return;
+    var openOverflow = arguments[1];
+    var items = PsychePanes.footerItems(paneFooterState(thread));
+    var currentTier = thread.paneFooter.dataset.tier ||
+      PsychePanes.footerTier(thread.paneFooter.getBoundingClientRect().width);
+    var isAgentPaneKind = PsychePanes.isAgentPaneKind(thread.kind);
+    var hiddenKeys = PsychePanes.hiddenFooterKeys(currentTier, isAgentPaneKind);
+    var hiddenItems = items.filter(function (item) {
+      return hiddenKeys.indexOf(item.key) !== -1;
+    });
+
+    thread.paneFooterItems.innerHTML = "";
+    items.forEach(function (item) {
+      thread.paneFooterItems.appendChild(thread.createPaneFooterButton(item));
+    });
+    thread.paneFooterOverflow.hidden = hiddenItems.length === 0;
+
+    closePaneFooterMenu(thread, false);
+    if (!openOverflow || hiddenItems.length === 0) return;
+
+    var menu = document.createElement("div");
+    menu.className = "pane-footer-popover pane-footer-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Hidden pane details");
+    hiddenItems.forEach(function (item) {
+      var button = thread.createPaneFooterButton(item, "menuitem");
+      button.setAttribute("role", "menuitem");
+      menu.appendChild(button);
+    });
+    document.body.appendChild(menu);
+    thread.paneFooterMenu = menu;
+    thread.paneFooterOverflow.setAttribute("aria-expanded", "true");
+    var anchor = thread.paneFooterOverflow.getBoundingClientRect();
+    var menuRect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(
+      anchor.right - menuRect.width,
+      window.innerWidth - menuRect.width - 8
+    )) + "px";
+    menu.style.top = Math.max(8, anchor.top - menuRect.height - 4) + "px";
+
+    function onOutsidePointerDown(event) {
+      if (menu.contains(event.target) || thread.paneFooterOverflow.contains(event.target)) return;
+      closePaneFooterMenu(thread, false);
+    }
+    function onMenuKeyDown(event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closePaneFooterMenu(thread, true);
+      }
+    }
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    document.addEventListener("keydown", onMenuKeyDown, true);
+    thread.paneFooterMenuCleanup = function () {
+      document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+      document.removeEventListener("keydown", onMenuKeyDown, true);
+    };
+    var first = menu.querySelector("button");
+    if (first) first.focus();
   }
 
   /**

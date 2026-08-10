@@ -153,7 +153,12 @@ describe('Tauri workspace panels', () => {
       )?.[0];
       expect(boundsFunction).toBeTruthy();
       expect(boundsFunction).toContain('preview.isConnected');
+      expect(boundsFunction).toContain('browserSurface.parentElement !== pane.browserBody');
+      expect(boundsFunction).toContain('preview.getBoundingClientRect()');
       expect(boundsFunction).not.toContain('state.activeThreadId');
+      expect(mainJs).toMatch(
+        /function mountBrowserPane\(thread\)[\s\S]*pane\.appendChild\(body\);[\s\S]*pane\.appendChild\(createPaneFooter\(thread\)\)/,
+      );
     });
 
     it('returns contextual shortcuts to terminal mode through every Web close path', () => {
