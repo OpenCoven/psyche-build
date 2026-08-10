@@ -152,6 +152,21 @@ describe('Tauri sidebar model', () => {
     });
   });
 
+  it('treats failed local threads as exited even when attention or working flags are set', () => {
+    expect(deriveLocalSidebarStatus({
+      status: 'failed',
+      needsAttention: true,
+      spawning: true,
+      isWorking: true,
+      lastOutputAt: 9_999,
+    }, 10_000)).toEqual({
+      key: 'exited',
+      label: 'EXITED',
+      icon: '×',
+      tooltip: 'Exited — process has ended',
+    });
+  });
+
   it('maps Coven statuses to sidebar states', () => {
     expect(deriveCovenSidebarStatus({ status: 'waiting' })).toEqual({
       key: 'attention',
@@ -483,7 +498,7 @@ describe('Tauri sidebar model', () => {
     });
     expect(result.branches).toHaveLength(1);
     expect(result.branches[0]).toMatchObject({
-      key: 'branch:/repo/psyche-build-wt',
+      key: 'branch:psyche\u0000/repo/psyche-build-wt',
       count: 4,
       attentionCount: 2,
     });
@@ -512,6 +527,83 @@ describe('Tauri sidebar model', () => {
       'active-newer',
       'active-older',
       'active-oldest',
+    ]);
+  });
+
+  it('builds globally unique unresolved branch keys that stay stable per project', () => {
+    const buildWithUnresolvedRows = (project: typeof baseProject) => buildSidebarProjectModel({
+      project,
+      localSessions: [localSession('orphan-shell', {
+        worktreePath: '/elsewhere/branch',
+        lastOutputAt: 9_000,
+      })],
+      covenSessions: [covenSession('orphan-coven', {
+        cwd: '/another/place',
+      })],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    const projectA = {
+      ...baseProject,
+      id: 'psyche-a',
+      name: 'Psyche A',
+      root: '/repo/psyche-a',
+      selectedWorktreePath: '/repo/psyche-a-wt',
+      worktrees: [{
+        path: '/repo/psyche-a-wt',
+        branch: 'feat/a',
+        collapsed: false,
+        dirty: true,
+        missing: false,
+      }],
+    };
+    const projectB = {
+      ...baseProject,
+      id: 'psyche-b',
+      name: 'Psyche B',
+      root: '/repo/psyche-b',
+      selectedWorktreePath: '/repo/psyche-b-wt',
+      worktrees: [{
+        path: '/repo/psyche-b-wt',
+        branch: 'feat/b',
+        collapsed: false,
+        dirty: true,
+        missing: false,
+      }],
+    };
+
+    const first = buildWithUnresolvedRows(projectA);
+    const repeated = buildWithUnresolvedRows(projectA);
+    const other = buildWithUnresolvedRows(projectB);
+
+    expect(first.branches.map((branch) => branch.key)).toEqual(['branch:psyche-a\u0000__unresolved__']);
+    expect(repeated.branches[0].key).toBe(first.branches[0].key);
+    expect(other.branches[0].key).toBe('branch:psyche-b\u0000__unresolved__');
+    expect(other.branches[0].key).not.toBe(first.branches[0].key);
+  });
+
+  it('uses code-unit row keys as the final locale-independent sort tiebreaker', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-ä', { name: 'ä', status: 'exited' }),
+        localSession('shell-Z', { name: 'Z', status: 'exited' }),
+        localSession('shell-a', { name: 'a', status: 'exited' }),
+      ],
+      covenSessions: [],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(result.branches[0].categories[0].rows.map((row) => row.id)).toEqual([
+      'shell-Z',
+      'shell-a',
+      'shell-ä',
     ]);
   });
 

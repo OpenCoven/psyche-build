@@ -51,6 +51,7 @@ const SORT_ORDER = Object.freeze({
   idle: 3,
   exited: 4,
 });
+const NON_LIVE_LOCAL_STATUSES = new Set(['exited', 'failed']);
 
 function text(value) {
   if (value === null || value === undefined) return '';
@@ -91,6 +92,10 @@ function statusKeyForSort(status) {
 
 function projectTitle(project) {
   return text(project?.name) || basename(project?.root);
+}
+
+function projectStableIdentity(project) {
+  return text(project?.id || project?.root);
 }
 
 function branchTitle(worktree) {
@@ -283,7 +288,7 @@ function sortRows(rows, selectedKey) {
     const activityDifference = numericValue(right.lastActiveAt) - numericValue(left.lastActiveAt);
     if (activityDifference) return activityDifference;
 
-    return left.key.localeCompare(right.key);
+    return compareRowKeys(left.key, right.key);
   });
 }
 
@@ -318,7 +323,7 @@ export function deriveLocalSidebarStatus(
   activeWindowMs = SIDEBAR_ACTIVE_WINDOW_MS,
 ) {
   const status = lower(thread?.status);
-  if (status === 'exited') return STATUS_PRESENTATION.exited;
+  if (NON_LIVE_LOCAL_STATUSES.has(status)) return STATUS_PRESENTATION.exited;
   if (thread?.needsAttention) return STATUS_PRESENTATION.attention;
 
   const isWorking = Boolean(thread?.isWorking);
@@ -448,9 +453,7 @@ export function buildSidebarProjectModel(options) {
       ].filter(Boolean);
 
       return {
-        key: text(worktree?.path)
-          ? `branch:${text(worktree.path)}`
-          : 'branch:__unresolved__',
+        key: `branch:${projectStableIdentity(project)}\u0000${text(worktree?.path) || '__unresolved__'}`,
         worktree,
         title: branchTitle(worktree),
         titleMatches: matchTextRanges(branchTitle(worktree), normalizedQuery),
@@ -469,7 +472,7 @@ export function buildSidebarProjectModel(options) {
   const title = projectTitle(project);
 
   return {
-    key: `project:${text(project?.id || project?.root)}`,
+    key: `project:${projectStableIdentity(project)}`,
     project,
     title,
     titleMatches: matchTextRanges(title, normalizedQuery),
