@@ -7,11 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0471C40617596B588B68F316 /* PaneWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36C2542B4B731C8B314F83FA /* PaneWorkspaceView.swift */; };
 		04E83890A129FB1782F79F98 /* BridgeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0899D0A654BB447D7D88380A /* BridgeMessages.swift */; };
 		081E43EFCA60F4E5ADED0047 /* WorkspaceFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C43E6A1E83A7A2553415A2E /* WorkspaceFixturesTests.swift */; };
+		0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
+		2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */; };
+		37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */; };
 		3A9AAA98C90BA65DDED19F3F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A1D2D3833898A9E46B0861 /* AppModel.swift */; };
 		43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */; };
+		4AB0F1275B1595BBDFA089EC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53CD9B827118A43330ED5907 /* SettingsView.swift */; };
 		4EE44BEAEF5AEA280FF40827 /* NowItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62AEDC0262461A3E2670DA01 /* NowItem.swift */; };
 		509C226C8BAE7EC9489F375A /* PairedHostStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */; };
 		531AEC6890A3351A83127EAD /* PairedHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A997355FB217A6A644109877 /* PairedHost.swift */; };
@@ -30,10 +35,14 @@
 		9D716B819F7802ACB98AC881 /* PinnedCertificateDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */; };
 		A7E6CEE49BA3FDEC13794413 /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79423F6893871C3D7AD45E8C /* SecureStore.swift */; };
 		AB1FC89CB2954D125308A9E5 /* PsycheTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */; };
+		ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40D4A071246B0EBEC1668CCE /* NowView.swift */; };
+		B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */; };
 		B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0208B0729C5558A164DD1556 /* CockpitView.swift */; };
+		B3E9EADB6B356B73E26B5DE8 /* PsycheTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3749C68EDDDED29D3827655 /* PsycheTheme.swift */; };
 		C1186894FA78279D5FCDFE9B /* URLSessionControlTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */; };
 		C131870074104FFE0EE72DBC /* WireProtocolContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */; };
 		C241A1A166992E67435F315E /* WorkspaceFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 373FAC0DE696BFF3AEA9B8CB /* WorkspaceFixtures.swift */; };
+		C41A0357612B4800ACCEDBBC /* PaneAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F43EBFD69B1019D3EA5429D /* PaneAccessibility.swift */; };
 		C47E0519F01CE5BF77E873F8 /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		C5705019D0B13652CECE4667 /* ProtocolVersions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E78871160AA42DBF2E794D0 /* ProtocolVersions.swift */; };
 		C7F239519FB92079A04D842E /* ControlRequestClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */; };
@@ -62,6 +71,13 @@
 			remoteInfo = PsycheCore;
 		};
 		CCE085BCFB2D884746A22CC1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3FA92D13CB55A0DC4F378CC7 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8ADE4C2F5910D2DE934CC66D;
+			remoteInfo = PsycheApp;
+		};
+		F096DBB990D17EF8E4677844 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 3FA92D13CB55A0DC4F378CC7 /* Project object */;
 			proxyType = 1;
@@ -104,13 +120,22 @@
 		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
 		171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStore.swift; sourceTree = "<group>"; };
 		1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransport.swift; sourceTree = "<group>"; };
+		1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsView.swift; sourceTree = "<group>"; };
+		2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		2F43EBFD69B1019D3EA5429D /* PaneAccessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAccessibility.swift; sourceTree = "<group>"; };
+		32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneAccessibilityTests.swift; sourceTree = "<group>"; };
+		36C2542B4B731C8B314F83FA /* PaneWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneWorkspaceView.swift; sourceTree = "<group>"; };
 		373FAC0DE696BFF3AEA9B8CB /* WorkspaceFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFixtures.swift; sourceTree = "<group>"; };
+		40D4A071246B0EBEC1668CCE /* NowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowView.swift; sourceTree = "<group>"; };
 		462E536FA1DDE6558B926190 /* PinnedCertificateDelegateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedCertificateDelegateTests.swift; sourceTree = "<group>"; };
 		4A0D85B21F0645DC962E680C /* MobileAppComposition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppComposition.swift; sourceTree = "<group>"; };
 		4E6FAE3C258A175B0E4A9876 /* URLSessionControlTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransportTests.swift; sourceTree = "<group>"; };
 		4E78871160AA42DBF2E794D0 /* ProtocolVersions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolVersions.swift; sourceTree = "<group>"; };
+		52D4210729283DB57A46D07C /* PsycheAppTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		53CD9B827118A43330ED5907 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		56D912A6A487EC289774C800 /* PsycheApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheApp.swift; sourceTree = "<group>"; };
 		57532C369ADD3A8953FA08FF /* ControlRequestClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClient.swift; sourceTree = "<group>"; };
+		5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairHostSheet.swift; sourceTree = "<group>"; };
 		62AEDC0262461A3E2670DA01 /* NowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowItem.swift; sourceTree = "<group>"; };
 		6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PsycheApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -127,6 +152,7 @@
 		B20C06BCF70A170E35F80BF3 /* PinnedCertificateDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedCertificateDelegate.swift; sourceTree = "<group>"; };
 		B25C571EEFFA869223BF5924 /* ConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionManager.swift; sourceTree = "<group>"; };
 		B6748125A581F028503863B5 /* BonjourHostDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourHostDiscoveryTests.swift; sourceTree = "<group>"; };
+		C3749C68EDDDED29D3827655 /* PsycheTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTheme.swift; sourceTree = "<group>"; };
 		D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PsycheAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9D412D06D4B9BE4902586CC /* ControlMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMessages.swift; sourceTree = "<group>"; };
 		E6A1D2D3833898A9E46B0861 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -192,6 +218,15 @@
 			path = Fixtures;
 			sourceTree = "<group>";
 		};
+		25FACD0C6B436E1A2F0AC1A3 /* UnitTests */ = {
+			isa = PBXGroup;
+			children = (
+				2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */,
+				32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */,
+			);
+			path = UnitTests;
+			sourceTree = "<group>";
+		};
 		2FD2B19E7AD39188BF911ED7 /* Connection */ = {
 			isa = PBXGroup;
 			children = (
@@ -213,6 +248,14 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		3A8E16E9F9D734F6300018E5 /* Design */ = {
+			isa = PBXGroup;
+			children = (
+				C3749C68EDDDED29D3827655 /* PsycheTheme.swift */,
+			);
+			path = Design;
+			sourceTree = "<group>";
+		};
 		50C864CEA1A345EEB75E417C /* Sources */ = {
 			isa = PBXGroup;
 			children = (
@@ -225,6 +268,7 @@
 			isa = PBXGroup;
 			children = (
 				6AC28DF81E9E1BE9886046B9 /* PsycheApp.app */,
+				52D4210729283DB57A46D07C /* PsycheAppTests.xctest */,
 				D2DEBE06B83FD927FAD0C546 /* PsycheAppUITests.xctest */,
 				9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */,
 				6AB21E6A5478C2F4ED968A0F /* PsycheCoreTests.xctest */,
@@ -248,6 +292,7 @@
 			children = (
 				50C864CEA1A345EEB75E417C /* Sources */,
 				0568D1AAE1DDDACA3F321018 /* Tests */,
+				25FACD0C6B436E1A2F0AC1A3 /* UnitTests */,
 			);
 			path = PsycheApp;
 			sourceTree = "<group>";
@@ -259,6 +304,8 @@
 				0208B0729C5558A164DD1556 /* CockpitView.swift */,
 				171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */,
 				56D912A6A487EC289774C800 /* PsycheApp.swift */,
+				3A8E16E9F9D734F6300018E5 /* Design */,
+				D7C7DF5BC480E7FBEE672FD8 /* Views */,
 			);
 			path = PsycheApp;
 			sourceTree = "<group>";
@@ -305,6 +352,19 @@
 				9E578634CC59DAF283DF8D2F /* WorkspaceStoreTests.swift */,
 			);
 			path = PsycheCoreTests;
+			sourceTree = "<group>";
+		};
+		D7C7DF5BC480E7FBEE672FD8 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				40D4A071246B0EBEC1668CCE /* NowView.swift */,
+				5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */,
+				2F43EBFD69B1019D3EA5429D /* PaneAccessibility.swift */,
+				36C2542B4B731C8B314F83FA /* PaneWorkspaceView.swift */,
+				1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */,
+				53CD9B827118A43330ED5907 /* SettingsView.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 		F42B00CEB7CC6365FE1FB068 = {
@@ -404,6 +464,24 @@
 			productReference = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */;
 			productType = "com.apple.product-type.framework";
 		};
+		FF7723641178B1E943F72C8C /* PsycheAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D207A7B0358B457250963417 /* Build configuration list for PBXNativeTarget "PsycheAppTests" */;
+			buildPhases = (
+				C0C421FFB2F52478C471844B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				684BEA1E5CFEB2346F43CE22 /* PBXTargetDependency */,
+			);
+			name = PsycheAppTests;
+			packageProductDependencies = (
+			);
+			productName = PsycheAppTests;
+			productReference = 52D4210729283DB57A46D07C /* PsycheAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -426,6 +504,9 @@
 					ECF6C642C37AA9953E6714DD = {
 						ProvisioningStyle = Automatic;
 					};
+					FF7723641178B1E943F72C8C = {
+						ProvisioningStyle = Automatic;
+					};
 				};
 			};
 			buildConfigurationList = 87530FA0B1336597CA3996D5 /* Build configuration list for PBXProject "Psyche" */;
@@ -443,6 +524,7 @@
 			projectRoot = "";
 			targets = (
 				8ADE4C2F5910D2DE934CC66D /* PsycheApp */,
+				FF7723641178B1E943F72C8C /* PsycheAppTests */,
 				74A409596775FB76C108C60D /* PsycheAppUITests */,
 				ECF6C642C37AA9953E6714DD /* PsycheCore */,
 				7BB8397E93E6CC7E68808C4A /* PsycheCoreTests */,
@@ -500,7 +582,23 @@
 				3A9AAA98C90BA65DDED19F3F /* AppModel.swift in Sources */,
 				B3A62E2DE6A3F7B9E94D8936 /* CockpitView.swift in Sources */,
 				834FD0F2CEF75F2B4DED623D /* DemoStore.swift in Sources */,
+				ADE2364200253F66FF3F60A5 /* NowView.swift in Sources */,
+				37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */,
+				C41A0357612B4800ACCEDBBC /* PaneAccessibility.swift in Sources */,
+				0471C40617596B588B68F316 /* PaneWorkspaceView.swift in Sources */,
+				0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */,
 				2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */,
+				B3E9EADB6B356B73E26B5DE8 /* PsycheTheme.swift in Sources */,
+				4AB0F1275B1595BBDFA089EC /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0C421FFB2F52478C471844B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */,
+				2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -519,6 +617,11 @@
 			isa = PBXTargetDependency;
 			target = 8ADE4C2F5910D2DE934CC66D /* PsycheApp */;
 			targetProxy = CCE085BCFB2D884746A22CC1 /* PBXContainerItemProxy */;
+		};
+		684BEA1E5CFEB2346F43CE22 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8ADE4C2F5910D2DE934CC66D /* PsycheApp */;
+			targetProxy = F096DBB990D17EF8E4677844 /* PBXContainerItemProxy */;
 		};
 		707749F7AABAA542E29A2BAB /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -650,6 +753,38 @@
 				PRODUCT_NAME = "Psyche Build";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		7C21C294C10F2698D3D5C5AE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.apptests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Psyche Build.app/Psyche Build";
+			};
+			name = Release;
+		};
+		8350284A942DD6212AA082CB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.opencoven.psyche-ios.apptests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Psyche Build.app/Psyche Build";
 			};
 			name = Debug;
 		};
@@ -850,6 +985,15 @@
 			buildConfigurations = (
 				6961D6D2A86AD6C4B01E98A6 /* Debug */,
 				06EF7F03A6F1534708AFD878 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D207A7B0358B457250963417 /* Build configuration list for PBXNativeTarget "PsycheAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8350284A942DD6212AA082CB /* Debug */,
+				7C21C294C10F2698D3D5C5AE /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

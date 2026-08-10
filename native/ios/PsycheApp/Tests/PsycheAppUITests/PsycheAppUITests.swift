@@ -194,8 +194,15 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Paired with psyche.local"].waitForExistence(timeout: 5))
     }
 
-    private func launchApp() -> XCUIApplication {
+    /// Always launches the fixture root.
+    ///
+    /// Without this the app composes its production graph — a real transport
+    /// and the device keychain — under test, which is what the fixture root
+    /// exists to avoid. It also made four of these tests die with `signal
+    /// kill` on launch rather than fail with anything readable.
+    private func launchApp(arguments: [String] = ["-uiFixture", "multiproject"]) -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchArguments += arguments
         app.launch()
         return app
     }

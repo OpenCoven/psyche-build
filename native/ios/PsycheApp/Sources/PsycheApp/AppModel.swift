@@ -12,6 +12,9 @@ import PsycheCore
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var connectionError: String?
+    /// Which host the state on screen came from. Rows read it for VoiceOver,
+    /// where the host is not otherwise recoverable from the visible text.
+    @Published private(set) var hostName: String?
 
     let workspaceStore: WorkspaceStore
     /// `nil` under a fixture launch — that absence is what makes the fixture
@@ -35,6 +38,14 @@ final class AppModel: ObservableObject {
 
         composition = nil
         workspaceStore = DemoStore.makeWorkspaceStore(fixture: fixture)
+        hostName = Self.fixtureHostName
+    }
+
+    /// Fixed so UI tests can assert host context without a paired record.
+    static let fixtureHostName = "psyche-demo.local"
+
+    func recordPairedHostName(_ name: String) {
+        hostName = name
     }
 
     /// Reads the launch arguments once so the decision cannot drift between
@@ -54,6 +65,14 @@ final class AppModel: ObservableObject {
         guard let composition else { return }
 
         await composition.start()
+
+        // Read the stored identity rather than waiting on a welcome: it is
+        // what auto-connect just used, and it lets Settings and VoiceOver name
+        // the host even when the connection has not come up.
+        if let paired = try? await composition.pairedHostStore.hosts().first {
+            hostName = paired.serverName
+        }
+
         let state = await composition.connectionManager.state
         if case let .failed(reason) = state {
             connectionError = reason

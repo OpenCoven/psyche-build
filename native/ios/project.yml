@@ -66,6 +66,18 @@ targets:
         PRODUCT_NAME: Psyche Build
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
+  PsycheAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: PsycheApp/UnitTests
+    dependencies:
+      - target: PsycheApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.opencoven.psyche-ios.apptests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Psyche Build.app/Psyche Build
+        BUNDLE_LOADER: $(TEST_HOST)
   PsycheAppUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -90,8 +102,10 @@ schemes:
     build:
       targets:
         PsycheApp: all
+        PsycheAppTests: [test]
         PsycheAppUITests: [test]
     test:
       targets:
         - PsycheCoreTests
+        - PsycheAppTests
         - PsycheAppUITests
