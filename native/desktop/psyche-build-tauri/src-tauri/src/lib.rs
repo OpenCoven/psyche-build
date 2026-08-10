@@ -22,6 +22,7 @@ use tauri::{
 
 mod coven_sessions;
 mod platform;
+pub mod pty_transport;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
