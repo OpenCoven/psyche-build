@@ -1028,9 +1028,10 @@
 
     try {
       var scaleFactor = await currentWindow.scaleFactor();
-      if (Number.isFinite(scaleFactor) && scaleFactor > 0) {
-        imageDropScaleFactor = scaleFactor;
+      if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+        throw new Error("invalid window scale factor");
       }
+      imageDropScaleFactor = scaleFactor;
       if (typeof currentWindow.onScaleChanged === "function") {
         await currentWindow.onScaleChanged(function (event) {
           var nextScaleFactor = event && event.payload && event.payload.scaleFactor;

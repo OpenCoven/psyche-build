@@ -584,6 +584,34 @@ describe('native terminal image drop wiring', () => {
     ]);
   });
 
+  it.each([
+    Number.NaN,
+    0,
+  ])('warns when the initial scale factor is invalid (%s)', async (scaleResult) => {
+    const actions: string[] = [];
+    const installInvalidScale = compileFunction<() => Promise<boolean>>(
+      functionSource('installTerminalImageDrop'),
+      {
+        currentWindow: {
+          scaleFactor: async () => scaleResult,
+          onScaleChanged: async () => actions.push('scale-listener'),
+          onDragDropEvent: async () => actions.push('drag-listener'),
+        },
+        imageDropScaleFactor: 1,
+        window: { addEventListener: () => actions.push('blur-listener') },
+        setStatus: (text: string, level: string) => actions.push(`${level}:${text}`),
+        clearImageDropTarget: () => actions.push('clear'),
+        handleTerminalImageDropEvent: () => undefined,
+      },
+    );
+
+    await expect(installInvalidScale()).resolves.toBe(false);
+    expect(actions).toEqual([
+      'clear',
+      'warn:image drop unavailable: Error: invalid window scale factor',
+    ]);
+  });
+
   it('installs image drop once at the start of boot', () => {
     expect(mainJs).toContain('var imageDropScaleFactor = 1;');
     expect(mainJs).toContain('var imageDropTarget = null;');
@@ -594,8 +622,25 @@ describe('native terminal image drop wiring', () => {
   });
 
   it('styles the pane target with the required visible instruction', () => {
-    expect(stylesCss).toContain('.terminal-pane.image-drop-target');
-    expect(stylesCss).toContain('content: "Drop images to insert paths"');
+    const targetRule = stylesCss.match(/\.terminal-pane\.image-drop-target\s*\{([^}]*)\}/s)?.[1];
+    const overlayRule = stylesCss.match(/\.terminal-pane\.image-drop-target::after\s*\{([^}]*)\}/s)?.[1];
+
+    expect(targetRule).toBeTruthy();
+    expect(targetRule).toContain('border-color: rgba(var(--rgb-accent), 0.72);');
+    expect(targetRule).toContain('box-shadow:');
+    expect(overlayRule).toBeTruthy();
+    expect(overlayRule).toContain('content: "Drop images to insert paths";');
+    expect(overlayRule).toContain('left: 50%;');
+    expect(overlayRule).toContain('top: 50%;');
+    expect(overlayRule).toContain('transform: translate(-50%, -50%);');
+    expect(overlayRule).toContain('padding: 8px 12px;');
+    expect(overlayRule).toContain('border: 1px solid rgba(var(--rgb-accent), 0.26);');
+    expect(overlayRule).toContain('border-radius: 999px;');
+    expect(overlayRule).toContain('background: var(--surface-1);');
+    expect(overlayRule).toContain('pointer-events: none;');
+    expect(overlayRule).not.toContain('inset:');
+    expect(overlayRule).not.toContain('display: grid;');
+    expect(overlayRule).not.toContain('place-items: center;');
     expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*position:\s*relative/s);
   });
 });
