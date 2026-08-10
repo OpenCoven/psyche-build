@@ -1,4 +1,5 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import type { Stats } from 'node:fs';
 
 export type BuildChannel = 'stable' | 'dev';
 
@@ -19,16 +20,26 @@ export interface BuildChannelConfig {
   appName: string;
 }
 
-export interface BuildProvenance {
-  channel: BuildChannel;
+export interface BuildProvenanceBase {
   commitSha: string;
-  requestedRef?: string;
   dirty: boolean;
   builtAt: string;
   installedPath: string;
   productName: string;
   bundleIdentifier: string;
 }
+
+export interface StableBuildProvenance extends BuildProvenanceBase {
+  channel: 'stable';
+  requestedRef: string;
+}
+
+export interface DevBuildProvenance extends BuildProvenanceBase {
+  channel: 'dev';
+  requestedRef?: never;
+}
+
+export type BuildProvenance = StableBuildProvenance | DevBuildProvenance;
 
 export interface BundleIdentity {
   name: string;
@@ -57,9 +68,22 @@ export type BuildCommand = [command: string, args: string[], cwd: string];
 export interface CommandOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  stage?: string;
 }
 
 export interface CommandResult {
+  stdout: string;
+  stderr: string;
+}
+
+export interface RunCommandError extends Error {
+  command: string;
+  args: string[];
+  cwd: string;
+  stage: string;
+  exitCode?: number;
+  code?: string;
+  signal?: NodeJS.Signals;
   stdout: string;
   stderr: string;
 }
@@ -86,10 +110,17 @@ export interface InstallOverrides {
 export interface WriteBuildProvenanceOverrides {
   homeDir?: string;
   mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  makeLockDirectory?: (directoryPath: string) => void | Promise<void>;
   readFileText?: (filePath: string) => string | Promise<string>;
   writeFileText?: (filePath: string, content: string) => void | Promise<void>;
   renamePath?: (sourcePath: string, destinationPath: string) => void | Promise<void>;
   removePath?: (targetPath: string) => void | Promise<void>;
+  statPath?: (targetPath: string) => Pick<Stats, 'mtimeMs'> | Promise<Pick<Stats, 'mtimeMs'>>;
+  sleep?: (ms: number) => Promise<void>;
+  nowMs?: () => number;
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
+  staleLockMs?: number;
   randomUUID?: () => string;
 }
 
@@ -115,13 +146,13 @@ export interface SmokeLaunchOverrides {
 export interface StableRunMacosBuildOptions {
   channel: 'stable';
   ref: string;
-  repositoryRoot: string;
+  repositoryRoot?: string;
 }
 
 export interface DevRunMacosBuildOptions {
   channel: 'dev';
   ref?: never;
-  repositoryRoot: string;
+  repositoryRoot?: string;
 }
 
 export type RunMacosBuildOptions = StableRunMacosBuildOptions | DevRunMacosBuildOptions;
@@ -150,19 +181,22 @@ export interface RunMacosBuildDependencies {
   homeDir?: string;
 }
 
-export interface StableRunMacosBuildResult extends BuildProvenance {
-  channel: 'stable';
-  requestedRef: string;
-}
+export interface StableRunMacosBuildResult extends StableBuildProvenance {}
 
-export interface DevRunMacosBuildResult extends BuildProvenance {
-  channel: 'dev';
-  requestedRef?: never;
-}
+export interface DevRunMacosBuildResult extends DevBuildProvenance {}
 
 export type RunMacosBuildResult =
   | StableRunMacosBuildResult
   | DevRunMacosBuildResult;
+
+export interface RunCliDependencies {
+  runBuild?: (
+    options: RunMacosBuildOptions,
+    deps?: RunMacosBuildDependencies,
+  ) => Promise<RunMacosBuildResult>;
+  stdout?: (line: string) => void;
+  stderr?: (line: string) => void;
+}
 
 export function parseBuildArguments(argv: readonly string[]): ParsedBuildArguments;
 export function channelConfig(channel: BuildChannel): BuildChannelConfig;
@@ -217,3 +251,7 @@ export function runMacosBuild(
   options: RunMacosBuildOptions,
   deps?: RunMacosBuildDependencies,
 ): Promise<RunMacosBuildResult>;
+export function runCli(
+  argv: readonly string[],
+  deps?: RunCliDependencies,
+): Promise<number>;

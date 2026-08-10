@@ -1,4 +1,18 @@
-import { channelConfig, installBundleTransactional } from '../scripts/build-macos-app.mjs';
+import {
+  channelConfig,
+  installBundleTransactional,
+  runCli,
+  runCommand,
+  runMacosBuild,
+} from '../scripts/build-macos-app.mjs';
+import type {
+  BuildProvenance,
+  CommandOptions,
+  DevBuildProvenance,
+  RunCliDependencies,
+  RunMacosBuildDependencies,
+  StableBuildProvenance,
+} from '../scripts/build-macos-app.mjs';
 
 const candidate = '/Applications/Psyche Build Dev.app';
 const devChannel = channelConfig('dev');
@@ -12,3 +26,76 @@ void installBundleTransactional(candidate, devChannel);
 
 // @ts-expect-error validateInstalledBundle is required
 void installBundleTransactional(candidate, devChannel, {});
+
+const baseProvenance = {
+  commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  dirty: false,
+  builtAt: '2026-08-10T18:00:00.000Z',
+  installedPath: '/Users/test/Applications/Psyche Build.app',
+  productName: 'Psyche Build',
+  bundleIdentifier: 'dev.opencoven.psyche',
+};
+
+const stableProvenance: StableBuildProvenance = {
+  ...baseProvenance,
+  channel: 'stable',
+  requestedRef: 'release/v1.2.3',
+};
+
+const devProvenance: DevBuildProvenance = {
+  ...baseProvenance,
+  channel: 'dev',
+  installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+  productName: 'Psyche Build Dev',
+  bundleIdentifier: 'dev.opencoven.psyche.dev',
+};
+
+const provenanceRecords: BuildProvenance[] = [stableProvenance, devProvenance];
+void provenanceRecords;
+
+// @ts-expect-error stable provenance requires requestedRef
+const stableWithoutRequestedRef: StableBuildProvenance = {
+  ...baseProvenance,
+  channel: 'stable',
+};
+void stableWithoutRequestedRef;
+
+const devWithRequestedRef: DevBuildProvenance = {
+  ...baseProvenance,
+  channel: 'dev',
+  installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+  productName: 'Psyche Build Dev',
+  bundleIdentifier: 'dev.opencoven.psyche.dev',
+  // @ts-expect-error dev provenance forbids requestedRef
+  requestedRef: 'HEAD',
+};
+void devWithRequestedRef;
+
+const commandOptions: CommandOptions = {
+  cwd: '/workspace/psyche-build',
+  stage: 'resolve current commit',
+};
+void runCommand('git', ['rev-parse', 'HEAD'], commandOptions);
+
+const buildDependencies: RunMacosBuildDependencies = {
+  execute: async () => ({ stdout: '', stderr: '' }),
+  writeBuildProvenance: async (record) => {
+    const typedRecord: BuildProvenance = record;
+    void typedRecord;
+    return '/state/builds.json';
+  },
+};
+void runMacosBuild({ channel: 'dev' }, buildDependencies);
+
+// @ts-expect-error stable builds require a ref
+void runMacosBuild({ channel: 'stable' }, buildDependencies);
+
+// @ts-expect-error dev builds forbid a ref
+void runMacosBuild({ channel: 'dev', ref: 'HEAD' }, buildDependencies);
+
+const cliDependencies: RunCliDependencies = {
+  runBuild: async (options, dependencies) => runMacosBuild(options, dependencies),
+  stdout: (_line) => {},
+  stderr: (_line) => {},
+};
+void runCli(['dev'], cliDependencies);

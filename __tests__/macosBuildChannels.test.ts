@@ -1,11 +1,13 @@
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
@@ -25,6 +27,7 @@ import {
   parseBuildArguments,
   readBundleIdentity,
   resolveCommit,
+  runCli,
   runCommand,
   runMacosBuild,
   smokeLaunchBundle,
@@ -122,6 +125,21 @@ function readAppMarker(appPath: string): string {
 
 function copyBundle(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
+}
+
+function runGit(repository: string, args: string[]): string {
+  const result = spawnSync('git', args, {
+    cwd: repository,
+    encoding: 'utf8',
+  });
+
+  if (result.status !== 0) {
+    throw new Error(
+      `git ${args.join(' ')} failed with status ${String(result.status)}\n${result.stderr}`,
+    );
+  }
+
+  return result.stdout;
 }
 
 function createSleepController() {
@@ -332,16 +350,21 @@ describe('macOS build channels', () => {
       });
     });
 
-    it('reports command failure details and preserves the cause', async () => {
+    it('reports stage, cwd, command failure details, and preserves the cause', async () => {
       const command = process.execPath;
       const failure = await runCommand(command, [
         '-e',
         'process.stdout.write("partial"); process.stderr.write("broken"); process.exit(7)',
-      ]).then(
+      ], {
+        cwd: repositoryRoot,
+        stage: 'validate generated application',
+      }).then(
         () => undefined,
         (error) =>
           error as Error & {
             command?: string;
+            cwd?: string;
+            stage?: string;
             exitCode?: number;
             stdout?: string;
             stderr?: string;
@@ -349,14 +372,75 @@ describe('macOS build channels', () => {
       );
 
       expect(failure).toBeDefined();
+      expect(failure?.message).toContain('validate generated application');
+      expect(failure?.message).toContain(repositoryRoot);
       expect(failure?.message).toContain(command);
       expect(failure?.message).toContain('exit code 7');
       expect(failure?.message).toContain('partial');
       expect(failure?.message).toContain('broken');
+      expect(failure?.message).toContain('cause:');
       expect(failure?.command).toBe(command);
+      expect(failure?.cwd).toBe(repositoryRoot);
+      expect(failure?.stage).toBe('validate generated application');
       expect(failure?.exitCode).toBe(7);
       expect(failure?.stdout).toBe('partial');
       expect(failure?.stderr).toBe('broken');
+      expect(failure?.cause).toBeInstanceOf(Error);
+    });
+
+    it('reports spawn codes and messages when the executable does not exist', async () => {
+      const missingCommand = join(
+        createScratchDirectory('missing-command'),
+        'does-not-exist',
+      );
+      const failure = await runCommand(missingCommand, [], {
+        cwd: repositoryRoot,
+        stage: 'resolve external tool',
+      }).then(
+        () => undefined,
+        (error) =>
+          error as Error & {
+            code?: string;
+            stage?: string;
+          },
+      );
+
+      expect(failure).toBeDefined();
+      expect(failure?.message).toContain('resolve external tool');
+      expect(failure?.message).toContain(`spawn code ENOENT`);
+      expect(failure?.message).toMatch(/ENOENT|no such file/i);
+      expect(failure?.message).toContain('cause:');
+      expect(failure?.code).toBe('ENOENT');
+      expect(failure?.stage).toBe('resolve external tool');
+      expect(failure?.cause).toBeInstanceOf(Error);
+    });
+
+    it('reports the terminating signal when a command is killed', async () => {
+      const failure = await runCommand(
+        process.execPath,
+        ['-e', 'process.kill(process.pid, "SIGTERM")'],
+        {
+          cwd: repositoryRoot,
+          stage: 'exercise signal reporting',
+        },
+      ).then(
+        () => undefined,
+        (error) =>
+          error as Error & {
+            signal?: NodeJS.Signals;
+            stdout?: string;
+            stderr?: string;
+          },
+      );
+
+      expect(failure).toBeDefined();
+      expect(failure?.message).toContain('exercise signal reporting');
+      expect(failure?.message).toContain('signal SIGTERM');
+      expect(failure?.message).toContain('stdout:\n');
+      expect(failure?.message).toContain('stderr:\n');
+      expect(failure?.signal).toBe('SIGTERM');
+      expect(failure?.stdout).toBe('');
+      expect(failure?.stderr).toBe('');
       expect(failure?.cause).toBeInstanceOf(Error);
     });
 
@@ -375,7 +459,26 @@ describe('macOS build channels', () => {
       expect(execute).toHaveBeenCalledWith(
         'git',
         ['rev-parse', '--verify', 'release candidate^{commit}'],
-        { cwd: '/repo with spaces' },
+        {
+          cwd: '/repo with spaces',
+          stage: 'resolve Git ref "release candidate"',
+        },
+      );
+    });
+
+    it('rejects an ambiguous ref in a real repository even when git prints a full SHA', async () => {
+      const gitRepository = createScratchDirectory('ambiguous-git-ref');
+      runGit(gitRepository, ['init', '--quiet']);
+      runGit(gitRepository, ['config', 'user.name', 'Psyche Build Tests']);
+      runGit(gitRepository, ['config', 'user.email', 'tests@example.invalid']);
+      writeFileSync(join(gitRepository, 'tracked.txt'), 'tracked\n', 'utf8');
+      runGit(gitRepository, ['add', 'tracked.txt']);
+      runGit(gitRepository, ['commit', '--quiet', '-m', 'initial']);
+      runGit(gitRepository, ['branch', 'shared-name']);
+      runGit(gitRepository, ['tag', 'shared-name']);
+
+      await expect(resolveCommit(gitRepository, 'shared-name')).rejects.toThrow(
+        /ambiguous.*shared-name|shared-name.*ambiguous/i,
       );
     });
 
@@ -404,7 +507,10 @@ describe('macOS build channels', () => {
       );
 
       await expect(sourceIsDirty('/repo', execute)).resolves.toBe(expected);
-      expect(execute).toHaveBeenCalledWith('git', ['status', '--porcelain'], { cwd: '/repo' });
+      expect(execute).toHaveBeenCalledWith('git', ['status', '--porcelain'], {
+        cwd: '/repo',
+        stage: 'inspect source status',
+      });
     });
 
     it('reads all required bundle identity values with plutil argument arrays', async () => {
@@ -428,9 +534,21 @@ describe('macOS build channels', () => {
         executable: 'psyche-build',
       });
       expect(execute.mock.calls).toEqual([
-        ['plutil', ['-extract', 'CFBundleName', 'raw', '-o', '-', infoPath]],
-        ['plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPath]],
-        ['plutil', ['-extract', 'CFBundleExecutable', 'raw', '-o', '-', infoPath]],
+        [
+          'plutil',
+          ['-extract', 'CFBundleName', 'raw', '-o', '-', infoPath],
+          { stage: 'read plist key CFBundleName' },
+        ],
+        [
+          'plutil',
+          ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPath],
+          { stage: 'read plist key CFBundleIdentifier' },
+        ],
+        [
+          'plutil',
+          ['-extract', 'CFBundleExecutable', 'raw', '-o', '-', infoPath],
+          { stage: 'read plist key CFBundleExecutable' },
+        ],
       ]);
     });
   });
@@ -668,6 +786,7 @@ describe('macOS build channels', () => {
           stdio: ['ignore', 'pipe', 'pipe'],
           env: expect.objectContaining({
             HOME: '/virtual/home',
+            CFFIXED_USER_HOME: '/virtual/home',
             TMPDIR: '/virtual/home/tmp',
             XDG_CONFIG_HOME: '/virtual/home/.config',
             XDG_CACHE_HOME: '/virtual/home/.cache',
@@ -1095,6 +1214,72 @@ describe('macOS build channels', () => {
       bundleIdentifier: 'dev.opencoven.psyche.dev',
     };
 
+    it.each([
+      {
+        name: 'unknown channel',
+        record: { ...devRecord, channel: 'preview' },
+        errorPattern: /channel must be "stable" or "dev"/i,
+      },
+      {
+        name: 'stable record without requestedRef',
+        record: (({ requestedRef: _requestedRef, ...record }) => record)(stableRecord),
+        errorPattern: /stable.*requestedRef.*nonblank/i,
+      },
+      {
+        name: 'stable record with blank requestedRef',
+        record: { ...stableRecord, requestedRef: '   ' },
+        errorPattern: /stable.*requestedRef.*nonblank/i,
+      },
+      {
+        name: 'dev record with requestedRef',
+        record: { ...devRecord, requestedRef: 'HEAD' },
+        errorPattern: /dev.*requestedRef.*forbidden/i,
+      },
+      {
+        name: 'uppercase commit SHA',
+        record: { ...devRecord, commitSha: 'B'.repeat(40) },
+        errorPattern: /lowercase hexadecimal commitSha/i,
+      },
+      {
+        name: 'non-boolean dirty state',
+        record: { ...devRecord, dirty: 'yes' },
+        errorPattern: /boolean dirty/i,
+      },
+      {
+        name: 'non-canonical build timestamp',
+        record: { ...devRecord, builtAt: '2026-08-10T11:00:00Z' },
+        errorPattern: /exact ISO timestamp/i,
+      },
+      {
+        name: 'relative installed path',
+        record: { ...devRecord, installedPath: 'Applications/Psyche Build Dev.app' },
+        errorPattern: /absolute installedPath/i,
+      },
+      {
+        name: 'wrong installed app name',
+        record: { ...devRecord, installedPath: '/Users/test/Applications/Psyche Build.app' },
+        errorPattern: /installedPath.*Psyche Build Dev\.app/i,
+      },
+      {
+        name: 'wrong product name',
+        record: { ...devRecord, productName: 'Psyche Build' },
+        errorPattern: /productName="Psyche Build Dev"/i,
+      },
+      {
+        name: 'wrong bundle identifier',
+        record: { ...devRecord, bundleIdentifier: 'dev.opencoven.psyche' },
+        errorPattern: /bundleIdentifier="dev\.opencoven\.psyche\.dev"/i,
+      },
+    ])('rejects an incoming $name before creating state', async ({ record, errorPattern }) => {
+      const homeDir = createScratchDirectory('provenance-invalid-incoming');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+
+      await expect(
+        writeBuildProvenance(record as unknown as BuildProvenance, { homeDir }),
+      ).rejects.toThrow(errorPattern);
+      expect(existsSync(stateDir)).toBe(false);
+    });
+
     it('preserves stable and dev provenance independently', async () => {
       const homeDir = createScratchDirectory('provenance-preservation');
       const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
@@ -1162,6 +1347,68 @@ describe('macOS build channels', () => {
           /Invalid build provenance file .* channel "dev" record must contain a 40-character lowercase hexadecimal commitSha/i,
       },
       {
+        name: 'stable record without requestedRef',
+        state: {
+          version: 1,
+          channels: {
+            stable: (({ requestedRef: _requestedRef, ...record }) => record)(stableRecord),
+          },
+        },
+        errorPattern: /Invalid build provenance file .*stable.*requestedRef.*nonblank/i,
+      },
+      {
+        name: 'dev record with requestedRef',
+        state: {
+          version: 1,
+          channels: {
+            dev: {
+              ...devRecord,
+              requestedRef: 'HEAD',
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .*dev.*requestedRef.*forbidden/i,
+      },
+      {
+        name: 'non-canonical timestamp',
+        state: {
+          version: 1,
+          channels: {
+            dev: {
+              ...devRecord,
+              builtAt: '2026-08-10T11:00:00Z',
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .* exact ISO timestamp/i,
+      },
+      {
+        name: 'relative installed path',
+        state: {
+          version: 1,
+          channels: {
+            dev: {
+              ...devRecord,
+              installedPath: 'Applications/Psyche Build Dev.app',
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .* absolute installedPath/i,
+      },
+      {
+        name: 'wrong stable identity',
+        state: {
+          version: 1,
+          channels: {
+            stable: {
+              ...stableRecord,
+              productName: 'Psyche Build Dev',
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .* productName="Psyche Build"/i,
+      },
+      {
         name: 'unknown channel key',
         state: {
           version: 1,
@@ -1187,6 +1434,109 @@ describe('macOS build channels', () => {
       expect(readFileSync(provenancePath, 'utf8')).toBe(before);
     });
 
+    it('serializes concurrent stable and dev updates so neither record is lost', async () => {
+      const homeDir = createScratchDirectory('provenance-concurrent');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      let releaseFirstWrite = () => {};
+      let markFirstWriting = () => {};
+      const firstWriteGate = new Promise<void>((resolveGate) => {
+        releaseFirstWrite = resolveGate;
+      });
+      const firstWriting = new Promise<void>((resolveWriting) => {
+        markFirstWriting = resolveWriting;
+      });
+
+      const stableWrite = writeBuildProvenance(stableRecord, {
+        homeDir,
+        lockRetryMs: 1,
+        writeFileText: async (filePath: string, content: string) => {
+          markFirstWriting();
+          await firstWriteGate;
+          writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+        },
+      });
+      await firstWriting;
+
+      const devWrite = writeBuildProvenance(devRecord, {
+        homeDir,
+        lockRetryMs: 1,
+      });
+      await tick();
+      releaseFirstWrite();
+      await Promise.all([stableWrite, devWrite]);
+
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          stable: stableRecord,
+          dev: devRecord,
+        },
+      });
+      expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it('times out while a fresh provenance lock is held by another process', async () => {
+      const homeDir = createScratchDirectory('provenance-lock-timeout');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          lockTimeoutMs: 0,
+          staleLockMs: 60_000,
+        }),
+      ).rejects.toThrow(/Timed out.*provenance lock/i);
+      expect(existsSync(provenancePath)).toBe(false);
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    it('bounds lock retries even when the injected clock does not advance', async () => {
+      const homeDir = createScratchDirectory('provenance-static-clock-timeout');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const lockPath = join(stateDir, 'builds.json.lock');
+      const sleep = vi.fn(async () => {});
+      mkdirSync(lockPath, { recursive: true });
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          nowMs: () => 1_000,
+          sleep,
+          lockTimeoutMs: 3,
+          lockRetryMs: 1,
+          staleLockMs: 60_000,
+        }),
+      ).rejects.toThrow(/Timed out after 3ms.*provenance lock/i);
+      expect(sleep).toHaveBeenCalledTimes(3);
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    it('recovers a stale provenance lock and removes its replacement lock after writing', async () => {
+      const homeDir = createScratchDirectory('provenance-stale-lock');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+      const staleTime = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, staleTime, staleTime);
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          lockRetryMs: 1,
+          lockTimeoutMs: 50,
+          staleLockMs: 10,
+        }),
+      ).resolves.toBe(provenancePath);
+      expect(existsSync(lockPath)).toBe(false);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+    });
+
     it('cleans up atomic temp files when writing the provenance file fails', async () => {
       const homeDir = createScratchDirectory('provenance-write-failure');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
@@ -1202,6 +1552,7 @@ describe('macOS build channels', () => {
       ).rejects.toThrow(/write failed/);
 
       expect(readdirSync(stateDir)).toEqual([]);
+      expect(existsSync(join(stateDir, 'builds.json.lock'))).toBe(false);
     });
 
     it('cleans up atomic temp files when renaming the provenance file fails', async () => {
@@ -1228,6 +1579,61 @@ describe('macOS build channels', () => {
         },
       });
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
+    it('reports lock release failures after an otherwise successful write', async () => {
+      const homeDir = createScratchDirectory('provenance-release-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+
+      const error = await writeBuildProvenance(devRecord, {
+        homeDir,
+        removePath: async (targetPath) => {
+          if (targetPath === lockPath) {
+            throw new Error('release failed');
+          }
+          rmSync(targetPath, { recursive: true, force: true });
+        },
+      }).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error?.message).toContain('Failed to release build provenance lock');
+      expect(error?.message).toContain('release failed');
+      expect(error?.cause).toBeInstanceOf(Error);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    it('preserves write and lock release failures together', async () => {
+      const homeDir = createScratchDirectory('provenance-write-release-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const lockPath = join(stateDir, 'builds.json.lock');
+
+      const error = await writeBuildProvenance(devRecord, {
+        homeDir,
+        writeFileText: async () => {
+          throw new Error('write failed');
+        },
+        removePath: async (targetPath) => {
+          if (targetPath === lockPath) {
+            throw new Error('release failed');
+          }
+          rmSync(targetPath, { recursive: true, force: true });
+        },
+      }).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error?.message).toContain('write failed');
+      expect(error?.message).toContain('Failed to release build provenance lock');
+      expect(error?.message).toContain('release failed');
+      expect((error as AggregateError).errors).toHaveLength(2);
+      expect(existsSync(lockPath)).toBe(true);
     });
   });
 
@@ -1321,17 +1727,37 @@ describe('macOS build channels', () => {
       const expectedBuildCalls = buildCommandsFor('stable').map(([command, args, relativeCwd]) => [
         command,
         args,
-        { cwd: resolve(sourceRoot, relativeCwd) },
+        {
+          cwd: resolve(sourceRoot, relativeCwd),
+          stage: `run stable validation/build command: ${command} ${args.join(' ')}`,
+        },
       ]);
       expect(execute.mock.calls).toEqual([
         [
           'git',
           ['rev-parse', '--verify', 'release candidate^{commit}'],
-          { cwd: virtualRepository },
+          {
+            cwd: virtualRepository,
+            stage: 'resolve Git ref "release candidate"',
+          },
         ],
-        ['git', ['worktree', 'add', '--detach', sourceRoot, stableSha], { cwd: virtualRepository }],
+        [
+          'git',
+          ['worktree', 'add', '--detach', sourceRoot, stableSha],
+          {
+            cwd: virtualRepository,
+            stage: 'add stable worktree',
+          },
+        ],
         ...expectedBuildCalls,
-        ['git', ['worktree', 'remove', '--force', sourceRoot], { cwd: virtualRepository }],
+        [
+          'git',
+          ['worktree', 'remove', '--force', sourceRoot],
+          {
+            cwd: virtualRepository,
+            stage: 'remove stable worktree',
+          },
+        ],
       ]);
       expect(sourceRoot).not.toBe(tempRoot);
       expect(events.indexOf(`remove:${candidate}`)).toBeLessThan(
@@ -1418,8 +1844,16 @@ describe('macOS build channels', () => {
       expect(
         execute.mock.calls.filter(([command, args]) => command === 'git' && args[0] === 'worktree'),
       ).toEqual([
-        ['git', ['worktree', 'add', '--detach', sourceRoot, stableSha], { cwd: virtualRepository }],
-        ['git', ['worktree', 'remove', '--force', sourceRoot], { cwd: virtualRepository }],
+        [
+          'git',
+          ['worktree', 'add', '--detach', sourceRoot, stableSha],
+          { cwd: virtualRepository, stage: 'add stable worktree' },
+        ],
+        [
+          'git',
+          ['worktree', 'remove', '--force', sourceRoot],
+          { cwd: virtualRepository, stage: 'remove stable worktree' },
+        ],
       ]);
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('prune');
       expect(install).not.toHaveBeenCalled();
@@ -1487,13 +1921,24 @@ describe('macOS build channels', () => {
         tempRoot,
       );
       expect(execute.mock.calls).toEqual([
-        ['git', ['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: virtualRepository }],
-        ['git', ['status', '--porcelain'], { cwd: virtualRepository }],
+        [
+          'git',
+          ['rev-parse', '--verify', 'HEAD^{commit}'],
+          { cwd: virtualRepository, stage: 'resolve current commit' },
+        ],
+        [
+          'git',
+          ['status', '--porcelain'],
+          { cwd: virtualRepository, stage: 'inspect source status' },
+        ],
         ...buildCommandsFor('dev', { devConfigPath: configPath }).map(
           ([command, args, relativeCwd]) => [
             command,
             args,
-            { cwd: resolve(virtualRepository, relativeCwd) },
+            {
+              cwd: resolve(virtualRepository, relativeCwd),
+              stage: `run dev validation/build command: ${command} ${args.join(' ')}`,
+            },
           ],
         ),
       ]);
@@ -1511,6 +1956,84 @@ describe('macOS build channels', () => {
         productName: 'Psyche Build Dev',
         bundleIdentifier: 'dev.opencoven.psyche.dev',
       });
+    });
+
+    it('does not install or record provenance when a dev build command fails and cleans the config root', async () => {
+      const tempRoot = '/workspace/.build-temp/dev-build-failure';
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const candidate = join(
+        virtualRepository,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'Psyche Build Dev.app',
+      );
+      const removePath = vi.fn(async () => {});
+      const install = vi.fn(async () => '/should-not-install');
+      const writeProvenance = vi.fn(async () => '/should-not-write');
+
+      await expect(
+        runMacosBuild(
+          { channel: 'dev', repositoryRoot: virtualRepository },
+          {
+            execute: async (command, args) => {
+              if (command === 'git' && args[0] === 'rev-parse') {
+                return { stdout: `${devSha}\n`, stderr: '' };
+              }
+              if (command === 'pnpm') {
+                throw new Error('dev build failed');
+              }
+              return { stdout: '', stderr: '' };
+            },
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath,
+            writeDevTauriConfig: async () => configPath,
+            installBundleTransactional: install,
+            writeBuildProvenance: writeProvenance,
+          },
+        ),
+      ).rejects.toThrow('dev build failed');
+
+      expect(install).not.toHaveBeenCalled();
+      expect(writeProvenance).not.toHaveBeenCalled();
+      expect(removePath).toHaveBeenNthCalledWith(1, candidate);
+      expect(removePath).toHaveBeenLastCalledWith(tempRoot);
+    });
+
+    it('does not install or record provenance when dev bundle identity fails and cleans the config root', async () => {
+      const tempRoot = '/workspace/.build-temp/dev-identity-failure';
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const candidate = join(
+        virtualRepository,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'Psyche Build Dev.app',
+      );
+      const removePath = vi.fn(async () => {});
+      const install = vi.fn(async () => '/should-not-install');
+      const writeProvenance = vi.fn(async () => '/should-not-write');
+
+      await expect(
+        runMacosBuild(
+          { channel: 'dev', repositoryRoot: virtualRepository },
+          {
+            execute: async (command, args) => {
+              if (command === 'git' && args[0] === 'rev-parse') {
+                return { stdout: `${devSha}\n`, stderr: '' };
+              }
+              return { stdout: '', stderr: '' };
+            },
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath,
+            writeDevTauriConfig: async () => configPath,
+            findCandidateApp: async () => candidate,
+            readBundleIdentity: async () => stableIdentity,
+            installBundleTransactional: install,
+            writeBuildProvenance: writeProvenance,
+          },
+        ),
+      ).rejects.toThrow(/Bundle identity mismatch/);
+
+      expect(install).not.toHaveBeenCalled();
+      expect(writeProvenance).not.toHaveBeenCalled();
+      expect(removePath).toHaveBeenLastCalledWith(tempRoot);
     });
 
     it('leaves an installed app in place when provenance writing fails', async () => {
@@ -1619,6 +2142,91 @@ describe('macOS build channels', () => {
   });
 
   describe('CLI entrypoint', () => {
+    it('prints stable install path and exact SHA without a dirty phrase', async () => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const runBuild = vi.fn(async () => ({
+        channel: 'stable' as const,
+        commitSha: 'a'.repeat(40),
+        requestedRef: 'release/v1.2.3',
+        dirty: false,
+        builtAt: '2026-08-10T18:00:00.000Z',
+        installedPath: '/Users/test/Applications/Psyche Build.app',
+        productName: 'Psyche Build',
+        bundleIdentifier: 'dev.opencoven.psyche',
+      }));
+
+      await expect(
+        runCli(['stable', 'release/v1.2.3'], {
+          runBuild,
+          stdout: (line: string) => stdout.push(line),
+          stderr: (line: string) => stderr.push(line),
+        }),
+      ).resolves.toBe(0);
+
+      expect(runBuild).toHaveBeenCalledOnce();
+      expect(runBuild).toHaveBeenCalledWith({
+        channel: 'stable',
+        ref: 'release/v1.2.3',
+        repositoryRoot,
+      });
+      expect(stdout).toEqual([
+        'Installed Psyche Build at /Users/test/Applications/Psyche Build.app',
+        `Source ${'a'.repeat(40)} (clean source)`,
+      ]);
+      expect(stdout.join('\n')).not.toMatch(/dirty/i);
+      expect(stderr).toEqual([]);
+    });
+
+    it('prints dev install path, exact SHA, and the dirty phrase for a dirty dev build', async () => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const runBuild = vi.fn(async () => ({
+        channel: 'dev' as const,
+        commitSha: 'b'.repeat(40),
+        dirty: true,
+        builtAt: '2026-08-10T18:00:00.000Z',
+        installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+        productName: 'Psyche Build Dev',
+        bundleIdentifier: 'dev.opencoven.psyche.dev',
+      }));
+
+      await expect(
+        runCli(['dev'], {
+          runBuild,
+          stdout: (line: string) => stdout.push(line),
+          stderr: (line: string) => stderr.push(line),
+        }),
+      ).resolves.toBe(0);
+
+      expect(runBuild).toHaveBeenCalledOnce();
+      expect(stdout).toEqual([
+        'Installed Psyche Build Dev at /Users/test/Applications/Psyche Build Dev.app',
+        `Source ${'b'.repeat(40)} (dirty source)`,
+      ]);
+      expect(stderr).toEqual([]);
+    });
+
+    it('prints CLI errors to stderr without reporting success', async () => {
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const runBuild = vi.fn(async () => {
+        throw new Error('build exploded');
+      });
+
+      await expect(
+        runCli(['dev'], {
+          runBuild,
+          stdout: (line: string) => stdout.push(line),
+          stderr: (line: string) => stderr.push(line),
+        }),
+      ).resolves.toBe(1);
+
+      expect(runBuild).toHaveBeenCalledOnce();
+      expect(stdout).toEqual([]);
+      expect(stderr).toEqual(['build exploded']);
+    });
+
     it('names the missing stable ref on stderr, exits nonzero, and prints no install success', () => {
       const result = spawnSync('node', [scriptPath, 'stable'], {
         cwd: tauriDirectory,

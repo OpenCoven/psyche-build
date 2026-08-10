@@ -2,7 +2,16 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID as createRandomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,6 +42,9 @@ const repositoryRoot = path.resolve(path.dirname(scriptFilePath), '..');
 const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
+const DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_PROVENANCE_LOCK_RETRY_MS = 50;
+const DEFAULT_PROVENANCE_STALE_LOCK_MS = 30_000;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 const TEMP_BUILD_PREFIX = 'psyche-build-macos-';
 const BUILD_CHANNELS = ['stable', 'dev'];
@@ -104,21 +116,44 @@ export async function runCommand(command, args, options = {}) {
       stderr: String(result.stderr),
     };
   } catch (cause) {
+    const stage =
+      typeof options.stage === 'string' && options.stage.trim() !== ''
+        ? options.stage.trim()
+        : 'run command';
+    const cwd = path.resolve(options.cwd ?? process.cwd());
     const stdout = typeof cause?.stdout === 'string' ? cause.stdout : '';
     const stderr = typeof cause?.stderr === 'string' ? cause.stderr : '';
     const exitCode = typeof cause?.code === 'number' ? cause.code : undefined;
+    const code = typeof cause?.code === 'string' ? cause.code : undefined;
+    const signal = typeof cause?.signal === 'string' ? cause.signal : undefined;
     const sections = [
-      `Command failed: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
+      `Stage: ${stage}`,
+      `cwd: ${cwd}`,
+      `Command: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
     ];
 
     if (exitCode !== undefined) {
       sections.push(`exit code ${exitCode}`);
+    } else if (code !== undefined) {
+      sections.push(`spawn code ${code}`);
     }
-    sections.push(`stdout:\n${stdout}`, `stderr:\n${stderr}`);
+    if (signal !== undefined) {
+      sections.push(`signal ${signal}`);
+    }
+    sections.push(
+      `stdout:\n${stdout}`,
+      `stderr:\n${stderr}`,
+      `cause: ${describeError(cause)}`,
+    );
 
     const error = new Error(sections.join('\n'), { cause });
     error.command = command;
+    error.args = [...args];
+    error.cwd = cwd;
+    error.stage = stage;
     error.exitCode = exitCode;
+    error.code = code;
+    error.signal = signal;
     error.stdout = stdout;
     error.stderr = stderr;
     throw error;
@@ -128,7 +163,13 @@ export async function runCommand(command, args, options = {}) {
 export async function resolveCommit(root, ref, execute = runCommand) {
   const result = await execute('git', ['rev-parse', '--verify', `${ref}^{commit}`], {
     cwd: path.resolve(root),
+    stage: ref === 'HEAD' ? 'resolve current commit' : `resolve Git ref "${ref}"`,
   });
+
+  if (/\bambiguous\b/i.test(result.stderr)) {
+    throw new Error(`Git ref "${ref}" is ambiguous:\n${result.stderr.trim()}`);
+  }
+
   const commitSha = result.stdout.trim();
 
   if (!COMMIT_SHA_PATTERN.test(commitSha)) {
@@ -143,6 +184,7 @@ export async function resolveCommit(root, ref, execute = runCommand) {
 export async function sourceIsDirty(root, execute = runCommand) {
   const result = await execute('git', ['status', '--porcelain'], {
     cwd: path.resolve(root),
+    stage: 'inspect source status',
   });
   return result.stdout.length > 0;
 }
@@ -150,7 +192,9 @@ export async function sourceIsDirty(root, execute = runCommand) {
 export async function readBundleIdentity(appPath, execute = runCommand) {
   const infoPath = path.join(path.resolve(appPath), 'Contents', 'Info.plist');
   const readValue = async (key) => {
-    const result = await execute('plutil', ['-extract', key, 'raw', '-o', '-', infoPath]);
+    const result = await execute('plutil', ['-extract', key, 'raw', '-o', '-', infoPath], {
+      stage: `read plist key ${key}`,
+    });
     return result.stdout.trim();
   };
 
@@ -374,40 +418,101 @@ export async function writeBuildProvenance(record, overrides = {}) {
   const homeDir = path.resolve(overrides.homeDir ?? os.homedir());
   const stateDir = path.join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
   const statePath = path.join(stateDir, 'builds.json');
+  const lockPath = `${statePath}.lock`;
   const tempPath = path.join(
     stateDir,
     `.builds.json.${(overrides.randomUUID ?? createRandomUUID)()}.tmp`,
   );
   const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const makeLockDirectory = overrides.makeLockDirectory ?? defaultMakeLockDirectory;
   const readFileText = overrides.readFileText ?? defaultReadFileText;
   const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
   const renamePath = overrides.renamePath ?? defaultRenamePath;
   const removePath = overrides.removePath ?? defaultRemovePath;
+  const statPath = overrides.statPath ?? defaultStatPath;
+  const sleep = overrides.sleep ?? defaultSleep;
+  const nowMs = overrides.nowMs ?? Date.now;
+  const lockTimeoutMs =
+    overrides.lockTimeoutMs ?? DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS;
+  const lockRetryMs = overrides.lockRetryMs ?? DEFAULT_PROVENANCE_LOCK_RETRY_MS;
+  const staleLockMs =
+    overrides.staleLockMs ?? DEFAULT_PROVENANCE_STALE_LOCK_MS;
 
+  validateIncomingBuildProvenance(record);
+  validateLockTimingOption('lockTimeoutMs', lockTimeoutMs, true);
+  validateLockTimingOption('lockRetryMs', lockRetryMs, false);
+  validateLockTimingOption('staleLockMs', staleLockMs, false);
   await mkdirPath(stateDir);
 
-  const nextState = {
-    version: 1,
-    channels: {
-      ...(await readExistingBuildProvenance(statePath, readFileText)),
-      [record.channel]: record,
-    },
-  };
+  let lockAcquired = false;
+  let operationError;
+  let releaseError;
 
   try {
+    await acquireBuildProvenanceLock(lockPath, {
+      makeLockDirectory,
+      removePath,
+      statPath,
+      sleep,
+      nowMs,
+      lockTimeoutMs,
+      lockRetryMs,
+      staleLockMs,
+    });
+    lockAcquired = true;
+
+    const nextState = {
+      version: 1,
+      channels: {
+        ...(await readExistingBuildProvenance(statePath, readFileText)),
+        [record.channel]: record,
+      },
+    };
+
     await writeFileText(tempPath, `${JSON.stringify(nextState, null, 2)}\n`);
     await renamePath(tempPath, statePath);
-    return statePath;
   } catch (error) {
-    try {
-      await removePath(tempPath);
-    } catch (cleanupError) {
-      throw new Error(
-        `${describeError(error)}\nFailed to clean temporary provenance file: ${describeError(cleanupError)}`,
-      );
+    operationError = error;
+
+    if (lockAcquired) {
+      try {
+        await removePath(tempPath);
+      } catch (cleanupError) {
+        operationError = combineErrors(
+          operationError,
+          cleanupError,
+          'Failed to clean temporary provenance file',
+        );
+      }
     }
-    throw error;
+  } finally {
+    if (lockAcquired) {
+      try {
+        await removePath(lockPath);
+      } catch (error) {
+        releaseError = error;
+      }
+    }
   }
+
+  if (operationError && releaseError) {
+    throw combineErrors(
+      operationError,
+      releaseError,
+      'Failed to release build provenance lock',
+    );
+  }
+  if (operationError) {
+    throw operationError;
+  }
+  if (releaseError) {
+    throw new Error(
+      `Failed to release build provenance lock "${lockPath}": ${describeError(releaseError)}`,
+      { cause: releaseError },
+    );
+  }
+
+  return statePath;
 }
 
 export async function smokeLaunchBundle(appPath, overrides) {
@@ -546,7 +651,10 @@ export async function runMacosBuild(options, deps = {}) {
       await execute(
         'git',
         ['worktree', 'add', '--detach', sourceRoot, commitSha],
-        { cwd: absoluteRepositoryRoot },
+        {
+          cwd: absoluteRepositoryRoot,
+          stage: 'add stable worktree',
+        },
       );
       stableWorktreeAdded = true;
     }
@@ -564,7 +672,10 @@ export async function runMacosBuild(options, deps = {}) {
         : buildCommandsFor('dev', { devConfigPath });
 
     for (const [command, args, relativeCwd] of buildCommands) {
-      await execute(command, args, { cwd: path.resolve(sourceRoot, relativeCwd) });
+      await execute(command, args, {
+        cwd: path.resolve(sourceRoot, relativeCwd),
+        stage: `run ${channel} validation/build command: ${command} ${args.join(' ')}`,
+      });
     }
 
     const candidate = await findCandidate(bundleDir, expectedConfig.appName);
@@ -606,7 +717,10 @@ export async function runMacosBuild(options, deps = {}) {
         await execute(
           'git',
           ['worktree', 'remove', '--force', sourceRoot],
-          { cwd: absoluteRepositoryRoot },
+          {
+            cwd: absoluteRepositoryRoot,
+            stage: 'remove stable worktree',
+          },
         );
       } catch (error) {
         cleanupError = error;
@@ -658,6 +772,7 @@ async function collectCandidateApps(currentDir, expectedAppName, matches) {
 function temporaryHomeEnvironment(tempHome) {
   return {
     HOME: tempHome,
+    CFFIXED_USER_HOME: tempHome,
     TMPDIR: path.join(tempHome, 'tmp'),
     XDG_CONFIG_HOME: path.join(tempHome, '.config'),
     XDG_CACHE_HOME: path.join(tempHome, '.cache'),
@@ -689,10 +804,6 @@ async function defaultRemoveTemporaryHome(tempHome) {
 
 function defaultSpawnProcess(command, args, options) {
   return spawn(command, args, options);
-}
-
-async function execFileAsync(command, args) {
-  return runCommand(command, args);
 }
 
 function defaultSleep(ms) {
@@ -804,7 +915,9 @@ function isEnoentError(error) {
 }
 
 async function copyBundleWithDitto(source, destination) {
-  await execFileAsync('ditto', [source, destination]);
+  await runCommand('ditto', [source, destination], {
+    stage: 'copy app bundle with ditto',
+  });
 }
 
 async function defaultCreateDirectory(directoryPath) {
@@ -825,6 +938,73 @@ async function defaultReadFileText(filePath) {
 
 async function defaultWriteFileText(filePath, content) {
   await writeFile(filePath, content, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function defaultMakeLockDirectory(lockPath) {
+  await mkdir(lockPath);
+}
+
+async function defaultStatPath(targetPath) {
+  return stat(targetPath);
+}
+
+async function acquireBuildProvenanceLock(lockPath, options) {
+  const startedAt = options.nowMs();
+  let waitedMs = 0;
+
+  while (true) {
+    try {
+      await options.makeLockDirectory(lockPath);
+      return;
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    if (await buildProvenanceLockIsStale(lockPath, options)) {
+      try {
+        await options.removePath(lockPath);
+      } catch (error) {
+        if (!isEnoentError(error)) {
+          throw error;
+        }
+      }
+      continue;
+    }
+
+    const currentTime = options.nowMs();
+    const clockElapsedMs =
+      Number.isFinite(startedAt) && Number.isFinite(currentTime)
+        ? Math.max(0, currentTime - startedAt)
+        : 0;
+    const elapsedMs = Math.max(clockElapsedMs, waitedMs);
+
+    if (elapsedMs >= options.lockTimeoutMs) {
+      throw new Error(
+        `Timed out after ${options.lockTimeoutMs}ms waiting for build provenance lock "${lockPath}"`,
+      );
+    }
+
+    const retryDelayMs = Math.min(
+      options.lockRetryMs,
+      options.lockTimeoutMs - elapsedMs,
+    );
+    await options.sleep(retryDelayMs);
+    waitedMs += retryDelayMs;
+  }
+}
+
+async function buildProvenanceLockIsStale(lockPath, options) {
+  try {
+    const lockStat = await options.statPath(lockPath);
+    return options.nowMs() - lockStat.mtimeMs >= options.staleLockMs;
+  } catch (error) {
+    if (isEnoentError(error)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function readExistingBuildProvenance(statePath, readFileText) {
@@ -866,55 +1046,133 @@ function validateBuildProvenanceChannels(statePath, channels) {
       throw invalidBuildProvenance(statePath, `unknown channel "${channelName}"`);
     }
 
-    validateBuildProvenanceRecord(statePath, channelName, record);
+    validateBuildProvenanceRecord(
+      record,
+      channelName,
+      (detail) => invalidBuildProvenance(statePath, detail),
+    );
   }
 }
 
-function validateBuildProvenanceRecord(statePath, channelName, record) {
+function validateIncomingBuildProvenance(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
-    throw invalidBuildProvenance(statePath, `channel "${channelName}" must be an object`);
+    throw invalidIncomingBuildProvenance('record must be an object');
+  }
+
+  if (!BUILD_CHANNELS.includes(record.channel)) {
+    throw invalidIncomingBuildProvenance('channel must be "stable" or "dev"');
+  }
+
+  validateBuildProvenanceRecord(
+    record,
+    record.channel,
+    invalidIncomingBuildProvenance,
+  );
+}
+
+function validateBuildProvenanceRecord(record, channelName, invalid) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw invalid(`channel "${channelName}" must be an object`);
   }
 
   if (record.channel !== channelName) {
-    throw invalidBuildProvenance(
-      statePath,
+    throw invalid(
       `channel "${channelName}" record must contain channel="${channelName}"`,
     );
   }
 
   if (typeof record.commitSha !== 'string' || !COMMIT_SHA_PATTERN.test(record.commitSha)) {
-    throw invalidBuildProvenance(
-      statePath,
+    throw invalid(
       `channel "${channelName}" record must contain a 40-character lowercase hexadecimal commitSha`,
     );
   }
 
   if (typeof record.dirty !== 'boolean') {
-    throw invalidBuildProvenance(
-      statePath,
+    throw invalid(
       `channel "${channelName}" record must contain boolean dirty`,
     );
   }
 
-  for (const fieldName of ['builtAt', 'installedPath', 'productName', 'bundleIdentifier']) {
-    if (typeof record[fieldName] !== 'string') {
-      throw invalidBuildProvenance(
-        statePath,
-        `channel "${channelName}" record must contain string ${fieldName}`,
-      );
-    }
-  }
-
-  if (record.requestedRef !== undefined && typeof record.requestedRef !== 'string') {
-    throw invalidBuildProvenance(
-      statePath,
-      `channel "${channelName}" record must omit requestedRef or provide it as a string`,
+  if (!isExactIsoTimestamp(record.builtAt)) {
+    throw invalid(
+      `channel "${channelName}" record must contain builtAt as an exact ISO timestamp`,
     );
   }
+
+  const expectedConfig = CHANNEL_CONFIG[channelName];
+
+  if (typeof record.installedPath !== 'string' || !path.isAbsolute(record.installedPath)) {
+    throw invalid(
+      `channel "${channelName}" record must contain an absolute installedPath`,
+    );
+  }
+
+  if (path.basename(record.installedPath) !== expectedConfig.appName) {
+    throw invalid(
+      `channel "${channelName}" installedPath must end in "${expectedConfig.appName}"`,
+    );
+  }
+
+  if (record.productName !== expectedConfig.productName) {
+    throw invalid(
+      `channel "${channelName}" record must contain productName="${expectedConfig.productName}"`,
+    );
+  }
+
+  if (record.bundleIdentifier !== expectedConfig.bundleIdentifier) {
+    throw invalid(
+      `channel "${channelName}" record must contain bundleIdentifier="${expectedConfig.bundleIdentifier}"`,
+    );
+  }
+
+  if (
+    channelName === 'stable' &&
+    (typeof record.requestedRef !== 'string' || record.requestedRef.trim() === '')
+  ) {
+    throw invalid(
+      'channel "stable" record requestedRef must be nonblank',
+    );
+  }
+
+  if (
+    channelName === 'dev' &&
+    Object.prototype.hasOwnProperty.call(record, 'requestedRef')
+  ) {
+    throw invalid('channel "dev" record requestedRef is forbidden');
+  }
+}
+
+function validateLockTimingOption(name, value, allowZero) {
+  const validRange = allowZero ? value >= 0 : value > 0;
+
+  if (!Number.isFinite(value) || !validRange) {
+    const requirement = allowZero ? 'a nonnegative finite number' : 'a positive finite number';
+    throw new Error(`${name} must be ${requirement}`);
+  }
+}
+
+function isExactIsoTimestamp(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
+function invalidIncomingBuildProvenance(detail) {
+  return new Error(`Invalid build provenance record: ${detail}`);
 }
 
 function invalidBuildProvenance(statePath, detail) {
   return new Error(`Invalid build provenance file at "${statePath}": ${detail}`);
+}
+
+function isAlreadyExistsError(error) {
+  return Boolean(error) && typeof error === 'object' && error.code === 'EEXIST';
 }
 
 class StartupSmokeFailure extends Error {
@@ -932,15 +1190,24 @@ function isEntrypoint() {
   return import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 }
 
-if (isEntrypoint()) {
+export async function runCli(argv, deps = {}) {
+  const runBuild = deps.runBuild ?? runMacosBuild;
+  const stdout = deps.stdout ?? ((line) => console.log(line));
+  const stderr = deps.stderr ?? ((line) => console.error(line));
+
   try {
-    const options = parseBuildArguments(process.argv.slice(2));
-    const result = await runMacosBuild({ ...options, repositoryRoot });
+    const options = parseBuildArguments(argv);
+    const result = await runBuild({ ...options, repositoryRoot });
     const sourceState = result.dirty ? 'dirty source' : 'clean source';
-    console.log(`Installed ${result.productName} at ${result.installedPath}`);
-    console.log(`Source ${result.commitSha} (${sourceState})`);
+    stdout(`Installed ${result.productName} at ${result.installedPath}`);
+    stdout(`Source ${result.commitSha} (${sourceState})`);
+    return 0;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    stderr(error instanceof Error ? error.message : String(error));
+    return 1;
   }
+}
+
+if (isEntrypoint()) {
+  process.exitCode = await runCli(process.argv.slice(2));
 }
