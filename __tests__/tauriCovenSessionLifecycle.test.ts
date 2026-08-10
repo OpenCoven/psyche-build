@@ -273,9 +273,9 @@ describe('macOS Coven session lifecycle boundary', () => {
   });
 
   it('retains stored local Coven identity when creating threads', () => {
-    expect(functionSource(mainJs, 'createThread')).toContain(
-      'covenSessionId: opts.covenSessionId || null'
-    );
+    const source = functionSource(mainJs, 'createThread');
+    expect(source).toContain('covenSessionId: opts.covenSessionId || null');
+    expect(source).toContain('metricsProvider: opts.metricsProvider || null');
   });
 
   it('keeps native Coven create and attach outside daemon/tmux mutation paths', () => {
@@ -285,7 +285,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(nativeCovenSource).not.toMatch(
       /coven\.session\.open|openProjectCovenSession|createTmuxPane|sendTmuxCommand|TMUX_TMPDIR/
     );
-    expect(nativeCovenSource).toContain('args: ["chat"]');
+    expect(nativeCovenSource).toContain('args: ["code", "--session-id", sessionId]');
     expect(nativeCovenSource).toContain('args: ["attach", session.id]');
   });
 
@@ -297,6 +297,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(source).toContain('args: ["attach", session.id]');
     expect(source).toContain('launchKind: "coven-attach"');
     expect(source).toContain('covenSessionId: session.id');
+    expect(source).toContain('metricsProvider: session.harness || "coven"');
     expect(source).toContain('.finally(function ()');
     expect(source).not.toMatch(/coven\.session\.open|openProjectCovenSession|tmux/i);
   });
@@ -401,6 +402,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     };
     const session = {
       id: 'remote', projectRoot: '/repo', cwd: '/repo/feature/packages/app',
+      harness: 'codex',
     };
     let createdOptions: Record<string, unknown> | null = null;
     const openCovenSession = compileOpenCovenSession<(
@@ -427,6 +429,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(createdOptions).toMatchObject({
       cwd: '/repo/feature/packages/app',
       worktreePath: '/repo/feature',
+      metricsProvider: 'codex',
     });
   });
 

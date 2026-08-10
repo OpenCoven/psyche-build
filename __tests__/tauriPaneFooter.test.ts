@@ -820,6 +820,31 @@ describe('pane footer integration contract', () => {
     expect(state).not.toContain('"loading"');
   });
 
+  it('uses the launch-owned Coven identity and provider in footer state', () => {
+    const paneFooterState = compileFunction<(thread: Record<string, unknown>) => Record<string, any>>(
+      functionSource(mainJs, 'paneFooterState'),
+      {
+        threadWorktree: () => ({ path: '/repo', branch: 'feat/footer' }),
+        PsychePanes: { isAgentPaneKind: () => true },
+        shortenRoot: (value: string) => value,
+      },
+    );
+
+    expect(paneFooterState({
+      id: 'thread-1',
+      kind: 'coven-chat',
+      worktreePath: '/repo',
+      metrics: null,
+      launch: {
+        covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
+        metricsProvider: 'coven',
+      },
+    }).metrics).toMatchObject({
+      provider: 'coven',
+      sessionId: '12345678-1234-4abc-8def-1234567890ab',
+    });
+  });
+
   it('uses one truthful dispatcher for all footer actions', () => {
     const dispatcher = functionSource(mainJs, 'runPaneFooterAction');
 

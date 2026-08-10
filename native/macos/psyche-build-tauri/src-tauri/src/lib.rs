@@ -360,12 +360,23 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-chat" => {
-            if options.coven_session_id.is_some() {
-                return Err("coven-chat does not accept a session id".to_string());
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-chat requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-chat session id is unsafe".to_string());
             }
             match options.args.as_deref() {
-                Some([verb]) if verb == "chat" => Ok(()),
-                _ => Err("coven-chat requires exactly one 'chat' argument".to_string()),
+                Some([verb, flag, argument])
+                    if verb == "code" && flag == "--session-id" && argument == session_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(
+                    "coven-chat requires exactly 'code --session-id' and the validated session id"
+                        .to_string(),
+                ),
             }
         }
         "coven-attach" => {
@@ -2334,12 +2345,18 @@ mod workspace_panel_tests {
     #[test]
     fn accepts_exact_native_coven_chat_and_attach_launches() {
         let coven = "/canonical/bin/coven";
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some(session_id),
+            Some(coven),
+            Some(&["code", "--session-id", session_id]),
+        );
         let attach = launch_options(
             Some("coven-attach"),
-            Some("release:fix_01.a-b"),
+            Some(session_id),
             Some(coven),
-            Some(&["attach", "release:fix_01.a-b"]),
+            Some(&["attach", session_id]),
         );
 
         assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
@@ -2361,19 +2378,54 @@ mod workspace_panel_tests {
                 Some("coven-chat"),
                 None,
                 Some(coven),
-                Some(&["chat", "extra"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                Some("unexpected"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some(coven),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                None,
+                Some("../unsafe"),
+                Some(coven),
+                Some(&["code", "--session-id", "../unsafe"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some("/wrong/coven"),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&["code", "12345678-1234-4abc-8def-1234567890ab"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                    "extra",
+                ]),
             ),
             launch_options(
                 Some("coven-attach"),
@@ -2405,7 +2457,16 @@ mod workspace_panel_tests {
         for options in invalid {
             assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
         }
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some("12345678-1234-4abc-8def-1234567890ab"),
+            Some(coven),
+            Some(&[
+                "code",
+                "--session-id",
+                "12345678-1234-4abc-8def-1234567890ab",
+            ]),
+        );
         assert!(validate_coven_launch_with(&chat, None).is_err());
     }
 

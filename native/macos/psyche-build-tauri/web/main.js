@@ -1155,6 +1155,30 @@
     threadCounter += 1;
     return "t" + Date.now().toString(36) + "-" + threadCounter;
   }
+  function makeCovenSessionId() {
+    var cryptoApi = window.crypto;
+    if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+      try {
+        return cryptoApi.randomUUID();
+      } catch (_) {}
+    }
+    if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
+      try {
+        var bytes = new Uint8Array(16);
+        cryptoApi.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        var hex = "";
+        for (var i = 0; i < bytes.length; i++) {
+          hex += bytes[i].toString(16).padStart(2, "0");
+        }
+        return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+          hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+      } catch (_) {}
+    }
+    setStatus("Secure session ID generation is unavailable", "error");
+    return null;
+  }
   function isLiveThread(thread) {
     return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
   }
@@ -1170,6 +1194,7 @@
       cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
       launchKind: opts.launchKind || null,
       covenSessionId: opts.covenSessionId || null,
+      metricsProvider: opts.metricsProvider || null,
     };
     var launch = {
       command: sourceLaunch.command,
@@ -1180,6 +1205,7 @@
         (project && activeWorkspaceRoot(project)) || null,
       launchKind: sourceLaunch.launchKind || null,
       covenSessionId: sourceLaunch.covenSessionId || null,
+      metricsProvider: sourceLaunch.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
@@ -1208,6 +1234,9 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      metricsGeneration: 0,
+      metrics: null,
+      metricsRefreshTimer: 0,
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
@@ -3818,6 +3847,7 @@
         worktreePath: worktree.path,
         launchKind: "coven-attach",
         covenSessionId: session.id,
+        metricsProvider: session.harness || "coven",
       });
     }).finally(function () {
       covenAttachInFlight.delete(key);
@@ -7078,15 +7108,18 @@
 
   function covenChatLaunch(project, worktreePath) {
     var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
+    var sessionId = makeCovenSessionId();
+    if (!sessionId) return null;
     return {
       command: state.env.coven_path,
-      args: ["chat"],
+      args: ["code", "--session-id", sessionId],
       env: {},
       projectRoot: project.root,
       cwd: worktree.path,
       kind: "coven-chat",
       launchKind: "coven-chat",
-      covenSessionId: null,
+      covenSessionId: sessionId,
+      metricsProvider: "coven",
     };
   }
 
@@ -7109,6 +7142,7 @@
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    if (!launch) return null;
     return createThread({
       project: currentProject,
       worktreePath: launch.cwd,
