@@ -314,3 +314,60 @@ describe("BridgeDaemon terminal streams", () => {
     expect(session.sendBinary).not.toHaveBeenCalled();
   });
 });
+
+describe("BridgeDaemon terminal stream limits", () => {
+  it("refuses to hold unbounded streams for one connection", async () => {
+    const { daemon } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+
+    const accepted: string[] = [];
+    let refusal: any;
+    for (let i = 0; i < 8; i += 1) {
+      const response = await control(daemon, session, {
+        type: "panes.attach",
+        requestId: `attach-${i}`,
+        id: PUBLISHED_PANE,
+      });
+      if (response?.type === "mobile.panes.attach.result") {
+        accepted.push(response.streamId);
+      } else {
+        refusal = response;
+        break;
+      }
+    }
+
+    expect(refusal).toMatchObject({ type: "error", code: "too_many_streams" });
+    expect(accepted.length).toBeLessThanOrEqual(4);
+    expect(session.controlStreams.size).toBe(accepted.length);
+  });
+
+  it("frees the budget again once a stream is detached", async () => {
+    const { daemon } = createDaemon();
+    const session = createSession();
+    install(daemon, [session]);
+
+    const streamIds: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const response = await control(daemon, session, {
+        type: "panes.attach",
+        requestId: `attach-${i}`,
+        id: PUBLISHED_PANE,
+      });
+      streamIds.push(response.streamId);
+    }
+
+    await control(daemon, session, {
+      type: "panes.detach",
+      requestId: "detach-1",
+      streamId: streamIds[0],
+    });
+    const response = await control(daemon, session, {
+      type: "panes.attach",
+      requestId: "attach-again",
+      id: PUBLISHED_PANE,
+    });
+
+    expect(response).toMatchObject({ type: "mobile.panes.attach.result" });
+  });
+});

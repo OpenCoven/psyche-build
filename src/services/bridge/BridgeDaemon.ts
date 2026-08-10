@@ -26,6 +26,12 @@ import { TokenStore, DeviceRecord } from "./TokenStore.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { BridgeBonjour } from "./BridgeBonjour.js";
 import { isTmuxPaneId } from "../../utils/tmuxTarget.js";
+
+/**
+ * Two visible terminals is what the mobile workspace renders; the extra
+ * headroom covers a reattach landing before the old stream is detached.
+ */
+const MAX_CONTROL_STREAMS_PER_CONNECTION = 4;
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
 import type { ReadonlyWorkspaceSnapshot } from "../../workspace/snapshot.js";
@@ -611,6 +617,15 @@ export class BridgeDaemon {
     }
 
     const session = this.sessionForConnection(context.connectionId);
+    // The client caps itself at two live terminals, but the host must not
+    // depend on it doing so: each stream holds a subscription on a pane
+    // buffer, so an unbounded client could pin arbitrary output forever.
+    if (session.controlStreams.size >= MAX_CONTROL_STREAMS_PER_CONNECTION) {
+      throw new MobileControlGatewayError(
+        "too_many_streams",
+        `a connection may hold at most ${MAX_CONTROL_STREAMS_PER_CONNECTION} terminal streams`,
+      );
+    }
     const streamId = randomUUID().slice(0, 8);
     const buffer = this.hub!.bufferFor(paneId);
 
