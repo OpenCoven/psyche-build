@@ -1427,6 +1427,65 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(pendingRequestCount, 0)
     }
 
+    func testCorrelatedAckClaimsRecoveryBeforeBackToBackSnapshotCanApply() async throws {
+        let fake = FakeTransport()
+        let failureGate = MessageProcessorStartGate()
+        let composition = makeComposition(
+            transport: fake,
+            token: "token",
+            snapshotRequestFailureStart: failureGate.wait
+        )
+        let manager = composition.manager
+
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+        let initialID = try await waitForSnapshotRequest(on: fake)
+        await fake.emit(.control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+            requestID: initialID,
+            sequence: 1,
+            workspace: makeWorkspace(revision: 1)
+        ))))
+        try await waitForWorkspaceRevision(1, in: composition.workspaceStore)
+
+        await fake.emit(.workspaceChanged(WorkspaceChangedEvent(
+            revision: 3,
+            sequence: 3,
+            workspace: makeWorkspace(revision: 3)
+        )))
+        let recoveryID = try await waitForSnapshotRequest(on: fake, occurrence: 2)
+        await fake.emitBackToBack([
+            .control(.ack(ControlAckResponse(requestID: recoveryID))),
+            .control(.workspaceSnapshot(MobileWorkspaceSnapshotResult(
+                requestID: recoveryID,
+                sequence: 99,
+                workspace: makeWorkspace(revision: 99)
+            )))
+        ])
+
+        await failureGate.waitUntilEntered()
+        await manager.waitForEventDrain(after: 4)
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+        XCTAssertEqual(composition.workspaceStore.workspace?.revision, 1)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+
+        await failureGate.release()
+        let failure = await waitForFailure(in: manager)
+        XCTAssertEqual(
+            failure,
+            ConnectionManagerError.unexpectedSnapshotResponse(recoveryID).localizedDescription
+        )
+        let isConnected = await fake.isConnected
+        let disconnectCount = await fake.disconnectCount
+        XCTAssertFalse(isConnected)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
     func testCorrelatedOtherResponseForRecoverySnapshotFailsAndCanReconnect() async throws {
         let fake = FakeTransport()
         let composition = makeComposition(transport: fake, token: "token")
@@ -1684,7 +1743,8 @@ final class ConnectionManagerTests: XCTestCase {
         clientID: String = "test-client",
         clientName: String = "Psyche Tests",
         token: String? = nil,
-        messageProcessorStart: @escaping @Sendable () async -> Void = {}
+        messageProcessorStart: @escaping @Sendable () async -> Void = {},
+        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
     ) -> TestComposition {
         let requestClient = ControlRequestClient(transport: transport)
         let workspaceStore = WorkspaceStore(controlRequests: requestClient)
@@ -1697,7 +1757,8 @@ final class ConnectionManagerTests: XCTestCase {
             clientID: clientID,
             clientName: clientName,
             token: token,
-            messageProcessorStart: messageProcessorStart
+            messageProcessorStart: messageProcessorStart,
+            snapshotRequestFailureStart: snapshotRequestFailureStart
         )
         XCTAssertTrue(manager.requestClient === requestClient)
         return TestComposition(
@@ -2191,5 +2252,11 @@ private extension MobileClientMessage {
     var isWorkspaceSnapshotRequest: Bool {
         if case .control(.workspaceSnapshot) = self { return true }
         return false
+    }
+}
+
+private extension FakeTransport {
+    func emitBackToBack(_ messages: [MobileServerMessage]) {
+        messages.forEach(emit)
     }
 }

@@ -59,6 +59,7 @@ public actor ConnectionManager {
     private let workspaceStore: WorkspaceStore
     private let pairedHostStore: PairedHostStore
     private let messageProcessorStart: @Sendable () async -> Void
+    private let snapshotRequestFailureStart: @Sendable () async -> Void
     private let manualCredentials: ConnectionCredentials
     private var activeConnection: ConnectionConfiguration?
     private let clientName: String
@@ -74,7 +75,7 @@ public actor ConnectionManager {
     private var lifecycleIntentEpoch: UInt64 = 0
     private var teardownFinalStateOverride: ConnectionState?
     private var activeMessageSession: UUID?
-    private var activeSnapshotRequestID: String?
+    private var activeSnapshotRequest: SnapshotRequestState?
     private var transportCleanupGeneration: ConnectionGeneration?
     private var hasActiveTransport = false
     private var requestedInitialSnapshot = false
@@ -97,7 +98,8 @@ public actor ConnectionManager {
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS",
         token: String? = nil,
-        messageProcessorStart: @escaping @Sendable () async -> Void = {}
+        messageProcessorStart: @escaping @Sendable () async -> Void = {},
+        snapshotRequestFailureStart: @escaping @Sendable () async -> Void = {}
     ) {
         self.transport = transport
         self.workspaceStore = workspaceStore
@@ -109,6 +111,7 @@ public actor ConnectionManager {
         )
         self.clientName = clientName
         self.messageProcessorStart = messageProcessorStart
+        self.snapshotRequestFailureStart = snapshotRequestFailureStart
     }
 
     deinit {
@@ -560,23 +563,40 @@ public actor ConnectionManager {
 
         switch response {
         case .workspaceSnapshot(let result):
-            guard activeSnapshotRequestID == result.requestID else {
+            guard wasHandled,
+                  activeSnapshotRequest == .awaiting(result.requestID) else {
                 return .ignored
             }
             isSnapshotRecoveryInFlight = false
-            activeSnapshotRequestID = nil
+            activeSnapshotRequest = nil
             snapshotRequestTask = nil
             await workspaceStore.applySnapshot(
                 workspace: result.workspace,
                 sequence: result.sequence,
                 for: generation
             )
-        case .error(let error) where !wasHandled:
-            return .failed(error.message)
+        case .error(let error):
+            if !claimSnapshotFailure(for: response, wasHandled: wasHandled),
+               !wasHandled {
+                return .failed(error.message)
+            }
         default:
-            break
+            _ = claimSnapshotFailure(for: response, wasHandled: wasHandled)
         }
         return .processed
+    }
+
+    private func claimSnapshotFailure(
+        for response: MobileControlResponse,
+        wasHandled: Bool
+    ) -> Bool {
+        guard wasHandled,
+              let requestID = response.requestID,
+              activeSnapshotRequest == .awaiting(requestID) else {
+            return false
+        }
+        activeSnapshotRequest = .failing(requestID)
+        return true
     }
 
     private func requestInitialSnapshotIfAuthorized(
@@ -611,9 +631,10 @@ public actor ConnectionManager {
             return
         }
 
-        activeSnapshotRequestID = requestID
+        activeSnapshotRequest = .awaiting(requestID)
         let requestClient = self.requestClient
-        snapshotRequestTask = Task { [weak self, requestClient] in
+        let snapshotRequestFailureStart = self.snapshotRequestFailureStart
+        snapshotRequestTask = Task { [weak self, requestClient, snapshotRequestFailureStart] in
             do {
                 let response = try await requestClient.send(
                     .workspaceSnapshot(ControlRequestIDOnly(requestID: requestID)),
@@ -626,6 +647,8 @@ public actor ConnectionManager {
             } catch is CancellationError {
                 return
             } catch {
+                await snapshotRequestFailureStart()
+                guard !Task.isCancelled else { return }
                 await self?.snapshotRequestFailed(
                     requestID: requestID,
                     session: session,
@@ -643,11 +666,11 @@ public actor ConnectionManager {
         error: any Error
     ) async {
         guard isActive(session: session, generation: generation),
-              activeSnapshotRequestID == requestID else {
+              activeSnapshotRequest?.requestID == requestID else {
             return
         }
         isSnapshotRecoveryInFlight = false
-        activeSnapshotRequestID = nil
+        activeSnapshotRequest = nil
         snapshotRequestTask = nil
         await tearDownActiveConnection(
             generation: generation,
@@ -767,7 +790,7 @@ public actor ConnectionManager {
     ) async {
         snapshotRequestTask?.cancel()
         snapshotRequestTask = nil
-        activeSnapshotRequestID = nil
+        activeSnapshotRequest = nil
         requestedInitialSnapshot = false
         isSnapshotRecoveryInFlight = false
         activeConnection = nil
@@ -869,6 +892,18 @@ public actor ConnectionManager {
     private struct ConnectionCredentials {
         let clientID: String
         let token: String?
+    }
+
+    private enum SnapshotRequestState: Equatable {
+        case awaiting(String)
+        case failing(String)
+
+        var requestID: String {
+            switch self {
+            case .awaiting(let requestID), .failing(let requestID):
+                requestID
+            }
+        }
     }
 
     private struct ConnectionConfiguration {
