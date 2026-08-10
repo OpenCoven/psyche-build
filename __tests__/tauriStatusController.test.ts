@@ -700,6 +700,110 @@ describe('tauri status controller', () => {
     );
   });
 
+  it('uses approved compact Tasks wording and excludes blocked counts from the collapsed metric', () => {
+    const { controller, elements } = createHarness({ hidden: true });
+
+    const withFailure = controller.render(buildSample({
+      summary: {
+        tasks: [
+          { id: 'run-1', name: 'Run 1', status: 'running', runtimeMs: 4_000, threadId: 'run-1' },
+          { id: 'run-2', name: 'Run 2', status: 'running', runtimeMs: 6_000, threadId: 'run-2' },
+          { id: 'wait-1', name: 'Wait 1', status: 'waiting', runtimeMs: 1_000, threadId: 'wait-1' },
+          { id: 'blocked-1', name: 'Blocked 1', status: 'blocked', runtimeMs: 2_000, threadId: 'blocked-1' },
+          { id: 'fail-1', name: 'Fail 1', status: 'failed', runtimeMs: 3_000, threadId: 'fail-1' },
+        ],
+        counts: {
+          agents: 0,
+          shells: 0,
+          running: 2,
+          waiting: 1,
+          failed: 1,
+        },
+      },
+    }));
+
+    expect(withFailure?.labels.tasks).toBe('2 Run  1 Wait  1 Fail');
+    expect(
+      elements.metrics.querySelector('[data-metric="tasks"]')?.querySelector('.status-metric-value')?.textContent,
+    ).toBe('2 Run  1 Wait  1 Fail');
+
+    const withoutFailure = controller.render(buildSample({
+      summary: {
+        tasks: [
+          { id: 'run-1', name: 'Run 1', status: 'running', runtimeMs: 4_000, threadId: 'run-1' },
+          { id: 'blocked-1', name: 'Blocked 1', status: 'blocked', runtimeMs: 2_000, threadId: 'blocked-1' },
+        ],
+        counts: {
+          agents: 0,
+          shells: 0,
+          running: 1,
+          waiting: 0,
+          failed: 0,
+        },
+      },
+    }));
+
+    expect(withoutFailure?.labels.tasks).toBe('1 Run  0 Wait');
+    expect(withoutFailure?.labels.tasks).not.toContain('Block');
+    expect(withoutFailure?.labels.tasks).not.toContain('Fail');
+  });
+
+  it('shows overflow rows with live compact values and marks unavailable metrics without fabricating zeros', () => {
+    const hiddenByWidth = createHarness({
+      hidden: true,
+      barWidth: 300,
+    });
+    hiddenByWidth.controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot({
+        workspace: {
+          cpuPercent: 55,
+          memoryBytes: 512 * 1024 * 1024,
+        },
+      }),
+      frame: {
+        fps: 48,
+        renderLatencyMs: 21,
+        droppedFrames: 0,
+      },
+      summary: {
+        counts: {
+          agents: 1,
+          shells: 0,
+          running: 2,
+          waiting: 1,
+          failed: 1,
+        },
+      },
+    }));
+    hiddenByWidth.elements.more.dispatch('click');
+
+    const hiddenTasksOpen = hiddenByWidth.elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]');
+    expect(hiddenTasksOpen?.querySelector('.status-more-open-label')?.textContent).toBe('Tasks');
+    expect(hiddenTasksOpen?.querySelector('.status-more-open-value')?.textContent).toBe('2 Run  1 Wait  1 Fail');
+    expect(hiddenTasksOpen?.title).toBeTruthy();
+    expect(
+      hiddenByWidth.elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]')
+        ?.parentElement?.querySelector('.status-more-meta')?.textContent,
+    ).toContain('hidden by width');
+
+    const unavailable = createHarness({ hidden: true });
+    unavailable.controller.render(buildSample({
+      nativeSnapshot: null,
+      frame: {
+        fps: null,
+        renderLatencyMs: null,
+        droppedFrames: null,
+      },
+    }));
+    unavailable.elements.more.dispatch('click');
+
+    const unavailablePerfOpen = unavailable.elements.moreMenu.querySelector('[data-focus-key="more-open:performance"]');
+    expect(unavailablePerfOpen?.disabled).toBe(true);
+    expect(unavailablePerfOpen?.querySelector('.status-more-open-label')?.textContent).toBe('Perf');
+    expect(unavailablePerfOpen?.querySelector('.status-more-open-value')?.textContent).toBe('Unavailable');
+    expect(unavailablePerfOpen?.parentElement?.querySelector('.status-more-meta')?.textContent).toContain('unavailable');
+  });
+
   it('times out hung native polls, keeps one controller poll active, and ignores late completions', async () => {
     const firstSnapshot = buildNativeSnapshot({
       sampledAtMs: 1_700_000_000_000,
@@ -739,7 +843,7 @@ describe('tauri status controller', () => {
     await flushMicrotasks();
     await clock.advance(0);
     expect(fetchCount).toBe(1);
-    expect(controller.render()?.labels.connection).toBe('ready');
+    expect(controller.render()?.labels.connection).toBe('Connected');
 
     await clock.advance(1_000);
     expect(fetchCount).toBe(2);
@@ -751,12 +855,12 @@ describe('tauri status controller', () => {
 
     await clock.advance(10_000);
     const timedOutView = await pending;
-    expect(timedOutView?.labels.connection).toBe('degrd');
+    expect(timedOutView?.labels.connection).toBe('Degraded');
     expect(fetchCount).toBe(3);
 
     await flushMicrotasks();
     const recoveredView = controller.render();
-    expect(recoveredView?.labels.connection).toBe('ready');
+    expect(recoveredView?.labels.connection).toBe('Connected');
     expect(recoveredView?.labels.performance).toBe('77% 768M');
 
     hanging.resolve(lateSnapshot);
@@ -787,13 +891,74 @@ describe('tauri status controller', () => {
     await clock.advance(1_000);
 
     await clock.advance(8_999);
-    expect(controller.render()?.labels.connection).toBe('ready');
+    expect(controller.render()?.labels.connection).toBe('Connected');
 
     await clock.advance(1);
-    expect(controller.render()?.labels.connection).toBe('degrd');
+    expect(controller.render()?.labels.connection).toBe('Degraded');
 
     await clock.advance(20_000);
-    expect(controller.render()?.labels.connection).toBe('down');
+    expect(controller.render()?.labels.connection).toBe('Disconnected');
+  });
+
+  it('renders connection state copy and indicator affordances without making healthy text semantic-colored', () => {
+    const { controller, elements } = createHarness({ hidden: true });
+
+    controller.render(buildSample());
+
+    const readyMetric = elements.metrics.querySelector('[data-metric="connection"]');
+    const readyValue = readyMetric?.querySelector('.status-metric-value');
+    expect(readyValue?.dataset.connectionState).toBe('connected');
+    expect(readyValue?.querySelector('.status-connection-indicator')).not.toBeNull();
+    expect(readyValue?.querySelector('.status-connection-text')?.textContent).toBe('Connected');
+
+    controller.render(buildSample({
+      nativeHealth: {
+        status: 'starting',
+        reconnects: 0,
+        latencyMs: null,
+        lastSuccessAt: null,
+        error: '',
+      },
+    }));
+    const connectingValue = elements.metrics
+      .querySelector('[data-metric="connection"]')
+      ?.querySelector('.status-metric-value');
+    expect(connectingValue?.dataset.connectionState).toBe('connecting');
+    expect(connectingValue?.querySelector('.status-connection-text')?.textContent).toBe('Connecting');
+
+    controller.render(buildSample({
+      nativeHealth: {
+        status: 'ready',
+        reconnects: 0,
+        latencyMs: 9,
+        lastSuccessAt: 1_700_000_000_000,
+      },
+      covenHealth: {
+        phase: 'error',
+        reconnects: 1,
+        latencyMs: 25,
+        refreshedAt: 1_700_000_000_000,
+        error: 'timeout',
+      },
+    }));
+    const degradedMetric = elements.metrics.querySelector('[data-metric="connection"]');
+    const degradedValue = degradedMetric?.querySelector('.status-metric-value');
+    expect(degradedValue?.dataset.connectionState).toBe('degraded');
+    expect(degradedValue?.querySelector('.status-connection-text')?.textContent).toBe('Degraded');
+
+    controller.render(buildSample({
+      nativeHealth: {
+        status: 'ready',
+        reconnects: 2,
+        latencyMs: null,
+        lastSuccessAt: 1_699_999_960_000,
+        error: 'offline',
+      },
+    }));
+    const disconnectedMetric = elements.metrics.querySelector('[data-metric="connection"]');
+    const disconnectedValue = disconnectedMetric?.querySelector('.status-metric-value');
+    expect(disconnectedValue?.dataset.connectionState).toBe('disconnected');
+    expect(disconnectedValue?.querySelector('.status-connection-text')?.textContent).toBe('Disconnected');
   });
 
   it('renders stale age and last refresh, and never substitutes unavailable age with zero', () => {

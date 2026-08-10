@@ -82,6 +82,12 @@ describe('Tauri footer status bar shell', () => {
       /<div[\s\S]*class="status-more-menu"[\s\S]*id="status-more-menu"[\s\S]*role="dialog"[\s\S]*aria-modal="false"[\s\S]*aria-labelledby="status-more-title"[\s\S]*hidden[\s\S]*>/
     );
     expect(indexHtml).toMatch(/id="status-more-title"[^>]*>Status options<\/div>/);
+    expect(indexHtml).toMatch(
+      /data-metric="connection"[\s\S]*class="status-metric-value" data-connection-state="connecting"[\s\S]*class="status-connection-indicator"[\s\S]*class="status-connection-text">Connecting<\/span>/
+    );
+    expect(indexHtml).toMatch(
+      /data-metric="tasks"[\s\S]*class="status-metric-value">0 Run\s{2}0 Wait<\/span>/
+    );
   });
 
   it('defines the exact 26px footer rail CSS contract', () => {
@@ -196,6 +202,14 @@ describe('Tauri footer status bar shell', () => {
     expect(section).toContain('.status-detail-scope-btn:focus-visible');
     expect(section).toContain('.status-detail-close:focus-visible');
     expect(section).toContain('.status-more-btn:focus-visible');
+    expect(section).toContain('.status-connection-indicator');
+    expect(section).toContain('.status-metric-value[data-connection-state="connected"]');
+    expect(section).toContain('.status-metric-value[data-connection-state="connecting"]');
+    expect(section).toContain('.status-metric-value[data-connection-state="degraded"]');
+    expect(section).toContain('.status-metric-value[data-connection-state="disconnected"]');
+    expect(section).toMatch(/\.status-metric\[data-metric="connection"\]\s*\{[^}]*116px;/s);
+    expect(section).toMatch(/\.status-metric\[data-metric="tasks"\]\s*\{[^}]*128px;/s);
+    expect(section).toContain('.status-more-open-value');
   });
 
   it('exports the controller and public footer helpers through the browser entrypoint', async () => {

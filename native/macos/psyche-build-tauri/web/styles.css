@@ -2069,16 +2069,59 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   text-overflow: ellipsis;
 }
 
+.status-metric-value[data-connection-state],
+.status-more-open-value[data-connection-state] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-connection-indicator {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.status-metric-value[data-connection-state="connected"] .status-connection-indicator,
+.status-more-open-value[data-connection-state="connected"] .status-connection-indicator {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.status-metric-value[data-connection-state="connecting"] .status-connection-indicator,
+.status-more-open-value[data-connection-state="connecting"] .status-connection-indicator {
+  border-color: var(--muted);
+}
+
+.status-metric-value[data-connection-state="degraded"] .status-connection-indicator,
+.status-more-open-value[data-connection-state="degraded"] .status-connection-indicator {
+  background: var(--warn);
+  border-color: var(--warn);
+}
+
+.status-metric-value[data-connection-state="disconnected"] .status-connection-indicator,
+.status-more-open-value[data-connection-state="disconnected"] .status-connection-indicator {
+  background: var(--error);
+  border-color: var(--error);
+}
+
 .status-metric[data-metric="connection"] {
-  flex: 0 0 76px;
-  min-width: 76px;
+  flex: 0 0 116px;
+  min-width: 116px;
 }
 
 .status-metric[data-metric="agents"],
-.status-metric[data-metric="shells"],
-.status-metric[data-metric="tasks"] {
+.status-metric[data-metric="shells"] {
   flex: 0 0 62px;
   min-width: 62px;
+}
+
+.status-metric[data-metric="tasks"] {
+  flex: 0 0 128px;
+  min-width: 128px;
 }
 
 .status-metric[data-metric="performance"] {
@@ -2190,7 +2233,23 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 
 .status-more-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 0;
+}
+
+.status-more-open-label,
+.status-more-open-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-more-open-value {
+  margin-left: auto;
 }
 
 .status-more-toggle {

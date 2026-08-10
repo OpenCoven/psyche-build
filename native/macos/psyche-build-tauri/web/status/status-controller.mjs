@@ -27,10 +27,10 @@ const FAILURE_DISCONNECTED_WINDOW_MS = 30_000;
 const FAILURE_DISCONNECTED_COUNT = 5;
 const DEFAULT_NATIVE_POLL_TIMEOUT_MS = 10_000;
 const METRIC_WIDTH_FALLBACKS = Object.freeze({
-  connection: 76,
+  connection: 116,
   agents: 62,
   shells: 62,
-  tasks: 62,
+  tasks: 128,
   performance: 72,
   fps: 56,
   activity: 82,
@@ -523,6 +523,14 @@ function cloneTrendValues(trend) {
   return Array.isArray(trend?.values) ? [...trend.values] : [];
 }
 
+function metricDisplayValue(valueText) {
+  const text = valueText == null ? null : String(valueText);
+  return {
+    available: text != null,
+    valueText: text,
+  };
+}
+
 function coerceBytes(value) {
   if (value instanceof Uint8Array) return value;
   if (typeof value === 'string') return new TextEncoder().encode(value);
@@ -534,21 +542,39 @@ function coerceBytes(value) {
 }
 
 function compactConnection(nativeHealth, covenHealth) {
-  if (nativeHealth.status === 'disconnected') return 'down';
-  if (nativeHealth.status === 'starting') return 'start';
-  if (nativeHealth.status === 'degraded' || ['incompatible', 'error'].includes(covenHealth.phase)) {
-    return 'degrd';
+  let state = 'connected';
+  let valueText = 'Connected';
+
+  if (nativeHealth.status === 'disconnected') {
+    state = 'disconnected';
+    valueText = 'Disconnected';
+  } else if (nativeHealth.status === 'starting') {
+    state = 'connecting';
+    valueText = 'Connecting';
+  } else if (
+    nativeHealth.status === 'degraded'
+    || ['incompatible', 'error'].includes(covenHealth.phase)
+  ) {
+    state = 'degraded';
+    valueText = 'Degraded';
   }
-  return 'ready';
+
+  return {
+    available: true,
+    state,
+    valueText,
+  };
 }
 
 function compactTasks(summary) {
-  const blocked = summary.tasks.filter((task) => task.status === 'blocked').length;
-  const parts = [`${summary.counts.running}r`];
-  if (summary.counts.waiting > 0) parts.push(`${summary.counts.waiting}w`);
-  if (blocked > 0) parts.push(`${blocked}b`);
-  if (summary.counts.failed > 0) parts.push(`${summary.counts.failed}f`);
-  return parts.join(' ');
+  const parts = [
+    `${summary.counts.running} Run`,
+    `${summary.counts.waiting} Wait`,
+  ];
+  if (summary.counts.failed > 0) {
+    parts.push(`${summary.counts.failed} Fail`);
+  }
+  return parts.join('  ');
 }
 
 function compactActivity(activity) {
@@ -559,7 +585,7 @@ function compactActivity(activity) {
   return `${Math.round(operations)} ops`;
 }
 
-function buildMetricLabels(sample) {
+function buildMetricDisplays(sample) {
   const nativeSnapshot = sample.nativeSnapshot;
   const frame = sample.frame;
   const activity = sample.activity;
@@ -567,20 +593,46 @@ function buildMetricLabels(sample) {
 
   return {
     connection: compactConnection(sample.nativeHealth, sample.covenHealth),
-    agents: String(summary.counts.agents),
-    shells: String(summary.counts.shells),
-    tasks: compactTasks(summary),
-    performance: nativeSnapshot
-      ? `${formatPercent(nativeSnapshot.workspace?.cpuPercent)} ${shortMemory(nativeSnapshot.workspace?.memoryBytes)}`
-      : null,
-    fps: Number.isFinite(frame?.fps) ? String(Math.round(frame.fps)) : null,
-    activity: compactActivity(activity),
+    agents: metricDisplayValue(String(summary.counts.agents)),
+    shells: metricDisplayValue(String(summary.counts.shells)),
+    tasks: metricDisplayValue(compactTasks(summary)),
+    performance: metricDisplayValue(
+      nativeSnapshot
+        ? `${formatPercent(nativeSnapshot.workspace?.cpuPercent)} ${shortMemory(nativeSnapshot.workspace?.memoryBytes)}`
+        : null,
+    ),
+    fps: metricDisplayValue(Number.isFinite(frame?.fps) ? String(Math.round(frame.fps)) : null),
+    activity: metricDisplayValue(compactActivity(activity)),
   };
 }
 
-function applyButtonState(record, id, valueText, severity, expanded) {
+function setPlainMetricValue(record, text) {
+  record.value.textContent = text;
+  record.value.setAttribute('data-connection-state', 'none');
+}
+
+function setConnectionMetricValue(doc, record, display) {
+  resetNode(record.value);
+  record.value.setAttribute('data-connection-state', display.state);
+
+  const indicator = doc.createElement('span');
+  indicator.className = 'status-connection-indicator';
+  indicator.setAttribute('aria-hidden', 'true');
+
+  const text = doc.createElement('span');
+  text.className = 'status-connection-text';
+  text.textContent = display.valueText;
+
+  record.value.append(indicator, text);
+}
+
+function applyButtonState(doc, record, id, display, severity, expanded) {
   record.label.textContent = METRICS[id].compactLabel;
-  record.value.textContent = valueText;
+  if (id === 'connection') {
+    setConnectionMetricValue(doc, record, display);
+  } else {
+    setPlainMetricValue(record, display?.valueText ?? '--');
+  }
   record.button.dataset.metric = id;
   record.button.dataset.severity = severity ?? 'neutral';
   record.button.title = METRICS[id].tooltip;
@@ -947,6 +999,7 @@ function renderMoreMenuState({
   doc,
   availableMetrics,
   currentMetricSeverity,
+  metricDisplays,
   elements,
   overflowed,
   preferences,
@@ -974,9 +1027,26 @@ function renderMoreMenuState({
     open.dataset.metric = id;
     open.dataset.moreAction = 'open-metric';
     open.dataset.severity = currentMetricSeverity[id] ?? 'neutral';
-    open.textContent = METRICS[id].label;
     open.title = METRICS[id].tooltip;
     open.setAttribute('aria-expanded', currentTriggerMetric === id ? 'true' : 'false');
+    const display = metricDisplays[id];
+    const available = display?.available !== false;
+    open.disabled = !available;
+
+    const label = appendTextCell(doc, 'status-more-open-label', METRICS[id].label);
+    const value = doc.createElement('span');
+    value.className = 'status-more-open-value';
+    if (id === 'connection') {
+      setConnectionMetricValue(doc, { value }, display);
+      value.className = 'status-more-open-value';
+    } else {
+      setPlainMetricValue(
+        { value },
+        available ? (display?.valueText ?? '--') : 'Unavailable',
+      );
+      value.className = 'status-more-open-value';
+    }
+    open.append(label, value);
 
     const toggle = doc.createElement('label');
     toggle.className = 'status-more-toggle';
@@ -1515,7 +1585,10 @@ export function createStatusController(options = {}) {
     const renderedAt = now();
     const liveSample = liveHealthSample(sample, renderedAt);
     const focusToken = captureFocusToken(doc, elements);
-    const labels = buildMetricLabels(liveSample);
+    const metricDisplays = buildMetricDisplays(liveSample);
+    const labels = Object.fromEntries(
+      Object.entries(metricDisplays).map(([id, display]) => [id, display?.available ? display.valueText : null]),
+    );
     const { focusedAvailable, scopeName } = liveSample.scopeState ?? effectiveScopeForContext(liveSample.context ?? {});
     liveSample.scopeState = {
       focusedAvailable,
@@ -1538,7 +1611,14 @@ export function createStatusController(options = {}) {
     const buttonRecords = new Map();
     for (const id of availableMetrics) {
       const record = createMetricNode(doc, metricNodeCache, id);
-      applyButtonState(record, id, labels[id], currentMetricSeverity[id] ?? 'neutral', activeTriggerMetric === id);
+      applyButtonState(
+        doc,
+        record,
+        id,
+        metricDisplays[id],
+        currentMetricSeverity[id] ?? 'neutral',
+        activeTriggerMetric === id,
+      );
       buttonRecords.set(id, record);
       widthCache.set(id, measureWidth(record.button, widthCache.get(id) ?? METRIC_WIDTH_FALLBACKS[id] ?? 80));
     }
@@ -1620,6 +1700,7 @@ export function createStatusController(options = {}) {
       doc,
       availableMetrics,
       currentMetricSeverity,
+      metricDisplays,
       elements,
       overflowed,
       preferences: preferencesState.value,

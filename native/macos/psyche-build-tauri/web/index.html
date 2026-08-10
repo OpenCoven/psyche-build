@@ -415,7 +415,10 @@
           <div class="status-metrics" id="status-metrics" role="group" aria-label="Status metrics">
             <button class="status-metric" type="button" data-metric="connection">
               <span class="status-metric-label">Conn</span>
-              <span class="status-metric-value">local</span>
+              <span class="status-metric-value" data-connection-state="connecting">
+                <span class="status-connection-indicator" aria-hidden="true"></span>
+                <span class="status-connection-text">Connecting</span>
+              </span>
             </button>
             <button class="status-metric" type="button" data-metric="agents">
               <span class="status-metric-label">Agents</span>
@@ -427,7 +430,7 @@
             </button>
             <button class="status-metric" type="button" data-metric="tasks">
               <span class="status-metric-label">Tasks</span>
-              <span class="status-metric-value">0</span>
+              <span class="status-metric-value">0 Run  0 Wait</span>
             </button>
             <button class="status-metric" type="button" data-metric="performance">
               <span class="status-metric-label">Perf</span>
