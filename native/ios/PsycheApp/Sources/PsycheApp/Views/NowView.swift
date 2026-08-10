@@ -27,13 +27,25 @@ struct NowView: View {
         }
         .listStyle(.insetGrouped)
         .overlay {
+            // The overlay covers the list, and the list is where the stale
+            // notice lives. With nothing confirmed yet, saying "nothing
+            // running" would state as fact something no host has told us.
             if store.nowSections.isEmpty {
-                ContentUnavailableView(
-                    "Nothing running",
-                    systemImage: "moon.zzz",
-                    description: Text("Panes appear here as soon as your host reports them.")
-                )
-                .accessibilityIdentifier("now-empty")
+                if store.workspace == nil {
+                    ContentUnavailableView(
+                        "Not connected",
+                        systemImage: "wifi.slash",
+                        description: Text("Pair a host in Settings to see what is running.")
+                    )
+                    .accessibilityIdentifier("now-disconnected")
+                } else {
+                    ContentUnavailableView(
+                        "Nothing running",
+                        systemImage: "moon.zzz",
+                        description: Text("Panes appear here as soon as your host reports them.")
+                    )
+                    .accessibilityIdentifier("now-empty")
+                }
             }
         }
         .navigationTitle("Now")

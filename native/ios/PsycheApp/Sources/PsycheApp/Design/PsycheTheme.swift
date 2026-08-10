@@ -4,6 +4,10 @@ import SwiftUI
 /// One palette, one accent. Mint is the only accent colour in the app; amber
 /// is reserved for "this needs you" and never used decoratively, so a warm dot
 /// anywhere in the UI always means the same thing.
+///
+/// The terminal tokens have no caller yet — the pane workspace that used them
+/// was removed with the demo drill-down and is rebuilt in the terminal phase.
+/// They stay because they define the palette, not because something reads them.
 enum PsycheTheme {
     static let background = Color(red: 0.045, green: 0.061, blue: 0.075)
     static let terminal = Color(red: 0.024, green: 0.035, blue: 0.045)
@@ -18,35 +22,49 @@ enum PsycheTheme {
     static let minimumTapTarget: CGFloat = 44
 }
 
-struct StatusDot: View {
-    let status: PaneStatus
+/// What a pane's dot is saying.
+///
+/// Kept separate from the colour so the rule is testable, and derived from the
+/// same status sets the Now sections group by — a pane in Running and a pane
+/// showing a live dot must never disagree.
+enum PaneIndicator: Equatable {
+    case needsAttention
+    case running
+    case quiet
 
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 8, height: 8)
-            .shadow(color: color.opacity(0.8), radius: status == .working ? 4 : 0)
-            .accessibilityLabel(status.rawValue)
+    static func forStatus(_ status: String, needsAttention: Bool) -> PaneIndicator {
+        let status = status.lowercased()
+        if needsAttention || NowSectionKind.attentionStatuses.contains(status) {
+            return .needsAttention
+        }
+        if NowSectionKind.runningStatuses.contains(status) {
+            return .running
+        }
+        return .quiet
     }
 
-    private var color: Color {
-        switch status {
-        case .working: PsycheTheme.mint
-        case .waiting: PsycheTheme.amber
-        case .idle, .unknown: .gray
+    var color: Color {
+        switch self {
+        case .needsAttention: PsycheTheme.amber
+        case .running: PsycheTheme.mint
+        case .quiet: .gray
         }
     }
 }
 
-/// The same dot for the live workspace types, which carry status as the raw
-/// host string rather than the legacy enum.
+/// The dot beside a pane. Hidden from VoiceOver on purpose: the row's combined
+/// label already states the status, so exposing it again would say it twice.
 struct WorkspaceStatusDot: View {
     let status: String
     let needsAttention: Bool
 
+    private var indicator: PaneIndicator {
+        PaneIndicator.forStatus(status, needsAttention: needsAttention)
+    }
+
     var body: some View {
         Circle()
-            .fill(needsAttention ? PsycheTheme.amber : PsycheTheme.mint)
+            .fill(indicator.color)
             .frame(width: 9, height: 9)
             .accessibilityHidden(true)
     }

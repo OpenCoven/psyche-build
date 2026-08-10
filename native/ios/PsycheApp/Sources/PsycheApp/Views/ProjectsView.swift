@@ -123,6 +123,18 @@ struct ProjectDetailView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .overlay {
+            // A project can vanish between snapshots while its detail is open.
+            // Say so rather than leaving an empty list under a stale title.
+            if project == nil {
+                ContentUnavailableView(
+                    "Project unavailable",
+                    systemImage: "folder.badge.questionmark",
+                    description: Text("This project is no longer published by the host.")
+                )
+                .accessibilityIdentifier("project-unavailable")
+            }
+        }
         .navigationTitle(project?.title ?? "Project")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("project-detail-\(projectID)")

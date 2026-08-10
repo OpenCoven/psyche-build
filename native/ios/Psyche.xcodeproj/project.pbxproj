@@ -13,6 +13,7 @@
 		0F01384040440B16FD0E79F4 /* ProjectsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC6CD0D46E3ABC60ECA196E /* ProjectsView.swift */; };
 		2330B5B27CE5005482E42520 /* PsycheApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D912A6A487EC289774C800 /* PsycheApp.swift */; };
 		2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */; };
+		36C478336226BA4B15A8766E /* PaneIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */; };
 		37AC8C53A77A8747916251FF /* PairHostSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A050B0898E8E4F6815CEB76 /* PairHostSheet.swift */; };
 		3A9AAA98C90BA65DDED19F3F /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A1D2D3833898A9E46B0861 /* AppModel.swift */; };
 		43F3C300AE917045911BC1DA /* PsycheTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E8406429DED9F64BBF20B3 /* PsycheTransportTests.swift */; };
@@ -117,6 +118,7 @@
 		09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionControlTransport.swift; sourceTree = "<group>"; };
 		0A673F1BEBAB99E38B91C69D /* ControlRequestClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlRequestClientTests.swift; sourceTree = "<group>"; };
 		1364AD74F9298BF79AF4F2E9 /* PairedHostStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairedHostStore.swift; sourceTree = "<group>"; };
+		145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneIndicatorTests.swift; sourceTree = "<group>"; };
 		158E01EEED93FEC978269484 /* WireProtocolContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireProtocolContractTests.swift; sourceTree = "<group>"; };
 		171B1ED652B1AA9F5C98FAF0 /* DemoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStore.swift; sourceTree = "<group>"; };
 		1CEEAF9D0EBB558BCAABF4E7 /* PsycheTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PsycheTransport.swift; sourceTree = "<group>"; };
@@ -223,6 +225,7 @@
 			children = (
 				2B01F85780ECB7DA2A3933F1 /* AppModelTests.swift */,
 				32B37ACB2BDE762E4091F2CC /* PaneAccessibilityTests.swift */,
+				145FE2009F0E817AF44D610E /* PaneIndicatorTests.swift */,
 			);
 			path = UnitTests;
 			sourceTree = "<group>";
@@ -599,6 +602,7 @@
 			files = (
 				B28AA7E56F8C0B0EADACA6C6 /* AppModelTests.swift in Sources */,
 				2F55F53C111C6532AB9A6FD3 /* PaneAccessibilityTests.swift in Sources */,
+				36C478336226BA4B15A8766E /* PaneIndicatorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
