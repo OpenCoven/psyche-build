@@ -597,6 +597,67 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .session-row.starting .session-dot { animation: none; }
 }
+/* -------- Sidebar design pass --------
+   Additive only: the row's colourless-selection-plus-violet-bar language is
+   deliberate and left alone. */
+
+/* A long list scrolls *under* its project header rather than past it, so you
+   never lose track of which project the rows below belong to. */
+.session-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.94));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Search reads as a search field before it is focused. background-color rather
+   than the background shorthand, so the icon survives the focus state. */
+.session-search {
+  padding-left: 28px;
+  background-color: var(--surface-2);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239a9aa3' stroke-width='1.5'%3E%3Ccircle cx='7' cy='7' r='4.25'/%3E%3Cpath d='M10.2 10.2 13.5 13.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 9px center;
+  background-size: 13px 13px;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+.session-search:focus {
+  background-color: var(--surface-3);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.14);
+}
+
+/* AGENTS / COVEN carry a trailing hairline, so sections separate without
+   spending vertical space on gaps. */
+.session-subsection-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-subsection-label::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+  opacity: 0.55;
+}
+
+/* The selected worktree gets the same violet edge the active row uses, so
+   "where am I" reads at a glance instead of only from a 6% wash. */
+.session-worktree-group { position: relative; }
+.session-worktree-group.selected::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(var(--rgb-accent), 0.5);
+}
+
 .session-empty {
   padding: 10px 10px;
   font-size: 12.5px;
