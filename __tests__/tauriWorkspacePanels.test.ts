@@ -35,6 +35,16 @@ const tauriPackage = JSON.parse(
 };
 
 describe('Tauri workspace panels', () => {
+  it('registers a scoped pane-session metrics command', () => {
+    expect(tauriLib).toContain('mod pane_metrics;');
+    expect(tauriLib).toMatch(
+      /fn pane_session_metrics\([\s\S]*project_root:\s*String[\s\S]*cwd:\s*String[\s\S]*session_id:\s*String/,
+    );
+    expect(tauriLib).toMatch(/\n\s*pane_session_metrics,/);
+    expect(tauriLib).toMatch(/open_pty_cwd\(&project_root,\s*&cwd\)/);
+    expect(tauriLib).toMatch(/is_safe_session_id\(&session_id\)/);
+  });
+
   it('scopes filesystem reads to the active project root', () => {
     expect(mainJs).toMatch(
       /invoke\("fs_list_dir",\s*\{\s*root:\s*root,\s*path:\s*dirPath\s*\}\)/

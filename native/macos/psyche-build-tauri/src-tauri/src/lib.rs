@@ -20,9 +20,11 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod pane_metrics;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use pane_metrics::PaneSessionMetrics;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -407,6 +409,20 @@ fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn pane_session_metrics(
+    project_root: String,
+    cwd: String,
+    session_id: String,
+) -> Result<PaneSessionMetrics, String> {
+    if !is_safe_session_id(&session_id) {
+        return Err("session id is unsafe".to_string());
+    }
+    let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
+    let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
+    pane_metrics::load_coven_metrics(&coven, &resolved_cwd.canonical_path, &session_id)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2169,6 +2185,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pane_session_metrics,
             canonical_project_path,
             pty_write,
             pty_resize,
