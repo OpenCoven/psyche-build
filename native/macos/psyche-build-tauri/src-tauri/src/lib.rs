@@ -20,9 +20,11 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod native_workspace;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use native_workspace::{workspace_load, workspace_save};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -2159,6 +2161,8 @@ pub fn run() {
             browser_reload,
             browser_eval,
             app_environment,
+            workspace_load,
+            workspace_save,
             coven_sessions,
             agent_skills,
             fs_list_dir,
