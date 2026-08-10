@@ -1587,6 +1587,31 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 /* Picking dims the canvas and rings the picks. The overlay is a real button so
    the click never reaches the terminal underneath. */
 .terminal-pane { position: relative; }
+.terminal-pane.image-drop-target {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--rgb-accent), 0.28),
+    0 0 0 1px rgba(var(--rgb-accent), 0.16);
+}
+.terminal-pane.image-drop-target::after {
+  content: "Drop images to insert paths";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--rgb-accent), 0.26);
+  border-radius: 999px;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .terminal-pane.is-picking { opacity: 0.55; }
 .terminal-pane.is-picked {
   opacity: 1;
@@ -1672,6 +1697,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .minimap-dot.running { background: var(--ok); }
 .minimap-dot.starting { background: var(--warn); }
 .minimap-dot.exited { background: var(--error); }
+.minimap-dot.file {
+  background: var(--accent);
+  box-shadow: 0 0 7px var(--accent-glow);
+}
 /* Focus mode draws one pane and hides the rest, so the minimap is the only
    place a waiting pane can still be seen. It wins over the status colour and
    grows a ring, because at 5px a hue swap alone is not a signal. */
