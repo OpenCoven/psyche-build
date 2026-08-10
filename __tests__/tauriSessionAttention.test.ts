@@ -173,6 +173,18 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toContain('PsycheSessions.createAttentionTracker()');
   });
 
+  it('initialises local threads with sidebar activity fields', () => {
+    expect(mainJs).toMatch(
+      /function createThread\(opts\)[\s\S]{0,2600}lastOutputAt:\s*0,[\s\S]{0,120}isWorking:\s*false,[\s\S]{0,120}sidebarStatusKey:\s*"busy"/,
+    );
+  });
+
+  it('timestamps PTY output as soon as a live thread receives bytes', () => {
+    expect(mainJs).toMatch(
+      /listen\("pty:data", function \(event\) \{[\s\S]{0,260}var thread = findThread\(payload\.thread_id\);[\s\S]{0,120}if \(!isLiveThread\(thread\)\) return;[\s\S]{0,120}thread\.lastOutputAt = Date\.now\(\);/,
+    );
+  });
+
   it('samples only panes that can actually be waiting on an answer', () => {
     // A shell prompt sitting at `$` is idle, not waiting — badging it would put
     // a permanent mark on every terminal in the app.
@@ -183,14 +195,42 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toContain('setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS)');
   });
 
+  it('samples terminal tails once for working state before gating attention', () => {
+    expect(mainJs).toMatch(
+      /function sampleThreadAttention\(\)[\s\S]{0,600}var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,200}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
+    );
+  });
+
+  it('stores the derived sidebar status key and rerenders when it changes', () => {
+    expect(mainJs).toMatch(/var sidebarStateChanged = false;/);
+    expect(mainJs).toMatch(
+      /var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}sidebarStateChanged = true;/,
+    );
+    expect(mainJs).toMatch(
+      /attentionTracker\.retain\(tracked\);[\s\S]{0,160}if \(sidebarStateChanged\) \{[\s\S]{0,80}renderSessionList\(\);[\s\S]{0,80}syncSessionListScroll\(\);/,
+    );
+  });
+
   it('reads what the terminal shows rather than the bytes that produced it', () => {
     expect(mainJs).toMatch(/function terminalTail\(term, lines\)[\s\S]{0,400}translateToString\(true\)/);
+  });
+
+  it('keeps shells out of attention tracking even while sampling their work state', () => {
+    expect(mainJs).toMatch(
+      /thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,200}if \(!threadWantsAttentionTracking\(thread\)\) \{[\s\S]{0,160}if \(thread\.needsAttention\) \{[\s\S]{0,120}clearThreadAttention\(thread\)/,
+    );
   });
 
   it('clears attention on the keystroke, the bell and on exit', () => {
     expect(mainJs).toMatch(/term\.onData\(function \(data\) \{[\s\S]{0,300}noteThreadUserInput\(thread\)/);
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
-    expect(mainJs).toMatch(/thread\.status = "exited";[\s\S]{0,300}clearThreadAttention\(thread\)/);
+    expect(mainJs).toMatch(
+      /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    );
+  });
+
+  it('marks dead or failed PTYs as no longer working', () => {
+    expect(mainJs).toMatch(/thread\.status = "failed";[\s\S]{0,120}thread\.isWorking = false;/);
   });
 
   it('marks the waiting session on the rail, the pane and the minimap', () => {

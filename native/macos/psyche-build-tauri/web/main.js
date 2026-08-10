@@ -887,7 +887,8 @@
     if (!payload.thread_id || !payload.bytes) return;
     var bytes = new Uint8Array(payload.bytes);
     var thread = findThread(payload.thread_id);
-    if (!thread || thread.closing) return;
+    if (!isLiveThread(thread)) return;
+    thread.lastOutputAt = Date.now();
     if (thread.term) {
       thread.term.write(bytes);
     } else {
@@ -908,6 +909,7 @@
     thread.stopRequested = false;
     thread.spawning = false;
     thread.status = "exited";
+    thread.isWorking = false;
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
@@ -1106,18 +1108,35 @@
   function sampleThreadAttention() {
     var now = Date.now();
     var tracked = [];
+    var sidebarStateChanged = false;
     state.threads.forEach(function (thread) {
-      if (!threadWantsAttentionTracking(thread) || !thread.term) {
-        if (thread && thread.needsAttention) clearThreadAttention(thread);
-        return;
+      if (!thread || !thread.term) return;
+      var tail = terminalTail(thread.term, ATTENTION_TAIL_LINES);
+      var attentionChanged = false;
+      thread.isWorking = PsycheSessions.sidebarTailIsWorking(tail);
+      if (!threadWantsAttentionTracking(thread)) {
+        if (thread.needsAttention) {
+          attentionChanged = clearThreadAttention(thread);
+        }
+      } else {
+        tracked.push(thread.id);
+        attentionChanged = applyThreadAttention(
+          thread,
+          attentionTracker.observe(thread.id, tail, now)
+        );
       }
-      tracked.push(thread.id);
-      applyThreadAttention(
-        thread,
-        attentionTracker.observe(thread.id, terminalTail(thread.term, ATTENTION_TAIL_LINES), now)
-      );
+      var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);
+      if (thread.sidebarStatusKey !== nextStatus.key) {
+        thread.sidebarStatusKey = nextStatus.key;
+        sidebarStateChanged = true;
+      }
+      if (attentionChanged) sidebarStateChanged = false;
     });
     attentionTracker.retain(tracked);
+    if (sidebarStateChanged) {
+      renderSessionList();
+      syncSessionListScroll();
+    }
   }
 
   setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS);
@@ -1184,6 +1203,9 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      lastOutputAt: 0,
+      isWorking: false,
+      sidebarStatusKey: "busy",
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
@@ -1302,6 +1324,7 @@
         thread.ptyStarted = false;
         thread.status = "exited";
         thread.spawning = false;
+        thread.isWorking = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -1340,6 +1363,7 @@
         thread.ptyStarted = false;
         thread.status = "exited";
         thread.spawning = false;
+        thread.isWorking = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -1362,6 +1386,7 @@
       } else {
         thread.ptyStarted = false;
         thread.status = "failed";
+        thread.isWorking = false;
         if (thread.term) {
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
