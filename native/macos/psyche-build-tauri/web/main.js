@@ -1072,9 +1072,12 @@
     if (minimapDot) minimapDot.classList.toggle("attention", !!thread.needsAttention);
   }
 
-  function noteThreadUserInput(thread) {
-    if (!thread) return;
-    applyThreadAttention(thread, attentionTracker.userInput(thread.id));
+  function noteThreadInput(thread, text) {
+    if (!thread || !threadWantsAttentionTracking(thread)) return;
+    var next = text === "\x03"
+      ? attentionTracker.interrupt(thread.id)
+      : attentionTracker.userInput(thread.id);
+    applyThreadAttention(thread, next);
   }
 
   function clearThreadAttention(thread) {
@@ -1743,18 +1746,7 @@
       }
     } catch (_) { /* canvas fallback is fine */ }
 
-    term.onData(function (data) {
-      // Typing *is* the answer, so the badge clears on the keystroke rather
-      // than on focus: opening a pane to look at the question should not make
-      // the app forget it was asked.
-      noteThreadUserInput(thread);
-      var bytes = Array.from(new TextEncoder().encode(data));
-      invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-        function (err) {
-          term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
-        }
-      );
-    });
+    term.onData(function (data) { sendToThread(thread, data); });
     // Agents ring the bell for exactly one reason -- they want the user back --
     // so it is trusted immediately instead of waiting for the tail to settle.
     if (typeof term.onBell === "function") {
@@ -4874,10 +4866,21 @@
     });
   }
   function sendToThread(thread, text) {
+    if (!thread || thread.kind === "web") return Promise.resolve(false);
+    noteThreadInput(thread, text);
     var bytes = Array.from(new TextEncoder().encode(text));
-    invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-      function () {}
-    );
+    return invoke("pty_write", {
+      threadId: thread.id,
+      thread_id: thread.id,
+      bytes: bytes,
+    }).then(function () {
+      return true;
+    }).catch(function (err) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      }
+      return false;
+    });
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
