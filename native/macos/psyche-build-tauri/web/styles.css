@@ -1423,6 +1423,51 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-span:hover,
 .terminal-pane-max:hover,
 .terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
+
+/* -------- Pane chrome design pass (additive) --------
+
+   Three buttons at 22px each is a third of a 200px pane's header spent on
+   controls you are not using. They now rest at zero opacity and appear on
+   hover, on keyboard focus inside the pane, and permanently on the focused
+   pane - the one you are actually driving. Opacity rather than display keeps
+   the grid tracks reserved, so nothing reflows as they appear. */
+.terminal-pane-span,
+.terminal-pane-max,
+.terminal-pane-close {
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast),
+              color var(--transition-fast);
+}
+.terminal-pane:hover .terminal-pane-span,
+.terminal-pane:hover .terminal-pane-max,
+.terminal-pane:hover .terminal-pane-close,
+.terminal-pane:focus-within .terminal-pane-span,
+.terminal-pane:focus-within .terminal-pane-max,
+.terminal-pane:focus-within .terminal-pane-close,
+.terminal-pane.focused .terminal-pane-span,
+.terminal-pane.focused .terminal-pane-max,
+.terminal-pane.focused .terminal-pane-close { opacity: 1; }
+/* Never let a keyboard user tab to something they cannot see. */
+.terminal-pane-span:focus-visible,
+.terminal-pane-max:focus-visible,
+.terminal-pane-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Unfocused panes recede so the focused one reads instantly in a grid of
+   them. The title stays legible - this dims chrome, not content. */
+.terminal-pane:not(.focused) .terminal-pane-title { color: var(--text-soft); }
+.terminal-pane:not(.focused) .terminal-pane-glyph { opacity: 0.7; }
+
+/* A hairline under the header so terminal content scrolls beneath an edge
+   rather than butting straight into it. */
+.terminal-pane-header {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+  position: relative;
+  z-index: 1;
+}
 .terminal-pane-span:focus-visible,
 .terminal-pane-max:focus-visible,
 .terminal-pane-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
