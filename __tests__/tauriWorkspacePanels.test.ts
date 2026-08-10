@@ -246,4 +246,156 @@ describe('Tauri workspace panels', () => {
       expect(mainJs).toMatch(/if \(!\(options && options\.keepContext\)\) diffContext = null;/);
     });
   });
+
+  describe('dock to canvas', () => {
+    it('moves one live surface rather than rendering it twice', () => {
+      // Two renderings of the git panel could diverge; one element with two
+      // possible homes cannot.
+      expect(indexHtml).toContain('id="git-surface"');
+      expect(mainJs).toMatch(/function dockGitSurface\(\)[\s\S]*gitPanelEl\.appendChild\(gitSurfaceEl\)/);
+      expect(mainJs).toMatch(/thread\.kind === "git" && thread\.toolBody && gitSurfaceEl/);
+      // Only one git surface exists in the markup.
+      expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
+    });
+
+    it('offers pop-out and drag from the same control', () => {
+      expect(indexHtml).toMatch(/id="git-pop-out"[\s\S]*draggable="true"/);
+      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("click"[\s\S]*popOutGitPane\(\)/);
+      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("dragstart"[\s\S]*text\/x-psyche-tool/);
+    });
+
+    it('lands a dropped tool where it was dropped', () => {
+      expect(mainJs).toMatch(/terminalHost\.addEventListener\("drop"[\s\S]*popOutGitPane\(target\)/);
+      expect(mainJs).toMatch(/movePaneTo\(id, dropTarget\.threadId, dropTarget\.position\)/);
+    });
+
+    it('shares one drop indicator with the pane drag', () => {
+      // A second visual language for the same gesture would be noise.
+      expect(mainJs).toMatch(/function showPaneDropIndicator\(rect, position\)/);
+      expect(mainJs).toMatch(/var showIndicator = showPaneDropIndicator;/);
+      expect(mainJs.match(/className = "pane-drop-indicator"/g)).toHaveLength(1);
+    });
+
+    it('hands the surface back before the pane is torn down', () => {
+      // Removing the pane first would take the surface out of the document
+      // with it.
+      expect(mainJs).toMatch(/function closeToolPane\(thread\)[\s\S]*dockGitSurface\(\)[\s\S]*detachThreadPane\(thread\)/);
+    });
+
+    it('files a tool pane as a tool, not an agent', () => {
+      expect(mainJs).toMatch(/var TOOL_KINDS = \["git", "web"\];/);
+      expect(mainJs).toMatch(/\["Tools", function \(t\) \{ return TOOL_KINDS\.indexOf/);
+    });
+  });
+
+  describe('voice call bar', () => {
+    function compile(deps: Record<string, unknown> = {}) {
+      const bar = { hidden: true, classList: { toggle: () => undefined } };
+      const els: Record<string, any> = {
+        'call-bar': bar,
+        'call-target': { textContent: '' },
+        'call-timer': { textContent: '' },
+        'call-note': { textContent: '' },
+        'call-mute': { textContent: '', setAttribute: () => undefined, addEventListener: () => undefined },
+        'call-end': { addEventListener: () => undefined },
+        'composer-call': { setAttribute: () => undefined, addEventListener: () => undefined },
+      };
+      const source = [
+        'formatCallTime', 'paintCallBar', 'startCall', 'endCall', 'toggleCallMute',
+      ].map((name) => functionSourceOf(name)).join('\n');
+      const factory = Function(
+        'document', 'findThread', 'state', 'setInterval', 'clearInterval', 'Date',
+        `"use strict";
+         var callBarEl = document.getElementById('call-bar');
+         var callTargetEl = document.getElementById('call-target');
+         var callTimerEl = document.getElementById('call-timer');
+         var callNoteEl = document.getElementById('call-note');
+         var callMuteBtn = document.getElementById('call-mute');
+         var callEndBtn = document.getElementById('call-end');
+         var composerCallEl = document.getElementById('composer-call');
+         var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+         ${source}
+         return { formatCallTime, startCall, endCall, toggleCallMute, callState, els: {
+           bar: callBarEl, target: callTargetEl, note: callNoteEl, mute: callMuteBtn } };`,
+      );
+      return factory(
+        { getElementById: (id: string) => els[id] ?? null },
+        () => ({ name: 'codex-review' }),
+        { activeThreadId: 't1' },
+        () => 1,
+        () => undefined,
+        Date,
+        ...Object.values(deps),
+      ) as any;
+    }
+
+    function functionSourceOf(name: string) {
+      const start = mainJs.indexOf(`function ${name}(`);
+      if (start === -1) throw new Error(`missing ${name}`);
+      const bodyStart = mainJs.indexOf('{', start);
+      let depth = 0;
+      for (let i = bodyStart; i < mainJs.length; i += 1) {
+        if (mainJs[i] === '{') depth += 1;
+        if (mainJs[i] === '}') depth -= 1;
+        if (depth === 0) return mainJs.slice(start, i + 1);
+      }
+      throw new Error(`unterminated ${name}`);
+    }
+
+    it('formats elapsed time as m:ss', () => {
+      const api = compile();
+      expect(api.formatCallTime(0)).toBe('0:00');
+      expect(api.formatCallTime(9_000)).toBe('0:09');
+      expect(api.formatCallTime(61_000)).toBe('1:01');
+      expect(api.formatCallTime(600_000)).toBe('10:00');
+      // A clock that ran backwards would print a negative time.
+      expect(api.formatCallTime(-5_000)).toBe('0:00');
+    });
+
+    it('names the focused pane and says plainly that nothing is transmitting', () => {
+      const api = compile();
+      api.startCall();
+      expect(api.els.target.textContent).toBe('codex-review');
+      // There is no getUserMedia, recogniser or audio path in this app; the bar
+      // must not imply an agent is listening.
+      expect(api.els.note.textContent).toMatch(/no voice transport/i);
+      // Assert on the API entry points, not the words: the comment above
+      // startCall names them precisely to say they are absent.
+      expect(mainJs).not.toMatch(/navigator\.mediaDevices/);
+      expect(mainJs).not.toMatch(/new\s+(?:webkit)?SpeechRecognition\s*\(/);
+      expect(mainJs).not.toMatch(/\.getUserMedia\s*\(/);
+    });
+
+    it('starts unmuted, toggles, and resets the control when the call ends', () => {
+      const api = compile();
+      api.startCall();
+      expect(api.els.mute.textContent).toBe('Mute');
+      expect(api.toggleCallMute()).toBe(true);
+      expect(api.els.mute.textContent).toBe('Unmute');
+      api.endCall();
+      // Painted while hidden, or the next call opens reading "Unmute".
+      expect(api.els.mute.textContent).toBe('Mute');
+    });
+
+    it('is idempotent at both ends', () => {
+      const api = compile();
+      expect(api.startCall()).toBe(true);
+      expect(api.startCall()).toBe(false);
+      expect(api.endCall()).toBe(true);
+      expect(api.endCall()).toBe(false);
+      // Muting a call that is not running is a no-op, not a state change.
+      expect(api.toggleCallMute()).toBe(false);
+    });
+
+    it('ends on esc, after the more transient layers', () => {
+      expect(mainJs).toMatch(/if \(armedSessionClose\) \{ disarmSessionClose\(\); return; \}[\s\S]*if \(endCall\(\)\) return;/);
+    });
+
+    it('sits above the composer so the composer never moves', () => {
+      expect(indexHtml).toContain('id="call-bar"');
+      expect(stylesCss).toMatch(/\.call-bar\s*\{[^}]*bottom: calc\(100% - 4px\);/s);
+      // Muting stops the waveform -- the one honest thing it can show.
+      expect(stylesCss).toMatch(/\.call-bar\.is-muted \.call-wave i\s*\{[^}]*animation: none;/s);
+    });
+  });
 });

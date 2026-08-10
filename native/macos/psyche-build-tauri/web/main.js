@@ -77,6 +77,11 @@
      *  Refreshed on boot and on project switch via `agent_skills`. */
     agentSkills: [],
   };
+  // File focus is presentation-only. Open files persist through state.openFiles,
+  // but the pane to return to belongs only to the current interaction.
+  var fileFocus = {
+    returnThreadId: null,
+  };
   var paneLayouts = new Map();
   var imageDropScaleFactor = 1;
   var imageDropTarget = null;
@@ -622,6 +627,88 @@
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
   var dockGitCountEl = document.getElementById("dock-git-count");
+
+  // -------- Voice call bar --------
+  // Board 4's call bar. The bar, its timer and its mute state are real UI; what
+  // does not exist yet is a voice transport. There is no getUserMedia, no
+  // speech recogniser and no audio path to an agent anywhere in this app, so a
+  // call is a local session that shows the designed chrome and says plainly
+  // that it is not carrying audio. When a transport lands, `startCall` is where
+  // it attaches -- nothing below fakes a connection or a peer.
+
+  var callBarEl = document.getElementById("call-bar");
+  var callTargetEl = document.getElementById("call-target");
+  var callTimerEl = document.getElementById("call-timer");
+  var callNoteEl = document.getElementById("call-note");
+  var callMuteBtn = document.getElementById("call-mute");
+  var callEndBtn = document.getElementById("call-end");
+  var composerCallEl = document.getElementById("composer-call");
+
+  var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+
+  function formatCallTime(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var minutes = Math.floor(total / 60);
+    var seconds = total % 60;
+    return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+  }
+
+  function paintCallBar() {
+    if (!callBarEl) return;
+    callBarEl.hidden = !callState.active;
+    callBarEl.classList.toggle("is-muted", callState.muted);
+    if (composerCallEl) composerCallEl.setAttribute("aria-pressed", callState.active ? "true" : "false");
+    // Painted whether or not the bar is showing: leaving the control reading
+    // "Unmute" after a call ends would have the next call open mislabelled.
+    if (callMuteBtn) {
+      callMuteBtn.textContent = callState.muted ? "Unmute" : "Mute";
+      callMuteBtn.setAttribute("aria-pressed", callState.muted ? "true" : "false");
+    }
+    if (!callState.active) return;
+    if (callTimerEl) callTimerEl.textContent = formatCallTime(Date.now() - callState.startedAt);
+  }
+
+  function startCall() {
+    if (callState.active) return false;
+    var thread = findThread(state.activeThreadId);
+    callState.active = true;
+    callState.muted = false;
+    callState.startedAt = Date.now();
+    if (callTargetEl) callTargetEl.textContent = thread ? thread.name : "no pane focused";
+    // Say what is actually true rather than "the agent hears your terminal":
+    // nothing is listening, and a bar that implied otherwise would be a lie
+    // told in the UI.
+    if (callNoteEl) callNoteEl.textContent = "no voice transport yet — chrome only";
+    paintCallBar();
+    callState.timer = setInterval(paintCallBar, 1000);
+    return true;
+  }
+
+  function endCall() {
+    if (!callState.active) return false;
+    clearInterval(callState.timer);
+    callState.timer = 0;
+    callState.active = false;
+    callState.muted = false;
+    paintCallBar();
+    return true;
+  }
+
+  function toggleCallMute() {
+    if (!callState.active) return false;
+    callState.muted = !callState.muted;
+    paintCallBar();
+    return callState.muted;
+  }
+
+  if (composerCallEl) {
+    composerCallEl.addEventListener("click", function () {
+      if (callState.active) endCall();
+      else startCall();
+    });
+  }
+  if (callMuteBtn) callMuteBtn.addEventListener("click", toggleCallMute);
+  if (callEndBtn) callEndBtn.addEventListener("click", endCall);
 
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
@@ -1629,6 +1716,244 @@
     }
   }
 
+  // -------- Tools on the canvas --------
+  // The git surface is a single element with two possible homes: the dock, or a
+  // pane. Moving it rather than rendering it twice is what keeps the two in
+  // sync -- there is only ever one of it, so there is nothing to diverge.
+
+  var gitSurfaceEl = document.getElementById("git-surface");
+  var gitPanelEl = document.querySelector(".panel-git");
+  var gitPoppedNoteEl = document.getElementById("git-popped-note");
+
+  /** The thread holding the git pane, if it is popped out. */
+  function gitPaneThread() {
+    for (var i = 0; i < state.threads.length; i++) {
+      if (state.threads[i].kind === "git" && !state.threads[i].closing) return state.threads[i];
+    }
+    return null;
+  }
+
+  function syncGitDockChrome() {
+    var popped = Boolean(gitPaneThread());
+    if (gitPoppedNoteEl) gitPoppedNoteEl.hidden = !popped;
+    var popBtn = document.getElementById("git-pop-out");
+    if (popBtn) popBtn.hidden = popped;
+  }
+
+  /** Put the surface back in the dock, wherever it currently is. */
+  function dockGitSurface() {
+    if (gitSurfaceEl && gitPanelEl && gitSurfaceEl.parentElement !== gitPanelEl) {
+      gitPanelEl.appendChild(gitSurfaceEl);
+    }
+    syncGitDockChrome();
+  }
+
+  function mountToolPane(thread) {
+    var pane = document.createElement("section");
+    pane.className = "terminal-pane is-tool";
+    pane.dataset.threadId = thread.id;
+    var header = document.createElement("header");
+    header.className = "terminal-pane-header";
+    var glyph = document.createElement("span");
+    glyph.className = "terminal-pane-glyph is-tool";
+    glyph.textContent = "\u2387";
+    glyph.setAttribute("aria-hidden", "true");
+    var label = document.createElement("span");
+    label.className = "terminal-pane-label";
+    var title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    title.id = "terminal-pane-title-" + thread.id;
+    title.textContent = thread.name;
+    pane.setAttribute("aria-labelledby", title.id);
+    var meta = document.createElement("span");
+    meta.className = "terminal-pane-meta";
+    label.appendChild(title);
+    label.appendChild(meta);
+    var status = document.createElement("span");
+    status.className = "terminal-pane-status";
+    var span = document.createElement("button");
+    span.type = "button";
+    span.className = "terminal-pane-span";
+    span.addEventListener("click", function (event) {
+      event.stopPropagation();
+      cyclePaneSpan(thread);
+    });
+    var maximize = document.createElement("button");
+    maximize.type = "button";
+    maximize.className = "terminal-pane-max";
+    maximize.addEventListener("click", function (event) {
+      event.stopPropagation();
+      togglePaneMaximize(thread);
+    });
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "terminal-pane-close";
+    close.title = "Return Git to the dock";
+    close.setAttribute("aria-label", "Return Git to the dock");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeToolPane(thread);
+    });
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(thread, event);
+    });
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(thread);
+    });
+    header.appendChild(glyph);
+    header.appendChild(label);
+    header.appendChild(status);
+    header.appendChild(span);
+    header.appendChild(maximize);
+    header.appendChild(close);
+    var body = document.createElement("div");
+    body.className = "terminal-pane-body tool-pane-body";
+    body.addEventListener("pointerdown", function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    }, true);
+    pane.appendChild(header);
+    pane.appendChild(body);
+    thread.pane = pane;
+    thread.host = body;
+    thread.toolBody = body;
+    thread.paneTitle = title;
+    thread.paneMeta = meta;
+    thread.paneStatus = status;
+    thread.paneSpan = span;
+    thread.paneMax = maximize;
+    thread.paneClose = close;
+    syncThreadPaneMetadata(thread);
+    renderPaneWorkspace();
+  }
+
+  /**
+   * Open Git as a pane. `dropTarget` optionally places it next to an existing
+   * pane, which is how a drag from the dock lands where it was dropped.
+   */
+  async function popOutGitPane(dropTarget) {
+    var existing = gitPaneThread();
+    if (existing) { await focusThread(existing.id); return existing; }
+    var project = activeProject();
+    if (!project) { setStatus("No project open", "warn"); return null; }
+    var worktreePath = activeWorkspaceRoot(project);
+    var id = makeThreadId();
+    var placement = preparePanePlacement(id, project.id, worktreePath);
+    if (!placement) {
+      setStatus("Not enough space for another pane", "warn");
+      return null;
+    }
+    var thread = {
+      id: id,
+      projectId: project.id,
+      worktreePath: worktreePath,
+      name: "Git",
+      kind: "git",
+      status: "",
+      spawning: false,
+      term: null,
+      fit: null,
+      host: null,
+      pane: null,
+      closing: false,
+      closeStarted: false,
+      startInFlight: false,
+      stopRequested: false,
+      ptyStarted: false,
+    };
+    commitPanePlacement(placement);
+    state.threads.push(thread);
+    mountToolPane(thread);
+    if (dropTarget && dropTarget.threadId && dropTarget.position) {
+      movePaneTo(id, dropTarget.threadId, dropTarget.position);
+    }
+    await focusThread(id);
+    syncGitDockChrome();
+    refreshSidebar();
+    return thread;
+  }
+
+  /** Close the pane and hand the surface back to the dock. */
+  function closeToolPane(thread) {
+    if (!thread || thread.closeStarted) return;
+    thread.closeStarted = true;
+    thread.closing = true;
+    // Move the surface home before the pane is torn down, or it would be
+    // removed from the document along with its container.
+    dockGitSurface();
+    forgetThreadInSets(thread.id);
+    var nextThreadId = detachThreadPane(thread);
+    state.threads = state.threads.filter(function (t) { return t.id !== thread.id; });
+    if (thread.pane && thread.pane.parentNode) thread.pane.parentNode.removeChild(thread.pane);
+    if (state.activeThreadId === thread.id) state.activeThreadId = nextThreadId;
+    syncGitDockChrome();
+    renderPaneWorkspace();
+    refreshSidebar();
+    saveWorkspaceSoon();
+  }
+
+  // Click pops out; dragging the same control onto the canvas pops out where it
+  // lands. One affordance, two gestures, so the tab does not need a second
+  // control for the second gesture.
+  var gitPopOutBtn = document.getElementById("git-pop-out");
+  if (gitPopOutBtn) {
+    gitPopOutBtn.addEventListener("click", function () { popOutGitPane(); });
+    gitPopOutBtn.addEventListener("dragstart", function (event) {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData("text/x-psyche-tool", "git");
+      event.dataTransfer.effectAllowed = "move";
+      document.body.classList.add("is-tool-dragging");
+    });
+    gitPopOutBtn.addEventListener("dragend", function () {
+      document.body.classList.remove("is-tool-dragging");
+      clearPaneDropIndicator();
+    });
+  }
+  var gitDockBackBtn = document.getElementById("git-dock-back");
+  if (gitDockBackBtn) {
+    gitDockBackBtn.addEventListener("click", function () {
+      var thread = gitPaneThread();
+      if (thread) closeToolPane(thread);
+    });
+  }
+
+  function toolDropTargetAt(clientX, clientY) {
+    var hit = paneElementAt(clientX, clientY);
+    if (!hit) return null;
+    return {
+      threadId: hit.thread.id,
+      position: paneDropZone(hit.rect, clientX, clientY),
+      rect: hit.rect,
+    };
+  }
+
+  if (terminalHost) {
+    terminalHost.addEventListener("dragover", function (event) {
+      if (!event.dataTransfer || event.dataTransfer.types.indexOf("text/x-psyche-tool") === -1) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      var target = toolDropTargetAt(event.clientX, event.clientY);
+      // Reuse the pane-drag indicator so a tool lands with the same affordance
+      // as moving a pane; a second visual language here would be noise.
+      if (target) showPaneDropIndicator(target.rect, target.position);
+      else clearPaneDropIndicator();
+    });
+    terminalHost.addEventListener("dragleave", function (event) {
+      if (event.target === terminalHost) clearPaneDropIndicator();
+    });
+    terminalHost.addEventListener("drop", function (event) {
+      if (!event.dataTransfer || event.dataTransfer.getData("text/x-psyche-tool") !== "git") return;
+      event.preventDefault();
+      var target = toolDropTargetAt(event.clientX, event.clientY);
+      clearPaneDropIndicator();
+      document.body.classList.remove("is-tool-dragging");
+      popOutGitPane(target);
+    });
+  }
+
   function mountBrowserPane(thread) {
     var pane = document.createElement("section");
     pane.className = "terminal-pane is-web";
@@ -1985,6 +2310,43 @@
     return true;
   }
 
+  // The drop highlight is shared by both drags -- repositioning a pane and
+  // dragging a tool out of the dock -- so the two gestures read identically.
+  // Fixed positioning takes the client rects as-is, so it needs no positioned
+  // ancestor and cannot be clipped by a pane's own overflow.
+  var paneDropIndicator = null;
+
+  function showPaneDropIndicator(rect, position) {
+    if (!paneDropIndicator) {
+      paneDropIndicator = document.createElement("div");
+      paneDropIndicator.className = "pane-drop-indicator";
+      paneDropIndicator.setAttribute("aria-hidden", "true");
+      document.body.appendChild(paneDropIndicator);
+    }
+    var left = rect.left;
+    var top = rect.top;
+    var width = rect.width;
+    var height = rect.height;
+    if (position === "left" || position === "right") {
+      width = rect.width / 2;
+      if (position === "right") left = rect.left + width;
+    } else {
+      height = rect.height / 2;
+      if (position === "below") top = rect.top + height;
+    }
+    paneDropIndicator.style.left = left + "px";
+    paneDropIndicator.style.top = top + "px";
+    paneDropIndicator.style.width = width + "px";
+    paneDropIndicator.style.height = height + "px";
+    paneDropIndicator.hidden = false;
+  }
+
+  function clearPaneDropIndicator() {
+    if (!paneDropIndicator) return;
+    paneDropIndicator.remove();
+    paneDropIndicator = null;
+  }
+
   function startPaneReposition(thread, event) {
     if (!terminalHost || event.button !== 0 || !thread || !thread.pane) return;
     // A lone pane has nothing to be repositioned against.
@@ -1995,39 +2357,14 @@
     var startY = event.clientY;
     var dragging = false;
     var drop = null;
-    var indicator = null;
 
     function beginDrag() {
       dragging = true;
-      indicator = document.createElement("div");
-      indicator.className = "pane-drop-indicator";
-      indicator.setAttribute("aria-hidden", "true");
-      indicator.hidden = true;
-      document.body.appendChild(indicator);
       document.body.classList.add("is-pane-dragging");
       thread.pane.classList.add("is-dragging");
     }
 
-    // Fixed positioning takes the client rects as-is, so the highlight needs no
-    // positioned ancestor and cannot be clipped by a pane's own overflow.
-    function showIndicator(rect, position) {
-      var left = rect.left;
-      var top = rect.top;
-      var width = rect.width;
-      var height = rect.height;
-      if (position === "left" || position === "right") {
-        width = rect.width / 2;
-        if (position === "right") left = rect.left + width;
-      } else {
-        height = rect.height / 2;
-        if (position === "below") top = rect.top + height;
-      }
-      indicator.style.left = left + "px";
-      indicator.style.top = top + "px";
-      indicator.style.width = width + "px";
-      indicator.style.height = height + "px";
-      indicator.hidden = false;
-    }
+    var showIndicator = showPaneDropIndicator;
 
     function onPointerMove(moveEvent) {
       if (moveEvent.pointerId !== pointerId) return;
@@ -2041,7 +2378,7 @@
       var hit = paneElementAt(moveEvent.clientX, moveEvent.clientY);
       if (!hit || hit.thread.id === thread.id) {
         drop = null;
-        indicator.hidden = true;
+        clearPaneDropIndicator();
         return;
       }
       var position = paneDropZone(hit.rect, moveEvent.clientX, moveEvent.clientY);
@@ -2066,8 +2403,7 @@
       if (!dragging) return;
       document.body.classList.remove("is-pane-dragging");
       thread.pane.classList.remove("is-dragging");
-      if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
-      indicator = null;
+      clearPaneDropIndicator();
       dragging = false;
       if (drop) movePaneTo(thread.id, drop.threadId, drop.position);
     }
@@ -2448,6 +2784,10 @@
       var thread = findThread(node.threadId);
       if (thread && thread.kind === "web" && thread.browserBody && browserSurface) {
         thread.browserBody.appendChild(browserSurface);
+      }
+      if (thread && thread.kind === "git" && thread.toolBody && gitSurfaceEl &&
+          gitSurfaceEl.parentElement !== thread.toolBody) {
+        thread.toolBody.appendChild(gitSurfaceEl);
       }
       return thread && thread.pane ? thread.pane : document.createDocumentFragment();
     }
@@ -3560,7 +3900,14 @@
         // Rows are grouped by what the pane actually is, so a worktree with a
         // mix of agent harnesses and plain shells reads at a glance.
         var groupedThreads = [];
-        [["Agents", function (t) { return (t.kind || "shell") !== "shell"; }],
+        // A tool pane is neither an agent nor a shell: filing Git under Agents
+        // would claim a model is running in it.
+        var TOOL_KINDS = ["git", "web"];
+        [["Agents", function (t) {
+           var kind = t.kind || "shell";
+           return kind !== "shell" && TOOL_KINDS.indexOf(kind) === -1;
+         }],
+         ["Tools", function (t) { return TOOL_KINDS.indexOf(t.kind || "shell") !== -1; }],
          ["Shells", function (t) { return (t.kind || "shell") === "shell"; }]]
           .forEach(function (kindGroup) {
             var hits = threads.filter(kindGroup[1]);
@@ -4051,6 +4398,19 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
+  function enterFileFocus(file) {
+    if (!file) return false;
+    if (!state.activeFileId) {
+      fileFocus.returnThreadId = state.activeThreadId || null;
+    }
+    state.activeFileId = file.id;
+    terminalArea.classList.add("is-file-focused");
+    fileViewEl.hidden = false;
+    terminalHost.hidden = true;
+    renderPaneMinimap(activePaneLayout(), file);
+    return true;
+  }
+
   async function openFileTab(path, project) {
     project = project || activeProject();
     if (!project) return;
@@ -4113,10 +4473,8 @@
   function activateFileTabNow(id) {
     var file = findOpenFile(id);
     if (!file) return false;
-    state.activeFileId = id;
+    enterFileFocus(file);
     markActiveSurface("terminal");
-    if (fileViewEl) fileViewEl.hidden = false;
-    if (terminalHost) terminalHost.hidden = true;
     refreshTabs();
     renderFileView();
     return true;
@@ -5798,6 +6156,9 @@
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
+      // A call is the most transient thing on screen after a menu, and ending
+      // it is always safe: nothing is transmitting.
+      if (endCall()) return;
       if (!typing && exitPaneMaximize()) return;
       return;
     }
