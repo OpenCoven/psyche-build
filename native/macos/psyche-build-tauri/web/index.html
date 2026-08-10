@@ -254,10 +254,14 @@
                     <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
                     <div class="diff-detail" id="diff-detail">
                       <div class="diff-detail-status">
+                        <span role="group" aria-label="Diff layout" class="diff-layout-toggle">
+                          <button id="diff-view-split" type="button" class="diff-layout-btn is-active" aria-pressed="true" title="Side-by-side diff">Split</button>
+                          <button id="diff-view-stacked" type="button" class="diff-layout-btn" aria-pressed="false" title="Unified diff">Stacked</button>
+                        </span>
                         <span id="diff-metadata" role="status" aria-live="polite"></span>
                         <span id="diff-truncation" role="alert" hidden></span>
                       </div>
-                      <div class="diff-editor-host" id="diff-editor-host"></div>
+                      <div class="diff-rows" id="diff-rows" role="table" aria-label="Diff"></div>
                     </div>
                   </div>
                 </div>
@@ -399,6 +403,7 @@
       </div>
     </dialog>
     <script src="./editor.bundle.js" defer></script>
+    <script src="./diffs.bundle.js" defer></script>
     <script src="./sessions.bundle.js" defer></script>
     <script src="./panes.bundle.js" defer></script>
     <script src="./main.js" defer></script>
