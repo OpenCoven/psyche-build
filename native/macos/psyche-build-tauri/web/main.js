@@ -3132,7 +3132,7 @@
    * itself when the timer runs out — the guard costs nothing if you meant it
    * and everything if you didn't.
    */
-  function armSessionClose(wrapper, close, thread) {
+  function armSessionClose(host, close, thread) {
     disarmSessionClose();
     var left = SESSION_CLOSE_SECONDS;
     var confirm = document.createElement("button");
@@ -3150,7 +3150,7 @@
       closeThread(thread.id);
     });
     close.hidden = true;
-    wrapper.appendChild(confirm);
+    host.appendChild(confirm);
     var timer = setInterval(function () {
       left -= 1;
       if (left <= 0) { disarmSessionClose(); return; }
@@ -3288,13 +3288,17 @@
     }
   }
 
-  function createDisclosure(label, expanded) {
+  function createDisclosure(label, expanded, autoExpanded) {
     var disclosure = document.createElement("button");
     disclosure.type = "button";
     disclosure.className = "session-disclosure";
     disclosure.setAttribute("tabindex", "-1");
-    disclosure.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + label);
+    var actionLabel = autoExpanded
+      ? label + " is temporarily expanded for search; clear search to restore saved collapse state"
+      : (expanded ? "Collapse " : "Expand ") + label;
+    disclosure.setAttribute("aria-label", actionLabel);
     disclosure.textContent = expanded ? "▾" : "▸";
+    attachTooltip(disclosure, actionLabel);
     return disclosure;
   }
 
@@ -3349,8 +3353,7 @@
       : rowModel.status.key === "busy"
         ? " starting"
         : rowModel.status.key === "exited" ? " exited" : "";
-    var row = document.createElement("button");
-    row.type = "button";
+    var row = document.createElement("div");
     row.className = "session-row kind-" + rowModel.type.slice(0, -1)
       + " status-" + rowModel.status.key
       + legacyStatus
@@ -3369,7 +3372,9 @@
     var icon = document.createElement("span");
     icon.className = "session-type-icon session-glyph";
     icon.setAttribute("aria-hidden", "true");
-    icon.textContent = rowModel.type === "shells" ? "❯_" : "✳";
+    icon.textContent = rowModel.source === "coven"
+      ? "✳"
+      : paneGlyphFor(rowModel.kind);
 
     var text = document.createElement("span");
     text.className = "session-text";
@@ -3437,7 +3442,11 @@
 
     var head = document.createElement("div");
     head.className = "session-branch-head session-worktree-head";
-    var disclosure = createDisclosure(branchModel.title, branchModel.expanded);
+    var disclosure = createDisclosure(
+      branchModel.title,
+      branchModel.expanded,
+      branchModel.autoExpanded
+    );
     var title = document.createElement("span");
     title.className = "session-branch-name worktree-name";
     appendHighlightedText(title, branchModel.title, branchModel.titleMatches);
@@ -3465,7 +3474,10 @@
       head,
       branchModel.worktree.virtual
         ? "Sessions with no available worktree"
-        : (branchModel.worktree.path || branchModel.title)
+        : (branchModel.worktree.path || branchModel.title) +
+          (branchModel.autoExpanded
+            ? " — temporarily expanded for search; clear search to restore saved collapse state"
+            : "")
     );
     group.setAttribute(
       "aria-label",
@@ -3473,7 +3485,8 @@
         (branchModel.count === 1 ? "" : "s") +
         (branchModel.attentionCount > 0
           ? ", " + branchModel.attentionCount + " need attention"
-          : "")
+          : "") +
+        (branchModel.autoExpanded ? ", temporarily expanded for search" : "")
     );
     group.title = branchModel.worktree.virtual
       ? "Sessions with no available worktree"
@@ -3504,7 +3517,11 @@
 
     var head = document.createElement("div");
     head.className = "session-project-head session-group-head";
-    var disclosure = createDisclosure(projectModel.title, projectModel.expanded);
+    var disclosure = createDisclosure(
+      projectModel.title,
+      projectModel.expanded,
+      projectModel.autoExpanded
+    );
     var title = document.createElement("span");
     title.className = "session-project-name";
     appendHighlightedText(title, projectModel.title, projectModel.titleMatches);
@@ -3533,14 +3550,21 @@
     head.appendChild(disclosure);
     head.appendChild(title);
     head.appendChild(count);
-    attachTooltip(head, projectModel.project.root || projectModel.title);
+    attachTooltip(
+      head,
+      (projectModel.project.root || projectModel.title) +
+        (projectModel.autoExpanded
+          ? " — temporarily expanded for search; clear search to restore saved collapse state"
+          : "")
+    );
     group.setAttribute(
       "aria-label",
       projectModel.title + ", " + projectModel.count + " session" +
         (projectModel.count === 1 ? "" : "s") +
         (projectModel.attentionCount > 0
           ? ", " + projectModel.attentionCount + " need attention"
-          : "")
+          : "") +
+        (projectModel.autoExpanded ? ", temporarily expanded for search" : "")
     );
     group.title = projectModel.project.root || projectModel.title;
 
@@ -3632,12 +3656,17 @@
         current: project.id === state.activeProjectId,
         tabindex: "-1",
       });
+      function setProjectExpanded(expanded) {
+        if (projectModel.autoExpanded || Boolean(project.collapsed) === !expanded) return false;
+        project.collapsed = !expanded;
+        refreshSidebar();
+        saveWorkspaceSoon();
+        return true;
+      }
       projectParts.disclosure.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
-        project.collapsed = !project.collapsed;
-        refreshSidebar();
-        saveWorkspaceSoon();
+        setProjectExpanded(!projectModel.expanded);
       });
       projectParts.group.addEventListener("click", function (event) {
         if (!targetWithin(event, projectParts.head) ||
@@ -3646,11 +3675,21 @@
         setActiveProject(project.id);
       });
       projectParts.group.addEventListener("keydown", function (event) {
-        if (!ownTreeItemKeydown(event, projectParts.group) ||
-            (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar")) return;
+        if (!ownTreeItemKeydown(event, projectParts.group)) return;
+        if (event.key === "Enter") {
+          event.preventDefault();
+          clearFocusSet();
+          setActiveProject(project.id);
+          return;
+        }
+        if (event.key === " " || event.key === "Spacebar") {
+          event.preventDefault();
+          setProjectExpanded(!projectModel.expanded);
+          return;
+        }
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
-        clearFocusSet();
-        setActiveProject(project.id);
+        setProjectExpanded(event.key === "ArrowRight");
       });
 
       if (projectModel.expanded) {
@@ -3660,13 +3699,18 @@
           active: !worktree.virtual && project.selectedWorktreePath === worktree.path,
           tabindex: "-1",
         });
-        branchParts.disclosure.addEventListener("click", function (event) {
-          if (worktree.virtual || worktree.missing) return;
-          event.preventDefault();
-          event.stopPropagation();
-          worktree.collapsed = !worktree.collapsed;
+        function setBranchExpanded(expanded) {
+          if (worktree.virtual || worktree.missing || branchModel.autoExpanded ||
+              Boolean(worktree.collapsed) === !expanded) return false;
+          worktree.collapsed = !expanded;
           refreshSidebar();
           saveWorkspaceSoon();
+          return true;
+        }
+        branchParts.disclosure.addEventListener("click", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          setBranchExpanded(!branchModel.expanded);
         });
         branchParts.group.addEventListener("click", async function (event) {
           if (!targetWithin(event, branchParts.head) ||
@@ -3679,27 +3723,24 @@
               targetWithin(event, branchParts.disclosure)) return;
           if (worktree.virtual || worktree.missing) return;
           event.preventDefault();
-          worktree.collapsed = !worktree.collapsed;
-          refreshSidebar();
-          saveWorkspaceSoon();
+          setBranchExpanded(!branchModel.expanded);
         });
-        branchParts.group.addEventListener("keydown", function (event) {
+        branchParts.group.addEventListener("keydown", async function (event) {
           if (worktree.virtual || worktree.missing ||
               !ownTreeItemKeydown(event, branchParts.group)) return;
-          if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+          if (event.key === "Enter") {
             event.preventDefault();
-            worktree.collapsed = !worktree.collapsed;
-            refreshSidebar();
-            saveWorkspaceSoon();
+            await activateProjectWorktree(project, worktree.path);
+            return;
+          }
+          if (event.key === " " || event.key === "Spacebar") {
+            event.preventDefault();
+            setBranchExpanded(!branchModel.expanded);
             return;
           }
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          var collapse = event.key === "ArrowLeft";
-          if (worktree.collapsed === collapse) return;
           event.preventDefault();
-          worktree.collapsed = !worktree.collapsed;
-          refreshSidebar();
-          saveWorkspaceSoon();
+          setBranchExpanded(event.key === "ArrowRight");
         });
 
         var hiddenThreads = state.threads.filter(function (thread) {
@@ -3732,12 +3773,7 @@
           branchModel.categories.forEach(function (category) {
             var categoryGroup = document.createElement("div");
             categoryGroup.className = "session-category";
-            categoryGroup.setAttribute("role", "group");
-            categoryGroup.setAttribute(
-              "aria-label",
-              category.label + ", " + category.count + " session" +
-                (category.count === 1 ? "" : "s")
-            );
+            categoryGroup.setAttribute("role", "none");
             categoryGroup.appendChild(createCategoryLabel(category));
 
             category.rows.forEach(function (rowModel) {
@@ -3761,10 +3797,16 @@
                 });
                 row.dataset.sessionId = rowModel.id;
                 row.title = (attached ? "Focus attachment — " : "Attach — ") + row.title;
-                row.addEventListener("click", function () {
+                function activateCovenRow() {
                   settings.selectedSessionKey = rowModel.selectionKey;
                   saveSettings();
                   openCovenSession(project, rowModel.value);
+                }
+                row.addEventListener("click", activateCovenRow);
+                row.addEventListener("keydown", function (event) {
+                  if (!ownTreeItemKeydown(event, row) || event.key !== "Enter") return;
+                  event.preventDefault();
+                  activateCovenRow();
                 });
                 categoryGroup.appendChild(wrapper);
                 return;
@@ -3781,7 +3823,7 @@
                 row.setAttribute("aria-pressed", picked ? "true" : "false");
                 row.title = (picked ? "Remove " : "Include ") + thread.name + " in the set";
               }
-              row.addEventListener("click", async function () {
+              async function activateLocalRow() {
                 if (setPicking) { toggleSetPick(thread.id); return; }
                 settings.selectedSessionKey = rowModel.selectionKey;
                 saveSettings();
@@ -3789,6 +3831,12 @@
                     !(await setActiveProject(project.id))) return;
                 applySetScopeForThread(thread);
                 await focusThread(thread.id);
+              }
+              row.addEventListener("click", activateLocalRow);
+              row.addEventListener("keydown", function (event) {
+                if (!ownTreeItemKeydown(event, row) || event.key !== "Enter") return;
+                event.preventDefault();
+                activateLocalRow();
               });
               function beginSessionRename(event) {
                 event.stopPropagation();
@@ -3850,7 +3898,7 @@
                     : null,
                   { label: "Hide", run: function () { hideThread(thread.id); } },
                   { label: "Stop and close", danger: true, run: function () {
-                      armSessionClose(wrapper, close, thread);
+                      armSessionClose(row, close, thread);
                     } },
                 ]);
               });
@@ -3873,7 +3921,7 @@
                 if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
                 else hideThread(thread.id);
               });
-              wrapper.appendChild(close);
+              row.appendChild(close);
               categoryGroup.appendChild(wrapper);
             });
             branchParts.children.appendChild(categoryGroup);

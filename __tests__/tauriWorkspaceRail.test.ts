@@ -159,7 +159,12 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
     expect(mainJs).toContain('event.target === treeItem && document.activeElement === treeItem');
-    expect(mainJs).toMatch(/event\.key === "Enter" \|\| event\.key === " " \|\| event\.key === "Spacebar"/);
+    expect(mainJs).toContain('if (event.key === "Enter")');
+    expect(mainJs).toContain('if (event.key === " " || event.key === "Spacebar")');
+    expect(mainJs).toContain('setActiveProject(project.id)');
+    expect(mainJs).toContain('await activateProjectWorktree(project, worktree.path)');
+    expect(mainJs).toContain('setProjectExpanded(!projectModel.expanded)');
+    expect(mainJs).toContain('setBranchExpanded(!branchModel.expanded)');
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
     expect(mainJs).toContain('"[data-tree-item]"');
     expect(mainJs).not.toContain('"[data-tree-item], .session-close"');
