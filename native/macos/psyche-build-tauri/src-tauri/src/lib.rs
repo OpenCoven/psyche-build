@@ -20,6 +20,7 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod metrics;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
