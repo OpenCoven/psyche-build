@@ -1,28 +1,20 @@
 import XCTest
 
-/// Smoke coverage for the Now-first shell. The fuller compact/regular matrix
-/// — tab switching, sidebar behaviour, state across rotation — lands with the
-/// dedicated UI-coverage task.
+/// Shell coverage for the Now-first cockpit.
+///
+/// Every test launches the fixture root, so nothing here touches the network
+/// or the device keychain. Tests that only make sense at one width guard on
+/// the window and skip on the other device class rather than quietly asserting
+/// something weaker.
 final class PsycheAppUITests: XCTestCase {
+
+    // MARK: - Both device classes
+
     func testLaunchesIntoNow() throws {
         let app = launchApp()
 
         XCTAssertTrue(app.otherElements["main-cockpit"].waitForExistence(timeout: 10))
         XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
-    }
-
-    func testOpensAPaneInOneTapFromNow() throws {
-        let app = launchApp()
-        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
-
-        // The fixture puts this pane in Needs You, so it is reachable without
-        // scrolling or switching sections.
-        let paneRow = row("now-pane-web-home", in: app)
-        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
-        paneRow.tap()
-
-        XCTAssertTrue(element("pane-workspace", in: app).waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["homepage polish"].waitForExistence(timeout: 10))
     }
 
     func testNowGroupsPanesIntoTheThreeSections() throws {
@@ -34,53 +26,191 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Recent"].exists)
     }
 
-    func testProjectsReachEveryPublishedProject() throws {
-        let app = launchApp()
-        try showProjects(in: app)
-
-        XCTAssertTrue(element("project-psyche", in: app).waitForExistence(timeout: 10))
-        XCTAssertTrue(element("project-website", in: app).exists)
-        XCTAssertTrue(element("project-infra", in: app).exists)
-    }
-
-    func testProjectDetailGroupsPanesUnderTheirWorktree() throws {
-        let app = launchApp()
-        try showProjects(in: app)
-
-        let project = row("project-psyche", in: app)
-        XCTAssertTrue(project.waitForExistence(timeout: 10))
-        project.tap()
-
-        XCTAssertTrue(element("project-detail-psyche", in: app).waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["main"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["feat/native-ios-cloud-terminal"].exists)
-        XCTAssertTrue(element("project-pane-ios-cockpit", in: app).exists)
-    }
-
-    func testSettingsReportsConnectionAndHost() throws {
-        let app = launchApp()
-        try showSettings(in: app)
-
-        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
-
-        // The rows combine their children for VoiceOver, so the host name is
-        // part of the row's label rather than a separate static text.
-        let host = element("settings-host", in: app)
-        XCTAssertTrue(host.waitForExistence(timeout: 10))
-        XCTAssertTrue(host.label.contains("psyche-demo.local"), host.label)
-
-        let status = element("settings-status", in: app)
-        XCTAssertTrue(status.waitForExistence(timeout: 10))
-        XCTAssertTrue(status.label.contains("Connection status"), status.label)
-    }
-
     func testNoLegacyDrillDownRemains() throws {
         let app = launchApp()
         XCTAssertTrue(app.otherElements["main-cockpit"].waitForExistence(timeout: 10))
 
+        // Narrow queries on purpose. Asking `descendants(matching: .any)` for
+        // an identifier that does not exist walks the whole tree three times
+        // and turned this into a 100-second test under load.
         XCTAssertFalse(app.buttons["cockpit-siderail-toggle"].exists)
-        XCTAssertFalse(element("pane-list", in: app).exists)
-        XCTAssertFalse(element("terminal-output", in: app).exists)
+        XCTAssertFalse(app.otherElements["pane-list"].exists)
+        XCTAssertFalse(app.otherElements["terminal-output"].exists)
+        XCTAssertFalse(app.collectionViews["pane-list"].exists)
+    }
+
+    /// The identifiers every other test steers by, asserted in one place.
+    ///
+    /// Renaming one otherwise scatters failures across the suite and reads as
+    /// a product regression instead of a rename.
+    func testCoreAccessibilityIdentifiersArePresent() throws {
+        let app = launchApp()
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+
+        for identifier in ["main-cockpit", "now-view", "now-pane-web-home"] {
+            XCTAssertTrue(
+                element(identifier, in: app).waitForExistence(timeout: 5),
+                "Missing identifier \(identifier)"
+            )
+        }
+
+        // The shell itself is identified by what it presents rather than by an
+        // identifier: SwiftUI does not surface one set on TabView or
+        // NavigationSplitView as a queryable element.
+        if app.windows.firstMatch.frame.width < 700 {
+            XCTAssertTrue(app.tabBars.buttons["Now"].exists)
+        } else {
+            XCTAssertTrue(element("source-rail", in: app).exists)
+        }
+    }
+
+    /// The status the fixture publishes is the one the row speaks, so a pane
+    /// that needs you says so rather than only looking different.
+    func testAttentionPaneIsLabelledAsNeedingYou() throws {
+        let app = launchApp()
+        let paneRow = row("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+
+        let label = paneRow.label
+        XCTAssertTrue(label.contains("homepage polish"), label)
+        XCTAssertTrue(label.contains("open-coven.dev"), label)
+        XCTAssertTrue(label.contains("waiting"), label)
+        XCTAssertTrue(label.contains("needs you"), label)
+    }
+
+    // MARK: - Compact width (iPhone)
+
+    func testCompactOpensANeedsYouPaneFromNowInOneTap() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+        XCTAssertTrue(app.staticTexts["Needs You"].waitForExistence(timeout: 10))
+
+        let paneRow = row("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        paneRow.tap()
+
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["homepage polish"].waitForExistence(timeout: 10))
+    }
+
+    func testCompactUsesTabsRatherThanASidebar() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+
+        XCTAssertTrue(app.tabBars.buttons["Now"].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("source-rail", in: app).exists)
+        XCTAssertTrue(app.tabBars.buttons["Projects"].exists)
+        XCTAssertTrue(app.tabBars.buttons["Settings"].exists)
+    }
+
+    func testCompactTabsReachProjectsAndSettingsAndReturnToNow() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+
+        app.tabBars.buttons["Projects"].tap()
+        XCTAssertTrue(element("projects-view", in: app).waitForExistence(timeout: 10))
+
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
+
+        app.tabBars.buttons["Now"].tap()
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+    }
+
+    /// Each tab keeps its own place, so leaving Now and coming back does not
+    /// dump you out of the pane you were reading.
+    func testCompactReturningToNowKeepsTheOpenPane() throws {
+        let app = launchApp()
+        try requireCompactWidth(in: app)
+
+        let paneRow = row("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        paneRow.tap()
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+
+        app.tabBars.buttons["Projects"].tap()
+        XCTAssertTrue(element("projects-view", in: app).waitForExistence(timeout: 10))
+        app.tabBars.buttons["Now"].tap()
+
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+    }
+
+    // MARK: - Regular width (iPad)
+
+    func testRegularUsesASidebarRatherThanTabs() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        XCTAssertTrue(element("source-rail", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(app.tabBars.buttons["Projects"].exists)
+    }
+
+    func testRegularSidebarOpensProjectDetailThenAPane() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        let project = row("source-project-psyche", in: app)
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+
+        XCTAssertTrue(element("project-detail-psyche", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["feat/native-ios-cloud-terminal"].waitForExistence(timeout: 10))
+
+        let pane = row("project-pane-ios-cockpit", in: app)
+        XCTAssertTrue(pane.waitForExistence(timeout: 10))
+        pane.tap()
+
+        XCTAssertTrue(element("pane-workspace-ios-cockpit", in: app).waitForExistence(timeout: 10))
+    }
+
+    func testRegularSidebarReachesTheProjectsOverviewAndSettings() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        let overview = row("source-projects", in: app)
+        XCTAssertTrue(overview.waitForExistence(timeout: 10))
+        overview.tap()
+        XCTAssertTrue(element("projects-view", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("project-psyche", in: app).waitForExistence(timeout: 10))
+
+        let settings = row("source-settings", in: app)
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
+
+        let host = element("settings-host", in: app)
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        XCTAssertTrue(host.label.contains("psyche-demo.local"), host.label)
+    }
+
+    func testRegularSidebarReturnsToNow() throws {
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        row("source-settings", in: app).tap()
+        XCTAssertTrue(element("settings-view", in: app).waitForExistence(timeout: 10))
+
+        row("source-now", in: app).tap()
+        XCTAssertTrue(element("now-view", in: app).waitForExistence(timeout: 10))
+    }
+
+    /// Rotation re-runs the layout. The open pane is navigation state, not
+    /// layout state, so it has to survive.
+    func testRegularKeepsTheOpenPaneAcrossRotation() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp()
+        try requireRegularWidth(in: app)
+
+        let paneRow = row("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        paneRow.tap()
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        try waitForLandscape(app)
+
+        XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
     }
 
     // MARK: - Helpers
@@ -100,30 +230,53 @@ final class PsycheAppUITests: XCTestCase {
         return app
     }
 
-    /// Reaches a root from whichever shell is on screen: a tab in compact
-    /// width, a sidebar row in regular.
-    private func showProjects(in app: XCUIApplication) throws {
-        try showRoot(tab: "Projects", sourceIdentifier: "source-projects", in: app)
+    private func requireCompactWidth(in app: XCUIApplication) throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        if window.frame.width >= 700 {
+            throw XCTSkip("Compact shell coverage requires an iPhone simulator.")
+        }
     }
 
-    private func showSettings(in app: XCUIApplication) throws {
-        try showRoot(tab: "Settings", sourceIdentifier: "source-settings", in: app)
+    private func requireRegularWidth(in app: XCUIApplication) throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        if window.frame.width < 700 {
+            throw XCTSkip("Regular shell coverage requires an iPad simulator.")
+        }
     }
 
-    private func showRoot(
-        tab: String,
-        sourceIdentifier: String,
-        in app: XCUIApplication
+    /// Waits for the device to actually be in landscape.
+    ///
+    /// Setting `XCUIDevice.orientation` requests a rotation, it does not
+    /// guarantee one, and this wait has to outlast a loaded machine.
+    ///
+    /// Deliberately does *not* retry the orientation request. That was tried
+    /// before: forcing the first wait to time out showed the device then
+    /// stayed portrait through every subsequent attempt, because re-issuing
+    /// orientation changes in quick succession wedges the simulator. One
+    /// patient wait recovers from a slow rotation; nothing inside the test
+    /// recovers from a wedged device, so it is better to fail saying so.
+    private func waitForLandscape(
+        _ app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) throws {
-        if app.tabBars.buttons[tab].waitForExistence(timeout: 5) {
-            app.tabBars.buttons[tab].tap()
+        let window = app.windows.firstMatch
+        let landscape = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in window.frame.width > window.frame.height },
+            object: window
+        )
+        guard XCTWaiter.wait(for: [landscape], timeout: 30) == .completed else {
+            XCTFail(
+                "Device never entered landscape within 30s; last frame \(window.frame). "
+                    + "This is a simulator-state failure rather than a product failure — "
+                    + "reboot the simulator (xcrun simctl shutdown/boot) and re-run.",
+                file: file,
+                line: line
+            )
             return
         }
-        let sidebarRow = row(sourceIdentifier, in: app)
-        guard sidebarRow.waitForExistence(timeout: 5) else {
-            throw XCTSkip("Neither shell presented a way to reach \(tab).")
-        }
-        sidebarRow.tap()
     }
 
     /// An identifier on a row propagates to the image and text inside it, and

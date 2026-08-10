@@ -79,7 +79,6 @@ struct CockpitView: View {
             .tabItem { Label(RootTab.settings.title, systemImage: RootTab.settings.systemImage) }
             .tag(RootTab.settings)
         }
-        .accessibilityIdentifier("compact-shell")
     }
 
     // MARK: - Regular
@@ -95,7 +94,6 @@ struct CockpitView: View {
                     }
             }
         }
-        .accessibilityIdentifier("regular-shell")
     }
 
     /// Now first, then projects, then settings — the same order the tabs use,

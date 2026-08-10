@@ -46,7 +46,6 @@ struct PaneWorkspaceView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding()
-                .accessibilityIdentifier("pane-workspace-\(pane.id)")
             } else {
                 ContentUnavailableView(
                     "No pane selected",
@@ -57,7 +56,10 @@ struct PaneWorkspaceView: View {
         }
         .navigationTitle(pane?.title ?? "Pane")
         .navigationBarTitleDisplayMode(.inline)
-        .accessibilityIdentifier("pane-workspace")
+        // Names the pane on the outer container. An identifier here masks any
+        // set on a child, so the specific one has to live at this level to be
+        // queryable at all.
+        .accessibilityIdentifier(pane.map { "pane-workspace-\($0.id)" } ?? "pane-workspace")
         .onAppear {
             if let requestedPrimaryPaneID {
                 store.primaryPaneID = requestedPrimaryPaneID
