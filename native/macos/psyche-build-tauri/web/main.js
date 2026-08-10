@@ -701,7 +701,6 @@
     document.querySelectorAll("[data-browser-toggle]")
   );
   var browserCollapseBtn = document.getElementById("browser-collapse");
-  var BROWSER_SIDES = ["right", "bottom", "left", "top"];
   var PANELS = ["git"];
   // Diffs used to be its own tab. It now lives inside the git panel, so every
   // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
@@ -827,21 +826,8 @@
   function toggleBrowser() {
     applyLayout(currentLayout() === "split" ? "terminal" : "split");
   }
-  function cycleBrowserSide(direction) {
-    var idx = BROWSER_SIDES.indexOf(currentSide());
-    if (idx < 0) idx = 0;
-    var step = direction === -1 ? -1 : 1;
-    var next = BROWSER_SIDES[(idx + step + BROWSER_SIDES.length) % BROWSER_SIDES.length];
-    applyLayout("split", { side: next });
-  }
-
   browserToggleBtns.forEach(function (btn) {
     btn.addEventListener("click", toggleBrowser);
-    // Right-click cycles side without changing visibility on/off.
-    btn.addEventListener("contextmenu", function (e) {
-      e.preventDefault();
-      cycleBrowserSide(e.shiftKey ? -1 : 1);
-    });
   });
   if (browserCollapseBtn) {
     // The chevron in the browser bar now collapses its own column rather than
@@ -923,14 +909,6 @@
         applyLayout("split");
         if (panelWasVisible) renderPanel(name);
       });
-      // Right-click cycles which edge the dock sits on, as it did on the old
-      // titlebar toggle.
-      if (btn.dataset.panelBtn === "browser") {
-        btn.addEventListener("contextmenu", function (e) {
-          e.preventDefault();
-          cycleBrowserSide(e.shiftKey ? -1 : 1);
-        });
-      }
     }
   );
 
@@ -2645,6 +2623,34 @@
       btn.addEventListener("click", function () {
         setSidebarTab(btn.dataset.sidebarTab);
       });
+    }
+  );
+
+  // The git panel uses the same segmented switch as the sidebar: Changes is the
+  // working tree and its diffs, Commit is the branch state and history. Two
+  // rails, one control to learn.
+  var gitTab = "changes";
+  function setGitTab(name) {
+    gitTab = name === "commit" ? "commit" : "changes";
+    var changes = document.getElementById("git-tab-changes");
+    var commit = document.getElementById("git-tab-commit");
+    if (changes) changes.hidden = gitTab !== "changes";
+    if (commit) commit.hidden = gitTab !== "commit";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-git-tab]"),
+      function (btn) {
+        var active = btn.dataset.gitTab === gitTab;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      }
+    );
+    return gitTab;
+  }
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-git-tab]"),
+    function (btn) {
+      btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
     }
   );
   var sessionSearchEl = document.getElementById("session-search");
@@ -4941,23 +4947,21 @@
     var dragging = false;
     var splitFrame = 0;
 
+    // The splitter only ever divides the canvas from the tools dock now, so
+    // the clamp is always horizontal.
     function splitClampBounds() {
       var rect = detail.getBoundingClientRect();
       var styles = window.getComputedStyle(detail);
-      var side = currentSide();
-      var horizontal = side === "right" || side === "left";
-      var size = horizontal ? rect.width : rect.height;
-      var termMin = parseFloat(styles.getPropertyValue(horizontal ? "--terminal-min" : "--terminal-min-y"))
-                    || (horizontal ? 220 : 160);
-      var brMin   = parseFloat(styles.getPropertyValue(horizontal ? "--browser-min"  : "--browser-min-y"))
-                    || (horizontal ? 220 : 160);
+      var size = rect.width;
+      var termMin = parseFloat(styles.getPropertyValue("--terminal-min")) || 220;
+      var brMin   = parseFloat(styles.getPropertyValue("--browser-min")) || 220;
       var splitW  = parseFloat(styles.getPropertyValue("--splitter-w")) || 10;
       var min = Math.max(0.2, termMin / size);
       var max = Math.min(0.85, (size - brMin - splitW) / size);
       if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
         min = 0.2; max = 0.85;
       }
-      return { rect: rect, min: min, max: max, side: side, horizontal: horizontal };
+      return { rect: rect, min: min, max: max };
     }
 
     function scheduleSplitLayoutSync() {
@@ -4983,11 +4987,7 @@
     // leading-edge sides (left/top) so the divider always tracks the pointer.
     function splitFracFromEvent(e) {
       var b = splitClampBounds();
-      if (b.side === "right")  return (e.clientX - b.rect.left)   / b.rect.width;
-      if (b.side === "left")   return (b.rect.right - e.clientX)  / b.rect.width;
-      if (b.side === "bottom") return (e.clientY - b.rect.top)    / b.rect.height;
-      if (b.side === "top")    return (b.rect.bottom - e.clientY) / b.rect.height;
-      return 0.6;
+      return (e.clientX - b.rect.left) / b.rect.width;
     }
 
     splitter.addEventListener("pointerdown", function (e) {
@@ -4995,10 +4995,8 @@
       dragging = true;
       splitter.classList.add("dragging");
       detail.classList.add("resizing");
-      var side = currentSide();
-      var axis = (side === "bottom" || side === "top") ? "y" : "x";
       document.body.classList.add("split-resizing");
-      document.body.dataset.axis = axis;
+      document.body.dataset.axis = "x";
       try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
       e.preventDefault();
     });
@@ -5028,16 +5026,66 @@
       if (currentLayout() !== "split") return;
       var current = currentSplitFrac();
       var step = e.shiftKey ? 0.01 : 0.04;
-      var side = currentSide();
-      var grow, shrink;
-      if      (side === "right")  { grow = "ArrowRight"; shrink = "ArrowLeft"; }
-      else if (side === "left")   { grow = "ArrowLeft";  shrink = "ArrowRight"; }
-      else if (side === "bottom") { grow = "ArrowDown";  shrink = "ArrowUp"; }
-      else                        { grow = "ArrowUp";    shrink = "ArrowDown"; }
+      var grow = "ArrowRight", shrink = "ArrowLeft";
       if (e.key === shrink)    { setSplitFrac(current - step); e.preventDefault(); }
       else if (e.key === grow) { setSplitFrac(current + step); e.preventDefault(); }
     });
     setSplitFrac(currentSplitFrac());
+  }
+
+  // The browser band is sized in pixels off its own bottom edge rather than as
+  // a fraction: it is a fixed-ish strip you glance at, not a half of the
+  // window, and a fraction would make it grow every time the window did.
+  var bandResize = document.getElementById("browser-band-resize");
+  var browserColumnEl = document.getElementById("browser-column");
+  if (bandResize && browserColumnEl && detail) {
+    var BAND_MIN = 120;
+    var bandDragging = false;
+
+    function setBandHeight(px) {
+      var max = Math.max(BAND_MIN, detail.getBoundingClientRect().height - 160);
+      var next = Math.min(max, Math.max(BAND_MIN, px));
+      detail.style.setProperty("--browser-band", next.toFixed(0) + "px");
+      syncBrowserBounds();
+      scheduleVisiblePaneFit();
+      return next;
+    }
+
+    bandResize.addEventListener("pointerdown", function (e) {
+      if (currentLayout() !== "split") return;
+      bandDragging = true;
+      bandResize.classList.add("dragging");
+      detail.classList.add("resizing");
+      document.body.classList.add("split-resizing");
+      document.body.dataset.axis = "y";
+      try { bandResize.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+    });
+    bandResize.addEventListener("pointermove", function (e) {
+      if (!bandDragging) return;
+      setBandHeight(e.clientY - browserColumnEl.getBoundingClientRect().top);
+      e.preventDefault();
+    });
+    function endBandDrag(e) {
+      if (!bandDragging) return;
+      bandDragging = false;
+      bandResize.classList.remove("dragging");
+      detail.classList.remove("resizing");
+      document.body.classList.remove("split-resizing");
+      delete document.body.dataset.axis;
+      if (e && typeof e.pointerId === "number") {
+        try { bandResize.releasePointerCapture(e.pointerId); } catch (_) {}
+      }
+    }
+    bandResize.addEventListener("pointerup", endBandDrag);
+    bandResize.addEventListener("pointercancel", endBandDrag);
+    bandResize.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      var step = e.shiftKey ? 4 : 16;
+      var current = browserColumnEl.getBoundingClientRect().height;
+      setBandHeight(current + (e.key === "ArrowDown" ? step : -step));
+      e.preventDefault();
+    });
   }
 
   // ============================================================
@@ -5092,10 +5140,10 @@
         return;
       }
     }
-    // ⌘⌥B toggles browser; ⌘⇧B cycles side. We match by `code` so option-B
-    // (which produces ∫ on macOS) still resolves to KeyB.
-    if (e.code === "KeyB" && e.altKey)   { toggleBrowser(); e.preventDefault(); return; }
-    if (e.code === "KeyB" && e.shiftKey) { cycleBrowserSide(1); e.preventDefault(); return; }
+    // ⌘⌥B toggles the browser band. We match by `code` so option-B (which
+    // produces ∫ on macOS) still resolves to KeyB. There is no side to cycle:
+    // the band has one home, across the top.
+    if (e.code === "KeyB" && e.altKey) { toggleBrowser(); e.preventDefault(); return; }
     // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
     // no files open they fall back to projects, which the sidebar also drives.
     if (e.key === "[") { e.preventDefault(); await switchTab(-1); return; }
@@ -5309,7 +5357,14 @@
   var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
   /** Working-tree file count, mirrored onto the dock's Git tab. */
+  var gitChangesCountEl = document.getElementById("git-changes-count");
   function setDockGitCount(count) {
+    // The count rides both the dock tab and the Changes tab, so the number of
+    // pending changes is legible whether or not the panel is open.
+    if (gitChangesCountEl) {
+      gitChangesCountEl.textContent = String(count || 0);
+      gitChangesCountEl.hidden = !count;
+    }
     if (!dockGitCountEl) return;
     dockGitCountEl.textContent = String(count || 0);
     dockGitCountEl.hidden = !count;

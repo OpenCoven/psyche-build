@@ -19,6 +19,10 @@ const panesBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/panes.bundle.js'),
   'utf8'
 );
+const stylesCss = readFileSync(
+  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  'utf8'
+);
 const tauriLib = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8'
@@ -125,5 +129,73 @@ describe('Tauri workspace panels', () => {
     expect(sessionsBundle).toContain('PsycheSessions');
     expect(panesBundle.length).toBeGreaterThan(0);
     expect(panesBundle).toContain('PsychePanes');
+  });
+
+  describe('browser band', () => {
+    it('spans the top of the workbench instead of sitting in a column', () => {
+      expect(indexHtml).toContain('<section class="browser-band" id="browser-column"');
+      // Row 1, every column: the band is centred on the workbench by covering
+      // it, so the canvas and the tools dock both sit underneath.
+      expect(stylesCss).toMatch(
+        /\.detail\[data-layout="split"\] \.browser-band\s*\{\s*grid-column: 1 \/ -1; grid-row: 1;/
+      );
+      expect(stylesCss).toMatch(/grid-template-rows: var\(--browser-band\) minmax\(var\(--terminal-min-y\), 1fr\);/);
+    });
+
+    it('has one home, so nothing is left that could move it to another edge', () => {
+      expect(stylesCss).not.toContain('data-browser-side');
+      expect(mainJs).not.toContain('BROWSER_SIDES');
+      expect(mainJs).not.toContain('cycleBrowserSide');
+    });
+
+    it('resizes from its lower edge only, in pixels', () => {
+      expect(indexHtml).toContain('id="browser-band-resize"');
+      expect(stylesCss).toMatch(/\.browser-band-resize\s*\{[^}]*cursor: row-resize;/s);
+      expect(mainJs).toMatch(/function setBandHeight\(px\)[\s\S]*--browser-band/);
+      // Bounds have to follow, or the native child webview keeps the old rect.
+      expect(mainJs).toMatch(/function setBandHeight\(px\)[\s\S]*syncBrowserBounds\(\)/);
+    });
+
+    it('is no longer one of the panels the dock switches between', () => {
+      expect(stylesCss).not.toMatch(/\.detail\[data-panel="browser"\] \.panel-browser/);
+      expect(stylesCss).toMatch(/\.browser-band \.panel-browser\s*\{[^}]*display: grid;/s);
+      // The band is a flex column; without a flex basis the preview is 0-high.
+      expect(stylesCss).toMatch(/\.browser-band \.panel-browser\s*\{[^}]*flex: 1 1 auto;[^}]*min-height: 0;/s);
+    });
+  });
+
+  describe('git panel tabs', () => {
+    it('uses the same segmented switch as the sidebar', () => {
+      expect(indexHtml).toContain('data-git-tab="changes"');
+      expect(indexHtml).toContain('data-git-tab="commit"');
+      // Same class as the sidebar's Sessions/Files switch: one control to learn.
+      expect(indexHtml).toMatch(/class="sidebar-tabs dock-tabs-segmented"/);
+      expect(indexHtml).toMatch(/class="sidebar-tab is-active" data-git-tab="changes"/);
+    });
+
+    it('shows exactly one section at a time', () => {
+      expect(mainJs).toMatch(/function setGitTab\(name\)[\s\S]*changes\.hidden = gitTab !== "changes"/);
+      expect(mainJs).toMatch(/function setGitTab\(name\)[\s\S]*commit\.hidden = gitTab !== "commit"/);
+      expect(mainJs).toMatch(/function setGitTab\(name\)[\s\S]*aria-selected/);
+    });
+
+    it('mirrors the changed-file count onto the Changes tab', () => {
+      expect(indexHtml).toContain('id="git-changes-count"');
+      expect(mainJs).toMatch(/function setDockGitCount\(count\)[\s\S]*gitChangesCountEl\.textContent/);
+    });
+  });
+
+  describe('sidebar footer', () => {
+    it('drops the permanent key hints the help overlay already documents', () => {
+      expect(indexHtml).not.toContain('sidebar-hints');
+      expect(stylesCss).not.toContain('.sidebar-hints');
+      expect(indexHtml).toContain('id="help-overlay"');
+    });
+
+    it('collapses appearance to a single row with a theme swatch', () => {
+      expect(indexHtml).toContain('class="appearance-swatch"');
+      expect(stylesCss).toMatch(/\.sidebar-settings > summary\s*\{[^}]*height: 22px;/s);
+      expect(stylesCss).toMatch(/\.appearance-swatch\s*\{[^}]*background: var\(--accent\);/s);
+    });
   });
 });
