@@ -4,22 +4,29 @@
   color-scheme: dark;
 
   /* Brand — themes below override --rgb-accent plus the two hex stops. The
-     soft/line/glow derivations stay put so a theme only states its colour. */
-  --rgb-accent: 184, 157, 255;
-  --accent: #b89dff;
-  --accent-strong: #9d80f0;
+     soft/line/glow derivations stay put so a theme only states its colour.
+
+     Violet has exactly one job: it marks where keyboard input goes. Focus
+     rings, the focused pane's header tint, the composer caret. It is never a
+     selection fill and never a status — those are neutral and semantic
+     respectively, so the three never get confused for one another. */
+  --rgb-accent: 167, 139, 250;
+  --accent: #a78bfa;
+  --accent-strong: #8f6ff0;
   --accent-soft: rgba(var(--rgb-accent), 0.14);
   --accent-line: rgba(var(--rgb-accent), 0.28);
   --accent-glow: rgba(var(--rgb-accent), 0.55);
+  --focus-ring: 0 0 0 3px rgba(var(--rgb-accent), 0.15);
 
   /* Surface ramp, darkest to lightest. Every translucent chrome background in
      the file resolves to one of these five, so a theme restyles the whole
-     window by restating them. */
-  --rgb-deep: 13, 11, 22;   /* titlebar, rails, panel bars */
-  --rgb-s1:   20, 18, 30;   /* tab strip, command bar, panes */
-  --rgb-s2:   28, 25, 42;   /* hover fills */
-  --rgb-s3:   38, 33, 56;   /* raised fills */
-  --rgb-term: 13, 12, 20;   /* terminal + file view */
+     window by restating them. The default ramp is neutral by design: colour
+     in the chrome competes with the colour that carries meaning. */
+  --rgb-deep: 11, 11, 13;   /* bg/0 — titlebar, rails, panel bars */
+  --rgb-s1:   16, 16, 20;   /* bg/1 — tab strip, command bar, panes */
+  --rgb-s2:   23, 23, 27;   /* bg/2 — inputs, hover fills */
+  --rgb-s3:   30, 30, 36;   /* bg/3 — raised fills, selection */
+  --rgb-term:  8,  8, 10;   /* terminal + file view */
 
   /* Surfaces — translucent over the macOS HudWindow vibrancy material */
   /* Master background-opacity multiplier. 1 reproduces the original design;
@@ -1022,14 +1029,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   flex: none;
   text-transform: lowercase;
 }
-.terminal-pane-retry,
 .terminal-pane-close {
   flex: none;
   border: 0;
   background: transparent;
   color: var(--muted);
 }
-.terminal-pane-retry:hover,
 .terminal-pane-close:hover {
   color: var(--text);
 }
@@ -1116,7 +1121,29 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane-status.starting { color: var(--warn); }
 .terminal-pane-status.exited { color: var(--muted); }
-.terminal-pane-retry,
+
+/* Running panes carry a dot instead of the word: it reads as "alive" at a
+   glance and costs a fraction of the header width. The element keeps its
+   aria-label, so nothing is lost to a screen reader. */
+.terminal-pane-status.running {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.10);
+  align-self: center;
+  animation: pane-status-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pane-status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-pane-status.running { animation: none; }
+}
+
 .terminal-pane-close {
   width: 22px;
   height: 20px;
@@ -1128,7 +1155,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   line-height: 1;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
-.terminal-pane-retry:hover,
 .terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
 .terminal-pane-divider {
   background: transparent;
@@ -1556,8 +1582,35 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
 .detail[data-panel="browser"] .panel-browser,
 .detail[data-panel="files"]   .panel-files,
-.detail[data-panel="diffs"]   .panel-diffs,
 .detail[data-panel="git"]     .panel-git { display: grid; }
+
+/* Git owns diffs now: repository state on top, then a subheading, then the
+   changed-file list and its detail. Only the last row flexes, so the git view
+   keeps its natural height and scrolls on its own once it outgrows the cap. */
+.panel-git-body {
+  display: grid;
+  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
+}
+.panel-git-body > .git-view {
+  max-height: 38%;
+  border-bottom: 1px solid var(--border);
+}
+.panel-subbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  min-height: 26px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+}
+.panel-subtitle {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
 
 .panel-bar {
   display: flex;

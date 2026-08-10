@@ -653,7 +653,16 @@
   );
   var browserCollapseBtn = document.getElementById("browser-collapse");
   var BROWSER_SIDES = ["right", "bottom", "left", "top"];
-  var PANELS = ["browser", "files", "diffs", "git"];
+  var PANELS = ["browser", "files", "git"];
+  // Diffs used to be its own tab. It now lives inside the git panel, so every
+  // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
+  // to the tab that actually shows it.
+  var PANEL_ALIASES = { diffs: "git" };
+  function resolvePanelName(name) {
+    return Object.prototype.hasOwnProperty.call(PANEL_ALIASES, name)
+      ? PANEL_ALIASES[name]
+      : name;
+  }
   var detailStyleRule = null;
 
   function currentLayout() { return detail.dataset.layout || "terminal"; }
@@ -758,7 +767,7 @@
 
   function handlePanelLayoutTransition(previousLayout, nextLayout) {
     var panel = currentPanel();
-    if (previousLayout === "split" && nextLayout !== "split" && panel === "diffs") {
+    if (previousLayout === "split" && nextLayout !== "split" && panel === "git") {
       suspendDiffRequests();
     }
     if (previousLayout !== "split" && nextLayout === "split") {
@@ -812,6 +821,7 @@
     );
   }
   function setPanel(name, opts) {
+    name = resolvePanelName(name);
     if (PANELS.indexOf(name) === -1) name = "browser";
     detail.dataset.panel = name;
     var project = activeProject();
@@ -824,8 +834,11 @@
   }
   function renderPanel(name) {
     if (name === "files") renderFilesPanel();
-    else if (name === "diffs") renderDiffsPanel();
-    else if (name === "git") renderGitPanel();
+    else if (name === "git") {
+      // One tab, two sections: repository state above, changed files below.
+      renderGitPanel();
+      renderDiffsPanel();
+    }
   }
   Array.prototype.forEach.call(
     document.querySelectorAll("[data-panel-btn]"),
@@ -1266,17 +1279,7 @@
     spacer.className = "terminal-pane-spacer";
     var status = document.createElement("span");
     status.className = "terminal-pane-status";
-    status.textContent = thread.status;
-    var retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "terminal-pane-retry";
-    retry.title = "Retry terminal";
-    retry.setAttribute("aria-label", "Retry " + thread.name);
-    retry.textContent = "Retry";
-    retry.addEventListener("click", function (event) {
-      event.stopPropagation();
-      retryThread(thread.id);
-    });
+    applyPaneStatus(status, thread.status);
     var close = document.createElement("button");
     close.type = "button";
     close.className = "terminal-pane-close";
@@ -1299,8 +1302,24 @@
     header.appendChild(meta);
     header.appendChild(spacer);
     header.appendChild(status);
-    header.appendChild(retry);
     header.appendChild(close);
+    // Retry lost its header button, so the pane's own context menu carries it.
+    // The sidebar row cannot: PR #54 hides exited rows, and exited is exactly
+    // the state you retry from.
+    header.addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      openSessionContextMenu(event, [
+        thread.status === "exited" || thread.status === "failed"
+          ? { label: "Retry", run: function () { retryThread(thread.id); } }
+          : null,
+        thread.status !== "exited"
+          ? { label: "Interrupt", run: function () { sendToThread(thread, "\x03"); } }
+          : null,
+        { label: "Hide", run: function () { hideThread(thread.id); } },
+        { label: "Stop and close", danger: true, run: function () { closeThread(thread.id); } },
+      ]);
+    });
     var body = document.createElement("div");
     body.className = "terminal-pane-body";
     var container = document.createElement("div");
@@ -1310,14 +1329,13 @@
     pane.appendChild(header);
     pane.appendChild(body);
     pane.addEventListener("pointerdown", function (event) {
-      handlePanePointerDown(thread, body, retry, close, event);
+      handlePanePointerDown(thread, body, close, event);
     });
     thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
     thread.paneStatus = status;
-    thread.paneRetry = retry;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
     renderPaneWorkspace();
@@ -1385,10 +1403,21 @@
     thread.fit = fit;
   }
 
-  function handlePanePointerDown(thread, body, retry, close, event) {
+  // "running" is the steady state of nearly every pane, so spelling it out in
+  // every header is noise. Running panes get a live dot instead; the states you
+  // actually need to read - starting, exited, failed - keep their word.
+  function applyPaneStatus(element, status) {
+    if (!element) return;
+    var label = status || "";
+    element.className = "terminal-pane-status " + label;
+    element.textContent = label === "running" ? "" : label;
+    element.title = label;
+    element.setAttribute("aria-label", label);
+  }
+
+  function handlePanePointerDown(thread, body, close, event) {
     var target = event.target;
-    if ((body && body.contains(target)) || (retry && retry.contains(target)) ||
-        (close && close.contains(target))) return;
+    if ((body && body.contains(target)) || (close && close.contains(target))) return;
     if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
@@ -1730,13 +1759,7 @@
         shortenRoot(thread.worktreePath || "");
     }
     if (thread.paneStatus) {
-      thread.paneStatus.textContent = thread.status;
-      thread.paneStatus.className = "terminal-pane-status " + (thread.status || "");
-    }
-    if (thread.paneRetry) {
-      thread.paneRetry.hidden = thread.startInFlight ||
-        (thread.status !== "failed" && thread.status !== "exited");
-      thread.paneRetry.setAttribute("aria-label", "Retry " + thread.name);
+      applyPaneStatus(thread.paneStatus, thread.status);
     }
     if (thread.paneClose) {
       thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
@@ -4570,7 +4593,7 @@
   }
 
   function panelIsVisible(panel) {
-    return currentLayout() === "split" && currentPanel() === panel;
+    return currentLayout() === "split" && currentPanel() === resolvePanelName(panel);
   }
 
   // The tree highlights whichever file currently owns the main area.
