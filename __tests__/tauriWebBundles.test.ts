@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
@@ -48,8 +49,7 @@ function parseBuildScript(script: string): BundleStep[] {
 }
 
 const steps = parseBuildScript(buildScript);
-const scratch = join(packageRoot, '.bundle-test-scratch');
-mkdirSync(scratch, { recursive: true });
+const scratch = mkdtempSync(join(tmpdir(), 'psyche-bundles-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
