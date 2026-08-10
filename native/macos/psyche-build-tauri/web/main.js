@@ -41,7 +41,9 @@
 
   var invoke = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
-  var openUrl = (window.__TAURI__.opener && window.__TAURI__.opener.openUrl) || null;
+  var opener = window.__TAURI__.opener || null;
+  var clipboardManager = window.__TAURI__.clipboardManager || null;
+  var openUrl = (opener && opener.openUrl) || null;
   var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
@@ -639,6 +641,43 @@
       toastEl.hidden = true;
       toastTimer = 0;
     }, 2600);
+  }
+
+  async function copyPaneFooterValue(label, value) {
+    if (!value) {
+      toast(label + " is not reported");
+      return false;
+    }
+    if (!clipboardManager || typeof clipboardManager.writeText !== "function") {
+      setStatus("Clipboard support is unavailable", "error");
+      return false;
+    }
+    try {
+      await clipboardManager.writeText(value);
+      toast(label + " copied");
+      return true;
+    } catch (error) {
+      setStatus("Copy failed: " + String(error), "error");
+      return false;
+    }
+  }
+
+  async function revealPaneWorktree(path) {
+    if (!path) {
+      setStatus("Worktree path is unavailable", "error");
+      return false;
+    }
+    if (!opener || typeof opener.revealItemInDir !== "function") {
+      setStatus("Finder reveal is unavailable", "error");
+      return false;
+    }
+    try {
+      await opener.revealItemInDir(path);
+      return true;
+    } catch (error) {
+      setStatus("Reveal failed: " + String(error), "error");
+      return false;
+    }
   }
 
   function markActiveSurface(surface) {

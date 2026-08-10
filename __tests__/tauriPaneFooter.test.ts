@@ -1,11 +1,20 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
+const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
 const panesRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web/panes');
 const footerModule = await import(pathToFileURL(join(panesRoot, 'pane-footer.mjs')).href);
+const tauriPackage = JSON.parse(readFileSync(join(tauriRoot, 'package.json'), 'utf8')) as {
+  dependencies: Record<string, string>;
+};
+const cargoToml = readFileSync(join(tauriRoot, 'src-tauri/Cargo.toml'), 'utf8');
+const defaultCapability = JSON.parse(
+  readFileSync(join(tauriRoot, 'src-tauri/capabilities/default.json'), 'utf8')
+) as { permissions: string[] };
+const nativeLib = readFileSync(join(tauriRoot, 'src-tauri/src/lib.rs'), 'utf8');
 
 const {
   FOOTER_TIERS,
@@ -17,6 +26,79 @@ const {
   isAgentPaneKind,
   shouldApplyMetricsResponse,
 } = footerModule;
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function functionSource(source: string, name: string) {
+  const match = new RegExp(
+    `(?:async\\s+)?function\\s+${escapeRegExp(name)}\\s*\\(`
+  ).exec(source);
+  if (!match || match.index === undefined) throw new Error(`missing function ${name}`);
+
+  const bodyStart = source.indexOf('{', match.index + match[0].length);
+  if (bodyStart === -1) throw new Error(`missing body for ${name}`);
+
+  let depth = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (lineComment) {
+      if (character === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character === '\\') {
+        index += 1;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '{') depth += 1;
+    if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(match.index, index + 1);
+    }
+  }
+
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
 
 describe('pane footer model', () => {
   it('uses only core controls for non-agent panes', () => {
@@ -211,6 +293,164 @@ const stylesCss = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
+
+describe('pane footer native actions contract', () => {
+  it('pins the official clipboard package and Rust plugin at major 2', () => {
+    expect(tauriPackage.dependencies['@tauri-apps/plugin-clipboard-manager'])
+      .toMatch(/^(\^|~)?2(?:$|\.)/);
+    expect(cargoToml).toMatch(/tauri-plugin-clipboard-manager\s*=\s*"2"/);
+  });
+
+  it('registers clipboard and reveal permissions plus the clipboard plugin', () => {
+    expect(defaultCapability.permissions).toContain('clipboard-manager:allow-write-text');
+    expect(defaultCapability.permissions).toContain('opener:allow-reveal-item-in-dir');
+    expect(nativeLib).toMatch(/\.plugin\(tauri_plugin_clipboard_manager::init\(\)\)/);
+  });
+
+  it('exposes Tauri globals and calls clipboard/reveal APIs from main.js', () => {
+    expect(mainJs).toContain('var opener = window.__TAURI__.opener || null;');
+    expect(mainJs).toContain('var clipboardManager = window.__TAURI__.clipboardManager || null;');
+    expect(mainJs).toContain('await clipboardManager.writeText(value);');
+    expect(mainJs).toContain('await opener.revealItemInDir(path);');
+  });
+});
+
+describe('pane footer native action helpers', () => {
+  it('copies a footer value with a success toast', async () => {
+    const toast = vi.fn();
+    const setStatus = vi.fn();
+    const writeText = vi.fn(async () => undefined);
+    const copyPaneFooterValue = compileFunction<
+      (label: string, value: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'copyPaneFooterValue'), {
+      clipboardManager: { writeText },
+      toast,
+      setStatus,
+    });
+
+    await expect(copyPaneFooterValue('Session', 'session-123')).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith('session-123');
+    expect(toast).toHaveBeenCalledWith('Session copied');
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('refuses to copy a missing footer value', async () => {
+    const toast = vi.fn();
+    const setStatus = vi.fn();
+    const writeText = vi.fn(async () => undefined);
+    const copyPaneFooterValue = compileFunction<
+      (label: string, value: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'copyPaneFooterValue'), {
+      clipboardManager: { writeText },
+      toast,
+      setStatus,
+    });
+
+    await expect(copyPaneFooterValue('Session', '')).resolves.toBe(false);
+    expect(toast).toHaveBeenCalledWith('Session is not reported');
+    expect(writeText).not.toHaveBeenCalled();
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('reports when clipboard support is unavailable', async () => {
+    const toast = vi.fn();
+    const setStatus = vi.fn();
+    const copyPaneFooterValue = compileFunction<
+      (label: string, value: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'copyPaneFooterValue'), {
+      clipboardManager: null,
+      toast,
+      setStatus,
+    });
+
+    await expect(copyPaneFooterValue('Session', 'session-123')).resolves.toBe(false);
+    expect(setStatus).toHaveBeenCalledWith('Clipboard support is unavailable', 'error');
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('surfaces clipboard write failures', async () => {
+    const toast = vi.fn();
+    const setStatus = vi.fn();
+    const copyPaneFooterValue = compileFunction<
+      (label: string, value: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'copyPaneFooterValue'), {
+      clipboardManager: {
+        writeText: vi.fn(async () => {
+          throw new Error('denied');
+        }),
+      },
+      toast,
+      setStatus,
+    });
+
+    await expect(copyPaneFooterValue('Session', 'session-123')).resolves.toBe(false);
+    expect(setStatus).toHaveBeenCalledWith('Copy failed: Error: denied', 'error');
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('reveals a worktree path via the opener plugin', async () => {
+    const setStatus = vi.fn();
+    const revealItemInDir = vi.fn(async () => undefined);
+    const revealPaneWorktree = compileFunction<
+      (path: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'revealPaneWorktree'), {
+      opener: { revealItemInDir },
+      setStatus,
+    });
+
+    await expect(revealPaneWorktree('/repo/.worktrees/feature')).resolves.toBe(true);
+    expect(revealItemInDir).toHaveBeenCalledWith('/repo/.worktrees/feature');
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('refuses to reveal a missing worktree path', async () => {
+    const setStatus = vi.fn();
+    const revealItemInDir = vi.fn(async () => undefined);
+    const revealPaneWorktree = compileFunction<
+      (path: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'revealPaneWorktree'), {
+      opener: { revealItemInDir },
+      setStatus,
+    });
+
+    await expect(revealPaneWorktree('')).resolves.toBe(false);
+    expect(setStatus).toHaveBeenCalledWith('Worktree path is unavailable', 'error');
+    expect(revealItemInDir).not.toHaveBeenCalled();
+  });
+
+  it('reports when Finder reveal support is unavailable', async () => {
+    const setStatus = vi.fn();
+    const revealPaneWorktree = compileFunction<
+      (path: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'revealPaneWorktree'), {
+      opener: null,
+      setStatus,
+    });
+
+    await expect(revealPaneWorktree('/repo/.worktrees/feature')).resolves.toBe(false);
+    expect(setStatus).toHaveBeenCalledWith('Finder reveal is unavailable', 'error');
+  });
+
+  it('surfaces Finder reveal failures', async () => {
+    const setStatus = vi.fn();
+    const revealPaneWorktree = compileFunction<
+      (path: string | null) => Promise<boolean>
+    >(functionSource(mainJs, 'revealPaneWorktree'), {
+      opener: {
+        revealItemInDir: vi.fn(async () => {
+          throw new Error('finder blocked');
+        }),
+      },
+      setStatus,
+    });
+
+    await expect(revealPaneWorktree('/repo/.worktrees/feature')).resolves.toBe(false);
+    expect(setStatus).toHaveBeenCalledWith(
+      'Reveal failed: Error: finder blocked',
+      'error',
+    );
+  });
+});
 
 describe.skip('pane footer integration contract', () => {
   it('mounts one footer in terminal and Web panes', () => {
