@@ -45,10 +45,19 @@ describe('Tauri browser dice shortcut', () => {
       'var DICE_BROWSER_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1&pp=ygUJcmljayByb2xsoAcB0gcJCckLAYcqIYzv";'
     );
     expect(mainJs).toMatch(
-      /async function openDiceBrowserTab\(\)\s*\{\s*var tab = await openBlankBrowserTab\(\);\s*if \(!tab\) return;\s*await navigateBrowser\(DICE_BROWSER_URL, \{ tabId: tab\.id \}\);\s*\}/
+      /async function openDiceBrowserTab\(\)\s*\{\s*var tab = await openBlankBrowserTab\(\{ requireNew: true \}\);\s*if \(!tab\) return;\s*await navigateBrowser\(DICE_BROWSER_URL, \{ tabId: tab\.id \}\);\s*\}/
     );
     expect(mainJs).toContain(
       'document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);'
+    );
+  });
+
+  it('only falls back to the current browser tab when a new tab is not required', () => {
+    expect(mainJs).toMatch(
+      /async function openBlankBrowserTab\(options\)\s*\{\s*options = options \|\| \{\};/
+    );
+    expect(mainJs).toContain(
+      'return tab || (options.requireNew ? null : currentBrowserTab(project));'
     );
   });
 

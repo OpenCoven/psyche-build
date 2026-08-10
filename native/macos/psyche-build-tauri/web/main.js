@@ -5566,7 +5566,8 @@
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
   }
-  async function openBlankBrowserTab() {
+  async function openBlankBrowserTab(options) {
+    options = options || {};
     var project = activeProject();
     if (!project) return null;
     var worktreePath = activeWorkspaceRoot(project);
@@ -5583,10 +5584,10 @@
     }
     syncProjectBrowser();
     if (urlInput) urlInput.focus();
-    return tab || currentBrowserTab(project);
+    return tab || (options.requireNew ? null : currentBrowserTab(project));
   }
   async function openDiceBrowserTab() {
-    var tab = await openBlankBrowserTab();
+    var tab = await openBlankBrowserTab({ requireNew: true });
     if (!tab) return;
     await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
