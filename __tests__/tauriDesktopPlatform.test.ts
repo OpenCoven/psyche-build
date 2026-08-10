@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
 const desktop = join(root, 'native/desktop/psyche-build-tauri');
+const libSourcePath = join(desktop, 'src-tauri/src/lib.rs');
+const covenSessionsSourcePath = join(desktop, 'src-tauri/src/coven_sessions.rs');
+const mainSourcePath = join(desktop, 'web/main.js');
 const textExtensions = new Set([
   '.cjs', '.css', '.html', '.js', '.json', '.lock', '.md', '.mjs', '.rs', '.sh',
   '.toml', '.ts', '.tsx', '.yaml', '.yml',
@@ -24,6 +27,22 @@ function stalePathReferences(): string[] {
       && !file.startsWith('docs/superpowers/')
       && textExtensions.has(extname(file)))
     .filter((file) => stalePathPattern.test(readFileSync(join(root, file), 'utf8')));
+}
+
+function bracedItem(source: string, marker: string, start = 0): string {
+  const itemStart = source.indexOf(marker, start);
+  expect(itemStart).toBeGreaterThanOrEqual(0);
+  const bodyStart = source.indexOf('{', itemStart);
+  expect(bodyStart).toBeGreaterThanOrEqual(0);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(itemStart, index + 1);
+  }
+
+  throw new Error(`Could not find the end of ${marker}`);
 }
 
 describe('desktop Tauri layout', () => {
@@ -109,5 +128,84 @@ describe('desktop Tauri layout', () => {
       .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
     expect(desktopPackage.devDependencies.vite).toBe('6.4.3');
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
+  });
+
+  it('routes the platform shell program and arguments without POSIX-only frontend wrapping', () => {
+    const libSource = readFileSync(libSourcePath, 'utf8');
+    const mainSource = readFileSync(mainSourcePath, 'utf8');
+    const appEnvironment = bracedItem(libSource, 'fn app_environment');
+    const ptyStart = bracedItem(libSource, 'fn pty_start');
+    const spawnShellThread = bracedItem(mainSource, 'function spawnShellThread');
+    const spawnPsycheThread = bracedItem(mainSource, 'function spawnPsycheThread');
+
+    expect(libSource).toMatch(/pub default_shell_args:\s*Vec<String>/);
+    expect(appEnvironment).toMatch(
+      /let\s+\(default_shell,\s*default_shell_args\)\s*=\s*platform::default_shell\(\)/,
+    );
+    expect(appEnvironment).toMatch(
+      /AppEnvironment\s*\{[\s\S]*default_shell,[\s\S]*default_shell_args,/,
+    );
+    expect(ptyStart).toMatch(
+      /let\s+\(default_command,\s*default_args\)\s*=\s*platform::default_shell\(\)/,
+    );
+    expect(ptyStart).toMatch(/options\.args\.unwrap_or\(default_args\)/);
+
+    expect(spawnShellThread).toContain('command: state.env.default_shell');
+    expect(spawnShellThread).toContain('args: state.env.default_shell_args');
+    expect(spawnShellThread).not.toMatch(/\/bin\/zsh|\[\s*["']-l["']\s*\]/);
+
+    expect(spawnPsycheThread).toContain('command: state.env.node_path');
+    expect(spawnPsycheThread).toContain('args: [state.env.psyche_entry]');
+    expect(spawnPsycheThread).not.toMatch(
+      /default_shell|\/bin\/zsh|quoted|["']exec\s|["']-l["']|["']-c["']/,
+    );
+  });
+
+  it('uses Windows PATHEXT when resolving extensionless executables', () => {
+    const libSource = readFileSync(libSourcePath, 'utf8');
+    const executableLookup = libSource.slice(
+      libSource.indexOf('fn is_executable_file'),
+      libSource.indexOf('fn locate_psyche_repo'),
+    );
+
+    expect(executableLookup).toMatch(/#\[cfg\(target_os = "windows"\)\][\s\S]*PATHEXT/);
+    expect(executableLookup).toMatch(/std::env::split_paths/);
+    expect(executableLookup).toMatch(/executable_names_with_extensions/);
+  });
+
+  it('cfg-isolates every Unix Coven descriptor and polling implementation detail', () => {
+    const source = readFileSync(covenSessionsSourcePath, 'utf8');
+    const unixOnlyDeclarations = [
+      'const EXCHANGE_TIMEOUT',
+      'fn try_load_coven_sessions',
+      'fn request_endpoint',
+      'trait LocalHttpStream',
+      'impl LocalHttpStream for TcpStream',
+      'impl LocalHttpStream for UnixStream',
+      'fn exchange_http',
+      'fn remaining_before',
+      'fn write_all_before',
+      'fn flush_before',
+      'fn read_to_end_before',
+      'fn connect_unix_before',
+      'fn wait_for_unix_connect',
+      'fn wait_for_io',
+      'fn categorize_io_error',
+    ];
+
+    for (const declaration of unixOnlyDeclarations) {
+      const start = source.indexOf(declaration);
+      expect(start, declaration).toBeGreaterThanOrEqual(0);
+      expect(source.slice(Math.max(0, start - 80), start), declaration)
+        .toMatch(/#\[cfg\(unix\)\]\s*$/);
+    }
+
+    expect(source).not.toContain('#[cfg(not(unix))]\n        CovenEndpoint::Unix');
+    expect(source).toMatch(
+      /#\[cfg\(target_os = "windows"\)\]\s*#\[tauri::command\][\s\S]*?fn coven_sessions[\s\S]*?-> CovenSessionsUnavailableResponse\s*\{\s*windows_transport_unavailable_response\(\)\s*\}/,
+    );
+    expect(source).toContain(
+      'reason: "local Coven Unix socket transport is unsupported on Windows"',
+    );
   });
 });

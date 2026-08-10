@@ -6807,8 +6807,8 @@
       project: project,
       name: "shell " + (state.threads.length + 1),
       kind: "shell",
-      command: state.env && state.env.default_shell ? state.env.default_shell : "/bin/zsh",
-      args: ["-l"],
+      command: state.env.default_shell,
+      args: state.env.default_shell_args,
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,
@@ -6824,22 +6824,14 @@
       );
       return null;
     }
-    // Spawn psyche through a login shell so it inherits your full user
-    // environment. Wrap with a tmux socket isolation so the embedded psyche
-    // doesn't collide with any tmux server already running outside the app.
-    var shell = (state.env.default_shell) || "/bin/zsh";
-    var quoted = function (s) {
-      return "'" + String(s).replace(/'/g, "'\\''") + "'";
-    };
-    var cmd = "exec " + quoted(state.env.node_path) + " " + quoted(state.env.psyche_entry);
     var project = activeProject();
     var worktree = selectedWorktree(project);
     return createThread({
       project: project,
       name: "psyche",
       kind: "psyche",
-      command: shell,
-      args: ["-l", "-c", cmd],
+      command: state.env.node_path,
+      args: [state.env.psyche_entry],
       projectRoot: project && project.root,
       cwd: worktree && worktree.path,
       worktreePath: worktree && worktree.path,

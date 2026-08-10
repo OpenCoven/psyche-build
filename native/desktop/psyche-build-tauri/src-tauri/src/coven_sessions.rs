@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+#[cfg(unix)]
+use std::net::{Shutdown, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
@@ -9,12 +12,14 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::Url;
 
+#[cfg(unix)]
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
@@ -225,7 +230,7 @@ pub(crate) fn is_safe_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -234,6 +239,7 @@ fn load_coven_sessions(
     load_coven_sessions_with_scopes(endpoint, project_roots, &project_scopes)
 }
 
+#[cfg(unix)]
 fn load_coven_sessions_with_scopes(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -259,6 +265,7 @@ fn load_coven_sessions_with_scopes(
     }
 }
 
+#[cfg(unix)]
 fn discover(
     env: &HashMap<String, String>,
     home: &Path,
@@ -314,6 +321,7 @@ pub(crate) async fn coven_sessions(
     windows_transport_unavailable_response()
 }
 
+#[cfg(unix)]
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -334,6 +342,7 @@ fn try_load_coven_sessions(
         .map_err(|_| CovenAdapterError::Failed)
 }
 
+#[cfg(unix)]
 fn request_endpoint(
     endpoint: &CovenEndpoint,
     path: &str,
@@ -350,8 +359,6 @@ fn request_endpoint(
                 .map_err(|error| categorize_io_error(&error, true))?;
             exchange_http(&mut stream, path, deadline)
         }
-        #[cfg(not(unix))]
-        CovenEndpoint::Unix(_) => Err(CovenAdapterError::Failed),
         CovenEndpoint::Http(address) => {
             if !address.ip().is_loopback() {
                 return Err(CovenAdapterError::Failed);
@@ -368,10 +375,12 @@ fn request_endpoint(
     }
 }
 
+#[cfg(unix)]
 trait LocalHttpStream: Read + Write + AsRawFd {
     fn shutdown_write(&self) -> io::Result<()>;
 }
 
+#[cfg(unix)]
 impl LocalHttpStream for TcpStream {
     fn shutdown_write(&self) -> io::Result<()> {
         self.shutdown(Shutdown::Write)
@@ -385,6 +394,7 @@ impl LocalHttpStream for UnixStream {
     }
 }
 
+#[cfg(unix)]
 fn exchange_http<S: LocalHttpStream>(
     stream: &mut S,
     path: &str,
@@ -406,6 +416,7 @@ fn exchange_http<S: LocalHttpStream>(
     parse_http_response(&response).map_err(|_| CovenAdapterError::Failed)
 }
 
+#[cfg(unix)]
 fn remaining_before(deadline: Instant) -> io::Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -413,6 +424,7 @@ fn remaining_before(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "Coven exchange deadline elapsed"))
 }
 
+#[cfg(unix)]
 fn write_all_before<S: LocalHttpStream>(
     stream: &mut S,
     mut bytes: &[u8],
@@ -433,6 +445,7 @@ fn write_all_before<S: LocalHttpStream>(
     Ok(())
 }
 
+#[cfg(unix)]
 fn flush_before<S: LocalHttpStream>(stream: &mut S, deadline: Instant) -> io::Result<()> {
     loop {
         remaining_before(deadline)?;
@@ -447,6 +460,7 @@ fn flush_before<S: LocalHttpStream>(stream: &mut S, deadline: Instant) -> io::Re
     }
 }
 
+#[cfg(unix)]
 fn read_to_end_before<S: LocalHttpStream>(
     stream: &mut S,
     deadline: Instant,
@@ -595,6 +609,7 @@ fn wait_for_io(raw_fd: RawFd, events: libc::c_short, deadline: Instant) -> io::R
     }
 }
 
+#[cfg(unix)]
 fn categorize_io_error(error: &io::Error, missing_is_unavailable: bool) -> CovenAdapterError {
     if matches!(
         error.kind(),
@@ -1058,7 +1073,7 @@ fn optional_string(
     Some((!value.is_empty()).then(|| value.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;

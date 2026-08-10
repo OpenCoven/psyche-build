@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -804,6 +805,7 @@ pub struct AppEnvironment {
     pub node_path: Option<String>,
     pub coven_path: Option<String>,
     pub default_shell: String,
+    pub default_shell_args: Vec<String>,
     pub native_workspace_v2: bool,
 }
 
@@ -824,7 +826,7 @@ fn feature_flag_enabled(name: &str, default: bool) -> bool {
 #[tauri::command]
 fn app_environment() -> AppEnvironment {
     let home = std::env::var("HOME").ok();
-    let (default_shell, _) = platform::default_shell();
+    let (default_shell, default_shell_args) = platform::default_shell();
     let native_workspace_v2 = feature_flag_enabled("PSYCHE_NATIVE_WORKSPACE_V2", true);
 
     // Try to find a `node` on PATH. portable-pty inherits the parent env, so
@@ -852,6 +854,7 @@ fn app_environment() -> AppEnvironment {
         node_path,
         coven_path,
         default_shell,
+        default_shell_args,
         native_workspace_v2,
     }
 }
@@ -1148,12 +1151,49 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn executable_in_dir(binary: &str, dir: &Path) -> Option<String> {
-    let canonical = dir.join(binary).canonicalize().ok()?;
-    if is_executable_file(&canonical) {
-        return Some(canonical.to_string_lossy().to_string());
+fn executable_names_with_extensions(binary: &OsStr, extensions: &[OsString]) -> Vec<OsString> {
+    if extensions.is_empty() || Path::new(binary).extension().is_some() {
+        return vec![binary.to_os_string()];
     }
-    None
+
+    extensions
+        .iter()
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            let mut executable = binary.to_os_string();
+            if !extension.to_string_lossy().starts_with('.') {
+                executable.push(".");
+            }
+            executable.push(extension);
+            executable
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn executable_extensions() -> Vec<OsString> {
+    let path_extensions = std::env::var_os("PATHEXT")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+    std::env::split_paths(&path_extensions)
+        .map(|extension| extension.into_os_string())
+        .filter(|extension| !extension.is_empty())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn executable_extensions() -> Vec<OsString> {
+    Vec::new()
+}
+
+fn executable_in_dir(binary: &str, dir: &Path) -> Option<String> {
+    let extensions = executable_extensions();
+    executable_names_with_extensions(OsStr::new(binary), &extensions)
+        .into_iter()
+        .find_map(|name| {
+            let canonical = dir.join(name).canonicalize().ok()?;
+            is_executable_file(&canonical).then(|| canonical.to_string_lossy().to_string())
+        })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2210,6 +2250,7 @@ mod workspace_panel_tests {
         ] {
             std::fs::create_dir_all(dir).unwrap();
         }
+
         write_test_executable(&non_executable.join("coven"), 0o600);
         write_test_executable(&group_only.join("coven"), 0o010);
         write_test_executable(&other_only.join("coven"), 0o001);
@@ -2237,6 +2278,34 @@ mod workspace_panel_tests {
             assert!(!is_executable_file(&group_only.join("coven")));
             assert!(!is_executable_file(&other_only.join("coven")));
         }
+    }
+
+    #[test]
+    fn appends_windows_pathext_entries_to_extensionless_executable_names() {
+        let extensions = [
+            OsString::from(".COM"),
+            OsString::from(".EXE"),
+            OsString::from(".CMD"),
+        ];
+
+        assert_eq!(
+            executable_names_with_extensions(OsStr::new("node"), &extensions),
+            vec![
+                OsString::from("node.COM"),
+                OsString::from("node.EXE"),
+                OsString::from("node.CMD"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_an_explicit_windows_executable_extension() {
+        let extensions = [OsString::from(".EXE"), OsString::from(".CMD")];
+
+        assert_eq!(
+            executable_names_with_extensions(OsStr::new("coven.cmd"), &extensions),
+            vec![OsString::from("coven.cmd")]
+        );
     }
 
     fn launch_options(
