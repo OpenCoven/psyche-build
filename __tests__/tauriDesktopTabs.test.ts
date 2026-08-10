@@ -6,6 +6,14 @@ const repoRoot = process.cwd();
 const mainJs = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'), 'utf8');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const platformMod = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/platform/mod.rs'),
+  'utf8'
+);
+const macosPlatform = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/platform/macos.rs'),
+  'utf8'
+);
 const indexHtml = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
 const tauriConfig = JSON.parse(
   readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
@@ -68,25 +76,24 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(/if\s+!created\s*\{[\s\S]*?webview\.navigate\(parsed_url\)/);
   });
 
-  it('reports PTY exit codes and avoids machine-specific nvm paths', () => {
+  it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {
     expect(tauriLib).toMatch(/status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\)/);
-    expect(tauriLib).toMatch(/static\s+AUGMENTED_PATH:\s*Lazy<String>\s*=\s*Lazy::new\(compute_augmented_path\);/);
-    expect(tauriLib).toMatch(/fn\s+augmented_path\(\)\s*->\s*&'static\s+str/);
-    expect(tauriLib).toMatch(/fn\s+compute_augmented_path\(\)\s*->\s*String/);
-    expect(tauriLib).toMatch(/let\s+mut\s+parts:\s*Vec<PathBuf>\s*=\s*Vec::new\(\);/);
-    expect(tauriLib).toMatch(/for\s+p\s+in\s+std::env::split_paths\(&existing\)[\s\S]*?parts\.push\(p\);[\s\S]*?for\s+extra\s+in\s+extras/);
-    expect(tauriLib).toMatch(/std::env::join_paths\(&parts\)/);
-    expect(tauriLib).toMatch(/\.unwrap_or_else\(\|_\|\s+existing\.clone\(\)\)/);
-    const augmentedPathFunction = tauriLib.match(
-      /fn\s+compute_augmented_path\(\)\s*->\s*String\s*\{[\s\S]*?\n\}\n\nfn\s+push_path_if_dir/
-    )?.[0];
-    expect(augmentedPathFunction).toBeTruthy();
-    expect(augmentedPathFunction).not.toMatch(
-      /std::env::join_paths\(&parts\)[\s\S]*?\.unwrap_or_default\(\)/
+    expect(tauriLib).toMatch(
+      /fn\s+app_environment\(\)\s*->\s*AppEnvironment[\s\S]*?let\s+\(default_shell,\s*default_shell_args\)\s*=\s*platform::default_shell\(\);/
     );
-    expect(tauriLib).toMatch(/for\s+dir\s+in\s+std::env::split_paths\(augmented_path\(\)\)/);
-    expect(tauriLib).toMatch(/fn\s+newest_nvm_node_bin\(/);
-    expect(tauriLib).not.toMatch(/\.nvm\/versions\/node\/v\d+\.\d+\.\d+\/bin/);
+    expect(tauriLib).toMatch(
+      /fn\s+which_on_path\(binary:\s*&str\)\s*->\s*Option<String>\s*\{\s*let\s+path\s*=\s*platform::augmented_path\(\);\s*for\s+dir\s+in\s+std::env::split_paths\(&path\)/s
+    );
+    expect(platformMod).toMatch(
+      /pub\s+fn\s+augmented_path\(\)\s*->\s*OsString\s*\{\s*target::augmented_path\(\)\s*\}/s
+    );
+    expect(macosPlatform).toMatch(/fn\s+augmented_path\(\)\s*->\s*OsString\s*\{/);
+    expect(macosPlatform).toMatch(/let\s+mut\s+parts\s*=\s*split_and_deduplicate_paths\(&existing\);/);
+    expect(macosPlatform).toMatch(/std::env::join_paths\(&parts\)\.unwrap_or\(existing\)/);
+    expect(macosPlatform).toMatch(/fn\s+newest_nvm_node_bin\(/);
+    expect(macosPlatform).toMatch(/apply_vibrancy/);
+    expect(macosPlatform).not.toMatch(/PATH\.split\(|join\(":"\)|split\(":"\)/);
+    expect(macosPlatform).not.toMatch(/\.nvm\/versions\/node\/v\d+\.\d+\.\d+\/bin/);
   });
 
   it('keeps Tauri backend shared-state operations grouped correctly', () => {
