@@ -118,6 +118,7 @@ export interface WriteBuildProvenanceOverrides {
   statPath?: (targetPath: string) => Pick<Stats, 'mtimeMs'> | Promise<Pick<Stats, 'mtimeMs'>>;
   sleep?: (ms: number) => Promise<void>;
   nowMs?: () => number;
+  isProcessAlive?: (pid: number) => boolean | Promise<boolean>;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
   staleLockMs?: number;

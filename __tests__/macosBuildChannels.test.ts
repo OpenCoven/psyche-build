@@ -127,6 +127,14 @@ function copyBundle(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
 }
 
+function writeLockOwner(lockPath: string, token: string, pid: number): void {
+  writeFileSync(
+    join(lockPath, 'owner.json'),
+    `${JSON.stringify({ token, pid })}\n`,
+    { encoding: 'utf8', mode: 0o600 },
+  );
+}
+
 function runGit(repository: string, args: string[]): string {
   const result = spawnSync('git', args, {
     cwd: repository,
@@ -458,7 +466,14 @@ describe('macOS build channels', () => {
       ).resolves.toBe(sha);
       expect(execute).toHaveBeenCalledWith(
         'git',
-        ['rev-parse', '--verify', 'release candidate^{commit}'],
+        [
+          '-c',
+          'core.warnAmbiguousRefs=true',
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          'release candidate^{commit}',
+        ],
         {
           cwd: '/repo with spaces',
           stage: 'resolve Git ref "release candidate"',
@@ -466,11 +481,53 @@ describe('macOS build channels', () => {
       );
     });
 
-    it('rejects an ambiguous ref in a real repository even when git prints a full SHA', async () => {
+    it('keeps option-like refs after rev-parse end-of-options', async () => {
+      const sha = 'a'.repeat(40);
+      const execute = vi.fn(
+        async (_command: string, _args: readonly string[]): Promise<CommandResult> => ({
+          stdout: `${sha}\n`,
+          stderr: '',
+        }),
+      );
+
+      await expect(resolveCommit('/repo', '--help', execute)).resolves.toBe(sha);
+      expect(execute).toHaveBeenCalledWith(
+        'git',
+        [
+          '-c',
+          'core.warnAmbiguousRefs=true',
+          'rev-parse',
+          '--verify',
+          '--end-of-options',
+          '--help^{commit}',
+        ],
+        {
+          cwd: '/repo',
+          stage: 'resolve Git ref "--help"',
+        },
+      );
+    });
+
+    it('rejects any successful ref resolution that emits stderr', async () => {
+      const sha = 'a'.repeat(40);
+      const execute = vi.fn(
+        async (_command: string, _args: readonly string[]): Promise<CommandResult> => ({
+          stdout: `${sha}\n`,
+          stderr: 'avertissement sans texte anglais attendu\n',
+        }),
+      );
+
+      await expect(resolveCommit('/repo', 'shared-name', execute)).rejects.toThrow(
+        /shared-name.*stderr|stderr.*shared-name/i,
+      );
+    });
+
+    it('rejects an ambiguous ref in a real repository despite disabled repo warnings', async () => {
       const gitRepository = createScratchDirectory('ambiguous-git-ref');
       runGit(gitRepository, ['init', '--quiet']);
       runGit(gitRepository, ['config', 'user.name', 'Psyche Build Tests']);
       runGit(gitRepository, ['config', 'user.email', 'tests@example.invalid']);
+      runGit(gitRepository, ['config', 'core.warnAmbiguousRefs', 'false']);
       writeFileSync(join(gitRepository, 'tracked.txt'), 'tracked\n', 'utf8');
       runGit(gitRepository, ['add', 'tracked.txt']);
       runGit(gitRepository, ['commit', '--quiet', '-m', 'initial']);
@@ -478,7 +535,7 @@ describe('macOS build channels', () => {
       runGit(gitRepository, ['tag', 'shared-name']);
 
       await expect(resolveCommit(gitRepository, 'shared-name')).rejects.toThrow(
-        /ambiguous.*shared-name|shared-name.*ambiguous/i,
+        /shared-name.*stderr|stderr.*shared-name/i,
       );
     });
 
@@ -1236,6 +1293,16 @@ describe('macOS build channels', () => {
         errorPattern: /dev.*requestedRef.*forbidden/i,
       },
       {
+        name: 'stable record with an unknown field',
+        record: { ...stableRecord, futureField: true },
+        errorPattern: /stable.*unknown field "futureField"/i,
+      },
+      {
+        name: 'dev record with an unknown field',
+        record: { ...devRecord, futureField: true },
+        errorPattern: /dev.*unknown field "futureField"/i,
+      },
+      {
         name: 'uppercase commit SHA',
         record: { ...devRecord, commitSha: 'B'.repeat(40) },
         errorPattern: /lowercase hexadecimal commitSha/i,
@@ -1280,6 +1347,20 @@ describe('macOS build channels', () => {
       expect(existsSync(stateDir)).toBe(false);
     });
 
+    it('rejects an unknown incoming field without changing existing state', async () => {
+      const homeDir = createScratchDirectory('provenance-invalid-incoming-unchanged');
+      const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
+      const before = readFileSync(provenancePath, 'utf8');
+
+      await expect(
+        writeBuildProvenance(
+          { ...devRecord, futureField: 'unsupported' } as unknown as BuildProvenance,
+          { homeDir },
+        ),
+      ).rejects.toThrow(/dev.*unknown field "futureField"/i);
+      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
+    });
+
     it('preserves stable and dev provenance independently', async () => {
       const homeDir = createScratchDirectory('provenance-preservation');
       const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
@@ -1295,6 +1376,35 @@ describe('macOS build channels', () => {
       });
     });
 
+    it('records a unique owner token and current PID while each lock is held', async () => {
+      const homeDir = createScratchDirectory('provenance-lock-owner');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const lockPath = join(stateDir, 'builds.json.lock');
+      const owners: unknown[] = [];
+
+      for (const [record, token] of [
+        [stableRecord, 'stable-owner-token'],
+        [devRecord, 'dev-owner-token'],
+      ] as const) {
+        await writeBuildProvenance(record, {
+          homeDir,
+          randomUUID: () => token,
+          writeFileText: async (filePath: string, content: string) => {
+            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+            if (!filePath.startsWith(`${lockPath}/`)) {
+              owners.push(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')));
+            }
+          },
+        });
+      }
+
+      expect(owners).toEqual([
+        { token: 'stable-owner-token', pid: process.pid },
+        { token: 'dev-owner-token', pid: process.pid },
+      ]);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+
     it('rejects malformed provenance files without changing them', async () => {
       const homeDir = createScratchDirectory('provenance-invalid-file');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
@@ -1305,6 +1415,28 @@ describe('macOS build channels', () => {
 
       await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
         /Invalid build provenance file/,
+      );
+      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
+    });
+
+    it('rejects unknown top-level provenance fields without changing the file', async () => {
+      const homeDir = createScratchDirectory('provenance-unknown-top-level');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        provenancePath,
+        `${JSON.stringify({
+          version: 1,
+          channels: { stable: stableRecord },
+          futureField: true,
+        }, null, 2)}\n`,
+        'utf8',
+      );
+      const before = readFileSync(provenancePath, 'utf8');
+
+      await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
+        /unknown top-level field "futureField"/i,
       );
       expect(readFileSync(provenancePath, 'utf8')).toBe(before);
     });
@@ -1368,6 +1500,32 @@ describe('macOS build channels', () => {
           },
         },
         errorPattern: /Invalid build provenance file .*dev.*requestedRef.*forbidden/i,
+      },
+      {
+        name: 'stable record with an unknown field',
+        state: {
+          version: 1,
+          channels: {
+            stable: {
+              ...stableRecord,
+              futureField: true,
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .*stable.*unknown field "futureField"/i,
+      },
+      {
+        name: 'dev record with an unknown field',
+        state: {
+          version: 1,
+          channels: {
+            dev: {
+              ...devRecord,
+              futureField: true,
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .*dev.*unknown field "futureField"/i,
       },
       {
         name: 'non-canonical timestamp',
@@ -1452,6 +1610,10 @@ describe('macOS build channels', () => {
         homeDir,
         lockRetryMs: 1,
         writeFileText: async (filePath: string, content: string) => {
+          if (filePath.startsWith(`${lockPath}/`)) {
+            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+            return;
+          }
           markFirstWriting();
           await firstWriteGate;
           writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
@@ -1516,14 +1678,54 @@ describe('macOS build channels', () => {
       expect(existsSync(lockPath)).toBe(true);
     });
 
-    it('recovers a stale provenance lock and removes its replacement lock after writing', async () => {
-      const homeDir = createScratchDirectory('provenance-stale-lock');
+    it('times out without removing an old lock whose owner process is alive', async () => {
+      const homeDir = createScratchDirectory('provenance-live-old-lock');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
       mkdirSync(lockPath, { recursive: true });
+      writeLockOwner(lockPath, 'live-owner', 4242);
       const staleTime = new Date(Date.now() - 60_000);
       utimesSync(lockPath, staleTime, staleTime);
+      const isProcessAlive = vi.fn(async (pid: number) => {
+        expect(pid).toBe(4242);
+        return true;
+      });
+      const removePath = vi.fn(async (targetPath: string) => {
+        rmSync(targetPath, { recursive: true, force: true });
+      });
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          lockTimeoutMs: 0,
+          staleLockMs: 10,
+          isProcessAlive,
+          removePath,
+        }),
+      ).rejects.toThrow(/Timed out.*provenance lock/i);
+      expect(isProcessAlive).toHaveBeenCalledTimes(1);
+      expect(removePath).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8'))).toEqual({
+        token: 'live-owner',
+        pid: 4242,
+      });
+      expect(existsSync(provenancePath)).toBe(false);
+    });
+
+    it('recovers an old lock whose owner process is dead', async () => {
+      const homeDir = createScratchDirectory('provenance-dead-stale-lock');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+      writeLockOwner(lockPath, 'dead-owner', 4242);
+      const staleTime = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, staleTime, staleTime);
+      const isProcessAlive = vi.fn(async (pid: number) => {
+        expect(pid).toBe(4242);
+        return false;
+      });
 
       await expect(
         writeBuildProvenance(devRecord, {
@@ -1531,10 +1733,104 @@ describe('macOS build channels', () => {
           lockRetryMs: 1,
           lockTimeoutMs: 50,
           staleLockMs: 10,
+          isProcessAlive,
         }),
       ).resolves.toBe(provenancePath);
+      expect(isProcessAlive).toHaveBeenCalled();
       expect(existsSync(lockPath)).toBe(false);
       expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
+    it('recovers an old lock with a malformed owner record', async () => {
+      const homeDir = createScratchDirectory('provenance-malformed-stale-lock');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+      writeFileSync(join(lockPath, 'owner.json'), '{"token":', 'utf8');
+      const staleTime = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, staleTime, staleTime);
+      const isProcessAlive = vi.fn(async () => true);
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          lockRetryMs: 1,
+          lockTimeoutMs: 50,
+          staleLockMs: 10,
+          isProcessAlive,
+        }),
+      ).resolves.toBe(provenancePath);
+      expect(isProcessAlive).not.toHaveBeenCalled();
+      expect(existsSync(lockPath)).toBe(false);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
+    });
+
+    it('lets only one concurrent contender quarantine a dead stale lock and retains both records', async () => {
+      const homeDir = createScratchDirectory('provenance-concurrent-stale-lock');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+      writeLockOwner(lockPath, 'dead-owner', 4242);
+      const staleTime = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, staleTime, staleTime);
+
+      let livenessChecks = 0;
+      let releaseLivenessChecks = () => {};
+      const bothCheckingLiveness = new Promise<void>((resolveChecks) => {
+        releaseLivenessChecks = resolveChecks;
+      });
+      const isProcessAlive = vi.fn(async (pid: number) => {
+        if (pid === process.pid) {
+          return true;
+        }
+        livenessChecks += 1;
+        if (livenessChecks === 2) {
+          releaseLivenessChecks();
+        }
+        await bothCheckingLiveness;
+        return false;
+      });
+      let successfulQuarantines = 0;
+      const renamePath = async (sourcePath: string, destinationPath: string) => {
+        await renameAsync(sourcePath, destinationPath);
+        if (sourcePath === lockPath && destinationPath.includes('.stale-')) {
+          successfulQuarantines += 1;
+        }
+      };
+
+      await Promise.all([
+        writeBuildProvenance(stableRecord, {
+          homeDir,
+          randomUUID: () => 'stable-contender',
+          lockRetryMs: 1,
+          lockTimeoutMs: 500,
+          staleLockMs: 10,
+          isProcessAlive,
+          renamePath,
+        }),
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'dev-contender',
+          lockRetryMs: 1,
+          lockTimeoutMs: 500,
+          staleLockMs: 10,
+          isProcessAlive,
+          renamePath,
+        }),
+      ]);
+
+      expect(successfulQuarantines).toBe(1);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          stable: stableRecord,
+          dev: devRecord,
+        },
+      });
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
 
     it('cleans up atomic temp files when writing the provenance file fails', async () => {
@@ -1545,7 +1841,11 @@ describe('macOS build channels', () => {
         writeBuildProvenance(stableRecord, {
           homeDir,
           randomUUID: () => 'write-failure',
-          writeFileText: async () => {
+          writeFileText: async (filePath: string, content: string) => {
+            if (filePath.startsWith(`${join(stateDir, 'builds.json.lock')}/`)) {
+              writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+              return;
+            }
             throw new Error('write failed');
           },
         }),
@@ -1566,8 +1866,11 @@ describe('macOS build channels', () => {
         writeBuildProvenance(devRecord, {
           homeDir,
           randomUUID: () => 'rename-failure',
-          renamePath: async () => {
-            throw new Error('rename failed');
+          renamePath: async (sourcePath: string, destinationPath: string) => {
+            if (destinationPath === provenancePath) {
+              throw new Error('rename failed');
+            }
+            await renameAsync(sourcePath, destinationPath);
           },
         }),
       ).rejects.toThrow(/rename failed/);
@@ -1579,6 +1882,36 @@ describe('macOS build channels', () => {
         },
       });
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
+    it('preserves a replacement lock when ownership changes before release', async () => {
+      const homeDir = createScratchDirectory('provenance-release-owner-mismatch');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      const ownerPath = join(lockPath, 'owner.json');
+
+      const error = await writeBuildProvenance(devRecord, {
+        homeDir,
+        randomUUID: () => 'original-owner',
+        writeFileText: async (filePath: string, content: string) => {
+          writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+          if (!filePath.startsWith(`${lockPath}/`)) {
+            writeLockOwner(lockPath, 'replacement-owner', 9999);
+          }
+        },
+      }).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error?.message).toMatch(/release.*ownership|ownership.*release/i);
+      expect(JSON.parse(readFileSync(ownerPath, 'utf8'))).toEqual({
+        token: 'replacement-owner',
+        pid: 9999,
+      });
+      expect(existsSync(lockPath)).toBe(true);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
     });
 
     it('reports lock release failures after an otherwise successful write', async () => {
@@ -1614,7 +1947,11 @@ describe('macOS build channels', () => {
 
       const error = await writeBuildProvenance(devRecord, {
         homeDir,
-        writeFileText: async () => {
+        writeFileText: async (filePath: string, content: string) => {
+          if (filePath.startsWith(`${lockPath}/`)) {
+            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+            return;
+          }
           throw new Error('write failed');
         },
         removePath: async (targetPath) => {
@@ -1671,7 +2008,7 @@ describe('macOS build channels', () => {
           _options: CommandOptions = {},
         ): Promise<CommandResult> => {
           events.push(`command:${command}:${args.join(' ')}`);
-          if (command === 'git' && args[0] === 'rev-parse') {
+          if (command === 'git' && args.includes('rev-parse')) {
             return { stdout: `${stableSha}\n`, stderr: '' };
           }
           return { stdout: '', stderr: '' };
@@ -1735,7 +2072,14 @@ describe('macOS build channels', () => {
       expect(execute.mock.calls).toEqual([
         [
           'git',
-          ['rev-parse', '--verify', 'release candidate^{commit}'],
+          [
+            '-c',
+            'core.warnAmbiguousRefs=true',
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            'release candidate^{commit}',
+          ],
           {
             cwd: virtualRepository,
             stage: 'resolve Git ref "release candidate"',
@@ -1815,7 +2159,7 @@ describe('macOS build channels', () => {
       );
       const execute = vi.fn(
         async (command: string, args: readonly string[]): Promise<CommandResult> => {
-          if (command === 'git' && args[0] === 'rev-parse') {
+          if (command === 'git' && args.includes('rev-parse')) {
             return { stdout: `${stableSha}\n`, stderr: '' };
           }
           if (command === 'pnpm' && args[0] === 'install') {
@@ -1870,7 +2214,7 @@ describe('macOS build channels', () => {
       const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
       const execute = vi.fn(
         async (command: string, args: readonly string[]): Promise<CommandResult> => {
-          if (command === 'git' && args[0] === 'rev-parse') {
+          if (command === 'git' && args.includes('rev-parse')) {
             return { stdout: `${devSha}\n`, stderr: '' };
           }
           if (command === 'git' && args[0] === 'status') {
@@ -1923,7 +2267,14 @@ describe('macOS build channels', () => {
       expect(execute.mock.calls).toEqual([
         [
           'git',
-          ['rev-parse', '--verify', 'HEAD^{commit}'],
+          [
+            '-c',
+            'core.warnAmbiguousRefs=true',
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            'HEAD^{commit}',
+          ],
           { cwd: virtualRepository, stage: 'resolve current commit' },
         ],
         [
@@ -1975,7 +2326,7 @@ describe('macOS build channels', () => {
           { channel: 'dev', repositoryRoot: virtualRepository },
           {
             execute: async (command, args) => {
-              if (command === 'git' && args[0] === 'rev-parse') {
+              if (command === 'git' && args.includes('rev-parse')) {
                 return { stdout: `${devSha}\n`, stderr: '' };
               }
               if (command === 'pnpm') {
@@ -2015,7 +2366,7 @@ describe('macOS build channels', () => {
           { channel: 'dev', repositoryRoot: virtualRepository },
           {
             execute: async (command, args) => {
-              if (command === 'git' && args[0] === 'rev-parse') {
+              if (command === 'git' && args.includes('rev-parse')) {
                 return { stdout: `${devSha}\n`, stderr: '' };
               }
               return { stdout: '', stderr: '' };
@@ -2047,7 +2398,7 @@ describe('macOS build channels', () => {
           { channel: 'dev', repositoryRoot: virtualRepository },
           {
             execute: async (command, args) => {
-              if (command === 'git' && args[0] === 'rev-parse') {
+              if (command === 'git' && args.includes('rev-parse')) {
                 return { stdout: `${devSha}\n`, stderr: '' };
               }
               return { stdout: '', stderr: '' };
@@ -2083,7 +2434,7 @@ describe('macOS build channels', () => {
         },
         {
           execute: async (command, args) => {
-            if (command === 'git' && args[0] === 'rev-parse') {
+            if (command === 'git' && args.includes('rev-parse')) {
               return { stdout: `${stableSha}\n`, stderr: '' };
             }
             if (command === 'pnpm') {
@@ -2118,7 +2469,7 @@ describe('macOS build channels', () => {
           { channel: 'dev', repositoryRoot: virtualRepository },
           {
             execute: async (command, args) => {
-              if (command === 'git' && args[0] === 'rev-parse') {
+              if (command === 'git' && args.includes('rev-parse')) {
                 return { stdout: `${devSha}\n`, stderr: '' };
               }
               return { stdout: '', stderr: '' };

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID as createRandomUUID } from 'node:crypto';
+import { createHash, randomUUID as createRandomUUID } from 'node:crypto';
 import {
   mkdtemp,
   mkdir,
@@ -45,9 +45,20 @@ const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
 const DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_PROVENANCE_LOCK_RETRY_MS = 50;
 const DEFAULT_PROVENANCE_STALE_LOCK_MS = 30_000;
+const PROVENANCE_LOCK_OWNER_FILE_NAME = 'owner.json';
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 const TEMP_BUILD_PREFIX = 'psyche-build-macos-';
 const BUILD_CHANNELS = ['stable', 'dev'];
+const BUILD_PROVENANCE_STATE_KEYS = ['version', 'channels'];
+const BUILD_PROVENANCE_BASE_RECORD_KEYS = [
+  'channel',
+  'commitSha',
+  'dirty',
+  'builtAt',
+  'installedPath',
+  'productName',
+  'bundleIdentifier',
+];
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const COMMAND_MAX_BUFFER = 20 * 1024 * 1024;
 const executeFile = promisify(execFile);
@@ -161,13 +172,26 @@ export async function runCommand(command, args, options = {}) {
 }
 
 export async function resolveCommit(root, ref, execute = runCommand) {
-  const result = await execute('git', ['rev-parse', '--verify', `${ref}^{commit}`], {
-    cwd: path.resolve(root),
-    stage: ref === 'HEAD' ? 'resolve current commit' : `resolve Git ref "${ref}"`,
-  });
+  const result = await execute(
+    'git',
+    [
+      '-c',
+      'core.warnAmbiguousRefs=true',
+      'rev-parse',
+      '--verify',
+      '--end-of-options',
+      `${ref}^{commit}`,
+    ],
+    {
+      cwd: path.resolve(root),
+      stage: ref === 'HEAD' ? 'resolve current commit' : `resolve Git ref "${ref}"`,
+    },
+  );
 
-  if (/\bambiguous\b/i.test(result.stderr)) {
-    throw new Error(`Git ref "${ref}" is ambiguous:\n${result.stderr.trim()}`);
+  if (result.stderr.length > 0) {
+    throw new Error(
+      `Git ref "${ref}" produced stderr during resolution and was rejected:\n${result.stderr}`,
+    );
   }
 
   const commitSha = result.stdout.trim();
@@ -419,9 +443,11 @@ export async function writeBuildProvenance(record, overrides = {}) {
   const stateDir = path.join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
   const statePath = path.join(stateDir, 'builds.json');
   const lockPath = `${statePath}.lock`;
+  const randomUUID = overrides.randomUUID ?? createRandomUUID;
+  const ownerToken = randomUUID();
   const tempPath = path.join(
     stateDir,
-    `.builds.json.${(overrides.randomUUID ?? createRandomUUID)()}.tmp`,
+    `.builds.json.${ownerToken}.tmp`,
   );
   const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
   const makeLockDirectory = overrides.makeLockDirectory ?? defaultMakeLockDirectory;
@@ -432,6 +458,7 @@ export async function writeBuildProvenance(record, overrides = {}) {
   const statPath = overrides.statPath ?? defaultStatPath;
   const sleep = overrides.sleep ?? defaultSleep;
   const nowMs = overrides.nowMs ?? Date.now;
+  const isProcessAlive = overrides.isProcessAlive ?? defaultIsProcessAlive;
   const lockTimeoutMs =
     overrides.lockTimeoutMs ?? DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS;
   const lockRetryMs = overrides.lockRetryMs ?? DEFAULT_PROVENANCE_LOCK_RETRY_MS;
@@ -444,22 +471,27 @@ export async function writeBuildProvenance(record, overrides = {}) {
   validateLockTimingOption('staleLockMs', staleLockMs, false);
   await mkdirPath(stateDir);
 
-  let lockAcquired = false;
+  let lockOwner;
   let operationError;
   let releaseError;
 
   try {
-    await acquireBuildProvenanceLock(lockPath, {
+    lockOwner = await acquireBuildProvenanceLock(lockPath, {
       makeLockDirectory,
+      readFileText,
+      writeFileText,
+      renamePath,
       removePath,
       statPath,
       sleep,
       nowMs,
+      isProcessAlive,
+      ownerToken,
+      ownerPid: process.pid,
       lockTimeoutMs,
       lockRetryMs,
       staleLockMs,
     });
-    lockAcquired = true;
 
     const nextState = {
       version: 1,
@@ -474,7 +506,7 @@ export async function writeBuildProvenance(record, overrides = {}) {
   } catch (error) {
     operationError = error;
 
-    if (lockAcquired) {
+    if (lockOwner) {
       try {
         await removePath(tempPath);
       } catch (cleanupError) {
@@ -486,9 +518,12 @@ export async function writeBuildProvenance(record, overrides = {}) {
       }
     }
   } finally {
-    if (lockAcquired) {
+    if (lockOwner) {
       try {
-        await removePath(lockPath);
+        await releaseBuildProvenanceLock(lockPath, lockOwner, {
+          readFileText,
+          removePath,
+        });
       } catch (error) {
         releaseError = error;
       }
@@ -948,28 +983,80 @@ async function defaultStatPath(targetPath) {
   return stat(targetPath);
 }
 
+async function defaultIsProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') {
+      return false;
+    }
+    if (error?.code === 'EPERM') {
+      return true;
+    }
+    throw error;
+  }
+}
+
 async function acquireBuildProvenanceLock(lockPath, options) {
   const startedAt = options.nowMs();
   let waitedMs = 0;
 
   while (true) {
+    let lockDirectoryCreated = false;
     try {
       await options.makeLockDirectory(lockPath);
-      return;
+      lockDirectoryCreated = true;
     } catch (error) {
       if (!isAlreadyExistsError(error)) {
         throw error;
       }
     }
 
-    if (await buildProvenanceLockIsStale(lockPath, options)) {
+    if (lockDirectoryCreated) {
+      const owner = {
+        token: options.ownerToken,
+        pid: options.ownerPid,
+      };
+      const ownerPath = buildProvenanceLockOwnerPath(lockPath);
+      const temporaryOwnerPath = path.join(
+        lockPath,
+        `.owner.${options.ownerToken}.tmp`,
+      );
+      await options.writeFileText(
+        temporaryOwnerPath,
+        `${JSON.stringify(owner)}\n`,
+      );
+      await options.renamePath(temporaryOwnerPath, ownerPath);
+      return owner;
+    }
+
+    const staleLock = await inspectStaleBuildProvenanceLock(lockPath, options);
+    if (staleLock) {
+      const quarantinePath = buildStaleLockQuarantinePath(
+        lockPath,
+        staleLock,
+        options.ownerToken,
+      );
       try {
-        await options.removePath(lockPath);
+        await options.renamePath(lockPath, quarantinePath);
       } catch (error) {
         if (!isEnoentError(error)) {
           throw error;
         }
+        continue;
       }
+
+      const quarantinedLock = await readBuildProvenanceLockSnapshot(
+        quarantinePath,
+        options,
+      );
+      if (!buildProvenanceLockSnapshotsMatch(staleLock, quarantinedLock)) {
+        await options.renamePath(quarantinePath, lockPath);
+        continue;
+      }
+
+      await options.removePath(quarantinePath);
       continue;
     }
 
@@ -995,22 +1082,141 @@ async function acquireBuildProvenanceLock(lockPath, options) {
   }
 }
 
-async function buildProvenanceLockIsStale(lockPath, options) {
+async function inspectStaleBuildProvenanceLock(lockPath, options) {
   try {
-    const lockStat = await options.statPath(lockPath);
-    return options.nowMs() - lockStat.mtimeMs >= options.staleLockMs;
+    const lock = await readBuildProvenanceLockSnapshot(lockPath, options);
+    if (options.nowMs() - lock.mtimeMs < options.staleLockMs) {
+      return undefined;
+    }
+
+    if (!lock.owner) {
+      return lock;
+    }
+
+    return (await options.isProcessAlive(lock.owner.pid))
+      ? undefined
+      : lock;
   } catch (error) {
     if (isEnoentError(error)) {
-      return false;
+      return undefined;
     }
     throw error;
   }
+}
+
+async function readBuildProvenanceLockSnapshot(lockPath, options) {
+  const lockStat = await options.statPath(lockPath);
+  const owner = await readBuildProvenanceLockOwner(
+    lockPath,
+    options.readFileText,
+  );
+
+  return {
+    mtimeMs: lockStat.mtimeMs,
+    device: Number.isSafeInteger(lockStat.dev) ? lockStat.dev : undefined,
+    inode: Number.isSafeInteger(lockStat.ino) ? lockStat.ino : undefined,
+    owner,
+  };
+}
+
+function buildProvenanceLockSnapshotsMatch(expected, actual) {
+  if (expected.owner || actual.owner) {
+    return expected.owner?.token === actual.owner?.token;
+  }
+
+  if (
+    expected.device !== undefined &&
+    expected.inode !== undefined &&
+    actual.device !== undefined &&
+    actual.inode !== undefined
+  ) {
+    return (
+      expected.device === actual.device &&
+      expected.inode === actual.inode
+    );
+  }
+
+  return true;
+}
+
+function buildStaleLockIdentityDigest(staleLock) {
+  const identity = JSON.stringify({
+    token: staleLock.owner?.token,
+    device: staleLock.device,
+    inode: staleLock.inode,
+    mtimeMs: staleLock.mtimeMs,
+  });
+  return createHash('sha256').update(identity).digest('hex').slice(0, 24);
+}
+
+function buildStaleLockQuarantinePath(lockPath, staleLock, ownerToken) {
+  const digest = createHash('sha256')
+    .update(`${buildStaleLockIdentityDigest(staleLock)}:${ownerToken}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${lockPath}.stale-${digest}`;
+}
+
+async function releaseBuildProvenanceLock(lockPath, expectedOwner, options) {
+  const owner = await readBuildProvenanceLockOwner(
+    lockPath,
+    options.readFileText,
+  );
+
+  if (!owner || owner.token !== expectedOwner.token) {
+    throw new Error(
+      `Build provenance lock ownership changed before release for "${lockPath}"`,
+    );
+  }
+
+  await options.removePath(lockPath);
+}
+
+async function readBuildProvenanceLockOwner(lockPath, readFileText) {
+  try {
+    const raw = await readFileText(buildProvenanceLockOwnerPath(lockPath));
+    const owner = JSON.parse(raw);
+
+    if (
+      !owner ||
+      typeof owner !== 'object' ||
+      Array.isArray(owner) ||
+      typeof owner.token !== 'string' ||
+      owner.token === '' ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0
+    ) {
+      return undefined;
+    }
+
+    return owner;
+  } catch (error) {
+    if (isEnoentError(error) || error instanceof SyntaxError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function buildProvenanceLockOwnerPath(lockPath) {
+  return path.join(lockPath, PROVENANCE_LOCK_OWNER_FILE_NAME);
 }
 
 async function readExistingBuildProvenance(statePath, readFileText) {
   try {
     const raw = await readFileText(statePath);
     const parsed = JSON.parse(raw);
+
+    const unknownTopLevelField = findUnknownField(
+      parsed,
+      BUILD_PROVENANCE_STATE_KEYS,
+    );
+    if (unknownTopLevelField) {
+      throw invalidBuildProvenance(
+        statePath,
+        `unknown top-level field "${unknownTopLevelField}"`,
+      );
+    }
 
     if (
       parsed?.version !== 1 ||
@@ -1140,6 +1346,26 @@ function validateBuildProvenanceRecord(record, channelName, invalid) {
   ) {
     throw invalid('channel "dev" record requestedRef is forbidden');
   }
+
+  const allowedKeys =
+    channelName === 'stable'
+      ? [...BUILD_PROVENANCE_BASE_RECORD_KEYS, 'requestedRef']
+      : BUILD_PROVENANCE_BASE_RECORD_KEYS;
+  const unknownField = findUnknownField(record, allowedKeys);
+  if (unknownField) {
+    throw invalid(
+      `channel "${channelName}" record contains unknown field "${unknownField}"`,
+    );
+  }
+}
+
+function findUnknownField(value, allowedKeys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).find((key) => !allowed.has(key));
 }
 
 function validateLockTimingOption(name, value, allowZero) {
