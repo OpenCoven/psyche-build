@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = process.cwd();
+const indexHtml = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
 const mainJs = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/main.js'), 'utf8');
 const styles = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauri = readFileSync(join(root, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
@@ -27,6 +28,21 @@ function functionSource(source: string, name: string) {
 }
 
 describe('Tauri project/worktree/pane rail', () => {
+  it('ships pinned sidebar controls and tree semantics contracts', () => {
+    expect(indexHtml).toContain('class="sidebar-controls"');
+    expect(indexHtml).toContain('class="session-search-wrap"');
+    expect(indexHtml).toContain('<kbd class="session-search-key">/</kbd>');
+    for (const filter of ['all', 'agents', 'shells', 'active', 'attention']) {
+      expect(indexHtml).toContain(`data-session-filter="${filter}"`);
+    }
+    expect(indexHtml).toContain('id="session-status-legend"');
+    expect(indexHtml).toMatch(
+      /id="session-list"[^>]*role="tree"[^>]*aria-label="Sessions grouped by project and branch"/,
+    );
+    expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
+    expect(indexHtml).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
+  });
+
   it('discovers canonical Git worktrees through a read-only native command', () => {
     expect(tauri).toMatch(/fn\s+git_worktrees\(root:\s*String\)\s*->\s*Result<Vec<GitWorktree>/);
     expect(tauri).toMatch(/"worktree",\s*"list",\s*"--porcelain"/);
@@ -106,6 +122,41 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('".session-coven-row, .session-close"');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
+  });
+
+  it('validates sidebar settings and persists collapsed project state', () => {
+    const loadSettingsSource = functionSource(mainJs, 'loadSettings');
+    const saveSettingsSource = functionSource(mainJs, 'saveSettings');
+    const persistableProjectSource = functionSource(mainJs, 'persistableProject');
+    const sanitizeSavedProjectSource = functionSource(mainJs, 'sanitizeSavedProject');
+    const mergeRestoredProjectSource = functionSource(mainJs, 'mergeRestoredProject');
+
+    expect(loadSettingsSource).toMatch(/sidebarTab:\s*"sessions"/);
+    expect(loadSettingsSource).toMatch(/sessionFilter:\s*"all"/);
+    expect(loadSettingsSource).toMatch(/selectedSessionKey:\s*""/);
+    expect(loadSettingsSource).toMatch(
+      /sidebarTab:\s*saved\.sidebarTab\s*===\s*"files"\s*\?\s*"files"\s*:\s*"sessions"/,
+    );
+    expect(loadSettingsSource).toContain('PsycheSessions.normalizeSidebarFilter(saved.sessionFilter)');
+    expect(loadSettingsSource).toMatch(
+      /selectedSessionKey:\s*typeof saved\.selectedSessionKey\s*===\s*"string"\s*\?\s*saved\.selectedSessionKey\.slice\(0,\s*1024\)\s*:\s*""/,
+    );
+
+    expect(saveSettingsSource).toMatch(
+      /settings\.sidebarTab\s*=\s*settings\.sidebarTab\s*===\s*"files"\s*\?\s*"files"\s*:\s*"sessions"/,
+    );
+    expect(saveSettingsSource).toContain(
+      'settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter)',
+    );
+    expect(saveSettingsSource).toMatch(
+      /settings\.selectedSessionKey\s*=\s*typeof settings\.selectedSessionKey\s*===\s*"string"\s*\?\s*settings\.selectedSessionKey\.slice\(0,\s*1024\)\s*:\s*""/,
+    );
+
+    expect(persistableProjectSource).toContain('collapsed: !!project.collapsed');
+    expect(sanitizeSavedProjectSource).toContain('collapsed: saved.collapsed === true');
+    expect(mergeRestoredProjectSource).toMatch(
+      /if\s*\(preferIncoming\)\s*\{[\s\S]*target\.collapsed\s*=\s*incoming\.collapsed;/,
+    );
   });
 
   it('offers reversible session context actions and labels destructive close explicitly', () => {

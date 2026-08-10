@@ -466,7 +466,16 @@
     return Math.max(min, Math.min(max, n));
   }
   function loadSettings() {
-    var defaults = { maxProjects: 10, maxBrowserTabsPerProject: 10, bgOpacity: DEFAULT_BG_OPACITY, theme: DEFAULT_THEME, solidBg: false };
+    var defaults = {
+      maxProjects: 10,
+      maxBrowserTabsPerProject: 10,
+      bgOpacity: DEFAULT_BG_OPACITY,
+      theme: DEFAULT_THEME,
+      solidBg: false,
+      sidebarTab: "sessions",
+      sessionFilter: "all",
+      selectedSessionKey: "",
+    };
     try {
       var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
       return {
@@ -475,6 +484,9 @@
         bgOpacity: clampFloat(saved.bgOpacity, defaults.bgOpacity, MIN_BG_OPACITY, MAX_BG_OPACITY),
         theme: THEMES.indexOf(saved.theme) === -1 ? defaults.theme : saved.theme,
         solidBg: saved.solidBg === true,
+        sidebarTab: saved.sidebarTab === "files" ? "files" : "sessions",
+        sessionFilter: PsycheSessions.normalizeSidebarFilter(saved.sessionFilter),
+        selectedSessionKey: typeof saved.selectedSessionKey === "string" ? saved.selectedSessionKey.slice(0, 1024) : "",
       };
     } catch (_) { return defaults; }
   }
@@ -484,6 +496,9 @@
     settings.bgOpacity = clampFloat(settings.bgOpacity, DEFAULT_BG_OPACITY, MIN_BG_OPACITY, MAX_BG_OPACITY);
     if (THEMES.indexOf(settings.theme) === -1) settings.theme = DEFAULT_THEME;
     settings.solidBg = settings.solidBg === true;
+    settings.sidebarTab = settings.sidebarTab === "files" ? "files" : "sessions";
+    settings.sessionFilter = PsycheSessions.normalizeSidebarFilter(settings.sessionFilter);
+    settings.selectedSessionKey = typeof settings.selectedSessionKey === "string" ? settings.selectedSessionKey.slice(0, 1024) : "";
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }
 
@@ -528,7 +543,7 @@
     return project.browsersByWorktree;
   }
   function persistableProject(project) {
-    return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
+    return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
   }
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return;
@@ -550,7 +565,7 @@
       id: saved.id || makeProjectId(),
       name: saved.name || String(saved.root).split("/").pop() || saved.root,
       root: saved.root,
-      collapsed: false,
+      collapsed: saved.collapsed === true,
       selectedWorktreePath: saved.selectedWorktreePath || saved.root,
       worktrees: Array.isArray(saved.worktreePresentation) ? saved.worktreePresentation : [],
       layout: {
@@ -6373,6 +6388,7 @@
       }
     });
     if (preferIncoming) {
+      target.collapsed = incoming.collapsed;
       target.selectedWorktreePath = incoming.selectedWorktreePath;
       target.layout = incoming.layout;
       target.name = incoming.name;
