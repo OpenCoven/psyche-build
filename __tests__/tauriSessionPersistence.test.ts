@@ -368,6 +368,221 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
+  test('does not let a duplicate layout consume a later matching thread', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'thread-a',
+        projects: [
+          { id: 'project-a', root: '/repo' },
+          { id: 'project-b', root: '/repo-b' },
+        ],
+        sessions: [
+          {
+            id: 'thread-a',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+          {
+            id: 'thread-b',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+        ],
+        paneLayouts: [
+          {
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            root: {
+              type: 'leaf',
+              id: 'leaf-a',
+              threadId: 'thread-b',
+            },
+            focusedLeafId: 'leaf-a',
+          },
+          {
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            root: {
+              type: 'leaf',
+              id: 'leaf-b',
+              threadId: 'thread-a',
+            },
+            focusedLeafId: 'leaf-b',
+          },
+          {
+            projectId: 'project-b',
+            worktreePath: '/repo-b',
+            root: {
+              type: 'leaf',
+              id: 'leaf-c',
+              threadId: 'thread-a',
+            },
+            focusedLeafId: 'leaf-c',
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a',
+      projects: [
+        { id: 'project-a', root: '/repo' },
+        { id: 'project-b', root: '/repo-b' },
+      ],
+      sessions: [
+        {
+          id: 'thread-a',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+        {
+          id: 'thread-b',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [
+        {
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          root: {
+            type: 'leaf',
+            id: 'leaf-a',
+            threadId: 'thread-b',
+          },
+          focusedLeafId: 'leaf-a',
+        },
+        {
+          projectId: 'project-b',
+          worktreePath: '/repo-b',
+          root: {
+            type: 'leaf',
+            id: 'leaf-c',
+            threadId: 'thread-a',
+          },
+          focusedLeafId: 'leaf-c',
+        },
+      ],
+    });
+  });
+
+  test('does not let a discarded malformed branch consume a later matching thread', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'thread-a',
+        projects: [
+          { id: 'project-a', root: '/repo' },
+          { id: 'project-b', root: '/repo-b' },
+        ],
+        sessions: [
+          {
+            id: 'thread-a',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+          {
+            id: 'thread-b',
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+            hidden: false,
+          },
+        ],
+        paneLayouts: [
+          {
+            projectId: 'project-a',
+            worktreePath: '/repo',
+            root: {
+              type: 'split',
+              id: 'split invalid',
+              first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-b' },
+              second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-a' },
+            },
+            focusedLeafId: 'leaf-a',
+          },
+          {
+            projectId: 'project-b',
+            worktreePath: '/repo-b',
+            root: {
+              type: 'leaf',
+              id: 'leaf-c',
+              threadId: 'thread-a',
+            },
+            focusedLeafId: 'leaf-c',
+          },
+        ],
+      }),
+    ).toEqual({
+      version: 3,
+      activeProjectId: 'project-a',
+      activeThreadId: 'thread-a',
+      projects: [
+        { id: 'project-a', root: '/repo' },
+        { id: 'project-b', root: '/repo-b' },
+      ],
+      sessions: [
+        {
+          id: 'thread-a',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+        {
+          id: 'thread-b',
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          kind: 'shell',
+          launchKind: 'shell',
+          hidden: false,
+        },
+      ],
+      paneLayouts: [
+        {
+          projectId: 'project-a',
+          worktreePath: '/repo',
+          root: {
+            type: 'leaf',
+            id: 'leaf-a',
+            threadId: 'thread-b',
+          },
+          focusedLeafId: 'leaf-a',
+        },
+        {
+          projectId: 'project-b',
+          worktreePath: '/repo-b',
+          root: {
+            type: 'leaf',
+            id: 'leaf-c',
+            threadId: 'thread-a',
+          },
+          focusedLeafId: 'leaf-c',
+        },
+      ],
+    });
+  });
+
   test('keeps bundle wiring ahead of main.js', () => {
     expect(packageJson.scripts['build:web']).toContain(
       'web/workspace/workspace-entry.js --bundle --minify --format=iife --global-name=PsycheWorkspace --outfile=web/workspace.bundle.js',

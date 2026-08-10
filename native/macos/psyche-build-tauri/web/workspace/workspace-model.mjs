@@ -36,6 +36,68 @@ function findLeafById(root, leafId) {
   return findLeafById(root.first, leafId) || findLeafById(root.second, leafId);
 }
 
+function sanitizePaneTreeDetails(root, knownThreadIds, seenLeaves = new Set()) {
+  const known =
+    knownThreadIds instanceof Set
+      ? knownThreadIds
+      : new Set(Array.isArray(knownThreadIds) ? knownThreadIds : []);
+  const seed =
+    seenLeaves instanceof Set
+      ? new Set(seenLeaves)
+      : new Set(Array.isArray(seenLeaves) ? seenLeaves : []);
+
+  function visit(node, seen) {
+    if (!isObject(node) || typeof node.type !== 'string') return null;
+
+    if (node.type === 'leaf') {
+      const id = safeId(node.id);
+      const threadId = safeId(node.threadId);
+      if (!id || !threadId || !known.has(threadId) || seen.has(threadId)) return null;
+      const threadIds = new Set([threadId]);
+      return { node: { type: 'leaf', id, threadId }, threadIds };
+    }
+
+    if (node.type !== 'split') return null;
+
+    const id = safeId(node.id);
+
+    if (!id) {
+      const first = visit(node.first, seen);
+      const second = visit(node.second, seen);
+      return first || second;
+    }
+
+    const first = visit(node.first, seen);
+    const seenForSecond = first
+      ? new Set([...seen, ...first.threadIds])
+      : seen;
+    const second = visit(node.second, seenForSecond);
+
+    if (!first && !second) return null;
+    if (!first) return second;
+    if (!second) return first;
+
+    const threadIds = new Set(first.threadIds);
+    for (const threadId of second.threadIds) {
+      threadIds.add(threadId);
+    }
+
+    return {
+      node: {
+        type: 'split',
+        id,
+        orientation: node.orientation === ROW ? ROW : COLUMN,
+        ratio: normalizeRatio(node.ratio),
+        first: first.node,
+        second: second.node,
+      },
+      threadIds,
+    };
+  }
+
+  return visit(root, seed);
+}
+
 export function importWorkspaceV2(saved) {
   return {
     version: 3,
@@ -79,41 +141,14 @@ export function sanitizeSessionDescriptor(saved) {
 }
 
 export function sanitizePaneTree(root, knownThreadIds, seenLeaves = new Set()) {
-  const known = knownThreadIds instanceof Set ? knownThreadIds : new Set(Array.isArray(knownThreadIds) ? knownThreadIds : []);
-
-  function visit(node) {
-    if (!isObject(node) || typeof node.type !== 'string') return null;
-
-    if (node.type === 'leaf') {
-      const id = safeId(node.id);
-      const threadId = safeId(node.threadId);
-      if (!id || !threadId || !known.has(threadId) || seenLeaves.has(threadId)) return null;
+  const sanitized = sanitizePaneTreeDetails(root, knownThreadIds, seenLeaves);
+  if (!sanitized) return null;
+  if (seenLeaves instanceof Set) {
+    for (const threadId of sanitized.threadIds) {
       seenLeaves.add(threadId);
-      return { type: 'leaf', id, threadId };
     }
-
-    if (node.type !== 'split') return null;
-
-    const first = visit(node.first);
-    const second = visit(node.second);
-    if (!first && !second) return null;
-    if (!first) return second;
-    if (!second) return first;
-
-    const id = safeId(node.id);
-    if (!id) return first || second;
-
-    return {
-      type: 'split',
-      id,
-      orientation: node.orientation === ROW ? ROW : COLUMN,
-      ratio: normalizeRatio(node.ratio),
-      first,
-      second,
-    };
   }
-
-  return visit(root);
+  return sanitized.node;
 }
 
 export function reconcileSessions(descriptors, liveIds) {
@@ -150,19 +185,20 @@ function sanitizePaneLayout(saved, knownThreadIds, seenLeaves) {
   const worktreePath = safeString(saved.worktreePath);
   if (!projectId || !worktreePath) return null;
 
-  const root = sanitizePaneTree(saved.root, knownThreadIds, seenLeaves);
-  if (!root) return null;
+  const sanitizedRoot = sanitizePaneTreeDetails(saved.root, knownThreadIds, seenLeaves);
+  if (!sanitizedRoot) return null;
 
   let focusedLeafId = safeString(saved.focusedLeafId);
-  if (!focusedLeafId || !findLeafById(root, focusedLeafId)) {
-    focusedLeafId = findFirstLeafId(root);
+  if (!focusedLeafId || !findLeafById(sanitizedRoot.node, focusedLeafId)) {
+    focusedLeafId = findFirstLeafId(sanitizedRoot.node);
   }
 
   return {
     projectId,
     worktreePath,
-    root,
+    root: sanitizedRoot.node,
     focusedLeafId,
+    threadIds: sanitizedRoot.threadIds,
   };
 }
 
@@ -203,7 +239,11 @@ export function sanitizeWorkspaceV3(saved) {
     const key = `${sanitized.projectId}\u0000${sanitized.worktreePath}`;
     if (seenLayouts.has(key)) continue;
     seenLayouts.add(key);
-    paneLayouts.push(sanitized);
+    for (const threadId of sanitized.threadIds) {
+      seenLeaves.add(threadId);
+    }
+    const { threadIds, ...layoutEntry } = sanitized;
+    paneLayouts.push(layoutEntry);
   }
 
   return {
