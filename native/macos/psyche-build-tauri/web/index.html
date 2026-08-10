@@ -157,32 +157,7 @@
           <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar">»</button>
         </aside>
 
-        <main class="detail" id="detail" data-layout="terminal" data-browser-side="right" data-panel="git" data-browser-column="open">
-          <section class="browser-band" id="browser-column" aria-label="Browser">
-            <div class="panel panel-browser">
-              <header class="pane-header browser-bar">
-                <button id="browser-collapse" class="icon-btn ghost-btn" title="Hide panel (⌘⌥B)" aria-label="Hide panel">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <button id="back" class="icon-btn nav-btn" title="Back" aria-label="Back">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.75 4.25 6 8l3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <button id="forward" class="icon-btn nav-btn" title="Forward" aria-label="Forward">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 4.25 10 8l-3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <button id="reload" class="icon-btn nav-btn" title="Reload" aria-label="Reload">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-                <input id="url" type="url" placeholder="example.com or localhost:5173 — Enter to load" />
-                <button id="open-external" class="icon-btn ghost-btn" title="Open in default browser" aria-label="Open in default browser">↗</button>
-              </header>
-              <div id="browser-tab-strip" class="browser-tab-strip"></div>
-              <div id="preview" class="preview-placeholder">
-                <div class="preview-empty">No browser tab yet — type a URL above or press +</div>
-              </div>
-            </div>
-            <div class="browser-band-resize" id="browser-band-resize" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize the browser band"></div>
-          </section>
+        <main class="detail" id="detail" data-layout="terminal" data-panel="git">
           <section class="terminal-area">
             <div class="terminal-host" id="terminal-host"></div>
             <div class="file-view" id="file-view" hidden>
@@ -236,22 +211,18 @@
           ></div>
 
 
-          <section class="browser-pane dock" aria-label="Tools">
-            <div class="dock-tabs" role="tablist" aria-label="Tools dock">
-              <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse dock (⌘⌥B)" aria-label="Collapse dock">
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                  <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                  <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
-              <button class="dock-tab" data-panel-btn="git" type="button" aria-pressed="false" title="Git, GitHub and diffs" aria-label="Git and diffs panel">Git<span class="dock-tab-count" id="dock-git-count" hidden></span></button>
-              <button class="dock-tab" data-browser-column-toggle type="button" aria-pressed="true" title="Show or hide the browser column (⌘⌥B)" aria-label="Browser column">Web</button>
-            </div>
-
+          <section class="git-dock dock" aria-label="Git tools">
             <div class="panel panel-git">
               <header class="pane-header panel-bar">
+                <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse Git dock (⌘⌥B)" aria-label="Collapse Git dock">
+                  <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                    <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                    <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+                    <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
                 <span class="panel-title">Git</span>
+                <span class="dock-tab-count" id="dock-git-count" hidden></span>
                 <span class="panel-crumb" id="git-branch"></span>
                 <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -316,8 +287,29 @@
                     stroke-width="1.35" stroke-linecap="round"/>
             </svg>
           </button>
-          <button class="mini-rail-btn" data-browser-column-toggle type="button" aria-pressed="true" title="Browser column" aria-label="Browser column">Web</button>
         </nav>
+      </div>
+
+      <div id="browser-surface-staging" hidden>
+        <div class="browser-surface" id="browser-surface">
+          <header class="pane-header browser-bar">
+            <button id="back" class="icon-btn nav-btn" title="Back" aria-label="Back">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.75 4.25 6 8l3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button id="forward" class="icon-btn nav-btn" title="Forward" aria-label="Forward">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 4.25 10 8l-3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button id="reload" class="icon-btn nav-btn" title="Reload" aria-label="Reload">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <input id="url" type="url" placeholder="example.com or localhost:5173 — Enter to load" />
+            <button id="open-external" class="icon-btn ghost-btn" title="Open in default browser" aria-label="Open in default browser">↗</button>
+          </header>
+          <div id="browser-tab-strip" class="browser-tab-strip"></div>
+          <div id="preview" class="preview-placeholder">
+            <div class="preview-empty">No browser tab yet — type a URL above or press +</div>
+          </div>
+        </div>
       </div>
 
       <footer class="composer" id="composer">

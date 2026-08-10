@@ -1146,12 +1146,15 @@ describe('Tauri physical terminal panes', () => {
   });
 
   describe('pane frame', () => {
-    it('gives the header six tracks so its buttons never clip', () => {
+    it('gives the header a track per child so its buttons never clip', () => {
+      // Seven since the attention chip joined: a header with more children than
+      // tracks wraps the close button onto a second row, which is exactly the
+      // state a pane is in when it most needs to look deliberate.
       expect(stylesCss).toMatch(
-        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto;/s,
+        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
-        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
       );
     });
 

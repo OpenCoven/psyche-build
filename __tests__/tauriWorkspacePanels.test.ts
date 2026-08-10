@@ -72,15 +72,14 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('leaves the dock with git alone, files on the left and the browser in its own column', () => {
-    expect(indexHtml).toContain('data-panel-btn="git"');
-    // The browser is a column between the canvas and the dock, toggled rather
-    // than switched to, so it is no longer a dock panel.
-    expect(indexHtml).not.toContain('data-panel-btn="browser"');
-    expect(indexHtml).toContain('data-browser-column-toggle');
-    expect(indexHtml).toContain('id="browser-column"');
-    const column = indexHtml.slice(indexHtml.indexOf('id="browser-column"'));
-    expect(column.slice(0, column.indexOf('</section>'))).toContain('class="panel panel-browser"');
+  it('keeps a Git-only dock with Changes and Commit', () => {
+    expect(indexHtml).not.toContain('class="dock-tab"');
+    expect(stylesCss).not.toMatch(/\.dock-tab\s*\{/);
+    expect(stylesCss).not.toContain('--dock-tabs-h');
+    expect(indexHtml).not.toContain('data-browser-column-toggle');
+    expect(indexHtml).toContain('class="panel panel-git"');
+    expect(indexHtml).toContain('data-git-tab="changes"');
+    expect(indexHtml).toContain('data-git-tab="commit"');
     // Diffs is no longer a tab of its own...
     expect(indexHtml).not.toContain('data-panel-btn="diffs"');
     // ...and Files left the dock entirely for the sidebar.
@@ -131,36 +130,44 @@ describe('Tauri workspace panels', () => {
     expect(panesBundle).toContain('PsychePanes');
   });
 
-  describe('browser band', () => {
-    it('spans the top of the workbench instead of sitting in a column', () => {
-      expect(indexHtml).toContain('<section class="browser-band" id="browser-column"');
-      // Row 1, every column: the band is centred on the workbench by covering
-      // it, so the canvas and the tools dock both sit underneath.
-      expect(stylesCss).toMatch(
-        /\.detail\[data-layout="split"\] \.browser-band\s*\{\s*grid-column: 1 \/ -1; grid-row: 1;/
+  describe('Web canvas pane', () => {
+    it('moves Web from the top band into the canvas pane lifecycle', () => {
+      expect(indexHtml).not.toContain('class="browser-band"');
+      expect(indexHtml).not.toContain('id="browser-band-resize"');
+      expect(indexHtml).toContain('id="browser-surface-staging"');
+      expect(mainJs).toMatch(/function createBrowserPane\(/);
+      expect(mainJs).toMatch(/kind:\s*"web"/);
+      expect(mainJs).toMatch(/preparePanePlacement\(id, project\.id, worktreePath\)/);
+      expect(mainJs).toMatch(/function closeBrowserPane\(/);
+    });
+
+    it('reveals the canvas before measuring a new Web pane placement', () => {
+      expect(mainJs).toMatch(
+        /async function createBrowserPane\(project\)[\s\S]*await showTerminalView\(\)[\s\S]*preparePanePlacement\(id, project\.id, worktreePath\)/
       );
-      expect(stylesCss).toMatch(/grid-template-rows: var\(--browser-band\) minmax\(var\(--terminal-min-y\), 1fr\);/);
     });
 
-    it('has one home, so nothing is left that could move it to another edge', () => {
-      expect(stylesCss).not.toContain('data-browser-side');
-      expect(mainJs).not.toContain('BROWSER_SIDES');
-      expect(mainJs).not.toContain('cycleBrowserSide');
+    it('keeps a visible Web pane painted when another canvas pane has focus', () => {
+      const boundsFunction = mainJs.match(
+        /function visibleBrowserBounds\(\)\s*\{[\s\S]*?\n  \}/
+      )?.[0];
+      expect(boundsFunction).toBeTruthy();
+      expect(boundsFunction).toContain('preview.isConnected');
+      expect(boundsFunction).not.toContain('state.activeThreadId');
     });
 
-    it('resizes from its lower edge only, in pixels', () => {
-      expect(indexHtml).toContain('id="browser-band-resize"');
-      expect(stylesCss).toMatch(/\.browser-band-resize\s*\{[^}]*cursor: row-resize;/s);
-      expect(mainJs).toMatch(/function setBandHeight\(px\)[\s\S]*--browser-band/);
-      // Bounds have to follow, or the native child webview keeps the old rect.
-      expect(mainJs).toMatch(/function setBandHeight\(px\)[\s\S]*syncBrowserBounds\(\)/);
+    it('returns contextual shortcuts to terminal mode through every Web close path', () => {
+      expect(mainJs).toMatch(
+        /function closeThread\(id, options\)[\s\S]{0,700}thread\.kind === "web"[\s\S]{0,120}state\.activeThreadId === id[\s\S]{0,120}markActiveSurface\("terminal"\)/
+      );
     });
 
-    it('is no longer one of the panels the dock switches between', () => {
-      expect(stylesCss).not.toMatch(/\.detail\[data-panel="browser"\] \.panel-browser/);
-      expect(stylesCss).toMatch(/\.browser-band \.panel-browser\s*\{[^}]*display: grid;/s);
-      // The band is a flex column; without a flex basis the preview is 0-high.
-      expect(stylesCss).toMatch(/\.browser-band \.panel-browser\s*\{[^}]*flex: 1 1 auto;[^}]*min-height: 0;/s);
+    it('has no browser-band or browser-column layout state', () => {
+      expect(stylesCss).not.toContain('--browser-band');
+      expect(stylesCss).not.toContain('.browser-band');
+      expect(mainJs).not.toContain('setBandHeight');
+      expect(mainJs).not.toContain('setBrowserColumn');
+      expect(mainJs).not.toContain('data-browser-column-toggle');
     });
   });
 

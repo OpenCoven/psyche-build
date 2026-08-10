@@ -124,7 +124,9 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('keeps browser tabs thin and collapsible under narrow browser panes', () => {
     expect(stylesCss).toMatch(/--browser-tab-h:\s*22px;/);
-    expect(stylesCss).toMatch(/grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) 1fr;/);
+    expect(stylesCss).toMatch(
+      /\.browser-surface\s*\{[^}]*grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) minmax\(0, 1fr\);/s
+    );
     expect(stylesCss).toMatch(/\.browser-tab\s*\{[\s\S]*?min-width:\s*34px;[\s\S]*?flex:\s*1 1 118px;/);
     expect(stylesCss).toMatch(/\.browser-tab-title\s*\{[\s\S]*?min-width:\s*0;/);
   });
