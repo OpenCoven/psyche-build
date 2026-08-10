@@ -3,6 +3,8 @@ import Foundation
 public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case missingWelcomeIdentity
     case unsupportedProtocolVersion(Int)
+    case messageProcessorEndedBeforeReady
+    case connectionCancelled
 
     public var errorDescription: String? {
         switch self {
@@ -10,6 +12,10 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
             "The host accepted pairing before identifying itself."
         case .unsupportedProtocolVersion(let version):
             "The host selected unsupported mobile protocol version \(version)."
+        case .messageProcessorEndedBeforeReady:
+            "The connection ended before its message processor became ready."
+        case .connectionCancelled:
+            "The connection was cancelled before its message processor became ready."
         }
     }
 }
@@ -25,6 +31,7 @@ public actor ConnectionManager {
     private let transport: any PsycheTransport
     private let workspaceStore: WorkspaceStore
     private let pairedHostStore: PairedHostStore
+    private let messageProcessorStart: @Sendable () async -> Void
     private var clientID: String
     private let clientName: String
     private var token: String?
@@ -32,6 +39,7 @@ public actor ConnectionManager {
     private var welcomeIdentity: WelcomeIdentity?
     private var messageTask: Task<Void, Never>?
     private var snapshotRequestTask: Task<Void, Never>?
+    private var activeConnectAttempt: UUID?
     private var activeMessageSession: UUID?
     private var activeSnapshotRequestID: String?
     private var hasActiveTransport = false
@@ -39,7 +47,8 @@ public actor ConnectionManager {
     private var requestedInitialSnapshot = false
     private var isSnapshotRecoveryInFlight = false
     private var isMessageProcessorReady = false
-    private var messageProcessorReadyWaiters: [CheckedContinuation<Void, Never>] = []
+    private var messageProcessorReadyWaiters:
+        [UUID: [CheckedContinuation<Void, any Error>]] = [:]
     private var processedMessageCount = 0
     private var eventDrainWaiters: [UUID: (count: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
     private var stateWaiters: [UUID: (state: ConnectionState, continuation: CheckedContinuation<Void, Never>)] = [:]
@@ -51,7 +60,8 @@ public actor ConnectionManager {
         pairedHostStore: PairedHostStore,
         clientID: String = UUID().uuidString,
         clientName: String = "Psyche iOS",
-        token: String? = nil
+        token: String? = nil,
+        messageProcessorStart: @escaping @Sendable () async -> Void = {}
     ) {
         self.transport = transport
         self.workspaceStore = workspaceStore
@@ -60,11 +70,17 @@ public actor ConnectionManager {
         self.clientID = clientID
         self.clientName = clientName
         self.token = token
+        self.messageProcessorStart = messageProcessorStart
     }
 
     deinit {
         messageTask?.cancel()
         snapshotRequestTask?.cancel()
+        for continuation in messageProcessorReadyWaiters.values.flatMap({ $0 }) {
+            continuation.resume(
+                throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
+            )
+        }
     }
 
     public func connectToStoredHost() async {
@@ -85,13 +101,27 @@ public actor ConnectionManager {
         guard !isConnectInFlight else { return }
         guard state != .disconnecting else { return }
         isConnectInFlight = true
-        defer { isConnectInFlight = false }
+        let attempt = UUID()
+        defer {
+            if activeConnectAttempt == attempt {
+                activeConnectAttempt = nil
+            }
+            isConnectInFlight = false
+        }
 
         await tearDownActiveConnection()
+        guard !Task.isCancelled else {
+            transition(to: .failed(ConnectionManagerError.connectionCancelled.localizedDescription))
+            return
+        }
+        activeConnectAttempt = attempt
         transition(to: .connecting)
 
         do {
             try await transport.connect(to: endpoint)
+            guard activeConnectAttempt == attempt else { return }
+            await workspaceStore.beginConnection()
+            guard activeConnectAttempt == attempt else { return }
             hasActiveTransport = true
             activeEndpoint = endpoint
             transition(to: .authenticating)
@@ -99,8 +129,11 @@ public actor ConnectionManager {
             isMessageProcessorReady = false
             let session = UUID()
             activeMessageSession = session
-            messageTask = Task { [weak self] in
-                await self?.markMessageProcessorReady()
+            let messageProcessorStart = self.messageProcessorStart
+            messageTask = Task { [weak self, messageProcessorStart] in
+                await messageProcessorStart()
+                guard !Task.isCancelled else { return }
+                await self?.markMessageProcessorReady(for: session)
                 for await message in messages {
                     guard !Task.isCancelled else { return }
                     guard let result = await self?.handle(message, for: session) else { return }
@@ -115,7 +148,19 @@ public actor ConnectionManager {
                     reason: "Connection closed unexpectedly"
                 )
             }
-            await waitForMessageProcessorReadiness()
+            try await withTaskCancellationHandler {
+                try await waitForMessageProcessorReadiness(for: session)
+            } onCancel: {
+                Task { [weak self] in
+                    await self?.cancelConnectAttempt(attempt)
+                }
+            }
+            try Task.checkCancellation()
+            guard activeConnectAttempt == attempt,
+                  activeMessageSession == session,
+                  hasActiveTransport else {
+                throw ConnectionManagerError.messageProcessorEndedBeforeReady
+            }
             try await transport.send(.legacy(.hello(HelloPayload(
                 clientID: clientID,
                 clientName: clientName,
@@ -123,6 +168,7 @@ public actor ConnectionManager {
                 token: token
             ))))
         } catch {
+            guard activeConnectAttempt == attempt else { return }
             await tearDownActiveConnection()
             transition(to: .failed(error.localizedDescription))
         }
@@ -161,10 +207,8 @@ public actor ConnectionManager {
     }
 
     func waitForMessageProcessorReadiness() async {
-        guard !isMessageProcessorReady else { return }
-        await withCheckedContinuation { continuation in
-            messageProcessorReadyWaiters.append(continuation)
-        }
+        guard let session = activeMessageSession else { return }
+        try? await waitForMessageProcessorReadiness(for: session)
     }
 
     func waitForEventDrain(after eventCount: Int) async {
@@ -183,10 +227,32 @@ public actor ConnectionManager {
         }
     }
 
-    private func markMessageProcessorReady() {
+    private func waitForMessageProcessorReadiness(for session: UUID) async throws {
+        guard activeMessageSession == session else {
+            throw ConnectionManagerError.messageProcessorEndedBeforeReady
+        }
+        guard !isMessageProcessorReady else { return }
+
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            guard activeMessageSession == session else {
+                continuation.resume(
+                    throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
+                )
+                return
+            }
+            guard !isMessageProcessorReady else {
+                continuation.resume()
+                return
+            }
+            messageProcessorReadyWaiters[session, default: []].append(continuation)
+        }
+    }
+
+    private func markMessageProcessorReady(for session: UUID) {
+        guard activeMessageSession == session else { return }
         isMessageProcessorReady = true
-        messageProcessorReadyWaiters.forEach { $0.resume() }
-        messageProcessorReadyWaiters.removeAll()
+        completeMessageProcessorReadiness(for: session, with: .success(()))
     }
 
     private func handle(
@@ -222,8 +288,14 @@ public actor ConnectionManager {
         _ message: ServerMessage,
         for session: UUID
     ) async -> MessageHandlingResult {
+        guard activeMessageSession == session else { return .ignored }
+
         switch message {
         case .welcome(let payload):
+            if payload.protocolVersion == PsycheProtocolVersion.legacy,
+               payload.supportedVersions?.contains(PsycheProtocolVersion.current) == true {
+                return .ignored
+            }
             guard payload.protocolVersion == PsycheProtocolVersion.current else {
                 return .failed(
                     ConnectionManagerError
@@ -249,6 +321,9 @@ public actor ConnectionManager {
             guard let welcomeIdentity, let activeEndpoint else {
                 return .failed(ConnectionManagerError.missingWelcomeIdentity.localizedDescription)
             }
+            guard activeMessageSession == session, !Task.isCancelled else {
+                return .ignored
+            }
             do {
                 try await pairedHostStore.save(PairedHost(
                     serverID: welcomeIdentity.serverID,
@@ -257,10 +332,14 @@ public actor ConnectionManager {
                     clientID: clientID,
                     token: payload.token
                 ))
+            } catch is CancellationError {
+                return .ignored
             } catch {
                 return .failed(error.localizedDescription)
             }
-            guard activeMessageSession == session else { return .ignored }
+            guard activeMessageSession == session, !Task.isCancelled else {
+                return .ignored
+            }
             token = payload.token
             await requestInitialSnapshotIfAuthorized(for: session)
         default:
@@ -358,8 +437,13 @@ public actor ConnectionManager {
         }
     }
 
-    private func tearDownActiveConnection() async {
+    private func tearDownActiveConnection(
+        readinessError: any Error = ConnectionManagerError.messageProcessorEndedBeforeReady
+    ) async {
+        let session = activeMessageSession
+        activeConnectAttempt = nil
         activeMessageSession = nil
+        completeMessageProcessorReadiness(for: session, with: .failure(readinessError))
         messageTask?.cancel()
         messageTask = nil
         let shouldDisconnectTransport = hasActiveTransport
@@ -383,10 +467,33 @@ public actor ConnectionManager {
         await requestClient.failAll(with: ControlRequestError.disconnected)
     }
 
+    private func cancelConnectAttempt(_ attempt: UUID) async {
+        guard activeConnectAttempt == attempt else { return }
+        let error = ConnectionManagerError.connectionCancelled
+        await tearDownActiveConnection(readinessError: error)
+        transition(to: .failed(error.localizedDescription))
+    }
+
+    private func completeMessageProcessorReadiness(
+        for session: UUID?,
+        with result: Result<Void, any Error>
+    ) {
+        let sessions = session.map { [$0] } ?? Array(messageProcessorReadyWaiters.keys)
+        for session in sessions {
+            let continuations = messageProcessorReadyWaiters.removeValue(forKey: session) ?? []
+            continuations.forEach { $0.resume(with: result) }
+        }
+    }
+
     private func messageProcessingEnded(for session: UUID, reason: String) async {
         guard activeMessageSession == session else { return }
 
+        activeConnectAttempt = nil
         activeMessageSession = nil
+        completeMessageProcessorReadiness(
+            for: session,
+            with: .failure(ConnectionManagerError.messageProcessorEndedBeforeReady)
+        )
         messageTask = nil
         transition(to: .disconnecting)
         let shouldDisconnectTransport = hasActiveTransport

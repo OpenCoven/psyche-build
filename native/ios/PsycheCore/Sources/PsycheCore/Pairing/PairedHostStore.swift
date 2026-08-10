@@ -49,6 +49,7 @@ public actor PairedHostStore {
     /// fingerprint no longer matches. Everything else about a known host —
     /// name, address, token — is free to change.
     public func save(_ host: PairedHost) throws {
+        try Task.checkCancellation()
         let normalized = try normalize(host)
         var records = try records()
 
@@ -58,6 +59,7 @@ public actor PairedHostStore {
         }
 
         records[normalized.serverID] = normalized
+        try Task.checkCancellation()
         try write(records)
     }
 

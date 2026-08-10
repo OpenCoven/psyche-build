@@ -91,6 +91,15 @@ public final class WorkspaceStore: ObservableObject {
         isStale = true
     }
 
+    /// A new transport connection has its own sequence space. Keep the last
+    /// known workspace visible while making the next authoritative snapshot
+    /// the new sequence baseline.
+    public func beginConnection() {
+        sequence = 0
+        isStale = true
+        needsFullSnapshot = true
+    }
+
     public func setDraft(_ draft: String?, forPane paneID: String) {
         drafts[paneID] = draft
     }
