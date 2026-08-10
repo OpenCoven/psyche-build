@@ -3,8 +3,12 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde_json::Value;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -13,6 +17,7 @@ const WORKSPACE_FILE_RELATIVE: &str = ".psyche/macos-app/workspace-v3.json";
 const WORKSPACE_ROLLBACK_COPY_LIMIT: u64 = 16 * 1024 * 1024;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static WORKSPACE_IO_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub(crate) fn workspace_path_from_home() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
@@ -46,6 +51,21 @@ pub(crate) fn validate_workspace(value: &Value) -> Result<(), String> {
 }
 
 pub(crate) fn load_workspace_from(path: &Path) -> Result<Option<Value>, String> {
+    let _process_lock = WORKSPACE_IO_MUTEX.lock();
+    let Some(parent) = path.parent() else {
+        return Err(format!(
+            "workspace path has no parent directory: {}",
+            path.display()
+        ));
+    };
+    if !parent.exists() {
+        return Ok(None);
+    }
+    let _file_lock = WorkspaceFileLock::shared(path)?;
+    load_workspace_from_locked(path)
+}
+
+fn load_workspace_from_locked(path: &Path) -> Result<Option<Value>, String> {
     let mut bytes = Vec::new();
     match File::open(path) {
         Ok(mut file) => {
@@ -64,18 +84,26 @@ pub(crate) fn load_workspace_from(path: &Path) -> Result<Option<Value>, String> 
 }
 
 pub(crate) fn save_workspace_to(path: &Path, value: &Value) -> Result<(), String> {
-    save_workspace_to_inner(path, value, |_| Ok(()), sync_parent_directory)
+    save_workspace_to_inner(
+        path,
+        value,
+        |_| Ok(()),
+        sync_parent_directory,
+        restore_workspace_backup,
+    )
 }
 
-fn save_workspace_to_inner<F, G>(
+fn save_workspace_to_inner<F, G, H>(
     path: &Path,
     value: &Value,
     before_rename: F,
-    sync_parent_directory: G,
+    mut sync_parent_directory: G,
+    restore_workspace_backup: H,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
-    G: FnOnce(&Path) -> Result<(), String>,
+    G: FnMut(&Path) -> Result<(), String>,
+    H: FnOnce(&Path, &Path) -> Result<(), String>,
 {
     validate_workspace(value)
         .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
@@ -96,17 +124,20 @@ where
         })?;
     }
 
+    let _process_lock = WORKSPACE_IO_MUTEX.lock();
+    let _file_lock = WorkspaceFileLock::exclusive(path)?;
+
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
         .to_string_lossy()
         .to_string();
     let temp_path = workspace_temp_path(parent, &file_name);
-    let rollback_path = workspace_rollback_path(parent, &file_name);
+    let recovery_path = workspace_recovery_path(parent, &file_name);
     let mut temp_file = open_temp_file(&temp_path)?;
     let mut temp_guard = TempFileGuard::new(temp_path.clone());
     let mut rollback_guard = if workspace_file_exists(path)? {
-        Some(create_rollback_backup(path, &rollback_path)?)
+        Some(create_rollback_backup(path, &recovery_path)?)
     } else {
         None
     };
@@ -146,14 +177,36 @@ where
         Err(err) => return Err(err),
     }
 
-    if let Err(err) = sync_parent_directory(parent) {
-        rollback_workspace_after_sync_failure(
+    if let Err(save_error) = sync_parent_directory(parent) {
+        if let Err(restore_error) = rollback_workspace_after_sync_failure(
             path,
-            rollback_path.as_path(),
+            recovery_path.as_path(),
             rollback_guard.as_mut(),
-        )?;
+            restore_workspace_backup,
+        ) {
+            if let Some(guard) = rollback_guard.as_mut() {
+                guard.preserve();
+                return Err(format!(
+                    "{save_error}; rollback restoration failed: {restore_error}; recovery copy preserved at '{}'",
+                    recovery_path.display()
+                ));
+            }
+            return Err(format!(
+                "{save_error}; rollback restoration failed: {restore_error}"
+            ));
+        }
+        sync_parent_directory(parent).map_err(|rollback_sync_error| {
+            format!(
+                "{save_error}; rollback restored the previous workspace but parent sync failed: {rollback_sync_error}"
+            )
+        })?;
         temp_guard.commit();
-        return Err(err);
+        return Err(save_error);
+    }
+
+    if let Some(guard) = rollback_guard.as_mut() {
+        guard.remove()?;
+        sync_parent_directory(parent)?;
     }
     Ok(())
 }
@@ -191,14 +244,12 @@ fn workspace_temp_path(parent: &Path, file_name: &str) -> PathBuf {
     ))
 }
 
-fn workspace_rollback_path(parent: &Path, file_name: &str) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(
-        ".{}.psyche-rollback-{}-{}",
-        file_name,
-        std::process::id(),
-        counter
-    ))
+fn workspace_lock_path(parent: &Path, file_name: &str) -> PathBuf {
+    parent.join(format!(".{file_name}.psyche-lock"))
+}
+
+fn workspace_recovery_path(parent: &Path, file_name: &str) -> PathBuf {
+    parent.join(format!(".{file_name}.psyche-recovery"))
 }
 
 fn workspace_file_exists(path: &Path) -> Result<bool, String> {
@@ -258,20 +309,25 @@ fn copy_rollback_backup(path: &Path, backup_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn restore_workspace_backup(backup_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(backup_path, path).map_err(|e| {
+        format!(
+            "restore workspace from recovery copy '{}' to '{}': {}",
+            backup_path.display(),
+            path.display(),
+            e
+        )
+    })
+}
+
 fn rollback_workspace_after_sync_failure(
     path: &Path,
     rollback_path: &Path,
     rollback_guard: Option<&mut RollbackBackupGuard>,
+    restore_workspace_backup: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
     if rollback_guard.is_some() {
-        fs::rename(rollback_path, path).map_err(|e| {
-            format!(
-                "restore workspace from rollback backup '{}' to '{}': {}",
-                rollback_path.display(),
-                path.display(),
-                e
-            )
-        })?;
+        restore_workspace_backup(rollback_path, path)?;
         if let Some(guard) = rollback_guard {
             guard.commit();
         }
@@ -280,6 +336,80 @@ fn rollback_workspace_after_sync_failure(
             .map_err(|e| format!("remove failed workspace '{}': {}", path.display(), e))?;
     }
     Ok(())
+}
+
+struct WorkspaceFileLock {
+    file: File,
+}
+
+impl WorkspaceFileLock {
+    fn shared(path: &Path) -> Result<Self, String> {
+        Self::acquire(path, LockMode::Shared)
+    }
+
+    fn exclusive(path: &Path) -> Result<Self, String> {
+        Self::acquire(path, LockMode::Exclusive)
+    }
+
+    fn acquire(path: &Path, mode: LockMode) -> Result<Self, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
+            .to_string_lossy();
+        let lock_path = workspace_lock_path(parent, &file_name);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options
+            .open(&lock_path)
+            .map_err(|e| format!("open workspace lock '{}': {}", lock_path.display(), e))?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+                format!(
+                    "set workspace lock permissions '{}': {}",
+                    lock_path.display(),
+                    e
+                )
+            })?;
+            let operation = match mode {
+                LockMode::Shared => libc::LOCK_SH,
+                LockMode::Exclusive => libc::LOCK_EX,
+            };
+            loop {
+                if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(format!(
+                        "lock workspace lock '{}': {}",
+                        lock_path.display(),
+                        error
+                    ));
+                }
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for WorkspaceFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+enum LockMode {
+    Shared,
+    Exclusive,
 }
 
 #[cfg(unix)]
@@ -336,6 +466,22 @@ impl RollbackBackupGuard {
     fn commit(&mut self) {
         self.committed = true;
     }
+
+    fn preserve(&mut self) {
+        self.committed = true;
+    }
+
+    fn remove(&mut self) -> Result<(), String> {
+        fs::remove_file(&self.path).map_err(|e| {
+            format!(
+                "remove workspace recovery copy '{}': {}",
+                self.path.display(),
+                e
+            )
+        })?;
+        self.commit();
+        Ok(())
+    }
 }
 
 impl Drop for RollbackBackupGuard {
@@ -347,17 +493,25 @@ impl Drop for RollbackBackupGuard {
 }
 
 #[cfg(test)]
-fn workspace_save_to_test_hook<F, G>(
+fn workspace_save_to_test_hook<F, G, H>(
     path: &Path,
     value: &Value,
     before_rename: F,
     sync_parent_directory: G,
+    restore_workspace_backup: H,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
-    G: FnOnce(&Path) -> Result<(), String>,
+    G: FnMut(&Path) -> Result<(), String>,
+    H: FnOnce(&Path, &Path) -> Result<(), String>,
 {
-    save_workspace_to_inner(path, value, before_rename, sync_parent_directory)
+    save_workspace_to_inner(
+        path,
+        value,
+        before_rename,
+        sync_parent_directory,
+        restore_workspace_backup,
+    )
 }
 
 pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
@@ -365,13 +519,24 @@ pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub(crate) fn workspace_load() -> Result<Option<Value>, String> {
+pub(crate) fn workspace_load(webview: tauri::Webview) -> Result<Option<Value>, String> {
+    ensure_trusted_workspace_caller(webview.label())?;
     load_workspace_from(&workspace_default_path()?)
 }
 
 #[tauri::command]
-pub(crate) fn workspace_save(workspace: Value) -> Result<(), String> {
+pub(crate) fn workspace_save(webview: tauri::Webview, workspace: Value) -> Result<(), String> {
+    ensure_trusted_workspace_caller(webview.label())?;
     save_workspace_to(&workspace_default_path()?, &workspace)
+}
+
+fn ensure_trusted_workspace_caller(label: &str) -> Result<(), String> {
+    if label == "main" {
+        return Ok(());
+    }
+    Err(format!(
+        "workspace storage is only available to trusted webview 'main'; rejected caller '{label}'"
+    ))
 }
 
 #[cfg(test)]
@@ -380,6 +545,9 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn workspace_value() -> Value {
@@ -420,6 +588,39 @@ mod tests {
         files
     }
 
+    fn cleanup_artifacts(dir: &Path) -> Vec<String> {
+        temp_files(dir)
+            .into_iter()
+            .filter(|name| name.contains(".psyche-save-"))
+            .collect()
+    }
+
+    fn recovery_path(path: &Path) -> PathBuf {
+        workspace_recovery_path(
+            path.parent().expect("parent"),
+            &path.file_name().expect("file name").to_string_lossy(),
+        )
+    }
+
+    fn workspace_with_project(id: &str) -> Value {
+        serde_json::json!({
+            "version": 3,
+            "projects": [{"id": id}],
+            "sessions": [],
+            "paneLayouts": [],
+        })
+    }
+
+    #[test]
+    fn native_workspace_tests_trusted_caller_guard() {
+        assert_eq!(ensure_trusted_workspace_caller("main"), Ok(()));
+
+        let error = ensure_trusted_workspace_caller("psyche-browser-untrusted")
+            .expect_err("browser caller must be rejected");
+        assert!(error.contains("trusted webview 'main'"));
+        assert!(error.contains("psyche-browser-untrusted"));
+    }
+
     #[test]
     fn native_workspace_tests_valid_round_trip() {
         let (_dir, path) = temp_workspace_path();
@@ -431,9 +632,7 @@ mod tests {
             .expect("load workspace")
             .expect("workspace exists");
         assert_eq!(loaded, value);
-        assert!(temp_files(path.parent().expect("parent"))
-            .iter()
-            .all(|name| !name.contains(".psyche-save-")));
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
     }
 
     #[test]
@@ -543,13 +742,13 @@ mod tests {
                 Err("controlled failure".to_string())
             },
             sync_parent_directory,
+            restore_workspace_backup,
         )
         .expect_err("hook should fail");
 
         assert_eq!(err, "controlled failure");
-        assert!(temp_files(path.parent().expect("parent"))
-            .iter()
-            .all(|name| !name.contains(".psyche-save-") && !name.contains(".psyche-rollback-")));
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+        assert!(!recovery_path(&path).exists());
     }
 
     #[test]
@@ -565,11 +764,20 @@ mod tests {
             "paneLayouts": [],
         });
 
+        let mut sync_calls = 0;
         let err = workspace_save_to_test_hook(
             &path,
             &updated,
             |_| Ok(()),
-            |_| Err("parent sync failed".to_string()),
+            |_| {
+                sync_calls += 1;
+                if sync_calls == 1 {
+                    Err("parent sync failed".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            restore_workspace_backup,
         )
         .expect_err("sync failure should fail");
 
@@ -581,9 +789,168 @@ mod tests {
         assert_eq!(restored, original);
 
         let parent = path.parent().expect("parent");
-        assert!(temp_files(parent)
-            .iter()
-            .all(|name| !name.contains(".psyche-save-") && !name.contains(".psyche-rollback-")));
+        assert!(cleanup_artifacts(parent).is_empty());
+        assert!(!recovery_path(&path).exists());
+    }
+
+    #[test]
+    fn native_workspace_tests_preserves_recovery_copy_when_restore_fails() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_value();
+        let original_bytes = serde_json::to_vec(&original).expect("serialize original");
+        fs::write(&path, &original_bytes).expect("write original workspace");
+        let updated = workspace_with_project("updated");
+        let recovery = recovery_path(&path);
+
+        let err = workspace_save_to_test_hook(
+            &path,
+            &updated,
+            |_| Ok(()),
+            |_| Err("parent sync failed".to_string()),
+            |backup, destination| {
+                assert_eq!(backup, recovery);
+                assert_eq!(destination, path);
+                Err("injected restore failure".to_string())
+            },
+        )
+        .expect_err("restore failure should fail");
+
+        assert!(err.contains("parent sync failed"));
+        assert!(err.contains("injected restore failure"));
+        assert!(err.contains(&recovery.display().to_string()));
+        assert_eq!(
+            fs::read(&recovery).expect("retained recovery copy"),
+            original_bytes
+        );
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load replacement")
+                .expect("replacement exists"),
+            updated
+        );
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_serializes_rollback_before_later_save() {
+        let (_dir, path) = temp_workspace_path();
+        save_workspace_to(&path, &workspace_value()).expect("save original");
+        let first_value = workspace_with_project("first");
+        let later_value = workspace_with_project("later");
+        let first_path = path.clone();
+        let (at_sync_tx, at_sync_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let first = thread::spawn(move || {
+            let mut sync_calls = 0;
+            workspace_save_to_test_hook(
+                &first_path,
+                &first_value,
+                |_| Ok(()),
+                move |_| {
+                    sync_calls += 1;
+                    if sync_calls == 1 {
+                        at_sync_tx.send(()).expect("signal first sync");
+                        release_rx.recv().expect("release rollback");
+                        Err("parent sync failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                restore_workspace_backup,
+            )
+        });
+        at_sync_rx.recv().expect("first save reached sync");
+
+        let later_path = path.clone();
+        let later_expected = later_value.clone();
+        let (later_started_tx, later_started_rx) = mpsc::channel();
+        let (later_done_tx, later_done_rx) = mpsc::channel();
+        let later = thread::spawn(move || {
+            later_started_tx.send(()).expect("signal later save");
+            let result = save_workspace_to(&later_path, &later_value);
+            later_done_tx.send(()).expect("signal later completion");
+            result
+        });
+        later_started_rx.recv().expect("later save started");
+        assert!(later_done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        release_tx.send(()).expect("release first save");
+        assert_eq!(
+            first.join().expect("join first save"),
+            Err("parent sync failed".to_string())
+        );
+        later.join().expect("join later save").expect("later save");
+
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load final workspace")
+                .expect("final workspace exists"),
+            later_expected
+        );
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+        assert!(!recovery_path(&path).exists());
+    }
+
+    #[test]
+    fn native_workspace_tests_reader_waits_for_rollback_to_finish() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_value();
+        save_workspace_to(&path, &original).expect("save original");
+        let writer_path = path.clone();
+        let (at_sync_tx, at_sync_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let writer = thread::spawn(move || {
+            let mut sync_calls = 0;
+            workspace_save_to_test_hook(
+                &writer_path,
+                &workspace_with_project("transient"),
+                |_| Ok(()),
+                move |_| {
+                    sync_calls += 1;
+                    if sync_calls == 1 {
+                        at_sync_tx.send(()).expect("signal first sync");
+                        release_rx.recv().expect("release rollback");
+                        Err("parent sync failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                restore_workspace_backup,
+            )
+        });
+        at_sync_rx.recv().expect("writer reached sync");
+
+        let reader_path = path.clone();
+        let (reader_started_tx, reader_started_rx) = mpsc::channel();
+        let (reader_done_tx, reader_done_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            reader_started_tx.send(()).expect("signal reader");
+            let result = load_workspace_from(&reader_path);
+            reader_done_tx.send(()).expect("signal reader completion");
+            result
+        });
+        reader_started_rx.recv().expect("reader started");
+        assert!(reader_done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        release_tx.send(()).expect("release writer");
+        assert_eq!(
+            writer.join().expect("join writer"),
+            Err("parent sync failed".to_string())
+        );
+        assert_eq!(
+            reader
+                .join()
+                .expect("join reader")
+                .expect("read workspace")
+                .expect("workspace exists"),
+            original
+        );
     }
 
     #[test]
@@ -598,8 +965,14 @@ mod tests {
             let parent = path.parent().expect("parent");
             let parent_mode = fs::metadata(parent).expect("metadata").permissions().mode() & 0o777;
             let file_mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            let lock_mode = fs::metadata(workspace_lock_path(parent, "workspace-v3.json"))
+                .expect("lock metadata")
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(parent_mode, 0o700);
             assert_eq!(file_mode, 0o600);
+            assert_eq!(lock_mode, 0o600);
         }
     }
 }
