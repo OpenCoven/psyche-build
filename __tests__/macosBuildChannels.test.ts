@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
+import { rename as renameAsync } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,8 +13,10 @@ import {
   channelConfig,
   createDevTauriConfig,
   findCandidateApp,
+  installBundleTransactional,
   parseBuildArguments,
   smokeLaunchBundle,
+  writeBuildProvenance,
 } from '../scripts/build-macos-app.mjs';
 
 const repositoryRoot = process.cwd();
@@ -73,6 +76,28 @@ function createBundleDirectory(relativePaths: string[]): string {
   }
 
   return bundleDir;
+}
+
+function createScratchDirectory(label: string): string {
+  const dir = join(scratchRoot, `${String(scratchSequence++)}-${label}`);
+  scratchDirs.push(dir);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function createAppBundle(root: string, relativePath: string, marker: string): string {
+  const appPath = join(root, relativePath);
+  mkdirSync(join(appPath, 'Contents', 'MacOS'), { recursive: true });
+  writeFileSync(join(appPath, 'Contents', 'marker.txt'), marker, 'utf8');
+  return appPath;
+}
+
+function readAppMarker(appPath: string): string {
+  return readFileSync(join(appPath, 'Contents', 'marker.txt'), 'utf8');
+}
+
+function copyBundle(source: string, destination: string): void {
+  cpSync(source, destination, { recursive: true });
 }
 
 function createSleepController() {
@@ -589,6 +614,268 @@ describe('macOS build channels', () => {
       expect(outcome).toBeInstanceOf(Error);
       expect((outcome as Error).message).toContain('did not exit within 70ms after SIGKILL');
       expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
+    });
+  });
+
+  describe('installBundleTransactional', () => {
+    it('replaces the dev app while leaving the stable app untouched', async () => {
+      const homeDir = createScratchDirectory('install-dev-replacement');
+      const applicationsDir = join(homeDir, 'Applications');
+      const stablePath = createAppBundle(applicationsDir, 'Psyche Build.app', 'stable-known-good');
+      const existingDevPath = createAppBundle(applicationsDir, 'Psyche Build Dev.app', 'dev-known-good');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-dev'),
+        'Psyche Build Dev.app',
+        'dev-candidate',
+      );
+      const validateInstalledBundle = vi.fn(async (appPath: string) => {
+        expect(readAppMarker(appPath)).toContain('dev');
+      });
+
+      const installedPath = await installBundleTransactional(candidatePath, channelConfig('dev'), {
+        homeDir,
+        copyBundle,
+        validateInstalledBundle,
+        randomUUID: () => 'dev-replacement',
+      });
+
+      expect(installedPath).toBe(existingDevPath);
+      expect(readAppMarker(stablePath)).toBe('stable-known-good');
+      expect(readAppMarker(existingDevPath)).toBe('dev-candidate');
+      expect(validateInstalledBundle).toHaveBeenCalledTimes(2);
+      expect(readdirSync(applicationsDir).sort()).toEqual([
+        'Psyche Build Dev.app',
+        'Psyche Build.app',
+      ]);
+    });
+
+    it('installs the first app when no prior channel bundle exists', async () => {
+      const homeDir = createScratchDirectory('install-first-app');
+      const applicationsDir = join(homeDir, 'Applications');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-first-install'),
+        'Psyche Build.app',
+        'stable-first-install',
+      );
+      const validateInstalledBundle = vi.fn(async (appPath: string) => {
+        expect(readAppMarker(appPath)).toBe('stable-first-install');
+      });
+
+      const installedPath = await installBundleTransactional(candidatePath, channelConfig('stable'), {
+        homeDir,
+        copyBundle,
+        validateInstalledBundle,
+        randomUUID: () => 'first-install',
+      });
+
+      expect(installedPath).toBe(join(applicationsDir, 'Psyche Build.app'));
+      expect(readAppMarker(installedPath)).toBe('stable-first-install');
+      expect(validateInstalledBundle).toHaveBeenCalledTimes(2);
+      expect(readdirSync(applicationsDir)).toEqual(['Psyche Build.app']);
+    });
+
+    it('restores the known-good app when the final rename fails', async () => {
+      const homeDir = createScratchDirectory('install-final-rename-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const finalPath = createAppBundle(applicationsDir, 'Psyche Build Dev.app', 'known-good');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-final-rename-failure'),
+        'Psyche Build Dev.app',
+        'replacement',
+      );
+      let renameCallCount = 0;
+
+      await expect(
+        installBundleTransactional(candidatePath, channelConfig('dev'), {
+          homeDir,
+          copyBundle,
+          validateInstalledBundle: async () => {},
+          randomUUID: () => 'rename-failure',
+          renamePath: async (from: string, to: string) => {
+            renameCallCount += 1;
+            if (renameCallCount === 2) {
+              throw new Error(`rename failed for ${from} -> ${to}`);
+            }
+            await renameAsync(from, to);
+          },
+        }),
+      ).rejects.toThrow(/rename failed/i);
+
+      expect(readAppMarker(finalPath)).toBe('known-good');
+      expect(readdirSync(applicationsDir)).toEqual(['Psyche Build Dev.app']);
+    });
+
+    it('removes the failed candidate and restores the known-good app when final validation fails', async () => {
+      const homeDir = createScratchDirectory('install-final-validation-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const finalPath = createAppBundle(applicationsDir, 'Psyche Build.app', 'known-good');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-final-validation-failure'),
+        'Psyche Build.app',
+        'replacement',
+      );
+
+      await expect(
+        installBundleTransactional(candidatePath, channelConfig('stable'), {
+          homeDir,
+          copyBundle,
+          randomUUID: () => 'validation-failure',
+          validateInstalledBundle: async (appPath: string) => {
+            if (appPath === finalPath) {
+              throw new Error('final validation failed');
+            }
+          },
+        }),
+      ).rejects.toThrow(/final validation failed/);
+
+      expect(readAppMarker(finalPath)).toBe('known-good');
+      expect(readdirSync(applicationsDir)).toEqual(['Psyche Build.app']);
+    });
+
+    it('reports both the installation failure and rollback failure explicitly', async () => {
+      const homeDir = createScratchDirectory('install-rollback-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const finalPath = createAppBundle(applicationsDir, 'Psyche Build Dev.app', 'known-good');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-rollback-failure'),
+        'Psyche Build Dev.app',
+        'replacement',
+      );
+      let renameCallCount = 0;
+
+      const install = installBundleTransactional(candidatePath, channelConfig('dev'), {
+        homeDir,
+        copyBundle,
+        randomUUID: () => 'rollback-failure',
+        validateInstalledBundle: async (appPath: string) => {
+          if (appPath === finalPath) {
+            throw new Error('final validation failed');
+          }
+        },
+        renamePath: async (from: string, to: string) => {
+          renameCallCount += 1;
+          if (renameCallCount === 3) {
+            throw new Error(`rollback restore failed for ${from} -> ${to}`);
+          }
+          await renameAsync(from, to);
+        },
+      });
+
+      await expect(install).rejects.toThrow(/final validation failed/);
+      await expect(install).rejects.toThrow(/rollback restore failed/);
+    });
+
+    it('cleans up staging paths after a successful install', async () => {
+      const homeDir = createScratchDirectory('install-staging-cleanup');
+      const applicationsDir = join(homeDir, 'Applications');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-staging-cleanup'),
+        'Psyche Build Dev.app',
+        'cleanup-target',
+      );
+
+      await installBundleTransactional(candidatePath, channelConfig('dev'), {
+        homeDir,
+        copyBundle,
+        validateInstalledBundle: async () => {},
+        randomUUID: () => 'cleanup',
+      });
+
+      expect(readdirSync(applicationsDir)).toEqual(['Psyche Build Dev.app']);
+    });
+  });
+
+  describe('writeBuildProvenance', () => {
+    const stableRecord = {
+      channel: 'stable' as const,
+      commitSha: 'abc1234',
+      requestedRef: 'origin/release/v1.2.3',
+      dirty: false,
+      builtAt: '2026-08-10T10:00:00.000Z',
+      installedPath: '/Users/test/Applications/Psyche Build.app',
+      productName: 'Psyche Build',
+      bundleIdentifier: 'dev.opencoven.psyche',
+    };
+    const devRecord = {
+      channel: 'dev' as const,
+      commitSha: 'def5678',
+      dirty: true,
+      builtAt: '2026-08-10T11:00:00.000Z',
+      installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+      productName: 'Psyche Build Dev',
+      bundleIdentifier: 'dev.opencoven.psyche.dev',
+    };
+
+    it('preserves stable and dev provenance independently', async () => {
+      const homeDir = createScratchDirectory('provenance-preservation');
+      const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
+      const secondPath = await writeBuildProvenance(devRecord, { homeDir });
+
+      expect(secondPath).toBe(provenancePath);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          stable: stableRecord,
+          dev: devRecord,
+        },
+      });
+    });
+
+    it('rejects malformed provenance files without changing them', async () => {
+      const homeDir = createScratchDirectory('provenance-invalid-file');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(provenancePath, '{"version":2,"channels":{}}', 'utf8');
+      const before = readFileSync(provenancePath, 'utf8');
+
+      await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
+        /Invalid build provenance file/,
+      );
+      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
+    });
+
+    it('cleans up atomic temp files when writing the provenance file fails', async () => {
+      const homeDir = createScratchDirectory('provenance-write-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+
+      await expect(
+        writeBuildProvenance(stableRecord, {
+          homeDir,
+          randomUUID: () => 'write-failure',
+          writeFileText: async () => {
+            throw new Error('write failed');
+          },
+        }),
+      ).rejects.toThrow(/write failed/);
+
+      expect(readdirSync(stateDir)).toEqual([]);
+    });
+
+    it('cleans up atomic temp files when renaming the provenance file fails', async () => {
+      const homeDir = createScratchDirectory('provenance-rename-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(provenancePath, JSON.stringify({ version: 1, channels: { stable: stableRecord } }), 'utf8');
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'rename-failure',
+          renamePath: async () => {
+            throw new Error('rename failed');
+          },
+        }),
+      ).rejects.toThrow(/rename failed/);
+
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          stable: stableRecord,
+        },
+      });
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
   });
 

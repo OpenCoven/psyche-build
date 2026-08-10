@@ -19,6 +19,17 @@ export interface BuildChannelConfig {
   appName: string;
 }
 
+export interface BuildProvenance {
+  channel: BuildChannel;
+  commitSha: string;
+  requestedRef?: string;
+  dirty: boolean;
+  builtAt: string;
+  installedPath: string;
+  productName: string;
+  bundleIdentifier: string;
+}
+
 export interface BundleIdentity {
   name: string;
   identifier: string;
@@ -42,6 +53,29 @@ export interface TauriConfig {
 }
 
 export type BuildCommand = [command: string, args: string[], cwd: string];
+
+export interface InstallOverrides {
+  homeDir?: string;
+  copyBundle?: (source: string, destination: string) => void | Promise<void>;
+  validateInstalledBundle?: (
+    appPath: string,
+    expectedChannelConfig: BuildChannelConfig,
+  ) => void | Promise<void>;
+  mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  renamePath?: (sourcePath: string, destinationPath: string) => void | Promise<void>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  randomUUID?: () => string;
+}
+
+export interface WriteBuildProvenanceOverrides {
+  homeDir?: string;
+  mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  readFileText?: (filePath: string) => string | Promise<string>;
+  writeFileText?: (filePath: string, content: string) => void | Promise<void>;
+  renamePath?: (sourcePath: string, destinationPath: string) => void | Promise<void>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  randomUUID?: () => string;
+}
 
 export interface SmokeLaunchOverrides {
   executableName: string;
@@ -71,6 +105,15 @@ export function assertBundleIdentity(
   identity: BundleIdentity,
   expectedChannelConfig: BuildChannelConfig,
 ): void;
+export function installBundleTransactional(
+  candidate: string,
+  requestedChannelConfig: BuildChannelConfig,
+  overrides?: InstallOverrides,
+): Promise<string>;
+export function writeBuildProvenance(
+  record: BuildProvenance,
+  overrides?: WriteBuildProvenanceOverrides,
+): Promise<string>;
 export function smokeLaunchBundle(
   appPath: string,
   overrides: SmokeLaunchOverrides,

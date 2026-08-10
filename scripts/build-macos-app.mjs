@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { randomUUID as createRandomUUID } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -151,6 +152,118 @@ export function assertBundleIdentity(appPath, identity, expectedChannelConfig) {
   );
 }
 
+export async function installBundleTransactional(candidate, requestedChannelConfig, overrides = {}) {
+  const validateInstalledBundle = overrides.validateInstalledBundle;
+
+  if (typeof validateInstalledBundle !== 'function') {
+    throw new Error('installBundleTransactional requires a validateInstalledBundle callback');
+  }
+
+  const homeDir = path.resolve(overrides.homeDir ?? os.homedir());
+  const applicationsDir = path.join(homeDir, 'Applications');
+  const uuid = (overrides.randomUUID ?? createRandomUUID)();
+  const finalPath = path.join(applicationsDir, requestedChannelConfig.appName);
+  const stagingRoot = path.join(
+    applicationsDir,
+    `.install-${requestedChannelConfig.appName}.${uuid}.staging`,
+  );
+  const stagingPath = path.join(stagingRoot, requestedChannelConfig.appName);
+  const backupPath = path.join(
+    applicationsDir,
+    `.${requestedChannelConfig.appName}.${uuid}.backup`,
+  );
+  const copyBundle = overrides.copyBundle ?? copyBundleWithDitto;
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const renamePath = overrides.renamePath ?? defaultRenamePath;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+
+  let backupCreated = false;
+  let finalValidated = false;
+
+  await mkdirPath(applicationsDir);
+
+  try {
+    await mkdirPath(stagingRoot);
+    await Promise.resolve(copyBundle(candidate, stagingPath));
+    await Promise.resolve(validateInstalledBundle(stagingPath, requestedChannelConfig));
+
+    try {
+      await renamePath(finalPath, backupPath);
+      backupCreated = true;
+    } catch (error) {
+      if (!isEnoentError(error)) {
+        throw error;
+      }
+    }
+
+    await renamePath(stagingPath, finalPath);
+    await Promise.resolve(validateInstalledBundle(finalPath, requestedChannelConfig));
+    finalValidated = true;
+
+    if (backupCreated) {
+      await removePath(backupPath);
+      backupCreated = false;
+    }
+
+    return finalPath;
+  } catch (error) {
+    if (backupCreated && !finalValidated) {
+      try {
+        await removePath(finalPath);
+        await renamePath(backupPath, finalPath);
+      } catch (rollbackError) {
+        throw new Error(
+          `${describeError(error)}\nRollback failed: ${describeError(rollbackError)}`,
+        );
+      }
+    }
+
+    throw error;
+  } finally {
+    await removePath(stagingRoot);
+  }
+}
+
+export async function writeBuildProvenance(record, overrides = {}) {
+  const homeDir = path.resolve(overrides.homeDir ?? os.homedir());
+  const stateDir = path.join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+  const statePath = path.join(stateDir, 'builds.json');
+  const tempPath = path.join(
+    stateDir,
+    `.builds.json.${(overrides.randomUUID ?? createRandomUUID)()}.tmp`,
+  );
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const readFileText = overrides.readFileText ?? defaultReadFileText;
+  const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
+  const renamePath = overrides.renamePath ?? defaultRenamePath;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+
+  await mkdirPath(stateDir);
+
+  const nextState = {
+    version: 1,
+    channels: {
+      ...(await readExistingBuildProvenance(statePath, readFileText)),
+      [record.channel]: record,
+    },
+  };
+
+  try {
+    await writeFileText(tempPath, `${JSON.stringify(nextState, null, 2)}\n`);
+    await renamePath(tempPath, statePath);
+    return statePath;
+  } catch (error) {
+    try {
+      await removePath(tempPath);
+    } catch (cleanupError) {
+      throw new Error(
+        `${describeError(error)}\nFailed to clean temporary provenance file: ${describeError(cleanupError)}`,
+      );
+    }
+    throw error;
+  }
+}
+
 export async function smokeLaunchBundle(appPath, overrides) {
   const executableName = overrides?.executableName?.trim();
   if (!executableName) {
@@ -284,6 +397,21 @@ function defaultSpawnProcess(command, args, options) {
   return spawn(command, args, options);
 }
 
+async function execFileAsync(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -378,6 +506,66 @@ function describeExit(exit) {
 
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isEnoentError(error) {
+  return Boolean(error) && typeof error === 'object' && error.code === 'ENOENT';
+}
+
+async function copyBundleWithDitto(source, destination) {
+  await execFileAsync('ditto', [source, destination]);
+}
+
+async function defaultCreateDirectory(directoryPath) {
+  await mkdir(directoryPath, { recursive: true });
+}
+
+async function defaultRenamePath(sourcePath, destinationPath) {
+  await rename(sourcePath, destinationPath);
+}
+
+async function defaultRemovePath(targetPath) {
+  await rm(targetPath, { recursive: true, force: true });
+}
+
+async function defaultReadFileText(filePath) {
+  return readFile(filePath, 'utf8');
+}
+
+async function defaultWriteFileText(filePath, content) {
+  await writeFile(filePath, content, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function readExistingBuildProvenance(statePath, readFileText) {
+  try {
+    const raw = await readFileText(statePath);
+    const parsed = JSON.parse(raw);
+
+    if (
+      parsed?.version !== 1 ||
+      !parsed.channels ||
+      typeof parsed.channels !== 'object' ||
+      Array.isArray(parsed.channels)
+    ) {
+      throw new Error('expected version 1 with object channels');
+    }
+
+    return parsed.channels;
+  } catch (error) {
+    if (isEnoentError(error)) {
+      return {};
+    }
+
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid build provenance file at "${statePath}": ${error.message}`);
+    }
+
+    if (error instanceof Error && error.message === 'expected version 1 with object channels') {
+      throw new Error(`Invalid build provenance file at "${statePath}": ${error.message}`);
+    }
+
+    throw error;
+  }
 }
 
 class StartupSmokeFailure extends Error {
