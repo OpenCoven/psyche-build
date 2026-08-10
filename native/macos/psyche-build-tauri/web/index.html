@@ -99,20 +99,19 @@
             </div>
 
             <div class="session-filter-row" role="toolbar" aria-label="Filter sessions">
-              <button class="session-filter-btn is-active" type="button" data-session-filter="all" aria-pressed="true">All</button>
-              <button class="session-filter-btn" type="button" data-session-filter="agents" aria-pressed="false">Agents</button>
-              <button class="session-filter-btn" type="button" data-session-filter="shells" aria-pressed="false">Shells</button>
-              <button class="session-filter-btn" type="button" data-session-filter="active" aria-pressed="false">Active</button>
-              <button class="session-filter-btn" type="button" data-session-filter="attention" aria-pressed="false">Attention</button>
+              <button class="session-filter is-active" type="button" data-session-filter="all" aria-pressed="true">All</button>
+              <button class="session-filter" type="button" data-session-filter="agents" aria-pressed="false">Agents</button>
+              <button class="session-filter" type="button" data-session-filter="shells" aria-pressed="false">Shells</button>
+              <button class="session-filter" type="button" data-session-filter="active" aria-pressed="false">Active</button>
+              <button class="session-filter" type="button" data-session-filter="attention" aria-pressed="false">Attention</button>
+              <button
+                class="session-legend-button has-tooltip"
+                type="button"
+                aria-label="Session status legend"
+                aria-describedby="session-status-legend"
+                data-tooltip="Purple selected/current, Green active, Blue busy, Yellow attention, Gray idle"
+              >?</button>
             </div>
-
-            <button
-              class="session-legend-button has-tooltip"
-              type="button"
-              aria-label="Session status legend"
-              aria-describedby="session-status-legend"
-              data-tooltip="Purple selected/current, Green active, Blue busy, Yellow attention, Gray idle"
-            >?</button>
             <div class="sr-only" id="session-status-legend">
               Session status legend: purple marks the selected or current session, green marks active sessions, blue marks busy sessions, yellow marks sessions needing attention, gray marks idle sessions, and red marks exited sessions.
             </div>

@@ -32,10 +32,25 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).toContain('class="sidebar-controls"');
     expect(indexHtml).toContain('class="session-search-wrap"');
     expect(indexHtml).toContain('<kbd class="session-search-key">/</kbd>');
+    expect(indexHtml).not.toContain('session-filter-btn');
+
+    const filterRowMatch = indexHtml.match(
+      /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">([\s\S]*?)<\/div>\s*<div class="sr-only" id="session-status-legend">/,
+    );
+    expect(filterRowMatch).not.toBeNull();
+    const filterRow = filterRowMatch?.[1] ?? '';
+    expect(filterRow.match(/class="session-filter(?:\s|")/g)?.length).toBe(5);
     for (const filter of ['all', 'agents', 'shells', 'active', 'attention']) {
       expect(indexHtml).toContain(`data-session-filter="${filter}"`);
     }
+    const attentionIndex = filterRow.indexOf('data-session-filter="attention"');
+    const legendIndex = filterRow.indexOf('class="session-legend-button has-tooltip"');
+    expect(attentionIndex).toBeGreaterThan(-1);
+    expect(legendIndex).toBeGreaterThan(attentionIndex);
     expect(indexHtml).toContain('id="session-status-legend"');
+    expect(indexHtml).toMatch(
+      /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">[\s\S]*class="session-legend-button has-tooltip"[\s\S]*<\/div>\s*<div class="sr-only" id="session-status-legend">/,
+    );
     expect(indexHtml).toMatch(
       /id="session-list"[^>]*role="tree"[^>]*aria-label="Sessions grouped by project and branch"/,
     );
