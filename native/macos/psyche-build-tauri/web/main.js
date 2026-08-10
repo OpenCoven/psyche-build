@@ -888,6 +888,9 @@
     thread.stopRequested = false;
     thread.spawning = false;
     thread.status = "exited";
+    // An exited pane is not waiting on an answer, it is over. Leaving the badge
+    // would send the user to a pane with nothing to say.
+    clearThreadAttention(thread);
     syncThreadPaneMetadata(thread);
     if (thread.term) {
       thread.term.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
@@ -917,6 +920,184 @@
         thread.worktreePath === worktreePath;
     }) || null;
   }
+
+  // ============================================================
+  // 5a. Hover to focus
+  // ============================================================
+
+  // Focus follows the mouse across the canvas: resting over a pane makes it the
+  // one that types, with no click. One delegated listener on the host rather
+  // than a handler per pane, so it covers terminal and browser panes alike and
+  // survives the canvas being re-tiled.
+  //
+  // Every guard here exists because hover is an *accidental* gesture -- the
+  // pointer crosses panes on the way to somewhere else, and it must not be
+  // able to interrupt something the user is deliberately doing.
+
+  var HOVER_FOCUS_DWELL_MS = 140;
+  var hoverFocusTimer = null;
+
+  function cancelHoverFocus() {
+    if (hoverFocusTimer === null) return;
+    clearTimeout(hoverFocusTimer);
+    hoverFocusTimer = null;
+  }
+
+  function hoverFocusBlocked() {
+    // Mid-drag the pointer is over panes it is not choosing, and re-tiling
+    // under a live drag would drop the gesture.
+    if (document.body.classList.contains("is-pane-dragging")) return true;
+    // An inline rename and a modal both own the keyboard; taking it back would
+    // discard what the user is part-way through.
+    if (editingContext) return true;
+    if (document.querySelector(".session-context-menu")) return true;
+    // The composer, the URL bar, a palette query: text the user is typing into
+    // is never worth losing to a stray pointer resting on the canvas.
+    var focused = document.activeElement;
+    if (focused && focused !== document.body) {
+      var editable = focused.isContentEditable
+        || focused.tagName === "INPUT"
+        || focused.tagName === "TEXTAREA";
+      if (editable && (!terminalHost || !terminalHost.contains(focused))) return true;
+    }
+    return false;
+  }
+
+  if (terminalHost) {
+    terminalHost.addEventListener("pointerover", function (event) {
+      // Touch and pen have no hover: for them a tap already means "focus this".
+      if (event.pointerType && event.pointerType !== "mouse") return;
+      var paneEl = event.target && event.target.closest
+        ? event.target.closest(".terminal-pane")
+        : null;
+      cancelHoverFocus();
+      if (!paneEl || !paneEl.dataset.threadId) return;
+      var threadId = paneEl.dataset.threadId;
+      if (threadId === state.activeThreadId) return;
+      hoverFocusTimer = setTimeout(function () {
+        hoverFocusTimer = null;
+        // Re-checked on fire, not just on entry: the dwell is long enough for a
+        // drag to start or a dialog to open after the pointer arrived.
+        if (hoverFocusBlocked()) return;
+        if (threadId === state.activeThreadId) return;
+        if (!findThread(threadId)) return;
+        focusThread(threadId);
+      }, HOVER_FOCUS_DWELL_MS);
+    });
+    terminalHost.addEventListener("pointerleave", cancelHoverFocus);
+  }
+
+  // ============================================================
+  // 5b. "This pane is waiting on you"
+  // ============================================================
+
+  // A pane that has asked the user something and gone quiet is the one state
+  // the app must never let scroll past. The rail already knew how to *count*
+  // sessions needing attention, but nothing ever set the flag on a local pane,
+  // so the badges only ever lit for daemon-reported Coven sessions. This is
+  // where local panes earn it: sample the visible tail, and when it settles
+  // with no sign of work in flight, the turn is the user's.
+  //
+  // Shells are exempt. A prompt sitting at `$` is idle, not waiting -- flagging
+  // that would put a permanent badge on every terminal in the app.
+
+  var ATTENTION_SAMPLE_MS = 700;
+  var ATTENTION_TAIL_LINES = 14;
+  var attentionTracker = PsycheSessions.createAttentionTracker();
+
+  function threadWantsAttentionTracking(thread) {
+    return !!thread
+      && (thread.kind || "shell") !== "shell"
+      && thread.kind !== "web"
+      && !thread.closing
+      && !thread.closeStarted
+      && thread.status !== "exited";
+  }
+
+  /**
+   * The last `lines` non-empty rows of what the terminal is actually showing.
+   * Read off the buffer rather than accumulated PTY bytes so redraws, cursor
+   * moves and cleared spinners are already resolved into what the user sees.
+   */
+  function terminalTail(term, lines) {
+    if (!term || !term.buffer || !term.buffer.active) return "";
+    var buffer = term.buffer.active;
+    var end = buffer.baseY + buffer.cursorY;
+    var out = [];
+    for (var row = end; row >= 0 && out.length < lines; row--) {
+      var line = buffer.getLine(row);
+      if (!line) continue;
+      var text = line.translateToString(true);
+      if (!text.trim() && out.length === 0) continue;
+      out.push(text);
+    }
+    return out.reverse().join("\n");
+  }
+
+  /**
+   * Push a session's attention state onto every surface that shows it. Only the
+   * rail is re-rendered wholesale; the pane and its minimap entry are touched
+   * in place, because this runs on a timer and re-tiling the canvas under a
+   * user mid-drag would be worse than the badge it is trying to draw.
+   */
+  function applyThreadAttention(thread, next) {
+    var was = !!thread.needsAttention;
+    var wasReason = thread.attentionReason || null;
+    if (was === next.needsAttention && wasReason === next.reason) return false;
+    thread.needsAttention = next.needsAttention;
+    thread.attentionReason = next.reason;
+    syncThreadAttentionChrome(thread);
+    renderSessionList();
+    syncSessionListScroll();
+    return true;
+  }
+
+  function syncThreadAttentionChrome(thread) {
+    if (!thread) return;
+    if (thread.pane) {
+      thread.pane.classList.toggle("needs-attention", !!thread.needsAttention);
+    }
+    if (thread.paneAttention) {
+      var label = PsycheSessions.attentionLabel(thread.attentionReason);
+      thread.paneAttention.hidden = !thread.needsAttention;
+      thread.paneAttention.textContent = thread.needsAttention ? label : "";
+      thread.paneAttention.title = label;
+      thread.paneAttention.setAttribute("aria-label", label);
+    }
+    var minimapDot = terminalArea &&
+      terminalArea.querySelector('.minimap-pane[data-thread-id="' + thread.id + '"] .minimap-dot');
+    if (minimapDot) minimapDot.classList.toggle("attention", !!thread.needsAttention);
+  }
+
+  function noteThreadUserInput(thread) {
+    if (!thread) return;
+    applyThreadAttention(thread, attentionTracker.userInput(thread.id));
+  }
+
+  function clearThreadAttention(thread) {
+    if (!thread) return;
+    attentionTracker.forget(thread.id);
+    applyThreadAttention(thread, { needsAttention: false, reason: null });
+  }
+
+  function sampleThreadAttention() {
+    var now = Date.now();
+    var tracked = [];
+    state.threads.forEach(function (thread) {
+      if (!threadWantsAttentionTracking(thread) || !thread.term) {
+        if (thread && thread.needsAttention) clearThreadAttention(thread);
+        return;
+      }
+      tracked.push(thread.id);
+      applyThreadAttention(
+        thread,
+        attentionTracker.observe(thread.id, terminalTail(thread.term, ATTENTION_TAIL_LINES), now)
+      );
+    });
+    attentionTracker.retain(tracked);
+  }
+
+  setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS);
 
   // ============================================================
   // 6. Threads — create / focus / close
@@ -1451,6 +1632,12 @@
       event.stopPropagation();
       closeThread(thread.id);
     });
+    // Worded, not a bare dot, and ahead of the status chip: a pane waiting on
+    // the user outranks "running" as the thing its header should be saying.
+    var attention = document.createElement("span");
+    attention.className = "terminal-pane-attention";
+    attention.hidden = true;
+    thread.paneAttention = attention;
     // The header doubles as the pane's drag handle. Buttons inside it keep
     // their own click behaviour; the gesture only starts once the pointer has
     // travelled far enough to not be a click.
@@ -1460,6 +1647,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
+    header.appendChild(attention);
     header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
@@ -1553,6 +1741,10 @@
     } catch (_) { /* canvas fallback is fine */ }
 
     term.onData(function (data) {
+      // Typing *is* the answer, so the badge clears on the keystroke rather
+      // than on focus: opening a pane to look at the question should not make
+      // the app forget it was asked.
+      noteThreadUserInput(thread);
       var bytes = Array.from(new TextEncoder().encode(data));
       invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
         function (err) {
@@ -1560,6 +1752,14 @@
         }
       );
     });
+    // Agents ring the bell for exactly one reason -- they want the user back --
+    // so it is trusted immediately instead of waiting for the tail to settle.
+    if (typeof term.onBell === "function") {
+      term.onBell(function () {
+        if (!threadWantsAttentionTracking(thread)) return;
+        applyThreadAttention(thread, attentionTracker.bell(thread.id));
+      });
+    }
     term.onResize(function (size) {
       invoke("pty_resize", {
         threadId: thread.id,
@@ -2284,9 +2484,15 @@
       if (!thread) return;
       var entry = document.createElement("button");
       entry.type = "button";
+      entry.dataset.threadId = thread.id;
       entry.className = "minimap-pane" +
         (layout.maximizedLeafId === leafId ? " is-current" : "");
+      // Focus mode is exactly when a waiting pane is easiest to lose, so the
+      // minimap says it in the label too, not just in the dot's colour.
       entry.title = thread.name + " — " + (thread.status || "") +
+        (thread.needsAttention
+          ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
+          : "") +
         " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
@@ -2296,7 +2502,8 @@
       glyph.className = "minimap-glyph";
       glyph.textContent = paneGlyphFor(thread.kind);
       var dot = document.createElement("span");
-      dot.className = "minimap-dot " + sessionStatusClass(thread);
+      dot.className = "minimap-dot " + sessionStatusClass(thread) +
+        (thread.needsAttention ? " attention" : "");
       head.appendChild(glyph);
       head.appendChild(dot);
 
@@ -3244,9 +3451,13 @@
           var kind = thread.kind || "shell";
           var picking = Boolean(setPicking);
           var picked = picking && isPicked(thread.id);
+          var attentionLabel = thread.needsAttention
+            ? PsycheSessions.attentionLabel(thread.attentionReason)
+            : "";
           row.className = "session-row " + sessionStatusClass(thread) +
             " kind-" + (kind === "shell" ? "shell" : "agent") +
             (state.activeThreadId === thread.id ? " active" : "") +
+            (thread.needsAttention ? " needs-attention" : "") +
             (picking ? " is-picking" : "") + (picked ? " is-picked" : "");
           row.dataset.threadId = thread.id;
           if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
@@ -3254,6 +3465,7 @@
           row.title = picking
             ? (picked ? "Remove " : "Include ") + thread.name + " in the set"
             : thread.name + " — " + worktree.path +
+              (attentionLabel ? " · " + attentionLabel : "") +
               (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
               " · double-click to rename";
           var chipMarkup = "";
@@ -3269,6 +3481,14 @@
             '<span class="session-text">' +
               '<span class="session-title-row">' +
                 '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
+                // Same `!` the Coven rows and the group counts use, so one mark
+                // means one thing throughout the rail. It rides in the title
+                // row rather than the status column because the title is the
+                // part of the row that survives every width.
+                (attentionLabel
+                  ? '<span class="session-attention-badge" title="' + escapeHtml(attentionLabel) +
+                    '" aria-label="' + escapeHtml(attentionLabel) + '">!</span>'
+                  : "") +
                 (onCanvas
                   ? '<span class="session-oncanvas" title="On the canvas" aria-label="On the canvas">' +
                       '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">' +

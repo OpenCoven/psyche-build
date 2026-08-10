@@ -705,6 +705,7 @@ describe('native Coven launch routing', () => {
     );
     const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
       functionSource('handlePtyExit'), {
+        clearThreadAttention: () => undefined,
         findThread: () => thread,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
@@ -1012,6 +1013,7 @@ describe('native Coven launch routing', () => {
     });
     const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
       functionSource('handlePtyExit'), {
+        clearThreadAttention: () => undefined,
         findThread: () => state.threads.find((value) => value.id === thread.id) || null,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
@@ -1078,6 +1080,7 @@ describe('native Coven launch routing', () => {
       );
       const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
         functionSource('handlePtyExit'), {
+          clearThreadAttention: () => undefined,
           findThread: () => thread,
           syncThreadPaneMetadata: () => undefined,
           refreshSidebar: () => undefined,

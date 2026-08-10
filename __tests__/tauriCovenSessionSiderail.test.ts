@@ -16,12 +16,22 @@ const indexHtml = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
   'utf8',
 );
-const PsycheSessions = await import(
-  pathToFileURL(join(
+/**
+ * The `PsycheSessions` global the shell sees is the *bundle*, and session-entry
+ * re-exports two modules into it. Standing in with only the session model made
+ * the rail renderer look like it could not reach `attentionLabel` when in the
+ * app it always can, so the stand-in is assembled the same way the bundle is.
+ */
+const PsycheSessions = {
+  ...(await import(pathToFileURL(join(
     repoRoot,
     'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
-  )).href,
-);
+  )).href)),
+  ...(await import(pathToFileURL(join(
+    repoRoot,
+    'native/macos/psyche-build-tauri/web/sessions/attention.mjs',
+  )).href)),
+};
 
 function extractFunctionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);

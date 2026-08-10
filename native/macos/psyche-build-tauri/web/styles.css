@@ -524,6 +524,21 @@ kbd {
 }
 .session-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
+/* A row waiting on the user keeps its badge legible at every state the row can
+   be in, including active — being the pane you are looking at is not the same
+   as having answered it. The tint is deliberately faint: the `!` is the signal,
+   this only stops the row reading as ordinary while it scrolls past. */
+.session-row.needs-attention .session-title { color: var(--text); }
+.session-row.needs-attention::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(251, 191, 36, 0.06);
+  pointer-events: none;
+}
+.session-title-row > .session-attention-badge { flex: none; }
+
 .session-dot {
   width: 7px;
   height: 7px;
@@ -1250,12 +1265,39 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.22);
 }
 
-/* Six tracks: glyph · label · status · span · maximise · close. The label is
-   the only flexible one, so the buttons keep their footprint at any width
-   instead of being squeezed out of the row. */
+/* A pane waiting on the user is the only thing allowed to outrank the focus
+   ring: violet marks where you are, amber marks where you are needed. It holds
+   even on the focused pane, because the answer is still outstanding until the
+   user types -- opening the pane is not replying to it. */
+.terminal-pane.needs-attention,
+.terminal-pane.focused.needs-attention {
+  border-color: rgba(251, 191, 36, 0.6);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.28);
+}
+.terminal-pane.needs-attention .terminal-pane-header {
+  background: rgba(251, 191, 36, 0.09);
+}
+/* Worded chip, matching how every other pane state is spelled out rather than
+   left to colour alone. */
+.terminal-pane-attention {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Seven tracks: glyph · label · attention · status · span · maximise · close.
+   The label is the only flexible one, so the buttons keep their footprint at
+   any width instead of being squeezed out of the row. The attention chip is
+   hidden (display:none) unless the pane is waiting, so its track collapses to
+   nothing rather than reserving space for a state most panes never reach. */
 .terminal-pane-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
@@ -1630,6 +1672,16 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .minimap-dot.running { background: var(--ok); }
 .minimap-dot.starting { background: var(--warn); }
 .minimap-dot.exited { background: var(--error); }
+/* Focus mode draws one pane and hides the rest, so the minimap is the only
+   place a waiting pane can still be seen. It wins over the status colour and
+   grows a ring, because at 5px a hue swap alone is not a signal. */
+.minimap-dot.attention {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.28);
+}
+.minimap-pane:has(.minimap-dot.attention) {
+  border-color: rgba(251, 191, 36, 0.45);
+}
 /* A blank slab, not a live preview: it reads as "a pane is here" at 66px wide
    without paying to render a second terminal. */
 .minimap-body {
