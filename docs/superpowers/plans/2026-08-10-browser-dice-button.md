@@ -140,7 +140,7 @@ Immediately after `openBlankBrowserTab()`, add:
 
 ```js
   async function openDiceBrowserTab() {
-    var tab = await openBlankBrowserTab();
+    var tab = await openBlankBrowserTab({ requireNew: true });
     if (!tab) return;
     await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
