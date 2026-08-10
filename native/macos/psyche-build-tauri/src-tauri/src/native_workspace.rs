@@ -51,6 +51,16 @@ pub(crate) fn validate_workspace(value: &Value) -> Result<(), String> {
 }
 
 pub(crate) fn load_workspace_from(path: &Path) -> Result<Option<Value>, String> {
+    load_workspace_from_inner(path, || Ok(()))
+}
+
+fn load_workspace_from_inner<F>(
+    path: &Path,
+    before_exclusive_recovery: F,
+) -> Result<Option<Value>, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     let _process_lock = WORKSPACE_IO_MUTEX.lock();
     let Some(parent) = path.parent() else {
         return Err(format!(
@@ -61,19 +71,44 @@ pub(crate) fn load_workspace_from(path: &Path) -> Result<Option<Value>, String> 
     if !parent.exists() {
         return Ok(None);
     }
-    let _file_lock = WorkspaceFileLock::shared(path)?;
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
-        .to_string_lossy();
+        .to_string_lossy()
+        .to_string();
     let pending_path = workspace_rollback_pending_path(parent, &file_name);
-    if pending_path.exists() {
-        return Err(format!(
-            "workspace recovery required: pending rollback '{}' must be restored before loading '{}'",
-            pending_path.display(),
-            path.display()
-        ));
+    let committed_path = workspace_rollback_committed_path(parent, &file_name);
+
+    let shared_lock = WorkspaceFileLock::shared(path)?;
+    let requires_recovery = pending_path.exists()
+        || committed_path.exists()
+        || rollback_candidates_exist(parent, &file_name);
+    if !requires_recovery {
+        return load_workspace_from_locked(path);
     }
+
+    drop(shared_lock);
+    before_exclusive_recovery()?;
+    let _exclusive_lock = WorkspaceFileLock::exclusive(path)?;
+
+    let mut sync_directory = sync_parent_directory;
+    if pending_path.exists() {
+        let cleanup_committed = recover_pending_workspace(
+            path,
+            parent,
+            pending_path.as_path(),
+            committed_path.as_path(),
+            &mut sync_directory,
+            &mut restore_workspace_backup,
+            &mut rename_workspace_path,
+        )?;
+        if cleanup_committed {
+            cleanup_committed_rollback(committed_path.as_path(), parent, &mut sync_directory);
+        }
+    } else {
+        cleanup_committed_rollback(committed_path.as_path(), parent, &mut sync_directory);
+    }
+    cleanup_rollback_candidates(parent, &file_name, &mut sync_directory);
     load_workspace_from_locked(path)
 }
 
@@ -383,6 +418,18 @@ fn cleanup_rollback_candidates(
     if removed {
         let _ = sync_parent_directory(parent);
     }
+}
+
+fn rollback_candidates_exist(parent: &Path, file_name: &str) -> bool {
+    let prefix = workspace_rollback_candidate_prefix(file_name);
+    fs::read_dir(parent).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(prefix.as_str())
+        })
+    })
 }
 
 fn cleanup_committed_rollback(
@@ -696,8 +743,19 @@ fn mark_rollback_committed(
             revert_error,
             pending_path.display()
         )),
-        Err(_) if committed_path.exists() => {
-            Ok(sync_parent_directory(parent).is_ok())
+        Err(revert_error) if committed_path.exists() => {
+            let retained_sync_result = sync_parent_directory(parent);
+            let mut message = format!(
+                "sync committed rollback marker '{}': {}; reverting marker failed: {}; committed rollback retained at '{}'",
+                committed_path.display(),
+                marker_sync_error,
+                revert_error,
+                committed_path.display()
+            );
+            if let Err(error) = retained_sync_result {
+                message.push_str(&format!(" but parent sync failed: {error}"));
+            }
+            Err(message)
         }
         Err(revert_error) => Err(format!(
             "sync committed rollback marker '{}': {}; reverting marker failed: {}; rollback marker is missing",
@@ -842,6 +900,17 @@ where
         create_rollback_backup,
         rename_workspace_path,
     )
+}
+
+#[cfg(test)]
+fn load_workspace_from_test_hook<F>(
+    path: &Path,
+    before_exclusive_recovery: F,
+) -> Result<Option<Value>, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    load_workspace_from_inner(path, before_exclusive_recovery)
 }
 
 #[cfg(test)]
@@ -1108,11 +1177,38 @@ mod tests {
     }
 
     #[test]
-    fn native_workspace_tests_load_requires_pending_recovery() {
+    fn native_workspace_tests_load_recovers_pending_rollback_and_cleans_markers() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        fs::write(&path, b"{uncommitted partial workspace").expect("write workspace");
+        let pending = pending_path(&path);
+        fs::write(&pending, serde_json::to_vec(&previous).expect("serialize"))
+            .expect("write pending rollback");
+        let committed = committed_path(&path);
+        fs::write(
+            &committed,
+            serde_json::to_vec(&workspace_with_project("stale committed")).expect("serialize"),
+        )
+        .expect("write committed rollback");
+        let candidate = rollback_candidate_path(&path, "partial");
+        fs::write(&candidate, b"{partial rollback candidate").expect("write candidate");
+
+        let loaded = load_workspace_from(&path)
+            .expect("load must recover pending rollback")
+            .expect("workspace exists");
+
+        assert_eq!(loaded, previous);
+        assert!(!pending.exists());
+        assert!(!committed.exists());
+        assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn native_workspace_tests_load_rechecks_state_after_exclusive_lock_upgrade() {
         let (_dir, path) = temp_workspace_path();
         fs::write(
             &path,
-            serde_json::to_vec(&workspace_with_project("unrecovered")).expect("serialize"),
+            serde_json::to_vec(&workspace_with_project("uncommitted")).expect("serialize"),
         )
         .expect("write workspace");
         let pending = pending_path(&path);
@@ -1121,11 +1217,21 @@ mod tests {
             serde_json::to_vec(&workspace_with_project("previous")).expect("serialize"),
         )
         .expect("write pending rollback");
+        let committed = committed_path(&path);
+        let resolved = workspace_with_project("resolved elsewhere");
+        let resolved_bytes = serde_json::to_vec(&resolved).expect("serialize resolved workspace");
 
-        let error = load_workspace_from(&path).expect_err("pending rollback must block load");
+        let loaded = load_workspace_from_test_hook(&path, || {
+            fs::write(&path, &resolved_bytes).map_err(|error| error.to_string())?;
+            fs::rename(&pending, &committed).map_err(|error| error.to_string())?;
+            sync_parent_directory(path.parent().expect("parent"))
+        })
+        .expect("load after raced recovery")
+        .expect("workspace exists");
 
-        assert!(error.contains("recovery required"));
-        assert!(error.contains(&pending.display().to_string()));
+        assert_eq!(loaded, resolved);
+        assert!(!pending.exists());
+        assert!(!committed.exists());
     }
 
     #[test]
@@ -1346,8 +1452,13 @@ mod tests {
                 .expect("workspace exists"),
             updated
         );
-        let load_error = load_workspace_from(&path).expect_err("pending must block load");
-        assert!(load_error.contains("recovery required"));
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load must recover pending rollback")
+                .expect("workspace exists"),
+            workspace_with_project("previous")
+        );
+        assert!(!pending.exists());
     }
 
     #[test]
@@ -1361,7 +1472,7 @@ mod tests {
         let updated = workspace_with_project("updated");
         let mut sync_calls = 0;
 
-        workspace_save_to_test_hook_with_ops(
+        let error = workspace_save_to_test_hook_with_ops(
             &path,
             &updated,
             |_| Ok(()),
@@ -1382,8 +1493,10 @@ mod tests {
                 fs::rename(source, destination).map_err(|e| e.to_string())
             },
         )
-        .expect("save cannot report failure after pending became unavailable");
+        .expect_err("save must fail when marker sync and reversion both fail");
 
+        assert!(error.contains("injected marker sync failure"));
+        assert!(error.contains("injected marker revert failure"));
         assert!(!pending.exists());
         assert_eq!(
             fs::read(&committed).expect("read retained committed rollback"),
@@ -1395,6 +1508,7 @@ mod tests {
                 .expect("workspace exists"),
             updated
         );
+        assert!(!committed.exists());
 
         let later = workspace_with_project("later");
         workspace_save_to_test_hook(
@@ -1412,7 +1526,7 @@ mod tests {
             sync_parent_directory,
             restore_workspace_backup,
         )
-        .expect("later save must clean committed without restoring it");
+        .expect("later save must proceed after committed cleanup");
         assert_eq!(
             load_workspace_from(&path)
                 .expect("load later workspace")
@@ -1812,10 +1926,15 @@ mod tests {
         )
         .expect_err("restore failure should fail");
 
-        let load_error = load_workspace_from(&path).expect_err("pending must block load");
-        assert!(load_error.contains("recovery required"));
         assert_eq!(
-            fs::read(&pending).expect("retained pending rollback"),
+            load_workspace_from(&path)
+                .expect("load must recover the failed save")
+                .expect("workspace exists"),
+            original
+        );
+        assert!(!pending.exists());
+        assert_eq!(
+            fs::read(&path).expect("read recovered workspace"),
             original_bytes
         );
 
@@ -1914,8 +2033,13 @@ mod tests {
             fs::read(&pending).expect("retained pending rollback"),
             original_bytes
         );
-        let load_error = load_workspace_from(&path).expect_err("pending must block load");
-        assert!(load_error.contains("recovery required"));
+        assert_eq!(
+            load_workspace_from(&path)
+                .expect("load must recover pending rollback")
+                .expect("workspace exists"),
+            original
+        );
+        assert!(!pending.exists());
         assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
     }
 
@@ -1983,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn native_workspace_tests_reader_waits_for_rollback_to_finish() {
+    fn native_workspace_tests_concurrent_reader_recovers_failed_save_without_partial_json() {
         let (_dir, path) = temp_workspace_path();
         let original = workspace_value();
         save_workspace_to(&path, &original).expect("save original");
@@ -2007,7 +2131,7 @@ mod tests {
                         Ok(())
                     }
                 },
-                restore_workspace_backup,
+                |_, _| Err("injected restore failure".to_string()),
             )
         });
         at_sync_rx.recv().expect("writer reached sync");
@@ -2027,10 +2151,12 @@ mod tests {
             .is_err());
 
         release_tx.send(()).expect("release writer");
-        assert_eq!(
-            writer.join().expect("join writer"),
-            Err("parent sync failed".to_string())
-        );
+        let writer_error = writer
+            .join()
+            .expect("join writer")
+            .expect_err("writer must leave pending recovery");
+        assert!(writer_error.contains("parent sync failed"));
+        assert!(writer_error.contains("injected restore failure"));
         assert_eq!(
             reader
                 .join()
@@ -2039,6 +2165,7 @@ mod tests {
                 .expect("workspace exists"),
             original
         );
+        assert!(!pending_path(&path).exists());
     }
 
     #[test]
