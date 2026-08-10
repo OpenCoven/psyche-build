@@ -5381,7 +5381,7 @@
 
   function consumeAgentPickerKey(event) {
     event.preventDefault();
-    event.stopPropagation();
+    event.stopImmediatePropagation();
   }
 
   function focusAgentPickerList() {

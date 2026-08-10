@@ -348,7 +348,13 @@ describe('Tauri agent picker', () => {
     let focusCalls = 0;
     const consumeEvents: string[] = [];
     const controller = compileFunctionWithState<
-      (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => boolean
+      (
+        event: {
+          key: string;
+          preventDefault: () => void;
+          stopImmediatePropagation: () => void;
+        }
+      ) => boolean
     >(
       functionSource('handleAgentPickerListKeydown'),
       {
@@ -363,9 +369,15 @@ describe('Tauri agent picker', () => {
         focusAgentPickerList: () => { focusCalls += 1; },
         launchSelectedAgent: () => { launchCalls += 1; },
         closeAgentPicker: () => { closeCalls += 1; },
-        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        consumeAgentPickerKey: (
+          event: {
+            key: string;
+            preventDefault: () => void;
+            stopImmediatePropagation: () => void;
+          }
+        ) => {
           event.preventDefault();
-          event.stopPropagation();
+          event.stopImmediatePropagation();
           consumeEvents.push(event.key);
         },
       },
@@ -373,12 +385,12 @@ describe('Tauri agent picker', () => {
     );
 
     const makeEvent = (key: string) => {
-      const calls = { prevented: 0, stopped: 0 };
+      const calls = { prevented: 0, immediateStopped: 0 };
       return {
         event: {
           key,
           preventDefault: () => { calls.prevented += 1; },
-          stopPropagation: () => { calls.stopped += 1; },
+          stopImmediatePropagation: () => { calls.immediateStopped += 1; },
         },
         calls,
       };
@@ -386,20 +398,20 @@ describe('Tauri agent picker', () => {
 
     const down = makeEvent('ArrowDown');
     expect(controller.fn(down.event)).toBe(true);
-    expect(down.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(down.calls).toEqual({ prevented: 1, immediateStopped: 1 });
     expect(controller.snapshot().agentPickerIndex).toBe(2);
 
     const tab = makeEvent('Tab');
     expect(controller.fn(tab.event)).toBe(true);
-    expect(tab.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(tab.calls).toEqual({ prevented: 1, immediateStopped: 1 });
 
     const enter = makeEvent('Enter');
     expect(controller.fn(enter.event)).toBe(true);
-    expect(enter.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(enter.calls).toEqual({ prevented: 1, immediateStopped: 1 });
 
     const escape = makeEvent('Escape');
     expect(controller.fn(escape.event)).toBe(true);
-    expect(escape.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(escape.calls).toEqual({ prevented: 1, immediateStopped: 1 });
 
     expect(renderCalls).toBe(1);
     expect(focusCalls).toBe(1);
@@ -416,7 +428,7 @@ describe('Tauri agent picker', () => {
         key: string;
         shiftKey?: boolean;
         preventDefault: () => void;
-        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
       }
     ) => boolean>(
       functionSource('handleAgentPickerListKeydown'),
@@ -431,9 +443,15 @@ describe('Tauri agent picker', () => {
         focusAgentPickerList: () => { focusCalls += 1; },
         launchSelectedAgent: () => undefined,
         closeAgentPicker: () => undefined,
-        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        consumeAgentPickerKey: (
+          event: {
+            key: string;
+            preventDefault: () => void;
+            stopImmediatePropagation: () => void;
+          }
+        ) => {
           event.preventDefault();
-          event.stopPropagation();
+          event.stopImmediatePropagation();
           consumeEvents.push(event.key);
         },
       },
@@ -441,13 +459,13 @@ describe('Tauri agent picker', () => {
     );
 
     const makeEvent = (shiftKey = false) => {
-      const calls = { prevented: 0, stopped: 0 };
+      const calls = { prevented: 0, immediateStopped: 0 };
       return {
         event: {
           key: 'Tab',
           shiftKey,
           preventDefault: () => { calls.prevented += 1; },
-          stopPropagation: () => { calls.stopped += 1; },
+          stopImmediatePropagation: () => { calls.immediateStopped += 1; },
         },
         calls,
       };
@@ -455,11 +473,11 @@ describe('Tauri agent picker', () => {
 
     const tab = makeEvent(false);
     expect(controller.fn(tab.event)).toBe(true);
-    expect(tab.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(tab.calls).toEqual({ prevented: 1, immediateStopped: 1 });
 
     const shiftTab = makeEvent(true);
     expect(controller.fn(shiftTab.event)).toBe(true);
-    expect(shiftTab.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(shiftTab.calls).toEqual({ prevented: 1, immediateStopped: 1 });
     expect(focusCalls).toBe(2);
     expect(consumeEvents).toEqual(['Tab', 'Tab']);
   });
@@ -474,7 +492,7 @@ describe('Tauri agent picker', () => {
         ctrlKey?: boolean;
         altKey?: boolean;
         preventDefault: () => void;
-        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
       }
     ) => boolean>(
       functionSource('routeAgentPickerModalKeydown'),
@@ -482,24 +500,30 @@ describe('Tauri agent picker', () => {
         agentPickerOpen: () => true,
         openAgentPicker: () => { opened.push('picker'); },
         handleAgentPickerListKeydown: () => false,
-        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        consumeAgentPickerKey: (
+          event: {
+            key: string;
+            preventDefault: () => void;
+            stopImmediatePropagation: () => void;
+          }
+        ) => {
           event.preventDefault();
-          event.stopPropagation();
+          event.stopImmediatePropagation();
           consumed.push(event.key);
         },
         dirtyFileDialogEl: { open: false },
       },
     );
 
-    const calls = { prevented: 0, stopped: 0 };
+    const calls = { prevented: 0, immediateStopped: 0 };
     expect(controller({
       key: 't',
       metaKey: true,
       preventDefault: () => { calls.prevented += 1; },
-      stopPropagation: () => { calls.stopped += 1; },
+      stopImmediatePropagation: () => { calls.immediateStopped += 1; },
     })).toBe(true);
 
-    expect(calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(calls).toEqual({ prevented: 1, immediateStopped: 1 });
     expect(consumed).toEqual(['t']);
     expect(opened).toEqual([]);
   });
@@ -512,7 +536,7 @@ describe('Tauri agent picker', () => {
         ctrlKey?: boolean;
         altKey?: boolean;
         preventDefault: () => void;
-        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
       }
     ) => boolean>(
       functionSource('routeAgentPickerModalKeydown'),
@@ -528,7 +552,7 @@ describe('Tauri agent picker', () => {
       key: 't',
       metaKey: true,
       preventDefault: () => undefined,
-      stopPropagation: () => undefined,
+      stopImmediatePropagation: () => undefined,
     })).toBe(false);
   });
 
@@ -540,7 +564,7 @@ describe('Tauri agent picker', () => {
         ctrlKey?: boolean;
         altKey?: boolean;
         preventDefault: () => void;
-        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
       }
     ) => boolean>(
       functionSource('routeAgentPickerModalKeydown'),
@@ -556,7 +580,7 @@ describe('Tauri agent picker', () => {
     expect(controller({
       key: 'Escape',
       preventDefault: () => undefined,
-      stopPropagation: () => undefined,
+      stopImmediatePropagation: () => undefined,
     })).toBe(false);
   });
 
@@ -570,7 +594,7 @@ describe('Tauri agent picker', () => {
         ctrlKey?: boolean;
         altKey?: boolean;
         preventDefault: () => void;
-        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
       }
     ) => boolean>(
       functionSource('routeAgentPickerModalKeydown'),
@@ -578,26 +602,134 @@ describe('Tauri agent picker', () => {
         agentPickerOpen: () => true,
         openAgentPicker: () => { opened.push('picker'); return true; },
         handleAgentPickerListKeydown: () => false,
-        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        consumeAgentPickerKey: (
+          event: {
+            key: string;
+            preventDefault: () => void;
+            stopImmediatePropagation: () => void;
+          }
+        ) => {
           event.preventDefault();
-          event.stopPropagation();
+          event.stopImmediatePropagation();
           consumed.push(event.key);
         },
         dirtyFileDialogEl: { open: false },
       },
     );
 
-    const calls = { prevented: 0, stopped: 0 };
+    const calls = { prevented: 0, immediateStopped: 0 };
     expect(controller({
       key: 'p',
       metaKey: true,
       preventDefault: () => { calls.prevented += 1; },
-      stopPropagation: () => { calls.stopped += 1; },
+      stopImmediatePropagation: () => { calls.immediateStopped += 1; },
     })).toBe(true);
 
-    expect(calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(calls).toEqual({ prevented: 1, immediateStopped: 1 });
     expect(consumed).toEqual(['p']);
     expect(opened).toEqual(['picker']);
+  });
+
+  it('blocks later same-document keydown listeners only while the picker is open', () => {
+    const consumeAgentPickerKey = compileFunction<
+      (
+        event: {
+          preventDefault: () => void;
+          stopPropagation: () => void;
+          stopImmediatePropagation: () => void;
+        }
+      ) => void
+    >(functionSource('consumeAgentPickerKey'), {});
+
+    const openRouter = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => true,
+        openAgentPicker: () => false,
+        handleAgentPickerListKeydown: () => false,
+        consumeAgentPickerKey,
+        dirtyFileDialogEl: { open: false },
+      },
+    );
+
+    const closedRouter = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => false,
+        openAgentPicker: () => false,
+        handleAgentPickerListKeydown: () => false,
+        consumeAgentPickerKey,
+        dirtyFileDialogEl: { open: false },
+      },
+    );
+
+    const dispatchDocumentKeydown = (
+      router: (event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+        stopImmediatePropagation: () => void;
+      }) => boolean,
+    ) => {
+      let helpCalls = 0;
+      const calls = { prevented: 0, stopped: 0, immediateStopped: 0 };
+      const event = {
+        key: '?',
+        metaKey: false,
+        ctrlKey: false,
+        altKey: false,
+        immediateStopped: false,
+        preventDefault: () => { calls.prevented += 1; },
+        stopPropagation: () => { calls.stopped += 1; },
+        stopImmediatePropagation: () => {
+          calls.immediateStopped += 1;
+          event.immediateStopped = true;
+        },
+      };
+      const listeners = [
+        () => { router(event); },
+        () => { helpCalls += 1; },
+      ];
+
+      for (const listener of listeners) {
+        listener();
+        if (event.immediateStopped) break;
+      }
+
+      return { helpCalls, calls };
+    };
+
+    expect(dispatchDocumentKeydown(openRouter)).toEqual({
+      helpCalls: 0,
+      calls: { prevented: 1, stopped: 0, immediateStopped: 1 },
+    });
+    expect(dispatchDocumentKeydown(closedRouter)).toEqual({
+      helpCalls: 1,
+      calls: { prevented: 0, stopped: 0, immediateStopped: 0 },
+    });
   });
 
   it('launches the selected agent from the picker', () => {
