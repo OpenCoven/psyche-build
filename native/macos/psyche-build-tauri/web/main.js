@@ -610,6 +610,10 @@
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
+  var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
+  var agentPickerListEl = document.getElementById("agent-picker-list");
+  var agentPickerIndex = 0;
+  var agentPickerPreviousFocus = null;
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
@@ -5225,6 +5229,11 @@
       await createTerminalPane();
       return;
     }
+    if (String(e.key).toLowerCase() === "p") {
+      e.preventDefault();
+      openAgentPicker();
+      return;
+    }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
     // ⌘W closes the active file tab; with none open it closes the project.
@@ -5370,6 +5379,50 @@
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
 
+  if (agentPickerListEl) {
+    agentPickerListEl.addEventListener("keydown", function (event) {
+      var count = agentLaunchOptions().length;
+      if (event.key === "ArrowDown") {
+        agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
+        renderAgentPicker();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, -1, count);
+        renderAgentPicker();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "Home") {
+        agentPickerIndex = 0;
+        renderAgentPicker();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "End") {
+        agentPickerIndex = count ? count - 1 : 0;
+        renderAgentPicker();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        launchSelectedAgent();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeAgentPicker();
+      }
+    });
+  }
+  if (agentPickerOverlayEl) {
+    agentPickerOverlayEl.addEventListener("pointerdown", function (event) {
+      if (event.target === agentPickerOverlayEl) closeAgentPicker();
+    });
+  }
+
   document.addEventListener("pointerdown", function (event) {
     if (newPaneMenuEl && !newPaneMenuEl.hidden &&
         !newPaneMenuEl.contains(event.target) &&
@@ -5428,8 +5481,9 @@
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → focus mode.
+    // picker → help → menus → set picking → armed confirm → focus mode.
     if (event.key === "Escape") {
+      if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
         (scopeMenuEl && !scopeMenuEl.hidden);
@@ -6083,6 +6137,88 @@
       { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
       { id: "grok-build", label: "Grok Build", command: "grok", args: [], kind: "agent-grok-build" },
     ];
+  }
+
+  function nextAgentPickerIndex(current, delta, count) {
+    if (!count) return 0;
+    return (((current + delta) % count) + count) % count;
+  }
+
+  function agentPickerOpen() {
+    return Boolean(agentPickerOverlayEl && !agentPickerOverlayEl.hidden);
+  }
+
+  function renderAgentPicker() {
+    if (!agentPickerListEl) return;
+    var entries = agentLaunchOptions();
+    agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 0, entries.length);
+    agentPickerListEl.innerHTML = "";
+    entries.forEach(function (entry, index) {
+      var selected = index === agentPickerIndex;
+      var option = document.createElement("button");
+      option.type = "button";
+      option.id = "agent-picker-option-" + entry.id;
+      option.className = "agent-picker-option" + (selected ? " is-selected" : "");
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+      option.tabIndex = -1;
+      option.innerHTML =
+        '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
+        '<span class="agent-picker-command">' +
+          escapeHtml(entry.id === "coven-code" ? "coven chat" : (entry.command || "")) +
+        "</span>";
+      option.addEventListener("pointermove", function () {
+        if (agentPickerIndex === index) return;
+        agentPickerIndex = index;
+        renderAgentPicker();
+      });
+      option.addEventListener("click", function () {
+        agentPickerIndex = index;
+        launchSelectedAgent();
+      });
+      agentPickerListEl.appendChild(option);
+    });
+    if (entries[agentPickerIndex]) {
+      agentPickerListEl.setAttribute(
+        "aria-activedescendant",
+        "agent-picker-option-" + entries[agentPickerIndex].id
+      );
+    } else {
+      agentPickerListEl.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function openAgentPicker() {
+    if (!agentPickerOverlayEl || !agentPickerListEl) return false;
+    if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
+    setHelpOpen(false);
+    closeNewPaneMenu();
+    closeScopeMenu();
+    agentPickerIndex = 0;
+    renderAgentPicker();
+    agentPickerOverlayEl.hidden = false;
+    agentPickerListEl.focus();
+    return true;
+  }
+
+  function closeAgentPicker() {
+    if (agentPickerOverlayEl) agentPickerOverlayEl.hidden = true;
+    var previousFocus = agentPickerPreviousFocus;
+    agentPickerPreviousFocus = null;
+    if (
+      previousFocus &&
+      typeof previousFocus.focus === "function" &&
+      (!document.contains || document.contains(previousFocus))
+    ) {
+      previousFocus.focus();
+    }
+  }
+
+  function launchSelectedAgent() {
+    var entry = agentLaunchOptions()[agentPickerIndex];
+    if (!entry) return null;
+    closeAgentPicker();
+    return spawnAgentThread(entry.id);
   }
 
   async function spawnAgentThread(agentId, project) {

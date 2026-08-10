@@ -42,6 +42,36 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function compileFunctionWithState<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+  state: Record<string, unknown>,
+) {
+  const dependencyNames = Object.keys(dependencies);
+  const dependencyValues = Object.values(dependencies);
+  const stateNames = Object.keys(state);
+  const stateValues = Object.values(state);
+  const snapshotLines = stateNames.map(
+    (name) => `${JSON.stringify(name)}: typeof ${name} === "undefined" ? undefined : ${name}`,
+  );
+  return Function(
+    ...dependencyNames,
+    ...stateNames,
+    `"use strict";
+    return {
+      fn: (${source}),
+      snapshot: function () {
+        return {
+          ${snapshotLines.join(',\n          ')}
+        };
+      },
+    };`,
+  )(...dependencyValues, ...stateValues) as {
+    fn: T;
+    snapshot: () => Record<string, unknown>;
+  };
+}
+
 type PickerProject = {
   id: string;
   root: string;
@@ -161,5 +191,106 @@ describe('Tauri agent picker', () => {
     expect(functionSource('spawnPty')).toContain(
       'setStatus(thread.name + " failed to start: " + msg, "error")',
     );
+  });
+
+  it('renders an accessible picker shell', () => {
+    expect(indexHtml).toMatch(/id="agent-picker-overlay" hidden/);
+    expect(indexHtml).toMatch(
+      /id="agent-picker"[\s\S]*role="dialog"[\s\S]*aria-modal="true"[\s\S]*aria-labelledby="agent-picker-title"/,
+    );
+    expect(indexHtml).toMatch(
+      /id="agent-picker-list"[\s\S]*role="listbox"[\s\S]*tabindex="0"/,
+    );
+    expect(stylesCss).toContain('.agent-picker-overlay[hidden] { display: none; }');
+    expect(stylesCss).toContain('.agent-picker-option.is-selected');
+  });
+
+  it('wraps picker keyboard selection', () => {
+    const nextAgentPickerIndex = compileFunction<
+      (current: number, delta: number, count: number) => number
+    >(functionSource('nextAgentPickerIndex'), {});
+
+    expect(nextAgentPickerIndex(0, -1, 5)).toBe(4);
+    expect(nextAgentPickerIndex(4, 1, 5)).toBe(0);
+    expect(nextAgentPickerIndex(2, 1, 5)).toBe(3);
+  });
+
+  it('opens the picker by resetting selection, rendering, and focusing the list', () => {
+    const overlay = { hidden: true };
+    const previousFocus = { id: 'before-picker' };
+    let renderCalls = 0;
+    let focusCalls = 0;
+    const controller = compileFunctionWithState<() => boolean>(
+      functionSource('openAgentPicker'),
+      {
+        document: { activeElement: previousFocus },
+        agentPickerOpen: () => false,
+        renderAgentPicker: () => { renderCalls += 1; },
+        setHelpOpen: () => undefined,
+        closeNewPaneMenu: () => undefined,
+        closeScopeMenu: () => undefined,
+      },
+      {
+        agentPickerOverlayEl: overlay,
+        agentPickerListEl: { focus: () => { focusCalls += 1; } },
+        agentPickerIndex: 4,
+        agentPickerPreviousFocus: null,
+      },
+    );
+
+    expect(controller.fn()).toBe(true);
+    expect(controller.snapshot().agentPickerIndex).toBe(0);
+    expect(renderCalls).toBe(1);
+    expect(focusCalls).toBe(1);
+    expect(overlay.hidden).toBe(false);
+    expect(controller.snapshot().agentPickerPreviousFocus).toBe(previousFocus);
+  });
+
+  it('uses Command-P and list keyboard controls to drive the picker', () => {
+    const commandPIndex = mainJs.indexOf('String(e.key).toLowerCase() === "p"');
+    const commandOIndex = mainJs.indexOf('if (e.key === "o")');
+    expect(commandPIndex).toBeGreaterThan(-1);
+    expect(commandPIndex).toBeLessThan(commandOIndex);
+    const shortcutBlock = mainJs.slice(commandPIndex, commandPIndex + 200);
+    expect(shortcutBlock).toContain('openAgentPicker()');
+
+    const listKeydownIndex = mainJs.indexOf('agentPickerListEl.addEventListener("keydown"');
+    expect(listKeydownIndex).toBeGreaterThan(-1);
+    const listKeydownBlock = mainJs.slice(listKeydownIndex, listKeydownIndex + 1200);
+    expect(listKeydownBlock).toContain('event.key === "ArrowDown"');
+    expect(listKeydownBlock).toContain('event.key === "ArrowUp"');
+    expect(listKeydownBlock).toContain('event.key === "Home"');
+    expect(listKeydownBlock).toContain('event.key === "End"');
+    expect(listKeydownBlock).toContain('event.key === "Enter"');
+    expect(listKeydownBlock).toContain('event.key === "Escape"');
+  });
+
+  it('launches the selected agent from the picker', () => {
+    let spawnedAgentId: string | null = null;
+    let closed = false;
+    const controller = compileFunctionWithState<() => string | null>(
+      functionSource('launchSelectedAgent'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'coven-code' },
+          { id: 'codex' },
+        ],
+        closeAgentPicker: () => { closed = true; },
+        spawnAgentThread: (agentId: string) => {
+          spawnedAgentId = agentId;
+          return agentId;
+        },
+      },
+      { agentPickerIndex: 1 },
+    );
+
+    expect(controller.fn()).toBe('codex');
+    expect(closed).toBe(true);
+    expect(spawnedAgentId).toBe('codex');
+  });
+
+  it('does not persist an agent preference and always reselects Coven Code', () => {
+    expect(mainJs).not.toMatch(/localStorage\.(?:getItem|setItem)\([^)]*agent/i);
+    expect(functionSource('openAgentPicker')).toContain('agentPickerIndex = 0;');
   });
 });

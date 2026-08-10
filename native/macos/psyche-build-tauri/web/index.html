@@ -377,6 +377,28 @@
           <div class="help-grid" id="help-grid"></div>
         </div>
       </div>
+
+      <div class="agent-picker-overlay" id="agent-picker-overlay" hidden>
+        <section
+          class="agent-picker"
+          id="agent-picker"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-picker-title"
+        >
+          <div class="agent-picker-head">
+            <span class="agent-picker-title" id="agent-picker-title">Choose agent</span>
+            <span class="agent-picker-hint">enter to launch · esc to close</span>
+          </div>
+          <div
+            class="agent-picker-list"
+            id="agent-picker-list"
+            role="listbox"
+            tabindex="0"
+            aria-label="Coding agents"
+          ></div>
+        </section>
+      </div>
     </div>
     <dialog
       class="file-decision-dialog"
