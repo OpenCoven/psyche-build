@@ -33,6 +33,7 @@
 		59BBF14BEACC05542B393FED /* MobileAppComposition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A0D85B21F0645DC962E680C /* MobileAppComposition.swift */; };
 		5F21C278237700B1A6E15AF1 /* TerminalSessionRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 964F806CE5644C3111EADFB6 /* TerminalSessionRegistry.swift */; };
 		62D14BA5029FD3FBA7358F3F /* BonjourHostDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE6A20F50E5972C57510BADB /* BonjourHostDiscovery.swift */; };
+		64E7F995F8CE7BFB6FD5C1DD /* FixtureControlRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EAB9843A291ECA8DDC87B08 /* FixtureControlRequests.swift */; };
 		67A5EDD173464941CE47C87D /* URLSessionControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B68FCC9AC1EECDE02B981A /* URLSessionControlTransport.swift */; };
 		7063996B4489396D0B070A6A /* PsycheCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; };
 		77624181EF84DC60C7D0099B /* PsycheCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 9FB5C2AA115C45B8FC28D2E7 /* PsycheCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -169,6 +170,7 @@
 		79423F6893871C3D7AD45E8C /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
 		7C422F47C586CD7CE3F0CCC6 /* CreatePaneFormTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreatePaneFormTests.swift; sourceTree = "<group>"; };
 		7D372D919A26B03B7D6759D5 /* BridgeMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeMessagesTests.swift; sourceTree = "<group>"; };
+		7EAB9843A291ECA8DDC87B08 /* FixtureControlRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureControlRequests.swift; sourceTree = "<group>"; };
 		8B84BDEB14FE60F2EF185773 /* PaneComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneComposerTests.swift; sourceTree = "<group>"; };
 		8FFA3F40786615CC884D71BA /* TerminalPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneView.swift; sourceTree = "<group>"; };
 		964F806CE5644C3111EADFB6 /* TerminalSessionRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionRegistry.swift; sourceTree = "<group>"; };
@@ -250,6 +252,7 @@
 		10296FAF96DA63AB676DF589 /* Fixtures */ = {
 			isa = PBXGroup;
 			children = (
+				7EAB9843A291ECA8DDC87B08 /* FixtureControlRequests.swift */,
 				49080BA406F9229608D97834 /* FixtureTerminalClient.swift */,
 				373FAC0DE696BFF3AEA9B8CB /* WorkspaceFixtures.swift */,
 			);
@@ -604,6 +607,7 @@
 				FAA2378B1D113CFC11C31E0D /* ConnectionManager.swift in Sources */,
 				ED4430FA791BE75586527F53 /* ControlMessages.swift in Sources */,
 				DF0A29D7D868E9B39A094D45 /* ControlRequestClient.swift in Sources */,
+				64E7F995F8CE7BFB6FD5C1DD /* FixtureControlRequests.swift in Sources */,
 				CE215E59267AF66B3E88AF53 /* FixtureTerminalClient.swift in Sources */,
 				59BBF14BEACC05542B393FED /* MobileAppComposition.swift in Sources */,
 				4EE44BEAEF5AEA280FF40827 /* NowItem.swift in Sources */,

@@ -302,6 +302,76 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(element("pane-workspace-web-home", in: app).waitForExistence(timeout: 10))
     }
 
+    // MARK: - Pane commands
+
+    /// The sheet opens on the context you are already in, so creating a pane
+    /// where you are looking takes no picking at all.
+    func testCreatingAPaneAddsItToTheWorkspace() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["New pane"].tap()
+        XCTAssertTrue(element("create-pane-sheet", in: app).waitForExistence(timeout: 10))
+
+        let submit = app.buttons["create-pane-submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 10))
+        XCTAssertTrue(submit.isEnabled, "The sheet should open ready to submit")
+        submit.tap()
+
+        // The sheet closes only on success, and the fixture host republishes
+        // the workspace, so the new pane appears in the switcher.
+        XCTAssertTrue(element("create-pane-sheet", in: app).waitForNonExistence(timeout: 10))
+        XCTAssertTrue(element("pane-chip-pane-1", in: app).waitForExistence(timeout: 10))
+    }
+
+    func testRenamingAPaneUpdatesWhatTheWorkspaceShows() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Rename"].tap()
+
+        // An alert's fields and buttons live in the alert, not the app root.
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        let field = alert.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(" reviewed")
+        alert.buttons["Rename"].tap()
+
+        XCTAssertTrue(
+            app.staticTexts["homepage polish reviewed"].waitForExistence(timeout: 10),
+            "The workspace should refresh with the new title"
+        )
+    }
+
+    /// Stopping is confirmed, names what is about to stop, and says the work
+    /// survives.
+    func testStoppingAPaneIsConfirmedAndRemovesIt() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        openPaneActions(in: app)
+        app.buttons["Stop"].tap()
+
+        XCTAssertTrue(app.staticTexts["Stop homepage polish?"].waitForExistence(timeout: 10))
+        let message = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS[c] %@", "worktree")
+        ).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "The confirmation must say the work survives")
+
+        let dialog = app.sheets.firstMatch.exists ? app.sheets.firstMatch : app.alerts.firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 10))
+        dialog.buttons["Stop pane"].tap()
+
+        XCTAssertTrue(
+            element("pane-chip-web-home", in: app).waitForNonExistence(timeout: 10),
+            "The stopped pane should leave the workspace"
+        )
+    }
+
     // MARK: - Split layout and focus
 
     /// Regular width has room for two terminals, and both must be live rather
@@ -469,6 +539,12 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func openPaneActions(in app: XCUIApplication) {
+        let actions = app.buttons["pane-actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        actions.tap()
+    }
 
     private func splitBeside(_ paneID: String, in app: XCUIApplication) {
         let split = row("pane-split-\(paneID)", in: app)
