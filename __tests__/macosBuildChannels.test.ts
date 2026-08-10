@@ -2,19 +2,29 @@ import { EventEmitter } from 'node:events';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  readlinkSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
-import { spawnSync } from 'node:child_process';
-import { rename as renameAsync } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { spawn as spawnChild, spawnSync } from 'node:child_process';
+import {
+  readlink as readlinkAsync,
+  rename as renameAsync,
+  symlink as symlinkAsync,
+  unlink as unlinkAsync,
+} from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -127,12 +137,103 @@ function copyBundle(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
 }
 
-function writeLockOwner(lockPath: string, token: string, pid: number): void {
+function writeLockOwner(
+  lockPath: string,
+  token: string,
+  pid: number,
+  createdAt = new Date().toISOString(),
+): { ownerPath: string; ownerTarget: string } {
+  const ownerTarget = `builds.json.lock.owner-${token}.json`;
+  const ownerPath = join(dirname(lockPath), ownerTarget);
+  mkdirSync(dirname(lockPath), { recursive: true });
   writeFileSync(
-    join(lockPath, 'owner.json'),
-    `${JSON.stringify({ token, pid })}\n`,
+    ownerPath,
+    `${JSON.stringify({ token, pid, createdAt })}\n`,
     { encoding: 'utf8', mode: 0o600 },
   );
+  symlinkSync(ownerTarget, lockPath);
+  return { ownerPath, ownerTarget };
+}
+
+function pathExistsIncludingDanglingSymlink(targetPath: string): boolean {
+  try {
+    lstatSync(targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function spawnProvenanceWriter(
+  record: BuildProvenance,
+  homeDir: string,
+  readyPath: string,
+  startPath: string,
+): Promise<void> {
+  const childScript = `
+    import { existsSync } from 'node:fs';
+    import { writeFile } from 'node:fs/promises';
+    import { setTimeout as sleep } from 'node:timers/promises';
+
+    const [moduleUrl, recordJson, homeDir, readyPath, startPath] = process.argv.slice(1);
+    await writeFile(readyPath, 'ready');
+    while (!existsSync(startPath)) {
+      await sleep(1);
+    }
+    const { writeBuildProvenance } = await import(moduleUrl);
+    await writeBuildProvenance(JSON.parse(recordJson), {
+      homeDir,
+      lockRetryMs: 1,
+      lockTimeoutMs: 5_000,
+    });
+  `;
+  const child = spawnChild(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      childScript,
+      pathToFileURL(scriptPath).href,
+      JSON.stringify(record),
+      homeDir,
+      readyPath,
+      startPath,
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] },
+  );
+
+  return new Promise<void>((resolveChild, rejectChild) => {
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', rejectChild);
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        resolveChild();
+        return;
+      }
+      rejectChild(
+        new Error(
+          `provenance child exited with code ${String(code)} signal ${String(signal)}: ${stderr}`,
+        ),
+      );
+    });
+  });
+}
+
+async function waitForPaths(paths: readonly string[]): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (paths.every((candidate) => existsSync(candidate))) {
+      return;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 1));
+  }
+  throw new Error(`Timed out waiting for paths: ${paths.join(', ')}`);
 }
 
 function runGit(repository: string, args: string[]): string {
@@ -1376,11 +1477,12 @@ describe('macOS build channels', () => {
       });
     });
 
-    it('records a unique owner token and current PID while each lock is held', async () => {
+    it('publishes a fully populated unique owner file before exposing its lock symlink', async () => {
       const homeDir = createScratchDirectory('provenance-lock-owner');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const lockPath = join(stateDir, 'builds.json.lock');
       const owners: unknown[] = [];
+      const lockTargets: string[] = [];
 
       for (const [record, token] of [
         [stableRecord, 'stable-owner-token'],
@@ -1389,20 +1491,43 @@ describe('macOS build channels', () => {
         await writeBuildProvenance(record, {
           homeDir,
           randomUUID: () => token,
-          writeFileText: async (filePath: string, content: string) => {
-            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-            if (!filePath.startsWith(`${lockPath}/`)) {
-              owners.push(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')));
-            }
+          symlinkPath: async (target: string, symlinkPath: string) => {
+            expect(symlinkPath).toBe(lockPath);
+            lockTargets.push(target);
+            owners.push(
+              JSON.parse(readFileSync(join(stateDir, target), 'utf8')),
+            );
+            await symlinkAsync(target, symlinkPath);
           },
         });
       }
 
-      expect(owners).toEqual([
-        { token: 'stable-owner-token', pid: process.pid },
-        { token: 'dev-owner-token', pid: process.pid },
+      expect(lockTargets).toEqual([
+        'builds.json.lock.owner-stable-owner-token.json',
+        'builds.json.lock.owner-dev-owner-token.json',
       ]);
+      expect(owners).toHaveLength(2);
+      expect(owners).toEqual([
+        {
+          token: 'stable-owner-token',
+          pid: process.pid,
+          createdAt: expect.any(String),
+        },
+        {
+          token: 'dev-owner-token',
+          pid: process.pid,
+          createdAt: expect.any(String),
+        },
+      ]);
+      expect(
+        owners.every(
+          (owner) =>
+            new Date((owner as { createdAt: string }).createdAt).toISOString() ===
+            (owner as { createdAt: string }).createdAt,
+        ),
+      ).toBe(true);
       expect(existsSync(lockPath)).toBe(false);
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
 
     it('rejects malformed provenance files without changing them', async () => {
@@ -1592,6 +1717,68 @@ describe('macOS build channels', () => {
       expect(readFileSync(provenancePath, 'utf8')).toBe(before);
     });
 
+    it('does not publish the lock before exclusive owner metadata creation completes', async () => {
+      const homeDir = createScratchDirectory('provenance-owner-publication-gap');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      let markOwnerWriteStarted = () => {};
+      let releaseOwnerWrite = () => {};
+      const ownerWriteStarted = new Promise<void>((resolveStarted) => {
+        markOwnerWriteStarted = resolveStarted;
+      });
+      const ownerWriteGate = new Promise<void>((resolveGate) => {
+        releaseOwnerWrite = resolveGate;
+      });
+
+      const stableWrite = writeBuildProvenance(stableRecord, {
+        homeDir,
+        randomUUID: () => 'publication-gap-owner',
+        lockRetryMs: 1,
+        lockTimeoutMs: 500,
+        staleLockMs: 1,
+        isProcessAlive: async () => false,
+        writeFileText: async (
+          filePath: string,
+          content: string,
+          options?: { exclusive?: boolean },
+        ) => {
+          if (options?.exclusive) {
+            markOwnerWriteStarted();
+            await ownerWriteGate;
+          }
+          writeFileSync(filePath, content, {
+            encoding: 'utf8',
+            mode: 0o600,
+            ...(options?.exclusive ? { flag: 'wx' } : {}),
+          });
+        },
+      });
+      await ownerWriteStarted;
+
+      const lockWasPublishedBeforeOwner = pathExistsIncludingDanglingSymlink(lockPath);
+      const devWrite = writeBuildProvenance(devRecord, {
+        homeDir,
+        randomUUID: () => 'publication-gap-successor',
+        lockRetryMs: 1,
+        lockTimeoutMs: 500,
+      });
+      await tick();
+      releaseOwnerWrite();
+      const results = await Promise.allSettled([stableWrite, devWrite]);
+
+      expect(lockWasPublishedBeforeOwner).toBe(false);
+      expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          dev: devRecord,
+          stable: stableRecord,
+        },
+      });
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
     it('serializes concurrent stable and dev updates so neither record is lost', async () => {
       const homeDir = createScratchDirectory('provenance-concurrent');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
@@ -1609,8 +1796,12 @@ describe('macOS build channels', () => {
       const stableWrite = writeBuildProvenance(stableRecord, {
         homeDir,
         lockRetryMs: 1,
-        writeFileText: async (filePath: string, content: string) => {
-          if (filePath.startsWith(`${lockPath}/`)) {
+        writeFileText: async (
+          filePath: string,
+          content: string,
+          options?: { exclusive?: boolean },
+        ) => {
+          if (options?.exclusive) {
             writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
             return;
           }
@@ -1639,12 +1830,46 @@ describe('macOS build channels', () => {
       expect(existsSync(lockPath)).toBe(false);
     });
 
+    it('preserves stable and dev records across concurrent processes', async () => {
+      const homeDir = createScratchDirectory('provenance-cross-process');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const startPath = join(homeDir, 'start');
+      const stableReadyPath = join(homeDir, 'stable-ready');
+      const devReadyPath = join(homeDir, 'dev-ready');
+
+      const stableWrite = spawnProvenanceWriter(
+        stableRecord,
+        homeDir,
+        stableReadyPath,
+        startPath,
+      );
+      const devWrite = spawnProvenanceWriter(
+        devRecord,
+        homeDir,
+        devReadyPath,
+        startPath,
+      );
+      await waitForPaths([stableReadyPath, devReadyPath]);
+      writeFileSync(startPath, 'start', 'utf8');
+      await Promise.all([stableWrite, devWrite]);
+
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          stable: stableRecord,
+          dev: devRecord,
+        },
+      });
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
     it('times out while a fresh provenance lock is held by another process', async () => {
       const homeDir = createScratchDirectory('provenance-lock-timeout');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
-      mkdirSync(lockPath, { recursive: true });
+      const { ownerTarget } = writeLockOwner(lockPath, 'fresh-owner', 4242);
 
       await expect(
         writeBuildProvenance(devRecord, {
@@ -1654,7 +1879,7 @@ describe('macOS build channels', () => {
         }),
       ).rejects.toThrow(/Timed out.*provenance lock/i);
       expect(existsSync(provenancePath)).toBe(false);
-      expect(existsSync(lockPath)).toBe(true);
+      expect(readlinkSync(lockPath)).toBe(ownerTarget);
     });
 
     it('bounds lock retries even when the injected clock does not advance', async () => {
@@ -1662,7 +1887,12 @@ describe('macOS build channels', () => {
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const lockPath = join(stateDir, 'builds.json.lock');
       const sleep = vi.fn(async () => {});
-      mkdirSync(lockPath, { recursive: true });
+      const { ownerTarget } = writeLockOwner(
+        lockPath,
+        'static-clock-owner',
+        4242,
+        new Date(1_000).toISOString(),
+      );
 
       await expect(
         writeBuildProvenance(devRecord, {
@@ -1675,7 +1905,7 @@ describe('macOS build channels', () => {
         }),
       ).rejects.toThrow(/Timed out after 3ms.*provenance lock/i);
       expect(sleep).toHaveBeenCalledTimes(3);
-      expect(existsSync(lockPath)).toBe(true);
+      expect(readlinkSync(lockPath)).toBe(ownerTarget);
     });
 
     it('times out without removing an old lock whose owner process is alive', async () => {
@@ -1683,16 +1913,22 @@ describe('macOS build channels', () => {
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
-      mkdirSync(lockPath, { recursive: true });
-      writeLockOwner(lockPath, 'live-owner', 4242);
       const staleTime = new Date(Date.now() - 60_000);
-      utimesSync(lockPath, staleTime, staleTime);
+      const { ownerPath, ownerTarget } = writeLockOwner(
+        lockPath,
+        'live-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(ownerPath, staleTime, staleTime);
       const isProcessAlive = vi.fn(async (pid: number) => {
         expect(pid).toBe(4242);
         return true;
       });
-      const removePath = vi.fn(async (targetPath: string) => {
-        rmSync(targetPath, { recursive: true, force: true });
+      const unlinkedPaths: string[] = [];
+      const unlinkPath = vi.fn(async (targetPath: string) => {
+        unlinkedPaths.push(targetPath);
+        await unlinkAsync(targetPath);
       });
 
       await expect(
@@ -1701,15 +1937,18 @@ describe('macOS build channels', () => {
           lockTimeoutMs: 0,
           staleLockMs: 10,
           isProcessAlive,
-          removePath,
+          unlinkPath,
         }),
       ).rejects.toThrow(/Timed out.*provenance lock/i);
       expect(isProcessAlive).toHaveBeenCalledTimes(1);
-      expect(removePath).not.toHaveBeenCalled();
-      expect(JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8'))).toEqual({
+      expect(unlinkedPaths).not.toContain(lockPath);
+      expect(unlinkedPaths).not.toContain(ownerPath);
+      expect(JSON.parse(readFileSync(ownerPath, 'utf8'))).toEqual({
         token: 'live-owner',
         pid: 4242,
+        createdAt: staleTime.toISOString(),
       });
+      expect(readlinkSync(lockPath)).toBe(ownerTarget);
       expect(existsSync(provenancePath)).toBe(false);
     });
 
@@ -1718,10 +1957,14 @@ describe('macOS build channels', () => {
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
-      mkdirSync(lockPath, { recursive: true });
-      writeLockOwner(lockPath, 'dead-owner', 4242);
       const staleTime = new Date(Date.now() - 60_000);
-      utimesSync(lockPath, staleTime, staleTime);
+      const { ownerPath } = writeLockOwner(
+        lockPath,
+        'dead-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(ownerPath, staleTime, staleTime);
       const isProcessAlive = vi.fn(async (pid: number) => {
         expect(pid).toBe(4242);
         return false;
@@ -1742,40 +1985,55 @@ describe('macOS build channels', () => {
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
 
-    it('recovers an old lock with a malformed owner record', async () => {
-      const homeDir = createScratchDirectory('provenance-malformed-stale-lock');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      mkdirSync(lockPath, { recursive: true });
-      writeFileSync(join(lockPath, 'owner.json'), '{"token":', 'utf8');
-      const staleTime = new Date(Date.now() - 60_000);
-      utimesSync(lockPath, staleTime, staleTime);
-      const isProcessAlive = vi.fn(async () => true);
+    it.each(['malformed', 'missing'] as const)(
+      'times out safely for an old lock with %s owner metadata',
+      async (ownerState) => {
+        const homeDir = createScratchDirectory(`provenance-${ownerState}-stale-lock`);
+        const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+        const provenancePath = join(stateDir, 'builds.json');
+        const lockPath = `${provenancePath}.lock`;
+        mkdirSync(stateDir, { recursive: true });
+        const ownerTarget = `builds.json.lock.owner-${ownerState}.json`;
+        const ownerPath = join(stateDir, ownerTarget);
+        if (ownerState === 'malformed') {
+          writeFileSync(ownerPath, '{"token":', 'utf8');
+        }
+        symlinkSync(ownerTarget, lockPath);
+        const staleTime = new Date(Date.now() - 60_000);
+        if (ownerState === 'malformed') {
+          utimesSync(ownerPath, staleTime, staleTime);
+        }
+        const isProcessAlive = vi.fn(async () => false);
 
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          lockRetryMs: 1,
-          lockTimeoutMs: 50,
-          staleLockMs: 10,
-          isProcessAlive,
-        }),
-      ).resolves.toBe(provenancePath);
-      expect(isProcessAlive).not.toHaveBeenCalled();
-      expect(existsSync(lockPath)).toBe(false);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-    });
+        await expect(
+          writeBuildProvenance(devRecord, {
+            homeDir,
+            lockRetryMs: 1,
+            lockTimeoutMs: 3,
+            staleLockMs: 10,
+            isProcessAlive,
+          }),
+        ).rejects.toThrow(/Timed out after 3ms.*provenance lock/i);
+        expect(isProcessAlive).not.toHaveBeenCalled();
+        expect(readlinkSync(lockPath)).toBe(ownerTarget);
+        expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(true);
+        expect(existsSync(provenancePath)).toBe(false);
+      },
+    );
 
-    it('lets only one concurrent contender quarantine a dead stale lock and retains both records', async () => {
+    it('lets only one of two stale contenders quarantine the observed symlink', async () => {
       const homeDir = createScratchDirectory('provenance-concurrent-stale-lock');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
-      mkdirSync(lockPath, { recursive: true });
-      writeLockOwner(lockPath, 'dead-owner', 4242);
       const staleTime = new Date(Date.now() - 60_000);
-      utimesSync(lockPath, staleTime, staleTime);
+      const { ownerPath, ownerTarget } = writeLockOwner(
+        lockPath,
+        'dead-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(ownerPath, staleTime, staleTime);
 
       let livenessChecks = 0;
       let releaseLivenessChecks = () => {};
@@ -1793,12 +2051,63 @@ describe('macOS build channels', () => {
         await bothCheckingLiveness;
         return false;
       });
-      let successfulQuarantines = 0;
-      const renamePath = async (sourcePath: string, destinationPath: string) => {
-        await renameAsync(sourcePath, destinationPath);
-        if (sourcePath === lockPath && destinationPath.includes('.stale-')) {
-          successfulQuarantines += 1;
+      let recoveryClaimObserved = false;
+      let oldTargetReads = 0;
+      let releasePreRenameReads = () => {};
+      const bothPreRenameReads = new Promise<void>((resolveReads) => {
+        releasePreRenameReads = resolveReads;
+      });
+      const readlinkPath = async (targetPath: string) => {
+        const target = await readlinkAsync(targetPath);
+        if (targetPath === lockPath && target === ownerTarget) {
+          oldTargetReads += 1;
+          if (!recoveryClaimObserved && oldTargetReads === 4) {
+            releasePreRenameReads();
+          }
+          if (!recoveryClaimObserved && oldTargetReads > 2) {
+            await bothPreRenameReads;
+          }
         }
+        return target;
+      };
+      let markFirstReacquired = () => {};
+      const firstReacquired = new Promise<void>((resolveReacquired) => {
+        markFirstReacquired = resolveReacquired;
+      });
+      const symlinkPath = async (target: string, targetPath: string) => {
+        await symlinkAsync(target, targetPath);
+        if (targetPath === lockPath && target !== ownerTarget) {
+          markFirstReacquired();
+        }
+      };
+      const renames: Array<[string, string]> = [];
+      let quarantineRenameAttempts = 0;
+      const renamePath = async (sourcePath: string, destinationPath: string) => {
+        if (
+          sourcePath === lockPath &&
+          destinationPath.includes('.stale-')
+        ) {
+          quarantineRenameAttempts += 1;
+          if (quarantineRenameAttempts > 1) {
+            await firstReacquired;
+          }
+        }
+        await renameAsync(sourcePath, destinationPath);
+        renames.push([sourcePath, destinationPath]);
+      };
+      const writeFileText = async (
+        filePath: string,
+        content: string,
+        options?: { exclusive?: boolean },
+      ) => {
+        if (filePath.includes('.recover-')) {
+          recoveryClaimObserved = true;
+        }
+        writeFileSync(filePath, content, {
+          encoding: 'utf8',
+          mode: 0o600,
+          ...(options?.exclusive ? { flag: 'wx' } : {}),
+        });
       };
 
       await Promise.all([
@@ -1809,6 +2118,9 @@ describe('macOS build channels', () => {
           lockTimeoutMs: 500,
           staleLockMs: 10,
           isProcessAlive,
+          readlinkPath,
+          symlinkPath,
+          writeFileText,
           renamePath,
         }),
         writeBuildProvenance(devRecord, {
@@ -1818,16 +2130,121 @@ describe('macOS build channels', () => {
           lockTimeoutMs: 500,
           staleLockMs: 10,
           isProcessAlive,
+          readlinkPath,
+          symlinkPath,
+          writeFileText,
           renamePath,
         }),
       ]);
 
-      expect(successfulQuarantines).toBe(1);
+      const quarantineRenames = renames.filter(
+        ([sourcePath, destinationPath]) =>
+          sourcePath === lockPath && destinationPath.includes('.stale-'),
+      );
+      expect(quarantineRenames).toHaveLength(1);
+      expect(quarantineRenameAttempts).toBe(1);
+      expect(
+        renames.some(
+          ([sourcePath, destinationPath]) =>
+            sourcePath.includes('.stale-') && destinationPath === lockPath,
+        ),
+      ).toBe(false);
       expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
         version: 1,
         channels: {
           stable: stableRecord,
           dev: devRecord,
+        },
+      });
+      expect(readdirSync(stateDir)).toEqual(['builds.json']);
+    });
+
+    it('allows a successor to acquire while a recovered owner file is being cleaned', async () => {
+      const homeDir = createScratchDirectory('provenance-successor-during-stale-cleanup');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      const staleTime = new Date(Date.now() - 60_000);
+      const { ownerPath: staleOwnerPath } = writeLockOwner(
+        lockPath,
+        'dead-owner',
+        4242,
+        staleTime.toISOString(),
+      );
+      utimesSync(staleOwnerPath, staleTime, staleTime);
+
+      let markStaleOwnerCleanup = () => {};
+      let releaseStaleOwnerCleanup = () => {};
+      const staleOwnerCleanupStarted = new Promise<void>((resolveStarted) => {
+        markStaleOwnerCleanup = resolveStarted;
+      });
+      const staleOwnerCleanupGate = new Promise<void>((resolveGate) => {
+        releaseStaleOwnerCleanup = resolveGate;
+      });
+      const stableWrite = writeBuildProvenance(stableRecord, {
+        homeDir,
+        randomUUID: () => 'stale-recovery-contender',
+        lockRetryMs: 1,
+        lockTimeoutMs: 500,
+        staleLockMs: 10,
+        isProcessAlive: async (pid: number) => pid === process.pid,
+        unlinkPath: async (targetPath: string) => {
+          if (targetPath === staleOwnerPath) {
+            markStaleOwnerCleanup();
+            await staleOwnerCleanupGate;
+          }
+          await unlinkAsync(targetPath);
+        },
+      });
+      await staleOwnerCleanupStarted;
+
+      let markSuccessorWriting = () => {};
+      let releaseSuccessorWrite = () => {};
+      const successorWriting = new Promise<void>((resolveWriting) => {
+        markSuccessorWriting = resolveWriting;
+      });
+      const successorWriteGate = new Promise<void>((resolveGate) => {
+        releaseSuccessorWrite = resolveGate;
+      });
+      const devWrite = writeBuildProvenance(devRecord, {
+        homeDir,
+        randomUUID: () => 'cleanup-successor',
+        lockRetryMs: 1,
+        lockTimeoutMs: 500,
+        writeFileText: async (
+          filePath: string,
+          content: string,
+          options?: { exclusive?: boolean },
+        ) => {
+          if (!options?.exclusive) {
+            markSuccessorWriting();
+            await successorWriteGate;
+          }
+          writeFileSync(filePath, content, {
+            encoding: 'utf8',
+            mode: 0o600,
+            ...(options?.exclusive ? { flag: 'wx' } : {}),
+          });
+        },
+      });
+      await successorWriting;
+
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-cleanup-successor.json',
+      );
+      releaseStaleOwnerCleanup();
+      await tick();
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-cleanup-successor.json',
+      );
+      releaseSuccessorWrite();
+      await Promise.all([stableWrite, devWrite]);
+
+      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          dev: devRecord,
+          stable: stableRecord,
         },
       });
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
@@ -1841,8 +2258,12 @@ describe('macOS build channels', () => {
         writeBuildProvenance(stableRecord, {
           homeDir,
           randomUUID: () => 'write-failure',
-          writeFileText: async (filePath: string, content: string) => {
-            if (filePath.startsWith(`${join(stateDir, 'builds.json.lock')}/`)) {
+          writeFileText: async (
+            filePath: string,
+            content: string,
+            options?: { exclusive?: boolean },
+          ) => {
+            if (options?.exclusive) {
               writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
               return;
             }
@@ -1884,20 +2305,145 @@ describe('macOS build channels', () => {
       expect(readdirSync(stateDir)).toEqual(['builds.json']);
     });
 
+    it('removes only its owner file when lock publication fails', async () => {
+      const homeDir = createScratchDirectory('provenance-lock-publication-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'publication-failure',
+          symlinkPath: async () => {
+            throw new Error('symlink publication failed');
+          },
+        }),
+      ).rejects.toThrow(/symlink publication failed/);
+
+      expect(readdirSync(stateDir)).toEqual([]);
+    });
+
+    it('cleans a partially written owner file before lock publication', async () => {
+      const homeDir = createScratchDirectory('provenance-owner-write-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'partial-owner',
+          writeFileText: async (
+            filePath: string,
+            content: string,
+            options?: { exclusive?: boolean },
+          ) => {
+            writeFileSync(filePath, content, {
+              encoding: 'utf8',
+              mode: 0o600,
+              ...(options?.exclusive ? { flag: 'wx' } : {}),
+            });
+            if (options?.exclusive) {
+              throw new Error('owner write failed');
+            }
+          },
+        }),
+      ).rejects.toThrow(/owner write failed/);
+
+      expect(readdirSync(stateDir)).toEqual([]);
+    });
+
+    it('preserves a pre-existing owner file when exclusive creation loses', async () => {
+      const homeDir = createScratchDirectory('provenance-owner-file-collision');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const ownerPath = join(
+        stateDir,
+        'builds.json.lock.owner-colliding-owner.json',
+      );
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(ownerPath, 'pre-existing owner\n', 'utf8');
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'colliding-owner',
+        }),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+
+      expect(readFileSync(ownerPath, 'utf8')).toBe('pre-existing owner\n');
+      expect(readdirSync(stateDir)).toEqual([
+        'builds.json.lock.owner-colliding-owner.json',
+      ]);
+    });
+
+    it('never deletes a successor acquired after its lock symlink is unlinked', async () => {
+      const homeDir = createScratchDirectory('provenance-release-successor');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      const lockPath = `${provenancePath}.lock`;
+      let lockUnlinks = 0;
+      let ownLockUnlinked = false;
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          randomUUID: () => 'releasing-owner',
+          readlinkPath: async (targetPath: string) => {
+            if (targetPath === lockPath && ownLockUnlinked) {
+              throw new Error('lock path read after release');
+            }
+            return readlinkAsync(targetPath);
+          },
+          unlinkPath: async (targetPath: string) => {
+            if (targetPath === lockPath) {
+              lockUnlinks += 1;
+              await unlinkAsync(targetPath);
+              ownLockUnlinked = true;
+              writeLockOwner(lockPath, 'release-successor', 9999);
+              return;
+            }
+            await unlinkAsync(targetPath);
+          },
+        }),
+      ).resolves.toBe(provenancePath);
+
+      expect(lockUnlinks).toBe(1);
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-release-successor.json',
+      );
+      expect(
+        existsSync(join(stateDir, 'builds.json.lock.owner-releasing-owner.json')),
+      ).toBe(false);
+    });
+
     it('preserves a replacement lock when ownership changes before release', async () => {
       const homeDir = createScratchDirectory('provenance-release-owner-mismatch');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
       const provenancePath = join(stateDir, 'builds.json');
       const lockPath = `${provenancePath}.lock`;
-      const ownerPath = join(lockPath, 'owner.json');
+      const originalOwnerPath = join(
+        stateDir,
+        'builds.json.lock.owner-original-owner.json',
+      );
+      let replacementOwnerPath = '';
 
       const error = await writeBuildProvenance(devRecord, {
         homeDir,
         randomUUID: () => 'original-owner',
-        writeFileText: async (filePath: string, content: string) => {
-          writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-          if (!filePath.startsWith(`${lockPath}/`)) {
-            writeLockOwner(lockPath, 'replacement-owner', 9999);
+        writeFileText: async (
+          filePath: string,
+          content: string,
+          options?: { exclusive?: boolean },
+        ) => {
+          writeFileSync(filePath, content, {
+            encoding: 'utf8',
+            mode: 0o600,
+            ...(options?.exclusive ? { flag: 'wx' } : {}),
+          });
+          if (!options?.exclusive) {
+            unlinkSync(lockPath);
+            replacementOwnerPath = writeLockOwner(
+              lockPath,
+              'replacement-owner',
+              9999,
+            ).ownerPath;
           }
         },
       }).then(
@@ -1906,11 +2452,15 @@ describe('macOS build channels', () => {
       );
 
       expect(error?.message).toMatch(/release.*ownership|ownership.*release/i);
-      expect(JSON.parse(readFileSync(ownerPath, 'utf8'))).toEqual({
+      expect(JSON.parse(readFileSync(replacementOwnerPath, 'utf8'))).toEqual({
         token: 'replacement-owner',
         pid: 9999,
+        createdAt: expect.any(String),
       });
-      expect(existsSync(lockPath)).toBe(true);
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-replacement-owner.json',
+      );
+      expect(existsSync(originalOwnerPath)).toBe(false);
       expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
     });
 
@@ -1922,11 +2472,12 @@ describe('macOS build channels', () => {
 
       const error = await writeBuildProvenance(devRecord, {
         homeDir,
-        removePath: async (targetPath) => {
+        randomUUID: () => 'release-failure',
+        unlinkPath: async (targetPath: string) => {
           if (targetPath === lockPath) {
             throw new Error('release failed');
           }
-          rmSync(targetPath, { recursive: true, force: true });
+          await unlinkAsync(targetPath);
         },
       }).then(
         () => undefined,
@@ -1937,7 +2488,9 @@ describe('macOS build channels', () => {
       expect(error?.message).toContain('release failed');
       expect(error?.cause).toBeInstanceOf(Error);
       expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-      expect(existsSync(lockPath)).toBe(true);
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-release-failure.json',
+      );
     });
 
     it('preserves write and lock release failures together', async () => {
@@ -1947,18 +2500,23 @@ describe('macOS build channels', () => {
 
       const error = await writeBuildProvenance(devRecord, {
         homeDir,
-        writeFileText: async (filePath: string, content: string) => {
-          if (filePath.startsWith(`${lockPath}/`)) {
+        randomUUID: () => 'write-release-failure',
+        writeFileText: async (
+          filePath: string,
+          content: string,
+          options?: { exclusive?: boolean },
+        ) => {
+          if (options?.exclusive) {
             writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
             return;
           }
           throw new Error('write failed');
         },
-        removePath: async (targetPath) => {
+        unlinkPath: async (targetPath: string) => {
           if (targetPath === lockPath) {
             throw new Error('release failed');
           }
-          rmSync(targetPath, { recursive: true, force: true });
+          await unlinkAsync(targetPath);
         },
       }).then(
         () => undefined,
@@ -1970,7 +2528,9 @@ describe('macOS build channels', () => {
       expect(error?.message).toContain('Failed to release build provenance lock');
       expect(error?.message).toContain('release failed');
       expect((error as AggregateError).errors).toHaveLength(2);
-      expect(existsSync(lockPath)).toBe(true);
+      expect(readlinkSync(lockPath)).toBe(
+        'builds.json.lock.owner-write-release-failure.json',
+      );
     });
   });
 

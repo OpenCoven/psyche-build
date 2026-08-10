@@ -110,12 +110,20 @@ export interface InstallOverrides {
 export interface WriteBuildProvenanceOverrides {
   homeDir?: string;
   mkdirPath?: (directoryPath: string) => void | Promise<void>;
-  makeLockDirectory?: (directoryPath: string) => void | Promise<void>;
   readFileText?: (filePath: string) => string | Promise<string>;
-  writeFileText?: (filePath: string, content: string) => void | Promise<void>;
+  readlinkPath?: (symlinkPath: string) => string | Promise<string>;
+  symlinkPath?: (target: string, symlinkPath: string) => void | Promise<void>;
+  unlinkPath?: (targetPath: string) => void | Promise<void>;
+  writeFileText?: (
+    filePath: string,
+    content: string,
+    options?: { exclusive?: boolean },
+  ) => void | Promise<void>;
   renamePath?: (sourcePath: string, destinationPath: string) => void | Promise<void>;
   removePath?: (targetPath: string) => void | Promise<void>;
-  statPath?: (targetPath: string) => Pick<Stats, 'mtimeMs'> | Promise<Pick<Stats, 'mtimeMs'>>;
+  statPath?: (
+    targetPath: string,
+  ) => Pick<Stats, 'mtimeMs' | 'isFile'> | Promise<Pick<Stats, 'mtimeMs' | 'isFile'>>;
   sleep?: (ms: number) => Promise<void>;
   nowMs?: () => number;
   isProcessAlive?: (pid: number) => boolean | Promise<boolean>;
