@@ -144,16 +144,34 @@ describe('Tauri native workspace security contract', () => {
   test('requires directory durability before initial forward certification succeeds', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const commit = functionBody(source, 'commit_initial_workspace_forward');
+    const finish = functionBody(source, 'finish_initial_workspace_forward');
     const certify = functionBody(source, 'certify_initial_forward_recovery');
 
     const commitMarker = commit.indexOf('declare_absent_forward_commit');
-    const commitDirectorySync = commit.indexOf('sync_parent_directory(workspace_dir, parent)');
+    const finishCall = commit.indexOf('finish_initial_workspace_forward');
+    const commitDirectorySync = finish.indexOf('sync_parent_directory(workspace_dir, parent)');
     const certifiedMarkerSync = certify.indexOf('marker.sync_all()');
     const certifiedDirectorySync = certify.indexOf('sync_parent_directory(workspace_dir, parent)');
 
     expect(commitMarker).toBeGreaterThanOrEqual(0);
-    expect(commitDirectorySync).toBeGreaterThan(commitMarker);
+    expect(finishCall).toBeGreaterThan(commitMarker);
+    expect(commitDirectorySync).toBeGreaterThanOrEqual(0);
     expect(certifiedMarkerSync).toBeGreaterThanOrEqual(0);
     expect(certifiedDirectorySync).toBeGreaterThan(certifiedMarkerSync);
+  });
+
+  test('revalidates normal initial-save success after its final directory sync', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const finish = functionBody(source, 'finish_initial_workspace_forward');
+    const resolve = functionBody(source, 'resolve_initial_workspace_after_marker_failure');
+
+    const directorySync = finish.indexOf('sync_parent_directory(workspace_dir, parent)');
+    const postSyncFault = finish.indexOf('run_post_initial_forward_sync_fault');
+    const resolution = finish.indexOf('resolve_initial_workspace_after_marker_failure');
+
+    expect(directorySync).toBeGreaterThanOrEqual(0);
+    expect(postSyncFault).toBeGreaterThan(directorySync);
+    expect(resolution).toBeGreaterThan(postSyncFault);
+    expect(resolve).toContain('certify_initial_forward_recovery');
   });
 });

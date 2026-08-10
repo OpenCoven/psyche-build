@@ -315,22 +315,32 @@ where
     before_rename(temp_guard.path.as_path())?;
 
     let had_workspace = workspace_file_exists_in(&workspace_dir, path)?;
-    let (transaction_pending_path, transaction_committed_path) = if had_workspace {
-        create_rollback_backup(&workspace_dir, path, pending_path.as_path())?;
-        (pending_path.as_path(), committed_path.as_path())
-    } else {
-        create_absent_rollback_marker_in(&workspace_dir, absent_pending_path.as_path())?;
-        create_forward_rollback_in(
-            &workspace_dir,
-            &temp_file,
-            temp_guard.path.as_path(),
-            forward_path.as_path(),
-        )?;
-        (
-            absent_pending_path.as_path(),
-            absent_committed_path.as_path(),
-        )
-    };
+    let (transaction_pending_path, transaction_committed_path, prior_workspace_bytes) =
+        if had_workspace {
+            create_rollback_backup(&workspace_dir, path, pending_path.as_path())?;
+            (
+                pending_path.as_path(),
+                committed_path.as_path(),
+                Some(read_workspace_artifact_bytes(
+                    &workspace_dir,
+                    pending_path.as_path(),
+                    "workspace pending rollback",
+                )?),
+            )
+        } else {
+            create_absent_rollback_marker_in(&workspace_dir, absent_pending_path.as_path())?;
+            (
+                absent_pending_path.as_path(),
+                absent_committed_path.as_path(),
+                None,
+            )
+        };
+    create_forward_rollback_in(
+        &workspace_dir,
+        &temp_file,
+        temp_guard.path.as_path(),
+        forward_path.as_path(),
+    )?;
     if let Err(error) = sync_parent_directory(&workspace_dir, parent) {
         return Err(format!(
             "publish pending workspace rollback '{}': {}",
@@ -416,7 +426,23 @@ where
         &mut rename_workspace_path,
     );
     if had_workspace {
-        return commit_result;
+        return finish_prior_workspace_transaction(
+            &workspace_dir,
+            &temp_file,
+            &bytes,
+            prior_workspace_bytes
+                .as_deref()
+                .expect("existing workspace transaction must retain prior bytes"),
+            path,
+            parent,
+            transaction_pending_path,
+            transaction_committed_path,
+            forward_path.as_path(),
+            commit_result,
+            &mut sync_parent_directory,
+            &mut restore_workspace_backup,
+            &mut recreate_pending_rollback,
+        );
     }
 
     let commit_error = match commit_result {
@@ -425,26 +451,19 @@ where
             transaction_pending_path,
             transaction_committed_path,
         ) {
-            Ok(()) => match sync_parent_directory(&workspace_dir, parent) {
-                Ok(()) => return Ok(()),
-                Err(sync_error) => {
-                    return resolve_initial_workspace_after_marker_failure(
-                        &workspace_dir,
-                        &temp_file,
-                        path,
-                        parent,
-                        transaction_pending_path,
-                        transaction_committed_path,
-                        forward_path.as_path(),
-                        format!(
-                            "sync forward workspace marker '{}': {}",
-                            transaction_committed_path.display(),
-                            sync_error
-                        ),
-                        &mut sync_parent_directory,
-                    )
-                }
-            },
+            Ok(()) => {
+                return finish_initial_workspace_forward(
+                    &workspace_dir,
+                    &temp_file,
+                    &bytes,
+                    path,
+                    parent,
+                    transaction_pending_path,
+                    transaction_committed_path,
+                    forward_path.as_path(),
+                    &mut sync_parent_directory,
+                )
+            }
             Err(error) => {
                 if let Err(reset_error) = declare_absent_rollback(
                     &workspace_dir,
@@ -454,6 +473,7 @@ where
                     let forward_error = commit_initial_workspace_forward(
                         &workspace_dir,
                         &temp_file,
+                        &bytes,
                         path,
                         parent,
                         transaction_pending_path,
@@ -466,6 +486,7 @@ where
                         Err(forward_error) => resolve_initial_workspace_after_marker_failure(
                             &workspace_dir,
                             &temp_file,
+                            &bytes,
                             path,
                             parent,
                             transaction_pending_path,
@@ -491,6 +512,7 @@ where
                     Err(rollback_error) => resolve_initial_workspace_after_marker_failure(
                         &workspace_dir,
                         &temp_file,
+                        &bytes,
                         path,
                         parent,
                         transaction_pending_path,
@@ -530,6 +552,7 @@ where
                 Err(retry_error) => match commit_initial_workspace_forward(
                     &workspace_dir,
                     &temp_file,
+                    &bytes,
                     path,
                     parent,
                     transaction_pending_path,
@@ -541,6 +564,7 @@ where
                     Err(forward_error) => resolve_initial_workspace_after_marker_failure(
                         &workspace_dir,
                         &temp_file,
+                        &bytes,
                         path,
                         parent,
                         transaction_pending_path,
@@ -1740,6 +1764,55 @@ fn create_forward_rollback_in(
     )
 }
 
+fn read_workspace_artifact_bytes(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let Some(mut file) = open_existing_regular_file(workspace_dir, path, context, false)? else {
+        return Err(format!("{context} '{}' is missing", path.display()));
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
+    Ok(bytes)
+}
+
+fn verify_workspace_artifact_bytes(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    expected_bytes: &[u8],
+    context: &str,
+) -> Result<(), String> {
+    let actual = read_workspace_artifact_bytes(workspace_dir, path, context)?;
+    if actual != expected_bytes {
+        return Err(format!("{context} '{}' changed contents", path.display()));
+    }
+    Ok(())
+}
+
+fn verify_opened_workspace_artifact(
+    workspace_dir: &SecureWorkspaceDir,
+    file: &File,
+    path: &Path,
+    expected_bytes: &[u8],
+    context: &str,
+) -> Result<(), String> {
+    verify_opened_regular_file(workspace_dir, file, path, context)?;
+    verify_workspace_artifact_bytes(workspace_dir, path, expected_bytes, context)
+}
+
+fn validate_workspace_artifact_bytes(
+    bytes: &[u8],
+    path: &Path,
+    context: &str,
+) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("parse {context} '{}': {}", path.display(), error))?;
+    validate_workspace(&value)
+        .map_err(|error| format!("validate {context} '{}': {}", path.display(), error))
+}
+
 fn write_absent_marker(
     workspace_dir: &SecureWorkspaceDir,
     marker: &mut File,
@@ -1846,9 +1919,47 @@ fn declare_absent_resolution(
     }
 }
 
+fn finish_initial_workspace_forward(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let failure = match sync_parent_directory(workspace_dir, parent) {
+        Ok(()) => {
+            #[cfg(test)]
+            run_post_initial_forward_sync_fault(path)?;
+            "final initial workspace forward certification failed".to_string()
+        }
+        Err(error) => format!(
+            "sync forward workspace marker '{}': {}",
+            committed_path.display(),
+            error
+        ),
+    };
+    resolve_initial_workspace_after_marker_failure(
+        workspace_dir,
+        source_file,
+        expected_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        forward_path,
+        failure,
+        sync_parent_directory,
+    )
+}
+
 fn commit_initial_workspace_forward(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     parent: &Path,
     pending_path: &Path,
@@ -1862,36 +1973,38 @@ fn commit_initial_workspace_forward(
         forward_path,
         "workspace forward rollback",
     )?;
-    ensure_forward_workspace(workspace_dir, path, forward_path, true)?;
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")?;
-    declare_absent_forward_commit(workspace_dir, pending_path, committed_path)?;
-    sync_parent_directory(workspace_dir, parent).map_err(|error| {
-        format!(
-            "sync forward workspace marker '{}': {}",
-            committed_path.display(),
-            error
-        )
-    })?;
-    if !matches!(
-        absent_rollback_resolution(workspace_dir, pending_path, committed_path)?,
-        Some(AbsentRollbackResolution::Forward { .. })
-    ) {
-        return Err(
-            "absent workspace marker changed while committing forward recovery".to_string(),
-        );
-    }
-    verify_opened_regular_file(
+    verify_workspace_artifact_bytes(
         workspace_dir,
-        source_file,
         forward_path,
+        expected_bytes,
         "workspace forward rollback",
     )?;
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")
+    ensure_forward_workspace(workspace_dir, path, forward_path, true)?;
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace temp",
+    )?;
+    declare_absent_forward_commit(workspace_dir, pending_path, committed_path)?;
+    finish_initial_workspace_forward(
+        workspace_dir,
+        source_file,
+        expected_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        forward_path,
+        sync_parent_directory,
+    )
 }
 
 fn resolve_initial_workspace_after_marker_failure(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     parent: &Path,
     pending_path: &Path,
@@ -1900,19 +2013,24 @@ fn resolve_initial_workspace_after_marker_failure(
     failure: String,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    // This only records an explicit, inode-verified forward branch; it is not
+    // This only records an explicit, inode-and-content-verified forward branch; it is not
     // certification until the fallback restores and directory-syncs that branch.
-    let forward_evidence = observed_initial_forward_recovery(
+    let (forward_evidence, observation_error) = match observed_initial_forward_recovery(
         workspace_dir,
         source_file,
+        expected_bytes,
         path,
         pending_path,
         committed_path,
         forward_path,
-    )?;
+    ) {
+        Ok(observed) => (observed, None),
+        Err(error) => (false, Some(error)),
+    };
     let certification_error = match certify_initial_forward_recovery(
         workspace_dir,
         source_file,
+        expected_bytes,
         path,
         parent,
         pending_path,
@@ -1924,10 +2042,15 @@ fn resolve_initial_workspace_after_marker_failure(
         Ok(false) => "no forward recovery marker remains".to_string(),
         Err(error) => error,
     };
+    let certification_error = match observation_error {
+        Some(error) => format!("{certification_error}; forward observation failed: {error}"),
+        None => certification_error,
+    };
 
     let forward_error = match durably_commit_initial_workspace_without_marker(
         workspace_dir,
         source_file,
+        expected_bytes,
         path,
         parent,
         pending_path,
@@ -1965,6 +2088,7 @@ fn resolve_initial_workspace_after_marker_failure(
         Err(rollback_error) if forward_evidence => restore_observed_initial_forward_recovery(
             workspace_dir,
             source_file,
+            expected_bytes,
             path,
             parent,
             forward_path,
@@ -1989,6 +2113,7 @@ fn resolve_initial_workspace_after_marker_failure(
 fn observed_initial_forward_recovery(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     pending_path: &Path,
     committed_path: &Path,
@@ -1996,7 +2121,7 @@ fn observed_initial_forward_recovery(
 ) -> Result<bool, String> {
     if !matches!(
         absent_rollback_resolution(workspace_dir, pending_path, committed_path)?,
-        Some(AbsentRollbackResolution::Forward {
+        AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Forward {
             require_candidate: true
         })
     ) {
@@ -2011,8 +2136,20 @@ fn observed_initial_forward_recovery(
         forward_path,
         "workspace forward rollback",
     )?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        forward_path,
+        expected_bytes,
+        "workspace forward rollback",
+    )?;
     if regular_file_exists(workspace_dir, path, "workspace")? {
-        verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")?;
+        verify_opened_workspace_artifact(
+            workspace_dir,
+            source_file,
+            path,
+            expected_bytes,
+            "workspace temp",
+        )?;
     }
     Ok(true)
 }
@@ -2020,13 +2157,20 @@ fn observed_initial_forward_recovery(
 fn restore_observed_initial_forward_recovery(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     parent: &Path,
     forward_path: &Path,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
     ensure_forward_workspace(workspace_dir, path, forward_path, true)?;
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")?;
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace temp",
+    )?;
     sync_parent_directory(workspace_dir, parent).map_err(|error| {
         format!(
             "sync restored observed forward workspace '{}': {}",
@@ -2034,12 +2178,19 @@ fn restore_observed_initial_forward_recovery(
             error
         )
     })?;
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace temp",
+    )
 }
 
 fn certify_initial_forward_recovery(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     parent: &Path,
     pending_path: &Path,
@@ -2047,8 +2198,9 @@ fn certify_initial_forward_recovery(
     forward_path: &Path,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<bool, String> {
-    let Some(AbsentRollbackResolution::Forward { require_candidate }) =
-        absent_rollback_resolution(workspace_dir, pending_path, committed_path)?
+    let AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Forward {
+        require_candidate,
+    }) = absent_rollback_resolution(workspace_dir, pending_path, committed_path)?
     else {
         return Ok(false);
     };
@@ -2100,7 +2252,7 @@ fn certify_initial_forward_recovery(
     })?;
     if !matches!(
         absent_rollback_resolution(workspace_dir, pending_path, committed_path)?,
-        Some(AbsentRollbackResolution::Forward { .. })
+        AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Forward { .. })
     ) {
         return Err(
             "absent workspace marker changed while certifying forward recovery".to_string(),
@@ -2122,10 +2274,22 @@ fn certify_initial_forward_recovery(
             forward_path,
             "workspace forward rollback",
         )?;
+        verify_workspace_artifact_bytes(
+            workspace_dir,
+            forward_path,
+            expected_bytes,
+            "workspace forward rollback",
+        )?;
     }
 
     if regular_file_exists(workspace_dir, path, "workspace")? {
-        verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")?;
+        verify_opened_workspace_artifact(
+            workspace_dir,
+            source_file,
+            path,
+            expected_bytes,
+            "workspace temp",
+        )?;
     } else if !has_forward {
         return Err(format!(
             "forward workspace '{}' and rollback '{}' are both missing",
@@ -2139,6 +2303,7 @@ fn certify_initial_forward_recovery(
 fn durably_commit_initial_workspace_without_marker(
     workspace_dir: &SecureWorkspaceDir,
     source_file: &File,
+    expected_bytes: &[u8],
     path: &Path,
     parent: &Path,
     pending_path: &Path,
@@ -2152,8 +2317,20 @@ fn durably_commit_initial_workspace_without_marker(
         forward_path,
         "workspace forward rollback",
     )?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        forward_path,
+        expected_bytes,
+        "workspace forward rollback",
+    )?;
     ensure_forward_workspace(workspace_dir, path, forward_path, true)?;
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")?;
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace temp",
+    )?;
     unlink_existing_regular_workspace_path(
         workspace_dir,
         pending_path,
@@ -2182,7 +2359,13 @@ fn durably_commit_initial_workspace_without_marker(
     )? {
         return Err("absent workspace marker reappeared after markerless forward sync".to_string());
     }
-    verify_opened_regular_file(workspace_dir, source_file, path, "workspace temp")
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace temp",
+    )
 }
 
 fn durably_restore_initial_absence_without_marker(
@@ -2276,6 +2459,334 @@ fn durably_restore_initial_absence(
             error
         )
     })
+}
+
+fn finish_prior_workspace_transaction(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    prior_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    commit_result: Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    recreate_pending_rollback: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    match commit_result {
+        Ok(()) => match certify_prior_workspace_forward(
+            workspace_dir,
+            source_file,
+            expected_bytes,
+            path,
+            parent,
+            pending_path,
+            committed_path,
+            forward_path,
+            false,
+            sync_parent_directory,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => resolve_prior_workspace_after_commit_failure(
+                workspace_dir,
+                source_file,
+                expected_bytes,
+                prior_bytes,
+                path,
+                parent,
+                pending_path,
+                committed_path,
+                forward_path,
+                format!("final committed workspace certification failed: {error}"),
+                sync_parent_directory,
+                restore_workspace_backup,
+                recreate_pending_rollback,
+            ),
+        },
+        Err(error) => resolve_prior_workspace_after_commit_failure(
+            workspace_dir,
+            source_file,
+            expected_bytes,
+            prior_bytes,
+            path,
+            parent,
+            pending_path,
+            committed_path,
+            forward_path,
+            error,
+            sync_parent_directory,
+            restore_workspace_backup,
+            recreate_pending_rollback,
+        ),
+    }
+}
+
+fn resolve_prior_workspace_after_commit_failure(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    prior_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    failure: String,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    recreate_pending_rollback: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let pending_error = match certify_prior_pending_recovery(
+        workspace_dir,
+        prior_bytes,
+        parent,
+        pending_path,
+        sync_parent_directory,
+    ) {
+        Ok(()) => return Err(failure),
+        Err(error) => error,
+    };
+
+    let rollback_error = match certify_prior_workspace_rollback(
+        workspace_dir,
+        prior_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        sync_parent_directory,
+        restore_workspace_backup,
+        recreate_pending_rollback,
+    ) {
+        Ok(()) => return Err(failure),
+        Err(error) => error,
+    };
+
+    let forward_error = match certify_prior_workspace_forward(
+        workspace_dir,
+        source_file,
+        expected_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        forward_path,
+        true,
+        sync_parent_directory,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+
+    match certify_prior_workspace_rollback(
+        workspace_dir,
+        prior_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        sync_parent_directory,
+        restore_workspace_backup,
+        recreate_pending_rollback,
+    ) {
+        Ok(()) => Err(format!(
+            "{failure}; pending recovery certification failed: {pending_error}; \
+             initial rollback certification failed: {rollback_error}; \
+             forward certification failed: {forward_error}"
+        )),
+        Err(final_rollback_error) => Err(format!(
+            "{failure}; pending recovery certification failed: {pending_error}; \
+             initial rollback certification failed: {rollback_error}; \
+             forward certification failed: {forward_error}; \
+             final rollback certification failed: {final_rollback_error}"
+        )),
+    }
+}
+
+fn certify_prior_pending_recovery(
+    workspace_dir: &SecureWorkspaceDir,
+    prior_bytes: &[u8],
+    parent: &Path,
+    pending_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
+        return Err(format!(
+            "workspace pending rollback '{}' is missing",
+            pending_path.display()
+        ));
+    }
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        pending_path,
+        prior_bytes,
+        "workspace pending rollback",
+    )?;
+    sync_parent_directory(workspace_dir, parent).map_err(|error| {
+        format!(
+            "sync certified pending rollback '{}': {}",
+            pending_path.display(),
+            error
+        )
+    })?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        pending_path,
+        prior_bytes,
+        "workspace pending rollback",
+    )
+}
+
+fn certify_prior_workspace_rollback(
+    workspace_dir: &SecureWorkspaceDir,
+    prior_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    recreate_pending_rollback: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
+        if !regular_file_exists(
+            workspace_dir,
+            committed_path,
+            "workspace committed rollback",
+        )? {
+            return Err(
+                "cannot certify prior workspace rollback because no recovery copy remains"
+                    .to_string(),
+            );
+        }
+        recreate_pending_rollback(workspace_dir, committed_path, pending_path).map_err(
+            |error| {
+                format!(
+                    "recreate pending rollback '{}' from '{}': {}",
+                    pending_path.display(),
+                    committed_path.display(),
+                    error
+                )
+            },
+        )?;
+    }
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        pending_path,
+        prior_bytes,
+        "workspace pending rollback",
+    )?;
+    restore_workspace_backup(workspace_dir, pending_path, path).map_err(|error| {
+        format!(
+            "restore prior workspace '{}' from '{}': {}",
+            path.display(),
+            pending_path.display(),
+            error
+        )
+    })?;
+    sync_parent_directory(workspace_dir, parent).map_err(|error| {
+        format!(
+            "sync certified prior workspace rollback '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        pending_path,
+        prior_bytes,
+        "workspace pending rollback",
+    )?;
+    verify_workspace_artifact_bytes(workspace_dir, path, prior_bytes, "workspace")
+}
+
+fn certify_prior_workspace_forward(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    force_sync: bool,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        forward_path,
+        expected_bytes,
+        "workspace forward rollback",
+    )?;
+
+    let mut mutated = false;
+    if let Err(path_error) = verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace",
+    ) {
+        restore_workspace_backup_in(workspace_dir, forward_path, path).map_err(|error| {
+            format!(
+                "{path_error}; restore forward workspace '{}' from '{}': {}",
+                path.display(),
+                forward_path.display(),
+                error
+            )
+        })?;
+        mutated = true;
+    }
+    if regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
+        unlink_workspace_path(workspace_dir, pending_path, "workspace pending rollback").map_err(
+            |error| {
+                format!(
+                    "remove pending rollback '{}' for forward certification: {}",
+                    pending_path.display(),
+                    error
+                )
+            },
+        )?;
+        mutated = true;
+    }
+    regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )?;
+    if force_sync || mutated {
+        sync_parent_directory(workspace_dir, parent).map_err(|error| {
+            format!(
+                "sync certified forward workspace '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+    }
+    if regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
+        return Err(format!(
+            "pending rollback '{}' reappeared after forward certification",
+            pending_path.display()
+        ));
+    }
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        forward_path,
+        expected_bytes,
+        "workspace forward rollback",
+    )?;
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        path,
+        expected_bytes,
+        "workspace",
+    )
 }
 
 #[cfg(test)]
@@ -2602,6 +3113,13 @@ fn recover_pending_rollback_state(
         absent_pending_path,
         "workspace absent pending rollback",
     )?;
+    let has_committed = regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )?;
+    let has_forward =
+        regular_file_exists(workspace_dir, forward_path, "workspace forward rollback")?;
     if has_pending && has_absent_pending {
         return Err(format!(
             "workspace has conflicting pending rollback states at '{}' and '{}'",
@@ -2620,11 +3138,10 @@ fn recover_pending_rollback_state(
             restore_workspace_backup,
             rename_workspace_path,
         )?;
-    } else if let Some(resolution) =
-        absent_rollback_resolution(workspace_dir, absent_pending_path, absent_committed_path)?
-    {
-        match resolution {
-            AbsentRollbackResolution::Rollback => {
+    } else {
+        match absent_rollback_resolution(workspace_dir, absent_pending_path, absent_committed_path)?
+        {
+            AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Rollback) => {
                 if has_absent_pending {
                     recover_pending_workspace(
                         workspace_dir,
@@ -2653,16 +3170,28 @@ fn recover_pending_rollback_state(
                     })?;
                 }
             }
-            AbsentRollbackResolution::Forward { require_candidate } => {
-                ensure_forward_workspace(workspace_dir, path, forward_path, require_candidate)?;
-                sync_parent_directory(workspace_dir, parent).map_err(|error| {
-                    format!(
-                        "sync forward workspace '{}': {}; forward recovery retained at '{}'",
-                        path.display(),
-                        error,
-                        forward_path.display()
-                    )
-                })?;
+            AbsentRollbackInterpretation::Resolved(AbsentRollbackResolution::Forward {
+                require_candidate,
+            }) => {
+                if require_candidate || has_forward {
+                    recover_workspace_from_forward_candidate(
+                        workspace_dir,
+                        path,
+                        parent,
+                        forward_path,
+                        sync_parent_directory,
+                    )?;
+                } else {
+                    ensure_forward_workspace(workspace_dir, path, forward_path, false)?;
+                    sync_parent_directory(workspace_dir, parent).map_err(|error| {
+                        format!(
+                            "sync forward workspace '{}': {}; forward recovery retained at '{}'",
+                            path.display(),
+                            error,
+                            forward_path.display()
+                        )
+                    })?;
+                }
                 if has_absent_pending {
                     cleanup_committed_rollback(
                         workspace_dir,
@@ -2672,6 +3201,28 @@ fn recover_pending_rollback_state(
                     )?;
                 }
             }
+            AbsentRollbackInterpretation::Ambiguous => {
+                recover_ambiguous_initial_workspace(
+                    workspace_dir,
+                    path,
+                    parent,
+                    absent_pending_path,
+                    absent_committed_path,
+                    forward_path,
+                    sync_parent_directory,
+                )?;
+            }
+            AbsentRollbackInterpretation::Missing if has_committed && has_forward => {
+                certify_prior_committed_recovery(
+                    workspace_dir,
+                    path,
+                    parent,
+                    committed_path,
+                    forward_path,
+                    sync_parent_directory,
+                )?;
+            }
+            AbsentRollbackInterpretation::Missing => {}
         }
     }
     Ok(())
@@ -2683,46 +3234,85 @@ enum AbsentRollbackResolution {
     Forward { require_candidate: bool },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbsentRollbackInterpretation {
+    Missing,
+    Resolved(AbsentRollbackResolution),
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbsentMarkerRead {
+    Missing,
+    Resolved(AbsentRollbackResolution),
+    Malformed,
+}
+
 fn absent_rollback_resolution(
     workspace_dir: &SecureWorkspaceDir,
     pending_path: &Path,
     committed_path: &Path,
-) -> Result<Option<AbsentRollbackResolution>, String> {
+) -> Result<AbsentRollbackInterpretation, String> {
     let pending = read_absent_marker_resolution(workspace_dir, pending_path, false)?;
     let committed = read_absent_marker_resolution(workspace_dir, committed_path, true)?;
-    if matches!(pending, Some(AbsentRollbackResolution::Rollback))
-        || matches!(committed, Some(AbsentRollbackResolution::Rollback))
-    {
-        return Ok(Some(AbsentRollbackResolution::Rollback));
+    if matches!(
+        pending,
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Rollback)
+    ) || matches!(
+        committed,
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Rollback)
+    ) {
+        return Ok(AbsentRollbackInterpretation::Resolved(
+            AbsentRollbackResolution::Rollback,
+        ));
     }
     if matches!(
         pending,
-        Some(AbsentRollbackResolution::Forward {
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Forward {
             require_candidate: true
         })
     ) || matches!(
         committed,
-        Some(AbsentRollbackResolution::Forward {
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Forward {
             require_candidate: true
         })
     ) {
-        return Ok(Some(AbsentRollbackResolution::Forward {
-            require_candidate: true,
-        }));
+        return Ok(AbsentRollbackInterpretation::Resolved(
+            AbsentRollbackResolution::Forward {
+                require_candidate: true,
+            },
+        ));
     }
-    if pending.is_some() || committed.is_some() {
-        return Ok(Some(AbsentRollbackResolution::Forward {
-            require_candidate: false,
-        }));
+    if matches!(
+        pending,
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Forward {
+            require_candidate: false
+        })
+    ) || matches!(
+        committed,
+        AbsentMarkerRead::Resolved(AbsentRollbackResolution::Forward {
+            require_candidate: false
+        })
+    ) {
+        return Ok(AbsentRollbackInterpretation::Resolved(
+            AbsentRollbackResolution::Forward {
+                require_candidate: false,
+            },
+        ));
     }
-    Ok(None)
+    if matches!(pending, AbsentMarkerRead::Malformed)
+        || matches!(committed, AbsentMarkerRead::Malformed)
+    {
+        return Ok(AbsentRollbackInterpretation::Ambiguous);
+    }
+    Ok(AbsentRollbackInterpretation::Missing)
 }
 
 fn read_absent_marker_resolution(
     workspace_dir: &SecureWorkspaceDir,
     marker_path: &Path,
     legacy_forward: bool,
-) -> Result<Option<AbsentRollbackResolution>, String> {
+) -> Result<AbsentMarkerRead, String> {
     let Some(mut marker) = open_existing_regular_file(
         workspace_dir,
         marker_path,
@@ -2730,7 +3320,7 @@ fn read_absent_marker_resolution(
         false,
     )?
     else {
-        return Ok(None);
+        return Ok(AbsentMarkerRead::Missing);
     };
     let marker_size = marker
         .metadata()
@@ -2743,11 +3333,7 @@ fn read_absent_marker_resolution(
         })?
         .len();
     if marker_size > ABSENT_MARKER_SIZE_LIMIT {
-        return Err(format!(
-            "absent workspace rollback marker '{}' is too large: {} bytes",
-            marker_path.display(),
-            marker_size
-        ));
+        return Ok(AbsentMarkerRead::Malformed);
     }
     let mut payload = Vec::with_capacity(marker_size as usize);
     marker.read_to_end(&mut payload).map_err(|error| {
@@ -2758,18 +3344,23 @@ fn read_absent_marker_resolution(
         )
     })?;
     match payload.as_slice() {
-        ABSENT_ROLLBACK_MARKER => Ok(Some(AbsentRollbackResolution::Rollback)),
-        ABSENT_FORWARD_MARKER => Ok(Some(AbsentRollbackResolution::Forward {
-            require_candidate: true,
-        })),
-        [] if legacy_forward => Ok(Some(AbsentRollbackResolution::Forward {
-            require_candidate: false,
-        })),
-        [] => Ok(Some(AbsentRollbackResolution::Rollback)),
-        _ => Err(format!(
-            "absent workspace rollback marker '{}' has invalid contents",
-            marker_path.display()
+        ABSENT_ROLLBACK_MARKER => Ok(AbsentMarkerRead::Resolved(
+            AbsentRollbackResolution::Rollback,
         )),
+        ABSENT_FORWARD_MARKER => Ok(AbsentMarkerRead::Resolved(
+            AbsentRollbackResolution::Forward {
+                require_candidate: true,
+            },
+        )),
+        [] if legacy_forward => Ok(AbsentMarkerRead::Resolved(
+            AbsentRollbackResolution::Forward {
+                require_candidate: false,
+            },
+        )),
+        [] => Ok(AbsentMarkerRead::Resolved(
+            AbsentRollbackResolution::Rollback,
+        )),
+        _ => Ok(AbsentMarkerRead::Malformed),
     }
 }
 
@@ -2818,6 +3409,174 @@ fn ensure_forward_workspace(
         path,
         "workspace forward rollback",
     )
+}
+
+fn recover_workspace_from_forward_candidate(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    parent: &Path,
+    forward_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let forward_bytes =
+        read_workspace_artifact_bytes(workspace_dir, forward_path, "workspace forward rollback")?;
+    validate_workspace_artifact_bytes(&forward_bytes, forward_path, "workspace forward rollback")?;
+
+    let workspace_matches = if regular_file_exists(workspace_dir, path, "workspace")? {
+        read_workspace_artifact_bytes(workspace_dir, path, "workspace")? == forward_bytes
+    } else {
+        false
+    };
+    if !workspace_matches {
+        restore_workspace_backup_in(workspace_dir, forward_path, path).map_err(|error| {
+            format!(
+                "restore forward workspace '{}' from '{}': {}",
+                path.display(),
+                forward_path.display(),
+                error
+            )
+        })?;
+    }
+    sync_parent_directory(workspace_dir, parent).map_err(|error| {
+        format!(
+            "sync forward workspace '{}': {}; forward recovery retained at '{}'",
+            path.display(),
+            error,
+            forward_path.display()
+        )
+    })?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        forward_path,
+        &forward_bytes,
+        "workspace forward rollback",
+    )?;
+    verify_workspace_artifact_bytes(workspace_dir, path, &forward_bytes, "workspace")
+}
+
+fn certify_prior_committed_recovery(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    parent: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let committed_bytes = read_workspace_artifact_bytes(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )?;
+    let forward_bytes =
+        read_workspace_artifact_bytes(workspace_dir, forward_path, "workspace forward rollback")?;
+    let workspace_bytes = read_workspace_artifact_bytes(workspace_dir, path, "workspace")?;
+    let certified_bytes = if workspace_bytes == forward_bytes {
+        validate_workspace_artifact_bytes(
+            &forward_bytes,
+            forward_path,
+            "workspace forward rollback",
+        )?;
+        forward_bytes.as_slice()
+    } else if workspace_bytes == committed_bytes {
+        committed_bytes.as_slice()
+    } else {
+        return Err(format!(
+            "workspace '{}' matches neither committed rollback '{}' nor forward candidate '{}'",
+            path.display(),
+            committed_path.display(),
+            forward_path.display()
+        ));
+    };
+
+    sync_parent_directory(workspace_dir, parent).map_err(|error| {
+        format!(
+            "sync certified committed workspace recovery '{}': {}",
+            path.display(),
+            error
+        )
+    })?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        committed_path,
+        &committed_bytes,
+        "workspace committed rollback",
+    )?;
+    verify_workspace_artifact_bytes(
+        workspace_dir,
+        forward_path,
+        &forward_bytes,
+        "workspace forward rollback",
+    )?;
+    verify_workspace_artifact_bytes(workspace_dir, path, certified_bytes, "workspace")
+}
+
+fn recover_ambiguous_initial_workspace(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let forward_error = match recover_workspace_from_forward_candidate(
+        workspace_dir,
+        path,
+        parent,
+        forward_path,
+        sync_parent_directory,
+    ) {
+        Ok(()) => {
+            unlink_existing_regular_workspace_path(
+                workspace_dir,
+                pending_path,
+                "workspace absent pending rollback",
+            )?;
+            unlink_existing_regular_workspace_path(
+                workspace_dir,
+                committed_path,
+                "workspace absent committed rollback",
+            )?;
+            sync_parent_directory(workspace_dir, parent).map_err(|error| {
+                format!(
+                    "sync removal of ambiguous absent workspace markers in '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+            if regular_file_exists(
+                workspace_dir,
+                pending_path,
+                "workspace absent pending rollback",
+            )? || regular_file_exists(
+                workspace_dir,
+                committed_path,
+                "workspace absent committed rollback",
+            )? {
+                return Err(
+                    "ambiguous absent workspace marker reappeared after forward recovery"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+
+    match durably_restore_initial_absence_without_marker(
+        workspace_dir,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        sync_parent_directory,
+    ) {
+        Ok(()) => Ok(()),
+        Err(rollback_error) => Err(format!(
+            "ambiguous absent workspace forward resolution failed: {forward_error}; \
+             rollback resolution failed: {rollback_error}"
+        )),
+    }
 }
 
 fn recover_pending_workspace(
@@ -3505,6 +4264,8 @@ where
 thread_local! {
     static POST_VERIFICATION_PRE_RENAME_REPLACEMENT: RefCell<Option<Vec<u8>>> =
         const { RefCell::new(None) };
+    static POST_INITIAL_FORWARD_SYNC_FAULT: RefCell<Option<PostInitialForwardSyncFault>> =
+        const { RefCell::new(None) };
     static MARKER_FILE_FAULT: RefCell<Option<MarkerFileFaultPlan>> = const { RefCell::new(None) };
 }
 
@@ -3520,10 +4281,31 @@ fn run_post_verification_pre_rename_fault(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
+enum PostInitialForwardSyncFault {
+    ReplaceWorkspace(Vec<u8>),
+}
+
+#[cfg(test)]
+fn run_post_initial_forward_sync_fault(path: &Path) -> Result<(), String> {
+    POST_INITIAL_FORWARD_SYNC_FAULT.with(|fault| {
+        let Some(fault) = fault.borrow_mut().take() else {
+            return Ok(());
+        };
+        match fault {
+            PostInitialForwardSyncFault::ReplaceWorkspace(replacement) => {
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+                fs::write(path, replacement).map_err(|error| error.to_string())
+            }
+        }
+    })
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum MarkerFileFaultMode {
     RepeatedWriteWithPersistedEmptyMarker,
     RepeatedSyncWithPersistedForwardMarker,
+    PartialWriteWithPersistedTornMarker,
 }
 
 #[cfg(test)]
@@ -3620,6 +4402,41 @@ fn run_marker_file_fault(
                 })?;
                 Err(format!(
                     "injected repeated marker file sync failure #{}",
+                    plan.failures
+                ))
+            }
+            MarkerFileFaultMode::PartialWriteWithPersistedTornMarker => {
+                if operation != MarkerFileOperation::Write
+                    || (!plan.armed && payload != ABSENT_FORWARD_MARKER)
+                {
+                    return Ok(());
+                }
+                plan.armed = true;
+                plan.failures += 1;
+                let partial_len = payload.len() / 2;
+                marker.write_all(&payload[..partial_len]).map_err(|error| {
+                    format!(
+                        "persist partial absent workspace marker '{}': {}",
+                        marker_path.display(),
+                        error
+                    )
+                })?;
+                marker.flush().map_err(|error| {
+                    format!(
+                        "flush partial absent workspace marker '{}': {}",
+                        marker_path.display(),
+                        error
+                    )
+                })?;
+                marker.sync_all().map_err(|error| {
+                    format!(
+                        "sync partial absent workspace marker '{}': {}",
+                        marker_path.display(),
+                        error
+                    )
+                })?;
+                Err(format!(
+                    "injected partial marker write failure #{}",
                     plan.failures
                 ))
             }
@@ -3727,6 +4544,30 @@ fn workspace_save_to_test_swap_after_final_verification_before_rename(
         .with(|pending| pending.borrow_mut().take().is_some());
     if missed {
         Err("expected post-verification pre-rename fault point was not reached".to_string())
+    } else {
+        result
+    }
+}
+
+#[cfg(test)]
+fn workspace_save_to_test_post_initial_forward_sync_fault(
+    path: &Path,
+    value: &Value,
+    fault: PostInitialForwardSyncFault,
+) -> Result<(), String> {
+    POST_INITIAL_FORWARD_SYNC_FAULT.with(|pending| {
+        assert!(
+            pending.borrow().is_none(),
+            "post-initial-forward-sync fault already installed"
+        );
+        *pending.borrow_mut() = Some(fault);
+    });
+
+    let result = save_workspace_to(path, value);
+    let missed =
+        POST_INITIAL_FORWARD_SYNC_FAULT.with(|pending| pending.borrow_mut().take().is_some());
+    if missed {
+        Err("expected post-initial-forward-sync fault point was not reached".to_string())
     } else {
         result
     }
@@ -5301,6 +6142,150 @@ mod tests {
         );
         result.expect("a durable forward marker recovers the new workspace forward");
         assert_eq!(restarted, Some(attempted));
+    }
+
+    #[test]
+    fn native_workspace_tests_initial_final_sync_workspace_swap_matches_restart_result() {
+        let (_dir, path) = temp_workspace_path();
+        let attempted = workspace_with_project("attempted");
+        let swapped = workspace_with_project("swapped-after-final-sync");
+        let swapped_bytes = serde_json::to_vec(&swapped).expect("serialize swapped workspace");
+
+        let result = workspace_save_to_test_post_initial_forward_sync_fault(
+            &path,
+            &attempted,
+            PostInitialForwardSyncFault::ReplaceWorkspace(swapped_bytes),
+        );
+
+        let restarted = load_workspace_from(&path);
+        match result {
+            Ok(()) => assert_eq!(
+                restarted.expect("successful save must restart cleanly"),
+                Some(attempted),
+                "Ok must retain the verified new workspace"
+            ),
+            Err(_) => assert_eq!(
+                restarted.expect("failed save must restart cleanly"),
+                None,
+                "Err must retain prior absence"
+            ),
+        }
+    }
+
+    #[test]
+    fn native_workspace_tests_partial_marker_write_matches_initial_restart_result() {
+        let (_dir, path) = temp_workspace_path();
+        let attempted = workspace_with_project("attempted");
+
+        let (result, marker_failures) = workspace_save_to_test_marker_file_fault(
+            &path,
+            &attempted,
+            MarkerFileFaultMode::PartialWriteWithPersistedTornMarker,
+        );
+
+        assert!(
+            (1..=4).contains(&marker_failures),
+            "torn-marker recovery must remain bounded"
+        );
+        let restarted = load_workspace_from(&path);
+        match result {
+            Ok(()) => assert_eq!(
+                restarted.expect("successful save must restart cleanly"),
+                Some(attempted),
+                "Ok must retain the verified new workspace"
+            ),
+            Err(_) => assert_eq!(
+                restarted.expect("failed save must restart cleanly"),
+                None,
+                "Err must retain prior absence"
+            ),
+        }
+    }
+
+    #[test]
+    fn native_workspace_tests_restart_resolves_malformed_internal_marker_with_forward_candidate() {
+        let (_dir, path) = temp_workspace_path();
+        let attempted = workspace_with_project("attempted");
+        let attempted_bytes = serde_json::to_vec(&attempted).expect("serialize attempted");
+        fs::write(&path, &attempted_bytes).expect("write workspace");
+        let forward = workspace_forward_rollback_path(
+            path.parent().expect("parent"),
+            path.file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .as_ref(),
+        );
+        fs::hard_link(&path, &forward).expect("publish forward candidate");
+        fs::write(absent_committed_path(&path), b"torn-forward-marker")
+            .expect("write malformed committed marker");
+        sync_parent_directory_standalone(path.parent().expect("parent"))
+            .expect("sync restart state");
+
+        assert_eq!(
+            load_workspace_from(&path).expect("malformed internal marker must be resolved"),
+            Some(attempted)
+        );
+        assert_eq!(
+            fs::read(&path).expect("read recovered workspace"),
+            attempted_bytes
+        );
+        assert!(rollback_artifacts(path.parent().expect("parent")).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_prior_marker_cascade_matches_exact_restart_bytes() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        let previous_bytes =
+            serde_json::to_vec_pretty(&previous).expect("serialize exact previous bytes");
+        fs::write(&path, &previous_bytes).expect("write previous workspace");
+        let updated = workspace_with_project("updated");
+        let updated_bytes = serde_json::to_vec(&updated).expect("serialize updated workspace");
+        let mut sync_calls = 0;
+
+        let result = workspace_save_to_test_hook_with_recreation_fault(
+            &path,
+            &updated,
+            |_| {
+                sync_calls += 1;
+                match sync_calls {
+                    3 => Err("injected committed marker sync failure".to_string()),
+                    4 => {
+                        fs::write(&path, &updated_bytes)
+                            .map_err(|error| format!("restore undurable new workspace: {error}"))?;
+                        Err("injected fallback rollback sync failure".to_string())
+                    }
+                    _ => Ok(()),
+                }
+            },
+            |source, destination| {
+                assert_eq!(source, committed_path(&path));
+                assert_eq!(destination, pending_path(&path));
+                Err("injected pending marker recreation failure".to_string())
+            },
+        );
+
+        assert_eq!(
+            sync_calls, 5,
+            "the complete failure cascade and bounded forward certification must run"
+        );
+        let restarted = load_workspace_from(&path).expect("restart recovery");
+        match result {
+            Ok(()) => {
+                assert_eq!(restarted, Some(updated));
+                assert_eq!(
+                    fs::read(&path).expect("read committed workspace"),
+                    updated_bytes
+                );
+            }
+            Err(_) => {
+                assert_eq!(restarted, Some(previous));
+                assert_eq!(
+                    fs::read(&path).expect("read restored prior workspace"),
+                    previous_bytes
+                );
+            }
+        }
     }
 
     #[test]
