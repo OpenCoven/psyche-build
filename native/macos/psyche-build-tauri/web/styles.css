@@ -3547,3 +3547,104 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   padding: 1px 7px;
   white-space: nowrap;
 }
+
+/* -------- Diff viewer --------
+   Split and stacked share one model, so they share one palette and one row
+   metric; only the track layout differs. Added and removed text carry their
+   own foreground against a 9% wash, which stays AA on bg/1 -- colour alone
+   never marks a line, the +/- marker and the gutters do. */
+
+.diff-layout-toggle {
+  display: inline-flex;
+  flex: none;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.diff-layout-btn {
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.diff-layout-btn:hover { color: var(--text); }
+.diff-layout-btn.is-active { background: rgba(255, 255, 255, 0.10); color: var(--text); }
+.diff-layout-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.diff-rows {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+.diff-row { display: grid; }
+.diff-rows[data-layout="stacked"] .diff-row { grid-template-columns: 34px 34px 16px minmax(0, 1fr); }
+.diff-rows[data-layout="split"]   .diff-row { grid-template-columns: 30px minmax(0, 1fr) 30px minmax(0, 1fr); }
+
+.diff-gutter {
+  padding-right: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  user-select: none;
+}
+.diff-rows[data-layout="stacked"] .diff-gutter-new { border-right: 1px solid rgba(255, 255, 255, 0.05); }
+.diff-marker { color: var(--muted); text-align: center; user-select: none; }
+
+.diff-text {
+  min-width: 0;
+  padding: 0 8px 0 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-rows[data-layout="split"] .diff-text:first-of-type { border-right: 1px solid var(--border); }
+
+.diff-row.diff-add    .diff-text, .diff-text.diff-add    { background: rgba(52, 211, 153, 0.09); color: #8fe3b8; }
+.diff-row.diff-delete .diff-text, .diff-text.diff-delete { background: rgba(248, 113, 113, 0.09); color: #f0a3a3; }
+.diff-row.diff-add    .diff-marker { color: var(--ok); }
+.diff-row.diff-delete .diff-marker { color: var(--error); }
+.diff-gutter.diff-add    { background: rgba(52, 211, 153, 0.05); }
+.diff-gutter.diff-delete { background: rgba(248, 113, 113, 0.05); }
+/* The cell opposite a pure add or delete. Tinted rather than blank so the gap
+   reads as "nothing here", not as an unstyled row. */
+.diff-text.diff-empty { background: rgba(255, 255, 255, 0.015); }
+
+/* Word-level marks sit on top of the line wash, so the changed tokens read
+   without having to compare two lines character by character. */
+.diff-add .diff-word, .diff-text.diff-add .diff-word { background: rgba(52, 211, 153, 0.30); border-radius: 3px; }
+.diff-delete .diff-word, .diff-text.diff-delete .diff-word { background: rgba(248, 113, 113, 0.32); border-radius: 3px; }
+
+.diff-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+}
+.diff-sep-mark { letter-spacing: 2px; }
+.diff-sep-spacer { flex: 1 1 auto; }
+.diff-sep-expand {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: inherit;
+}
+.diff-sep-expand:hover { color: #c4b5fd; }
+.diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
+.diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }

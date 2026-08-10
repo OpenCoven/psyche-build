@@ -98,14 +98,14 @@ describe('Tauri workspace panels', () => {
     // ...but its markup still exists, inside the git panel, with the element
     // ids the diff renderer writes into.
     const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
-    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-editor-host']) {
+    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-rows']) {
       expect(gitPanel).toContain(`id="${id}"`);
     }
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
     expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js'
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js'
     );
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
@@ -196,6 +196,35 @@ describe('Tauri workspace panels', () => {
       expect(indexHtml).toContain('class="appearance-swatch"');
       expect(stylesCss).toMatch(/\.sidebar-settings > summary\s*\{[^}]*height: 22px;/s);
       expect(stylesCss).toMatch(/\.appearance-swatch\s*\{[^}]*background: var\(--accent\);/s);
+    });
+  });
+
+  describe('hunk expansion', () => {
+    it('lets a caller widen the diff, with the width clamped', () => {
+      expect(tauriLib).toMatch(/fn git_diff\([\s\S]*context: Option<u32>/);
+      expect(tauriLib).toMatch(/args\.push\(format!\("-U\{\}", lines\.min\(MAX_DIFF_CONTEXT\)\)\)/);
+      // The value reaches a subprocess argument, so it is bounded rather than
+      // passed through.
+      expect(tauriLib).toMatch(/const MAX_DIFF_CONTEXT: u32 = \d+;/);
+    });
+
+    it('caches a widened diff apart from the narrow one', () => {
+      // Same file at 3 lines of context and at 400 are different documents;
+      // sharing a key would re-serve the narrow one after expanding.
+      expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged, context\)/);
+      expect(mainJs).toMatch(/\(context === undefined \|\| context === null \? "default" : context\)/);
+    });
+
+    it('expands from the separator and re-fetches at the new width', () => {
+      expect(mainJs).toMatch(/expand\.className = "diff-sep-expand"/);
+      expect(mainJs).toMatch(/diffContext = Math\.min\(2000, widest \+ 3\)/);
+      expect(mainJs).toMatch(/expand\.addEventListener\("click"[\s\S]*?refreshSelectedDiff\(\)/);
+      expect(mainJs).toMatch(/context: diffContext,/);
+    });
+
+    it('starts every newly selected file narrow again', () => {
+      // An expansion belongs to the view you expanded, not to the panel.
+      expect(mainJs).toMatch(/if \(!\(options && options\.keepContext\)\) diffContext = null;/);
     });
   });
 });
