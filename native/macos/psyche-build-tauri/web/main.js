@@ -702,7 +702,16 @@
   );
   var browserCollapseBtn = document.getElementById("browser-collapse");
   var BROWSER_SIDES = ["right", "bottom", "left", "top"];
-  var PANELS = ["browser", "files", "diffs", "git"];
+  var PANELS = ["browser", "files", "git"];
+  // Diffs used to be its own tab. It now lives inside the git panel, so every
+  // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
+  // to the tab that actually shows it.
+  var PANEL_ALIASES = { diffs: "git" };
+  function resolvePanelName(name) {
+    return Object.prototype.hasOwnProperty.call(PANEL_ALIASES, name)
+      ? PANEL_ALIASES[name]
+      : name;
+  }
   var detailStyleRule = null;
 
   function currentLayout() { return detail.dataset.layout || "terminal"; }
@@ -807,7 +816,7 @@
 
   function handlePanelLayoutTransition(previousLayout, nextLayout) {
     var panel = currentPanel();
-    if (previousLayout === "split" && nextLayout !== "split" && panel === "diffs") {
+    if (previousLayout === "split" && nextLayout !== "split" && panel === "git") {
       suspendDiffRequests();
     }
     if (previousLayout !== "split" && nextLayout === "split") {
@@ -861,6 +870,7 @@
     );
   }
   function setPanel(name, opts) {
+    name = resolvePanelName(name);
     if (PANELS.indexOf(name) === -1) name = "browser";
     detail.dataset.panel = name;
     var project = activeProject();
@@ -873,8 +883,11 @@
   }
   function renderPanel(name) {
     if (name === "files") renderFilesPanel();
-    else if (name === "diffs") renderDiffsPanel();
-    else if (name === "git") renderGitPanel();
+    else if (name === "git") {
+      // One tab, two sections: repository state above, changed files below.
+      renderGitPanel();
+      renderDiffsPanel();
+    }
   }
   Array.prototype.forEach.call(
     document.querySelectorAll("[data-panel-btn]"),
@@ -5248,7 +5261,7 @@
   }
 
   function panelIsVisible(panel) {
-    return currentLayout() === "split" && currentPanel() === panel;
+    return currentLayout() === "split" && currentPanel() === resolvePanelName(panel);
   }
 
   // The tree highlights whichever file currently owns the main area.

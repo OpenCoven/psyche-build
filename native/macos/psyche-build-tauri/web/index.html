@@ -199,8 +199,7 @@
                 </svg>
               </button>
               <button class="dock-tab" data-panel-btn="files" type="button" aria-pressed="false" title="Files" aria-label="File tree panel">Files</button>
-              <button class="dock-tab" data-panel-btn="git" type="button" aria-pressed="false" title="Git / GitHub" aria-label="Git panel">Git<span class="dock-tab-count" id="dock-git-count" hidden></span></button>
-              <button class="dock-tab" data-panel-btn="diffs" type="button" aria-pressed="false" title="Diffs" aria-label="Diff viewer panel">Diffs</button>
+              <button class="dock-tab" data-panel-btn="git" type="button" aria-pressed="false" title="Git, GitHub and diffs" aria-label="Git and diffs panel">Git<span class="dock-tab-count" id="dock-git-count" hidden></span></button>
               <button class="dock-tab" data-panel-btn="browser" type="button" aria-pressed="false" title="Browser (⌘⌥B). Right-click to cycle which side the dock sits on." aria-label="Browser panel">Web</button>
             </div>
 
@@ -240,26 +239,6 @@
               </div>
             </div>
 
-            <div class="panel panel-diffs">
-              <header class="pane-header panel-bar">
-                <span class="panel-title">Diffs</span>
-                <span class="panel-crumb" id="diffs-summary"></span>
-                <button id="diffs-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh diffs">
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-              </header>
-              <div class="panel-body panel-split">
-                <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
-                <div class="diff-detail" id="diff-detail">
-                  <div class="diff-detail-status">
-                    <span id="diff-metadata" role="status" aria-live="polite"></span>
-                    <span id="diff-truncation" role="alert" hidden></span>
-                  </div>
-                  <div class="diff-editor-host" id="diff-editor-host"></div>
-                </div>
-              </div>
-            </div>
-
             <div class="panel panel-git">
               <header class="pane-header panel-bar">
                 <span class="panel-title">Git</span>
@@ -271,8 +250,25 @@
                   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
               </header>
-              <div class="panel-body">
+              <div class="panel-body panel-git-body">
                 <div class="git-view" id="git-view"></div>
+                <div class="panel-subbar">
+                  <span class="panel-subtitle">Changes</span>
+                  <span class="panel-crumb" id="diffs-summary"></span>
+                  <button id="diffs-refresh" class="icon-btn ghost-btn" title="Refresh diffs" aria-label="Refresh diffs">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+                <div class="panel-body panel-split">
+                  <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
+                  <div class="diff-detail" id="diff-detail">
+                    <div class="diff-detail-status">
+                      <span id="diff-metadata" role="status" aria-live="polite"></span>
+                      <span id="diff-truncation" role="alert" hidden></span>
+                    </div>
+                    <div class="diff-editor-host" id="diff-editor-host"></div>
+                  </div>
+                </div>
               </div>
             </div>
           </section>
@@ -296,19 +292,6 @@
               <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
               <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
                     stroke-width="1.35" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button class="mini-rail-btn" data-panel-btn="diffs" type="button" aria-pressed="false"
-                  title="Diffs" aria-label="Diff viewer panel">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor"
-                    stroke-width="1.5" stroke-linecap="round"/>
-              <path d="M9.5 11.5h4.2" fill="none" stroke="currentColor"
-                    stroke-width="1.5" stroke-linecap="round"/>
-              <path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor"
-                    stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
-              <path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor"
-                    stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
             </svg>
           </button>
           <button class="mini-rail-btn" data-panel-btn="browser" type="button" aria-pressed="false"

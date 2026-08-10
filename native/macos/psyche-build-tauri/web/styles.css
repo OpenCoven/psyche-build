@@ -1839,8 +1839,35 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
 .detail[data-panel="browser"] .panel-browser,
 .detail[data-panel="files"]   .panel-files,
-.detail[data-panel="diffs"]   .panel-diffs,
 .detail[data-panel="git"]     .panel-git { display: grid; }
+
+/* Git owns diffs now: repository state on top, then a subheading, then the
+   changed-file list and its detail. Only the last row flexes, so the git view
+   keeps its natural height and scrolls on its own once it outgrows the cap. */
+.panel-git-body {
+  display: grid;
+  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
+}
+.panel-git-body > .git-view {
+  max-height: 38%;
+  border-bottom: 1px solid var(--border);
+}
+.panel-subbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  min-height: 26px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+}
+.panel-subtitle {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
 
 .panel-bar {
   display: flex;
