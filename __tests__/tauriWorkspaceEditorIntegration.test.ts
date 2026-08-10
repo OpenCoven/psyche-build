@@ -1148,9 +1148,13 @@ describe('native CodeMirror workspace editor surface', () => {
     );
   });
 
+  it('documents Escape as the way to leave a fullscreen file', () => {
+    expect(mainJs).toContain('["Leave a fullscreen file", "esc"]');
+  });
+
   it('restores the pane workspace after the last active file closes', async () => {
     const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
-    const state = { activeFileId: file.id, activeProjectId: 'p1', openFiles: [file] };
+    const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
     let cleared = 0;
     let rendered = 0;
     const closeFileTab = compileFunction<

@@ -6229,6 +6229,7 @@
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
     ["Save the open file", "⌘S"],
+    ["Leave a fullscreen file", "esc"],
     ["This overlay", "?"],
   ];
   function renderHelpRows() {
