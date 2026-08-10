@@ -1287,6 +1287,13 @@
       event.stopPropagation();
       closeThread(thread.id);
     });
+    // The header doubles as the pane's drag handle. Buttons inside it keep
+    // their own click behaviour; the gesture only starts once the pointer has
+    // travelled far enough to not be a click.
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(thread, event);
+    });
     header.appendChild(glyph);
     header.appendChild(title);
     header.appendChild(meta);
@@ -1385,12 +1392,171 @@
     if (state.activeThreadId !== thread.id) focusThread(thread.id);
   }
 
+  // -------- Drag a pane onto another pane's edge to re-tile it --------
+  // Pointer events rather than HTML5 drag-and-drop: the panes host xterm
+  // canvases, and a native drag image over a live terminal reads as a glitch.
+  // Owning the gesture also lets the drop target be a region of a pane rather
+  // than the whole element.
+
+  var PANE_DRAG_THRESHOLD = 5;
+
+  function paneElementAt(clientX, clientY) {
+    var ids = canvasThreadIds();
+    for (var i = 0; i < ids.length; i++) {
+      var thread = findThread(ids[i]);
+      var pane = thread && thread.pane;
+      if (!pane) continue;
+      var rect = pane.getBoundingClientRect();
+      if (clientX >= rect.left && clientX <= rect.right &&
+          clientY >= rect.top && clientY <= rect.bottom) {
+        return { thread: thread, rect: rect };
+      }
+    }
+    return null;
+  }
+
+  // Nearest edge wins, so the pane splits along whichever side the pointer is
+  // closest to. Four triangular zones meeting at the centre — predictable
+  // enough that the drop lands where the highlight promised.
+  function paneDropZone(rect, clientX, clientY) {
+    var relX = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+    var relY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+    var edges = [
+      { position: "left", distance: relX },
+      { position: "right", distance: 1 - relX },
+      { position: "above", distance: relY },
+      { position: "below", distance: 1 - relY },
+    ];
+    edges.sort(function (a, b) { return a.distance - b.distance; });
+    return edges[0].position;
+  }
+
+  function movePaneTo(sourceThreadId, targetThreadId, position) {
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) return false;
+    var source = PsychePanes.findLeafByThreadId(layout.root, sourceThreadId);
+    var target = PsychePanes.findLeafByThreadId(layout.root, targetThreadId);
+    if (!source || !target) return false;
+    var nextRoot = PsychePanes.moveLeaf(
+      layout.root, source.id, target.id, position, nextPaneId("split")
+    );
+    if (nextRoot === layout.root) return false;
+    layout.root = nextRoot;
+    layout.focusedLeafId = source.id;
+    renderPaneWorkspace();
+    scheduleVisiblePaneFit();
+    return true;
+  }
+
+  function startPaneReposition(thread, event) {
+    if (!terminalHost || event.button !== 0 || !thread || !thread.pane) return;
+    // A lone pane has nothing to be repositioned against.
+    if (canvasThreadIds().length < 2) return;
+
+    var pointerId = event.pointerId;
+    var startX = event.clientX;
+    var startY = event.clientY;
+    var dragging = false;
+    var drop = null;
+    var indicator = null;
+
+    function beginDrag() {
+      dragging = true;
+      indicator = document.createElement("div");
+      indicator.className = "pane-drop-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      indicator.hidden = true;
+      document.body.appendChild(indicator);
+      document.body.classList.add("is-pane-dragging");
+      thread.pane.classList.add("is-dragging");
+    }
+
+    // Fixed positioning takes the client rects as-is, so the highlight needs no
+    // positioned ancestor and cannot be clipped by a pane's own overflow.
+    function showIndicator(rect, position) {
+      var left = rect.left;
+      var top = rect.top;
+      var width = rect.width;
+      var height = rect.height;
+      if (position === "left" || position === "right") {
+        width = rect.width / 2;
+        if (position === "right") left = rect.left + width;
+      } else {
+        height = rect.height / 2;
+        if (position === "below") top = rect.top + height;
+      }
+      indicator.style.left = left + "px";
+      indicator.style.top = top + "px";
+      indicator.style.width = width + "px";
+      indicator.style.height = height + "px";
+      indicator.hidden = false;
+    }
+
+    function onPointerMove(moveEvent) {
+      if (moveEvent.pointerId !== pointerId) return;
+      if (!dragging) {
+        if (Math.abs(moveEvent.clientX - startX) < PANE_DRAG_THRESHOLD &&
+            Math.abs(moveEvent.clientY - startY) < PANE_DRAG_THRESHOLD) {
+          return;
+        }
+        beginDrag();
+      }
+      var hit = paneElementAt(moveEvent.clientX, moveEvent.clientY);
+      if (!hit || hit.thread.id === thread.id) {
+        drop = null;
+        indicator.hidden = true;
+        return;
+      }
+      var position = paneDropZone(hit.rect, moveEvent.clientX, moveEvent.clientY);
+      drop = { threadId: hit.thread.id, position: position };
+      showIndicator(hit.rect, position);
+    }
+
+    function onKeyDown(keyEvent) {
+      if (keyEvent.key !== "Escape") return;
+      keyEvent.preventDefault();
+      drop = null;
+      finish();
+    }
+
+    function finish(endEvent) {
+      if (endEvent && endEvent.pointerId !== undefined && endEvent.pointerId !== pointerId) return;
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", onKeyDown, true);
+      if (!dragging) return;
+      document.body.classList.remove("is-pane-dragging");
+      thread.pane.classList.remove("is-dragging");
+      if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
+      indicator = null;
+      dragging = false;
+      if (drop) movePaneTo(thread.id, drop.threadId, drop.position);
+    }
+
+    function cancel(cancelEvent) {
+      drop = null;
+      finish(cancelEvent);
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", onKeyDown, true);
+  }
+
   function createPaneDivider(node, ratio) {
+    // A column split stacks panes, so its separator runs left-to-right and is
+    // dragged vertically; a row split is the mirror image. ARIA names the
+    // separator's own orientation, which is the opposite of the drag axis.
+    var isRow = node.orientation === "row";
     var divider = document.createElement("div");
-    divider.className = "terminal-pane-divider";
+    divider.className = "terminal-pane-divider" + (isRow ? " is-row" : "");
     divider.dataset.splitId = node.id;
     divider.setAttribute("role", "separator");
-    divider.setAttribute("aria-orientation", "horizontal");
+    divider.setAttribute("aria-orientation", isRow ? "vertical" : "horizontal");
     divider.setAttribute("aria-valuemin", "0");
     divider.setAttribute("aria-valuemax", "100");
     divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
@@ -1400,7 +1566,9 @@
       var dragLayout = activePaneLayout();
       var parent = divider.parentElement;
       var rect = parent && parent.getBoundingClientRect();
-      if (!dragLayout || !rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0) {
+      var origin = rect && (isRow ? rect.left : rect.top);
+      var extent = rect && (isRow ? rect.width : rect.height);
+      if (!dragLayout || !rect || !Number.isFinite(origin) || !Number.isFinite(extent) || extent <= 0) {
         return;
       }
       var pointerId = event.pointerId;
@@ -1410,8 +1578,9 @@
           stopPointerResize();
           return;
         }
-        if (!Number.isFinite(moveEvent.clientY)) return;
-        var nextRatio = (moveEvent.clientY - rect.top) / rect.height;
+        var position = isRow ? moveEvent.clientX : moveEvent.clientY;
+        if (!Number.isFinite(position)) return;
+        var nextRatio = (position - origin) / extent;
         if (!Number.isFinite(nextRatio)) return;
         updateActiveSplit(node.id, nextRatio, dragLayout);
       }
@@ -1428,12 +1597,14 @@
       window.addEventListener("blur", stopPointerResize);
     });
     divider.addEventListener("keydown", function (event) {
-      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      var shrinkKey = isRow ? "ArrowLeft" : "ArrowUp";
+      var growKey = isRow ? "ArrowRight" : "ArrowDown";
+      if (event.key !== shrinkKey && event.key !== growKey) return;
       event.preventDefault();
       var step = event.shiftKey ? 0.01 : 0.04;
       updateActiveSplit(
         node.id,
-        ratio + (event.key === "ArrowUp" ? -step : step),
+        ratio + (event.key === shrinkKey ? -step : step),
         activePaneLayout(),
         true
       );
@@ -1471,8 +1642,9 @@
     }
     var ratio = splitRatios.get(node.id);
     if (!Number.isFinite(ratio)) ratio = node.ratio;
+    var isRow = node.orientation === "row";
     var split = document.createElement("div");
-    split.className = "terminal-pane-split";
+    split.className = "terminal-pane-split" + (isRow ? " is-row" : "");
     var first = document.createElement("div");
     first.className = "terminal-pane-branch";
     first.style.flexGrow = String(ratio);
