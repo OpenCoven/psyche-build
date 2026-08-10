@@ -42,12 +42,17 @@ describe('Tauri native workspace security contract', () => {
 
   test('holds shared and exclusive OS locks with explicit unlock', async () => {
     const source = await readFile(sourcePath, 'utf8');
+    const openLock = functionBody(source, 'open_workspace_lock');
 
     expect(source).toMatch(/LockMode::Shared\s*=>\s*libc::LOCK_SH/);
     expect(source).toMatch(/LockMode::Exclusive\s*=>\s*libc::LOCK_EX/);
     expect(source).toMatch(/libc::flock\(file\.as_raw_fd\(\),\s*operation\)/);
     expect(source).toMatch(/libc::flock\(self\.file\.as_raw_fd\(\),\s*libc::LOCK_UN\)/);
-    expect(source).toMatch(/options\.mode\(0o600\)/);
+    expect(openLock).toContain('libc::openat');
+    expect(openLock).toContain('workspace_dir.directory.as_raw_fd()');
+    expect(openLock).toContain('libc::O_NOFOLLOW');
+    expect(openLock).toContain('libc::O_CLOEXEC');
+    expect(openLock).toContain('0o600');
   });
 
   test('validates the complete workspace before filesystem mutation', async () => {
@@ -57,26 +62,45 @@ describe('Tauri native workspace security contract', () => {
     const validation = save.indexOf('validate_workspace(value)');
     expect(validation).toBeGreaterThanOrEqual(0);
     for (const mutation of [
-      'prepare_workspace_parent',
+      'SecureWorkspaceDir::prepare_for_save',
       'WorkspaceFileLock::exclusive',
       'recover_pending_workspace',
       'cleanup_rollback_candidates',
-      'open_temp_file',
+      'open_temp_file_in',
     ]) {
       expect(validation).toBeLessThan(save.indexOf(mutation));
     }
   });
 
-  test('uses no-follow file opens and one-level durable directory creation', async () => {
+  test('pins HOME and traverses app storage with descriptor-relative syscalls', async () => {
     const source = await readFile(sourcePath, 'utf8');
+    const prepare = functionBody(source, 'prepare_for_save');
+    const component = functionBody(source, 'open_directory_component');
 
-    expect(source).toContain('fs::symlink_metadata');
+    expect(source).toContain('struct SecureWorkspaceDir');
+    expect(prepare).toContain('open_directory_path_no_follow(&home, "HOME")');
+    expect(prepare).toContain('open_directory_component');
+    expect(source).toContain('libc::fstat(');
+    expect(source).toContain('libc::fstatat(');
+    expect(source).toContain('libc::AT_SYMLINK_NOFOLLOW');
     expect(source).toContain('libc::O_NOFOLLOW');
     expect(source).toContain('libc::O_DIRECTORY');
-    expect(source).toMatch(/create_new\(true\)/);
-    expect(source).toContain('libc::fchmod');
-    expect(source).toMatch(/fs::create_dir\(/);
-    expect(source).toMatch(/builder\.recursive\(false\)\.mode\(0o700\)\.create\(path\)/);
-    expect(source).not.toMatch(/fs::create_dir_all\(parent\)/);
+    expect(source).toContain('libc::O_CLOEXEC');
+    expect(component).toContain('libc::mkdirat');
+    expect(component).toContain('libc::openat');
+    expect(component).toContain('set_secure_directory_permissions_fd');
+    expect(component).toContain('parent.directory.sync_all()');
+    expect(component).toContain('directory.sync_all()');
+  });
+
+  test('keeps every workspace artifact operation relative to the pinned directory', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+
+    expect(functionBody(source, 'open_existing_regular_file')).toContain('libc::openat');
+    expect(functionBody(source, 'open_new_workspace_file')).toContain('libc::openat');
+    expect(functionBody(source, 'rename_workspace_path_in')).toContain('libc::renameat');
+    expect(functionBody(source, 'hard_link_workspace_path')).toContain('libc::linkat');
+    expect(functionBody(source, 'unlink_workspace_path')).toContain('libc::unlinkat');
+    expect(functionBody(source, 'workspace_directory_entries')).toContain('libc::fdopendir');
   });
 });

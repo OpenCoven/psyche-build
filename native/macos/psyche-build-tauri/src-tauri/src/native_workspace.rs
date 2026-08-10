@@ -1,4 +1,8 @@
-use std::fs::{self, File, OpenOptions};
+#[cfg(any(test, not(unix)))]
+use std::fs;
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,9 +12,11 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::ffi::{CStr, CString, OsStr, OsString};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 const WORKSPACE_VERSION: i64 = 3;
 const WORKSPACE_FILE_RELATIVE: &str = ".psyche/macos-app/workspace-v3.json";
@@ -68,9 +74,9 @@ where
             path.display()
         ));
     };
-    if !validate_workspace_parent_for_load(path)? {
+    let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
         return Ok(None);
-    }
+    };
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
@@ -79,46 +85,72 @@ where
     let pending_path = workspace_rollback_pending_path(parent, &file_name);
     let committed_path = workspace_rollback_committed_path(parent, &file_name);
 
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
-    let shared_lock = WorkspaceFileLock::shared(path)?;
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
-    let requires_recovery = regular_file_exists(&pending_path, "workspace pending rollback")?
-        || regular_file_exists(&committed_path, "workspace committed rollback")?
-        || rollback_candidates_exist(parent, &file_name)?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
+    let shared_lock = WorkspaceFileLock::shared(&workspace_dir, path)?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
+    let requires_recovery =
+        regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")?
+            || regular_file_exists(
+                &workspace_dir,
+                &committed_path,
+                "workspace committed rollback",
+            )?
+            || rollback_candidates_exist(&workspace_dir, parent, &file_name)?;
     if !requires_recovery {
-        return load_workspace_from_locked(path);
+        return load_workspace_from_locked_in(&workspace_dir, path);
     }
 
     drop(shared_lock);
     before_exclusive_recovery()?;
-    let _exclusive_lock = WorkspaceFileLock::exclusive(path)?;
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
+    let _exclusive_lock = WorkspaceFileLock::exclusive(&workspace_dir, path)?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
 
-    let mut sync_directory = sync_parent_directory;
-    if regular_file_exists(&pending_path, "workspace pending rollback")? {
+    let mut sync_directory = sync_workspace_directory;
+    if regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")? {
         let cleanup_committed = recover_pending_workspace(
+            &workspace_dir,
             path,
             parent,
             pending_path.as_path(),
             committed_path.as_path(),
             &mut sync_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
+            &mut restore_workspace_backup_in,
+            &mut rename_workspace_path_in,
         )?;
         if cleanup_committed {
-            let _ =
-                cleanup_committed_rollback(committed_path.as_path(), parent, &mut sync_directory);
+            let _ = cleanup_committed_rollback(
+                &workspace_dir,
+                committed_path.as_path(),
+                parent,
+                &mut sync_directory,
+            );
         }
     } else {
-        let _ = cleanup_committed_rollback(committed_path.as_path(), parent, &mut sync_directory);
+        let _ = cleanup_committed_rollback(
+            &workspace_dir,
+            committed_path.as_path(),
+            parent,
+            &mut sync_directory,
+        );
     }
-    cleanup_rollback_candidates(parent, &file_name, &mut sync_directory)?;
-    load_workspace_from_locked(path)
+    cleanup_rollback_candidates(&workspace_dir, parent, &file_name, &mut sync_directory)?;
+    load_workspace_from_locked_in(&workspace_dir, path)
 }
 
+#[cfg(test)]
 fn load_workspace_from_locked(path: &Path) -> Result<Option<Value>, String> {
+    let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
+        return Ok(None);
+    };
+    load_workspace_from_locked_in(&workspace_dir, path)
+}
+
+fn load_workspace_from_locked_in(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+) -> Result<Option<Value>, String> {
     let mut bytes = Vec::new();
-    match open_existing_regular_file(path, "workspace", false)? {
+    match open_existing_regular_file(workspace_dir, path, "workspace", false)? {
         Some(mut file) => {
             file.read_to_end(&mut bytes)
                 .map_err(|e| format!("read workspace '{}': {}", path.display(), e))?;
@@ -138,11 +170,11 @@ pub(crate) fn save_workspace_to(path: &Path, value: &Value) -> Result<(), String
         path,
         value,
         |_| Ok(()),
-        sync_parent_directory,
-        sync_parent_directory,
-        restore_workspace_backup,
-        create_rollback_backup,
-        rename_workspace_path,
+        |_| Ok(()),
+        sync_workspace_directory,
+        restore_workspace_backup_in,
+        create_rollback_backup_in,
+        rename_workspace_path_in,
     )
 }
 
@@ -159,10 +191,10 @@ fn save_workspace_to_inner<F, K, G, H, I, J>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
     K: FnMut(&Path) -> Result<(), String>,
-    G: FnMut(&Path) -> Result<(), String>,
-    H: FnMut(&Path, &Path) -> Result<(), String>,
-    I: FnOnce(&Path, &Path) -> Result<(), String>,
-    J: FnMut(&Path, &Path) -> Result<(), String>,
+    G: FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    H: FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    I: FnOnce(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    J: FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 {
     validate_workspace(value)
         .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
@@ -178,37 +210,49 @@ where
         .to_string_lossy()
         .to_string();
     let _process_lock = WORKSPACE_IO_MUTEX.lock();
-    prepare_workspace_parent(path, &mut sync_created_directory)?;
+    let workspace_dir = SecureWorkspaceDir::prepare_for_save(path, &mut sync_created_directory)?;
 
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
-    let _file_lock = WorkspaceFileLock::exclusive(path)?;
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
+    let _file_lock = WorkspaceFileLock::exclusive(&workspace_dir, path)?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
 
     let pending_path = workspace_rollback_pending_path(parent, &file_name);
     let committed_path = workspace_rollback_committed_path(parent, &file_name);
 
-    let cleanup_committed = if regular_file_exists(&pending_path, "workspace pending rollback")? {
-        recover_pending_workspace(
-            path,
-            parent,
-            pending_path.as_path(),
-            committed_path.as_path(),
-            &mut sync_parent_directory,
-            &mut restore_workspace_backup,
-            &mut rename_workspace_path,
-        )?
-    } else {
-        true
-    };
+    let cleanup_committed =
+        if regular_file_exists(&workspace_dir, &pending_path, "workspace pending rollback")? {
+            recover_pending_workspace(
+                &workspace_dir,
+                path,
+                parent,
+                pending_path.as_path(),
+                committed_path.as_path(),
+                &mut sync_parent_directory,
+                &mut restore_workspace_backup,
+                &mut rename_workspace_path,
+            )?
+        } else {
+            true
+        };
     if cleanup_committed {
-        cleanup_committed_rollback(committed_path.as_path(), parent, &mut sync_parent_directory)?;
+        cleanup_committed_rollback(
+            &workspace_dir,
+            committed_path.as_path(),
+            parent,
+            &mut sync_parent_directory,
+        )?;
     }
-    cleanup_rollback_candidates(parent, &file_name, &mut sync_parent_directory)?;
-    validate_workspace_artifact_paths(path, parent, &file_name)?;
+    cleanup_rollback_candidates(
+        &workspace_dir,
+        parent,
+        &file_name,
+        &mut sync_parent_directory,
+    )?;
+    validate_workspace_artifact_paths(&workspace_dir, path, parent, &file_name)?;
 
     let temp_path = workspace_temp_path(parent, &file_name);
-    let mut temp_file = open_temp_file(&temp_path)?;
-    let mut temp_guard = TempFileGuard::new(temp_path.clone());
+    let mut temp_file = open_temp_file_in(&workspace_dir, &temp_path)?;
+    let mut temp_guard = TempFileGuard::new(&workspace_dir, temp_path.clone());
 
     temp_file.write_all(&bytes).map_err(|e| {
         format!(
@@ -231,10 +275,10 @@ where
 
     before_rename(temp_guard.path.as_path())?;
 
-    let had_workspace = workspace_file_exists(path)?;
+    let had_workspace = workspace_file_exists_in(&workspace_dir, path)?;
     if had_workspace {
-        create_rollback_backup(path, pending_path.as_path())?;
-        if let Err(error) = sync_parent_directory(parent) {
+        create_rollback_backup(&workspace_dir, path, pending_path.as_path())?;
+        if let Err(error) = sync_parent_directory(&workspace_dir, parent) {
             return Err(format!(
                 "publish pending workspace rollback '{}': {}",
                 pending_path.display(),
@@ -244,6 +288,7 @@ where
     }
 
     if let Err(replace_error) = rename_regular_workspace_path(
+        &workspace_dir,
         temp_guard.path.as_path(),
         path,
         "workspace temp",
@@ -252,6 +297,7 @@ where
     ) {
         if had_workspace {
             let restore_error = rollback_workspace_after_failed_save(
+                &workspace_dir,
                 path,
                 parent,
                 pending_path.as_path(),
@@ -268,8 +314,9 @@ where
     }
     temp_guard.commit();
 
-    if let Err(save_error) = sync_parent_directory(parent) {
+    if let Err(save_error) = sync_parent_directory(&workspace_dir, parent) {
         if let Err(restore_error) = rollback_workspace_after_failed_save(
+            &workspace_dir,
             path,
             parent,
             pending_path.as_path(),
@@ -285,6 +332,7 @@ where
 
     if had_workspace {
         let cleanup_committed = mark_rollback_committed(
+            &workspace_dir,
             pending_path.as_path(),
             committed_path.as_path(),
             parent,
@@ -293,6 +341,7 @@ where
         )?;
         if cleanup_committed {
             let _ = cleanup_committed_rollback(
+                &workspace_dir,
                 committed_path.as_path(),
                 parent,
                 &mut sync_parent_directory,
@@ -302,29 +351,444 @@ where
     Ok(())
 }
 
-fn validate_workspace_parent_for_load(path: &Path) -> Result<bool, String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
-    validate_app_owned_directory_entries(parent)?;
-    directory_exists(parent, "workspace parent")
+struct SecureWorkspaceDir {
+    display_path: PathBuf,
+    #[cfg(unix)]
+    directory: File,
 }
 
-fn prepare_workspace_parent(
+impl SecureWorkspaceDir {
+    fn open_for_load(path: &Path) -> Result<Option<Self>, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            if let Some((home, psyche, app)) = app_owned_workspace_directories(parent) {
+                let home_dir = PinnedDirectory {
+                    display_path: home.clone(),
+                    directory: open_directory_path_no_follow(&home, "HOME")?,
+                };
+                let Some(psyche_dir) =
+                    open_directory_component(&home_dir, &psyche, false, false, &mut |_| Ok(()))?
+                else {
+                    return Ok(None);
+                };
+                let Some(app_dir) =
+                    open_directory_component(&psyche_dir, &app, false, false, &mut |_| Ok(()))?
+                else {
+                    return Ok(None);
+                };
+                return Ok(Some(Self {
+                    display_path: parent.to_path_buf(),
+                    directory: app_dir.directory,
+                }));
+            }
+            match open_directory_path_no_follow_optional(parent, "workspace parent")? {
+                Some(directory) => Ok(Some(Self {
+                    display_path: parent.to_path_buf(),
+                    directory,
+                })),
+                None => Ok(None),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) if metadata.is_dir() => Ok(Some(Self {
+                    display_path: parent.to_path_buf(),
+                })),
+                Ok(_) => Err(format!(
+                    "workspace parent '{}' must be a directory",
+                    parent.display()
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!(
+                    "inspect workspace parent '{}': {}",
+                    parent.display(),
+                    error
+                )),
+            }
+        }
+    }
+
+    fn prepare_for_save(
+        path: &Path,
+        sync_created_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            if let Some((home, psyche, app)) = app_owned_workspace_directories(parent) {
+                let home_dir = PinnedDirectory {
+                    display_path: home.clone(),
+                    directory: open_directory_path_no_follow(&home, "HOME")?,
+                };
+                let psyche_dir = open_directory_component(
+                    &home_dir,
+                    &psyche,
+                    true,
+                    true,
+                    sync_created_directory,
+                )?
+                .ok_or_else(|| {
+                    format!(
+                        "app-owned workspace directory '{}' is missing",
+                        psyche.display()
+                    )
+                })?;
+                let app_dir = open_directory_component(
+                    &psyche_dir,
+                    &app,
+                    true,
+                    true,
+                    sync_created_directory,
+                )?
+                .ok_or_else(|| format!("workspace parent '{}' is missing", parent.display()))?;
+                return Ok(Self {
+                    display_path: parent.to_path_buf(),
+                    directory: app_dir.directory,
+                });
+            }
+
+            let directory = open_directory_path_no_follow(parent, "workspace parent")?;
+            set_secure_directory_permissions_fd(&directory, parent)?;
+            directory.sync_all().map_err(|error| {
+                format!(
+                    "sync workspace directory permissions '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+            Ok(Self {
+                display_path: parent.to_path_buf(),
+                directory,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            prepare_workspace_parent_fallback(path, sync_created_directory)?;
+            Ok(Self {
+                display_path: parent.to_path_buf(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn child_name(&self, path: &Path, context: &str) -> Result<CString, String> {
+        if path.parent() != Some(self.display_path.as_path()) {
+            return Err(format!(
+                "{context} '{}' is outside pinned workspace directory '{}'",
+                path.display(),
+                self.display_path.display()
+            ));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| format!("{context} '{}' has no file name", path.display()))?;
+        c_name(name).map_err(|error| format!("{context} '{}': {error}", path.display()))
+    }
+
+    fn sync(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            return self.directory.sync_all().map_err(|error| {
+                format!(
+                    "sync workspace parent '{}': {}",
+                    self.display_path.display(),
+                    error
+                )
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+struct PinnedDirectory {
+    display_path: PathBuf,
+    directory: File,
+}
+
+#[cfg(unix)]
+fn app_owned_workspace_directories(parent: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    if parent.file_name()? != "macos-app" {
+        return None;
+    }
+    let psyche = parent.parent()?;
+    if psyche.file_name()? != ".psyche" {
+        return None;
+    }
+    let home = psyche.parent()?;
+    Some((
+        home.to_path_buf(),
+        psyche.to_path_buf(),
+        parent.to_path_buf(),
+    ))
+}
+
+#[cfg(unix)]
+fn c_name(name: &OsStr) -> Result<CString, String> {
+    CString::new(name.as_bytes()).map_err(|_| "file name contains a NUL byte".to_string())
+}
+
+#[cfg(unix)]
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("path contains a NUL byte: {}", path.display()))
+}
+
+#[cfg(unix)]
+fn fstat_fd(file: &File, path: &Path, context: &str) -> Result<libc::stat, String> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    if unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "inspect opened {context} '{}': {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(unix)]
+fn stat_is_type(stat: &libc::stat, file_type: libc::mode_t) -> bool {
+    (stat.st_mode as libc::mode_t & libc::S_IFMT as libc::mode_t) == file_type
+}
+
+#[cfg(unix)]
+fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
+}
+
+#[cfg(unix)]
+fn fstatat_child(
+    directory: &File,
+    name: &CString,
+    path: &Path,
+    context: &str,
+) -> Result<Option<libc::stat>, String> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Ok(Some(unsafe { stat.assume_init() }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(None);
+    }
+    Err(format!("inspect {context} '{}': {}", path.display(), error))
+}
+
+#[cfg(unix)]
+fn open_directory_path_no_follow(path: &Path, context: &str) -> Result<File, String> {
+    open_directory_path_no_follow_optional(path, context)?
+        .ok_or_else(|| format!("{context} '{}' is missing", path.display()))
+}
+
+#[cfg(unix)]
+fn open_directory_path_no_follow_optional(
+    path: &Path,
+    context: &str,
+) -> Result<Option<File>, String> {
+    let path_c = c_path(path)?;
+    let fd = unsafe {
+        libc::open(
+            path_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+            return Err(format!(
+                "{context} '{}' must not be a symlink",
+                path.display()
+            ));
+        }
+        return Err(format!("open {context} '{}': {}", path.display(), error));
+    }
+    let directory = unsafe { File::from_raw_fd(fd) };
+    let stat = fstat_fd(&directory, path, context)?;
+    if !stat_is_type(&stat, libc::S_IFDIR as libc::mode_t) {
+        return Err(format!(
+            "opened {context} '{}' must be a directory",
+            path.display()
+        ));
+    }
+    Ok(Some(directory))
+}
+
+#[cfg(unix)]
+fn open_directory_component(
+    parent: &PinnedDirectory,
+    path: &Path,
+    create: bool,
+    secure_permissions: bool,
+    sync_created_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+) -> Result<Option<PinnedDirectory>, String> {
+    if path.parent() != Some(parent.display_path.as_path()) {
+        return Err(format!(
+            "workspace directory '{}' is outside pinned parent '{}'",
+            path.display(),
+            parent.display_path.display()
+        ));
+    }
+    let name = c_name(
+        path.file_name()
+            .ok_or_else(|| format!("workspace directory '{}' has no name", path.display()))?,
+    )?;
+    let mut created_or_concurrent = false;
+    match fstatat_child(
+        &parent.directory,
+        &name,
+        path,
+        "app-owned workspace directory",
+    )? {
+        Some(stat) if stat_is_type(&stat, libc::S_IFLNK as libc::mode_t) => {
+            return Err(format!(
+                "app-owned workspace directory '{}' must not be a symlink",
+                path.display()
+            ));
+        }
+        Some(stat) if !stat_is_type(&stat, libc::S_IFDIR as libc::mode_t) => {
+            return Err(format!(
+                "app-owned workspace directory '{}' must be a directory",
+                path.display()
+            ));
+        }
+        Some(_) => {}
+        None if !create => return Ok(None),
+        None => {
+            if unsafe { libc::mkdirat(parent.directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(format!(
+                        "create workspace directory '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                }
+                created_or_concurrent = true;
+            } else {
+                created_or_concurrent = true;
+            }
+        }
+    }
+
+    let fd = unsafe {
+        libc::openat(
+            parent.directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+            return Err(format!(
+                "app-owned workspace directory '{}' must not be a symlink",
+                path.display()
+            ));
+        }
+        return Err(format!(
+            "open app-owned workspace directory '{}': {}",
+            path.display(),
+            error
+        ));
+    }
+    let directory = unsafe { File::from_raw_fd(fd) };
+    let stat = fstat_fd(&directory, path, "app-owned workspace directory")?;
+    if !stat_is_type(&stat, libc::S_IFDIR as libc::mode_t) {
+        return Err(format!(
+            "opened app-owned workspace directory '{}' must be a directory",
+            path.display()
+        ));
+    }
+
+    if created_or_concurrent {
+        sync_created_directory(&parent.display_path).map_err(|error| {
+            format!(
+                "sync containing directory '{}' after creating '{}': {}",
+                parent.display_path.display(),
+                path.display(),
+                error
+            )
+        })?;
+        parent.directory.sync_all().map_err(|error| {
+            format!(
+                "sync containing directory '{}' after creating '{}': {}",
+                parent.display_path.display(),
+                path.display(),
+                error
+            )
+        })?;
+    }
+    if secure_permissions {
+        set_secure_directory_permissions_fd(&directory, path)?;
+    }
+    if created_or_concurrent {
+        sync_created_directory(path).map_err(|error| {
+            format!(
+                "sync new workspace directory '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+    }
+    if secure_permissions || created_or_concurrent {
+        directory.sync_all().map_err(|error| {
+            format!(
+                "sync workspace directory permissions '{}': {}",
+                path.display(),
+                error
+            )
+        })?;
+    }
+    Ok(Some(PinnedDirectory {
+        display_path: path.to_path_buf(),
+        directory,
+    }))
+}
+
+#[cfg(unix)]
+fn set_secure_directory_permissions_fd(directory: &File, path: &Path) -> Result<(), String> {
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(format!(
+            "set workspace directory permissions '{}': {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_workspace_parent_fallback(
     path: &Path,
     sync_created_directory: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
-    validate_app_owned_directory_entries(parent)?;
-
     let mut missing = Vec::new();
     let mut cursor = parent.to_path_buf();
-    loop {
-        if directory_exists(&cursor, "workspace parent")? {
-            break;
-        }
+    while !cursor.exists() {
         missing.push(cursor.clone());
         cursor = cursor
             .parent()
@@ -336,345 +800,195 @@ fn prepare_workspace_parent(
             })?
             .to_path_buf();
     }
-
-    let mut created = Vec::new();
     for directory in missing.into_iter().rev() {
-        let containing_parent = directory.parent().ok_or_else(|| {
+        fs::create_dir(&directory).map_err(|error| {
             format!(
-                "workspace directory has no containing parent: {}",
+                "create workspace directory '{}': {}",
+                directory.display(),
+                error
+            )
+        })?;
+        sync_created_directory(directory.parent().ok_or_else(|| {
+            format!(
+                "workspace directory '{}' has no parent",
                 directory.display()
             )
-        })?;
-        if !directory_exists(containing_parent, "workspace containing parent")? {
-            return Err(format!(
-                "workspace containing parent is missing: {}",
-                containing_parent.display()
-            ));
-        }
-
-        match create_workspace_directory(&directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !directory_exists(&directory, "workspace parent")? {
-                    return Err(format!(
-                        "workspace parent disappeared while creating '{}'",
-                        directory.display()
-                    ));
-                }
-                sync_created_directory(containing_parent).map_err(|error| {
-                    format!(
-                        "sync containing directory '{}' for concurrently created '{}': {}",
-                        containing_parent.display(),
-                        directory.display(),
-                        error
-                    )
-                })?;
-                set_secure_directory_permissions(&directory)?;
-                sync_created_directory(&directory).map_err(|error| {
-                    format!(
-                        "sync concurrently created workspace directory '{}': {}",
-                        directory.display(),
-                        error
-                    )
-                })?;
-                created.push(directory);
-                continue;
-            }
-            Err(error) => {
-                return Err(format!(
-                    "create workspace directory '{}': {}",
-                    directory.display(),
-                    error
-                ))
-            }
-        }
-
-        sync_created_directory(containing_parent).map_err(|error| {
-            format!(
-                "sync containing directory '{}' after creating '{}': {}",
-                containing_parent.display(),
-                directory.display(),
-                error
-            )
-        })?;
-        set_secure_directory_permissions(&directory)?;
-        sync_created_directory(&directory).map_err(|error| {
-            format!(
-                "sync new workspace directory '{}': {}",
-                directory.display(),
-                error
-            )
-        })?;
-        created.push(directory);
-    }
-
-    validate_app_owned_directory_entries(parent)?;
-    if !directory_exists(parent, "workspace parent")? {
-        return Err(format!("workspace parent is missing: {}", parent.display()));
-    }
-
-    for directory in workspace_security_directories(parent) {
-        if created.iter().any(|created| created == &directory) {
-            continue;
-        }
-        set_secure_directory_permissions(&directory)?;
+        })?)?;
+        sync_created_directory(&directory)?;
     }
     Ok(())
-}
-
-fn workspace_security_directories(parent: &Path) -> Vec<PathBuf> {
-    if parent.file_name().is_some_and(|name| name == "macos-app") {
-        if let Some(psyche) = parent.parent() {
-            if psyche.file_name().is_some_and(|name| name == ".psyche") {
-                return vec![psyche.to_path_buf(), parent.to_path_buf()];
-            }
-        }
-    }
-    vec![parent.to_path_buf()]
-}
-
-fn validate_app_owned_directory_entries(parent: &Path) -> Result<(), String> {
-    for directory in workspace_security_directories(parent) {
-        let _ = directory_exists(&directory, "app-owned workspace directory")?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_workspace_directory(path: &Path) -> std::io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(false).mode(0o700).create(path)
-}
-
-#[cfg(not(unix))]
-fn create_workspace_directory(path: &Path) -> std::io::Result<()> {
-    fs::create_dir(path)
-}
-
-fn directory_exists(path: &Path, context: &str) -> Result<bool, String> {
-    let Some(metadata) = symlink_metadata_if_exists(path, context)? else {
-        return Ok(false);
-    };
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(format!(
-            "{context} '{}' must not be a symlink",
-            path.display()
-        ));
-    }
-    if !file_type.is_dir() {
-        return Err(format!(
-            "{context} '{}' must be a directory",
-            path.display()
-        ));
-    }
-    Ok(true)
-}
-
-fn regular_file_exists(path: &Path, context: &str) -> Result<bool, String> {
-    let Some(metadata) = symlink_metadata_if_exists(path, context)? else {
-        return Ok(false);
-    };
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(format!(
-            "{context} '{}' must not be a symlink",
-            path.display()
-        ));
-    }
-    if !file_type.is_file() {
-        return Err(format!(
-            "{context} '{}' must be a regular file",
-            path.display()
-        ));
-    }
-    Ok(true)
-}
-
-fn require_new_regular_file_path(path: &Path, context: &str) -> Result<(), String> {
-    let Some(metadata) = symlink_metadata_if_exists(path, context)? else {
-        return Ok(());
-    };
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(format!(
-            "{context} '{}' must not be a symlink",
-            path.display()
-        ));
-    }
-    if !file_type.is_file() {
-        return Err(format!(
-            "{context} '{}' must be a regular file",
-            path.display()
-        ));
-    }
-    Err(format!("{context} '{}' already exists", path.display()))
-}
-
-fn symlink_metadata_if_exists(path: &Path, context: &str) -> Result<Option<fs::Metadata>, String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("inspect {context} '{}': {}", path.display(), error)),
-    }
 }
 
 fn validate_workspace_artifact_paths(
+    workspace_dir: &SecureWorkspaceDir,
     path: &Path,
     parent: &Path,
     file_name: &str,
 ) -> Result<(), String> {
-    regular_file_exists(path, "workspace")?;
-    regular_file_exists(&workspace_lock_path(parent, file_name), "workspace lock")?;
+    regular_file_exists(workspace_dir, path, "workspace")?;
     regular_file_exists(
+        workspace_dir,
+        &workspace_lock_path(parent, file_name),
+        "workspace lock",
+    )?;
+    regular_file_exists(
+        workspace_dir,
         &workspace_rollback_pending_path(parent, file_name),
         "workspace pending rollback",
     )?;
     regular_file_exists(
+        workspace_dir,
         &workspace_rollback_committed_path(parent, file_name),
         "workspace committed rollback",
     )?;
-    validate_rollback_candidates(parent, file_name)?;
+    validate_rollback_candidates(workspace_dir, parent, file_name)?;
+    Ok(())
+}
+
+fn regular_file_exists(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        let name = workspace_dir.child_name(path, context)?;
+        let Some(stat) = fstatat_child(&workspace_dir.directory, &name, path, context)? else {
+            return Ok(false);
+        };
+        if stat_is_type(&stat, libc::S_IFLNK as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' must not be a symlink",
+                path.display()
+            ));
+        }
+        if !stat_is_type(&stat, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+                "{context} '{}' must not be a symlink",
+                path.display()
+            )),
+            Ok(metadata) if metadata.is_file() => Ok(true),
+            Ok(_) => Err(format!(
+                "{context} '{}' must be a regular file",
+                path.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!("inspect {context} '{}': {}", path.display(), error)),
+        }
+    }
+}
+
+fn require_new_regular_file_path(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<(), String> {
+    if regular_file_exists(workspace_dir, path, context)? {
+        return Err(format!("{context} '{}' already exists", path.display()));
+    }
     Ok(())
 }
 
 fn open_existing_regular_file(
+    workspace_dir: &SecureWorkspaceDir,
     path: &Path,
     context: &str,
     writable: bool,
 ) -> Result<Option<File>, String> {
-    if !regular_file_exists(path, context)? {
-        return Ok(None);
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).write(writable);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!("open {context} '{}': {}", path.display(), error));
-        }
-    };
-    verify_opened_regular_file(&file, path, context)?;
-    Ok(Some(file))
-}
-
-fn open_directory_no_follow(path: &Path, context: &str) -> Result<File, String> {
-    if !directory_exists(path, context)? {
-        return Err(format!("{context} '{}' is missing", path.display()));
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
-    let file = options
-        .open(path)
-        .map_err(|error| format!("open {context} '{}': {}", path.display(), error))?;
-    verify_opened_directory(&file, path, context)?;
-    Ok(file)
-}
-
-fn verify_opened_regular_file(file: &File, path: &Path, context: &str) -> Result<(), String> {
-    let opened = file
-        .metadata()
-        .map_err(|error| format!("inspect opened {context} '{}': {}", path.display(), error))?;
-    if !opened.file_type().is_file() {
-        return Err(format!(
-            "opened {context} '{}' must be a regular file",
-            path.display()
-        ));
-    }
-    let current = fs::symlink_metadata(path)
-        .map_err(|error| format!("reinspect {context} '{}': {}", path.display(), error))?;
-    if current.file_type().is_symlink() {
-        return Err(format!(
-            "{context} '{}' became a symlink while opening",
-            path.display()
-        ));
-    }
-    if !current.file_type().is_file() {
-        return Err(format!(
-            "{context} '{}' must be a regular file",
-            path.display()
-        ));
-    }
-    verify_opened_identity(&opened, &current, path, context)
-}
-
-fn verify_opened_directory(file: &File, path: &Path, context: &str) -> Result<(), String> {
-    let opened = file
-        .metadata()
-        .map_err(|error| format!("inspect opened {context} '{}': {}", path.display(), error))?;
-    if !opened.file_type().is_dir() {
-        return Err(format!(
-            "opened {context} '{}' must be a directory",
-            path.display()
-        ));
-    }
-    let current = fs::symlink_metadata(path)
-        .map_err(|error| format!("reinspect {context} '{}': {}", path.display(), error))?;
-    if current.file_type().is_symlink() {
-        return Err(format!(
-            "{context} '{}' became a symlink while opening",
-            path.display()
-        ));
-    }
-    if !current.file_type().is_dir() {
-        return Err(format!(
-            "{context} '{}' must be a directory",
-            path.display()
-        ));
-    }
-    verify_opened_identity(&opened, &current, path, context)
-}
-
-#[cfg(unix)]
-fn verify_opened_identity(
-    opened: &fs::Metadata,
-    current: &fs::Metadata,
-    path: &Path,
-    context: &str,
-) -> Result<(), String> {
-    if opened.dev() != current.dev() || opened.ino() != current.ino() {
-        return Err(format!(
-            "{context} '{}' changed while opening",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn verify_opened_identity(
-    _opened: &fs::Metadata,
-    _current: &fs::Metadata,
-    _path: &Path,
-    _context: &str,
-) -> Result<(), String> {
-    Ok(())
-}
-
-fn set_secure_directory_permissions(path: &Path) -> Result<(), String> {
-    let directory = open_directory_no_follow(path, "workspace directory")?;
     #[cfg(unix)]
     {
-        if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        let name = workspace_dir.child_name(path, context)?;
+        let Some(before) = fstatat_child(&workspace_dir.directory, &name, path, context)? else {
+            return Ok(None);
+        };
+        if stat_is_type(&before, libc::S_IFLNK as libc::mode_t) {
             return Err(format!(
-                "set workspace directory permissions '{}': {}",
-                path.display(),
-                std::io::Error::last_os_error()
+                "{context} '{}' must not be a symlink",
+                path.display()
             ));
         }
+        if !stat_is_type(&before, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+        let access = if writable {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
+        let fd = unsafe {
+            libc::openat(
+                workspace_dir.directory.as_raw_fd(),
+                name.as_ptr(),
+                access | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                return Err(format!(
+                    "{context} '{}' must not be a symlink",
+                    path.display()
+                ));
+            }
+            return Err(format!("open {context} '{}': {}", path.display(), error));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let opened = fstat_fd(&file, path, context)?;
+        if !stat_is_type(&opened, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "opened {context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+        let Some(current) = fstatat_child(&workspace_dir.directory, &name, path, context)? else {
+            return Err(format!(
+                "{context} '{}' disappeared while opening",
+                path.display()
+            ));
+        };
+        if stat_is_type(&current, libc::S_IFLNK as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' became a symlink while opening",
+                path.display()
+            ));
+        }
+        if !same_inode(&opened, &current) {
+            return Err(format!(
+                "{context} '{}' changed while opening",
+                path.display()
+            ));
+        }
+        set_secure_regular_file_permissions(&file, path, context)?;
+        Ok(Some(file))
     }
-    directory.sync_all().map_err(|error| {
-        format!(
-            "sync workspace directory permissions '{}': {}",
-            path.display(),
-            error
-        )
-    })
+    #[cfg(not(unix))]
+    {
+        if !regular_file_exists(workspace_dir, path, context)? {
+            return Ok(None);
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(writable);
+        options
+            .open(path)
+            .map(Some)
+            .map_err(|error| format!("open {context} '{}': {}", path.display(), error))
+    }
 }
 
 fn set_secure_regular_file_permissions(
@@ -696,21 +1010,22 @@ fn set_secure_regular_file_permissions(
 }
 
 fn rename_regular_workspace_path(
+    workspace_dir: &SecureWorkspaceDir,
     source: &Path,
     destination: &Path,
     source_context: &str,
     destination_context: &str,
-    rename: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
+    rename: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !regular_file_exists(source, source_context)? {
+    if !regular_file_exists(workspace_dir, source, source_context)? {
         return Err(format!(
             "{source_context} '{}' is missing",
             source.display()
         ));
     }
-    regular_file_exists(destination, destination_context)?;
-    rename(source, destination)?;
-    if !regular_file_exists(destination, destination_context)? {
+    regular_file_exists(workspace_dir, destination, destination_context)?;
+    rename(workspace_dir, source, destination)?;
+    if !regular_file_exists(workspace_dir, destination, destination_context)? {
         return Err(format!(
             "{destination_context} '{}' is missing after rename",
             destination.display()
@@ -719,22 +1034,71 @@ fn rename_regular_workspace_path(
     Ok(())
 }
 
+#[cfg(test)]
 fn open_temp_file(path: &Path) -> Result<File, String> {
-    open_new_workspace_file(path, "temp")
+    let workspace_dir = SecureWorkspaceDir::open_for_load(path)?
+        .ok_or_else(|| format!("workspace parent '{}' is missing", path.display()))?;
+    open_temp_file_in(&workspace_dir, path)
 }
 
-fn open_new_workspace_file(path: &Path, context: &str) -> Result<File, String> {
-    require_new_regular_file_path(path, &format!("workspace {context}"))?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+fn open_temp_file_in(workspace_dir: &SecureWorkspaceDir, path: &Path) -> Result<File, String> {
+    open_new_workspace_file(workspace_dir, path, "temp")
+}
+
+fn open_new_workspace_file(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<File, String> {
+    require_new_regular_file_path(workspace_dir, path, &format!("workspace {context}"))?;
     #[cfg(unix)]
-    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    let file = options
-        .open(path)
-        .map_err(|e| format!("create workspace {context} '{}': {}", path.display(), e))?;
-    verify_opened_regular_file(&file, path, &format!("workspace {context}"))?;
-    set_secure_regular_file_permissions(&file, path, &format!("workspace {context}"))?;
-    Ok(file)
+    {
+        let name = workspace_dir.child_name(path, &format!("workspace {context}"))?;
+        let fd = unsafe {
+            libc::openat(
+                workspace_dir.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                return Err(format!(
+                    "workspace {context} '{}' must not be a symlink",
+                    path.display()
+                ));
+            }
+            return Err(format!(
+                "create workspace {context} '{}': {}",
+                path.display(),
+                error
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let opened = fstat_fd(&file, path, &format!("workspace {context}"))?;
+        if !stat_is_type(&opened, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "opened workspace {context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+        set_secure_regular_file_permissions(&file, path, &format!("workspace {context}"))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                format!("create workspace {context} '{}': {}", path.display(), error)
+            })?;
+        set_secure_regular_file_permissions(&file, path, &format!("workspace {context}"))?;
+        Ok(file)
+    }
 }
 
 fn workspace_temp_path(parent: &Path, file_name: &str) -> PathBuf {
@@ -809,62 +1173,59 @@ fn workspace_restore_candidate_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn cleanup_rollback_candidates(
+    workspace_dir: &SecureWorkspaceDir,
     parent: &Path,
     file_name: &str,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut removed = false;
-    for candidate in rollback_candidate_paths(parent, file_name)? {
-        fs::remove_file(&candidate).map_err(|error| {
-            format!(
-                "remove workspace rollback candidate '{}': {}",
-                candidate.display(),
-                error
-            )
-        })?;
+    for candidate in rollback_candidate_paths(workspace_dir, parent, file_name)? {
+        unlink_workspace_path(workspace_dir, &candidate, "workspace rollback candidate").map_err(
+            |error| {
+                format!(
+                    "remove workspace rollback candidate '{}': {}",
+                    candidate.display(),
+                    error
+                )
+            },
+        )?;
         removed = true;
     }
     if removed {
-        let _ = sync_parent_directory(parent);
+        let _ = sync_parent_directory(workspace_dir, parent);
     }
     Ok(())
 }
 
-fn rollback_candidates_exist(parent: &Path, file_name: &str) -> Result<bool, String> {
-    Ok(!rollback_candidate_paths(parent, file_name)?.is_empty())
+fn rollback_candidates_exist(
+    workspace_dir: &SecureWorkspaceDir,
+    parent: &Path,
+    file_name: &str,
+) -> Result<bool, String> {
+    Ok(!rollback_candidate_paths(workspace_dir, parent, file_name)?.is_empty())
 }
 
-fn validate_rollback_candidates(parent: &Path, file_name: &str) -> Result<(), String> {
-    rollback_candidate_paths(parent, file_name).map(|_| ())
+fn validate_rollback_candidates(
+    workspace_dir: &SecureWorkspaceDir,
+    parent: &Path,
+    file_name: &str,
+) -> Result<(), String> {
+    rollback_candidate_paths(workspace_dir, parent, file_name).map(|_| ())
 }
 
-fn rollback_candidate_paths(parent: &Path, file_name: &str) -> Result<Vec<PathBuf>, String> {
+fn rollback_candidate_paths(
+    workspace_dir: &SecureWorkspaceDir,
+    parent: &Path,
+    file_name: &str,
+) -> Result<Vec<PathBuf>, String> {
     let prefix = workspace_rollback_candidate_prefix(file_name);
-    let entries = fs::read_dir(parent).map_err(|error| {
-        format!(
-            "read workspace parent for rollback candidates '{}': {}",
-            parent.display(),
-            error
-        )
-    })?;
     let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "read workspace rollback candidate in '{}': {}",
-                parent.display(),
-                error
-            )
-        })?;
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(prefix.as_str())
-        {
+    for name in workspace_directory_entries(workspace_dir, parent)? {
+        if !name.to_string_lossy().starts_with(prefix.as_str()) {
             continue;
         }
-        let candidate = entry.path();
-        if !regular_file_exists(&candidate, "workspace rollback candidate")? {
+        let candidate = parent.join(name);
+        if !regular_file_exists(workspace_dir, &candidate, "workspace rollback candidate")? {
             return Err(format!(
                 "workspace rollback candidate '{}' disappeared",
                 candidate.display()
@@ -875,38 +1236,166 @@ fn rollback_candidate_paths(parent: &Path, file_name: &str) -> Result<Vec<PathBu
     Ok(candidates)
 }
 
+fn workspace_directory_entries(
+    workspace_dir: &SecureWorkspaceDir,
+    parent: &Path,
+) -> Result<Vec<std::ffi::OsString>, String> {
+    #[cfg(unix)]
+    {
+        let current = CString::new(".").expect("static directory name");
+        let duplicate = unsafe {
+            libc::openat(
+                workspace_dir.directory.as_raw_fd(),
+                current.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if duplicate < 0 {
+            return Err(format!(
+                "open workspace parent directory stream '{}': {}",
+                parent.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(format!(
+                "read workspace parent for rollback candidates '{}': {}",
+                parent.display(),
+                error
+            ));
+        }
+        let mut entries = Vec::new();
+        loop {
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                break;
+            }
+            let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            entries.push(OsString::from_vec(bytes.to_vec()));
+        }
+        if unsafe { libc::closedir(stream) } != 0 {
+            return Err(format!(
+                "close workspace parent directory stream '{}': {}",
+                parent.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(entries)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::read_dir(parent)
+            .map_err(|error| {
+                format!(
+                    "read workspace parent for rollback candidates '{}': {}",
+                    parent.display(),
+                    error
+                )
+            })?
+            .map(|entry| {
+                entry.map(|entry| entry.file_name()).map_err(|error| {
+                    format!(
+                        "read workspace rollback candidate in '{}': {}",
+                        parent.display(),
+                        error
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn unlink_workspace_path(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let name = workspace_dir.child_name(path, context)?;
+        if unsafe { libc::unlinkat(workspace_dir.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::remove_file(path).map_err(|error| error.to_string())
+    }
+}
+
 fn cleanup_committed_rollback(
+    workspace_dir: &SecureWorkspaceDir,
     committed_path: &Path,
     parent: &Path,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    if !regular_file_exists(committed_path, "workspace committed rollback")? {
+    if !regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )? {
         return Ok(());
     }
-    fs::remove_file(committed_path).map_err(|error| {
+    unlink_workspace_path(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )
+    .map_err(|error| {
         format!(
             "remove committed workspace rollback '{}': {}",
             committed_path.display(),
             error
         )
     })?;
-    let _ = sync_parent_directory(parent);
+    let _ = sync_parent_directory(workspace_dir, parent);
     Ok(())
 }
 
+#[cfg(test)]
 fn workspace_file_exists(path: &Path) -> Result<bool, String> {
-    regular_file_exists(path, "workspace")
+    let Some(workspace_dir) = SecureWorkspaceDir::open_for_load(path)? else {
+        return Ok(false);
+    };
+    workspace_file_exists_in(&workspace_dir, path)
 }
 
-fn create_rollback_backup(path: &Path, backup_path: &Path) -> Result<(), String> {
-    create_rollback_backup_with(
+fn workspace_file_exists_in(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+) -> Result<bool, String> {
+    regular_file_exists(workspace_dir, path, "workspace")
+}
+
+#[cfg(test)]
+fn create_rollback_backup(_path: &Path, _backup_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn create_rollback_backup_in(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    backup_path: &Path,
+) -> Result<(), String> {
+    create_rollback_backup_with_in(
+        workspace_dir,
         path,
         backup_path,
-        |source, destination| fs::hard_link(source, destination),
+        hard_link_workspace_path,
         std::io::copy,
     )
 }
 
+#[cfg(test)]
 fn create_rollback_backup_with<F, G>(
     path: &Path,
     backup_path: &Path,
@@ -917,26 +1406,52 @@ where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
     G: FnOnce(&mut File, &mut File) -> std::io::Result<u64>,
 {
-    if !regular_file_exists(path, "workspace rollback source")? {
+    let workspace_dir = SecureWorkspaceDir::open_for_load(path)?
+        .ok_or_else(|| format!("workspace parent '{}' is missing", path.display()))?;
+    create_rollback_backup_with_in(
+        &workspace_dir,
+        path,
+        backup_path,
+        |_, source, destination| hard_link(source, destination),
+        copy_file,
+    )
+}
+
+fn create_rollback_backup_with_in<F, G>(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    backup_path: &Path,
+    hard_link: F,
+    copy_file: G,
+) -> Result<(), String>
+where
+    F: FnOnce(&SecureWorkspaceDir, &Path, &Path) -> std::io::Result<()>,
+    G: FnOnce(&mut File, &mut File) -> std::io::Result<u64>,
+{
+    if !regular_file_exists(workspace_dir, path, "workspace rollback source")? {
         return Err(format!(
             "workspace rollback source '{}' is missing",
             path.display()
         ));
     }
-    require_new_regular_file_path(backup_path, "workspace pending rollback")?;
+    require_new_regular_file_path(workspace_dir, backup_path, "workspace pending rollback")?;
     let candidate_path = workspace_rollback_candidate_path(backup_path)?;
-    let candidate_guard =
-        create_snapshot_candidate_with(path, &candidate_path, hard_link, copy_file).map_err(
-            |error| {
-                format!(
-                    "create pending rollback '{}' from '{}': {}",
-                    backup_path.display(),
-                    path.display(),
-                    error
-                )
-            },
-        )?;
-    fs::hard_link(&candidate_path, backup_path).map_err(|e| {
+    let candidate_guard = create_snapshot_candidate_with_in(
+        workspace_dir,
+        path,
+        &candidate_path,
+        hard_link,
+        copy_file,
+    )
+    .map_err(|error| {
+        format!(
+            "create pending rollback '{}' from '{}': {}",
+            backup_path.display(),
+            path.display(),
+            error
+        )
+    })?;
+    hard_link_workspace_path(workspace_dir, &candidate_path, backup_path).map_err(|e| {
         format!(
             "publish rollback candidate '{}' as pending '{}': {}",
             candidate_path.display(),
@@ -944,7 +1459,7 @@ where
             e
         )
     })?;
-    if !regular_file_exists(backup_path, "workspace pending rollback")? {
+    if !regular_file_exists(workspace_dir, backup_path, "workspace pending rollback")? {
         return Err(format!(
             "workspace pending rollback '{}' is missing after publication",
             backup_path.display()
@@ -954,34 +1469,76 @@ where
     Ok(())
 }
 
-fn create_snapshot_candidate_with<F, G>(
+fn hard_link_workspace_path(
+    workspace_dir: &SecureWorkspaceDir,
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let source_name = workspace_dir
+            .child_name(source, "workspace hard-link source")
+            .map_err(std::io::Error::other)?;
+        let destination_name = workspace_dir
+            .child_name(destination, "workspace hard-link destination")
+            .map_err(std::io::Error::other)?;
+        if unsafe {
+            libc::linkat(
+                workspace_dir.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                workspace_dir.directory.as_raw_fd(),
+                destination_name.as_ptr(),
+                0,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::hard_link(source, destination)
+    }
+}
+
+fn create_snapshot_candidate_with_in<'a, F, G>(
+    workspace_dir: &'a SecureWorkspaceDir,
     path: &Path,
     candidate_path: &Path,
     hard_link: F,
     copy_file: G,
-) -> Result<TempFileGuard, String>
+) -> Result<TempFileGuard<'a>, String>
 where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    F: FnOnce(&SecureWorkspaceDir, &Path, &Path) -> std::io::Result<()>,
     G: FnOnce(&mut File, &mut File) -> std::io::Result<u64>,
 {
-    if !regular_file_exists(path, "workspace snapshot source")? {
+    if !regular_file_exists(workspace_dir, path, "workspace snapshot source")? {
         return Err(format!(
             "workspace snapshot source '{}' is missing",
             path.display()
         ));
     }
-    require_new_regular_file_path(candidate_path, "workspace snapshot candidate")?;
-    match hard_link(path, candidate_path) {
+    require_new_regular_file_path(
+        workspace_dir,
+        candidate_path,
+        "workspace snapshot candidate",
+    )?;
+    match hard_link(workspace_dir, path, candidate_path) {
         Ok(()) => {
-            let guard = TempFileGuard::new(candidate_path.to_path_buf());
-            let file =
-                open_existing_regular_file(candidate_path, "workspace snapshot candidate", false)?
-                    .ok_or_else(|| {
-                        format!(
-                            "workspace snapshot candidate '{}' disappeared",
-                            candidate_path.display()
-                        )
-                    })?;
+            let guard = TempFileGuard::new(workspace_dir, candidate_path.to_path_buf());
+            let file = open_existing_regular_file(
+                workspace_dir,
+                candidate_path,
+                "workspace snapshot candidate",
+                false,
+            )?
+            .ok_or_else(|| {
+                format!(
+                    "workspace snapshot candidate '{}' disappeared",
+                    candidate_path.display()
+                )
+            })?;
             file.sync_all().map_err(|e| {
                 format!(
                     "sync workspace snapshot candidate '{}': {}",
@@ -991,20 +1548,21 @@ where
             })?;
             return Ok(guard);
         }
-        Err(link_error) => copy_snapshot_candidate(path, candidate_path, copy_file)
+        Err(link_error) => copy_snapshot_candidate(workspace_dir, path, candidate_path, copy_file)
             .map_err(|copy_error| format!("{} (hard link failed: {})", copy_error, link_error)),
     }
 }
 
-fn copy_snapshot_candidate<G>(
+fn copy_snapshot_candidate<'a, G>(
+    workspace_dir: &'a SecureWorkspaceDir,
     path: &Path,
     candidate_path: &Path,
     copy_file: G,
-) -> Result<TempFileGuard, String>
+) -> Result<TempFileGuard<'a>, String>
 where
     G: FnOnce(&mut File, &mut File) -> std::io::Result<u64>,
 {
-    let mut source = open_existing_regular_file(path, "rollback source", false)?
+    let mut source = open_existing_regular_file(workspace_dir, path, "rollback source", false)?
         .ok_or_else(|| format!("rollback source '{}' is missing", path.display()))?;
     let metadata = source
         .metadata()
@@ -1017,8 +1575,9 @@ where
             WORKSPACE_ROLLBACK_COPY_LIMIT
         ));
     }
-    let mut candidate = open_new_workspace_file(candidate_path, "snapshot candidate")?;
-    let candidate_guard = TempFileGuard::new(candidate_path.to_path_buf());
+    let mut candidate =
+        open_new_workspace_file(workspace_dir, candidate_path, "snapshot candidate")?;
+    let candidate_guard = TempFileGuard::new(workspace_dir, candidate_path.to_path_buf());
     let copy_result = (|| -> Result<(), String> {
         let copied = copy_file(&mut source, &mut candidate).map_err(|e| {
             format!(
@@ -1048,28 +1607,46 @@ where
     Ok(candidate_guard)
 }
 
-fn restore_workspace_backup(backup_path: &Path, path: &Path) -> Result<(), String> {
-    if !regular_file_exists(backup_path, "workspace rollback backup")? {
+#[cfg(test)]
+fn restore_workspace_backup_standalone(backup_path: &Path, path: &Path) -> Result<(), String> {
+    let workspace_dir = SecureWorkspaceDir::open_for_load(path)?
+        .ok_or_else(|| format!("workspace parent '{}' is missing", path.display()))?;
+    restore_workspace_backup_in(&workspace_dir, backup_path, path)
+}
+
+#[cfg(test)]
+fn restore_workspace_backup(_backup_path: &Path, _path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn restore_workspace_backup_in(
+    workspace_dir: &SecureWorkspaceDir,
+    backup_path: &Path,
+    path: &Path,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, backup_path, "workspace rollback backup")? {
         return Err(format!(
             "workspace rollback backup '{}' is missing",
             backup_path.display()
         ));
     }
-    regular_file_exists(path, "workspace")?;
+    regular_file_exists(workspace_dir, path, "workspace")?;
     let candidate_path = workspace_restore_candidate_path(path)?;
-    let mut candidate_guard = create_snapshot_candidate_with(
+    let mut candidate_guard = create_snapshot_candidate_with_in(
+        workspace_dir,
         backup_path,
         &candidate_path,
-        |source, destination| fs::hard_link(source, destination),
+        hard_link_workspace_path,
         std::io::copy,
     )?;
     rename_regular_workspace_path(
+        workspace_dir,
         &candidate_path,
         path,
         "workspace restore candidate",
         "workspace",
-        &mut |source, destination| {
-            fs::rename(source, destination).map_err(|e| {
+        &mut |workspace_dir, source, destination| {
+            rename_workspace_path_in(workspace_dir, source, destination).map_err(|e| {
                 format!(
                     "restore workspace from pending rollback '{}' to '{}': {}",
                     backup_path.display(),
@@ -1083,7 +1660,35 @@ fn restore_workspace_backup(backup_path: &Path, path: &Path) -> Result<(), Strin
     Ok(())
 }
 
-fn rename_workspace_path(source: &Path, destination: &Path) -> Result<(), String> {
+fn rename_workspace_path_in(
+    workspace_dir: &SecureWorkspaceDir,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let source_name = workspace_dir.child_name(source, "workspace rename source")?;
+        let destination_name =
+            workspace_dir.child_name(destination, "workspace rename destination")?;
+        if unsafe {
+            libc::renameat(
+                workspace_dir.directory.as_raw_fd(),
+                source_name.as_ptr(),
+                workspace_dir.directory.as_raw_fd(),
+                destination_name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(format!(
+                "rename workspace path '{}' to '{}': {}",
+                source.display(),
+                destination.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
     fs::rename(source, destination).map_err(|e| {
         format!(
             "rename workspace path '{}' to '{}': {}",
@@ -1095,15 +1700,16 @@ fn rename_workspace_path(source: &Path, destination: &Path) -> Result<(), String
 }
 
 fn recover_pending_workspace(
+    workspace_dir: &SecureWorkspaceDir,
     path: &Path,
     parent: &Path,
     pending_path: &Path,
     committed_path: &Path,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
-    restore_workspace_backup: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
-    rename_workspace_path: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<bool, String> {
-    restore_workspace_backup(pending_path, path).map_err(|error| {
+    restore_workspace_backup(workspace_dir, pending_path, path).map_err(|error| {
         format!(
             "restore pending workspace rollback '{}' to '{}': {}; pending rollback retained at '{}'",
             pending_path.display(),
@@ -1112,7 +1718,7 @@ fn recover_pending_workspace(
             pending_path.display()
         )
     })?;
-    sync_parent_directory(parent).map_err(|error| {
+    sync_parent_directory(workspace_dir, parent).map_err(|error| {
         format!(
             "sync restored workspace '{}': {}; pending rollback retained at '{}'",
             path.display(),
@@ -1120,8 +1726,17 @@ fn recover_pending_workspace(
             pending_path.display()
         )
     })?;
-    if regular_file_exists(committed_path, "workspace committed rollback")? {
-        fs::remove_file(committed_path).map_err(|error| {
+    if regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )? {
+        unlink_workspace_path(
+            workspace_dir,
+            committed_path,
+            "workspace committed rollback",
+        )
+        .map_err(|error| {
             format!(
                 "remove committed rollback '{}' before pending recovery: {}; pending rollback retained at '{}'",
                 committed_path.display(),
@@ -1129,9 +1744,10 @@ fn recover_pending_workspace(
                 pending_path.display()
             )
         })?;
-        let _ = sync_parent_directory(parent);
+        let _ = sync_parent_directory(workspace_dir, parent);
     }
     mark_rollback_committed(
+        workspace_dir,
         pending_path,
         committed_path,
         parent,
@@ -1141,16 +1757,18 @@ fn recover_pending_workspace(
 }
 
 fn rollback_workspace_after_failed_save(
+    workspace_dir: &SecureWorkspaceDir,
     path: &Path,
     parent: &Path,
     pending_path: &Path,
     committed_path: &Path,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
-    restore_workspace_backup: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
-    rename_workspace_path: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    if regular_file_exists(pending_path, "workspace pending rollback")? {
+    if regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
         let cleanup_committed = recover_pending_workspace(
+            workspace_dir,
             path,
             parent,
             pending_path,
@@ -1161,13 +1779,18 @@ fn rollback_workspace_after_failed_save(
         )
         .map_err(|error| format!("rollback restoration failed: {error}"))?;
         if cleanup_committed {
-            let _ = cleanup_committed_rollback(committed_path, parent, sync_parent_directory);
+            let _ = cleanup_committed_rollback(
+                workspace_dir,
+                committed_path,
+                parent,
+                sync_parent_directory,
+            );
         }
         Ok(())
-    } else if regular_file_exists(path, "workspace")? {
-        fs::remove_file(path)
+    } else if regular_file_exists(workspace_dir, path, "workspace")? {
+        unlink_workspace_path(workspace_dir, path, "workspace")
             .map_err(|e| format!("remove failed workspace '{}': {}", path.display(), e))?;
-        sync_parent_directory(parent).map_err(|error| {
+        sync_parent_directory(workspace_dir, parent).map_err(|error| {
             format!(
                 "sync removal of failed workspace '{}': {}",
                 path.display(),
@@ -1180,16 +1803,21 @@ fn rollback_workspace_after_failed_save(
 }
 
 fn mark_rollback_committed(
+    workspace_dir: &SecureWorkspaceDir,
     pending_path: &Path,
     committed_path: &Path,
     parent: &Path,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
-    rename_workspace_path: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<bool, String> {
-    if !regular_file_exists(pending_path, "workspace pending rollback")? {
+    if !regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
         return Ok(false);
     }
-    if regular_file_exists(committed_path, "workspace committed rollback")? {
+    if regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )? {
         return Err(format!(
             "cannot commit pending rollback '{}': committed rollback '{}' already exists",
             pending_path.display(),
@@ -1198,13 +1826,14 @@ fn mark_rollback_committed(
     }
 
     if let Err(error) = rename_regular_workspace_path(
+        workspace_dir,
         pending_path,
         committed_path,
         "workspace pending rollback",
         "workspace committed rollback",
         rename_workspace_path,
     ) {
-        if regular_file_exists(pending_path, "workspace pending rollback")? {
+        if regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
             return Err(format!(
                 "mark pending rollback '{}' as committed '{}': {}; pending rollback retained at '{}'",
                 pending_path.display(),
@@ -1213,11 +1842,16 @@ fn mark_rollback_committed(
                 pending_path.display()
             ));
         }
-        if regular_file_exists(committed_path, "workspace committed rollback")? {
-            if sync_parent_directory(parent).is_ok() {
+        if regular_file_exists(
+            workspace_dir,
+            committed_path,
+            "workspace committed rollback",
+        )? {
+            if sync_parent_directory(workspace_dir, parent).is_ok() {
                 return Ok(true);
             }
             return preserve_pending_after_uncertain_commit(
+                workspace_dir,
                 pending_path,
                 committed_path,
                 parent,
@@ -1233,11 +1867,11 @@ fn mark_rollback_committed(
         return Ok(false);
     }
 
-    let marker_sync_error = match sync_parent_directory(parent) {
+    let marker_sync_error = match sync_parent_directory(workspace_dir, parent) {
         Ok(()) => return Ok(true),
         Err(error) => error,
     };
-    if regular_file_exists(pending_path, "workspace pending rollback")? {
+    if regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
         return Err(format!(
             "sync committed rollback marker '{}': {}; pending rollback already exists at '{}'",
             committed_path.display(),
@@ -1247,6 +1881,7 @@ fn mark_rollback_committed(
     }
 
     match rename_regular_workspace_path(
+        workspace_dir,
         committed_path,
         pending_path,
         "workspace committed rollback",
@@ -1254,7 +1889,7 @@ fn mark_rollback_committed(
         rename_workspace_path,
     ) {
         Ok(()) => {
-            let revert_sync_result = sync_parent_directory(parent);
+            let revert_sync_result = sync_parent_directory(workspace_dir, parent);
             let mut message = format!(
                 "sync committed rollback marker '{}': {}; pending rollback restored at '{}'",
                 committed_path.display(),
@@ -1267,7 +1902,11 @@ fn mark_rollback_committed(
             Err(message)
         }
         Err(revert_error)
-            if regular_file_exists(pending_path, "workspace pending rollback")? =>
+            if regular_file_exists(
+                workspace_dir,
+                pending_path,
+                "workspace pending rollback",
+            )? =>
         {
             Err(format!(
                 "sync committed rollback marker '{}': {}; reverting marker failed: {}; pending rollback retained at '{}'",
@@ -1278,9 +1917,14 @@ fn mark_rollback_committed(
             ))
         }
         Err(revert_error)
-            if regular_file_exists(committed_path, "workspace committed rollback")? =>
+            if regular_file_exists(
+                workspace_dir,
+                committed_path,
+                "workspace committed rollback",
+            )? =>
         {
             preserve_pending_after_uncertain_commit(
+                workspace_dir,
                 pending_path,
                 committed_path,
                 parent,
@@ -1298,15 +1942,16 @@ fn mark_rollback_committed(
 }
 
 fn preserve_pending_after_uncertain_commit(
+    workspace_dir: &SecureWorkspaceDir,
     pending_path: &Path,
     committed_path: &Path,
     parent: &Path,
     failure: String,
-    sync_parent_directory: &mut impl FnMut(&Path) -> Result<(), String>,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
 ) -> Result<bool, String> {
-    match create_rollback_backup(committed_path, pending_path) {
+    match create_rollback_backup_in(workspace_dir, committed_path, pending_path) {
         Ok(()) => {
-            let sync_error = sync_parent_directory(parent).err();
+            let sync_error = sync_parent_directory(workspace_dir, parent).err();
             let mut message = format!(
                 "{failure}; pending rollback restored at '{}'",
                 pending_path.display()
@@ -1317,43 +1962,133 @@ fn preserve_pending_after_uncertain_commit(
             Err(message)
         }
         Err(_preserve_error) => {
-            let _ = sync_parent_directory(parent);
+            let _ = sync_parent_directory(workspace_dir, parent);
             Ok(false)
         }
     }
 }
 
-fn open_workspace_lock(path: &Path) -> Result<File, String> {
-    for _ in 0..8 {
-        let exists = regular_file_exists(path, "workspace lock")?;
-        let mut options = OpenOptions::new();
-        options.read(true).write(true);
-        if exists {
-            #[cfg(unix)]
-            options.custom_flags(libc::O_NOFOLLOW);
-        } else {
-            options.create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+fn verify_opened_regular_file(
+    workspace_dir: &SecureWorkspaceDir,
+    file: &File,
+    path: &Path,
+    context: &str,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let opened = fstat_fd(file, path, context)?;
+        if !stat_is_type(&opened, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "opened {context} '{}' must be a regular file",
+                path.display()
+            ));
         }
+        let name = workspace_dir.child_name(path, context)?;
+        let Some(current) = fstatat_child(&workspace_dir.directory, &name, path, context)? else {
+            return Err(format!(
+                "{context} '{}' disappeared while opening",
+                path.display()
+            ));
+        };
+        if stat_is_type(&current, libc::S_IFLNK as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' became a symlink while opening",
+                path.display()
+            ));
+        }
+        if !stat_is_type(&current, libc::S_IFREG as libc::mode_t) {
+            return Err(format!(
+                "{context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+        if !same_inode(&opened, &current) {
+            return Err(format!(
+                "{context} '{}' changed while opening",
+                path.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !file
+            .metadata()
+            .map_err(|error| format!("inspect opened {context} '{}': {}", path.display(), error))?
+            .is_file()
+        {
+            return Err(format!(
+                "opened {context} '{}' must be a regular file",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
 
-        let file = match options.open(path) {
-            Ok(file) => file,
-            Err(error)
-                if (!exists && error.kind() == std::io::ErrorKind::AlreadyExists)
-                    || (exists && error.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                continue;
+fn open_workspace_lock(workspace_dir: &SecureWorkspaceDir, path: &Path) -> Result<File, String> {
+    for _ in 0..8 {
+        let exists = regular_file_exists(workspace_dir, path, "workspace lock")?;
+        #[cfg(unix)]
+        let file = {
+            let name = workspace_dir.child_name(path, "workspace lock")?;
+            let mut flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            if !exists {
+                flags |= libc::O_CREAT | libc::O_EXCL;
             }
-            Err(error) => {
+            let fd = unsafe {
+                libc::openat(
+                    workspace_dir.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    flags,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                if (!exists && error.kind() == std::io::ErrorKind::AlreadyExists)
+                    || (exists && error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    continue;
+                }
+                if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                    return Err(format!(
+                        "workspace lock '{}' must not be a symlink",
+                        path.display()
+                    ));
+                }
                 return Err(format!(
                     "open workspace lock '{}': {}",
                     path.display(),
                     error
-                ))
+                ));
+            }
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(not(unix))]
+        let file = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            if !exists {
+                options.create_new(true);
+            }
+            match options.open(path) {
+                Ok(file) => file,
+                Err(error)
+                    if (!exists && error.kind() == std::io::ErrorKind::AlreadyExists)
+                        || (exists && error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "open workspace lock '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                }
             }
         };
-        verify_opened_regular_file(&file, path, "workspace lock")?;
+        verify_opened_regular_file(workspace_dir, &file, path, "workspace lock")?;
         set_secure_regular_file_permissions(&file, path, "workspace lock")?;
         file.sync_all().map_err(|error| {
             format!(
@@ -1375,15 +2110,19 @@ struct WorkspaceFileLock {
 }
 
 impl WorkspaceFileLock {
-    fn shared(path: &Path) -> Result<Self, String> {
-        Self::acquire(path, LockMode::Shared)
+    fn shared(workspace_dir: &SecureWorkspaceDir, path: &Path) -> Result<Self, String> {
+        Self::acquire(workspace_dir, path, LockMode::Shared)
     }
 
-    fn exclusive(path: &Path) -> Result<Self, String> {
-        Self::acquire(path, LockMode::Exclusive)
+    fn exclusive(workspace_dir: &SecureWorkspaceDir, path: &Path) -> Result<Self, String> {
+        Self::acquire(workspace_dir, path, LockMode::Exclusive)
     }
 
-    fn acquire(path: &Path, mode: LockMode) -> Result<Self, String> {
+    fn acquire(
+        workspace_dir: &SecureWorkspaceDir,
+        path: &Path,
+        mode: LockMode,
+    ) -> Result<Self, String> {
         let parent = path
             .parent()
             .ok_or_else(|| format!("workspace path has no parent directory: {}", path.display()))?;
@@ -1392,7 +2131,7 @@ impl WorkspaceFileLock {
             .ok_or_else(|| format!("workspace path has no file name: {}", path.display()))?
             .to_string_lossy();
         let lock_path = workspace_lock_path(parent, &file_name);
-        let file = open_workspace_lock(&lock_path)?;
+        let file = open_workspace_lock(workspace_dir, &lock_path)?;
         #[cfg(unix)]
         {
             let operation = match mode {
@@ -1413,7 +2152,7 @@ impl WorkspaceFileLock {
                 }
             }
         }
-        verify_opened_regular_file(&file, &lock_path, "workspace lock")?;
+        verify_opened_regular_file(workspace_dir, &file, &lock_path, "workspace lock")?;
         Ok(Self { file })
     }
 }
@@ -1432,26 +2171,36 @@ enum LockMode {
     Exclusive,
 }
 
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> Result<(), String> {
-    open_directory_no_follow(parent, "workspace parent")?
-        .sync_all()
-        .map_err(|e| format!("sync workspace parent '{}': {}", parent.display(), e))
+#[cfg(test)]
+fn sync_parent_directory_standalone(parent: &Path) -> Result<(), String> {
+    let path = parent.join("workspace-v3.json");
+    let workspace_dir = SecureWorkspaceDir::open_for_load(&path)?
+        .ok_or_else(|| format!("workspace parent '{}' is missing", parent.display()))?;
+    workspace_dir.sync()
 }
 
-#[cfg(not(unix))]
+#[cfg(test)]
 fn sync_parent_directory(_parent: &Path) -> Result<(), String> {
     Ok(())
 }
 
-struct TempFileGuard {
+fn sync_workspace_directory(
+    workspace_dir: &SecureWorkspaceDir,
+    _parent: &Path,
+) -> Result<(), String> {
+    workspace_dir.sync()
+}
+
+struct TempFileGuard<'a> {
+    workspace_dir: &'a SecureWorkspaceDir,
     path: PathBuf,
     committed: bool,
 }
 
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
+impl<'a> TempFileGuard<'a> {
+    fn new(workspace_dir: &'a SecureWorkspaceDir, path: PathBuf) -> Self {
         Self {
+            workspace_dir,
             path,
             committed: false,
         }
@@ -1462,10 +2211,10 @@ impl TempFileGuard {
     }
 }
 
-impl Drop for TempFileGuard {
+impl Drop for TempFileGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = fs::remove_file(&self.path);
+            let _ = unlink_workspace_path(self.workspace_dir, &self.path, "workspace temp");
         }
     }
 }
@@ -1475,8 +2224,8 @@ fn workspace_save_to_test_hook<F, G, H>(
     path: &Path,
     value: &Value,
     before_rename: F,
-    sync_transaction_directory: G,
-    restore_workspace_backup: H,
+    mut sync_transaction_directory: G,
+    mut restore_workspace_backup: H,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
@@ -1487,11 +2236,17 @@ where
         path,
         value,
         before_rename,
-        sync_parent_directory,
-        sync_transaction_directory,
-        restore_workspace_backup,
-        create_rollback_backup,
-        rename_workspace_path,
+        |_| Ok(()),
+        move |workspace_dir, parent| {
+            sync_transaction_directory(parent)?;
+            workspace_dir.sync()
+        },
+        move |workspace_dir, backup, destination| {
+            restore_workspace_backup(backup, destination)?;
+            restore_workspace_backup_in(workspace_dir, backup, destination)
+        },
+        create_rollback_backup_in,
+        rename_workspace_path_in,
     )
 }
 
@@ -1511,8 +2266,8 @@ fn workspace_save_to_test_hook_with_backup<F, G, H, I>(
     path: &Path,
     value: &Value,
     before_rename: F,
-    sync_transaction_directory: G,
-    restore_workspace_backup: H,
+    mut sync_transaction_directory: G,
+    mut restore_workspace_backup: H,
     create_rollback_backup: I,
 ) -> Result<(), String>
 where
@@ -1525,11 +2280,20 @@ where
         path,
         value,
         before_rename,
-        sync_parent_directory,
-        sync_transaction_directory,
-        restore_workspace_backup,
-        create_rollback_backup,
-        rename_workspace_path,
+        |_| Ok(()),
+        move |workspace_dir, parent| {
+            sync_transaction_directory(parent)?;
+            workspace_dir.sync()
+        },
+        move |workspace_dir, backup, destination| {
+            restore_workspace_backup(backup, destination)?;
+            restore_workspace_backup_in(workspace_dir, backup, destination)
+        },
+        move |workspace_dir, source, backup| {
+            create_rollback_backup(source, backup)?;
+            create_rollback_backup_in(workspace_dir, source, backup)
+        },
+        rename_workspace_path_in,
     )
 }
 
@@ -1538,10 +2302,10 @@ fn workspace_save_to_test_hook_with_ops<F, G, H, I, J>(
     path: &Path,
     value: &Value,
     before_rename: F,
-    sync_transaction_directory: G,
-    restore_workspace_backup: H,
+    mut sync_transaction_directory: G,
+    mut restore_workspace_backup: H,
     create_rollback_backup: I,
-    rename_workspace_path: J,
+    mut rename_workspace_path: J,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
@@ -1554,11 +2318,23 @@ where
         path,
         value,
         before_rename,
-        sync_parent_directory,
-        sync_transaction_directory,
-        restore_workspace_backup,
-        create_rollback_backup,
-        rename_workspace_path,
+        |_| Ok(()),
+        move |workspace_dir, parent| {
+            sync_transaction_directory(parent)?;
+            workspace_dir.sync()
+        },
+        move |workspace_dir, backup, destination| {
+            restore_workspace_backup(backup, destination)?;
+            restore_workspace_backup_in(workspace_dir, backup, destination)
+        },
+        move |workspace_dir, source, backup| {
+            create_rollback_backup(source, backup)?;
+            create_rollback_backup_in(workspace_dir, source, backup)
+        },
+        move |workspace_dir, source, destination| {
+            rename_workspace_path(source, destination)?;
+            rename_workspace_path_in(workspace_dir, source, destination)
+        },
     )
 }
 
@@ -1576,10 +2352,10 @@ where
         value,
         |_| Ok(()),
         sync_created_directory,
-        sync_parent_directory,
-        restore_workspace_backup,
-        create_rollback_backup,
-        rename_workspace_path,
+        sync_workspace_directory,
+        restore_workspace_backup_in,
+        create_rollback_backup_in,
+        rename_workspace_path_in,
     )
 }
 
@@ -1988,8 +2764,8 @@ mod tests {
         let backup = case.path().join("rollback.pending");
         symlink(&outside, &backup).expect("symlink backup");
 
-        let error =
-            restore_workspace_backup(&backup, &workspace).expect_err("reject backup symlink");
+        let error = restore_workspace_backup_standalone(&backup, &workspace)
+            .expect_err("reject backup symlink");
 
         assert!(error.contains("symlink"));
         assert_eq!(
@@ -2134,7 +2910,7 @@ mod tests {
         let loaded = load_workspace_from_test_hook(&path, || {
             fs::write(&path, &resolved_bytes).map_err(|error| error.to_string())?;
             fs::rename(&pending, &committed).map_err(|error| error.to_string())?;
-            sync_parent_directory(path.parent().expect("parent"))
+            sync_parent_directory_standalone(path.parent().expect("parent"))
         })
         .expect("load after raced recovery")
         .expect("workspace exists");
@@ -2280,7 +3056,7 @@ mod tests {
                 if source == pending && destination == committed {
                     return Err("injected marker rename failure".to_string());
                 }
-                fs::rename(source, destination).map_err(|e| e.to_string())
+                Ok(())
             },
         )
         .expect_err("marker rename failure must fail with pending preserved");
@@ -2400,7 +3176,7 @@ mod tests {
                 if source == committed && destination == pending {
                     return Err("injected marker revert failure".to_string());
                 }
-                fs::rename(source, destination).map_err(|e| e.to_string())
+                Ok(())
             },
         )
         .expect_err("save must fail when marker sync and reversion both fail");
@@ -2457,7 +3233,7 @@ mod tests {
                 {
                     return Err("injected workspace rename failure".to_string());
                 }
-                fs::rename(source, destination).map_err(|e| e.to_string())
+                Ok(())
             },
         )
         .expect_err("workspace rename failure must roll back");
@@ -3097,7 +3873,7 @@ mod tests {
 
         workspace_save_to_test_hook_with_parent_sync(&path, &workspace_value(), |directory| {
             synced.push(directory.to_path_buf());
-            sync_parent_directory(directory)
+            sync_parent_directory_standalone(directory)
         })
         .expect("save workspace");
 
@@ -3131,5 +3907,261 @@ mod tests {
         assert!(psyche.exists());
         assert!(!psyche.join("macos-app").exists());
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_save_stays_on_pinned_inode_after_psyche_symlink_replacement() {
+        let (_dir, path) = temp_parent_workspace_path();
+        let original = workspace_with_project("original");
+        save_workspace_to(&path, &original).expect("save original");
+
+        let app = path.parent().expect("macos-app").to_path_buf();
+        let psyche = app.parent().expect(".psyche").to_path_buf();
+        let home = psyche.parent().expect("home");
+        let pinned_psyche = home.join(".psyche-pinned");
+        let pinned_path = pinned_psyche.join("macos-app").join("workspace-v3.json");
+        let outside = home.join("outside-psyche");
+        let outside_app = outside.join("macos-app");
+        fs::create_dir_all(&outside_app).expect("create outside app");
+        let outside_path = outside_app.join("workspace-v3.json");
+        let outside_bytes =
+            serde_json::to_vec(&workspace_with_project("outside")).expect("serialize outside");
+        fs::write(&outside_path, &outside_bytes).expect("write outside workspace");
+
+        let updated = workspace_with_project("updated");
+        workspace_save_to_test_hook(
+            &path,
+            &updated,
+            |_| {
+                fs::rename(&psyche, &pinned_psyche).map_err(|error| error.to_string())?;
+                symlink(&outside, &psyche).map_err(|error| error.to_string())
+            },
+            sync_parent_directory,
+            restore_workspace_backup,
+        )
+        .expect("save through pinned directory");
+
+        assert_eq!(
+            load_workspace_from(&pinned_path)
+                .expect("load pinned workspace")
+                .expect("pinned workspace exists"),
+            updated
+        );
+        assert_eq!(
+            fs::read(&outside_path).expect("read outside workspace"),
+            outside_bytes
+        );
+        assert_eq!(temp_files(&outside_app), vec!["workspace-v3.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_load_stays_on_pinned_inode_after_app_symlink_replacement() {
+        let (_dir, path) = temp_parent_workspace_path();
+        let previous = workspace_with_project("previous");
+        save_workspace_to(&path, &workspace_with_project("uncommitted"))
+            .expect("save uncommitted workspace");
+        let pending = pending_path(&path);
+        fs::write(
+            &pending,
+            serde_json::to_vec(&previous).expect("serialize previous"),
+        )
+        .expect("write pending rollback");
+
+        let app = path.parent().expect("macos-app").to_path_buf();
+        let psyche = app.parent().expect(".psyche");
+        let pinned_app = psyche.join("macos-app-pinned");
+        let pinned_path = pinned_app.join("workspace-v3.json");
+        let outside_app = psyche.parent().expect("home").join("outside-macos-app");
+        fs::create_dir(&outside_app).expect("create outside app");
+        let outside_path = outside_app.join("workspace-v3.json");
+        let outside_bytes =
+            serde_json::to_vec(&workspace_with_project("outside")).expect("serialize outside");
+        fs::write(&outside_path, &outside_bytes).expect("write outside workspace");
+
+        let loaded = load_workspace_from_test_hook(&path, || {
+            fs::rename(&app, &pinned_app).map_err(|error| error.to_string())?;
+            symlink(&outside_app, &app).map_err(|error| error.to_string())
+        })
+        .expect("load through pinned directory")
+        .expect("pinned workspace exists");
+
+        assert_eq!(loaded, previous);
+        assert_eq!(
+            load_workspace_from(&pinned_path)
+                .expect("load recovered pinned workspace")
+                .expect("recovered pinned workspace exists"),
+            previous
+        );
+        assert_eq!(
+            fs::read(&outside_path).expect("read outside workspace"),
+            outside_bytes
+        );
+        assert_eq!(temp_files(&outside_app), vec!["workspace-v3.json"]);
+        assert!(!outside_app
+            .join(pending.file_name().expect("pending name"))
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_rollback_stays_on_pinned_inode_after_app_directory_replacement() {
+        let (_dir, path) = temp_parent_workspace_path();
+        let original = workspace_with_project("original");
+        save_workspace_to(&path, &original).expect("save original");
+
+        let app = path.parent().expect("macos-app").to_path_buf();
+        let psyche = app.parent().expect(".psyche");
+        let pinned_app = psyche.join("macos-app-pinned");
+        let pinned_path = pinned_app.join("workspace-v3.json");
+        let replacement_bytes =
+            serde_json::to_vec(&workspace_with_project("replacement")).expect("serialize");
+        let mut sync_calls = 0;
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("updated"),
+            |_| Ok(()),
+            |_| {
+                sync_calls += 1;
+                if sync_calls == 2 {
+                    fs::rename(&app, &pinned_app).map_err(|error| error.to_string())?;
+                    fs::create_dir(&app).map_err(|error| error.to_string())?;
+                    fs::write(app.join("workspace-v3.json"), &replacement_bytes)
+                        .map_err(|error| error.to_string())?;
+                    Err("injected parent sync failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            restore_workspace_backup,
+        )
+        .expect_err("failed save must roll back through pinned directory");
+
+        assert_eq!(error, "injected parent sync failure");
+        assert_eq!(
+            load_workspace_from(&pinned_path)
+                .expect("load rolled back pinned workspace")
+                .expect("rolled back pinned workspace exists"),
+            original
+        );
+        assert_eq!(
+            fs::read(app.join("workspace-v3.json")).expect("read replacement workspace"),
+            replacement_bytes
+        );
+        assert_eq!(temp_files(&app), vec!["workspace-v3.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_rollback_stays_on_pinned_inode_after_psyche_symlink_replacement() {
+        let (_dir, path) = temp_parent_workspace_path();
+        let original = workspace_with_project("original");
+        save_workspace_to(&path, &original).expect("save original");
+
+        let app = path.parent().expect("macos-app");
+        let psyche = app.parent().expect(".psyche").to_path_buf();
+        let home = psyche.parent().expect("home");
+        let pinned_psyche = home.join(".psyche-pinned");
+        let pinned_path = pinned_psyche.join("macos-app").join("workspace-v3.json");
+        let outside = home.join("outside-rollback");
+        let outside_app = outside.join("macos-app");
+        fs::create_dir_all(&outside_app).expect("create outside app");
+        let outside_path = outside_app.join("workspace-v3.json");
+        let outside_bytes =
+            serde_json::to_vec(&workspace_with_project("outside")).expect("serialize outside");
+        fs::write(&outside_path, &outside_bytes).expect("write outside workspace");
+        let mut sync_calls = 0;
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("updated"),
+            |_| Ok(()),
+            |_| {
+                sync_calls += 1;
+                if sync_calls == 2 {
+                    fs::rename(&psyche, &pinned_psyche).map_err(|error| error.to_string())?;
+                    symlink(&outside, &psyche).map_err(|error| error.to_string())?;
+                    Err("injected parent sync failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            restore_workspace_backup,
+        )
+        .expect_err("failed save must roll back through pinned directory");
+
+        assert_eq!(error, "injected parent sync failure");
+        assert_eq!(
+            load_workspace_from(&pinned_path)
+                .expect("load rolled back pinned workspace")
+                .expect("rolled back pinned workspace exists"),
+            original
+        );
+        assert_eq!(
+            fs::read(&outside_path).expect("read outside workspace"),
+            outside_bytes
+        );
+        assert_eq!(temp_files(&outside_app), vec!["workspace-v3.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_rejects_final_symlink_replacement_after_parent_is_pinned() {
+        let (_dir, path) = temp_workspace_path();
+        let original = workspace_with_project("original");
+        save_workspace_to(&path, &original).expect("save original");
+        let outside = path.parent().expect("parent").join("outside-workspace");
+        let outside_bytes =
+            serde_json::to_vec(&workspace_with_project("outside")).expect("serialize outside");
+        fs::write(&outside, &outside_bytes).expect("write outside workspace");
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("updated"),
+            |_| {
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                symlink(&outside, &path).map_err(|error| error.to_string())
+            },
+            sync_parent_directory,
+            restore_workspace_backup,
+        )
+        .expect_err("final workspace symlink must be rejected");
+
+        assert!(error.contains("symlink"), "{error}");
+        assert_eq!(
+            fs::read(&outside).expect("read outside workspace"),
+            outside_bytes
+        );
+        assert!(fs::symlink_metadata(&path)
+            .expect("workspace metadata")
+            .file_type()
+            .is_symlink());
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_rejects_final_directory_replacement_after_parent_is_pinned() {
+        let (_dir, path) = temp_workspace_path();
+        save_workspace_to(&path, &workspace_with_project("original")).expect("save original");
+
+        let error = workspace_save_to_test_hook(
+            &path,
+            &workspace_with_project("updated"),
+            |_| {
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                fs::create_dir(&path).map_err(|error| error.to_string())
+            },
+            sync_parent_directory,
+            restore_workspace_backup,
+        )
+        .expect_err("final workspace directory must be rejected");
+
+        assert!(error.contains("regular file"), "{error}");
+        assert!(path.is_dir());
+        assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+        assert!(rollback_artifacts(path.parent().expect("parent")).is_empty());
     }
 }
