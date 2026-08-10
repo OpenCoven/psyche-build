@@ -4656,6 +4656,7 @@
     }
     if (!canShowTerminal) return false;
     clearFileFocusPresentation();
+    renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;

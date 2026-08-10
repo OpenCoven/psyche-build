@@ -1139,6 +1139,34 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(clearCalls).toBe(0);
   });
 
+  it('refreshes the pane minimap immediately after leaving file focus', async () => {
+    const calls: string[] = [];
+    const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
+    const showTerminalView = compileFunction<() => Promise<boolean>>(
+      extractFunctionSource(mainJs, 'showTerminalView'),
+      {
+        state: { activeFileId: 'file-a' },
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        guardDirtyFile: async () => true,
+        findOpenFile: () => ({ id: 'file-a', dirty: false }),
+        clearFileFocusPresentation: () => { calls.push('clear'); },
+        activePaneLayout: () => layout,
+        renderPaneMinimap: (value: unknown, file: unknown) => {
+          expect(value).toBe(layout);
+          expect(file).toBeNull();
+          calls.push('minimap');
+        },
+        refreshTabs: () => { calls.push('tabs'); },
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => { calls.push('fit'); },
+      },
+    );
+
+    await expect(showTerminalView()).resolves.toBe(true);
+    expect(calls).toEqual(['clear', 'minimap', 'tabs', 'fit']);
+  });
+
   it('routes Escape through guarded file return before pane maximize', () => {
     expect(mainJs).toMatch(
       /document\.addEventListener\("keydown", async function \(event\)[\s\S]*if \(state\.activeFileId\) \{[\s\S]*event\.preventDefault\(\);[\s\S]*await returnFromFileFocus\(\);[\s\S]*if \(!typing && exitPaneMaximize\(\)\)/
