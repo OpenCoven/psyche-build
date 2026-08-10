@@ -3508,7 +3508,7 @@
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
           '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
-          '<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span></button>' +
+          '<span class="glyph">◍</span>Browser<span class="key">Web +</span></button>' +
       "</div>";
     empty.addEventListener("click", function (event) {
       var button = event.target.closest("[data-empty-action]");
