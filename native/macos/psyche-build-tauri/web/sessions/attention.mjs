@@ -149,6 +149,7 @@ export function createAttentionTracker(options) {
         // at adoption predates us and says nothing about whose turn it is.
         entry.tail = text;
         entry.changedAt = at;
+        entry.interruptPending = false;
         return resolve(entry);
       }
 
