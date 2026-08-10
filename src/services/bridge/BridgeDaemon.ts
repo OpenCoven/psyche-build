@@ -3,7 +3,12 @@ import { hostname } from "node:os";
 import { loadOrCreateTLS, TLSMaterial } from "./TLSCertificate.js";
 import { WSSListener } from "./WSSListener.js";
 import { Session } from "./Session.js";
-import { MobileControlGateway, MobileControlGatewayError } from "./MobileControlGateway.js";
+import {
+  MobileControlGateway,
+  MobileControlGatewayError,
+  type MobileAttachedStream,
+  type MobileControlGatewayContext,
+} from "./MobileControlGateway.js";
 import {
   ClientMessage,
   MobileControlRequest,
@@ -68,6 +73,12 @@ export class BridgeDaemon {
     this.mobileGateway = opts.workspaceProvider
       ? new MobileControlGateway({
         workspaceSnapshot: () => this.readWorkspaceSnapshot(),
+        attachPane: (context, paneId, sinceSeq) => this.attachPaneStream(context, paneId, sinceSeq),
+        detachPane: (connectionId, streamId) => this.detachPaneStream(connectionId, streamId),
+        sendPaneInput: (connectionId, streamId, data) =>
+          this.sendPaneStreamInput(connectionId, streamId, data),
+        resizePane: (connectionId, streamId, cols, rows) =>
+          this.resizePaneStream(connectionId, streamId, cols, rows),
       })
       : undefined;
     this.pairing.on("open", (w: { code: string; expiresAt: Date }) => this.broadcastPairChallenge(w));
@@ -107,10 +118,7 @@ export class BridgeDaemon {
     this.listener = new WSSListener(this.tls, {
       onConnection: (s) => this.onConnect(s),
       onClientMessage: (s, m) => this.onMessage(s, m),
-      onClose: (s) => {
-        for (const teardown of s.subscriptionTeardowns.values()) teardown();
-        for (const subs of this.paneSubscribers.values()) subs.delete(s);
-      },
+      onClose: (s) => this.onSessionClose(s),
       // Transport errors are expected on a LAN listener (peers vanish, wifi
       // drops). They must be observed so they do not crash psyche, but they
       // are not actionable, so they go to the log rather than stdout — this
@@ -478,23 +486,39 @@ export class BridgeDaemon {
       return;
     }
 
+    // Attach metadata has to reach the client before any output frame, or the
+    // client cannot tell which stream the bytes belong to. Frames raised while
+    // the request is in flight queue here; once the response is on the wire
+    // this same callback forwards directly, so a live chunk can never overtake
+    // the replay that preceded it.
     const queuedBinaryFrames: Array<{ streamId: string; sequence: number; payload: Uint8Array }> = [];
+    let responseFlushed = false;
+    const sendBinary = (streamId: string, sequence: number, payload: Uint8Array) => {
+      if (responseFlushed) {
+        s.sendBinary(streamId, sequence, payload);
+        return;
+      }
+      queuedBinaryFrames.push({ streamId, sequence, payload });
+    };
+
     try {
       const response = await this.mobileGateway.handle(request, {
         ownerId: s.clientId ?? s.token ?? this.serverId,
         connectionId: s.connectionId,
-        sendBinary: (streamId, sequence, payload) => {
-          queuedBinaryFrames.push({ streamId, sequence, payload });
-        },
+        sendBinary,
       });
       this.sendControl(s, response);
     } catch (error) {
       this.sendControl(s, this.controlErrorPayload(request, error));
     }
 
+    // Drain before flipping the flag. Both steps are synchronous, so no frame
+    // can arrive mid-drain and jump ahead of what is already queued.
     for (const frame of queuedBinaryFrames) {
       s.sendBinary(frame.streamId, frame.sequence, frame.payload);
     }
+    queuedBinaryFrames.length = 0;
+    responseFlushed = true;
   }
 
   private sendControl(s: Session, payload: MobileControlResponse): void {
@@ -548,6 +572,134 @@ export class BridgeDaemon {
     return typeof request.requestId === "string" && request.requestId.trim().length > 0
       ? request.requestId
       : undefined;
+  }
+
+  /**
+   * Only an authenticated, still-live session owns streams. Looking a
+   * connection up by id rather than trusting the caller keeps one client from
+   * detaching or typing into another's stream.
+   */
+  private sessionForConnection(connectionId: string): Session {
+    for (const s of this.listener?.activeSessions ?? []) {
+      if (s.connectionId === connectionId && s.state === "authenticated") return s;
+    }
+    throw new MobileControlGatewayError("no_connection", "connection is not authenticated");
+  }
+
+  private controlStream(connectionId: string, streamId: string) {
+    const session = this.sessionForConnection(connectionId);
+    const stream = session.controlStreams.get(streamId);
+    if (!stream) {
+      throw new MobileControlGatewayError("no_stream", "unknown terminal stream");
+    }
+    return { session, stream };
+  }
+
+  private async attachPaneStream(
+    context: MobileControlGatewayContext,
+    paneId: string,
+    sinceSeq?: number,
+  ): Promise<MobileAttachedStream> {
+    // A pane id reaches tmux as command text, and attaching allocates a replay
+    // buffer keyed by it, so an unchecked id both grows the hub without bound
+    // and seeds a value that later runs as a command.
+    if (!isTmuxPaneId(paneId)) {
+      throw new MobileControlGatewayError("invalid_pane", "paneId must be a tmux pane id such as %3");
+    }
+    if (!await this.isPublishedPane(paneId)) {
+      throw new MobileControlGatewayError("unknown_pane", "pane is not published by this host");
+    }
+
+    const session = this.sessionForConnection(context.connectionId);
+    const streamId = randomUUID().slice(0, 8);
+    const buffer = this.hub!.bufferFor(paneId);
+
+    // Subscribe before reading the replay window so a chunk written during the
+    // handoff is held rather than lost, then released once the replay it would
+    // have duplicated has been sent.
+    let replaySent = false;
+    const pendingLive: Array<{ data: Buffer; seq: number }> = [];
+    let latestSentSeq = 0;
+    const teardown = buffer.subscribe((chunk) => {
+      if (!replaySent) {
+        pendingLive.push(chunk);
+        return;
+      }
+      if (chunk.seq <= latestSentSeq) return;
+      latestSentSeq = chunk.seq;
+      context.sendBinary(streamId, chunk.seq, chunk.data);
+    });
+    session.controlStreams.set(streamId, { paneId, teardown });
+
+    const snapshot = buffer.snapshot(sinceSeq);
+    if (snapshot.data.length > 0) {
+      context.sendBinary(streamId, snapshot.latestSeq, snapshot.data);
+    }
+    latestSentSeq = snapshot.latestSeq;
+    replaySent = true;
+    for (const chunk of pendingLive) {
+      if (chunk.seq <= latestSentSeq) continue;
+      latestSentSeq = chunk.seq;
+      context.sendBinary(streamId, chunk.seq, chunk.data);
+    }
+
+    return {
+      streamId,
+      latestSeq: snapshot.latestSeq,
+      hasReplay: snapshot.data.length > 0,
+      // Anything the client cannot append onto what it already holds has to be
+      // replaced outright, or it would splice unrelated output together.
+      replayMode:
+        sinceSeq === undefined || snapshot.gap || sinceSeq > snapshot.latestSeq
+          ? "replace"
+          : "append",
+    };
+  }
+
+  private async detachPaneStream(connectionId: string, streamId: string): Promise<void> {
+    const { session, stream } = this.controlStream(connectionId, streamId);
+    stream.teardown();
+    session.controlStreams.delete(streamId);
+  }
+
+  private async sendPaneStreamInput(
+    connectionId: string,
+    streamId: string,
+    data: Buffer,
+  ): Promise<void> {
+    const { stream } = this.controlStream(connectionId, streamId);
+    this.hub!.sendInput(stream.paneId, data);
+  }
+
+  private async resizePaneStream(
+    connectionId: string,
+    streamId: string,
+    cols: number,
+    rows: number,
+  ): Promise<void> {
+    const { stream } = this.controlStream(connectionId, streamId);
+    this.hub!.resizePane(stream.paneId, cols, rows);
+  }
+
+  /** Streams are scoped to what the workspace actually publishes. */
+  private async isPublishedPane(paneId: string): Promise<boolean> {
+    const { workspace } = await this.readWorkspaceSnapshot();
+    return workspace.projects.some((project) =>
+      project.projectPanes.some((pane) => pane.id === paneId)
+      || project.worktrees.some((worktree) =>
+        worktree.panes.some((pane) => pane.id === paneId)));
+  }
+
+  /**
+   * A dropped socket must not leave a live tmux subscription behind writing
+   * into a session nobody is reading.
+   */
+  private onSessionClose(s: Session): void {
+    for (const stream of s.controlStreams.values()) stream.teardown();
+    s.controlStreams.clear();
+    for (const teardown of s.subscriptionTeardowns.values()) teardown();
+    s.subscriptionTeardowns.clear();
+    for (const subs of this.paneSubscribers.values()) subs.delete(s);
   }
 
   private subscribePane(s: Session, paneId: string, sinceSeq: number | null) {

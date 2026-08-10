@@ -24,6 +24,12 @@ export class Session {
   token: string | null = null;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();
+  /**
+   * Terminal streams this connection attached, keyed by stream id. Scoped to
+   * the connection so one client cannot detach or type into another's stream,
+   * and torn down on close so a dropped socket leaves no live subscription.
+   */
+  controlStreams = new Map<string, { paneId: string; teardown: () => void }>();
 
   constructor(public readonly ctx: SessionContext) {}
 
