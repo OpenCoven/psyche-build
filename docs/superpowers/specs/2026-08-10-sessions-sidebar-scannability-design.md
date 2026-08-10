@@ -351,8 +351,10 @@ the first valid visible item without suppressing an error from the underlying
 session or discovery model.
 
 The selected-session key is `coven:<session-id>` for daemon sessions and a
-stable composite of project root, worktree path, kind, and displayed name for
-local panes. Selection is restored only when a matching session still exists.
+composite of project root, worktree path, kind, displayed name, and command
+discriminator for local panes. A local pane without a command discriminator
+uses its live thread identifier, which remains stable for the lifetime of that
+runtime only. Selection is restored only when a matching session still exists.
 The native application does not currently recreate local PTYs after relaunch,
 so a missing local session key falls back to the selected branch or first
 visible session rather than implying that the stopped process was restored.
