@@ -140,4 +140,20 @@ describe('Tauri native workspace security contract', () => {
     expect(save.slice(tempSync, publication)).not.toContain('drop(temp_file)');
     expect(publish.slice(revalidation, rename)).not.toContain('regular_file_exists');
   });
+
+  test('requires directory durability before initial forward certification succeeds', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const commit = functionBody(source, 'commit_initial_workspace_forward');
+    const certify = functionBody(source, 'certify_initial_forward_recovery');
+
+    const commitMarker = commit.indexOf('declare_absent_forward_commit');
+    const commitDirectorySync = commit.indexOf('sync_parent_directory(workspace_dir, parent)');
+    const certifiedMarkerSync = certify.indexOf('marker.sync_all()');
+    const certifiedDirectorySync = certify.indexOf('sync_parent_directory(workspace_dir, parent)');
+
+    expect(commitMarker).toBeGreaterThanOrEqual(0);
+    expect(commitDirectorySync).toBeGreaterThan(commitMarker);
+    expect(certifiedMarkerSync).toBeGreaterThanOrEqual(0);
+    expect(certifiedDirectorySync).toBeGreaterThan(certifiedMarkerSync);
+  });
 });
