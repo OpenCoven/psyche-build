@@ -440,7 +440,7 @@ describe('Tauri sidebar model', () => {
     expect(matchTextRanges('Hello', '')).toEqual([]);
     expect(matchTextRanges('Agent Coven', 'cOv')).toEqual([[6, 9]]);
 
-    const result = buildSidebarProjectModel({
+    const options = {
       project: { ...baseProject, name: 'Agent Garden' },
       localSessions: [
         localSession('shell-agent', {
@@ -450,17 +450,22 @@ describe('Tauri sidebar model', () => {
         }),
       ],
       covenSessions: [covenSession('agent-coven', { title: 'Agent Coven' })],
-      query: 'agent',
       filter: 'all',
       selectedKey: '',
       now: 10_000,
-    });
+    };
+    const result = buildSidebarProjectModel({ ...options, query: 'agent' });
 
     expect(result.titleMatches).toEqual([[0, 5]]);
     expect(result.branches[0].titleMatches).toEqual([]);
     expect(result.branches[0].categories[0].labelMatches).toEqual([[0, 5]]);
     expect(result.branches[0].categories[0].rows[0].titleMatches).toEqual([[0, 5]]);
     expect(result.branches[0].categories[1].rows[0].metaMatches).toEqual([[0, 5]]);
+
+    const branchResult = buildSidebarProjectModel({ ...options, query: 'web-pane' });
+
+    expect(branchResult.branches[0].title).toBe('feat/web-pane-attention');
+    expect(branchResult.branches[0].titleMatches).toEqual([[5, 13]]);
   });
 
   it('temporarily expands matching collapsed groups without mutating the source project or worktree', () => {
