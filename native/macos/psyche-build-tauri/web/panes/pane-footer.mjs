@@ -1,5 +1,7 @@
 const EM_DASH = "—";
 const ELLIPSIS = "…";
+const NOT_REPORTED = "not reported";
+const LOADING = "loading";
 
 export const FOOTER_TIERS = Object.freeze({
   FULL: "full",
@@ -61,8 +63,28 @@ function metricValue(metrics, formatter) {
   return formatter(metrics);
 }
 
+function metricA11yValue(metrics, formatter) {
+  if (!metrics || metrics.phase === "idle" || metrics.phase === "loading") {
+    return LOADING;
+  }
+  return formatter(metrics);
+}
+
 function footerValue(value, fallback) {
   return value ? String(value) : fallback;
+}
+
+function contextFullValue(metrics) {
+  return Number.isFinite(metrics && metrics.contextUsed) &&
+    Number.isFinite(metrics && metrics.contextLimit)
+    ? `${metrics.contextUsed} / ${metrics.contextLimit} tokens`
+    : "";
+}
+
+function spendFullValue(metrics) {
+  return Number.isFinite(metrics && metrics.spendUsd)
+    ? `$${metrics.spendUsd.toFixed(4)}`
+    : "";
 }
 
 export function footerItems(state) {
@@ -73,6 +95,7 @@ export function footerItems(state) {
       label: "Branch",
       value: footerValue(state.branch, "detached"),
       fullValue: footerValue(state.branch, "detached"),
+      a11yValue: footerValue(state.branch, "detached"),
       action: "copy",
     },
     {
@@ -80,6 +103,10 @@ export function footerItems(state) {
       label: "Worktree",
       value: footerValue(state.worktreeLabel, state.worktreePath || "worktree"),
       fullValue: footerValue(state.worktreePath, ""),
+      a11yValue: footerValue(state.worktreePath, footerValue(
+        state.worktreeLabel,
+        "worktree",
+      )),
       action: "reveal",
     },
   ];
@@ -90,6 +117,7 @@ export function footerItems(state) {
       label: "Pane ID",
       value: footerValue(state.paneId, ""),
       fullValue: footerValue(state.paneId, ""),
+      a11yValue: footerValue(state.paneId, NOT_REPORTED),
       action: "copy",
     }]);
   }
@@ -100,6 +128,7 @@ export function footerItems(state) {
       label: "Model",
       value: metricValue(metrics, (current) => footerValue(current.model, EM_DASH)),
       fullValue: footerValue(metrics && metrics.model, ""),
+      a11yValue: metricA11yValue(metrics, (current) => footerValue(current.model, NOT_REPORTED)),
       action: metrics && metrics.canSwitchModel ? "switch-model" : "usage",
     },
     {
@@ -107,25 +136,23 @@ export function footerItems(state) {
       label: "Session ID",
       value: metricValue(metrics, (current) => current.sessionId ? current.sessionId.slice(0, 8) : EM_DASH),
       fullValue: footerValue(metrics && metrics.sessionId, ""),
+      a11yValue: metricA11yValue(metrics, (current) => footerValue(current.sessionId, NOT_REPORTED)),
       action: "copy",
     },
     {
       key: "context",
       label: "Context",
       value: metricValue(metrics, (current) => formatContext(current.contextUsed, current.contextLimit)),
-      fullValue: Number.isFinite(metrics && metrics.contextUsed) &&
-        Number.isFinite(metrics && metrics.contextLimit)
-        ? `${metrics.contextUsed} / ${metrics.contextLimit} tokens`
-        : "",
+      fullValue: contextFullValue(metrics),
+      a11yValue: metricA11yValue(metrics, (current) => contextFullValue(current) || NOT_REPORTED),
       action: "usage",
     },
     {
       key: "spend",
       label: "Spend",
       value: metricValue(metrics, (current) => formatSpend(current.spendUsd)),
-      fullValue: Number.isFinite(metrics && metrics.spendUsd)
-        ? `$${metrics.spendUsd.toFixed(4)}`
-        : "",
+      fullValue: spendFullValue(metrics),
+      a11yValue: metricA11yValue(metrics, (current) => spendFullValue(current) || NOT_REPORTED),
       action: "usage",
     },
   ]);

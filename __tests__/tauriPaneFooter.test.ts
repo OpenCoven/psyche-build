@@ -235,6 +235,36 @@ describe('pane footer model', () => {
     });
   });
 
+  it('keeps missing session ids semantically empty and truthfully labelled', () => {
+    const item = footerItems({
+      kind: 'coven-chat',
+      branch: 'feat/footer',
+      worktreeLabel: 'footer-pane',
+      worktreePath: '/repo/.worktrees/footer-pane',
+      paneId: 'thread-1',
+      metrics: {
+        phase: 'ready',
+        provider: 'coven',
+        sessionId: null,
+        model: 'gpt-5',
+        contextUsed: 42_000,
+        contextLimit: 100_000,
+        spendUsd: 0.375,
+        updatedAt: '2026-08-10T20:00:00Z',
+        stale: false,
+        error: null,
+        canSwitchModel: true,
+      },
+    }).find((entry: { key: string }) => entry.key === 'session');
+
+    expect(item).toMatchObject({
+      value: '—',
+      fullValue: '',
+      a11yValue: 'not reported',
+      action: 'copy',
+    });
+  });
+
   it('uses ellipses while agent metrics are loading or idle', () => {
     for (const phase of ['idle', 'loading'] as const) {
       const items = footerItems({
@@ -260,6 +290,9 @@ describe('pane footer model', () => {
 
       expect(items.filter((item: { key: string }) => ['model', 'session', 'context', 'spend'].includes(item.key))
         .map((item: { value: string }) => item.value)).toEqual(['…', '…', '…', '…']);
+      expect(items.find((item: { key: string }) => item.key === 'session')).toMatchObject({
+        a11yValue: 'loading',
+      });
     }
   });
 
@@ -450,6 +483,123 @@ describe('pane footer native action helpers', () => {
       'error',
     );
   });
+
+  it('passes only semantic full values into copy actions', async () => {
+    const copyPaneFooterValue = vi.fn(async () => false);
+    const revealPaneWorktree = vi.fn(async () => false);
+    const toast = vi.fn();
+    const runPaneFooterAction = compileFunction<
+      (thread: unknown, item: Record<string, unknown>) => Promise<boolean> | boolean
+    >(functionSource(mainJs, 'runPaneFooterAction'), {
+      copyPaneFooterValue,
+      revealPaneWorktree,
+      toast,
+      paneFooterActionValue: compileFunction<(item: Record<string, unknown>) => string>(
+        functionSource(mainJs, 'paneFooterActionValue'),
+        {},
+      ),
+    });
+
+    await expect(runPaneFooterAction({}, {
+      label: 'Session ID',
+      action: 'copy',
+      value: '—',
+      fullValue: '',
+    })).resolves.toBe(false);
+    expect(copyPaneFooterValue).toHaveBeenCalledWith('Session ID', '');
+    expect(revealPaneWorktree).not.toHaveBeenCalled();
+  });
+});
+
+describe('pane footer interaction behavior', () => {
+  it('focuses footer chrome on pointerdown but defers inactive button focus until after click action dispatch', () => {
+    const thread = { id: 'thread-a' };
+    const state = { activeThreadId: 'thread-b' };
+    const calls: string[] = [];
+    let queuedFocus: (() => void) | null = null;
+    const focusPaneAfterFooterAction = compileFunction<(threadValue: typeof thread) => void>(
+      functionSource(mainJs, 'focusPaneAfterFooterAction'),
+      {
+        state,
+        focusThread: (id: string) => { calls.push(`focus:${id}`); },
+        requestAnimationFrame: (callback: () => void) => {
+          calls.push('queue-focus');
+          queuedFocus = callback;
+        },
+      },
+    );
+    const handlePaneFooterPointerDown = compileFunction<(
+      threadValue: typeof thread,
+      event: { target: { closest?: (selector: string) => unknown } | null; stopPropagation: () => void },
+    ) => void>(functionSource(mainJs, 'handlePaneFooterPointerDown'), {
+      state,
+      focusThread: (id: string) => { calls.push(`focus:${id}`); },
+    });
+    const handlePaneFooterItemClick = compileFunction<(
+      threadValue: typeof thread,
+      item: Record<string, unknown>,
+      event: { stopPropagation: () => void },
+    ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
+      closePaneFooterMenu: () => { calls.push('close-menu'); },
+      runPaneFooterAction: () => {
+        calls.push('run-action');
+        return true;
+      },
+      focusPaneAfterFooterAction: (threadValue: typeof thread) => {
+        calls.push('schedule-focus');
+        focusPaneAfterFooterAction(threadValue);
+      },
+    });
+
+    const footerChromeTarget = { closest: () => null };
+    handlePaneFooterPointerDown(thread, {
+      target: footerChromeTarget,
+      stopPropagation: () => { calls.push('stop:chrome'); },
+    });
+    expect(calls).toEqual(['focus:thread-a', 'stop:chrome']);
+
+    calls.length = 0;
+    state.activeThreadId = 'thread-b';
+    const buttonTarget = {
+      closest: (selector: string) => (selector === 'button' ? buttonTarget : null),
+    };
+    handlePaneFooterPointerDown(thread, {
+      target: buttonTarget,
+      stopPropagation: () => { calls.push('stop:button'); },
+    });
+    expect(calls).toEqual(['stop:button']);
+
+    handlePaneFooterItemClick(thread, {
+      label: 'Session ID',
+      action: 'copy',
+      value: '12345678',
+      fullValue: 'session-123',
+    }, {
+      stopPropagation: () => { calls.push('stop:click'); },
+    });
+    expect(calls).toEqual([
+      'stop:button',
+      'stop:click',
+      'close-menu',
+      'run-action',
+      'schedule-focus',
+      'queue-focus',
+    ]);
+    expect(queuedFocus).not.toBeNull();
+    expect(calls).not.toContain('focus:thread-a');
+
+    const flushFocus = queuedFocus as (() => void) | null;
+    if (flushFocus) flushFocus();
+    expect(calls).toEqual([
+      'stop:button',
+      'stop:click',
+      'close-menu',
+      'run-action',
+      'schedule-focus',
+      'queue-focus',
+      'focus:thread-a',
+    ]);
+  });
 });
 
 describe('pane footer integration contract', () => {
@@ -494,8 +644,10 @@ describe('pane footer integration contract', () => {
   it('uses one truthful dispatcher for all footer actions', () => {
     const dispatcher = functionSource(mainJs, 'runPaneFooterAction');
 
-    expect(dispatcher).toMatch(/item\.action === "copy"[\s\S]*copyPaneFooterValue/);
-    expect(dispatcher).toMatch(/item\.action === "reveal"[\s\S]*revealPaneWorktree/);
+    expect(functionSource(mainJs, 'paneFooterActionValue'))
+      .toMatch(/typeof item\.fullValue === "string" \? item\.fullValue : ""/);
+    expect(dispatcher).toMatch(/item\.action === "copy"[\s\S]*copyPaneFooterValue\(item\.label,\s*paneFooterActionValue\(item\)\)/);
+    expect(dispatcher).toMatch(/item\.action === "reveal"[\s\S]*revealPaneWorktree\(paneFooterActionValue\(item\)\)/);
     expect(dispatcher).toMatch(/item\.action === "usage"[\s\S]*toast\(item\.label \+ " is not reported"\)/);
     expect(dispatcher).toMatch(/item\.action === "switch-model"[\s\S]*toast\(item\.label \+ " is not reported"\)/);
     expect(dispatcher).not.toMatch(/switchPaneFooterModel|showPaneUsage/);
@@ -509,8 +661,9 @@ describe('pane footer integration contract', () => {
     expect(create).toMatch(/className = "terminal-pane-footer-items"/);
     expect(create).toMatch(/className = "terminal-pane-footer-overflow"/);
     expect(create).toMatch(/data-footer-key|dataset\.footerKey/);
-    expect(create).toMatch(/runPaneFooterAction\(thread, item\)/);
-    expect(create).toMatch(/addEventListener\("pointerdown"[\s\S]*focusThread\(thread\.id\)[\s\S]*stopPropagation/);
+    expect(create).toMatch(/paneFooterItemDescription\(item\)/);
+    expect(create).toMatch(/handlePaneFooterItemClick\(thread, item, event\)/);
+    expect(create).toMatch(/handlePaneFooterPointerDown\(thread, event\)/);
     expect(create).toMatch(/new ResizeObserver[\s\S]*PsychePanes\.footerTier/);
     expect(create).toMatch(/observer\.observe\(thread\.pane \|\| footer\)/);
     expect(create).toMatch(/thread\.paneFooter = footer/);
@@ -526,7 +679,7 @@ describe('pane footer integration contract', () => {
     expect(sync).toMatch(/setAttribute\("role", "menuitem"\)/);
     expect(sync).toMatch(/thread\.createPaneFooterButton\(item, "menuitem"\)/);
     expect(functionSource(mainJs, 'createPaneFooter'))
-      .toMatch(/runPaneFooterAction\(thread, item\)/);
+      .toMatch(/handlePaneFooterItemClick\(thread, item, event\)/);
     expect(sync).toMatch(/event\.key === "Escape"/);
     expect(sync).toMatch(/document\.addEventListener\("pointerdown", onOutsidePointerDown, true\)/);
     expect(sync).toMatch(/document\.addEventListener\("keydown", onMenuKeyDown, true\)/);

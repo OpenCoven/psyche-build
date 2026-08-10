@@ -3418,13 +3418,23 @@
     };
   }
 
+  function paneFooterActionValue(item) {
+    return item && typeof item.fullValue === "string" ? item.fullValue : "";
+  }
+
+  function paneFooterItemDescription(item) {
+    if (!item) return "";
+    var value = item.a11yValue || paneFooterActionValue(item) || item.value || "not reported";
+    return item.label + ": " + value;
+  }
+
   function runPaneFooterAction(thread, item) {
     if (!item) return false;
     if (item.action === "copy") {
-      return copyPaneFooterValue(item.label, item.fullValue || item.value);
+      return copyPaneFooterValue(item.label, paneFooterActionValue(item));
     }
     if (item.action === "reveal") {
-      return revealPaneWorktree(item.fullValue);
+      return revealPaneWorktree(paneFooterActionValue(item));
     }
     if (item.action === "usage" || item.action === "model-details") {
       toast(item.label + " is not reported");
@@ -3436,6 +3446,31 @@
     }
     toast(item.label + " is not reported");
     return false;
+  }
+
+  function handlePaneFooterPointerDown(thread, event) {
+    var target = event.target;
+    if (target && target.closest && target.closest("button")) {
+      event.stopPropagation();
+      return;
+    }
+    if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    event.stopPropagation();
+  }
+
+  function focusPaneAfterFooterAction(thread) {
+    if (!thread || state.activeThreadId === thread.id) return;
+    requestAnimationFrame(function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    });
+  }
+
+  function handlePaneFooterItemClick(thread, item, event) {
+    event.stopPropagation();
+    closePaneFooterMenu(thread, false);
+    var result = runPaneFooterAction(thread, item);
+    focusPaneAfterFooterAction(thread);
+    return result;
   }
 
   function closePaneFooterMenu(thread, restoreFocus) {
@@ -3479,7 +3514,7 @@
         ? "pane-footer-menu-item"
         : "terminal-pane-footer-item";
       button.dataset.footerKey = item.key;
-      var description = item.label + ": " + (item.fullValue || item.value || "not reported");
+      var description = paneFooterItemDescription(item);
       button.title = description;
       button.setAttribute("aria-label", description);
       if (role) button.setAttribute("role", role);
@@ -3492,16 +3527,13 @@
       button.appendChild(label);
       button.appendChild(value);
       button.addEventListener("click", function (event) {
-        event.stopPropagation();
-        closePaneFooterMenu(thread, false);
-        runPaneFooterAction(thread, item);
+        handlePaneFooterItemClick(thread, item, event);
       });
       return button;
     };
 
     footer.addEventListener("pointerdown", function (event) {
-      if (state.activeThreadId !== thread.id) focusThread(thread.id);
-      event.stopPropagation();
+      handlePaneFooterPointerDown(thread, event);
     });
     overflow.addEventListener("click", function (event) {
       event.stopPropagation();
