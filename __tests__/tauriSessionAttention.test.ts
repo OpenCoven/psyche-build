@@ -272,7 +272,7 @@ describe('desktop shell wiring', () => {
   it('synchronizes cached sidebar status keys at the start of every sidebar render', () => {
     const renderSource = functionSource('renderSessionList');
     expect(renderSource).toMatch(
-      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}syncLocalSidebarStatusKeys\(Date\.now\(\)\);[\s\S]{0,320}disarmSessionClose\(\);/,
+      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}var now = Date\.now\(\);[\s\S]{0,80}syncLocalSidebarStatusKeys\(now\);[\s\S]{0,320}disarmSessionClose\(\);/,
     );
 
     const source = functionSource('syncLocalSidebarStatusKeys');
@@ -487,13 +487,14 @@ describe('desktop shell wiring', () => {
   });
 
   it('marks the waiting session on the rail, the pane and the minimap', () => {
-    expect(mainJs).toMatch(/thread\.needsAttention \? " needs-attention" : ""/);
-    expect(mainJs).toMatch(/session-attention-badge[\s\S]{0,200}>!</);
+    expect(mainJs).toMatch(/rowModel\.needsAttention \? " needs-attention" : ""/);
+    expect(mainJs).toMatch(/attention\.textContent = "!" \+ (?:branchModel|projectModel)\.attentionCount/);
+    expect(mainJs).toContain('label.textContent = status.label;');
     expect(mainJs).toContain('classList.toggle("needs-attention", !!thread.needsAttention)');
     expect(mainJs).toMatch(/thread\.needsAttention \? " attention" : ""/);
     // The group-head counts already existed but only ever saw Coven rows; local
     // panes reaching them is the point of all of the above.
-    expect(mainJs).toContain('row.needsAttention');
+    expect(mainJs).toContain('rowModel.needsAttention');
   });
 
   it('states the waiting reason in words, never in colour alone', () => {

@@ -422,6 +422,24 @@ kbd {
   font-size: 10.5px;
 }
 .session-worktree-group .session-row { padding-left: 25px; }
+.session-disclosure {
+  flex: 0 0 16px;
+  width: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.session-project-count,
+.session-branch-count,
+.session-category-count {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--muted);
+}
 .session-subsection-label {
   padding: 5px 8px 2px 22px;
   font-size: 9.5px;
@@ -3385,6 +3403,20 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   align-items: flex-end;
   gap: 2px;
 }
+.session-status {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.session-status.status-active { color: var(--ok); }
+.session-status.status-busy { color: #60a5fa; }
+.session-status.status-attention { color: var(--warn); }
+.session-status.status-idle { color: var(--muted); }
+.session-status.status-exited { color: var(--error); }
 .session-chip {
   display: inline-block;
   padding: 1px 6px;

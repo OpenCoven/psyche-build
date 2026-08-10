@@ -3063,6 +3063,7 @@
   );
   var sessionSearchEl = document.getElementById("session-search");
   var sessionFilter = "";
+  var sessionTypeFilter = settings.sessionFilter;
 
   // ~/Documents/GitHub/OpenCoven/coven-cave → ~/…/OpenCoven/coven-cave
   function shortenRoot(root) {
@@ -3092,20 +3093,6 @@
     return "✳";
   }
 
-  /**
-   * The row's leading glyph. It reports the lane's git state rather than the
-   * pane's kind, because "has this lane got uncommitted work in it" is the
-   * question the sidebar gets scanned for — the kind is one line below.
-   * Colour is never the only carrier: the glyph shape and the tooltip both
-   * say the same thing.
-   */
-  function sessionGitState(worktree) {
-    if (worktree && worktree.dirty) {
-      return { glyph: "±", className: "git-dirty", tip: "Uncommitted changes" };
-    }
-    return { glyph: "⎇", className: "git-clean", tip: "Clean working tree" };
-  }
-
   /** Meta line's second half: the branch if there is one, else the path. */
   function sessionLaneLabel(worktree) {
     if (!worktree) return "";
@@ -3124,21 +3111,6 @@
       if (worktrees[i].path === path) return sessionLaneLabel(worktrees[i]);
     }
     return shortenRoot(path);
-  }
-
-  /**
-   * Focus-set membership swatches. Squares, in the set's colour, so they can't
-   * be read as a status light. A pane in no set renders nothing.
-   */
-  function sessionSetSwatches(thread) {
-    var sets = setsForThread(thread);
-    if (!sets.length) return "";
-    return '<span class="session-sets">' + sets.map(function (set) {
-      var index = Math.min(4, Math.max(1, Number(set.index) || 1));
-      var name = "In " + (set.name || "a focus set");
-      return '<span class="session-set-swatch" data-set="' + index +
-        '" title="' + escapeHtml(name) + '" aria-label="' + escapeHtml(name) + '"></span>';
-    }).join("") + "</span>";
   }
 
   var SESSION_CLOSE_SECONDS = 3;
@@ -3285,37 +3257,303 @@
     return opening;
   }
 
-  function createCovenSessionRow(project, session) {
-    var presentation = PsycheSessions.statusPresentation(session.status);
-    var attached = state.threads.some(function (thread) {
-      return thread.projectId === project.id
-        && thread.covenSessionId === session.id
-        && !thread.closeStarted;
+  function attachTooltip(element, text) {
+    if (!element || !text) return element;
+    element.classList.add("has-tooltip");
+    element.dataset.tooltip = text;
+    if (!element.title) element.title = text;
+    return element;
+  }
+
+  function appendHighlightedText(element, value, ranges) {
+    var source = String(value || "");
+    var cursor = 0;
+    (ranges || []).forEach(function (range) {
+      var start = range[0];
+      var end = range[1];
+      if (start > cursor) {
+        var plain = document.createElement("span");
+        plain.textContent = source.slice(cursor, start);
+        element.appendChild(plain);
+      }
+      var mark = document.createElement("mark");
+      mark.textContent = source.slice(start, end);
+      element.appendChild(mark);
+      cursor = end;
     });
+    if (cursor < source.length) {
+      var remainder = document.createElement("span");
+      remainder.textContent = source.slice(cursor);
+      element.appendChild(remainder);
+    }
+  }
+
+  function createDisclosure(label, expanded) {
+    var disclosure = document.createElement("button");
+    disclosure.type = "button";
+    disclosure.className = "session-disclosure";
+    disclosure.setAttribute("tabindex", "-1");
+    disclosure.setAttribute("aria-label", (expanded ? "Collapse " : "Expand ") + label);
+    disclosure.textContent = expanded ? "▾" : "▸";
+    return disclosure;
+  }
+
+  function createStatusIndicator(status) {
+    var indicator = document.createElement("span");
+    indicator.className = "session-status session-state status-" + status.key;
+    indicator.setAttribute("aria-label", status.tooltip);
+    var icon = document.createElement("span");
+    icon.className = "session-status-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = status.icon;
+    var label = document.createElement("span");
+    label.className = "session-status-label";
+    label.textContent = status.label;
+    indicator.appendChild(icon);
+    indicator.appendChild(label);
+    attachTooltip(indicator, status.tooltip);
+    return indicator;
+  }
+
+  function createCategoryLabel(category) {
+    var label = document.createElement("div");
+    label.className = "session-category-label session-subsection-label";
+    label.setAttribute("role", "presentation");
+    var icon = document.createElement("span");
+    icon.className = "session-category-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = category.icon;
+    var name = document.createElement("span");
+    name.className = "session-category-name";
+    appendHighlightedText(name, category.label, category.labelMatches);
+    var count = document.createElement("span");
+    count.className = "session-category-count";
+    count.textContent = String(category.count);
+    count.setAttribute(
+      "aria-label",
+      category.count + " " + category.label.toLowerCase() + " session" +
+        (category.count === 1 ? "" : "s")
+    );
+    label.appendChild(icon);
+    label.appendChild(name);
+    label.appendChild(count);
+    return label;
+  }
+
+  function createSessionRow(rowModel, options) {
+    var wrapper = document.createElement("div");
+    wrapper.className = "session-row-wrap";
+    wrapper.setAttribute("role", "none");
+    var legacyStatus = rowModel.status.key === "active"
+      ? " running"
+      : rowModel.status.key === "busy"
+        ? " starting"
+        : rowModel.status.key === "exited" ? " exited" : "";
     var row = document.createElement("button");
     row.type = "button";
-    row.className = "session-coven-row";
-    row.dataset.sessionId = session.id;
-    row.title = attached ? "Focus attachment" : "Attach";
+    row.className = "session-row kind-" + rowModel.type.slice(0, -1)
+      + " status-" + rowModel.status.key
+      + legacyStatus
+      + (options.selected ? " is-selected active" : "")
+      + (rowModel.needsAttention ? " needs-attention" : "");
+    row.dataset.treeItem = "session";
+    row.dataset.treeKey = rowModel.key;
+    row.dataset.selectionKey = rowModel.selectionKey;
+    row.setAttribute("role", "treeitem");
+    row.setAttribute("aria-level", "3");
+    row.setAttribute("aria-selected", options.selected ? "true" : "false");
+    row.setAttribute("tabindex", options.tabindex);
+    if (options.selected) row.setAttribute("aria-current", "true");
+    attachTooltip(row, options.tooltip);
+
+    var icon = document.createElement("span");
+    icon.className = "session-type-icon session-glyph";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = rowModel.type === "shells" ? "❯_" : "✳";
+
+    var text = document.createElement("span");
+    text.className = "session-text";
+    var titleLine = document.createElement("span");
+    titleLine.className = "session-title-line session-title-row";
     var title = document.createElement("span");
-    title.className = "session-coven-title";
-    title.textContent = session.title || session.id;
-    var meta = document.createElement("span");
-    meta.className = "session-coven-meta coven-tone-" + presentation.tone;
-    meta.textContent = [session.harness, presentation.label].filter(Boolean).join(" · ");
-    row.appendChild(title);
-    row.appendChild(meta);
-    if (presentation.label === "waiting") {
-      var badge = document.createElement("span");
-      badge.className = "session-attention-badge";
-      badge.textContent = "!";
-      badge.title = "Waiting for input";
-      row.appendChild(badge);
+    title.className = "session-title";
+    appendHighlightedText(title, rowModel.title, rowModel.titleMatches);
+    titleLine.appendChild(title);
+    if (options.onCanvas) {
+      var onCanvas = document.createElement("span");
+      onCanvas.className = "session-oncanvas";
+      onCanvas.textContent = "▣";
+      onCanvas.setAttribute("aria-label", "On the canvas");
+      attachTooltip(onCanvas, "On the canvas");
+      titleLine.appendChild(onCanvas);
     }
-    row.addEventListener("click", function () {
-      openCovenSession(project, session);
-    });
-    return row;
+    if (options.sets && options.sets.length) {
+      var swatches = document.createElement("span");
+      swatches.className = "session-sets";
+      options.sets.forEach(function (set) {
+        var swatch = document.createElement("span");
+        swatch.className = "session-set-swatch";
+        swatch.dataset.set = String(Math.min(4, Math.max(1, Number(set.index) || 1)));
+        swatch.setAttribute("aria-label", "In " + (set.name || "a focus set"));
+        attachTooltip(swatch, "In " + (set.name || "a focus set"));
+        swatches.appendChild(swatch);
+      });
+      titleLine.appendChild(swatches);
+    }
+    var meta = document.createElement("span");
+    meta.className = "session-meta session-sub";
+    if (rowModel.source === "coven" &&
+        String(rowModel.meta || "").toLowerCase().indexOf("coven") === -1) {
+      var source = document.createElement("span");
+      source.className = "session-source";
+      source.textContent = "Coven · ";
+      meta.appendChild(source);
+    }
+    appendHighlightedText(meta, rowModel.meta, rowModel.metaMatches);
+    text.appendChild(titleLine);
+    text.appendChild(meta);
+
+    row.appendChild(icon);
+    row.appendChild(text);
+    row.appendChild(createStatusIndicator(rowModel.status));
+    wrapper.appendChild(row);
+    return { wrapper: wrapper, row: row, title: title };
+  }
+
+  function createBranchGroup(branchModel, options) {
+    var group = document.createElement("div");
+    group.className = "session-branch session-worktree-group"
+      + (options.active ? " is-active selected" : "")
+      + (branchModel.worktree.missing ? " is-missing missing" : "");
+    group.dataset.treeItem = "branch";
+    group.dataset.treeKey = branchModel.key;
+    group.setAttribute("role", "treeitem");
+    group.setAttribute("aria-level", "2");
+    group.setAttribute("tabindex", options.tabindex);
+    group.setAttribute("aria-expanded", branchModel.expanded ? "true" : "false");
+    if (branchModel.worktree.virtual || branchModel.worktree.missing) {
+      group.setAttribute("aria-disabled", "true");
+    }
+
+    var head = document.createElement("div");
+    head.className = "session-branch-head session-worktree-head";
+    var disclosure = createDisclosure(branchModel.title, branchModel.expanded);
+    var title = document.createElement("span");
+    title.className = "session-branch-name worktree-name";
+    appendHighlightedText(title, branchModel.title, branchModel.titleMatches);
+    var count = document.createElement("span");
+    count.className = "session-branch-count";
+    count.textContent = String(branchModel.count);
+    if (branchModel.worktree.dirty) count.textContent += " ±";
+    count.setAttribute(
+      "aria-label",
+      branchModel.count + " session" + (branchModel.count === 1 ? "" : "s") +
+        (branchModel.attentionCount > 0
+          ? ", " + branchModel.attentionCount + " need attention"
+          : "")
+    );
+    if (branchModel.attentionCount > 0) {
+      var attention = document.createElement("span");
+      attention.className = "session-attention-count session-attention-badge";
+      attention.textContent = "!" + branchModel.attentionCount;
+      count.appendChild(attention);
+    }
+    head.appendChild(disclosure);
+    head.appendChild(title);
+    head.appendChild(count);
+    attachTooltip(
+      head,
+      branchModel.worktree.virtual
+        ? "Sessions with no available worktree"
+        : (branchModel.worktree.path || branchModel.title)
+    );
+    group.setAttribute(
+      "aria-label",
+      branchModel.title + ", " + branchModel.count + " session" +
+        (branchModel.count === 1 ? "" : "s") +
+        (branchModel.attentionCount > 0
+          ? ", " + branchModel.attentionCount + " need attention"
+          : "")
+    );
+    group.title = branchModel.worktree.virtual
+      ? "Sessions with no available worktree"
+      : (branchModel.worktree.path || branchModel.title);
+
+    var children = document.createElement("div");
+    children.className = "session-branch-children";
+    children.setAttribute("role", "group");
+    group.appendChild(head);
+    return {
+      group: group,
+      head: head,
+      disclosure: disclosure,
+      children: children,
+    };
+  }
+
+  function createProjectGroup(projectModel, options) {
+    var group = document.createElement("section");
+    group.className = "session-project session-group"
+      + (options.current ? " is-current" : "");
+    group.dataset.treeItem = "project";
+    group.dataset.treeKey = projectModel.key;
+    group.setAttribute("role", "treeitem");
+    group.setAttribute("aria-level", "1");
+    group.setAttribute("tabindex", options.tabindex);
+    group.setAttribute("aria-expanded", projectModel.expanded ? "true" : "false");
+
+    var head = document.createElement("div");
+    head.className = "session-project-head session-group-head";
+    var disclosure = createDisclosure(projectModel.title, projectModel.expanded);
+    var title = document.createElement("span");
+    title.className = "session-project-name";
+    appendHighlightedText(title, projectModel.title, projectModel.titleMatches);
+    if (options.current) {
+      var current = document.createElement("span");
+      current.className = "session-current-badge";
+      current.textContent = "CURRENT";
+      title.appendChild(current);
+    }
+    var count = document.createElement("span");
+    count.className = "session-project-count";
+    count.textContent = String(projectModel.count);
+    count.setAttribute(
+      "aria-label",
+      projectModel.count + " session" + (projectModel.count === 1 ? "" : "s") +
+        (projectModel.attentionCount > 0
+          ? ", " + projectModel.attentionCount + " need attention"
+          : "")
+    );
+    if (projectModel.attentionCount > 0) {
+      var attention = document.createElement("span");
+      attention.className = "session-attention-count session-attention-badge";
+      attention.textContent = "!" + projectModel.attentionCount;
+      count.appendChild(attention);
+    }
+    head.appendChild(disclosure);
+    head.appendChild(title);
+    head.appendChild(count);
+    attachTooltip(head, projectModel.project.root || projectModel.title);
+    group.setAttribute(
+      "aria-label",
+      projectModel.title + ", " + projectModel.count + " session" +
+        (projectModel.count === 1 ? "" : "s") +
+        (projectModel.attentionCount > 0
+          ? ", " + projectModel.attentionCount + " need attention"
+          : "")
+    );
+    group.title = projectModel.project.root || projectModel.title;
+
+    var children = document.createElement("div");
+    children.className = "session-project-children";
+    children.setAttribute("role", "group");
+    group.appendChild(head);
+    return {
+      group: group,
+      head: head,
+      disclosure: disclosure,
+      children: children,
+    };
   }
 
   function covenToneClass(phase) {
@@ -3336,11 +3574,20 @@
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
-    syncLocalSidebarStatusKeys(Date.now());
+    var now = Date.now();
+    syncLocalSidebarStatusKeys(now);
     // A re-render would strand an armed confirm on a row that no longer exists,
     // and an armed confirm is a question the user has not answered — drop it.
     disarmSessionClose();
-    sessionListEl.innerHTML = "";
+    var focusedKey = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.treeKey
+      : "";
+    sessionListEl.setAttribute("role", "tree");
+    sessionListEl.setAttribute(
+      "aria-label",
+      "Sessions by project, branch, and category"
+    );
+    sessionListEl.replaceChildren();
 
     var currentSearchQuery = sessionFilter;
     var needle = currentSearchQuery.trim().toLowerCase();
@@ -3349,132 +3596,88 @@
     // Walked once per render: every row tests membership against this list.
     var onCanvasIds = canvasThreadIds();
 
+    var selectedThread = findThread(state.activeThreadId);
+    var selectedThreadProject = selectedThread && findProject(selectedThread.projectId);
+    var selectedKey = selectedThread && selectedThreadProject
+      ? PsycheSessions.localSidebarSelectionKey(selectedThreadProject, selectedThread)
+      : settings.selectedSessionKey;
+
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden && !isDormantThread(t);
       });
       var remoteRows = covenSessionsForProject(project);
-      var railModel = PsycheSessions.buildProjectRailModel(
-        project, localRows, remoteRows, currentSearchQuery
-      );
-      var visibleWorktrees = railModel.worktrees.filter(function (entry) {
-        return entry.rows.length > 0;
+      var projectModel = PsycheSessions.buildSidebarProjectModel({
+        project: project,
+        localSessions: localRows,
+        covenSessions: remoteRows,
+        query: currentSearchQuery,
+        filter: sessionTypeFilter,
+        selectedKey: selectedKey,
+        now: now,
       });
-      if (railModel.projectRows.length > 0) {
-        visibleWorktrees.push({
-          worktree: {
-            path: "",
-            branch: "Unresolved sessions",
-            is_main: false,
-            dirty: false,
-            missing: true,
-            collapsed: false,
-            virtual: true,
-          },
-          matches: true,
-          rows: railModel.projectRows,
-        });
-      }
-      if (visibleWorktrees.length === 0) return;
-      matched += visibleWorktrees.length + visibleWorktrees.reduce(function (count, entry) {
-        return count + entry.rows.length;
-      }, 0);
+      if (projectModel.visibleCount === 0) return;
+      matched += projectModel.visibleCount;
 
-      var group = document.createElement("div");
-      group.className = "session-group";
-
-      var head = document.createElement("button");
-      head.type = "button";
-      head.className = "session-group-head";
-      head.textContent = project.name;
-      head.title = project.root || project.name;
-      var projectAttention = visibleWorktrees.reduce(function (count, entry) {
-        return count + entry.rows.filter(function (row) { return row.needsAttention; }).length;
-      }, 0);
-      if (projectAttention > 0) {
-        var projectBadge = document.createElement("span");
-        projectBadge.className = "session-attention-badge";
-        projectBadge.textContent = String(projectAttention);
-        projectBadge.setAttribute("aria-label", projectAttention + " sessions need attention");
-        head.appendChild(projectBadge);
-      }
-      // The project header is the "show me everything again" affordance: it is
-      // the one row that is above any set.
-      head.addEventListener("click", function () {
+      var projectParts = createProjectGroup(projectModel, {
+        current: project.id === state.activeProjectId,
+        tabindex: "-1",
+      });
+      projectParts.disclosure.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        project.collapsed = !project.collapsed;
+        refreshSidebar();
+        saveWorkspaceSoon();
+      });
+      projectParts.head.addEventListener("click", function () {
         clearFocusSet();
         setActiveProject(project.id);
       });
-      group.appendChild(head);
 
-      visibleWorktrees.forEach(function (entry) {
-        var worktree = entry.worktree;
-        var threads = entry.rows
-          .filter(function (row) { return row.source === "psyche"; })
-          .map(function (row) { return row.value; });
-        var covenSessions = entry.rows
-          .filter(function (row) { return row.source === "coven"; })
-          .map(function (row) { return row.value; });
-
-        var worktreeGroup = document.createElement("div");
-        worktreeGroup.className = "session-worktree-group" +
-          (!worktree.virtual && project.selectedWorktreePath === worktree.path ? " selected" : "") +
-          (worktree.missing ? " missing" : "");
-        var worktreeHead = document.createElement("button");
-        worktreeHead.type = "button";
-        worktreeHead.className = "session-worktree-head";
-        var worktreeName = worktree.branch || (worktree.is_main ? "main checkout" : shortenRoot(worktree.path));
-        worktreeHead.innerHTML =
-          '<span class="worktree-twisty">' + (worktree.collapsed ? "▶" : "▼") + "</span>" +
-          '<span class="worktree-name">' + escapeHtml(worktreeName) + "</span>" +
-          (worktree.dirty ? '<span class="worktree-state" title="Uncommitted changes">●</span>' : "") +
-          (worktree.missing ? '<span class="worktree-warning" title="Worktree is missing">!</span>' : "");
-        var worktreeAttention = entry.rows.filter(function (row) {
-          return row.needsAttention;
-        }).length;
-        if (worktreeAttention > 0) {
-          var worktreeBadge = document.createElement("span");
-          worktreeBadge.className = "session-attention-badge";
-          worktreeBadge.textContent = String(worktreeAttention);
-          worktreeBadge.setAttribute(
-            "aria-label", worktreeAttention + " sessions need attention in this worktree"
-          );
-          worktreeHead.appendChild(worktreeBadge);
-        }
-        worktreeHead.title = worktree.virtual ? "Sessions with no available worktree" : worktree.path;
-        worktreeHead.disabled = Boolean(worktree.virtual);
-        worktreeHead.addEventListener("click", async function () {
-          if (worktree.virtual) return;
-          if (!(await activateProjectWorktree(project, worktree.path))) return;
-          worktree.collapsed = false;
+      if (projectModel.expanded) {
+        projectModel.branches.forEach(function (branchModel) {
+        var worktree = branchModel.worktree;
+        var branchParts = createBranchGroup(branchModel, {
+          active: !worktree.virtual && project.selectedWorktreePath === worktree.path,
+          tabindex: "-1",
         });
-        worktreeHead.addEventListener("dblclick", function (event) {
-          if (worktree.virtual) return;
+        branchParts.disclosure.addEventListener("click", function (event) {
+          if (worktree.virtual || worktree.missing) return;
+          event.preventDefault();
+          event.stopPropagation();
+          worktree.collapsed = !worktree.collapsed;
+          refreshSidebar();
+          saveWorkspaceSoon();
+        });
+        branchParts.head.addEventListener("click", async function () {
+          if (worktree.virtual || worktree.missing) return;
+          await activateProjectWorktree(project, worktree.path);
+        });
+        branchParts.head.addEventListener("dblclick", function (event) {
+          if (worktree.virtual || worktree.missing) return;
           event.preventDefault();
           worktree.collapsed = !worktree.collapsed;
           refreshSidebar();
           saveWorkspaceSoon();
         });
-        worktreeHead.addEventListener("keydown", function (event) {
-          if (worktree.virtual || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+        branchParts.group.addEventListener("keydown", function (event) {
+          if (worktree.virtual || worktree.missing ||
+              (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
           var collapse = event.key === "ArrowLeft";
           if (worktree.collapsed === collapse) return;
           event.preventDefault();
-          worktree.collapsed = collapse;
+          worktree.collapsed = !worktree.collapsed;
           refreshSidebar();
           saveWorkspaceSoon();
-          requestAnimationFrame(function () {
-            var heads = sessionListEl.querySelectorAll(".session-worktree-head");
-            for (var i = 0; i < heads.length; i++) {
-              if (heads[i].title === worktree.path) { heads[i].focus(); break; }
-            }
-          });
         });
+
         var hiddenThreads = state.threads.filter(function (thread) {
           return thread.projectId === project.id && thread.worktreePath === worktree.path &&
             thread.hidden;
         });
-        if (!worktree.virtual) {
-          worktreeHead.addEventListener("contextmenu", function (event) {
+        if (!worktree.virtual && !worktree.missing) {
+          branchParts.head.addEventListener("contextmenu", function (event) {
             var actions = [{
               label: "Open Coven Terminal",
               run: async function () {
@@ -3486,207 +3689,172 @@
               actions.push({
                 label: "Show " + hiddenThreads.length + " hidden session" +
                   (hiddenThreads.length === 1 ? "" : "s"),
-                run: async function () { await reopenThreadsForWorkspace(project, worktree.path); },
+                run: async function () {
+                  await reopenThreadsForWorkspace(project, worktree.path);
+                },
               });
             }
             openSessionContextMenu(event, actions);
           });
         }
-        worktreeGroup.appendChild(worktreeHead);
 
-        // Rows are grouped by what the pane actually is, so a worktree with a
-        // mix of agent harnesses and plain shells reads at a glance.
-        var groupedThreads = [];
-        [["Agents", function (t) { return (t.kind || "shell") !== "shell"; }],
-         ["Shells", function (t) { return (t.kind || "shell") === "shell"; }]]
-          .forEach(function (kindGroup) {
-            var hits = threads.filter(kindGroup[1]);
-            if (!hits.length) return;
-            groupedThreads.push({ label: kindGroup[0] });
-            hits.forEach(function (thread) { groupedThreads.push({ thread: thread }); });
-          });
+        if (branchModel.expanded) {
+          branchModel.categories.forEach(function (category) {
+            var categoryGroup = document.createElement("div");
+            categoryGroup.className = "session-category";
+            categoryGroup.setAttribute("role", "group");
+            categoryGroup.setAttribute(
+              "aria-label",
+              category.label + ", " + category.count + " session" +
+                (category.count === 1 ? "" : "s")
+            );
+            categoryGroup.appendChild(createCategoryLabel(category));
 
-        if (!worktree.collapsed) groupedThreads.forEach(function (entry) {
-          if (entry.label) {
-            var kindLabel = document.createElement("div");
-            kindLabel.className = "session-subsection-label";
-            kindLabel.textContent = entry.label;
-            worktreeGroup.appendChild(kindLabel);
-            return;
-          }
-          var thread = entry.thread;
-          var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
-          var wrapper = document.createElement("div");
-          wrapper.className = "session-row-wrap";
-          var row = document.createElement("button");
-          row.type = "button";
-          var kind = thread.kind || "shell";
-          var picking = Boolean(setPicking);
-          var picked = picking && isPicked(thread.id);
-          var attentionLabel = thread.needsAttention
-            ? PsycheSessions.attentionLabel(thread.attentionReason)
-            : "";
-          row.className = "session-row " + sessionStatusClass(thread) +
-            " kind-" + (kind === "shell" ? "shell" : "agent") +
-            (state.activeThreadId === thread.id ? " active" : "") +
-            (thread.needsAttention ? " needs-attention" : "") +
-            (picking ? " is-picking" : "") + (picked ? " is-picked" : "");
-          row.dataset.threadId = thread.id;
-          if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
-          if (picking) row.setAttribute("aria-pressed", picked ? "true" : "false");
-          row.title = picking
-            ? (picked ? "Remove " : "Include ") + thread.name + " in the set"
-            : thread.name + " — " + worktree.path +
-              (attentionLabel ? " · " + attentionLabel : "") +
-              (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
-              " · double-click to rename";
-          var chipMarkup = "";
-          if (thread.status === "exited") {
-            chipMarkup = '<span class="session-chip muted">exited</span>';
-          } else if (thread.spawning || thread.status === "starting") {
-            chipMarkup = '<span class="session-chip">starting</span>';
-          }
-          var git = sessionGitState(worktree);
-          row.innerHTML =
-            '<span class="session-glyph ' + git.className + '" title="' + escapeHtml(git.tip) +
-              '" aria-label="' + escapeHtml(git.tip) + '">' + escapeHtml(git.glyph) + "</span>" +
-            '<span class="session-text">' +
-              '<span class="session-title-row">' +
-                '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
-                // Same `!` the Coven rows and the group counts use, so one mark
-                // means one thing throughout the rail. It rides in the title
-                // row rather than the status column because the title is the
-                // part of the row that survives every width.
-                (attentionLabel
-                  ? '<span class="session-attention-badge" title="' + escapeHtml(attentionLabel) +
-                    '" aria-label="' + escapeHtml(attentionLabel) + '">!</span>'
-                  : "") +
-                (onCanvas
-                  ? '<span class="session-oncanvas" title="On the canvas" aria-label="On the canvas">' +
-                      '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">' +
-                      '<rect x="1" y="1" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
-                      '<rect x="3.2" y="3.2" width="5.6" height="5.6" rx="1" fill="currentColor"/></svg></span>'
-                  : "") +
-                sessionSetSwatches(thread) +
-              "</span>" +
-              '<span class="session-sub">' +
-                escapeHtml(kind + " · " + sessionLaneLabel(worktree)) +
-              "</span>" +
-            "</span>" +
-            '<span class="session-state"><span class="session-dot"></span>' + chipMarkup + "</span>";
+            category.rows.forEach(function (rowModel) {
+              var selected = rowModel.selectionKey === selectedKey;
+              var rowParts = createSessionRow(rowModel, {
+                selected: selected,
+                tabindex: "-1",
+                tooltip: rowModel.title + " — " + rowModel.meta +
+                  " — " + rowModel.status.tooltip,
+                onCanvas: rowModel.source === "psyche" &&
+                  onCanvasIds.indexOf(rowModel.id) !== -1,
+                sets: rowModel.source === "psyche" ? setsForThread(rowModel.value) : [],
+              });
+              var row = rowParts.row;
+              var wrapper = rowParts.wrapper;
+              if (rowModel.source === "coven") {
+                var attached = state.threads.some(function (thread) {
+                  return thread.projectId === project.id
+                    && thread.covenSessionId === rowModel.id
+                    && !thread.closeStarted;
+                });
+                row.dataset.sessionId = rowModel.id;
+                row.title = (attached ? "Focus attachment — " : "Attach — ") + row.title;
+                row.addEventListener("click", function () {
+                  settings.selectedSessionKey = rowModel.selectionKey;
+                  saveSettings();
+                  openCovenSession(project, rowModel.value);
+                });
+                categoryGroup.appendChild(wrapper);
+                return;
+              }
 
-          row.addEventListener("click", async function () {
-            // While picking, a row is a checkbox — it must not also focus the
-            // pane, or selecting would keep yanking the canvas around.
-            if (setPicking) { toggleSetPick(thread.id); return; }
-            if (project.id !== state.activeProjectId && !(await setActiveProject(project.id))) return;
-            applySetScopeForThread(thread);
-            await focusThread(thread.id);
-          });
-          var titleEl = row.querySelector(".session-title");
-          function beginSessionRename(e) {
-            e.stopPropagation();
-            editLabelInline(titleEl, "sidebar", {
-              initial: thread.name,
-              host: wrapper,
-              hide: row,
-              ariaLabel: "Session name",
-              onCommit: function (v) { renameThread(thread.id, v); },
-              done: function () {
-                renderSessionList();
-                var replacementRows = sessionListEl.querySelectorAll(".session-row");
-                for (var i = 0; i < replacementRows.length; i++) {
-                  if (replacementRows[i].dataset.threadId === thread.id) {
-                    replacementRows[i].focus();
-                    break;
-                  }
-                }
-              },
+              var thread = rowModel.value;
+              var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
+              var picking = Boolean(setPicking);
+              var picked = picking && isPicked(thread.id);
+              row.dataset.threadId = thread.id;
+              if (picking) {
+                row.classList.add("is-picking");
+                if (picked) row.classList.add("is-picked");
+                row.setAttribute("aria-pressed", picked ? "true" : "false");
+                row.title = (picked ? "Remove " : "Include ") + thread.name + " in the set";
+              }
+              row.addEventListener("click", async function () {
+                if (setPicking) { toggleSetPick(thread.id); return; }
+                settings.selectedSessionKey = rowModel.selectionKey;
+                saveSettings();
+                if (project.id !== state.activeProjectId &&
+                    !(await setActiveProject(project.id))) return;
+                applySetScopeForThread(thread);
+                await focusThread(thread.id);
+              });
+              function beginSessionRename(event) {
+                event.stopPropagation();
+                editLabelInline(rowParts.title, "sidebar", {
+                  initial: thread.name,
+                  host: wrapper,
+                  hide: row,
+                  ariaLabel: "Session name",
+                  onCommit: function (value) {
+                    if (renameThread(rowModel.id, value) &&
+                        state.activeThreadId === rowModel.id) {
+                      settings.selectedSessionKey =
+                        PsycheSessions.localSidebarSelectionKey(project, thread);
+                      saveSettings();
+                    }
+                  },
+                  done: function () {
+                    renderSessionList();
+                    var replacementRows = sessionListEl.querySelectorAll(".session-row");
+                    for (var i = 0; i < replacementRows.length; i++) {
+                      if (replacementRows[i].dataset.threadId === thread.id) {
+                        replacementRows[i].focus();
+                        break;
+                      }
+                    }
+                  },
+                });
+              }
+              row.addEventListener("dblclick", beginSessionRename);
+              row.addEventListener("keydown", function (event) {
+                if (event.key !== "F2") return;
+                event.preventDefault();
+                beginSessionRename(event);
+              });
+              row.addEventListener("contextmenu", function (event) {
+                var memberships = setsForThread(thread);
+                openSessionContextMenu(event, [
+                  { label: "Focus", run: function () { focusThread(thread.id); } },
+                  memberships.length
+                    ? { label: "Show only " + memberships[0].name, run: function () {
+                        activateFocusSet(memberships[0].id);
+                      } }
+                    : null,
+                  memberships.length
+                    ? { label: "Remove from " + memberships[0].name, run: function () {
+                        removeFromFocusSet(memberships[0].id, thread.id);
+                      } }
+                    : null,
+                  { label: "Rename…", run: function () {
+                      beginSessionRename({ stopPropagation: function () {} });
+                    } },
+                  thread.status !== "exited"
+                    ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
+                    : null,
+                  thread.status !== "exited"
+                    ? { label: "Interrupt", run: function () {
+                        sendToThread(thread, "\x03");
+                      } }
+                    : null,
+                  { label: "Hide", run: function () { hideThread(thread.id); } },
+                  { label: "Stop and close", danger: true, run: function () {
+                      armSessionClose(wrapper, close, thread);
+                    } },
+                ]);
+              });
+
+              var close = document.createElement("button");
+              close.type = "button";
+              close.className = "session-close";
+              var scopingSet = activeFocusSet();
+              var inScopingSet = Boolean(scopingSet) &&
+                scopingSet.threadIds.indexOf(thread.id) !== -1;
+              close.title = inScopingSet
+                ? "Remove from " + scopingSet.name + " — the pane stays open"
+                : onCanvas
+                  ? "Hide the pane — the session keeps running"
+                  : "Hide session";
+              close.setAttribute("aria-label", close.title);
+              close.textContent = "×";
+              close.addEventListener("click", function (event) {
+                event.stopPropagation();
+                if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
+                else hideThread(thread.id);
+              });
+              wrapper.appendChild(close);
+              categoryGroup.appendChild(wrapper);
             });
-          }
-          row.addEventListener("dblclick", beginSessionRename);
-          row.addEventListener("keydown", function (e) {
-            if (e.key !== "F2") return;
-            e.preventDefault();
-            beginSessionRename(e);
+            branchParts.children.appendChild(categoryGroup);
           });
-          row.addEventListener("contextmenu", function (event) {
-            var memberships = setsForThread(thread);
-            openSessionContextMenu(event, [
-              { label: "Focus", run: function () { focusThread(thread.id); } },
-              memberships.length
-                ? { label: "Show only " + memberships[0].name, run: function () {
-                    activateFocusSet(memberships[0].id);
-                  } }
-                : null,
-              memberships.length
-                ? { label: "Remove from " + memberships[0].name, run: function () {
-                    removeFromFocusSet(memberships[0].id, thread.id);
-                  } }
-                : null,
-              { label: "Rename…", run: function () {
-                beginSessionRename({ stopPropagation: function () {} });
-              } },
-              thread.status !== "exited"
-                ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
-                : null,
-              thread.status !== "exited"
-                ? { label: "Interrupt", run: function () { sendToThread(thread, "\x03"); } }
-                : null,
-              { label: "Hide", run: function () { hideThread(thread.id); } },
-              // Stopping a session kills a process, so it never lands on one
-              // click: the row arms a countdown that has to be confirmed and
-              // cancels itself if it isn't.
-              { label: "Stop and close", danger: true, run: function () {
-                armSessionClose(wrapper, close, thread);
-              } },
-            ]);
-          });
-
-          var close = document.createElement("button");
-          close.type = "button";
-          close.className = "session-close";
-          // Inside a set, × means "not part of this set" — the narrower, more
-          // likely intent when the canvas is already scoped. Outside one it
-          // detaches the pane's leaf from the tree and hides the row; the PTY
-          // keeps running and the worktree menu reopens it. Both are reversible
-          // and frequent, so both stay a single click. The timed confirm guards
-          // "Stop and close", which is neither.
-          var scopingSet = activeFocusSet();
-          var inScopingSet = Boolean(scopingSet) &&
-            scopingSet.threadIds.indexOf(thread.id) !== -1;
-          close.title = inScopingSet
-            ? "Remove from " + scopingSet.name + " — the pane stays open"
-            : onCanvas
-              ? "Hide the pane — the session keeps running"
-              : "Hide session";
-          close.setAttribute("aria-label", close.title);
-          close.textContent = "×";
-          close.addEventListener("click", function (e) {
-            e.stopPropagation();
-            if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
-            else hideThread(thread.id);
-          });
-          wrapper.appendChild(row);
-          wrapper.appendChild(close);
-          worktreeGroup.appendChild(wrapper);
-        });
-
-        if (!worktree.collapsed && covenSessions.length > 0) {
-          var covenLabel = document.createElement("div");
-          covenLabel.className = "session-subsection-label";
-          covenLabel.textContent = "Coven";
-          worktreeGroup.appendChild(covenLabel);
+          branchParts.group.appendChild(branchParts.children);
         }
-
-        if (!worktree.collapsed) covenSessions.forEach(function (session) {
-          worktreeGroup.appendChild(createCovenSessionRow(project, session));
+        projectParts.children.appendChild(branchParts.group);
         });
-
-        group.appendChild(worktreeGroup);
-      });
-
-      sessionListEl.appendChild(group);
+        projectParts.group.appendChild(projectParts.children);
+      }
+      sessionListEl.appendChild(projectParts.group);
     });
 
     if (inlineState) {
@@ -3706,6 +3874,43 @@
           ? "No matching projects, worktrees, or panes."
           : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
+    }
+
+    var renderedItems = Array.prototype.slice.call(
+      sessionListEl.querySelectorAll("[data-tree-item]")
+    );
+    var preferred = renderedItems.find(function (item) {
+      return focusedKey && item.dataset.treeKey === focusedKey;
+    }) || renderedItems.find(function (item) {
+      return item.dataset.selectionKey === selectedKey;
+    }) || renderedItems.find(function (item) {
+      return item.dataset.treeItem === "project"
+        && item.classList.contains("is-current");
+    }) || renderedItems[0];
+    renderedItems.forEach(function (item) {
+      item.setAttribute("tabindex", item === preferred ? "0" : "-1");
+    });
+    if (focusedKey && preferred) preferred.focus();
+
+    var persistedSelectionExists = !settings.selectedSessionKey ||
+      state.projects.some(function (project) {
+        var localMatch = state.threads.some(function (thread) {
+          return thread.projectId === project.id && !thread.hidden &&
+            !isDormantThread(thread) &&
+            PsycheSessions.localSidebarSelectionKey(project, thread) ===
+              settings.selectedSessionKey;
+        });
+        if (localMatch) return true;
+        return covenSessionsForProject(project).some(function (session) {
+          return PsycheSessions.sidebarSelectionKey({
+            source: "coven",
+            id: session.id,
+          }) === settings.selectedSessionKey;
+        });
+      });
+    if (settings.selectedSessionKey && !selectedThread && !persistedSelectionExists) {
+      settings.selectedSessionKey = "";
+      saveSettings();
     }
   }
 
@@ -3751,10 +3956,7 @@
     sessionListEl.addEventListener("keydown", function (event) {
       if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
       var items = Array.prototype.filter.call(
-        sessionListEl.querySelectorAll(
-          ".session-group-head, .session-worktree-head:not(:disabled), .session-row, " +
-          ".session-coven-row, .session-close"
-        ),
+        sessionListEl.querySelectorAll("[data-tree-item], .session-close"),
         function (item) { return item.offsetParent !== null; }
       );
       if (!items.length) return;

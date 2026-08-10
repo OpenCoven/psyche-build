@@ -54,6 +54,11 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).toMatch(
       /id="session-list"[^>]*role="navigation"[^>]*aria-label="Sessions grouped by project and branch"/,
     );
+    const renderSessionList = functionSource(mainJs, 'renderSessionList');
+    expect(renderSessionList).toContain('sessionListEl.setAttribute("role", "tree")');
+    expect(renderSessionList).toMatch(
+      /sessionListEl\.setAttribute\(\s*"aria-label",\s*"Sessions by project, branch, and category"\s*\)/,
+    );
     expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
     expect(indexHtml).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
   });
@@ -78,9 +83,9 @@ describe('Tauri project/worktree/pane rail', () => {
   });
 
   it('renders project, worktree, then pane rows and scopes new panes to selection', () => {
-    expect(mainJs).toMatch(/session-worktree-group/);
-    expect(mainJs).toMatch(/session-worktree-head/);
-    expect(mainJs).toMatch(/PsycheSessions\.buildProjectRailModel/);
+    expect(mainJs).toMatch(/session-project/);
+    expect(mainJs).toMatch(/session-branch/);
+    expect(mainJs).toMatch(/PsycheSessions\.buildSidebarProjectModel/);
     expect(sessionModel).toMatch(/session\?\.worktreePath/);
     expect(sessionModel).toMatch(/owningWorktree\(worktrees, cwd\)/);
     expect(mainJs).toMatch(/function\s+selectedWorktree\(project\)/);
@@ -88,6 +93,26 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/cwd:\s*worktree\s*&&\s*worktree\.path/);
     expect(styles).toMatch(/\.session-worktree-head\s*\{/);
     expect(styles).toMatch(/\.session-worktree-group\s*\{/);
+  });
+
+  it('builds the sessions tree through reusable DOM helpers', () => {
+    for (const helper of [
+      'attachTooltip',
+      'createDisclosure',
+      'createStatusIndicator',
+      'createCategoryLabel',
+      'createSessionRow',
+      'createBranchGroup',
+      'createProjectGroup',
+    ]) {
+      expect(mainJs).toContain(`function ${helper}(`);
+    }
+    const renderer = functionSource(mainJs, 'renderSessionList');
+    expect(renderer).toContain('projectParts.disclosure.addEventListener("click"');
+    expect(renderer).toContain('branchParts.disclosure.addEventListener("click"');
+    expect(renderer).toContain('saveWorkspaceSoon();');
+    expect(renderer).toContain('settings.selectedSessionKey = rowModel.selectionKey;');
+    expect(renderer).toContain('saveSettings();');
   });
 
   it('scopes browser tabs to the selected worktree and migrates project browser state', () => {
@@ -111,17 +136,17 @@ describe('Tauri project/worktree/pane rail', () => {
     }
 
     const renderSessionList = functionSource(mainJs, 'renderSessionList');
-    const clickStart = renderSessionList.indexOf('worktreeHead.addEventListener("click"');
-    const clickEnd = renderSessionList.indexOf('worktreeHead.addEventListener("dblclick"');
+    const clickStart = renderSessionList.indexOf('branchParts.head.addEventListener("click"');
+    const clickEnd = renderSessionList.indexOf('branchParts.head.addEventListener("dblclick"');
     expect(renderSessionList.slice(clickStart, clickEnd)).toContain(
       'await activateProjectWorktree(project, worktree.path)',
     );
 
     const contextMenuStart = renderSessionList.indexOf(
-      'worktreeHead.addEventListener("contextmenu"',
+      'branchParts.head.addEventListener("contextmenu"',
     );
     const contextMenuEnd = renderSessionList.indexOf(
-      'worktreeGroup.appendChild(worktreeHead);',
+      'if (branchModel.expanded) {',
     );
     const worktreeContextMenu = renderSessionList.slice(contextMenuStart, contextMenuEnd);
     expect(worktreeContextMenu).toContain('label: "Open Coven Terminal"');
@@ -134,7 +159,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
     expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
-    expect(mainJs).toContain('".session-coven-row, .session-close"');
+    expect(mainJs).toContain('"[data-tree-item], .session-close"');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
   });
