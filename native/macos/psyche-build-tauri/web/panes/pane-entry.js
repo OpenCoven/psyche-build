@@ -1,4 +1,15 @@
 export {
+  FOOTER_TIERS,
+  footerItems,
+  footerTier,
+  formatContext,
+  formatSpend,
+  hiddenFooterKeys,
+  isAgentPaneKind,
+  shouldApplyMetricsResponse,
+} from "./pane-footer.mjs";
+
+export {
   canFit,
   createLeaf,
   findLeafById,

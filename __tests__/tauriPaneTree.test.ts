@@ -12,20 +12,28 @@ const entry = await import(pathToFileURL(join(panesRoot, 'pane-entry.js')).href)
 describe('Tauri physical pane tree', () => {
   const minimums = { width: 320, height: 120, separator: 6 };
 
-  test('exposes every pane-tree API through the browser entrypoint', () => {
+  test('exposes pane tree and footer helpers through the browser entrypoint', () => {
     expect(Object.keys(entry).sort()).toEqual([
+      'FOOTER_TIERS',
       'canFit',
       'createLeaf',
       'findLeafById',
       'findLeafByThreadId',
+      'footerItems',
+      'footerTier',
+      'formatContext',
+      'formatSpend',
+      'hiddenFooterKeys',
       'insertBelow',
       'insertRelative',
+      'isAgentPaneKind',
       'layoutRects',
       'leafIds',
       'moveLeaf',
       'removeLeaf',
       'resizeSplit',
       'retainThreads',
+      'shouldApplyMetricsResponse',
       'spanLayout',
       'splitOrientation',
     ]);
