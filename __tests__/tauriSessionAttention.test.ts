@@ -123,6 +123,24 @@ describe('attention tracker', () => {
       .needsAttention).toBe(true);
   });
 
+  it('treats an interrupt as a fresh settle window instead of an immediate badge', () => {
+    const tracker = createAttentionTracker();
+    tracker.observe('a', '> ', 0);
+    expect(tracker.observe('a', '✻ Working… (esc to interrupt)', 1_000)).toEqual({
+      needsAttention: false, reason: null,
+    });
+
+    expect(tracker.interrupt('a')).toEqual({ needsAttention: false, reason: null });
+
+    expect(tracker.observe('a', '> ', 2_000)).toEqual({ needsAttention: false, reason: null });
+    expect(tracker.observe('a', '> ', 2_000 + SETTLE - 1)).toEqual({
+      needsAttention: false, reason: null,
+    });
+    expect(tracker.observe('a', '> ', 2_000 + SETTLE)).toEqual({
+      needsAttention: true, reason: 'turn',
+    });
+  });
+
   it('trusts the bell immediately, but not before the session has done anything', () => {
     const tracker = createAttentionTracker();
     expect(tracker.bell('a').needsAttention).toBe(false);
