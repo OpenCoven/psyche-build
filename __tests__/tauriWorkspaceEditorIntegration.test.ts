@@ -41,6 +41,14 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+function extractPanelButtonClickHandler(source: string) {
+  const match = source.match(
+    /btn\.addEventListener\("click", function \(\) \{([\s\S]*?)\n\s*\}\);\n\s*\/\/ Right-click cycles/
+  );
+  if (!match) throw new Error('missing panel button click handler');
+  return `function (btn) {${match[1]}\n}`;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => { resolve = settle; });
@@ -351,6 +359,102 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorModule.diffClass('--- a/file')).toBe('cm-diff-meta');
     expect(editorModule.diffClass('+added')).toBe('cm-diff-add');
     expect(editorModule.diffClass('-deleted')).toBe('cm-diff-delete');
+  });
+
+  it('keeps the dock rail persistent and the dock panels in one shared grid cell', () => {
+    expect(stylesCss).toMatch(
+      /\.workbench\s*\{[\s\S]*grid-template-columns:\s*var\(--sidebar-w\) minmax\(0,\s*1fr\) var\(--mini-rail-w\);/
+    );
+    expect(stylesCss).toMatch(
+      /\.app\[data-sidebar="collapsed"\] \.workbench\s*\{\s*grid-template-columns:\s*var\(--mini-rail-w\) minmax\(0,\s*1fr\) var\(--mini-rail-w\);\s*\}/
+    );
+    expect(stylesCss).not.toContain('.app[data-dock="collapsed"] .workbench');
+
+    const browserPaneRules =
+      stylesCss.match(/\.browser-pane\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);[^}]*\}/g) ?? [];
+    expect(browserPaneRules).toHaveLength(2);
+    expect(stylesCss).not.toContain('var(--dock-tabs-h) minmax(0, 1fr)');
+    expect(stylesCss).toMatch(/\.panel\s*\{[\s\S]*grid-area:\s*1 \/ 1;/);
+
+    expect(stylesCss).not.toContain('.dock-tabs');
+    expect(stylesCss).not.toContain('.dock-tab {');
+    expect(stylesCss).toMatch(/\.dock-tab-count\s*\{[\s\S]*font-size:\s*8\.5px;/);
+    expect(stylesCss).toMatch(
+      /\.dock-mini \.dock-tab-count\s*\{[\s\S]*top:\s*2px;[\s\S]*right:\s*2px;[\s\S]*transform:\s*none;/
+    );
+  });
+
+  it('keeps syncDockChrome data-only and preserves shared rail button collapse behavior', () => {
+    const syncDockChromeSource = extractFunctionSource(mainJs, 'syncDockChrome');
+    expect(syncDockChromeSource).not.toContain('dockMiniEl.hidden');
+    expect(mainJs).not.toContain('onRailClick("dock-collapse"');
+
+    const openApp = { dataset: {} as Record<string, string> };
+    const openDockMini = { hidden: 'unchanged' as const };
+    const syncOpen = compileFunction<() => void>(syncDockChromeSource, {
+      currentLayout: () => 'split',
+      appEl: openApp,
+      dockMiniEl: openDockMini,
+    });
+    syncOpen();
+    expect(openApp.dataset.dock).toBe('open');
+    expect(openDockMini.hidden).toBe('unchanged');
+
+    const collapsedApp = { dataset: {} as Record<string, string> };
+    const collapsedDockMini = { hidden: false };
+    const syncCollapsed = compileFunction<() => void>(syncDockChromeSource, {
+      currentLayout: () => 'terminal',
+      appEl: collapsedApp,
+      dockMiniEl: collapsedDockMini,
+    });
+    syncCollapsed();
+    expect(collapsedApp.dataset.dock).toBe('collapsed');
+    expect(collapsedDockMini.hidden).toBe(false);
+
+    const activeOps: string[] = [];
+    const handlePanelButtonClick = compileFunction<
+      (btn: { dataset: { panelBtn: string } }) => void
+    >(extractPanelButtonClickHandler(mainJs), {
+      currentLayout: () => 'split',
+      currentPanel: () => 'git',
+      applyLayout: (layout: string) => { activeOps.push(`layout:${layout}`); },
+      setPanel: (name: string, opts: { render: boolean }) => {
+        activeOps.push(`set:${name}:${String(opts.render)}`);
+      },
+      renderPanel: (name: string) => { activeOps.push(`render:${name}`); },
+    });
+    handlePanelButtonClick({ dataset: { panelBtn: 'git' } });
+    expect(activeOps).toEqual(['layout:terminal']);
+
+    const hiddenOps: string[] = [];
+    const reopenPanelButtonClick = compileFunction<
+      (btn: { dataset: { panelBtn: string } }) => void
+    >(extractPanelButtonClickHandler(mainJs), {
+      currentLayout: () => 'terminal',
+      currentPanel: () => 'git',
+      applyLayout: (layout: string) => { hiddenOps.push(`layout:${layout}`); },
+      setPanel: (name: string, opts: { render: boolean }) => {
+        hiddenOps.push(`set:${name}:${String(opts.render)}`);
+      },
+      renderPanel: (name: string) => { hiddenOps.push(`render:${name}`); },
+    });
+    reopenPanelButtonClick({ dataset: { panelBtn: 'files' } });
+    expect(hiddenOps).toEqual(['set:files:false', 'layout:split']);
+
+    const visibleOps: string[] = [];
+    const switchPanelButtonClick = compileFunction<
+      (btn: { dataset: { panelBtn: string } }) => void
+    >(extractPanelButtonClickHandler(mainJs), {
+      currentLayout: () => 'split',
+      currentPanel: () => 'git',
+      applyLayout: (layout: string) => { visibleOps.push(`layout:${layout}`); },
+      setPanel: (name: string, opts: { render: boolean }) => {
+        visibleOps.push(`set:${name}:${String(opts.render)}`);
+      },
+      renderPanel: (name: string) => { visibleOps.push(`render:${name}`); },
+    });
+    switchPanelButtonClick({ dataset: { panelBtn: 'browser' } });
+    expect(visibleOps).toEqual(['set:browser:false', 'layout:split', 'render:browser']);
   });
 
   it('coordinates structured diff responses with exact cache and request identity', () => {

@@ -190,19 +190,6 @@
           ></div>
 
           <section class="browser-pane dock" aria-label="Tools">
-            <div class="dock-tabs" role="tablist" aria-label="Tools dock">
-              <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse dock (⌘⌥B)" aria-label="Collapse dock">
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                  <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                  <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
-              <button class="dock-tab" data-panel-btn="files" type="button" aria-pressed="false" title="Files" aria-label="File tree panel">Files</button>
-              <button class="dock-tab" data-panel-btn="git" type="button" aria-pressed="false" title="Git, GitHub and diffs" aria-label="Git and diffs panel">Git<span class="dock-tab-count" id="dock-git-count" hidden></span></button>
-              <button class="dock-tab" data-panel-btn="browser" type="button" aria-pressed="false" title="Browser (⌘⌥B). Right-click to cycle which side the dock sits on." aria-label="Browser panel">Web</button>
-            </div>
-
             <div class="panel panel-browser">
               <header class="pane-header browser-bar">
                 <button id="browser-collapse" class="icon-btn ghost-btn" title="Hide panel (⌘⌥B)" aria-label="Hide panel">
@@ -274,7 +261,7 @@
           </section>
         </main>
 
-        <nav class="mini-rail dock-mini" id="rail-right" hidden
+        <nav class="mini-rail dock-mini" id="rail-right"
              role="toolbar" aria-orientation="vertical" aria-label="Panels">
           <button class="mini-rail-btn" data-panel-btn="files" type="button" aria-pressed="false"
                   title="Files" aria-label="File tree panel">
@@ -284,7 +271,7 @@
             </svg>
           </button>
           <button class="mini-rail-btn" data-panel-btn="git" type="button" aria-pressed="false"
-                  title="Git / GitHub" aria-label="Git panel">
+                  title="Git / GitHub / diffs" aria-label="Git and diffs panel">
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
               <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
               <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
@@ -293,6 +280,7 @@
               <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
                     stroke-width="1.35" stroke-linecap="round"/>
             </svg>
+            <span class="dock-tab-count" id="dock-git-count" hidden></span>
           </button>
           <button class="mini-rail-btn" data-panel-btn="browser" type="button" aria-pressed="false"
                   title="Browser (⌘⌥B)" aria-label="Browser panel">

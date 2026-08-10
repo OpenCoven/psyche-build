@@ -604,7 +604,6 @@
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
-  var dockMiniEl = document.getElementById("rail-right");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
@@ -806,12 +805,11 @@
   }
 
   // The dock is "open" in any layout that shows it — split, and browser-only.
-  // Collapsed, it hands its column to a mini rail whose buttons reopen it on
-  // the panel they name.
+  // The right rail stays visible in every state; only the app-level data
+  // attribute changes so CSS can react to the dock being open or collapsed.
   function syncDockChrome() {
     var open = currentLayout() !== "terminal";
     if (appEl) appEl.dataset.dock = open ? "open" : "collapsed";
-    if (dockMiniEl) dockMiniEl.hidden = open;
   }
 
   function handlePanelLayoutTransition(previousLayout, nextLayout) {
@@ -5067,7 +5065,6 @@
       setSidebarOpen(true);
     });
   }
-  onRailClick("dock-collapse", function () { applyLayout("terminal"); });
 
   // Sidebar width is a CSS custom property so the grid, the rails and the
   // splitter clamps all read one number.

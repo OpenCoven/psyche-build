@@ -68,10 +68,25 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('exposes the three right-rail panels, with diffs folded into git', () => {
+  it('uses the persistent right rail for files, git, and browser while keeping diffs folded into git', () => {
+    expect(indexHtml).not.toContain('class="dock-tabs"');
+    expect(indexHtml).not.toContain('class="dock-tab"');
+
+    const railStart = indexHtml.indexOf('<nav class="mini-rail dock-mini" id="rail-right"');
+    expect(railStart).toBeGreaterThan(-1);
+    const railEnd = indexHtml.indexOf('</nav>', railStart);
+    expect(railEnd).toBeGreaterThan(railStart);
+    const railHtml = indexHtml.slice(railStart, railEnd);
+    const railOpenTag = railHtml.slice(0, railHtml.indexOf('>'));
+
+    expect(railOpenTag).not.toContain(' hidden');
     for (const panel of ['browser', 'files', 'git']) {
-      expect(indexHtml).toContain(`data-panel-btn="${panel}"`);
+      expect(railHtml).toContain(`data-panel-btn="${panel}"`);
     }
+    expect(railHtml).toContain('id="dock-git-count"');
+    expect(railHtml).toMatch(/data-panel-btn="git"[\s\S]*title="[^"]*diffs[^"]*"/);
+    expect(railHtml).toMatch(/data-panel-btn="git"[\s\S]*aria-label="[^"]*diffs[^"]*"/);
+
     // Diffs is no longer a tab of its own...
     expect(indexHtml).not.toContain('data-panel-btn="diffs"');
     // ...but its markup still exists, inside the git panel, with the element

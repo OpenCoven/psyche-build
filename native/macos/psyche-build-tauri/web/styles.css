@@ -138,15 +138,11 @@ kbd {
 .workbench {
   position: relative;
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0px;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w);
   min-height: 0;
   overflow: hidden;
 }
-.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) 0px; }
-.app[data-dock="collapsed"] .workbench { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w); }
-.app[data-sidebar="collapsed"][data-dock="collapsed"] .workbench {
-  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w);
-}
+.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w); }
 .app[data-sidebar="collapsed"] .sidebar { display: none; }
 .app[data-sidebar="open"] .sidebar-mini { display: none; }
 
@@ -1772,13 +1768,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Browser pane -------- */
 
-/* The tools dock hosts four stacked panels (files / git / diffs / browser)
-   under one tab row; the tabs pick which one is visible via
-   .detail[data-panel]. The panels share one grid cell so switching never
-   reflows the dock. */
+/* The tools dock hosts stacked panels (files / git / browser). The active one
+   is picked via .detail[data-panel], and every panel shares one grid cell so
+   switching never reflows the dock. */
 .browser-pane {
   display: grid;
-  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 1fr;
   min-width: 0;
   min-height: 0;
@@ -1787,47 +1782,15 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   -webkit-backdrop-filter: blur(16px);
   border-left: 1px solid var(--border);
 }
-.dock-tabs {
-  grid-area: 1 / 1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 8px 4px;
-  min-width: 0;
-}
-.dock-tabs .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
-.dock-tab {
-  position: relative;
-  flex: 1 1 0;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  transition: color var(--transition-fast), background var(--transition-fast);
-}
-.dock-tab:hover { color: var(--text); background: var(--surface-2); }
-.dock-tab[aria-pressed="true"] {
-  color: var(--text);
-  box-shadow: inset 0 -1.5px 0 0 var(--accent);
-}
 .dock-tab-count {
   font-size: 8.5px;
   font-weight: 700;
   color: var(--warn);
-  transform: translateY(-3px);
 }
+.dock-mini .dock-tab-count { position: absolute; top: 2px; right: 2px; transform: none; }
 .dock-tab-count[hidden] { display: none; }
 .panel {
-  grid-area: 2 / 1;
+  grid-area: 1 / 1;
   display: none;
   min-width: 0;
   min-height: 0;
@@ -2651,12 +2614,11 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 8px;
 }
 
-/* The dock's second row is a single cell that all four panels share; the
-   bar/tabs/preview areas belong to the browser panel, which is the only one
-   that has them. */
+/* The dock is a single cell that all three panels share; the browser panel is
+   the only one that owns a bar, tab strip, and preview stack inside it. */
 .browser-pane {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
 }
 .panel-browser {
