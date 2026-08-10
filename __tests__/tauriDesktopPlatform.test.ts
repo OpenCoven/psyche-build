@@ -130,6 +130,7 @@ describe('desktop Tauri layout', () => {
       'curl',
       'wget',
       'file',
+      'libxdo-dev',
       'libssl-dev',
       'libayatana-appindicator3-dev',
       'librsvg2-dev',
