@@ -32,6 +32,7 @@ describe('tauri footer status model', () => {
     ]);
     expect(METRICS.fps.panel).toBe('performance');
     expect(METRICS.performance.tooltip).toMatch(/80% CPU|85% memory/i);
+    expect(METRICS.performance.tooltip).toMatch(/used\/total memory ratio/i);
     expect(METRICS.fps.tooltip).toMatch(/45 FPS|32 ?ms/i);
     expect(METRICS.activity.tooltip).toMatch(/1,?000 lines\/s|4x/i);
 
@@ -157,6 +158,62 @@ describe('tauri footer status model', () => {
       runtimeMs: null,
     });
     expect(summary.tasks.find((task) => task.id === 'coven:session-3')?.runtimeMs).toBe(900_000);
+  });
+
+  test('keeps live remote agents visible when an attached local pane has already completed', () => {
+    const summary = summarizeWorkspace({
+      now: 20_000,
+      threads: [
+        {
+          id: 'agent',
+          name: 'Nova local',
+          kind: 'coven-attach',
+          status: 'exited',
+          exitCode: 0,
+          covenSessionId: 'session-1',
+          startedAt: 5_000,
+          finishedAt: 12_000,
+          processBacked: true,
+        },
+      ],
+      covenSessions: [
+        {
+          id: 'session-1',
+          title: 'Nova remote',
+          harness: 'claude',
+          status: 'running',
+          currentTask: 'Reviewing follow-up',
+          createdAt: 8_000,
+        },
+      ],
+    });
+
+    expect(summary.agents).toEqual([
+      expect.objectContaining({
+        id: 'coven:session-1',
+        name: 'Nova remote',
+        harness: 'claude',
+        currentTask: 'Reviewing follow-up',
+        status: 'running',
+        threadId: null,
+      }),
+    ]);
+    expect(summary.tasks).toEqual([
+      expect.objectContaining({
+        id: 'local:agent',
+        name: 'Nova local',
+        status: 'completed',
+        runtimeMs: 7_000,
+        threadId: 'agent',
+      }),
+    ]);
+    expect(summary.counts).toEqual({
+      agents: 1,
+      shells: 0,
+      running: 0,
+      waiting: 0,
+      failed: 0,
+    });
   });
 
   test('ignores non-counted pane session ids when deciding which remote sessions are attached', () => {

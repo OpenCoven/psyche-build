@@ -60,8 +60,8 @@ export const METRICS = Object.freeze({
     label: 'Perf',
     compactLabel: 'Perf',
     priority: 70,
-    tooltip: 'Workspace CPU and memory pressure. Warns after 5 consecutive samples at or above 80% CPU or 85% memory, and clears below 70% CPU or 78% memory.',
-    technicalTooltip: 'Workspace CPU and memory pressure. Warns after 5 consecutive samples at or above 80% CPU or 85% memory, and clears below 70% CPU or 78% memory.',
+    tooltip: 'Workspace CPU and memory pressure. Current portable memory-pressure value uses the system used/total memory ratio. Warns after 5 consecutive samples at or above 80% CPU or 85% memory, and clears below 70% CPU or 78% memory.',
+    technicalTooltip: 'Workspace CPU and memory pressure. Current portable memory-pressure value uses the system used/total memory ratio. Warns after 5 consecutive samples at or above 80% CPU or 85% memory, and clears below 70% CPU or 78% memory.',
   }),
   fps: Object.freeze({
     id: 'fps',
@@ -198,14 +198,27 @@ export function summarizeWorkspace(input) {
   );
   const processThreads = threads.filter((thread) => thread?.processBacked === true);
   const localAgentThreads = processThreads.filter((thread) => LOCAL_AGENT_KINDS.has(thread?.kind));
-  const attachedSessionIds = new Set(
+  const attachedTaskSessionIds = new Set(
     localAgentThreads
       .map((thread) => (typeof thread?.covenSessionId === 'string' && thread.covenSessionId)
         ? thread.covenSessionId
         : null)
       .filter(Boolean),
   );
-  const unattachedSessions = covenSessions.filter((session) => !attachedSessionIds.has(session?.id));
+  const attachedActiveAgentSessionIds = new Set(
+    localAgentThreads
+      .filter((thread) => isActiveAgentStatus(normalizeLocalStatus(thread)))
+      .map((thread) => (typeof thread?.covenSessionId === 'string' && thread.covenSessionId)
+        ? thread.covenSessionId
+        : null)
+      .filter(Boolean),
+  );
+  const unattachedAgentSessions = covenSessions.filter(
+    (session) => !attachedActiveAgentSessionIds.has(session?.id),
+  );
+  const unattachedTaskSessions = covenSessions.filter(
+    (session) => !attachedTaskSessionIds.has(session?.id),
+  );
 
   const agents = localAgentThreads
     .map((thread) => {
@@ -226,7 +239,7 @@ export function summarizeWorkspace(input) {
     })
     .filter((agent) => isActiveAgentStatus(agent.status))
     .concat(
-      unattachedSessions
+      unattachedAgentSessions
         .map((session) => ({
           id: `coven:${session.id}`,
           name: typeof session?.title === 'string' && session.title.trim()
@@ -263,7 +276,7 @@ export function summarizeWorkspace(input) {
       threadId: thread.id,
     }))
     .concat(
-      unattachedSessions.map((session) => ({
+      unattachedTaskSessions.map((session) => ({
         id: `coven:${session.id}`,
         name: typeof session?.title === 'string' && session.title.trim()
           ? session.title.trim()
