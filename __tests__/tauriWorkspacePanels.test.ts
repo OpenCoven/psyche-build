@@ -68,10 +68,15 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('exposes the two right-rail panels, with diffs folded into git and files moved left', () => {
-    for (const panel of ['browser', 'git']) {
-      expect(indexHtml).toContain(`data-panel-btn="${panel}"`);
-    }
+  it('leaves the dock with git alone, files on the left and the browser in its own column', () => {
+    expect(indexHtml).toContain('data-panel-btn="git"');
+    // The browser is a column between the canvas and the dock, toggled rather
+    // than switched to, so it is no longer a dock panel.
+    expect(indexHtml).not.toContain('data-panel-btn="browser"');
+    expect(indexHtml).toContain('data-browser-column-toggle');
+    expect(indexHtml).toContain('id="browser-column"');
+    const column = indexHtml.slice(indexHtml.indexOf('id="browser-column"'));
+    expect(column.slice(0, column.indexOf('</section>'))).toContain('class="panel panel-browser"');
     // Diffs is no longer a tab of its own...
     expect(indexHtml).not.toContain('data-panel-btn="diffs"');
     // ...and Files left the dock entirely for the sidebar.
