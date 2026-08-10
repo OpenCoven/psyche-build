@@ -83,6 +83,8 @@
     returnThreadId: null,
   };
   var paneLayouts = new Map();
+  var imageDropScaleFactor = 1;
+  var imageDropTarget = null;
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
@@ -1001,6 +1003,141 @@
     return null;
   }
 
+  function acceptsImageDrop(thread) {
+    return !!thread
+      && thread.kind !== "web"
+      && !thread.closing
+      && !thread.closeStarted
+      && thread.status === "running"
+      && thread.ptyStarted === true;
+  }
+
+  function resolveImageDropTarget(position, scaleFactor) {
+    var cssPosition = PsycheTerminalInput.physicalToCssPosition(position, scaleFactor);
+    if (!cssPosition) return null;
+    var element = document.elementFromPoint(cssPosition.x, cssPosition.y);
+    var pane = element && typeof element.closest === "function"
+      ? element.closest(".terminal-pane[data-thread-id]")
+      : null;
+    if (!pane) return null;
+    var thread = findThread(pane.dataset.threadId);
+    return acceptsImageDrop(thread) ? thread : null;
+  }
+
+  function clearImageDropTarget() {
+    if (imageDropTarget && imageDropTarget.pane) {
+      imageDropTarget.pane.classList.remove("image-drop-target");
+    }
+    imageDropTarget = null;
+  }
+
+  function setImageDropTarget(thread) {
+    if (thread === imageDropTarget) return;
+    clearImageDropTarget();
+    if (!acceptsImageDrop(thread) || !thread.pane) return;
+    imageDropTarget = thread;
+    thread.pane.classList.add("image-drop-target");
+  }
+
+  async function insertDroppedImages(thread, paths) {
+    var insertion = PsycheTerminalInput.buildImageDropInsertion(paths);
+    if (!insertion.accepted.length) {
+      toast("No supported images in this drop");
+      return false;
+    }
+
+    try {
+      if (!(await focusThread(thread.id))) {
+        setStatus("image drop focus failed", "warn");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop focus failed", "warn");
+      return false;
+    }
+
+    thread = findThread(thread.id);
+    if (!acceptsImageDrop(thread)) {
+      setStatus("image drop target is no longer available", "warn");
+      return false;
+    }
+
+    try {
+      if (!(await sendToThread(thread, insertion.text))) {
+        setStatus("image drop write failed", "error");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop write failed", "error");
+      return false;
+    }
+
+    if (insertion.skipped.length) {
+      toast(
+        "Inserted " + insertion.accepted.length + " image" +
+        (insertion.accepted.length === 1 ? "" : "s") +
+        "; skipped " + insertion.skipped.length + " unsupported file" +
+        (insertion.skipped.length === 1 ? "" : "s")
+      );
+    }
+    return true;
+  }
+
+  async function handleTerminalImageDropEvent(event) {
+    var payload = event && event.payload ? event.payload : {};
+    if (payload.type === "leave") {
+      clearImageDropTarget();
+      return false;
+    }
+    if (payload.type !== "enter" && payload.type !== "over" && payload.type !== "drop") {
+      return false;
+    }
+
+    var thread = resolveImageDropTarget(payload.position, imageDropScaleFactor);
+    setImageDropTarget(thread);
+    if (payload.type !== "drop") return !!thread;
+
+    clearImageDropTarget();
+    if (!thread) {
+      toast("Drop images onto a running terminal pane");
+      return false;
+    }
+    return insertDroppedImages(thread, Array.isArray(payload.paths) ? payload.paths : []);
+  }
+
+  async function installTerminalImageDrop() {
+    if (!currentWindow ||
+        typeof currentWindow.scaleFactor !== "function" ||
+        typeof currentWindow.onDragDropEvent !== "function") {
+      setStatus("image drop unavailable: Tauri window API missing", "warn");
+      return false;
+    }
+
+    try {
+      var scaleFactor = await currentWindow.scaleFactor();
+      if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+        throw new Error("invalid window scale factor");
+      }
+      imageDropScaleFactor = scaleFactor;
+      if (typeof currentWindow.onScaleChanged === "function") {
+        await currentWindow.onScaleChanged(function (event) {
+          var nextScaleFactor = event && event.payload && event.payload.scaleFactor;
+          if (Number.isFinite(nextScaleFactor) && nextScaleFactor > 0) {
+            imageDropScaleFactor = nextScaleFactor;
+          }
+          clearImageDropTarget();
+        });
+      }
+      await currentWindow.onDragDropEvent(handleTerminalImageDropEvent);
+      window.addEventListener("blur", clearImageDropTarget);
+      return true;
+    } catch (error) {
+      clearImageDropTarget();
+      setStatus("image drop unavailable: " + String(error), "warn");
+      return false;
+    }
+  }
+
   function findBrowserPane(projectId, worktreePath) {
     return state.threads.find(function (thread) {
       return thread.kind === "web" && thread.projectId === projectId &&
@@ -1159,9 +1296,12 @@
     if (minimapDot) minimapDot.classList.toggle("attention", !!thread.needsAttention);
   }
 
-  function noteThreadUserInput(thread) {
-    if (!thread) return;
-    applyThreadAttention(thread, attentionTracker.userInput(thread.id));
+  function noteThreadInput(thread, text) {
+    if (!thread || !threadWantsAttentionTracking(thread)) return;
+    var next = text === "\x03"
+      ? attentionTracker.interrupt(thread.id)
+      : attentionTracker.userInput(thread.id);
+    applyThreadAttention(thread, next);
   }
 
   function clearThreadAttention(thread) {
@@ -2068,18 +2208,7 @@
       }
     } catch (_) { /* canvas fallback is fine */ }
 
-    term.onData(function (data) {
-      // Typing *is* the answer, so the badge clears on the keystroke rather
-      // than on focus: opening a pane to look at the question should not make
-      // the app forget it was asked.
-      noteThreadUserInput(thread);
-      var bytes = Array.from(new TextEncoder().encode(data));
-      invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-        function (err) {
-          term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
-        }
-      );
-    });
+    term.onData(function (data) { sendToThread(thread, data); });
     // Agents ring the bell for exactly one reason -- they want the user back --
     // so it is trusted immediately instead of waiting for the tail to settle.
     if (typeof term.onBell === "function") {
@@ -5232,10 +5361,21 @@
     });
   }
   function sendToThread(thread, text) {
+    if (!thread || thread.kind === "web") return Promise.resolve(false);
+    noteThreadInput(thread, text);
     var bytes = Array.from(new TextEncoder().encode(text));
-    invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-      function () {}
-    );
+    return invoke("pty_write", {
+      threadId: thread.id,
+      thread_id: thread.id,
+      bytes: bytes,
+    }).then(function () {
+      return true;
+    }).catch(function (err) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      }
+      return false;
+    });
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
@@ -6955,6 +7095,7 @@
 
   async function boot(env) {
     state.env = env || {};
+    await installTerminalImageDrop();
     var saved = readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;

@@ -121,6 +121,7 @@ export function createAttentionTracker(options) {
         changedAt: 0,
         sawActivity: false,
         awaitingAgent: false,
+        interruptPending: false,
         needsAttention: false,
         reason: null,
       };
@@ -148,6 +149,18 @@ export function createAttentionTracker(options) {
         // at adoption predates us and says nothing about whose turn it is.
         entry.tail = text;
         entry.changedAt = at;
+        entry.interruptPending = false;
+        return resolve(entry);
+      }
+
+      if (entry.interruptPending) {
+        entry.tail = text;
+        entry.changedAt = at;
+        entry.sawActivity = true;
+        entry.awaitingAgent = false;
+        entry.interruptPending = false;
+        entry.needsAttention = false;
+        entry.reason = null;
         return resolve(entry);
       }
 
@@ -183,6 +196,7 @@ export function createAttentionTracker(options) {
       const entry = entryFor(id);
       if (entry.tail === null || entry.awaitingAgent) return resolve(entry);
       entry.sawActivity = true;
+      entry.interruptPending = false;
       entry.needsAttention = true;
       entry.reason = 'question';
       return resolve(entry);
@@ -194,6 +208,16 @@ export function createAttentionTracker(options) {
       entry.needsAttention = false;
       entry.reason = null;
       entry.awaitingAgent = true;
+      entry.interruptPending = false;
+      return resolve(entry);
+    },
+
+    interrupt(id) {
+      const entry = entryFor(id);
+      entry.needsAttention = false;
+      entry.reason = null;
+      entry.awaitingAgent = false;
+      entry.interruptPending = true;
       return resolve(entry);
     },
 
@@ -203,6 +227,7 @@ export function createAttentionTracker(options) {
       if (!entry) return NOT_WAITING;
       entry.needsAttention = false;
       entry.reason = null;
+      entry.interruptPending = false;
       return NOT_WAITING;
     },
 
