@@ -255,33 +255,50 @@ kbd {
    with the session list, one at a time, so the explorer sits where an
    explorer belongs and the dock keeps Git and Web. */
 
+/* Segmented control: a recessed track holding two pills, where the selected
+   one lifts out of it with an accent edge. The track is darker than the rail
+   so the inactive half reads as a groove rather than a button. */
 .sidebar-tabs {
   display: flex;
   align-items: stretch;
-  gap: 2px;
+  gap: 4px;
   flex: none;
-  width: 100%;
-  padding: 0 6px 6px;
+  box-sizing: border-box;
+  width: calc(100% - 12px);
+  margin: 0 6px 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92));
 }
 .sidebar-tab {
   flex: 1 1 0;
-  height: 24px;
-  border: 0;
-  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.02em;
   cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition: background var(--transition-fast), color var(--transition-fast),
+              border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
-.sidebar-tab:hover { background: var(--surface-2); color: var(--text); }
+.sidebar-tab svg { flex: none; opacity: 0.85; }
+.sidebar-tab:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
 .sidebar-tab.is-active {
-  background: rgba(var(--rgb-accent), 0.14);
-  color: var(--text);
+  background: rgba(var(--rgb-accent), 0.15);
+  border-color: rgba(var(--rgb-accent), 0.55);
+  color: #f8f5ff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
-.sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sidebar-tab.is-active svg { color: var(--accent); opacity: 1; }
+.sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .sidebar-files {
   display: flex;
@@ -757,12 +774,31 @@ kbd {
   --terminal-min-y: 160px;
   --browser-min-y:  54px;
   --split-frac: 0.6;
+  /* The browser is its own column between the canvas and the tools dock.
+     Collapsing it zeroes the track rather than hiding the element, so the
+     native child webview's bounds go to zero with it. */
+  --browser-col: 420px;
+  --browser-col-y: 260px;
   --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
               grid-template-rows    var(--transition-layout);
   will-change: grid-template-columns, grid-template-rows;
 }
 .detail.resizing { transition: none; }
+.detail[data-browser-column="collapsed"] {
+  --browser-col: 0px;
+  --browser-col-y: 0px;
+}
+.browser-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+}
+.detail[data-browser-column="collapsed"] .browser-column { border-left-color: transparent; }
+.detail[data-layout="terminal"] .browser-column { display: none; }
 
 .boot-error {
   color: #ff6b6b;
@@ -790,45 +826,54 @@ kbd {
 .detail[data-layout="split"][data-browser-side="right"] {
   grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
                          var(--splitter-w)
+                         var(--browser-col)
                          minmax(var(--browser-min), 1fr);
   grid-template-rows: 1fr;
 }
-.detail[data-layout="split"][data-browser-side="right"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .browser-pane  { grid-column: 3; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="right"] .terminal-area  { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="right"] .splitter       { grid-column: 2; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="right"] .browser-column { grid-column: 3; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="right"] .browser-pane   { grid-column: 4; grid-row: 1; }
 
 /* split — browser on left, terminal on right */
 .detail[data-layout="split"][data-browser-side="left"] {
   grid-template-columns: minmax(var(--browser-min), 1fr)
+                         var(--browser-col)
                          var(--splitter-w)
                          minmax(var(--terminal-min), var(--terminal-col));
   grid-template-rows: 1fr;
 }
-.detail[data-layout="split"][data-browser-side="left"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .terminal-area { grid-column: 3; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="left"] .browser-pane   { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="left"] .browser-column { grid-column: 2; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="left"] .splitter       { grid-column: 3; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="left"] .terminal-area  { grid-column: 4; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="left"] .browser-column { border-left: 0; border-right: 1px solid var(--border); }
 
 /* split — browser on bottom */
 .detail[data-layout="split"][data-browser-side="bottom"] {
   grid-template-columns: 1fr;
   grid-template-rows: minmax(var(--terminal-min-y), var(--terminal-col))
                       var(--splitter-w)
+                      var(--browser-col-y)
                       minmax(var(--browser-min-y), 1fr);
 }
-.detail[data-layout="split"][data-browser-side="bottom"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="bottom"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="bottom"] .browser-pane  { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"][data-browser-side="bottom"] .terminal-area  { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="bottom"] .splitter       { grid-column: 1; grid-row: 2; }
+.detail[data-layout="split"][data-browser-side="bottom"] .browser-column { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"][data-browser-side="bottom"] .browser-pane   { grid-column: 1; grid-row: 4; }
 
 /* split — browser on top */
 .detail[data-layout="split"][data-browser-side="top"] {
   grid-template-columns: 1fr;
   grid-template-rows: minmax(var(--browser-min-y), 1fr)
+                      var(--browser-col-y)
                       var(--splitter-w)
                       minmax(var(--terminal-min-y), var(--terminal-col));
 }
-.detail[data-layout="split"][data-browser-side="top"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="top"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="top"] .terminal-area { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"][data-browser-side="top"] .browser-pane   { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"][data-browser-side="top"] .browser-column { grid-column: 1; grid-row: 2; }
+.detail[data-layout="split"][data-browser-side="top"] .splitter       { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"][data-browser-side="top"] .terminal-area  { grid-column: 1; grid-row: 4; }
 
 .splitter {
   background: transparent;

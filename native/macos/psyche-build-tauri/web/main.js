@@ -702,7 +702,7 @@
   );
   var browserCollapseBtn = document.getElementById("browser-collapse");
   var BROWSER_SIDES = ["right", "bottom", "left", "top"];
-  var PANELS = ["browser", "git"];
+  var PANELS = ["git"];
   // Diffs used to be its own tab. It now lives inside the git panel, so every
   // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
   // to the tab that actually shows it.
@@ -844,17 +844,19 @@
     });
   });
   if (browserCollapseBtn) {
+    // The chevron in the browser bar now collapses its own column rather than
+    // tearing down the whole split, which would take the tools dock with it.
     browserCollapseBtn.addEventListener("click", function () {
-      applyLayout("terminal");
+      setBrowserColumn(false);
     });
   }
   // ---- Right-rail panel switching ----
-  // The rail is a radio group over the right pane's four panels. Clicking the
+  // The rail is a radio group over the dock's panels. Clicking the
   // panel that is already showing collapses the pane, so one button both opens
   // and closes — the usual activity-bar behaviour.
   function currentPanel() {
     var p = detail.dataset.panel;
-    return PANELS.indexOf(p) === -1 ? "browser" : p;
+    return PANELS.indexOf(p) === -1 ? PANELS[0] : p;
   }
   function syncPanelButtons() {
     var open = currentLayout() === "split";
@@ -869,9 +871,28 @@
       }
     );
   }
+  function setBrowserColumn(open) {
+    if (!detail) return false;
+    detail.dataset.browserColumn = open ? "open" : "collapsed";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-browser-column-toggle]"),
+      function (btn) { btn.setAttribute("aria-pressed", open ? "true" : "false"); }
+    );
+    if (open && currentLayout() !== "split") applyLayout("split");
+    syncBrowserBounds();
+    return open;
+  }
+  function toggleBrowserColumn() {
+    return setBrowserColumn(detail.dataset.browserColumn === "collapsed");
+  }
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-browser-column-toggle]"),
+    function (btn) { btn.addEventListener("click", function () { toggleBrowserColumn(); }); }
+  );
+
   function setPanel(name, opts) {
     name = resolvePanelName(name);
-    if (PANELS.indexOf(name) === -1) name = "browser";
+    if (PANELS.indexOf(name) === -1) name = PANELS[0];
     detail.dataset.panel = name;
     var project = activeProject();
     if (project) project.panel = name;
@@ -4861,7 +4882,7 @@
     if (preview) preview.classList.toggle("loading", !!(tab && tab.loading));
     updateBrowserControls();
   }
-  function visibleBrowserBounds() { var rect = preview.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; if (detail.dataset.layout === "terminal") return null; if (currentPanel() !== "browser") return null; return { x: rect.left, y: rect.top, w: rect.width, h: rect.height }; }
+  function visibleBrowserBounds() { var rect = preview.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; if (detail.dataset.layout === "terminal") return null; if (detail.dataset.browserColumn === "collapsed") return null; return { x: rect.left, y: rect.top, w: rect.width, h: rect.height }; }
   function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
   function syncBrowserBounds() {
     var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
