@@ -732,6 +732,52 @@ describe('macOS build channels', () => {
       expect(readdirSync(applicationsDir)).toEqual(['Psyche Build.app']);
     });
 
+    it('removes the invalid first install when final validation fails after the staging rename', async () => {
+      const homeDir = createScratchDirectory('install-first-final-validation-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const finalPath = join(applicationsDir, 'Psyche Build.app');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-first-final-validation-failure'),
+        'Psyche Build.app',
+        'replacement',
+      );
+
+      await expect(
+        installBundleTransactional(candidatePath, channelConfig('stable'), {
+          homeDir,
+          copyBundle,
+          randomUUID: () => 'first-validation-failure',
+          validateInstalledBundle: async (appPath: string) => {
+            if (appPath === finalPath) {
+              throw new Error('final validation failed');
+            }
+          },
+        }),
+      ).rejects.toThrow(/final validation failed/);
+
+      expect(readdirSync(applicationsDir)).toEqual([]);
+    });
+
+    it('fails with an explicit error when the validator callback is missing', async () => {
+      const candidatePath = createAppBundle(
+        createScratchDirectory('candidate-missing-validator'),
+        'Psyche Build Dev.app',
+        'replacement',
+      );
+      const installWithoutValidator = installBundleTransactional as unknown as (
+        candidate: string,
+        requestedChannelConfig: ReturnType<typeof channelConfig>,
+        overrides?: unknown,
+      ) => Promise<string>;
+
+      await expect(installWithoutValidator(candidatePath, channelConfig('dev'))).rejects.toThrow(
+        'installBundleTransactional requires a validateInstalledBundle callback',
+      );
+      await expect(
+        installWithoutValidator(candidatePath, channelConfig('dev'), {}),
+      ).rejects.toThrow('installBundleTransactional requires a validateInstalledBundle callback');
+    });
+
     it('reports both the installation failure and rollback failure explicitly', async () => {
       const homeDir = createScratchDirectory('install-rollback-failure');
       const applicationsDir = join(homeDir, 'Applications');
@@ -788,7 +834,7 @@ describe('macOS build channels', () => {
   describe('writeBuildProvenance', () => {
     const stableRecord = {
       channel: 'stable' as const,
-      commitSha: 'abc1234',
+      commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       requestedRef: 'origin/release/v1.2.3',
       dirty: false,
       builtAt: '2026-08-10T10:00:00.000Z',
@@ -798,7 +844,7 @@ describe('macOS build channels', () => {
     };
     const devRecord = {
       channel: 'dev' as const,
-      commitSha: 'def5678',
+      commitSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       dirty: true,
       builtAt: '2026-08-10T11:00:00.000Z',
       installedPath: '/Users/test/Applications/Psyche Build Dev.app',
@@ -832,6 +878,69 @@ describe('macOS build channels', () => {
       await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
         /Invalid build provenance file/,
       );
+      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
+    });
+
+    it.each([
+      {
+        name: 'null stable record',
+        state: { version: 1, channels: { stable: null } },
+        errorPattern: /Invalid build provenance file .* channel "stable" must be an object/i,
+      },
+      {
+        name: 'mismatched dev channel record',
+        state: {
+          version: 1,
+          channels: {
+            stable: stableRecord,
+            dev: {
+              ...devRecord,
+              channel: 'stable',
+            },
+          },
+        },
+        errorPattern:
+          /Invalid build provenance file .* channel "dev" record must contain channel="dev"/i,
+      },
+      {
+        name: 'malformed dev record',
+        state: {
+          version: 1,
+          channels: {
+            stable: stableRecord,
+            dev: {
+              ...devRecord,
+              commitSha: 'SHORTSHA',
+              requestedRef: 42,
+            },
+          },
+        },
+        errorPattern:
+          /Invalid build provenance file .* channel "dev" record must contain a 40-character lowercase hexadecimal commitSha/i,
+      },
+      {
+        name: 'unknown channel key',
+        state: {
+          version: 1,
+          channels: {
+            stable: stableRecord,
+            preview: {
+              ...devRecord,
+              channel: 'dev',
+            },
+          },
+        },
+        errorPattern: /Invalid build provenance file .* unknown channel "preview"/i,
+      },
+    ])('rejects $name without changing the file', async ({ state, errorPattern }) => {
+      const homeDir = createScratchDirectory('provenance-channel-validation');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const provenancePath = join(stateDir, 'builds.json');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(provenancePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+      const before = readFileSync(provenancePath, 'utf8');
+
+      await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(errorPattern);
       expect(readFileSync(provenancePath, 'utf8')).toBe(before);
     });
 

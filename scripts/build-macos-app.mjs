@@ -29,6 +29,8 @@ const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
+const BUILD_CHANNELS = ['stable', 'dev'];
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 export function parseBuildArguments(argv) {
   const tokens = argv.filter((value) => value !== '--');
@@ -152,8 +154,8 @@ export function assertBundleIdentity(appPath, identity, expectedChannelConfig) {
   );
 }
 
-export async function installBundleTransactional(candidate, requestedChannelConfig, overrides = {}) {
-  const validateInstalledBundle = overrides.validateInstalledBundle;
+export async function installBundleTransactional(candidate, requestedChannelConfig, overrides) {
+  const validateInstalledBundle = overrides?.validateInstalledBundle;
 
   if (typeof validateInstalledBundle !== 'function') {
     throw new Error('installBundleTransactional requires a validateInstalledBundle callback');
@@ -179,6 +181,7 @@ export async function installBundleTransactional(candidate, requestedChannelConf
 
   let backupCreated = false;
   let finalValidated = false;
+  let finalInstalled = false;
 
   await mkdirPath(applicationsDir);
 
@@ -197,6 +200,7 @@ export async function installBundleTransactional(candidate, requestedChannelConf
     }
 
     await renamePath(stagingPath, finalPath);
+    finalInstalled = true;
     await Promise.resolve(validateInstalledBundle(finalPath, requestedChannelConfig));
     finalValidated = true;
 
@@ -207,13 +211,23 @@ export async function installBundleTransactional(candidate, requestedChannelConf
 
     return finalPath;
   } catch (error) {
-    if (backupCreated && !finalValidated) {
+    if (!finalValidated) {
       try {
-        await removePath(finalPath);
-        await renamePath(backupPath, finalPath);
+        if (finalInstalled) {
+          await removePath(finalPath);
+          finalInstalled = false;
+        }
+
+        if (backupCreated) {
+          await renamePath(backupPath, finalPath);
+          backupCreated = false;
+        }
       } catch (rollbackError) {
+        const rollbackContext = backupCreated
+          ? 'Rollback failed'
+          : 'Failed to remove invalid installed app';
         throw new Error(
-          `${describeError(error)}\nRollback failed: ${describeError(rollbackError)}`,
+          `${describeError(error)}\n${rollbackContext}: ${describeError(rollbackError)}`,
         );
       }
     }
@@ -550,6 +564,7 @@ async function readExistingBuildProvenance(statePath, readFileText) {
       throw new Error('expected version 1 with object channels');
     }
 
+    validateBuildProvenanceChannels(statePath, parsed.channels);
     return parsed.channels;
   } catch (error) {
     if (isEnoentError(error)) {
@@ -566,6 +581,63 @@ async function readExistingBuildProvenance(statePath, readFileText) {
 
     throw error;
   }
+}
+
+function validateBuildProvenanceChannels(statePath, channels) {
+  for (const [channelName, record] of Object.entries(channels)) {
+    if (!BUILD_CHANNELS.includes(channelName)) {
+      throw invalidBuildProvenance(statePath, `unknown channel "${channelName}"`);
+    }
+
+    validateBuildProvenanceRecord(statePath, channelName, record);
+  }
+}
+
+function validateBuildProvenanceRecord(statePath, channelName, record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw invalidBuildProvenance(statePath, `channel "${channelName}" must be an object`);
+  }
+
+  if (record.channel !== channelName) {
+    throw invalidBuildProvenance(
+      statePath,
+      `channel "${channelName}" record must contain channel="${channelName}"`,
+    );
+  }
+
+  if (typeof record.commitSha !== 'string' || !COMMIT_SHA_PATTERN.test(record.commitSha)) {
+    throw invalidBuildProvenance(
+      statePath,
+      `channel "${channelName}" record must contain a 40-character lowercase hexadecimal commitSha`,
+    );
+  }
+
+  if (typeof record.dirty !== 'boolean') {
+    throw invalidBuildProvenance(
+      statePath,
+      `channel "${channelName}" record must contain boolean dirty`,
+    );
+  }
+
+  for (const fieldName of ['builtAt', 'installedPath', 'productName', 'bundleIdentifier']) {
+    if (typeof record[fieldName] !== 'string') {
+      throw invalidBuildProvenance(
+        statePath,
+        `channel "${channelName}" record must contain string ${fieldName}`,
+      );
+    }
+  }
+
+  if (record.requestedRef !== undefined && typeof record.requestedRef !== 'string') {
+    throw invalidBuildProvenance(
+      statePath,
+      `channel "${channelName}" record must omit requestedRef or provide it as a string`,
+    );
+  }
+}
+
+function invalidBuildProvenance(statePath, detail) {
+  return new Error(`Invalid build provenance file at "${statePath}": ${detail}`);
 }
 
 class StartupSmokeFailure extends Error {

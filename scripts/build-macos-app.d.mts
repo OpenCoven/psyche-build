@@ -57,7 +57,7 @@ export type BuildCommand = [command: string, args: string[], cwd: string];
 export interface InstallOverrides {
   homeDir?: string;
   copyBundle?: (source: string, destination: string) => void | Promise<void>;
-  validateInstalledBundle?: (
+  validateInstalledBundle: (
     appPath: string,
     expectedChannelConfig: BuildChannelConfig,
   ) => void | Promise<void>;
@@ -108,7 +108,7 @@ export function assertBundleIdentity(
 export function installBundleTransactional(
   candidate: string,
   requestedChannelConfig: BuildChannelConfig,
-  overrides?: InstallOverrides,
+  overrides: InstallOverrides,
 ): Promise<string>;
 export function writeBuildProvenance(
   record: BuildProvenance,
