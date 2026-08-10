@@ -336,7 +336,7 @@ and closing.
 Persist through the existing settings/workspace storage:
 
 - active sidebar tab;
-- selected session through the existing active thread identity;
+- selected session key;
 - project expansion;
 - branch expansion;
 - active filter; and
@@ -349,6 +349,13 @@ Saved state is validated against known enum values and current project,
 worktree, and session identifiers. Missing or stale identifiers fall back to
 the first valid visible item without suppressing an error from the underlying
 session or discovery model.
+
+The selected-session key is `coven:<session-id>` for daemon sessions and a
+stable composite of project root, worktree path, kind, and displayed name for
+local panes. Selection is restored only when a matching session still exists.
+The native application does not currently recreate local PTYs after relaunch,
+so a missing local session key falls back to the selected branch or first
+visible session rather than implying that the stopped process was restored.
 
 ## Error handling
 
