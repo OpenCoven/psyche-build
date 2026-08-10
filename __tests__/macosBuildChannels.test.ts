@@ -1,5 +1,13 @@
 import { EventEmitter } from 'node:events';
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { rename as renameAsync } from 'node:fs/promises';
@@ -15,8 +23,24 @@ import {
   findCandidateApp,
   installBundleTransactional,
   parseBuildArguments,
+  readBundleIdentity,
+  resolveCommit,
+  runCommand,
+  runMacosBuild,
   smokeLaunchBundle,
+  sourceIsDirty,
+  writeDevTauriConfig,
   writeBuildProvenance,
+} from '../scripts/build-macos-app.mjs';
+import type {
+  BuildProvenance,
+  BundleIdentity,
+  CommandOptions,
+  CommandResult,
+  InstallOverrides,
+  Runner,
+  RunMacosBuildDependencies,
+  SmokeLaunchOverrides,
 } from '../scripts/build-macos-app.mjs';
 
 const repositoryRoot = process.cwd();
@@ -291,6 +315,138 @@ describe('macOS build channels', () => {
       expect(() => createDevTauriConfig(withoutMain)).toThrow(
         'Production Tauri config must contain an app.windows entry labeled "main"',
       );
+    });
+  });
+
+  describe('command and source helpers', () => {
+    it('runs commands with argument arrays and captures string output', async () => {
+      const result = await runCommand(process.execPath, [
+        '-e',
+        'process.stdout.write(process.argv[1]); process.stderr.write("stderr")',
+        'release candidate with spaces',
+      ]);
+
+      expect(result).toEqual({
+        stdout: 'release candidate with spaces',
+        stderr: 'stderr',
+      });
+    });
+
+    it('reports command failure details and preserves the cause', async () => {
+      const command = process.execPath;
+      const failure = await runCommand(command, [
+        '-e',
+        'process.stdout.write("partial"); process.stderr.write("broken"); process.exit(7)',
+      ]).then(
+        () => undefined,
+        (error) =>
+          error as Error & {
+            command?: string;
+            exitCode?: number;
+            stdout?: string;
+            stderr?: string;
+          },
+      );
+
+      expect(failure).toBeDefined();
+      expect(failure?.message).toContain(command);
+      expect(failure?.message).toContain('exit code 7');
+      expect(failure?.message).toContain('partial');
+      expect(failure?.message).toContain('broken');
+      expect(failure?.command).toBe(command);
+      expect(failure?.exitCode).toBe(7);
+      expect(failure?.stdout).toBe('partial');
+      expect(failure?.stderr).toBe('broken');
+      expect(failure?.cause).toBeInstanceOf(Error);
+    });
+
+    it('resolves a ref containing spaces as one git argument', async () => {
+      const sha = 'a'.repeat(40);
+      const execute = vi.fn(
+        async (_command: string, _args: readonly string[]): Promise<CommandResult> => ({
+          stdout: `${sha}\n`,
+          stderr: '',
+        }),
+      );
+
+      await expect(
+        resolveCommit('/repo with spaces', 'release candidate', execute),
+      ).resolves.toBe(sha);
+      expect(execute).toHaveBeenCalledWith(
+        'git',
+        ['rev-parse', '--verify', 'release candidate^{commit}'],
+        { cwd: '/repo with spaces' },
+      );
+    });
+
+    it('rejects git output that is not a full lowercase commit SHA', async () => {
+      const execute = vi.fn(
+        async (_command: string, _args: readonly string[]): Promise<CommandResult> => ({
+          stdout: 'abc123\n',
+          stderr: '',
+        }),
+      );
+
+      await expect(resolveCommit('/repo', 'main', execute)).rejects.toThrow(
+        /full lowercase 40-character commit SHA/i,
+      );
+    });
+
+    it.each([
+      { output: '', expected: false },
+      { output: ' M scripts/build-macos-app.mjs\n', expected: true },
+    ])('reports dirty=$expected from porcelain output', async ({ output, expected }) => {
+      const execute = vi.fn(
+        async (_command: string, _args: readonly string[]): Promise<CommandResult> => ({
+          stdout: output,
+          stderr: '',
+        }),
+      );
+
+      await expect(sourceIsDirty('/repo', execute)).resolves.toBe(expected);
+      expect(execute).toHaveBeenCalledWith('git', ['status', '--porcelain'], { cwd: '/repo' });
+    });
+
+    it('reads all required bundle identity values with plutil argument arrays', async () => {
+      const values: Record<string, string> = {
+        CFBundleName: 'Psyche Build',
+        CFBundleIdentifier: 'dev.opencoven.psyche',
+        CFBundleExecutable: 'psyche-build',
+      };
+      const execute = vi.fn(
+        async (_command: string, args: readonly string[]): Promise<CommandResult> => ({
+          stdout: `${values[args[1] ?? '']}\n`,
+          stderr: '',
+        }),
+      );
+      const appPath = '/Applications/Psyche Build.app';
+      const infoPath = join(appPath, 'Contents', 'Info.plist');
+
+      await expect(readBundleIdentity(appPath, execute)).resolves.toEqual({
+        name: 'Psyche Build',
+        identifier: 'dev.opencoven.psyche',
+        executable: 'psyche-build',
+      });
+      expect(execute.mock.calls).toEqual([
+        ['plutil', ['-extract', 'CFBundleName', 'raw', '-o', '-', infoPath]],
+        ['plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', infoPath]],
+        ['plutil', ['-extract', 'CFBundleExecutable', 'raw', '-o', '-', infoPath]],
+      ]);
+    });
+  });
+
+  describe('writeDevTauriConfig', () => {
+    it('atomically writes a complete private config under the temporary parent', async () => {
+      const tempRoot = createScratchDirectory('dev-tauri-config');
+      const configPath = await writeDevTauriConfig(repositoryRoot, tempRoot);
+
+      expect(resolve(configPath)).toBe(configPath);
+      expect(configPath.startsWith(`${tempRoot}/`)).toBe(true);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(
+        createDevTauriConfig(macosTauriConfig),
+      );
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(readdirSync(tempRoot)).toEqual([configPath.split('/').at(-1)]);
     });
   });
 
@@ -1075,33 +1231,403 @@ describe('macOS build channels', () => {
     });
   });
 
-  describe('CLI entrypoint', () => {
-    it('prints repositoryRoot and parsed options as JSON', () => {
-      const result = spawnSync('node', [scriptPath, 'stable', '--', 'origin/main'], {
-        cwd: tauriDirectory,
-        encoding: 'utf8',
-      });
+  describe('runMacosBuild', () => {
+    const stableSha = 'a'.repeat(40);
+    const devSha = 'b'.repeat(40);
+    const builtAt = '2026-08-10T18:00:00.000Z';
+    const virtualRepository = '/workspace/psyche-build';
+    const virtualHome = '/Users/test';
+    const stableIdentity: BundleIdentity = {
+      name: 'Psyche Build',
+      identifier: 'dev.opencoven.psyche',
+      executable: 'psyche-build',
+    };
+    const devIdentity: BundleIdentity = {
+      name: 'Psyche Build Dev',
+      identifier: 'dev.opencoven.psyche.dev',
+      executable: 'psyche-build-dev',
+    };
 
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe('');
-      expect(JSON.parse(result.stdout)).toEqual({
-        repositoryRoot,
-        options: {
-          channel: 'stable',
-          ref: 'origin/main',
+    it('runs the exact stable workflow in an isolated source child and records provenance', async () => {
+      const tempRoot = '/workspace/.build-temp/stable-1';
+      const sourceRoot = join(tempRoot, 'source');
+      const bundleDir = join(
+        sourceRoot,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+      );
+      const candidate = join(bundleDir, 'Psyche Build.app');
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build.app');
+      const events: string[] = [];
+      const execute = vi.fn(
+        async (
+          command: string,
+          args: readonly string[],
+          _options: CommandOptions = {},
+        ): Promise<CommandResult> => {
+          events.push(`command:${command}:${args.join(' ')}`);
+          if (command === 'git' && args[0] === 'rev-parse') {
+            return { stdout: `${stableSha}\n`, stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
         },
+      );
+      const removePath = vi.fn(async (targetPath: string) => {
+        events.push(`remove:${targetPath}`);
+      });
+      const readIdentity = vi.fn(
+        async (_appPath: string, _execute?: Runner): Promise<BundleIdentity> => stableIdentity,
+      );
+      const smokeLaunch = vi.fn(
+        async (_appPath: string, _overrides: SmokeLaunchOverrides): Promise<void> => {},
+      );
+      const install = vi.fn(
+        async (
+          installedCandidate: string,
+          requestedConfig: ReturnType<typeof channelConfig>,
+          overrides: InstallOverrides,
+        ) => {
+          expect(installedCandidate).toBe(candidate);
+          expect(requestedConfig).toEqual(channelConfig('stable'));
+          await Promise.resolve(
+            overrides.validateInstalledBundle('/staging/Psyche Build.app', requestedConfig),
+          );
+          await Promise.resolve(overrides.validateInstalledBundle(installedPath, requestedConfig));
+          return installedPath;
+        },
+      );
+      const writeProvenance = vi.fn(async (_record: BuildProvenance) => '/state/builds.json');
+      const dependencies = {
+        execute,
+        makeTemporaryDirectory: vi.fn(async () => tempRoot),
+        removePath,
+        findCandidateApp: vi.fn(async () => candidate),
+        readBundleIdentity: readIdentity,
+        smokeLaunchBundle: smokeLaunch,
+        installBundleTransactional: install,
+        writeBuildProvenance: writeProvenance,
+        now: () => new Date(builtAt),
+        homeDir: virtualHome,
+      } satisfies RunMacosBuildDependencies;
+
+      const result = await runMacosBuild(
+        {
+          channel: 'stable',
+          ref: 'release candidate',
+          repositoryRoot: virtualRepository,
+        },
+        dependencies,
+      );
+
+      const expectedBuildCalls = buildCommandsFor('stable').map(([command, args, relativeCwd]) => [
+        command,
+        args,
+        { cwd: resolve(sourceRoot, relativeCwd) },
+      ]);
+      expect(execute.mock.calls).toEqual([
+        [
+          'git',
+          ['rev-parse', '--verify', 'release candidate^{commit}'],
+          { cwd: virtualRepository },
+        ],
+        ['git', ['worktree', 'add', '--detach', sourceRoot, stableSha], { cwd: virtualRepository }],
+        ...expectedBuildCalls,
+        ['git', ['worktree', 'remove', '--force', sourceRoot], { cwd: virtualRepository }],
+      ]);
+      expect(sourceRoot).not.toBe(tempRoot);
+      expect(events.indexOf(`remove:${candidate}`)).toBeLessThan(
+        events.indexOf('command:pnpm:install --frozen-lockfile'),
+      );
+      expect(dependencies.findCandidateApp).toHaveBeenCalledWith(
+        bundleDir,
+        'Psyche Build.app',
+      );
+      expect(readIdentity.mock.calls.map(([appPath]) => appPath)).toEqual([
+        candidate,
+        '/staging/Psyche Build.app',
+        installedPath,
+      ]);
+      expect(smokeLaunch).toHaveBeenCalledWith(candidate, {
+        executableName: stableIdentity.executable,
+      });
+      expect(removePath).toHaveBeenLastCalledWith(tempRoot);
+      expect(writeProvenance).toHaveBeenCalledWith(
+        {
+          channel: 'stable',
+          commitSha: stableSha,
+          requestedRef: 'release candidate',
+          dirty: false,
+          builtAt,
+          installedPath,
+          productName: 'Psyche Build',
+          bundleIdentifier: 'dev.opencoven.psyche',
+        },
+        { homeDir: virtualHome },
+      );
+      expect(result).toEqual({
+        channel: 'stable',
+        commitSha: stableSha,
+        requestedRef: 'release candidate',
+        dirty: false,
+        builtAt,
+        installedPath,
+        productName: 'Psyche Build',
+        bundleIdentifier: 'dev.opencoven.psyche',
       });
     });
 
-    it('writes parser errors to stderr and exits with code 1', () => {
-      const result = spawnSync('node', [scriptPath, 'dev', 'main'], {
+    it('force-removes only its added stable worktree after failure and does not install', async () => {
+      const tempRoot = '/workspace/.build-temp/stable-failure';
+      const sourceRoot = join(tempRoot, 'source');
+      const install = vi.fn(
+        async (
+          _candidate: string,
+          _config: ReturnType<typeof channelConfig>,
+          _overrides: InstallOverrides,
+        ): Promise<string> => {
+          throw new Error('install should not run');
+        },
+      );
+      const execute = vi.fn(
+        async (command: string, args: readonly string[]): Promise<CommandResult> => {
+          if (command === 'git' && args[0] === 'rev-parse') {
+            return { stdout: `${stableSha}\n`, stderr: '' };
+          }
+          if (command === 'pnpm' && args[0] === 'install') {
+            throw new Error('build command failed');
+          }
+          return { stdout: '', stderr: '' };
+        },
+      );
+
+      await expect(
+        runMacosBuild(
+          {
+            channel: 'stable',
+            ref: 'origin/release',
+            repositoryRoot: virtualRepository,
+          },
+          {
+            execute,
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath: async () => {},
+            installBundleTransactional: install,
+          },
+        ),
+      ).rejects.toThrow('build command failed');
+
+      expect(
+        execute.mock.calls.filter(([command, args]) => command === 'git' && args[0] === 'worktree'),
+      ).toEqual([
+        ['git', ['worktree', 'add', '--detach', sourceRoot, stableSha], { cwd: virtualRepository }],
+        ['git', ['worktree', 'remove', '--force', sourceRoot], { cwd: virtualRepository }],
+      ]);
+      expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('prune');
+      expect(install).not.toHaveBeenCalled();
+    });
+
+    it('builds dev from the current checkout with a temporary config and no stable-only gates', async () => {
+      const tempRoot = '/workspace/.build-temp/dev-1';
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const bundleDir = join(
+        virtualRepository,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+      );
+      const candidate = join(bundleDir, 'Psyche Build Dev.app');
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+      const execute = vi.fn(
+        async (command: string, args: readonly string[]): Promise<CommandResult> => {
+          if (command === 'git' && args[0] === 'rev-parse') {
+            return { stdout: `${devSha}\n`, stderr: '' };
+          }
+          if (command === 'git' && args[0] === 'status') {
+            return { stdout: ' M scripts/build-macos-app.mjs\n', stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
+        },
+      );
+      const smokeLaunch = vi.fn(
+        async (_appPath: string, _overrides: SmokeLaunchOverrides): Promise<void> => {},
+      );
+      const install = vi.fn(
+        async (
+          _candidate: string,
+          requestedConfig: ReturnType<typeof channelConfig>,
+          overrides: InstallOverrides,
+        ) => {
+          await Promise.resolve(
+            overrides.validateInstalledBundle('/staging/Psyche Build Dev.app', requestedConfig),
+          );
+          await Promise.resolve(overrides.validateInstalledBundle(installedPath, requestedConfig));
+          return installedPath;
+        },
+      );
+      const dependencies = {
+        execute,
+        makeTemporaryDirectory: vi.fn(async () => tempRoot),
+        removePath: vi.fn(async () => {}),
+        writeDevTauriConfig: vi.fn(async () => configPath),
+        findCandidateApp: vi.fn(async () => candidate),
+        readBundleIdentity: vi.fn(
+          async (_appPath: string, _execute?: Runner): Promise<BundleIdentity> => devIdentity,
+        ),
+        smokeLaunchBundle: smokeLaunch,
+        installBundleTransactional: install,
+        writeBuildProvenance: vi.fn(async () => '/state/builds.json'),
+        now: () => new Date(builtAt),
+        homeDir: virtualHome,
+      } satisfies RunMacosBuildDependencies;
+
+      const result = await runMacosBuild(
+        { channel: 'dev', repositoryRoot: virtualRepository },
+        dependencies,
+      );
+
+      expect(dependencies.writeDevTauriConfig).toHaveBeenCalledWith(
+        virtualRepository,
+        tempRoot,
+      );
+      expect(execute.mock.calls).toEqual([
+        ['git', ['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: virtualRepository }],
+        ['git', ['status', '--porcelain'], { cwd: virtualRepository }],
+        ...buildCommandsFor('dev', { devConfigPath: configPath }).map(
+          ([command, args, relativeCwd]) => [
+            command,
+            args,
+            { cwd: resolve(virtualRepository, relativeCwd) },
+          ],
+        ),
+      ]);
+      expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('worktree');
+      expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('test');
+      expect(smokeLaunch).not.toHaveBeenCalled();
+      expect(dependencies.removePath).toHaveBeenNthCalledWith(1, candidate);
+      expect(dependencies.removePath).toHaveBeenLastCalledWith(tempRoot);
+      expect(result).toEqual({
+        channel: 'dev',
+        commitSha: devSha,
+        dirty: true,
+        builtAt,
+        installedPath,
+        productName: 'Psyche Build Dev',
+        bundleIdentifier: 'dev.opencoven.psyche.dev',
+      });
+    });
+
+    it('leaves an installed app in place when provenance writing fails', async () => {
+      const tempRoot = '/workspace/.build-temp/dev-provenance-failure';
+      const candidate = '/workspace/Psyche Build Dev.app';
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+      let installed = false;
+
+      await expect(
+        runMacosBuild(
+          { channel: 'dev', repositoryRoot: virtualRepository },
+          {
+            execute: async (command, args) => {
+              if (command === 'git' && args[0] === 'rev-parse') {
+                return { stdout: `${devSha}\n`, stderr: '' };
+              }
+              return { stdout: '', stderr: '' };
+            },
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath: async () => {},
+            writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
+            findCandidateApp: async () => candidate,
+            readBundleIdentity: async () => devIdentity,
+            installBundleTransactional: async () => {
+              installed = true;
+              return installedPath;
+            },
+            writeBuildProvenance: async () => {
+              throw new Error('provenance write failed');
+            },
+            homeDir: virtualHome,
+          },
+        ),
+      ).rejects.toThrow('provenance write failed');
+
+      expect(installed).toBe(true);
+    });
+
+    it('reports both a primary failure and stable worktree cleanup failure', async () => {
+      const tempRoot = '/workspace/.build-temp/stable-double-failure';
+
+      const error = await runMacosBuild(
+        {
+          channel: 'stable',
+          ref: 'origin/release',
+          repositoryRoot: virtualRepository,
+        },
+        {
+          execute: async (command, args) => {
+            if (command === 'git' && args[0] === 'rev-parse') {
+              return { stdout: `${stableSha}\n`, stderr: '' };
+            }
+            if (command === 'pnpm') {
+              throw new Error('primary build failure');
+            }
+            if (command === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+              throw new Error('worktree cleanup failure');
+            }
+            return { stdout: '', stderr: '' };
+          },
+          makeTemporaryDirectory: async () => tempRoot,
+          removePath: async () => {},
+        },
+      ).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error?.message).toContain('primary build failure');
+      expect(error?.message).toContain('worktree cleanup failure');
+      expect(error?.cause).toBeInstanceOf(Error);
+      expect((error?.cause as Error).message).toBe('primary build failure');
+    });
+
+    it('fails when temporary-parent cleanup fails after a successful operation', async () => {
+      const tempRoot = '/workspace/.build-temp/dev-cleanup-failure';
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+
+      await expect(
+        runMacosBuild(
+          { channel: 'dev', repositoryRoot: virtualRepository },
+          {
+            execute: async (command, args) => {
+              if (command === 'git' && args[0] === 'rev-parse') {
+                return { stdout: `${devSha}\n`, stderr: '' };
+              }
+              return { stdout: '', stderr: '' };
+            },
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath: async (targetPath) => {
+              if (targetPath === tempRoot) {
+                throw new Error('temporary parent cleanup failed');
+              }
+            },
+            writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
+            findCandidateApp: async () => '/workspace/Psyche Build Dev.app',
+            readBundleIdentity: async () => devIdentity,
+            installBundleTransactional: async () => installedPath,
+            writeBuildProvenance: async () => '/state/builds.json',
+            homeDir: virtualHome,
+          },
+        ),
+      ).rejects.toThrow('temporary parent cleanup failed');
+    });
+  });
+
+  describe('CLI entrypoint', () => {
+    it('names the missing stable ref on stderr, exits nonzero, and prints no install success', () => {
+      const result = spawnSync('node', [scriptPath, 'stable'], {
         cwd: tauriDirectory,
         encoding: 'utf8',
       });
 
       expect(result.status).toBe(1);
-      expect(result.stdout).toBe('');
-      expect(result.stderr).toContain('dev builds do not accept a Git ref');
+      expect(result.stdout).not.toContain('Installed');
+      expect(result.stderr).toMatch(/stable.*ref/i);
     });
   });
 });

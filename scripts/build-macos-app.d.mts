@@ -33,7 +33,7 @@ export interface BuildProvenance {
 export interface BundleIdentity {
   name: string;
   identifier: string;
-  executable?: string | null;
+  executable: string;
 }
 
 export interface TauriWindowConfig {
@@ -53,6 +53,22 @@ export interface TauriConfig {
 }
 
 export type BuildCommand = [command: string, args: string[], cwd: string];
+
+export interface CommandOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+}
+
+export type Runner = (
+  command: string,
+  args: readonly string[],
+  options?: CommandOptions,
+) => Promise<CommandResult>;
 
 export interface InstallOverrides {
   homeDir?: string;
@@ -96,9 +112,80 @@ export interface SmokeLaunchOverrides {
   removeTemporaryHome?: (homePath: string) => void | Promise<void>;
 }
 
+export interface StableRunMacosBuildOptions {
+  channel: 'stable';
+  ref: string;
+  repositoryRoot: string;
+}
+
+export interface DevRunMacosBuildOptions {
+  channel: 'dev';
+  ref?: never;
+  repositoryRoot: string;
+}
+
+export type RunMacosBuildOptions = StableRunMacosBuildOptions | DevRunMacosBuildOptions;
+
+export interface RunMacosBuildDependencies {
+  execute?: Runner;
+  makeTemporaryDirectory?: (prefix: string) => string | Promise<string>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  writeDevTauriConfig?: (sourceRoot: string, tempRoot: string) => Promise<string>;
+  findCandidateApp?: (bundleDir: string, expectedAppName: string) => Promise<string>;
+  readBundleIdentity?: (appPath: string, execute?: Runner) => Promise<BundleIdentity>;
+  smokeLaunchBundle?: (
+    appPath: string,
+    overrides: SmokeLaunchOverrides,
+  ) => Promise<void>;
+  installBundleTransactional?: (
+    candidate: string,
+    requestedChannelConfig: BuildChannelConfig,
+    overrides: InstallOverrides,
+  ) => Promise<string>;
+  writeBuildProvenance?: (
+    record: BuildProvenance,
+    overrides?: WriteBuildProvenanceOverrides,
+  ) => Promise<string>;
+  now?: () => Date;
+  homeDir?: string;
+}
+
+export interface StableRunMacosBuildResult extends BuildProvenance {
+  channel: 'stable';
+  requestedRef: string;
+}
+
+export interface DevRunMacosBuildResult extends BuildProvenance {
+  channel: 'dev';
+  requestedRef?: never;
+}
+
+export type RunMacosBuildResult =
+  | StableRunMacosBuildResult
+  | DevRunMacosBuildResult;
+
 export function parseBuildArguments(argv: readonly string[]): ParsedBuildArguments;
 export function channelConfig(channel: BuildChannel): BuildChannelConfig;
 export function createDevTauriConfig(production: TauriConfig): TauriConfig;
+export function runCommand(
+  command: string,
+  args: readonly string[],
+  options?: CommandOptions,
+): Promise<CommandResult>;
+export function resolveCommit(
+  root: string,
+  ref: string,
+  execute?: Runner,
+): Promise<string>;
+export function sourceIsDirty(root: string, execute?: Runner): Promise<boolean>;
+export function readBundleIdentity(
+  appPath: string,
+  execute?: Runner,
+): Promise<BundleIdentity>;
+export function writeDevTauriConfig(
+  sourceRoot: string,
+  tempRoot: string,
+): Promise<string>;
 export function findCandidateApp(bundleDir: string, expectedAppName: string): Promise<string>;
 export function assertBundleIdentity(
   appPath: string,
@@ -126,3 +213,7 @@ export function buildCommandsFor(
   channel: 'dev',
   options: { devConfigPath: string },
 ): BuildCommand[];
+export function runMacosBuild(
+  options: RunMacosBuildOptions,
+  deps?: RunMacosBuildDependencies,
+): Promise<RunMacosBuildResult>;

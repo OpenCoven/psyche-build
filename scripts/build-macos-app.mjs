@@ -6,9 +6,14 @@ import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:f
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 const TAURI_CWD = 'native/macos/psyche-build-tauri';
 const CARGO_MANIFEST_PATH = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
+const BUNDLE_RELATIVE_PATH =
+  'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos';
+const PRODUCTION_TAURI_CONFIG_RELATIVE_PATH =
+  'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json';
 
 const CHANNEL_CONFIG = {
   stable: {
@@ -29,8 +34,11 @@ const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
+const TEMP_BUILD_PREFIX = 'psyche-build-macos-';
 const BUILD_CHANNELS = ['stable', 'dev'];
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const COMMAND_MAX_BUFFER = 20 * 1024 * 1024;
+const executeFile = promisify(execFile);
 
 export function parseBuildArguments(argv) {
   const tokens = argv.filter((value) => value !== '--');
@@ -77,6 +85,114 @@ export function createDevTauriConfig(production) {
   mainWindow.title = devIdentity.productName;
 
   return devConfig;
+}
+
+export async function runCommand(command, args, options = {}) {
+  if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string')) {
+    throw new TypeError('runCommand requires an array of string arguments');
+  }
+
+  try {
+    const result = await executeFile(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: 'utf8',
+      maxBuffer: COMMAND_MAX_BUFFER,
+    });
+    return {
+      stdout: String(result.stdout),
+      stderr: String(result.stderr),
+    };
+  } catch (cause) {
+    const stdout = typeof cause?.stdout === 'string' ? cause.stdout : '';
+    const stderr = typeof cause?.stderr === 'string' ? cause.stderr : '';
+    const exitCode = typeof cause?.code === 'number' ? cause.code : undefined;
+    const sections = [
+      `Command failed: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
+    ];
+
+    if (exitCode !== undefined) {
+      sections.push(`exit code ${exitCode}`);
+    }
+    sections.push(`stdout:\n${stdout}`, `stderr:\n${stderr}`);
+
+    const error = new Error(sections.join('\n'), { cause });
+    error.command = command;
+    error.exitCode = exitCode;
+    error.stdout = stdout;
+    error.stderr = stderr;
+    throw error;
+  }
+}
+
+export async function resolveCommit(root, ref, execute = runCommand) {
+  const result = await execute('git', ['rev-parse', '--verify', `${ref}^{commit}`], {
+    cwd: path.resolve(root),
+  });
+  const commitSha = result.stdout.trim();
+
+  if (!COMMIT_SHA_PATTERN.test(commitSha)) {
+    throw new Error(
+      `Git ref "${ref}" did not resolve to a full lowercase 40-character commit SHA`,
+    );
+  }
+
+  return commitSha;
+}
+
+export async function sourceIsDirty(root, execute = runCommand) {
+  const result = await execute('git', ['status', '--porcelain'], {
+    cwd: path.resolve(root),
+  });
+  return result.stdout.length > 0;
+}
+
+export async function readBundleIdentity(appPath, execute = runCommand) {
+  const infoPath = path.join(path.resolve(appPath), 'Contents', 'Info.plist');
+  const readValue = async (key) => {
+    const result = await execute('plutil', ['-extract', key, 'raw', '-o', '-', infoPath]);
+    return result.stdout.trim();
+  };
+
+  return {
+    name: await readValue('CFBundleName'),
+    identifier: await readValue('CFBundleIdentifier'),
+    executable: await readValue('CFBundleExecutable'),
+  };
+}
+
+export async function writeDevTauriConfig(sourceRoot, tempRoot) {
+  const absoluteSourceRoot = path.resolve(sourceRoot);
+  const absoluteTempRoot = path.resolve(tempRoot);
+  const productionPath = path.join(
+    absoluteSourceRoot,
+    PRODUCTION_TAURI_CONFIG_RELATIVE_PATH,
+  );
+  const configPath = path.join(absoluteTempRoot, 'tauri.dev.generated.json');
+  const temporaryPath = path.join(
+    absoluteTempRoot,
+    `.tauri.dev.generated.${createRandomUUID()}.tmp`,
+  );
+  const production = JSON.parse(await readFile(productionPath, 'utf8'));
+  const devConfig = createDevTauriConfig(production);
+
+  await mkdir(absoluteTempRoot, { recursive: true });
+
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(devConfig, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await rename(temporaryPath, configPath);
+    return configPath;
+  } catch (error) {
+    try {
+      await rm(temporaryPath, { force: true });
+    } catch {
+      // The orchestration owns removal of the temporary parent.
+    }
+    throw error;
+  }
 }
 
 export function buildCommandsFor(channel, options = {}) {
@@ -377,6 +493,150 @@ export async function smokeLaunchBundle(appPath, overrides) {
   }
 }
 
+export async function runMacosBuild(options, deps = {}) {
+  const channel = options?.channel;
+  const absoluteRepositoryRoot = path.resolve(options?.repositoryRoot ?? repositoryRoot);
+
+  if (channel !== 'stable' && channel !== 'dev') {
+    throw new Error('runMacosBuild channel must be "stable" or "dev"');
+  }
+
+  const requestedRef = channel === 'stable' ? options.ref?.trim() : undefined;
+  if (channel === 'stable' && !requestedRef) {
+    throw new Error('stable builds require a nonblank Git ref');
+  }
+  if (channel === 'dev' && options.ref !== undefined) {
+    throw new Error('dev builds do not accept a Git ref');
+  }
+
+  const execute = deps.execute ?? runCommand;
+  const makeTemporaryDirectory =
+    deps.makeTemporaryDirectory ?? defaultMakeBuildTemporaryDirectory;
+  const removePath = deps.removePath ?? defaultRemovePath;
+  const writeDevConfig = deps.writeDevTauriConfig ?? writeDevTauriConfig;
+  const findCandidate = deps.findCandidateApp ?? findCandidateApp;
+  const readIdentity = deps.readBundleIdentity ?? readBundleIdentity;
+  const smokeLaunch = deps.smokeLaunchBundle ?? smokeLaunchBundle;
+  const installBundle = deps.installBundleTransactional ?? installBundleTransactional;
+  const writeProvenance = deps.writeBuildProvenance ?? writeBuildProvenance;
+  const now = deps.now ?? (() => new Date());
+  const homeDir = path.resolve(deps.homeDir ?? os.homedir());
+  const expectedConfig = channelConfig(channel);
+
+  let operationError;
+  let cleanupError;
+  let result;
+  let tempRoot;
+  let sourceRoot = absoluteRepositoryRoot;
+  let stableWorktreeAdded = false;
+
+  try {
+    const commitSha = await resolveCommit(
+      absoluteRepositoryRoot,
+      channel === 'stable' ? requestedRef : 'HEAD',
+      execute,
+    );
+    const dirty =
+      channel === 'dev' ? await sourceIsDirty(absoluteRepositoryRoot, execute) : false;
+
+    tempRoot = path.resolve(await makeTemporaryDirectory(TEMP_BUILD_PREFIX));
+
+    if (channel === 'stable') {
+      sourceRoot = path.join(tempRoot, 'source');
+      await execute(
+        'git',
+        ['worktree', 'add', '--detach', sourceRoot, commitSha],
+        { cwd: absoluteRepositoryRoot },
+      );
+      stableWorktreeAdded = true;
+    }
+
+    const devConfigPath =
+      channel === 'dev' ? await writeDevConfig(sourceRoot, tempRoot) : undefined;
+    const bundleDir = path.join(sourceRoot, BUNDLE_RELATIVE_PATH);
+    const expectedCandidate = path.join(bundleDir, expectedConfig.appName);
+
+    await removePath(expectedCandidate);
+
+    const buildCommands =
+      channel === 'stable'
+        ? buildCommandsFor('stable')
+        : buildCommandsFor('dev', { devConfigPath });
+
+    for (const [command, args, relativeCwd] of buildCommands) {
+      await execute(command, args, { cwd: path.resolve(sourceRoot, relativeCwd) });
+    }
+
+    const candidate = await findCandidate(bundleDir, expectedConfig.appName);
+    const identity = await readIdentity(candidate, execute);
+    assertBundleIdentity(candidate, identity, expectedConfig);
+
+    if (channel === 'stable') {
+      await smokeLaunch(candidate, { executableName: identity.executable });
+    }
+
+    const validateInstalledBundle = async (appPath, requestedConfig) => {
+      const installedIdentity = await readIdentity(appPath, execute);
+      assertBundleIdentity(appPath, installedIdentity, requestedConfig);
+    };
+    const installedPath = await installBundle(candidate, expectedConfig, {
+      homeDir,
+      validateInstalledBundle,
+    });
+    const builtAt = now().toISOString();
+
+    const provenance = {
+      channel,
+      commitSha,
+      ...(channel === 'stable' ? { requestedRef } : {}),
+      dirty,
+      builtAt,
+      installedPath,
+      productName: expectedConfig.productName,
+      bundleIdentifier: expectedConfig.bundleIdentifier,
+    };
+
+    await writeProvenance(provenance, { homeDir });
+    result = provenance;
+  } catch (error) {
+    operationError = error;
+  } finally {
+    if (stableWorktreeAdded) {
+      try {
+        await execute(
+          'git',
+          ['worktree', 'remove', '--force', sourceRoot],
+          { cwd: absoluteRepositoryRoot },
+        );
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+
+    if (tempRoot) {
+      try {
+        await removePath(tempRoot);
+      } catch (error) {
+        cleanupError = cleanupError
+          ? combineErrors(cleanupError, error, 'Failed to remove temporary build parent')
+          : error;
+      }
+    }
+  }
+
+  if (operationError && cleanupError) {
+    throw combineErrors(operationError, cleanupError, 'Build cleanup failed');
+  }
+  if (operationError) {
+    throw operationError;
+  }
+  if (cleanupError) {
+    throw cleanupError;
+  }
+
+  return result;
+}
+
 async function collectCandidateApps(currentDir, expectedAppName, matches) {
   const entries = await readdir(currentDir, { withFileTypes: true });
 
@@ -419,6 +679,10 @@ async function defaultMakeTemporaryHome() {
   return tempHome;
 }
 
+async function defaultMakeBuildTemporaryDirectory(prefix) {
+  return mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
 async function defaultRemoveTemporaryHome(tempHome) {
   await rm(tempHome, { recursive: true, force: true });
 }
@@ -428,18 +692,7 @@ function defaultSpawnProcess(command, args, options) {
 }
 
 async function execFileAsync(command, args) {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, (error, stdout, stderr) => {
-      if (error) {
-        error.stdout = stdout;
-        error.stderr = stderr;
-        reject(error);
-        return;
-      }
-
-      resolve({ stdout, stderr });
-    });
-  });
+  return runCommand(command, args);
 }
 
 function defaultSleep(ms) {
@@ -682,7 +935,10 @@ function isEntrypoint() {
 if (isEntrypoint()) {
   try {
     const options = parseBuildArguments(process.argv.slice(2));
-    console.log(JSON.stringify({ repositoryRoot, options }));
+    const result = await runMacosBuild({ ...options, repositoryRoot });
+    const sourceState = result.dirty ? 'dirty source' : 'clean source';
+    console.log(`Installed ${result.productName} at ${result.installedPath}`);
+    console.log(`Source ${result.commitSha} (${sourceState})`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
