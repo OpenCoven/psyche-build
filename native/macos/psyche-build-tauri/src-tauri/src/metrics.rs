@@ -1,13 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+
+// sysinfo reports process start times in whole seconds, so allow a narrow
+// one-second window around the spawn-time identity captured by the caller.
+const PROCESS_START_IDENTITY_TOLERANCE_SECS: u64 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 struct ProcessSample {
     pid: u32,
     parent: Option<u32>,
+    start_time_secs: u64,
     name: String,
     cpu_percent: f32,
     memory_bytes: u64,
@@ -17,6 +22,29 @@ struct ProcessSample {
 pub(crate) struct TrackedPty {
     pub thread_id: String,
     pub pid: u32,
+    pub spawn_time_secs: Option<u64>,
+}
+
+impl TrackedPty {
+    pub(crate) fn new(thread_id: impl Into<String>, pid: u32) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            pid,
+            spawn_time_secs: None,
+        }
+    }
+
+    pub(crate) fn with_spawn_time_secs(
+        thread_id: impl Into<String>,
+        pid: u32,
+        spawn_time_secs: u64,
+    ) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            pid,
+            spawn_time_secs: Some(spawn_time_secs),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -48,6 +76,7 @@ pub(crate) struct MetricsSnapshot {
     pub sampled_at_ms: u64,
     pub total_memory_bytes: u64,
     pub used_memory_bytes: u64,
+    /// Portable proxy: used/total system memory ratio, not an OS-native pressure signal.
     pub memory_pressure_percent: f32,
     pub workspace: AggregateMetrics,
     pub processes: Vec<ProcessMetrics>,
@@ -55,6 +84,7 @@ pub(crate) struct MetricsSnapshot {
 
 pub(crate) struct MetricsCollector {
     system: sysinfo::System,
+    last_process_refresh_at: Option<Instant>,
 }
 
 impl Default for MetricsCollector {
@@ -66,7 +96,10 @@ impl Default for MetricsCollector {
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
-        Self { system }
+        Self {
+            system,
+            last_process_refresh_at: Some(Instant::now()),
+        }
     }
 }
 
@@ -78,11 +111,21 @@ impl MetricsCollector {
         scope: MetricsScope,
     ) -> MetricsSnapshot {
         self.system.refresh_memory();
+        let now = Instant::now();
+        let wait_duration = remaining_cpu_refresh_wait(
+            self.last_process_refresh_at,
+            now,
+            sysinfo::MINIMUM_CPU_UPDATE_INTERVAL,
+        );
+        if !wait_duration.is_zero() {
+            std::thread::sleep(wait_duration);
+        }
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
+        self.last_process_refresh_at = Some(Instant::now());
 
         let samples = self
             .system
@@ -91,6 +134,7 @@ impl MetricsCollector {
             .map(|(pid, process)| ProcessSample {
                 pid: pid.as_u32(),
                 parent: process.parent().map(|parent| parent.as_u32()),
+                start_time_secs: process.start_time(),
                 name: process.name().to_string_lossy().into_owned(),
                 cpu_percent: process.cpu_usage(),
                 memory_bytes: process.memory(),
@@ -119,6 +163,18 @@ impl MetricsCollector {
         };
         snapshot
     }
+}
+
+fn remaining_cpu_refresh_wait(
+    last_process_refresh_at: Option<Instant>,
+    now: Instant,
+    minimum_interval: Duration,
+) -> Duration {
+    last_process_refresh_at
+        .map(|last_refresh_at| {
+            minimum_interval.saturating_sub(now.saturating_duration_since(last_refresh_at))
+        })
+        .unwrap_or_default()
 }
 
 fn descendants(samples: &[ProcessSample], root: u32) -> HashSet<u32> {
@@ -173,6 +229,21 @@ fn aggregate_set(
     }
 }
 
+struct ValidTrackedRoot<'a> {
+    pty: &'a TrackedPty,
+    root: &'a ProcessSample,
+    pids: HashSet<u32>,
+}
+
+fn tracked_root_matches_identity(root: &ProcessSample, pty: &TrackedPty) -> bool {
+    match pty.spawn_time_secs {
+        Some(spawn_time_secs) => {
+            root.start_time_secs.abs_diff(spawn_time_secs) <= PROCESS_START_IDENTITY_TOLERANCE_SECS
+        }
+        None => true,
+    }
+}
+
 fn aggregate_samples(
     samples: &[ProcessSample],
     app_pid: u32,
@@ -185,46 +256,62 @@ fn aggregate_samples(
         .map(|sample| (sample.pid, sample))
         .collect::<HashMap<_, _>>();
 
-    let process_rows = tracked
+    let valid_tracked_roots = tracked
         .iter()
-        .filter(|pty| {
-            focused_thread_id
-                .map(|focused| pty.thread_id == focused)
-                .unwrap_or(true)
-        })
         .filter_map(|pty| {
-            let root = sample_by_pid.get(&pty.pid)?;
+            let root = *sample_by_pid.get(&pty.pid)?;
+            if !tracked_root_matches_identity(root, pty) {
+                return None;
+            }
             let pids = descendants(samples, pty.pid);
             if pids.is_empty() {
                 return None;
             }
-            let aggregate = aggregate_set(samples, &pids, cpu_count);
-            Some(ProcessMetrics {
-                thread_id: pty.thread_id.clone(),
-                process_name: root.name.clone(),
-                pid: pty.pid,
+            Some(ValidTrackedRoot { pty, root, pids })
+        })
+        .collect::<Vec<_>>();
+
+    let process_rows = valid_tracked_roots
+        .iter()
+        .filter(|tracked_root| {
+            focused_thread_id
+                .map(|focused| tracked_root.pty.thread_id == focused)
+                .unwrap_or(true)
+        })
+        .map(|tracked_root| {
+            let aggregate = aggregate_set(samples, &tracked_root.pids, cpu_count);
+            ProcessMetrics {
+                thread_id: tracked_root.pty.thread_id.clone(),
+                process_name: tracked_root.root.name.clone(),
+                pid: tracked_root.pty.pid,
                 cpu_percent: aggregate.cpu_percent,
                 memory_bytes: aggregate.memory_bytes,
-            })
+            }
         })
         .collect::<Vec<_>>();
 
     let workspace_pids = if let Some(focused_thread_id) = focused_thread_id {
-        tracked
+        valid_tracked_roots
             .iter()
-            .find(|pty| pty.thread_id == focused_thread_id)
-            .map(|pty| descendants(samples, pty.pid))
-            .unwrap_or_default()
+            .filter(|tracked_root| tracked_root.pty.thread_id == focused_thread_id)
+            .fold(HashSet::new(), |mut pids, tracked_root| {
+                pids.extend(tracked_root.pids.iter().copied());
+                pids
+            })
     } else {
         let mut pids = descendants(samples, app_pid);
-        for pty in tracked {
-            pids.extend(descendants(samples, pty.pid));
+        for tracked_root in &valid_tracked_roots {
+            pids.extend(tracked_root.pids.iter().copied());
         }
         pids
     };
 
     let mut processes = process_rows;
-    processes.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+    processes.sort_by(|left, right| {
+        left.thread_id
+            .cmp(&right.thread_id)
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
 
     MetricsSnapshot {
         sampled_at_ms: 0,
@@ -244,6 +331,7 @@ mod tests {
     fn sample(
         pid: u32,
         parent: Option<u32>,
+        start_time_secs: u64,
         name: &str,
         cpu_percent: f32,
         memory_bytes: u64,
@@ -251,6 +339,7 @@ mod tests {
         ProcessSample {
             pid,
             parent,
+            start_time_secs,
             name: name.to_string(),
             cpu_percent,
             memory_bytes,
@@ -258,19 +347,20 @@ mod tests {
     }
 
     fn tracked(thread_id: &str, pid: u32) -> TrackedPty {
-        TrackedPty {
-            thread_id: thread_id.to_string(),
-            pid,
-        }
+        TrackedPty::new(thread_id, pid)
+    }
+
+    fn tracked_with_spawn_time(thread_id: &str, pid: u32, spawn_time_secs: u64) -> TrackedPty {
+        TrackedPty::with_spawn_time_secs(thread_id, pid, spawn_time_secs)
     }
 
     #[test]
     fn aggregate_samples_builds_workspace_and_focus_views() {
         let samples = vec![
-            sample(10, None, "app", 40.0, 100),
-            sample(20, Some(10), "pty-a", 20.0, 200),
-            sample(21, Some(20), "child-a", 80.0, 300),
-            sample(30, Some(10), "pty-b", 60.0, 400),
+            sample(10, None, 100, "app", 40.0, 100),
+            sample(20, Some(10), 100, "pty-a", 20.0, 200),
+            sample(21, Some(20), 100, "child-a", 80.0, 300),
+            sample(30, Some(10), 100, "pty-b", 60.0, 400),
         ];
         let tracked = vec![tracked("b", 30), tracked("a", 20)];
 
@@ -298,8 +388,8 @@ mod tests {
     #[test]
     fn aggregate_samples_omits_missing_tracked_roots() {
         let samples = vec![
-            sample(10, None, "app", 40.0, 100),
-            sample(20, Some(10), "pty-a", 20.0, 200),
+            sample(10, None, 100, "app", 40.0, 100),
+            sample(20, Some(10), 100, "pty-a", 20.0, 200),
         ];
         let tracked = vec![tracked("missing", 999), tracked("a", 20)];
 
@@ -312,10 +402,10 @@ mod tests {
     #[test]
     fn descendants_returns_root_and_descendants_recursively() {
         let samples = vec![
-            sample(1, None, "root", 0.0, 0),
-            sample(2, Some(1), "child", 0.0, 0),
-            sample(3, Some(2), "grandchild", 0.0, 0),
-            sample(4, Some(1), "sibling", 0.0, 0),
+            sample(1, None, 100, "root", 0.0, 0),
+            sample(2, Some(1), 100, "child", 0.0, 0),
+            sample(3, Some(2), 100, "grandchild", 0.0, 0),
+            sample(4, Some(1), 100, "sibling", 0.0, 0),
         ];
 
         let result = descendants(&samples, 1);
@@ -325,7 +415,7 @@ mod tests {
 
     #[test]
     fn aggregate_set_uses_minimum_cpu_divisor_of_one() {
-        let samples = vec![sample(7, None, "proc", 12.5, 64)];
+        let samples = vec![sample(7, None, 100, "proc", 12.5, 64)];
         let pids = HashSet::from([7]);
 
         let aggregate = aggregate_set(&samples, &pids, 0);
@@ -336,6 +426,72 @@ mod tests {
                 cpu_percent: 12.5,
                 memory_bytes: 64,
             }
+        );
+    }
+
+    #[test]
+    fn aggregate_samples_omits_stale_pid_reuse_when_spawn_time_mismatches() {
+        let samples = vec![
+            sample(10, None, 100, "app", 40.0, 100),
+            sample(20, None, 105, "reused-pid", 20.0, 200),
+        ];
+        let tracked = vec![tracked_with_spawn_time("stale", 20, 100)];
+
+        let snapshot = aggregate_samples(&samples, 10, &tracked, Some("stale"), 4);
+
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.workspace, AggregateMetrics::default());
+    }
+
+    #[test]
+    fn aggregate_samples_unions_all_focused_roots_with_same_thread_id() {
+        let samples = vec![
+            sample(10, None, 100, "app", 20.0, 100),
+            sample(20, Some(10), 100, "pty-a-1", 40.0, 200),
+            sample(21, Some(20), 100, "pty-a-1-child", 20.0, 100),
+            sample(30, Some(10), 100, "pty-a-2", 80.0, 300),
+            sample(31, Some(30), 100, "pty-a-2-child", 20.0, 400),
+        ];
+        let tracked = vec![tracked("a", 20), tracked("a", 30)];
+
+        let snapshot = aggregate_samples(&samples, 10, &tracked, Some("a"), 4);
+
+        assert_eq!(snapshot.processes.len(), 2);
+        assert_eq!(snapshot.processes[0].pid, 20);
+        assert_eq!(snapshot.processes[1].pid, 30);
+        assert_eq!(snapshot.workspace.memory_bytes, 1_000);
+        assert!((snapshot.workspace.cpu_percent - 40.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn remaining_cpu_refresh_wait_returns_zero_without_prior_refresh() {
+        let now = Instant::now();
+
+        assert_eq!(
+            remaining_cpu_refresh_wait(None, now, Duration::from_millis(200)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn remaining_cpu_refresh_wait_returns_remaining_interval() {
+        let now = Instant::now();
+        let last_refresh_at = now.checked_sub(Duration::from_millis(50)).unwrap();
+
+        assert_eq!(
+            remaining_cpu_refresh_wait(Some(last_refresh_at), now, Duration::from_millis(200),),
+            Duration::from_millis(150)
+        );
+    }
+
+    #[test]
+    fn remaining_cpu_refresh_wait_returns_zero_after_minimum_interval() {
+        let now = Instant::now();
+        let last_refresh_at = now.checked_sub(Duration::from_millis(250)).unwrap();
+
+        assert_eq!(
+            remaining_cpu_refresh_wait(Some(last_refresh_at), now, Duration::from_millis(200),),
+            Duration::ZERO
         );
     }
 }
