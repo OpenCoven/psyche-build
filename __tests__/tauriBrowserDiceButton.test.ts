@@ -32,17 +32,11 @@ describe('Tauri browser dice shortcut', () => {
     expect(browserBar).toContain(
       '<button id="open-surprise" class="icon-btn ghost-btn" title="Open surprise in new tab" aria-label="Open surprise in new tab">'
     );
-    expect(browserBar).toContain(
-      '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">'
+    const diceSvg = surpriseButton?.match(/<svg[\s\S]*?<\/svg>/)?.[0];
+    expect(diceSvg).toBeTruthy();
+    expect(diceSvg?.replace(/\s+/g, ' ').trim()).toBe(
+      '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"> <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.35"/> <circle cx="5" cy="5" r="0.85" fill="currentColor"/> <circle cx="11" cy="5" r="0.85" fill="currentColor"/> <circle cx="8" cy="8" r="0.85" fill="currentColor"/> <circle cx="5" cy="11" r="0.85" fill="currentColor"/> <circle cx="11" cy="11" r="0.85" fill="currentColor"/> </svg>'
     );
-    expect(surpriseButton).toContain(
-      '<rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.35"/>'
-    );
-    expect(surpriseButton).toContain('<circle cx="5" cy="5" r="0.85" fill="currentColor"/>');
-    expect(surpriseButton).toContain('<circle cx="11" cy="5" r="0.85" fill="currentColor"/>');
-    expect(surpriseButton).toContain('<circle cx="8" cy="8" r="0.85" fill="currentColor"/>');
-    expect(surpriseButton).toContain('<circle cx="5" cy="11" r="0.85" fill="currentColor"/>');
-    expect(surpriseButton).toContain('<circle cx="11" cy="11" r="0.85" fill="currentColor"/>');
     expect(remainingToolbar).toMatch(/^\s*<button id="open-external"/);
   });
 
