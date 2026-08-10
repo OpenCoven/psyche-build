@@ -1036,7 +1036,8 @@
       && thread.kind !== "web"
       && !thread.closing
       && !thread.closeStarted
-      && thread.status !== "exited";
+      && thread.status !== "exited"
+      && thread.status !== "failed";
   }
 
   /**
@@ -1100,20 +1101,26 @@
   }
 
   function clearThreadAttention(thread) {
-    if (!thread) return;
+    if (!thread) return false;
     attentionTracker.forget(thread.id);
-    applyThreadAttention(thread, { needsAttention: false, reason: null });
+    return applyThreadAttention(thread, { needsAttention: false, reason: null });
   }
 
   function sampleThreadAttention() {
     var now = Date.now();
     var tracked = [];
-    var sidebarStateChanged = false;
+    var needsFinalRender = false;
     state.threads.forEach(function (thread) {
       if (!thread || !thread.term) return;
       var tail = terminalTail(thread.term, ATTENTION_TAIL_LINES);
-      var attentionChanged = false;
       thread.isWorking = PsycheSessions.sidebarTailIsWorking(tail);
+      var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);
+      var statusChanged = false;
+      if (thread.sidebarStatusKey !== nextStatus.key) {
+        thread.sidebarStatusKey = nextStatus.key;
+        statusChanged = true;
+      }
+      var attentionChanged = false;
       if (!threadWantsAttentionTracking(thread)) {
         if (thread.needsAttention) {
           attentionChanged = clearThreadAttention(thread);
@@ -1125,15 +1132,14 @@
           attentionTracker.observe(thread.id, tail, now)
         );
       }
-      var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);
-      if (thread.sidebarStatusKey !== nextStatus.key) {
-        thread.sidebarStatusKey = nextStatus.key;
-        sidebarStateChanged = true;
+      if (attentionChanged) {
+        needsFinalRender = false;
+      } else if (statusChanged) {
+        needsFinalRender = true;
       }
-      if (attentionChanged) sidebarStateChanged = false;
     });
     attentionTracker.retain(tracked);
-    if (sidebarStateChanged) {
+    if (needsFinalRender) {
       renderSessionList();
       syncSessionListScroll();
     }

@@ -17,6 +17,30 @@ const sessionEntry = readFileSync(join(webRoot, 'sessions/session-entry.js'), 'u
 
 const SETTLE = 2200;
 
+function functionSource(name: string) {
+  const asyncStart = mainJs.indexOf(`async function ${name}(`);
+  const syncStart = mainJs.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing function ${name}`);
+  const bodyStart = mainJs.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < mainJs.length; index += 1) {
+    if (mainJs[index] === '{') depth += 1;
+    if (mainJs[index] === '}') depth -= 1;
+    if (depth === 0) return mainJs.slice(start, index + 1);
+  }
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
 describe('agent working indicators', () => {
   it('reads the interrupt hint as work in flight', () => {
     expect(hasWorkingIndicators('✻ Pondering… (12s · esc to interrupt)')).toBe(true);
@@ -188,27 +212,134 @@ describe('desktop shell wiring', () => {
   it('samples only panes that can actually be waiting on an answer', () => {
     // A shell prompt sitting at `$` is idle, not waiting — badging it would put
     // a permanent mark on every terminal in the app.
-    expect(mainJs).toMatch(
-      /function threadWantsAttentionTracking\(thread\)[\s\S]{0,320}\(thread\.kind \|\| "shell"\) !== "shell"/
-    );
-    expect(mainJs).toMatch(/threadWantsAttentionTracking[\s\S]{0,400}thread\.status !== "exited"/);
+    const source = functionSource('threadWantsAttentionTracking');
+    expect(source).toMatch(/\(thread\.kind \|\| "shell"\) !== "shell"/);
+    expect(source).toMatch(/thread\.status !== "exited"/);
+    expect(source).toMatch(/thread\.status !== "failed"/);
     expect(mainJs).toContain('setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS)');
   });
 
+  it('excludes failed PTYs from attention tracking', () => {
+    const threadWantsAttentionTracking = compileFunction<
+      (thread: Record<string, unknown> | null | undefined) => boolean
+    >(functionSource('threadWantsAttentionTracking'), {});
+
+    expect(threadWantsAttentionTracking({
+      id: 'failed',
+      kind: 'coven',
+      status: 'failed',
+    })).toBe(false);
+    expect(threadWantsAttentionTracking({
+      id: 'running',
+      kind: 'coven',
+      status: 'running',
+    })).toBe(true);
+  });
+
   it('samples terminal tails once for working state before gating attention', () => {
-    expect(mainJs).toMatch(
-      /function sampleThreadAttention\(\)[\s\S]{0,600}var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,200}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
+    expect(functionSource('sampleThreadAttention')).toMatch(
+      /var tail = terminalTail\(thread\.term, ATTENTION_TAIL_LINES\);[\s\S]{0,120}thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{/,
     );
   });
 
-  it('stores the derived sidebar status key and rerenders when it changes', () => {
-    expect(mainJs).toMatch(/var sidebarStateChanged = false;/);
-    expect(mainJs).toMatch(
-      /var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}sidebarStateChanged = true;/,
+  it('returns the clear-attention render verdict so callers can coalesce correctly', () => {
+    const source = functionSource('clearThreadAttention');
+    expect(source).toMatch(/if \(!thread\) return false;/);
+    expect(source).toMatch(
+      /return applyThreadAttention\(thread, \{ needsAttention: false, reason: null \}\);/,
     );
-    expect(mainJs).toMatch(
-      /attentionTracker\.retain\(tracked\);[\s\S]{0,160}if \(sidebarStateChanged\) \{[\s\S]{0,80}renderSessionList\(\);[\s\S]{0,80}syncSessionListScroll\(\);/,
+
+    const calls: Array<[Record<string, unknown>, { needsAttention: boolean; reason: string | null }]> = [];
+    const clearThreadAttention = compileFunction<
+      (thread: Record<string, unknown> | null | undefined) => boolean
+    >(source, {
+      attentionTracker: { forget: () => undefined },
+      applyThreadAttention: (
+        thread: Record<string, unknown>,
+        next: { needsAttention: boolean; reason: string | null },
+      ) => {
+        calls.push([thread, next]);
+        return true;
+      },
+    });
+
+    expect(clearThreadAttention(null)).toBe(false);
+    const thread = { id: 'thread-1' };
+    expect(clearThreadAttention(thread)).toBe(true);
+    expect(calls).toEqual([[thread, { needsAttention: false, reason: null }]]);
+  });
+
+  it('coalesces attention renders without dropping later status-only changes', () => {
+    const source = functionSource('sampleThreadAttention');
+    expect(source).toContain('var needsFinalRender = false;');
+    expect(source).toMatch(
+      /var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}var statusChanged = false;[\s\S]{0,160}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}statusChanged = true;/,
     );
+    expect(source).toMatch(/if \(attentionChanged\) \{[\s\S]{0,80}needsFinalRender = false;/);
+    expect(source).toMatch(
+      /else if \(statusChanged\) \{[\s\S]{0,80}needsFinalRender = true;/,
+    );
+    expect(source).toMatch(
+      /attentionTracker\.retain\(tracked\);[\s\S]{0,160}if \(needsFinalRender\) \{[\s\S]{0,80}renderSessionList\(\);[\s\S]{0,80}syncSessionListScroll\(\);/,
+    );
+
+    const runSample = (
+      threads: Array<{ id: string; term: object; sidebarStatusKey: string; nextStatusKey: string }>,
+      attentionById: Map<string, boolean>,
+    ) => {
+      const renderCalls: string[] = [];
+      const syncCalls: string[] = [];
+      const retained: string[] = [];
+      const state = { threads };
+      const sampleThreadAttention = compileFunction<() => void>(source, {
+        ATTENTION_TAIL_LINES: 14,
+        Date: { now: () => 1000 },
+        terminalTail: () => '',
+        PsycheSessions: {
+          sidebarTailIsWorking: () => false,
+          deriveLocalSidebarStatus: (thread: { nextStatusKey: string }) => ({ key: thread.nextStatusKey }),
+        },
+        threadWantsAttentionTracking: () => true,
+        clearThreadAttention: () => false,
+        applyThreadAttention: (
+          thread: { id: string },
+          next: { changed: boolean },
+        ) => {
+          if (!next.changed) return false;
+          renderCalls.push(`attention:${thread.id}`);
+          syncCalls.push(`attention:${thread.id}`);
+          return true;
+        },
+        attentionTracker: {
+          observe: (id: string) => ({ changed: attentionById.get(id) || false }),
+          retain: (ids: string[]) => retained.push(ids.join(',')),
+        },
+        state,
+        renderSessionList: () => { renderCalls.push('final'); },
+        syncSessionListScroll: () => { syncCalls.push('final'); },
+      });
+
+      sampleThreadAttention();
+      return { renderCalls, syncCalls, retained };
+    };
+
+    expect(runSample([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'idle' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'busy' },
+    ], new Map([['one', false], ['two', true]]))).toEqual({
+      renderCalls: ['attention:two'],
+      syncCalls: ['attention:two'],
+      retained: ['one,two'],
+    });
+
+    expect(runSample([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'busy' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'idle' },
+    ], new Map([['one', true], ['two', false]]))).toEqual({
+      renderCalls: ['attention:one', 'final'],
+      syncCalls: ['attention:one', 'final'],
+      retained: ['one,two'],
+    });
   });
 
   it('reads what the terminal shows rather than the bytes that produced it', () => {
@@ -216,8 +347,8 @@ describe('desktop shell wiring', () => {
   });
 
   it('keeps shells out of attention tracking even while sampling their work state', () => {
-    expect(mainJs).toMatch(
-      /thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,200}if \(!threadWantsAttentionTracking\(thread\)\) \{[\s\S]{0,160}if \(thread\.needsAttention\) \{[\s\S]{0,120}clearThreadAttention\(thread\)/,
+    expect(functionSource('sampleThreadAttention')).toMatch(
+      /thread\.isWorking = PsycheSessions\.sidebarTailIsWorking\(tail\);[\s\S]{0,420}if \(!threadWantsAttentionTracking\(thread\)\) \{[\s\S]{0,160}if \(thread\.needsAttention\) \{[\s\S]{0,120}clearThreadAttention\(thread\)/,
     );
   });
 
