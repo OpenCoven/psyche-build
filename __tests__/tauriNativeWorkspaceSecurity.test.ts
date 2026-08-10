@@ -8,7 +8,8 @@ const sourcePath = resolve(
 );
 
 function functionBody(source: string, name: string): string {
-  const start = source.indexOf(`fn ${name}(`);
+  const signature = new RegExp(`\\bfn\\s+${name}(?:<[^>]*>)?\\s*\\(`).exec(source);
+  const start = signature?.index ?? -1;
   expect(start).toBeGreaterThanOrEqual(0);
   const bodyStart = source.indexOf('{', start);
   let depth = 0;
@@ -47,5 +48,35 @@ describe('Tauri native workspace security contract', () => {
     expect(source).toMatch(/libc::flock\(file\.as_raw_fd\(\),\s*operation\)/);
     expect(source).toMatch(/libc::flock\(self\.file\.as_raw_fd\(\),\s*libc::LOCK_UN\)/);
     expect(source).toMatch(/options\.mode\(0o600\)/);
+  });
+
+  test('validates the complete workspace before filesystem mutation', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const save = functionBody(source, 'save_workspace_to_inner');
+
+    const validation = save.indexOf('validate_workspace(value)');
+    expect(validation).toBeGreaterThanOrEqual(0);
+    for (const mutation of [
+      'prepare_workspace_parent',
+      'WorkspaceFileLock::exclusive',
+      'recover_pending_workspace',
+      'cleanup_rollback_candidates',
+      'open_temp_file',
+    ]) {
+      expect(validation).toBeLessThan(save.indexOf(mutation));
+    }
+  });
+
+  test('uses no-follow file opens and one-level durable directory creation', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+
+    expect(source).toContain('fs::symlink_metadata');
+    expect(source).toContain('libc::O_NOFOLLOW');
+    expect(source).toContain('libc::O_DIRECTORY');
+    expect(source).toMatch(/create_new\(true\)/);
+    expect(source).toContain('libc::fchmod');
+    expect(source).toMatch(/fs::create_dir\(/);
+    expect(source).toMatch(/builder\.recursive\(false\)\.mode\(0o700\)\.create\(path\)/);
+    expect(source).not.toMatch(/fs::create_dir_all\(parent\)/);
   });
 });
