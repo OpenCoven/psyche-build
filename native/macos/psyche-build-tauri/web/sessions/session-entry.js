@@ -19,3 +19,15 @@ export {
   sortCovenSessions,
   statusPresentation,
 } from './session-model.mjs';
+export {
+  buildSidebarProjectModel,
+  deriveCovenSidebarStatus,
+  deriveLocalSidebarStatus,
+  localSidebarSelectionKey,
+  matchTextRanges,
+  normalizeSidebarFilter,
+  sidebarSelectionKey,
+  sidebarTailIsWorking,
+  SIDEBAR_ACTIVE_WINDOW_MS,
+  SIDEBAR_FILTERS,
+} from './sidebar-model.mjs';
