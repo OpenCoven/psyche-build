@@ -123,6 +123,7 @@ class FakeElement {
   title = '';
   type = '';
   value = '';
+  disabled = false;
   spellcheck = true;
   autocomplete = '';
   focused = false;
@@ -1427,7 +1428,7 @@ describe('Tauri Coven session project rail', () => {
       .toBe('visible-beta');
   });
 
-  it('keeps unresolved sessions visible because their fallback group is populated', () => {
+  it('keeps unresolved sessions visible because their fallback group is populated', async () => {
     const renderer = createRenderer({
       projects: [{
         id: 'alpha', name: 'Alpha', root: '/alpha',
@@ -1443,10 +1444,67 @@ describe('Tauri Coven session project rail', () => {
 
     renderer.render();
 
+    const branch = renderer.sessionListEl.querySelector('.session-worktree-group');
+    const head = renderer.sessionListEl.querySelector('.session-worktree-head');
+    const disclosure = head?.children[0];
+    const row = renderer.sessionListEl.querySelector('.session-row');
+
     expect(renderer.sessionListEl.querySelectorAll('.session-worktree-group')).toHaveLength(1);
-    expect(renderer.sessionListEl.querySelector('.session-worktree-head')?.title)
-      .toBe('Sessions with no available worktree');
-    expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('orphan');
+    expect(branch?.getAttribute('aria-disabled')).toBeNull();
+    expect(branch?.getAttribute('aria-label')).toContain('sessions with no available worktree');
+    expect(head?.title).toBe('Sessions with no available worktree');
+    expect(head?.dataset.tooltip).toBe('Sessions with no available worktree');
+    expect(disclosure?.getAttribute('aria-disabled')).toBe('true');
+    expect(disclosure?.title).toBe('Sessions with no available worktree');
+    expect((disclosure as FakeElement | undefined)?.disabled).toBe(true);
+    expect(row?.dataset.threadId).toBe('orphan');
+
+    await row?.emit('click');
+    expect(renderer.focusThread).toHaveBeenCalledWith('orphan');
+  });
+
+  it('keeps missing worktrees activatable only through their session descendants', async () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha/missing',
+          branch: 'feat/orphaned',
+          is_main: false,
+          dirty: false,
+          missing: true,
+        }],
+      }],
+      threads: [{
+        id: 'missing-session',
+        projectId: 'alpha',
+        name: 'Missing session',
+        status: 'running',
+        worktreePath: '/alpha/missing',
+      }],
+    });
+
+    renderer.render();
+
+    const branch = renderer.sessionListEl.querySelector('.session-worktree-group');
+    const head = renderer.sessionListEl.querySelector('.session-worktree-head');
+    const disclosure = head?.children[0];
+    const row = renderer.sessionListEl.querySelector('.session-row');
+
+    expect(branch?.getAttribute('aria-disabled')).toBeNull();
+    expect(branch?.getAttribute('aria-label')).toContain('worktree is missing');
+    expect(head?.title).toBe('/alpha/missing — worktree is missing');
+    expect(disclosure?.getAttribute('aria-disabled')).toBe('true');
+    expect((disclosure as FakeElement | undefined)?.disabled).toBe(true);
+
+    await branch?.emit('click', { target: head ?? undefined });
+    expect(renderer.activateProjectWorktree).not.toHaveBeenCalled();
+
+    await row?.emit('click');
+    expect(renderer.focusThread).toHaveBeenCalledWith('missing-session');
   });
 
   it('searches local and daemon session metadata', () => {
@@ -1798,25 +1856,31 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.focusThread).toHaveBeenCalledWith('local');
     });
 
-    it('turns rows into checkboxes while picking, without focusing anything', async () => {
+    it('uses aria-selected for picked membership while keeping aria-current on the active row', async () => {
       const renderer = createRenderer({
         threads,
-        setPicking: { key, picked: ['local'] },
+        activeProjectId: 'alpha',
+        activeThreadId: 'local',
+        setPicking: { key, picked: ['other'] },
       });
       renderer.render();
 
       const rows = renderer.sessionListEl.querySelectorAll('.session-row');
-      expect(rows[0].classList.contains('is-picked')).toBe(true);
-      expect(rows[0].getAttribute('aria-pressed')).toBe('true');
+      expect(rows[0].classList.contains('is-picking')).toBe(true);
+      expect(rows[0].classList.contains('active')).toBe(true);
+      expect(rows[0].getAttribute('aria-current')).toBe('true');
+      expect(rows[0].getAttribute('aria-selected')).toBe('false');
       expect(rows[1].classList.contains('is-picking')).toBe(true);
-      expect(rows[1].getAttribute('aria-pressed')).toBe('false');
-      expect(rows[1].title).toBe('Include Other in the set');
+      expect(rows[1].classList.contains('is-picked')).toBe(true);
+      expect(rows[1].getAttribute('aria-current')).toBeNull();
+      expect(rows[1].getAttribute('aria-selected')).toBe('true');
+      expect(rows[0].title).toBe('Include Local in the set');
 
-      await rows[1].emit('click');
+      await rows[0].emit('click');
 
       // Picking must not drag the canvas around under the user.
       expect(renderer.focusThread).not.toHaveBeenCalled();
-      expect(renderer.picked()).toEqual(['local', 'other']);
+      expect(renderer.picked()).toEqual(['other', 'local']);
     });
 
     it('turns × into "remove from set" while a set scopes the canvas', async () => {
@@ -2027,12 +2091,15 @@ describe('Tauri Coven session project rail', () => {
     expect(rendererSource).toContain('covenSessions: remoteRows');
     expect(rendererSource).toContain('covenDiscovery');
     expect(rendererSource).toContain('createSessionRow');
+    expect(rendererSource).not.toContain('aria-pressed');
     expect(mainJs).not.toContain('function createCovenSessionRow(');
     const rowSource = extractFunctionSource(mainJs, 'createSessionRow');
+    const branchSource = extractFunctionSource(mainJs, 'createBranchGroup');
     expect(rowSource).toContain('document.createElement("div")');
     expect(rowSource).not.toContain('document.createElement("button")');
     expect(rowSource).toContain('role", "treeitem');
     expect(rowSource).toContain('aria-selected');
+    expect(branchSource).not.toContain('group.setAttribute("aria-disabled", "true")');
     expect(rowSource).toContain('paneGlyphFor(rowModel.kind)');
   });
 

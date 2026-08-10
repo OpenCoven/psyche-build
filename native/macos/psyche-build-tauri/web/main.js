@@ -3426,6 +3426,16 @@
   }
 
   function createBranchGroup(branchModel, options) {
+    var unavailableState = branchModel.worktree.virtual
+      ? "sessions with no available worktree"
+      : branchModel.worktree.missing ? "worktree is missing" : "";
+    var tooltip = branchModel.worktree.virtual
+      ? "Sessions with no available worktree"
+      : (branchModel.worktree.path || branchModel.title) +
+        (branchModel.worktree.missing ? " — worktree is missing" : "") +
+        (branchModel.autoExpanded
+          ? " — temporarily expanded for search; clear search to restore saved collapse state"
+          : "");
     var group = document.createElement("div");
     group.className = "session-branch session-worktree-group"
       + (options.active ? " is-active selected" : "")
@@ -3436,9 +3446,6 @@
     group.setAttribute("aria-level", "2");
     group.setAttribute("tabindex", options.tabindex);
     group.setAttribute("aria-expanded", branchModel.expanded ? "true" : "false");
-    if (branchModel.worktree.virtual || branchModel.worktree.missing) {
-      group.setAttribute("aria-disabled", "true");
-    }
 
     var head = document.createElement("div");
     head.className = "session-branch-head session-worktree-head";
@@ -3447,6 +3454,16 @@
       branchModel.expanded,
       branchModel.autoExpanded
     );
+    if (unavailableState) {
+      disclosure.disabled = true;
+      disclosure.setAttribute("aria-disabled", "true");
+      disclosure.setAttribute(
+        "aria-label",
+        branchModel.title + " unavailable — " + tooltip
+      );
+      disclosure.title = tooltip;
+      attachTooltip(disclosure, tooltip);
+    }
     var title = document.createElement("span");
     title.className = "session-branch-name worktree-name";
     appendHighlightedText(title, branchModel.title, branchModel.titleMatches);
@@ -3470,15 +3487,7 @@
     head.appendChild(disclosure);
     head.appendChild(title);
     head.appendChild(count);
-    attachTooltip(
-      head,
-      branchModel.worktree.virtual
-        ? "Sessions with no available worktree"
-        : (branchModel.worktree.path || branchModel.title) +
-          (branchModel.autoExpanded
-            ? " — temporarily expanded for search; clear search to restore saved collapse state"
-            : "")
-    );
+    attachTooltip(head, tooltip);
     group.setAttribute(
       "aria-label",
       branchModel.title + ", " + branchModel.count + " session" +
@@ -3486,11 +3495,10 @@
         (branchModel.attentionCount > 0
           ? ", " + branchModel.attentionCount + " need attention"
           : "") +
+        (unavailableState ? ", " + unavailableState : "") +
         (branchModel.autoExpanded ? ", temporarily expanded for search" : "")
     );
-    group.title = branchModel.worktree.virtual
-      ? "Sessions with no available worktree"
-      : (branchModel.worktree.path || branchModel.title);
+    group.title = tooltip;
 
     var children = document.createElement("div");
     children.className = "session-branch-children";
@@ -3820,7 +3828,7 @@
               if (picking) {
                 row.classList.add("is-picking");
                 if (picked) row.classList.add("is-picked");
-                row.setAttribute("aria-pressed", picked ? "true" : "false");
+                row.setAttribute("aria-selected", picked ? "true" : "false");
                 row.title = (picked ? "Remove " : "Include ") + thread.name + " in the set";
               }
               async function activateLocalRow() {
