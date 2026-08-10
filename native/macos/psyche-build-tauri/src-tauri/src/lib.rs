@@ -422,7 +422,12 @@ fn pane_session_metrics(
     }
     let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
     let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
-    pane_metrics::load_coven_metrics(&coven, &resolved_cwd.canonical_path, &session_id)
+    pane_metrics::load_coven_metrics(
+        &coven,
+        &resolved_cwd.canonical_path,
+        &session_id,
+        std::ffi::OsStr::new(augmented_path()),
+    )
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
