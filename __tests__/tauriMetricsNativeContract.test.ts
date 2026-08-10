@@ -103,12 +103,16 @@ describe('Tauri workspace metrics native contract', () => {
     expect(covenSessions).toMatch(
       /struct\s+CovenSessionSummary\s*\{[\s\S]*model:\s*Option<String>,[\s\S]*current_task:\s*Option<String>,[\s\S]*input_tokens:\s*Option<u64>,[\s\S]*output_tokens:\s*Option<u64>,[\s\S]*\}/,
     );
-    expect(covenSessions).toContain(
-      'fn optional_u64(fields: &Map<String, Value>, camel_case: &str, snake_case: &str) -> Option<u64> {',
+    expect(covenSessions).toContain('const MAX_JAVASCRIPT_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;');
+    expect(covenSessions).toMatch(
+      /fn\s+optional_javascript_safe_u64\s*\(\s*fields:\s*&Map<String,\s*Value>\s*,\s*camel_case:\s*&str\s*,\s*snake_case:\s*&str\s*,?\s*\)\s*->\s*Option<u64>\s*\{/,
     );
     expect(covenSessions).toContain('.and_then(Value::as_u64)');
+    expect(covenSessions).toContain(
+      '.filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER_U64)',
+    );
     expect(covenSessions).toMatch(
-      /model:\s*optional_string\(fields,\s*"model",\s*"model"\)\?,[\s\S]*current_task:\s*optional_string\(fields,\s*"currentTask",\s*"current_task"\)\?,[\s\S]*input_tokens:\s*optional_u64\(fields,\s*"inputTokens",\s*"input_tokens"\),[\s\S]*output_tokens:\s*optional_u64\(fields,\s*"outputTokens",\s*"output_tokens"\),/,
+      /model:\s*optional_string\(fields,\s*"model",\s*"model"\)\?,[\s\S]*current_task:\s*optional_string\(fields,\s*"currentTask",\s*"current_task"\)\?,[\s\S]*input_tokens:\s*optional_javascript_safe_u64\(fields,\s*"inputTokens",\s*"input_tokens"\),[\s\S]*output_tokens:\s*optional_javascript_safe_u64\(fields,\s*"outputTokens",\s*"output_tokens"\),/,
     );
 
     expect(mainSource).toMatch(

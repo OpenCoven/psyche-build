@@ -18,6 +18,7 @@ use tauri::Url;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
+const MAX_JAVASCRIPT_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
 const UNAVAILABLE_MESSAGE: &str = "Coven daemon is not running; run `coven daemon start`";
 const INCOMPATIBLE_MESSAGE: &str = "Coven daemon API update required";
 const ERROR_MESSAGE: &str = "Coven sessions could not be loaded";
@@ -1005,8 +1006,8 @@ fn normalize_session(
         harness: optional_string(fields, "harness", "harness")?,
         model: optional_string(fields, "model", "model")?,
         current_task: optional_string(fields, "currentTask", "current_task")?,
-        input_tokens: optional_u64(fields, "inputTokens", "input_tokens"),
-        output_tokens: optional_u64(fields, "outputTokens", "output_tokens"),
+        input_tokens: optional_javascript_safe_u64(fields, "inputTokens", "input_tokens"),
+        output_tokens: optional_javascript_safe_u64(fields, "outputTokens", "output_tokens"),
         title: optional_string(fields, "title", "title")?,
         status: optional_string(fields, "status", "status")?,
         created_at: optional_string(fields, "createdAt", "created_at")?,
@@ -1041,11 +1042,16 @@ fn optional_string(
     Some((!value.is_empty()).then(|| value.to_string()))
 }
 
-fn optional_u64(fields: &Map<String, Value>, camel_case: &str, snake_case: &str) -> Option<u64> {
+fn optional_javascript_safe_u64(
+    fields: &Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+) -> Option<u64> {
     fields
         .get(camel_case)
         .or_else(|| fields.get(snake_case))
         .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER_U64)
 }
 
 #[cfg(test)]
@@ -1768,6 +1774,49 @@ mod tests {
         assert_eq!(sessions[2].id, "invalid-tokens");
         assert_eq!(sessions[2].input_tokens, None);
         assert_eq!(sessions[2].output_tokens, None);
+    }
+
+    #[test]
+    fn accepts_token_metadata_at_javascript_safe_integer_boundary() {
+        let tree = TempTree::new("max-safe-tokens");
+        let project = tree.directory("project");
+        let requested = vec![project.clone()];
+        let payload = json!([{
+            "id": "max-safe",
+            "projectRoot": project,
+            "inputTokens": MAX_JAVASCRIPT_SAFE_INTEGER_U64,
+            "outputTokens": MAX_JAVASCRIPT_SAFE_INTEGER_U64,
+        }]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].input_tokens,
+            Some(MAX_JAVASCRIPT_SAFE_INTEGER_U64)
+        );
+        assert_eq!(
+            sessions[0].output_tokens,
+            Some(MAX_JAVASCRIPT_SAFE_INTEGER_U64)
+        );
+    }
+
+    #[test]
+    fn omits_token_metadata_past_javascript_safe_integer_boundary() {
+        let tree = TempTree::new("unsafe-tokens");
+        let project = tree.directory("project");
+        let requested = vec![project.clone()];
+        let payload = json!([{
+            "id": "unsafe-tokens",
+            "projectRoot": project,
+            "inputTokens": MAX_JAVASCRIPT_SAFE_INTEGER_U64 + 1,
+            "outputTokens": MAX_JAVASCRIPT_SAFE_INTEGER_U64 + 1,
+        }]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "unsafe-tokens");
+        assert_eq!(sessions[0].input_tokens, None);
+        assert_eq!(sessions[0].output_tokens, None);
     }
 
     #[test]
