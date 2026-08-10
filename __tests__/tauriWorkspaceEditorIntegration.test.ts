@@ -738,7 +738,6 @@ describe('native CodeMirror workspace editor surface', () => {
         visibleLayout = layout;
         liveLayoutCalls.push({ layout, options });
       },
-      currentSide: () => project.layout.side,
       loadAgentSkills: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
@@ -760,7 +759,7 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(project.layout.mode).toBe('browser');
     expect(liveLayoutCalls).toEqual([{
       layout: 'terminal',
-      options: { side: 'right', persist: false },
+      options: { persist: false },
     }]);
   });
 

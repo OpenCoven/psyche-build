@@ -75,7 +75,6 @@
   --tab-h: 30px;
   --command-h: 46px;
   --composer-h: 54px;
-  --dock-tabs-h: 40px;
   --session-row-h: 44px;
   --pane-head-h: 32px;
   --pane-gap: 2px;
@@ -861,60 +860,17 @@ kbd {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  /* Pane mins are relaxed from the old 360/320 so a narrow window can't push
-     the terminal under the painted child webview (which is z-ordered above
-     the DOM via macOS APIs). The splitter clamp picks the right pair based
-     on browser side. */
+  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
+     the Git dock. Browser surfaces now tile inside the canvas itself. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  --terminal-min-y: 160px;
-  --browser-min-y:  54px;
   --split-frac: 0.6;
-  /* The browser is a band across the top of the workbench rather than a
-     column beside it: a preview is something you glance up at, and giving it
-     the full canvas width means it never has to be read in a 420px slot.
-     Collapsing zeroes the track rather than hiding the element, so the native
-     child webview's bounds go to zero with it. */
-  --browser-band: 300px;
   --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
               grid-template-rows    var(--transition-layout);
   will-change: grid-template-columns, grid-template-rows;
 }
 .detail.resizing { transition: none; }
-.detail[data-browser-column="collapsed"] { --browser-band: 0px; }
-
-/* The band spans every column, so the canvas and the dock both sit under it
-   and it is centred on the workbench by construction. */
-.browser-band {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border);
-}
-.detail[data-browser-column="collapsed"] .browser-band { border-bottom-color: transparent; }
-.detail[data-layout="terminal"] .browser-band { display: none; }
-
-/* Only the lower edge can size it -- the band grows downward from the top. */
-.browser-band-resize {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -4px;
-  height: 9px;
-  z-index: 6;
-  cursor: row-resize;
-  touch-action: none;
-  outline: none;
-  transition: background var(--transition-fast);
-}
-.browser-band-resize:hover,
-.browser-band-resize:focus-visible,
-.browser-band-resize.dragging { background: rgba(var(--rgb-accent), 0.12); }
-
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
@@ -922,32 +878,24 @@ kbd {
   white-space: pre-wrap;
 }
 
-/* terminal-only & browser-only: hide unused side */
+/* The canvas is always present; the Git dock is the only optional side. */
 .detail[data-layout="terminal"] {
   grid-template-columns: 1fr;
   grid-template-rows: 1fr;
 }
-.detail[data-layout="terminal"] .browser-pane,
+.detail[data-layout="terminal"] .git-dock,
 .detail[data-layout="terminal"] .splitter { display: none; }
 
-.detail[data-layout="browser"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="browser"] .terminal-area,
-.detail[data-layout="browser"] .splitter { display: none; }
-
-/* split — browser band on top, canvas and tools dock beneath it */
+/* split — canvas, resize seam, Git dock */
 .detail[data-layout="split"] {
   grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
                          var(--splitter-w)
                          minmax(var(--browser-min), 1fr);
-  grid-template-rows: var(--browser-band) minmax(var(--terminal-min-y), 1fr);
+  grid-template-rows: 1fr;
 }
-.detail[data-layout="split"] .browser-band   { grid-column: 1 / -1; grid-row: 1; }
-.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 2; }
-.detail[data-layout="split"] .browser-pane   { grid-column: 3; grid-row: 2; }
+.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 1; }
+.detail[data-layout="split"] .git-dock       { grid-column: 3; grid-row: 1; }
 
 .splitter {
   background: transparent;
@@ -1257,6 +1205,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-body {
   overflow: hidden;
   padding: 4px 6px;
+}
+.terminal-pane.is-web .terminal-pane-body {
+  padding: 0;
+}
+.terminal-pane-glyph.is-web {
+  color: var(--accent);
 }
 .term-instance {
   position: relative;
@@ -1998,13 +1952,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Browser pane -------- */
 
-/* The tools dock hosts four stacked panels (files / git / diffs / browser)
-   under one tab row; the tabs pick which one is visible via
-   .detail[data-panel]. The panels share one grid cell so switching never
-   reflows the dock. */
-.browser-pane {
+/* Git is the only fixed tools dock. */
+.git-dock {
   display: grid;
-  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 1fr;
   min-width: 0;
   min-height: 0;
@@ -2016,38 +1967,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 /* Density pass: chrome rows keep their hit targets and lose their inset. The
    canvas already speaks in 2px seams, and every extra pixel of panel padding
    read as a gap the layout did not intend. */
-.dock-tabs {
-  grid-area: 1 / 1;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 3px 3px 0;
-  min-width: 0;
-}
-.dock-tabs .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
-.dock-tab {
-  position: relative;
-  flex: 1 1 0;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  transition: color var(--transition-fast), background var(--transition-fast);
-}
-.dock-tab:hover { color: var(--text); background: var(--surface-2); }
-.dock-tab[aria-pressed="true"] {
-  color: var(--text);
-  box-shadow: inset 0 -1.5px 0 0 var(--accent);
-}
+.panel-bar .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
 .dock-tab-count {
   font-size: 8.5px;
   font-weight: 700;
@@ -2056,27 +1976,24 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .dock-tab-count[hidden] { display: none; }
 .panel {
-  grid-area: 2 / 1;
+  grid-area: 1 / 1;
   display: none;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
-.panel-browser { grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) 1fr; }
 .panel-files,
 .panel-diffs,
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
-.detail[data-panel="files"] .panel-files,
-.detail[data-panel="git"]   .panel-git { display: grid; }
-/* The browser left the dock for the top band, so it is no longer one of the
-   panels the dock switches between -- it is shown whenever the band is, and
-   `data-panel` has nothing to say about it. */
-.browser-band .panel-browser {
-  grid-area: auto;
+.detail[data-panel="git"] .panel-git { display: grid; }
+.browser-surface {
   display: grid;
-  /* The band is a flex column: without this the panel collapses to its
-     rows' intrinsic height and the preview gets nothing. */
-  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
+  grid-template-areas: "bar" "tabs" "preview";
+  width: 100%;
+  height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -2859,8 +2776,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: rgba(255,255,255,0.10);
   box-shadow: 0 -1px 0 rgba(255,255,255,0.06) inset;
 }
-.detail[data-layout="split"] .browser-pane,
-.detail[data-layout="browser"] .browser-pane {
+.detail[data-layout="split"] .git-dock {
   animation: browser-pane-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes browser-pane-in {
@@ -2921,21 +2837,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 8px;
 }
 
-/* The dock's second row is a single cell that all four panels share; the
-   bar/tabs/preview areas belong to the browser panel, which is the only one
-   that has them. */
-.browser-pane {
+.git-dock {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--dock-tabs-h) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
-}
-.panel-browser {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
-  grid-template-areas:
-    "bar"
-    "tabs"
-    "preview";
 }
 .panel-files,
 .panel-diffs,
@@ -3057,9 +2962,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   padding: 0 8px;
   color: rgba(245,242,251,0.34);
   letter-spacing: 0.04em;
-}
-.detail[data-layout="browser"] .browser-pane {
-  grid-template-columns: minmax(0, 1fr);
 }
 .browser-tab { position: relative; }
 .browser-tab:hover .browser-tab-title,
@@ -3232,7 +3134,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 :root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
 :root[data-surface="solid"] .composer,
-:root[data-surface="solid"] .browser-pane,
+:root[data-surface="solid"] .git-dock,
 :root[data-surface="solid"] .browser-bar,
 :root[data-surface="solid"] .panel-bar,
 :root[data-surface="solid"] .palette {
