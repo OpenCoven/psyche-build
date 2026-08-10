@@ -21,6 +21,13 @@ describe('Tauri browser dice shortcut', () => {
       indexHtml.indexOf('<header class="pane-header browser-bar">'),
       indexHtml.indexOf('</header>', indexHtml.indexOf('<header class="pane-header browser-bar">'))
     );
+    const surpriseButton = browserBar.match(
+      /<button id="open-surprise"[\s\S]*?<\/button>/
+    )?.[0];
+    expect(surpriseButton).toBeTruthy();
+    const remainingToolbar = browserBar.slice(
+      browserBar.indexOf(surpriseButton!) + surpriseButton!.length
+    );
 
     expect(browserBar).toContain(
       '<button id="open-surprise" class="icon-btn ghost-btn" title="Open surprise in new tab" aria-label="Open surprise in new tab">'
@@ -28,7 +35,15 @@ describe('Tauri browser dice shortcut', () => {
     expect(browserBar).toContain(
       '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">'
     );
-    expect(browserBar.indexOf('id="open-surprise"')).toBeLessThan(browserBar.indexOf('id="open-external"'));
+    expect(surpriseButton).toContain(
+      '<rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.35"/>'
+    );
+    expect(surpriseButton).toContain('<circle cx="5" cy="5" r="0.85" fill="currentColor"/>');
+    expect(surpriseButton).toContain('<circle cx="11" cy="5" r="0.85" fill="currentColor"/>');
+    expect(surpriseButton).toContain('<circle cx="8" cy="8" r="0.85" fill="currentColor"/>');
+    expect(surpriseButton).toContain('<circle cx="5" cy="11" r="0.85" fill="currentColor"/>');
+    expect(surpriseButton).toContain('<circle cx="11" cy="11" r="0.85" fill="currentColor"/>');
+    expect(remainingToolbar).toMatch(/^\s*<button id="open-external"/);
   });
 
   it('wires the fixed dice URL through openDiceBrowserTab and the click handler', () => {
