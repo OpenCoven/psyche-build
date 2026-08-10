@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "identifier": "dev.opencoven.psyche",
   "build": {
-    "beforeDevCommand": "python3 -m http.server 1420 --bind 127.0.0.1 --directory web",
+    "beforeDevCommand": "pnpm run serve:web",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../web"
   },

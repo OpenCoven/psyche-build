@@ -98,4 +98,16 @@ describe('desktop Tauri layout', () => {
     );
     expect(cargoToml.match(/window-vibrancy/g)).toHaveLength(1);
   });
+
+  it('uses the portable Vite web server for Tauri development', () => {
+    const configs = ['tauri.conf.json', 'tauri.macos.conf.json',
+      'tauri.windows.conf.json', 'tauri.linux.conf.json'].map(json);
+    const desktopPackage = json('../package.json');
+
+    expect(configs[0].build.beforeDevCommand).toBe('pnpm run serve:web');
+    expect(desktopPackage.scripts['serve:web'])
+      .toBe('vite web --host 127.0.0.1 --port 1420 --strictPort');
+    expect(desktopPackage.devDependencies.vite).toBe('6.4.3');
+    expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
+  });
 });
