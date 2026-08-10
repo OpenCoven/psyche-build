@@ -412,7 +412,7 @@ fn canonical_project_path(root: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn pane_session_metrics(
+async fn pane_session_metrics(
     project_root: String,
     cwd: String,
     session_id: String,
@@ -422,12 +422,22 @@ fn pane_session_metrics(
     }
     let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
     let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
-    pane_metrics::load_coven_metrics(
-        &coven,
-        &resolved_cwd.canonical_path,
-        &session_id,
-        std::ffi::OsStr::new(augmented_path()),
-    )
+    let canonical_cwd = resolved_cwd.canonical_path;
+    let path = augmented_path().to_string();
+
+    match tauri::async_runtime::spawn_blocking(move || {
+        pane_metrics::load_coven_metrics(
+            &coven,
+            &canonical_cwd,
+            &session_id,
+            std::ffi::OsStr::new(&path),
+        )
+    })
+    .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => Err(format!("failed to join Coven metrics task: {error}")),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
