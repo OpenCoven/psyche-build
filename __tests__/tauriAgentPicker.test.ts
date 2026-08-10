@@ -226,13 +226,14 @@ describe('Tauri agent picker', () => {
         document: { activeElement: previousFocus },
         agentPickerOpen: () => false,
         renderAgentPicker: () => { renderCalls += 1; },
+        focusAgentPickerList: () => { focusCalls += 1; },
         setHelpOpen: () => undefined,
         closeNewPaneMenu: () => undefined,
         closeScopeMenu: () => undefined,
       },
       {
         agentPickerOverlayEl: overlay,
-        agentPickerListEl: { focus: () => { focusCalls += 1; } },
+        agentPickerListEl: { focus: () => { throw new Error('focus should route through focusAgentPickerList'); } },
         agentPickerIndex: 4,
         agentPickerPreviousFocus: null,
       },
@@ -247,8 +248,12 @@ describe('Tauri agent picker', () => {
   });
 
   it('uses Command-P and list keyboard controls to drive the picker', () => {
+    const documentShortcutIndex = mainJs.indexOf('document.addEventListener("keydown", async function (e) {');
+    const modalRouteIndex = mainJs.indexOf('if (routeAgentPickerModalKeydown(e)) return;', documentShortcutIndex);
     const commandPIndex = mainJs.indexOf('String(e.key).toLowerCase() === "p"');
     const commandOIndex = mainJs.indexOf('if (e.key === "o")');
+    expect(modalRouteIndex).toBeGreaterThan(documentShortcutIndex);
+    expect(modalRouteIndex).toBeLessThan(commandPIndex);
     expect(commandPIndex).toBeGreaterThan(-1);
     expect(commandPIndex).toBeLessThan(commandOIndex);
     const shortcutBlock = mainJs.slice(commandPIndex, commandPIndex + 200);
@@ -256,6 +261,7 @@ describe('Tauri agent picker', () => {
 
     expect(mainJs).toContain('agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown)');
     const listKeydownSource = functionSource('handleAgentPickerListKeydown');
+    expect(listKeydownSource).toContain('event.key === "Tab"');
     expect(listKeydownSource).toContain('event.key === "ArrowDown"');
     expect(listKeydownSource).toContain('event.key === "ArrowUp"');
     expect(listKeydownSource).toContain('event.key === "Home"');
@@ -268,6 +274,7 @@ describe('Tauri agent picker', () => {
     let renderCalls = 0;
     let launchCalls = 0;
     let closeCalls = 0;
+    let focusCalls = 0;
     const consumeEvents: string[] = [];
     const controller = compileFunctionWithState<
       (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => boolean
@@ -282,6 +289,7 @@ describe('Tauri agent picker', () => {
         nextAgentPickerIndex: (current: number, delta: number, count: number) =>
           (((current + delta) % count) + count) % count,
         renderAgentPicker: () => { renderCalls += 1; },
+        focusAgentPickerList: () => { focusCalls += 1; },
         launchSelectedAgent: () => { launchCalls += 1; },
         closeAgentPicker: () => { closeCalls += 1; },
         consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
@@ -310,6 +318,10 @@ describe('Tauri agent picker', () => {
     expect(down.calls).toEqual({ prevented: 1, stopped: 1 });
     expect(controller.snapshot().agentPickerIndex).toBe(2);
 
+    const tab = makeEvent('Tab');
+    expect(controller.fn(tab.event)).toBe(true);
+    expect(tab.calls).toEqual({ prevented: 1, stopped: 1 });
+
     const enter = makeEvent('Enter');
     expect(controller.fn(enter.event)).toBe(true);
     expect(enter.calls).toEqual({ prevented: 1, stopped: 1 });
@@ -319,9 +331,172 @@ describe('Tauri agent picker', () => {
     expect(escape.calls).toEqual({ prevented: 1, stopped: 1 });
 
     expect(renderCalls).toBe(1);
+    expect(focusCalls).toBe(1);
     expect(launchCalls).toBe(1);
     expect(closeCalls).toBe(1);
-    expect(consumeEvents).toEqual(['ArrowDown', 'Enter', 'Escape']);
+    expect(consumeEvents).toEqual(['ArrowDown', 'Tab', 'Enter', 'Escape']);
+  });
+
+  it('routes modal Tab and Shift-Tab back into the picker listbox', () => {
+    let focusCalls = 0;
+    const consumeEvents: string[] = [];
+    const controller = compileFunctionWithState<(
+      event: {
+        key: string;
+        shiftKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('handleAgentPickerListKeydown'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'coven-code' },
+          { id: 'copilot' },
+        ],
+        nextAgentPickerIndex: (current: number, delta: number, count: number) =>
+          (((current + delta) % count) + count) % count,
+        renderAgentPicker: () => undefined,
+        focusAgentPickerList: () => { focusCalls += 1; },
+        launchSelectedAgent: () => undefined,
+        closeAgentPicker: () => undefined,
+        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeEvents.push(event.key);
+        },
+      },
+      { agentPickerIndex: 0 },
+    );
+
+    const makeEvent = (shiftKey = false) => {
+      const calls = { prevented: 0, stopped: 0 };
+      return {
+        event: {
+          key: 'Tab',
+          shiftKey,
+          preventDefault: () => { calls.prevented += 1; },
+          stopPropagation: () => { calls.stopped += 1; },
+        },
+        calls,
+      };
+    };
+
+    const tab = makeEvent(false);
+    expect(controller.fn(tab.event)).toBe(true);
+    expect(tab.calls).toEqual({ prevented: 1, stopped: 1 });
+
+    const shiftTab = makeEvent(true);
+    expect(controller.fn(shiftTab.event)).toBe(true);
+    expect(shiftTab.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(focusCalls).toBe(2);
+    expect(consumeEvents).toEqual(['Tab', 'Tab']);
+  });
+
+  it('suppresses background modifier shortcuts while the picker is open', () => {
+    const opened: string[] = [];
+    const consumed: string[] = [];
+    const controller = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => true,
+        openAgentPicker: () => { opened.push('picker'); },
+        handleAgentPickerListKeydown: () => false,
+        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          event.preventDefault();
+          event.stopPropagation();
+          consumed.push(event.key);
+        },
+      },
+    );
+
+    const calls = { prevented: 0, stopped: 0 };
+    expect(controller({
+      key: 't',
+      metaKey: true,
+      preventDefault: () => { calls.prevented += 1; },
+      stopPropagation: () => { calls.stopped += 1; },
+    })).toBe(true);
+
+    expect(calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(consumed).toEqual(['t']);
+    expect(opened).toEqual([]);
+  });
+
+  it('does not intercept keys when the picker is closed', () => {
+    const controller = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => false,
+        openAgentPicker: () => { throw new Error('picker is closed'); },
+        handleAgentPickerListKeydown: () => { throw new Error('picker is closed'); },
+        consumeAgentPickerKey: () => { throw new Error('picker is closed'); },
+      },
+    );
+
+    expect(controller({
+      key: 't',
+      metaKey: true,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined,
+    })).toBe(false);
+  });
+
+  it('keeps Command-P as a modal reset-and-refocus shortcut', () => {
+    const opened: string[] = [];
+    const consumed: string[] = [];
+    const controller = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => true,
+        openAgentPicker: () => { opened.push('picker'); return true; },
+        handleAgentPickerListKeydown: () => false,
+        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          event.preventDefault();
+          event.stopPropagation();
+          consumed.push(event.key);
+        },
+      },
+    );
+
+    const calls = { prevented: 0, stopped: 0 };
+    expect(controller({
+      key: 'p',
+      metaKey: true,
+      preventDefault: () => { calls.prevented += 1; },
+      stopPropagation: () => { calls.stopped += 1; },
+    })).toBe(true);
+
+    expect(calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(consumed).toEqual(['p']);
+    expect(opened).toEqual(['picker']);
   });
 
   it('launches the selected agent from the picker', () => {

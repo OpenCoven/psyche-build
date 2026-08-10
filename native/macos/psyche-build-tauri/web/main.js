@@ -5217,6 +5217,7 @@
   }
 
   document.addEventListener("keydown", async function (e) {
+    if (routeAgentPickerModalKeydown(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
@@ -5384,8 +5385,22 @@
     event.stopPropagation();
   }
 
+  function focusAgentPickerList() {
+    if (
+      agentPickerListEl &&
+      typeof agentPickerListEl.focus === "function"
+    ) {
+      agentPickerListEl.focus();
+    }
+  }
+
   function handleAgentPickerListKeydown(event) {
     var count = agentLaunchOptions().length;
+    if (event.key === "Tab") {
+      focusAgentPickerList();
+      consumeAgentPickerKey(event);
+      return true;
+    }
     if (event.key === "ArrowDown") {
       agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
       renderAgentPicker();
@@ -5421,6 +5436,22 @@
       return true;
     }
     return false;
+  }
+
+  function routeAgentPickerModalKeydown(event) {
+    if (!agentPickerOpen()) return false;
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      String(event.key).toLowerCase() === "p"
+    ) {
+      consumeAgentPickerKey(event);
+      openAgentPicker();
+      return true;
+    }
+    if (handleAgentPickerListKeydown(event)) return true;
+    consumeAgentPickerKey(event);
+    return true;
   }
 
   if (agentPickerListEl) {
@@ -6206,7 +6237,7 @@
     agentPickerIndex = 0;
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
-    agentPickerListEl.focus();
+    focusAgentPickerList();
     return true;
   }
 
