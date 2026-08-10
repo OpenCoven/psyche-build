@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     let fixtureName: String?
     /// Owns the at-most-two attached terminals for whichever root is running.
     let terminalRegistry: TerminalSessionRegistry
+    let paneComposerSendAttempts = PaneComposerSendAttempts()
 
     private var hasStarted = false
 

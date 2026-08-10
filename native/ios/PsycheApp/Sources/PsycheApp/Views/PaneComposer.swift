@@ -3,9 +3,36 @@ import PsycheCore
 import SwiftUI
 
 @MainActor
+final class PaneComposerSendAttempts {
+    struct Attempt {
+        fileprivate let paneID: String
+        fileprivate let sequence: UInt64
+    }
+
+    private var latestSequenceByPaneID: [String: UInt64] = [:]
+    private var nextSequence: UInt64 = 0
+
+    func begin(forPane paneID: String) -> Attempt {
+        nextSequence &+= 1
+        latestSequenceByPaneID[paneID] = nextSequence
+        return Attempt(paneID: paneID, sequence: nextSequence)
+    }
+
+    func isCurrent(_ attempt: Attempt) -> Bool {
+        latestSequenceByPaneID[attempt.paneID] == attempt.sequence
+    }
+}
+
+@MainActor
 final class PaneComposerModel: ObservableObject {
     @Published private(set) var modifiers: TerminalModifiers = []
     @Published private(set) var inputErrorMessage: String?
+
+    private let sendAttempts: PaneComposerSendAttempts
+
+    init(sendAttempts: PaneComposerSendAttempts = PaneComposerSendAttempts()) {
+        self.sendAttempts = sendAttempts
+    }
 
     var armedControl: Bool { modifiers.contains(.control) }
     var armedAlt: Bool { modifiers.contains(.alt) }
@@ -68,10 +95,14 @@ final class PaneComposerModel: ObservableObject {
             data = modified
         }
 
-        beginSendAttempt()
+        let attempt = beginSendAttempt(forPane: targetPaneID)
         return Task {
             let accepted = await registry.send(data, toPane: targetPaneID)
-            guard accepted, store.drafts[targetPaneID] == text else { return }
+            guard accepted,
+                  sendAttempts.isCurrent(attempt),
+                  store.drafts[targetPaneID] == text else {
+                return
+            }
             store.setDraft(nil, forPane: targetPaneID)
         }
     }
@@ -92,7 +123,7 @@ final class PaneComposerModel: ObservableObject {
             return nil
         }
 
-        beginSendAttempt()
+        _ = beginSendAttempt(forPane: targetPaneID)
         return Task {
             _ = await registry.send(data, toPane: targetPaneID)
         }
@@ -116,9 +147,12 @@ final class PaneComposerModel: ObservableObject {
             && registry.focusedPaneID == targetPaneID
     }
 
-    private func beginSendAttempt() {
+    private func beginSendAttempt(
+        forPane paneID: String
+    ) -> PaneComposerSendAttempts.Attempt {
         inputErrorMessage = nil
         modifiers = []
+        return sendAttempts.begin(forPane: paneID)
     }
 
     private func modifierInputError(for text: String) -> String {
@@ -139,7 +173,11 @@ struct PaneComposer: View {
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var registry: TerminalSessionRegistry
 
-    @StateObject private var model = PaneComposerModel()
+    @StateObject private var model: PaneComposerModel
+
+    init(sendAttempts: PaneComposerSendAttempts) {
+        _model = StateObject(wrappedValue: PaneComposerModel(sendAttempts: sendAttempts))
+    }
 
     private var targetPaneID: String? { registry.focusedPaneID }
 

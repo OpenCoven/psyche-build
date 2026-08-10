@@ -191,6 +191,83 @@ final class PaneComposerTests: XCTestCase {
         )
     }
 
+    func testNewerFailedIdenticalSubmissionSurvivesOlderSuccessAcrossComposerRecreation() async {
+        let client = ComposerTerminalClient(
+            gateSends: true,
+            sendErrorsByIndex: [1: TerminalControlError.unexpectedResponse]
+        )
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let sendAttempts = PaneComposerSendAttempts()
+        let firstModel = PaneComposerModel(sendAttempts: sendAttempts)
+        let recreatedModel = PaneComposerModel(sendAttempts: sendAttempts)
+        await registry.show(primary: "web-home")
+        store.drafts["web-home"] = "git status"
+
+        let first = try! XCTUnwrap(firstModel.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(1)
+        let second = try! XCTUnwrap(recreatedModel.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(2)
+
+        await client.releaseSend(at: 1)
+        await second.value
+        XCTAssertEqual(store.drafts["web-home"], "git status")
+        XCTAssertEqual(
+            recreatedModel.errorMessage(forPane: "web-home", registry: registry),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
+
+        await client.releaseSend(at: 0)
+        await first.value
+        XCTAssertEqual(store.drafts["web-home"], "git status")
+        XCTAssertEqual(
+            recreatedModel.errorMessage(forPane: "web-home", registry: registry),
+            TerminalControlError.unexpectedResponse.localizedDescription
+        )
+    }
+
+    func testOlderSuccessCannotClearWhileNewerSubmissionIsCurrent() async {
+        let client = ComposerTerminalClient(gateSends: true)
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home")
+        store.drafts["web-home"] = "git status"
+
+        let first = try! XCTUnwrap(model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(1)
+        let second = try! XCTUnwrap(model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(2)
+
+        await client.releaseSend(at: 0)
+        await first.value
+        XCTAssertEqual(store.drafts["web-home"], "git status")
+
+        await client.releaseSend(at: 1)
+        await second.value
+        XCTAssertNil(store.drafts["web-home"])
+    }
+
     func testSuccessfulSendDoesNotClearNewerTextInTheInitiatingPane() async {
         let client = ComposerTerminalClient(gateSends: true)
         let registry = TerminalSessionRegistry(client: client)
@@ -211,6 +288,43 @@ final class PaneComposerTests: XCTestCase {
         await task.value
 
         XCTAssertEqual(store.drafts["web-home"], "new")
+    }
+
+    func testConcurrentDifferentPaneSubmissionsClearIndependently() async {
+        let client = ComposerTerminalClient(gateSends: true)
+        let registry = TerminalSessionRegistry(client: client)
+        let store = makeLiveStore()
+        let model = PaneComposerModel()
+        await registry.show(primary: "web-home", secondary: "ios-cockpit")
+        store.drafts = [
+            "web-home": "first",
+            "ios-cockpit": "second",
+        ]
+
+        let first = try! XCTUnwrap(model.submit(
+            targetPaneID: "web-home",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(1)
+        registry.focus("ios-cockpit")
+        let second = try! XCTUnwrap(model.submit(
+            targetPaneID: "ios-cockpit",
+            workspaceIsStale: false,
+            store: store,
+            registry: registry
+        ))
+        await client.waitUntilSendStarts(2)
+
+        await client.releaseSend(at: 0)
+        await first.value
+        XCTAssertNil(store.drafts["web-home"])
+        XCTAssertEqual(store.drafts["ios-cockpit"], "second")
+
+        await client.releaseSend(at: 1)
+        await second.value
+        XCTAssertNil(store.drafts["ios-cockpit"])
     }
 
     func testControlAndAltApplyToTypedInputAndResetWhenSendStarts() async {
@@ -377,16 +491,21 @@ private actor ComposerTerminalClient: TerminalControlling {
 
     private(set) var sends: [Send] = []
     private let sendError: (any Error)?
+    private let sendErrorsByIndex: [Int: any Error]
     private let gateSends: Bool
-    private var didStartSend = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var startWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var releaseContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
 
     private let frames: AsyncStream<TerminalBinaryFrame>
 
-    init(sendError: (any Error)? = nil, gateSends: Bool = false) {
+    init(
+        sendError: (any Error)? = nil,
+        gateSends: Bool = false,
+        sendErrorsByIndex: [Int: any Error] = [:]
+    ) {
         self.sendError = sendError
         self.gateSends = gateSends
+        self.sendErrorsByIndex = sendErrorsByIndex
         frames = AsyncStream { _ in }
     }
 
@@ -403,15 +522,17 @@ private actor ComposerTerminalClient: TerminalControlling {
     func detach(streamID: String) async throws {}
 
     func send(_ data: Data, toStream streamID: String) async throws {
+        let sendIndex = sends.count
         sends.append(Send(data: data, streamID: streamID))
-        didStartSend = true
-        startWaiters.forEach { $0.resume() }
-        startWaiters.removeAll()
+        let readyWaiters = startWaiters.filter { sends.count >= $0.count }
+        startWaiters.removeAll { sends.count >= $0.count }
+        readyWaiters.forEach { $0.continuation.resume() }
         if gateSends {
             await withCheckedContinuation { continuation in
-                releaseContinuation = continuation
+                releaseContinuations[sendIndex] = continuation
             }
         }
+        if let sendError = sendErrorsByIndex[sendIndex] { throw sendError }
         if let sendError { throw sendError }
     }
 
@@ -421,15 +542,14 @@ private actor ComposerTerminalClient: TerminalControlling {
         frames
     }
 
-    func waitUntilSendStarts() async {
-        if didStartSend { return }
+    func waitUntilSendStarts(_ count: Int = 1) async {
+        if sends.count >= count { return }
         await withCheckedContinuation { continuation in
-            startWaiters.append(continuation)
+            startWaiters.append((count, continuation))
         }
     }
 
-    func releaseSend() {
-        releaseContinuation?.resume()
-        releaseContinuation = nil
+    func releaseSend(at index: Int = 0) {
+        releaseContinuations.removeValue(forKey: index)?.resume()
     }
 }

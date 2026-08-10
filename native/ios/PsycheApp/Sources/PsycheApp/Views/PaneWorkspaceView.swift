@@ -8,6 +8,7 @@ import SwiftUI
 /// discarding it, so rotating back restores the split instead of making you
 /// pick the pane again.
 struct PaneWorkspaceView: View {
+    @EnvironmentObject private var appModel: AppModel
     @EnvironmentObject private var store: WorkspaceStore
     @EnvironmentObject private var registry: TerminalSessionRegistry
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -54,13 +55,24 @@ struct PaneWorkspaceView: View {
                 }
                 if primaryPane != nil {
                     Divider().overlay(PsycheTheme.border)
-                    PaneComposer()
+                    PaneComposer(sendAttempts: appModel.paneComposerSendAttempts)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .navigationTitle(primaryPane?.title ?? primaryPane?.id ?? "Pane")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let pane = primaryPane {
+                ToolbarItem(placement: .topBarTrailing) {
+                    PaneControlsMenu(
+                        paneID: pane.id,
+                        paneTitle: pane.title ?? pane.id,
+                        projectTitle: projectTitle(forPane: pane.id) ?? "this project"
+                    )
+                }
+            }
+        }
         // `.contain` matters: an identifier on this container otherwise masks
         // the ones on the terminals and the switcher inside it, leaving them
         // unqueryable — and untestable.
@@ -163,6 +175,15 @@ struct PaneWorkspaceView: View {
             return nil
         }
         return secondary
+    }
+
+    private func projectTitle(forPane paneID: String) -> String? {
+        store.workspace?.projects.first { project in
+            project.projectPanes.contains { $0.id == paneID }
+                || project.worktrees.contains { worktree in
+                    worktree.panes.contains { $0.id == paneID }
+                }
+        }?.title
     }
 
     private func pane(_ paneID: String?) -> WorkspacePaneSnapshot? {
