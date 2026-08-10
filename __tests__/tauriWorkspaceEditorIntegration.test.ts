@@ -389,7 +389,9 @@ describe('native CodeMirror workspace editor surface', () => {
     const handlePanelLayoutTransition = compileFunction<
       (previous: string, next: string) => void
     >(extractFunctionSource(mainJs, 'handlePanelLayoutTransition'), {
-      currentPanel: () => 'diffs',
+      // Diffs live in the git panel now, so git is the tab whose collapse has
+      // to suspend in-flight diff requests.
+      currentPanel: () => 'git',
       suspendDiffRequests: () => { transitions.push('suspend'); },
       renderPanel: (panel: string) => { transitions.push(`render:${panel}`); },
     });
@@ -397,7 +399,7 @@ describe('native CodeMirror workspace editor surface', () => {
     handlePanelLayoutTransition('split', 'terminal');
     handlePanelLayoutTransition('terminal', 'split');
 
-    expect(transitions).toEqual(['suspend', 'render:diffs']);
+    expect(transitions).toEqual(['suspend', 'render:git']);
   });
 
   it('does not render hidden panels and clears stale diff summaries on status errors', async () => {
