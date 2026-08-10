@@ -485,9 +485,11 @@ describe('native terminal image drop events', () => {
 describe('native terminal image drop wiring', () => {
   it('awaits scale and listener registration, tracks scale changes, and clears on blur', async () => {
     const actions: string[] = [];
-    let scaleChanged: ((event: { payload: { scaleFactor: number } }) => void) | null = null;
-    let dragHandler: ((event: { payload: Record<string, unknown> }) => Promise<boolean>) | null = null;
-    let blurHandler: (() => void) | null = null;
+    const listeners: {
+      scale?: (event: { payload: { scaleFactor: number } }) => void;
+      drag?: (event: { payload: Record<string, unknown> }) => Promise<boolean>;
+      blur?: () => void;
+    } = {};
     const controls = Function(
       'currentWindow',
       'window',
@@ -507,19 +509,19 @@ describe('native terminal image drop wiring', () => {
           actions.push('scale');
           return 2;
         },
-        async onScaleChanged(listener: typeof scaleChanged) {
+        async onScaleChanged(listener: typeof listeners.scale) {
           actions.push('scale-listener');
-          scaleChanged = listener;
+          listeners.scale = listener;
         },
-        async onDragDropEvent(listener: typeof dragHandler) {
+        async onDragDropEvent(listener: typeof listeners.drag) {
           actions.push('drag-listener');
-          dragHandler = listener;
+          listeners.drag = listener;
         },
       },
       {
         addEventListener(name: string, listener: () => void) {
           actions.push(`window:${name}`);
-          if (name === 'blur') blurHandler = listener;
+          if (name === 'blur') listeners.blur = listener;
         },
       },
       (text: string, level: string) => actions.push(`status:${level}:${text}`),
@@ -529,16 +531,16 @@ describe('native terminal image drop wiring', () => {
 
     await expect(controls.install()).resolves.toBe(true);
     expect(actions).toEqual(['scale', 'scale-listener', 'drag-listener', 'window:blur']);
-    expect(dragHandler).not.toBeNull();
+    expect(listeners.drag).toBeDefined();
     expect(controls.scale()).toBe(2);
 
-    scaleChanged?.({ payload: { scaleFactor: 3 } });
+    listeners.scale?.({ payload: { scaleFactor: 3 } });
     expect(controls.scale()).toBe(3);
     expect(actions.at(-1)).toBe('clear');
 
-    scaleChanged?.({ payload: { scaleFactor: Number.NaN } });
+    listeners.scale?.({ payload: { scaleFactor: Number.NaN } });
     expect(controls.scale()).toBe(3);
-    blurHandler?.();
+    listeners.blur?.();
     expect(actions.at(-1)).toBe('clear');
   });
 
