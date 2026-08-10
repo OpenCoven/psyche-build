@@ -760,4 +760,54 @@ describe('Tauri agent picker', () => {
     expect(mainJs).not.toMatch(/localStorage\.(?:getItem|setItem)\([^)]*agent/i);
     expect(functionSource('openAgentPicker')).toContain('agentPickerIndex = 0;');
   });
+
+  it('keeps shell and agent labels distinct across menus, empty state, and help', () => {
+    expect(indexHtml).toMatch(
+      /id="new-pane-term"[\s\S]*?Shell — login shell[\s\S]*?<span class="new-pane-key">⌘T<\/span>/,
+    );
+    expect(indexHtml).toMatch(
+      /id="new-pane-agent"[\s\S]*?Agent — choose CLI[\s\S]*?<span class="new-pane-key">⌘P<\/span>/,
+    );
+
+    const emptyState = functionSource('renderTerminalEmptyState');
+    expect(emptyState).toContain('data-empty-action="term"');
+    expect(emptyState).toContain('<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span>');
+    expect(emptyState).toContain('data-empty-action="agent"');
+    expect(emptyState).toContain('<span class="glyph">✳</span>Agent<span class="key">⌘P</span>');
+
+    expect(mainJs).toMatch(/\["New terminal pane", "⌘T"\]/);
+    expect(mainJs).toMatch(/\["Choose an agent", "⌘P"\]/);
+    expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
+    expect(mainJs).not.toMatch(/\["New agent pane \(coven chat\)", "⌘T"\]/);
+    expect(mainJs).not.toMatch(/\["New browser tab", "focus Web, then ⌘T"\]/);
+  });
+
+  it('routes manual shell and agent launch surfaces through the intended entry points', () => {
+    const toggleSource = functionSource('toggleNewPaneMenu');
+    expect(toggleSource).toContain('if (!newPaneMenuEl) { createTerminalPane(); return; }');
+
+    expect(mainJs).toMatch(
+      /onMenuClick\("new-pane-term", async function \(\) \{[\s\S]*?createTerminalPane\(\)[\s\S]*?\}\);/,
+    );
+    expect(mainJs).not.toMatch(
+      /onMenuClick\("new-pane-term", async function \(\) \{[\s\S]*?runNewShellCommand\(\)/,
+    );
+    expect(mainJs).toMatch(
+      /onMenuClick\("new-pane-agent", function \(\) \{[\s\S]*?openAgentPicker\(\);[\s\S]*?\}\);/,
+    );
+    expect(mainJs).not.toMatch(
+      /onMenuClick\("new-pane-agent", async function \(\) \{[\s\S]*?runNewThreadCommand\(\)/,
+    );
+
+    const emptyState = functionSource('renderTerminalEmptyState');
+    expect(emptyState).toContain('if (action === "term") createTerminalPane();');
+    expect(emptyState).toContain('else if (action === "agent") openAgentPicker();');
+    expect(emptyState).toContain('else openBlankBrowserTab();');
+  });
+
+  it('keeps automatic project startup on Coven while the picker handles manual agent choice', () => {
+    expect(functionSource('setActiveProject')).toContain('await ensureProjectCoven(project);');
+    expect(functionSource('openProjectPicker')).toContain('await ensureProjectCoven(project);');
+    expect(functionSource('boot')).toContain('await ensureProjectCoven(project);');
+  });
 });

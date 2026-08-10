@@ -3504,9 +3504,9 @@
       "</div>" +
       '<div class="canvas-empty-actions">' +
         '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
-          '<span class="glyph mono">❯_</span>Shell<span class="key">/new-shell</span></button>' +
+          '<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
-          '<span class="glyph">✳</span>Agent<span class="key">⌘T</span></button>' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
           '<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span></button>' +
       "</div>";
@@ -3515,8 +3515,8 @@
       if (!button) return;
       if (!activeProject()) { openProjectPicker(); return; }
       var action = button.dataset.emptyAction;
-      if (action === "term") runNewShellCommand();
-      else if (action === "agent") runNewThreadCommand();
+      if (action === "term") createTerminalPane();
+      else if (action === "agent") openAgentPicker();
       else openBlankBrowserTab();
     });
     terminalHost.appendChild(empty);
@@ -5365,12 +5365,11 @@
     el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
   }
   onMenuClick("new-pane-term", async function () {
-    await runNewShellCommand();
-    toast("Shell pane opened");
+    var thread = await createTerminalPane();
+    if (thread) toast("Terminal pane opened");
   });
-  onMenuClick("new-pane-agent", async function () {
-    await runNewThreadCommand();
-    toast("Agent pane opened — coven chat");
+  onMenuClick("new-pane-agent", function () {
+    openAgentPicker();
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -5483,9 +5482,9 @@
     ["Toggle the tools dock", "⌘⌥B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
-    ["New shell pane", "/new-shell"],
-    ["New agent pane (coven chat)", "⌘T"],
-    ["New browser tab", "focus Web, then ⌘T"],
+    ["New terminal pane", "⌘T"],
+    ["Choose an agent", "⌘P"],
+    ["New browser tab", "Web pane +"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
