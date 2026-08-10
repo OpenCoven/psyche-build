@@ -503,3 +503,100 @@ describe('MobileControlGateway pane mutations', () => {
     }
   });
 });
+
+describe('MobileControlGateway ritual launch', () => {
+  function workspace() {
+    return structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace) as ReadonlyWorkspaceSnapshot;
+  }
+
+  function ritualGateway(overrides: Record<string, unknown> = {}) {
+    return new MobileControlGateway({
+      workspaceSnapshot: () => ({ workspace: workspace(), sequence: 1 }),
+      launchRitual: async () => {},
+      ...overrides,
+    });
+  }
+
+  function launchRequest(extra: Record<string, unknown> = {}) {
+    return {
+      type: 'rituals.launch' as const,
+      requestId: 'ritual-1',
+      projectId: workspace().projects[0].id,
+      ritualId: 'daily-standup',
+      ...extra,
+    };
+  }
+
+  it('launches a ritual in a published project and announces the change', async () => {
+    const calls: Array<[string, string, Record<string, string>]> = [];
+    const changes: number[] = [];
+    const gateway = ritualGateway({
+      launchRitual: async (projectId: string, ritualId: string, params: Record<string, string>) => {
+        calls.push([projectId, ritualId, params]);
+      },
+      onWorkspaceChanged: () => changes.push(1),
+    });
+
+    await expect(gateway.handle(
+      launchRequest({ params: { branch: 'main' } }),
+      context(),
+    )).resolves.toEqual({ type: 'ack', requestId: 'ritual-1', ok: true });
+
+    expect(calls).toEqual([[workspace().projects[0].id, 'daily-standup', { branch: 'main' }]]);
+    expect(changes).toHaveLength(1);
+  });
+
+  it('defaults absent params to an empty set rather than undefined', async () => {
+    let seen: unknown;
+    const gateway = ritualGateway({
+      launchRitual: async (_p: string, _r: string, params: unknown) => { seen = params; },
+    });
+
+    await gateway.handle(launchRequest(), context());
+
+    expect(seen).toEqual({});
+  });
+
+  it('refuses a project the workspace does not publish, without launching', async () => {
+    let launches = 0;
+    const gateway = ritualGateway({
+      launchRitual: async () => { launches += 1; },
+    });
+
+    await expect(gateway.handle(
+      launchRequest({ projectId: 'nope' }),
+      context(),
+    )).rejects.toMatchObject({ code: 'unknown_target' });
+
+    expect(launches).toBe(0);
+  });
+
+  it('refuses params that are not strings rather than coercing them', async () => {
+    const gateway = ritualGateway();
+
+    for (const params of [{ n: 1 }, { b: true }, ['a'], { nested: { x: 'y' } }]) {
+      await expect(gateway.handle(
+        launchRequest({ params }) as any,
+        context(),
+      )).rejects.toMatchObject({ code: 'invalid_control_request' });
+    }
+  });
+
+  it('requires a ritual id', async () => {
+    const gateway = ritualGateway();
+
+    await expect(gateway.handle(
+      launchRequest({ ritualId: '' }) as any,
+      context(),
+    )).rejects.toMatchObject({ code: 'invalid_control_request' });
+  });
+
+  it('reports an unregistered launcher as unsupported', async () => {
+    const gateway = new MobileControlGateway({
+      workspaceSnapshot: () => ({ workspace: workspace(), sequence: 1 }),
+    });
+
+    await expect(gateway.handle(launchRequest(), context()))
+      .rejects.toMatchObject({ code: 'command_not_supported' });
+  });
+});

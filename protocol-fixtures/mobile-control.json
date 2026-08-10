@@ -126,6 +126,18 @@
     },
     "type": "control"
   },
+  "launchRitual": {
+    "payload": {
+      "params": {
+        "branch": "main"
+      },
+      "projectId": "psyche",
+      "requestId": "ritual-1",
+      "ritualId": "daily-standup",
+      "type": "rituals.launch"
+    },
+    "type": "control"
+  },
   "listFiles": {
     "payload": {
       "paneId": "%3",

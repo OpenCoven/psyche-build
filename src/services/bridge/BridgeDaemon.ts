@@ -40,6 +40,11 @@ export interface MobilePaneExecutors {
   spawn: (request: MobilePaneSpawnRequest) => Promise<PaneSpawnResult>;
   kill: (paneId: string) => Promise<void>;
   updateMeta: (paneId: string, meta: { title?: string; agent?: string }) => Promise<void>;
+  launchRitual: (
+    projectId: string,
+    ritualId: string,
+    params: Record<string, string>,
+  ) => Promise<void>;
 }
 import { decodeBase64Payload } from "../../utils/base64.js";
 import { LogService } from "../LogService.js";
@@ -98,6 +103,8 @@ export class BridgeDaemon {
         spawnPane: (request) => this.requireMobileExecutors().spawn(request),
         killPane: (paneId) => this.requireMobileExecutors().kill(paneId),
         updatePaneMeta: (paneId, meta) => this.requireMobileExecutors().updateMeta(paneId, meta),
+        launchRitual: (projectId, ritualId, params) =>
+          this.requireMobileExecutors().launchRitual(projectId, ritualId, params),
         // Only reached for a mutation that actually changed state, so a
         // replayed idempotent spawn does not announce a change twice.
         onWorkspaceChanged: () => this.notifyWorkspaceChanged(),

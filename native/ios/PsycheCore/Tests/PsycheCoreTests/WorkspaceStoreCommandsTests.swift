@@ -259,3 +259,98 @@ private actor FakeControlRequests: ControlRequesting {
         }
     }
 }
+
+@MainActor
+final class WorkspaceStoreRitualTests: XCTestCase {
+    private func makeStore(
+        _ requests: FakeRitualRequests,
+        connected: Bool = true
+    ) -> WorkspaceStore {
+        let store = WorkspaceStore(controlRequests: connected ? requests : nil)
+        store.applySnapshot(
+            workspace: WorkspaceFixtures.workspace(named: WorkspaceFixtures.multiproject),
+            sequence: 1
+        )
+        return store
+    }
+
+    func testLaunchesARitualInAPublishedProject() async throws {
+        let requests = FakeRitualRequests()
+        let store = makeStore(requests)
+
+        try await store.launchRitual("daily-standup", inProject: "psyche", params: ["branch": "main"])
+
+        let launch = await requests.lastLaunch
+        XCTAssertEqual(launch?.projectID, "psyche")
+        XCTAssertEqual(launch?.ritualID, "daily-standup")
+        XCTAssertEqual(launch?.params, ["branch": "main"])
+    }
+
+    func testOmitsEmptyParamsRatherThanSendingAnEmptyObject() async throws {
+        let requests = FakeRitualRequests()
+        let store = makeStore(requests)
+
+        try await store.launchRitual("r", inProject: "psyche")
+
+        let launch = await requests.lastLaunch
+        XCTAssertNil(launch?.params)
+    }
+
+    func testRefusesAnUnpublishedProjectWithoutSending() async {
+        let requests = FakeRitualRequests()
+        let store = makeStore(requests)
+
+        do {
+            try await store.launchRitual("r", inProject: "nope")
+            XCTFail("Expected an unpublished project to be refused")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceStoreError, .unknownProject("nope"))
+        }
+        let sent = await requests.sentCount
+        XCTAssertEqual(sent, 0)
+    }
+
+    func testFailsClearlyWhenDisconnected() async {
+        let store = makeStore(FakeRitualRequests(), connected: false)
+
+        do {
+            try await store.launchRitual("r", inProject: "psyche")
+            XCTFail("Expected a disconnected store to refuse")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceStoreError, .noControlRequests)
+        }
+    }
+
+    func testARefusedAckIsNotASuccess() async {
+        let requests = FakeRitualRequests()
+        await requests.setResponse(.ack(ControlAckResponse(requestID: "r", ok: false)))
+        let store = makeStore(requests)
+
+        do {
+            try await store.launchRitual("r", inProject: "psyche")
+            XCTFail("Expected a refused ack to throw")
+        } catch {
+            XCTAssertEqual(error as? WorkspaceStoreError, .rejected)
+        }
+    }
+}
+
+private actor FakeRitualRequests: ControlRequesting {
+    private(set) var sentCount = 0
+    private(set) var lastLaunch: MobileRitualLaunchRequest?
+    private var response: MobileControlResponse?
+    private var nextID = 0
+
+    func setResponse(_ response: MobileControlResponse) { self.response = response }
+
+    func nextRequestID() -> String {
+        nextID += 1
+        return "req-\(nextID)"
+    }
+
+    func send(_ request: MobileControlRequest) async throws -> MobileControlResponse {
+        sentCount += 1
+        if case let .launchRitual(launch) = request { lastLaunch = launch }
+        return response ?? .ack(ControlAckResponse(requestID: request.requestID ?? "", ok: true))
+    }
+}

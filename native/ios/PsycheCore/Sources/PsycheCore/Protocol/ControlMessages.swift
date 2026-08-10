@@ -84,6 +84,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
     case diffFile(MobileFilesDiffRequest)
     case startAction(MobileActionStartRequest)
     case respondToAction(MobileActionRespondRequest)
+    case launchRitual(MobileRitualLaunchRequest)
     case unknown(UnknownControlRequest)
 
     private enum CodingKeys: String, CodingKey {
@@ -105,6 +106,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         case diffFile = "files.diff"
         case startAction = "actions.start"
         case respondToAction = "actions.respond"
+        case launchRitual = "rituals.launch"
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +136,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         case "files.diff": self = .diffFile(try MobileFilesDiffRequest(from: decoder))
         case "actions.start": self = .startAction(try MobileActionStartRequest(from: decoder))
         case "actions.respond": self = .respondToAction(try MobileActionRespondRequest(from: decoder))
+        case "rituals.launch": self = .launchRitual(try MobileRitualLaunchRequest(from: decoder))
         case "ack",
              "panes.spawn.result",
              "panes.stream.exit",
@@ -175,6 +178,7 @@ public enum MobileControlRequest: Codable, Sendable, Equatable {
         case .diffFile(let payload): try payload.encode(to: encoder)
         case .startAction(let payload): try payload.encode(to: encoder)
         case .respondToAction(let payload): try payload.encode(to: encoder)
+        case .launchRitual(let payload): try payload.encode(to: encoder)
         case .unknown(let payload): try payload.encode(to: encoder)
         }
     }
@@ -266,6 +270,7 @@ public extension MobileControlRequest {
         case .diffFile(let payload): payload.requestID
         case .startAction(let payload): payload.requestID
         case .respondToAction(let payload): payload.requestID
+        case .launchRitual(let payload): payload.requestID
         case .unknown(let payload): payload.requestID
         }
     }
@@ -635,6 +640,34 @@ public struct PaneStatusRequest: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case type, id
         case requestID = "requestId"
+    }
+}
+
+public struct MobileRitualLaunchRequest: Codable, Sendable, Equatable {
+    public let type: String
+    public let requestID: String
+    public let projectID: String
+    public let ritualID: String
+    public let params: [String: String]?
+
+    public init(
+        requestID: String,
+        projectID: String,
+        ritualID: String,
+        params: [String: String]?
+    ) {
+        self.type = "rituals.launch"
+        self.requestID = requestID
+        self.projectID = projectID
+        self.ritualID = ritualID
+        self.params = params
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type, params
+        case requestID = "requestId"
+        case projectID = "projectId"
+        case ritualID = "ritualId"
     }
 }
 

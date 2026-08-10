@@ -353,6 +353,16 @@ export const MOBILE_CONTROL_FIXTURES = {
       id: '%3',
     },
   },
+  launchRitual: {
+    type: 'control',
+    payload: {
+      type: 'rituals.launch',
+      requestId: 'ritual-1',
+      projectId: 'psyche',
+      ritualId: 'daily-standup',
+      params: { branch: 'main' },
+    },
+  },
   paneMeta: {
     type: 'control',
     payload: {

@@ -216,6 +216,26 @@ public final class WorkspaceStore: ObservableObject {
         ))))
     }
 
+    /// Launches a ritual in a published project. Params travel as-is; the
+    /// host decides what they mean.
+    public func launchRitual(
+        _ ritualID: String,
+        inProject projectID: String,
+        params: [String: String] = [:]
+    ) async throws {
+        let requests = try requireControlRequests()
+        guard workspace?.projects.contains(where: { $0.id == projectID }) == true else {
+            throw WorkspaceStoreError.unknownProject(projectID)
+        }
+
+        try requireAck(await requests.send(.launchRitual(MobileRitualLaunchRequest(
+            requestID: await requests.nextRequestID(),
+            projectID: projectID,
+            ritualID: ritualID,
+            params: params.isEmpty ? nil : params
+        ))))
+    }
+
     // MARK: - Command helpers
 
     private func requireControlRequests() throws -> any ControlRequesting {

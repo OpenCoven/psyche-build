@@ -47,6 +47,11 @@ export interface MobileControlGatewayOptions {
     paneId: string,
     meta: { title?: string; agent?: string },
   ) => Promise<void>;
+  launchRitual?: (
+    projectId: string,
+    ritualId: string,
+    params: Record<string, string>,
+  ) => Promise<void>;
   /**
    * Invoked only once a mutation actually changed host state, so a replayed
    * idempotent request does not announce a change that did not happen.
@@ -206,6 +211,22 @@ export class MobileControlGateway {
         this.options.onWorkspaceChanged?.();
         return { type: 'ack', requestId, ok: true };
       }
+      case 'rituals.launch': {
+        const launchRitual = this.require(this.options.launchRitual, requestId);
+        const projectId = requireNonEmpty(field(request, 'projectId'), 'projectId', requestId);
+        const ritualId = requireNonEmpty(field(request, 'ritualId'), 'ritualId', requestId);
+        const params = requireStringMap(field(request, 'params'), requestId);
+
+        await this.requireScope(
+          requestId,
+          (workspace) => workspace.projects.some((project) => project.id === projectId),
+          'project is not published by this host',
+        );
+
+        await launchRitual(projectId, ritualId, params);
+        this.options.onWorkspaceChanged?.();
+        return { type: 'ack', requestId, ok: true };
+      }
       case 'hello':
         throw new MobileControlGatewayError(
           'invalid_control_request',
@@ -339,6 +360,30 @@ function requireDimension(value: unknown, field: string, requestId: string): num
     );
   }
   return value;
+}
+
+/// Ritual params reach the host as launch configuration, so a non-string
+/// value is refused rather than coerced into one.
+function requireStringMap(value: unknown, requestId: string): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new MobileControlGatewayError(
+      'invalid_control_request',
+      'params must be an object of strings',
+      requestId,
+    );
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  for (const [key, entry] of entries) {
+    if (typeof entry !== 'string') {
+      throw new MobileControlGatewayError(
+        'invalid_control_request',
+        `params.${key} must be a string`,
+        requestId,
+      );
+    }
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 function optionalString(value: unknown, field: string, requestId: string): string | undefined {

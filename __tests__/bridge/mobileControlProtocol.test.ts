@@ -119,6 +119,7 @@ describe('mobile control protocol v3', () => {
       'files.diff',
       'actions.start',
       'actions.respond',
+      'rituals.launch',
     ]);
     expect(MOBILE_CONTROL_RESPONSE_TYPES).toEqual([
       'ack',

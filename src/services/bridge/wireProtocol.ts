@@ -218,6 +218,14 @@ export type MobilePaneSpawnRequest = {
   projectId: string;
 } & PaneLaunchRequest;
 
+export type MobileRitualLaunchRequest = {
+  type: 'rituals.launch';
+  requestId: string;
+  projectId: string;
+  ritualId: string;
+  params?: Record<string, string>;
+};
+
 export type MobilePaneAttachRequest = {
   type: 'panes.attach';
   requestId: string;
@@ -356,7 +364,8 @@ export type MobileControlRequest =
   | MobileFilesReadRequest
   | MobileFilesDiffRequest
   | MobileActionsStartRequest
-  | MobileActionsRespondRequest;
+  | MobileActionsRespondRequest
+  | MobileRitualLaunchRequest;
 
 export type MobileControlResponse =
   | CanonicalMobileControlResponse
@@ -392,6 +401,7 @@ export const MOBILE_CONTROL_REQUEST_TYPES = [
   'files.diff',
   'actions.start',
   'actions.respond',
+  'rituals.launch',
 ] as const;
 
 export const MOBILE_CONTROL_RESPONSE_TYPES = [
