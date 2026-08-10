@@ -3022,23 +3022,15 @@
         });
       } else {
         entry.addEventListener("click", async function () {
-          var leaf = layout && layout.root
-            ? PsychePanes.findLeafByThreadId(layout.root, item.thread.id)
-            : null;
+          var leaf = PsychePanes.findLeafByThreadId(layout.root, item.thread.id);
           if (!leaf) return;
-          var previousMaximizedLeafId = layout.maximizedLeafId;
-          var previousFocusedLeafId = layout.focusedLeafId;
+          if (state.activeFileId) {
+            await returnFromFileFocus(item.thread.id, true);
+            return;
+          }
           layout.maximizedLeafId = leaf.id;
           layout.focusedLeafId = leaf.id;
-          if (activeFile) {
-            if (!(await focusThread(item.thread.id))) {
-              layout.maximizedLeafId = previousMaximizedLeafId;
-              layout.focusedLeafId = previousFocusedLeafId;
-              renderPaneMinimap(layout, findOpenFile(state.activeFileId));
-            }
-          } else {
-            focusThread(item.thread.id);
-          }
+          focusThread(item.thread.id);
         });
       }
       rail.appendChild(entry);
@@ -4424,6 +4416,7 @@
       bind(dirtyFileDialogEl, "keydown", function (event) {
         if (event.key === "Escape") {
           event.preventDefault();
+          event.stopPropagation();
           settle(fallback);
         }
       });
@@ -4446,6 +4439,44 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
+  function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot) {
+    return !!thread &&
+      !thread.hidden &&
+      thread.projectId === project.id &&
+      thread.worktreePath === workspaceRoot &&
+      !!PsychePanes.findLeafByThreadId(root, thread.id);
+  }
+
+  function resolveFileFocusThreadId(preferredId) {
+    var project = activeProject();
+    var layout = activePaneLayout();
+    if (!project || !layout || !layout.root) return null;
+    var root = scopedPaneRoot(layout);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var preferred = preferredId ? findThread(preferredId) : null;
+    if (fileFocusThreadIsAvailable(preferred, root, project, workspaceRoot)) {
+      return preferred.id;
+    }
+
+    var focused = layout.focusedLeafId
+      ? PsychePanes.findLeafById(root, layout.focusedLeafId)
+      : null;
+    var focusedThread = focused ? findThread(focused.threadId) : null;
+    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot)) {
+      return focusedThread.id;
+    }
+
+    var leafIds = PsychePanes.leafIds(root);
+    for (var i = 0; i < leafIds.length; i++) {
+      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+      var thread = leaf ? findThread(leaf.threadId) : null;
+      if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot)) {
+        return thread.id;
+      }
+    }
+    return null;
+  }
+
   function enterFileFocus(file) {
     if (!file) return false;
     if (!state.activeFileId) {
@@ -4456,6 +4487,45 @@
     fileViewEl.hidden = false;
     terminalHost.hidden = true;
     renderPaneMinimap(activePaneLayout(), file);
+    return true;
+  }
+
+  function clearFileFocusPresentation() {
+    state.activeFileId = null;
+    fileFocus.returnThreadId = null;
+    terminalArea.classList.remove("is-file-focused");
+    fileViewEl.hidden = true;
+    terminalHost.hidden = false;
+  }
+
+  async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
+    if (!state.activeFileId) return false;
+    var activeFile = findOpenFile(state.activeFileId);
+    var destinationId = resolveFileFocusThreadId(
+      explicitThreadId || fileFocus.returnThreadId
+    );
+    if (destinationId) {
+      var layout = activePaneLayout();
+      var leaf = layout && layout.root
+        ? PsychePanes.findLeafByThreadId(layout.root, destinationId)
+        : null;
+      var previousMaximizedLeafId = layout ? layout.maximizedLeafId : null;
+      var previousFocusedLeafId = layout ? layout.focusedLeafId : null;
+      if (maximizeDestination && layout && leaf) {
+        layout.maximizedLeafId = leaf.id;
+        layout.focusedLeafId = leaf.id;
+      }
+      var focused = await focusThread(destinationId);
+      if (!focused && maximizeDestination && layout) {
+        layout.maximizedLeafId = previousMaximizedLeafId;
+        layout.focusedLeafId = previousFocusedLeafId;
+        renderPaneMinimap(layout, activeFile);
+      }
+      return focused;
+    }
+    if (!(await showTerminalView())) return false;
+    renderPaneWorkspace();
+    refreshSidebar();
     return true;
   }
 
@@ -4585,9 +4655,7 @@
       fileNavigationInFlight = false;
     }
     if (!canShowTerminal) return false;
-    state.activeFileId = null;
-    if (fileViewEl) fileViewEl.hidden = true;
-    if (terminalHost) terminalHost.hidden = false;
+    clearFileFocusPresentation();
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;
@@ -4613,11 +4681,9 @@
     var next = remaining[Math.min(idx, remaining.length - 1)];
     if (next) activateFileTabNow(next.id);
     else {
-      state.activeFileId = null;
-      if (fileViewEl) fileViewEl.hidden = true;
-      if (terminalHost) terminalHost.hidden = false;
+      clearFileFocusPresentation();
       refreshTabs();
-      requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
+      renderPaneWorkspace();
     }
     return true;
   }
@@ -6188,13 +6254,13 @@
   }
 
   // `?` is only a shortcut when nothing text-like has focus.
-  document.addEventListener("keydown", function (event) {
+  document.addEventListener("keydown", async function (event) {
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → focus mode.
+    // help → menus → set picking → armed confirm → file return → focus mode.
     if (event.key === "Escape") {
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
@@ -6207,6 +6273,11 @@
       // A call is the most transient thing on screen after a menu, and ending
       // it is always safe: nothing is transmitting.
       if (endCall()) return;
+      if (state.activeFileId) {
+        event.preventDefault();
+        await returnFromFileFocus();
+        return;
+      }
       if (!typing && exitPaneMaximize()) return;
       return;
     }

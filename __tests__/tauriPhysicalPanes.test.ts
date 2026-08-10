@@ -987,6 +987,46 @@ describe('Tauri physical terminal panes', () => {
       };
     }
 
+    it('resolves the recorded return pane, then focused pane, then first pane', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-b' };
+      const threads = new Map([
+        ['thread-a', {
+          id: 'thread-a', projectId: 'project', worktreePath: '/repo', hidden: false,
+        }],
+        ['thread-b', {
+          id: 'thread-b', projectId: 'project', worktreePath: '/repo', hidden: false,
+        }],
+      ]);
+      const project = { id: 'project' };
+      const fileFocusThreadIsAvailable = compileFunction<
+        (
+          thread: Record<string, unknown> | null,
+          root: Record<string, unknown>,
+          value: typeof project,
+          workspaceRoot: string,
+        ) => boolean
+      >(functionSource('fileFocusThreadIsAvailable'), { PsychePanes });
+      const resolveFileFocusThreadId = compileFunction<
+        (preferredId?: string | null) => string | null
+      >(functionSource('resolveFileFocusThreadId'), {
+        activeProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
+        activePaneLayout: () => layout,
+        scopedPaneRoot: (value: Layout) => value.root,
+        findThread: (id: string) => threads.get(id) || null,
+        PsychePanes,
+        fileFocusThreadIsAvailable,
+      });
+
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-a');
+      threads.get('thread-a')!.hidden = true;
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-b');
+      layout.focusedLeafId = 'leaf-missing';
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-b');
+      threads.get('thread-b')!.hidden = true;
+      expect(resolveFileFocusThreadId('thread-a')).toBeNull();
+    });
+
     it('lists the active file before pane entries in the minimap helper', () => {
       const threads = new Map([
         ['thread-a', { id: 'thread-a', name: 'Agent', status: 'running' }],
