@@ -58,7 +58,7 @@ public actor ControlRequestClient: ControlRequesting {
     private var pending: [String: PendingRequest] = [:]
     private var reservations: [String: UInt64] = [:]
     private var nextToken: UInt64 = 0
-    private var activeGenerationID: UInt64?
+    private var activeGeneration: ConnectionGeneration?
 
     public init(
         transport: any PsycheTransport,
@@ -85,47 +85,81 @@ public actor ControlRequestClient: ControlRequesting {
     }
 
     public func send(_ request: MobileControlRequest) async throws -> MobileControlResponse {
-        try await send(request, generationID: activeGenerationID)
+        try await send(request, generation: activeGeneration)
     }
 
     func send(
         _ request: MobileControlRequest,
         for generation: ConnectionGeneration
     ) async throws -> MobileControlResponse {
-        guard activeGenerationID == generation.id else {
-            throw ControlRequestError.disconnected
-        }
-        return try await send(request, generationID: generation.id)
+        try await send(request, generation: generation)
     }
 
     private func send(
         _ request: MobileControlRequest,
-        generationID: UInt64?
+        generation: ConnectionGeneration?
     ) async throws -> MobileControlResponse {
         try Task.checkCancellation()
         guard let id = request.requestID, !id.isEmpty else {
             throw ControlRequestError.missingRequestID
         }
-        guard reservations[id] == nil else {
-            throw ControlRequestError.duplicateRequestID(id)
-        }
 
         nextToken &+= 1
         let token = nextToken
-        reservations[id] = token
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[id] = PendingRequest(
-                    token: token,
-                    generationID: generationID,
-                    continuation: continuation
-                )
-                startTasks(for: request, id: id, token: token)
+                let registration: RegistrationResult
+                if let generation {
+                    registration = generation.withValidity {
+                        guard activeGeneration === generation else {
+                            return .rejected(.disconnected)
+                        }
+                        return register(
+                            request,
+                            id: id,
+                            token: token,
+                            generation: generation,
+                            continuation: continuation
+                        )
+                    } ?? .rejected(.disconnected)
+                } else {
+                    registration = register(
+                        request,
+                        id: id,
+                        token: token,
+                        generation: nil,
+                        continuation: continuation
+                    )
+                }
+
+                if case .rejected(let error) = registration {
+                    continuation.resume(throwing: error)
+                }
             }
         } onCancel: {
             Task { await self.cancel(id, token: token) }
         }
+    }
+
+    private func register(
+        _ request: MobileControlRequest,
+        id: String,
+        token: UInt64,
+        generation: ConnectionGeneration?,
+        continuation: CheckedContinuation<MobileControlResponse, any Error>
+    ) -> RegistrationResult {
+        guard reservations[id] == nil else {
+            return .rejected(.duplicateRequestID(id))
+        }
+        reservations[id] = token
+        pending[id] = PendingRequest(
+            token: token,
+            generation: generation,
+            continuation: continuation
+        )
+        startTasks(for: request, id: id, token: token)
+        return .registered
     }
 
     /// Routes an inbound control response to whoever is waiting for it.
@@ -134,7 +168,7 @@ public actor ControlRequestClient: ControlRequesting {
     /// — so the caller can surface it instead of silently dropping it.
     @discardableResult
     public func handle(_ response: MobileControlResponse) -> Bool {
-        handle(response, generationID: nil)
+        handle(response, generation: nil)
     }
 
     @discardableResult
@@ -142,38 +176,40 @@ public actor ControlRequestClient: ControlRequesting {
         _ response: MobileControlResponse,
         for generation: ConnectionGeneration
     ) -> Bool {
-        guard activeGenerationID == generation.id else { return false }
-        return handle(response, generationID: generation.id)
+        guard activeGeneration === generation else { return false }
+        return generation.withValidity {
+            handle(response, generation: generation)
+        } ?? false
     }
 
     private func handle(
         _ response: MobileControlResponse,
-        generationID: UInt64?
+        generation: ConnectionGeneration?
     ) -> Bool {
         guard let id = response.requestID else { return false }
 
         if case .error(let payload) = response {
-            return resume(id, generationID: generationID, with: .failure(payload))
+            return resume(id, generation: generation, with: .failure(payload))
         }
-        return resume(id, generationID: generationID, with: .success(response))
+        return resume(id, generation: generation, with: .success(response))
     }
 
     func beginGeneration(_ generation: ConnectionGeneration) {
         _ = generation.withValidity {
-            activeGenerationID = generation.id
+            activeGeneration = generation
         }
     }
 
     func endGeneration(_ generation: ConnectionGeneration) {
-        guard activeGenerationID == nil || activeGenerationID == generation.id else { return }
-        activeGenerationID = nil
+        guard activeGeneration == nil || activeGeneration === generation else { return }
+        activeGeneration = nil
         failAllPending(with: ControlRequestError.disconnected)
     }
 
     /// Fails every waiter at once. Called on disconnect so no request outlives
     /// the connection that could have answered it.
     public func failAll(with error: any Error = ControlRequestError.disconnected) {
-        activeGenerationID = nil
+        activeGeneration = nil
         failAllPending(with: error)
     }
 
@@ -227,15 +263,33 @@ public actor ControlRequestClient: ControlRequesting {
         with error: any Error,
         releasingID: Bool = false
     ) {
-        guard pending[id]?.token == token else { return }
-        _ = finish(id, with: .failure(error), releasingID: releasingID)
+        withValidPendingRequest(id, token: token) {
+            _ = finish(id, with: .failure(error), releasingID: releasingID)
+        }
     }
 
     /// Cancellation abandons the wait, but the request is already on its way to
     /// the host, so the ID stays retired for the rest of this connection.
     private func cancel(_ id: String, token: UInt64) {
-        guard pending[id]?.token == token else { return }
-        _ = finish(id, with: .failure(CancellationError()), releasingID: false)
+        withValidPendingRequest(id, token: token) {
+            _ = finish(id, with: .failure(CancellationError()), releasingID: false)
+        }
+    }
+
+    private func withValidPendingRequest(
+        _ id: String,
+        token: UInt64,
+        operation: () -> Void
+    ) {
+        guard let request = pending[id], request.token == token else { return }
+        guard let generation = request.generation else {
+            operation()
+            return
+        }
+        _ = generation.withValidity {
+            guard pending[id]?.token == token else { return }
+            operation()
+        }
     }
 
     /// The single place a continuation is resumed. Removing first means a
@@ -244,11 +298,11 @@ public actor ControlRequestClient: ControlRequesting {
     @discardableResult
     private func resume(
         _ id: String,
-        generationID: UInt64?,
+        generation: ConnectionGeneration?,
         with result: Result<MobileControlResponse, any Error>
     ) -> Bool {
-        if let generationID, pending[id]?.generationID != generationID {
-            return false
+        if let pendingGeneration = pending[id]?.generation {
+            guard let generation, pendingGeneration === generation else { return false }
         }
         // The host answered, so this ID is settled and free to reuse.
         return finish(id, with: result, releasingID: true)
@@ -278,9 +332,14 @@ public actor ControlRequestClient: ControlRequesting {
 
     private struct PendingRequest {
         let token: UInt64
-        let generationID: UInt64?
+        let generation: ConnectionGeneration?
         let continuation: CheckedContinuation<MobileControlResponse, any Error>
         var transmission: Task<Void, Never>?
         var timeout: Task<Void, Never>?
+    }
+
+    private enum RegistrationResult {
+        case registered
+        case rejected(ControlRequestError)
     }
 }

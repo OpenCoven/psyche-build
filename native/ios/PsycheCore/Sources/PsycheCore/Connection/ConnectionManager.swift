@@ -67,6 +67,8 @@ public actor ConnectionManager {
     private var activeGeneration: ConnectionGeneration?
     private var activeConnectAttempt: UUID?
     private var connectExecutionOwner: UUID?
+    private var activeTeardown: UUID?
+    private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var activeMessageSession: UUID?
     private var activeSnapshotRequestID: String?
     private var transportCleanupGeneration: ConnectionGeneration?
@@ -116,6 +118,9 @@ public actor ConnectionManager {
                 throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
             )
         }
+        for continuation in teardownWaiters.values {
+            continuation.resume()
+        }
     }
 
     public func connectToStoredHost() async {
@@ -125,12 +130,17 @@ public actor ConnectionManager {
             token = host.token
             await connect(to: host.endpoint)
         } catch {
-            await tearDownActiveConnection()
+            guard activeGeneration == nil,
+                  activeTeardown == nil,
+                  connectExecutionOwner == nil else {
+                return
+            }
             transition(to: .failed(error.localizedDescription))
         }
     }
 
     public func connect(to endpoint: HostEndpoint) async {
+        guard await waitForTeardownCompletionUnlessCancelled() else { return }
         // Guard on execution, not on state. connect() keeps awaiting past the
         // .authenticating transition and the actor yields at every await.
         guard connectExecutionOwner == nil else { return }
@@ -247,16 +257,16 @@ public actor ConnectionManager {
             let error = ConnectionManagerError.connectionCancelled
             await tearDownActiveConnection(
                 generation: generation,
-                readinessError: error
+                readinessError: error,
+                finalState: .failed(error.localizedDescription)
             )
-            transition(to: .failed(error.localizedDescription))
         } catch {
             guard isActive(attempt: attempt, generation: generation) else { return }
             await tearDownActiveConnection(
                 generation: generation,
-                readinessError: error
+                readinessError: error,
+                finalState: .failed(error.localizedDescription)
             )
-            transition(to: .failed(error.localizedDescription))
         }
     }
 
@@ -266,8 +276,7 @@ public actor ConnectionManager {
             return
         }
         transition(to: .disconnecting)
-        await tearDownActiveConnection()
-        transition(to: .disconnected)
+        await tearDownActiveConnection(finalState: .disconnected)
     }
 
     /// Defaults to the identity already announced in `hello`. Passing a
@@ -278,7 +287,7 @@ public actor ConnectionManager {
         clientID: String? = nil,
         clientName: String? = nil
     ) async {
-        guard hasActiveTransport else { return }
+        guard hasActiveTransport, let generation = activeGeneration else { return }
 
         do {
             try await transport.send(.legacy(.pair(PairRequestPayload(
@@ -287,8 +296,10 @@ public actor ConnectionManager {
                 clientName: clientName ?? self.clientName
             ))))
         } catch {
-            await tearDownActiveConnection()
-            transition(to: .failed(error.localizedDescription))
+            await tearDownActiveConnection(
+                generation: generation,
+                finalState: .failed(error.localizedDescription)
+            )
         }
     }
 
@@ -588,8 +599,10 @@ public actor ConnectionManager {
         isSnapshotRecoveryInFlight = false
         activeSnapshotRequestID = nil
         snapshotRequestTask = nil
-        await tearDownActiveConnection(generation: generation)
-        transition(to: .failed(error.localizedDescription))
+        await tearDownActiveConnection(
+            generation: generation,
+            finalState: .failed(error.localizedDescription)
+        )
     }
 
     private func recordProcessedMessage() {
@@ -605,12 +618,24 @@ public actor ConnectionManager {
 
     private func tearDownActiveConnection(
         generation expectedGeneration: ConnectionGeneration? = nil,
-        readinessError: any Error = ConnectionManagerError.messageProcessorEndedBeforeReady
+        readinessError: any Error = ConnectionManagerError.messageProcessorEndedBeforeReady,
+        finalState: ConnectionState? = nil
     ) async {
-        guard let generation = activeGeneration,
-              expectedGeneration == nil || generation === expectedGeneration else {
+        if activeTeardown != nil {
+            await waitForTeardownCompletion()
             return
         }
+        guard let generation = activeGeneration else {
+            if expectedGeneration == nil, let finalState {
+                transition(to: finalState)
+            }
+            return
+        }
+        guard expectedGeneration == nil || generation === expectedGeneration else {
+            return
+        }
+        let teardown = UUID()
+        activeTeardown = teardown
         let session = activeMessageSession
         let attempt = activeConnectAttempt
         generation.invalidate()
@@ -633,6 +658,56 @@ public actor ConnectionManager {
         if shouldDisconnectTransport {
             await transport.disconnect()
         }
+        if let finalState {
+            transition(to: finalState)
+        }
+        completeTeardown(teardown)
+    }
+
+    private func waitForTeardownCompletion() async {
+        while activeTeardown != nil {
+            let waiter = UUID()
+            await withCheckedContinuation { continuation in
+                guard activeTeardown != nil else {
+                    continuation.resume()
+                    return
+                }
+                teardownWaiters[waiter] = continuation
+            }
+        }
+    }
+
+    private func waitForTeardownCompletionUnlessCancelled() async -> Bool {
+        while activeTeardown != nil {
+            guard !Task.isCancelled else { return false }
+            let waiter = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard activeTeardown != nil, !Task.isCancelled else {
+                        continuation.resume()
+                        return
+                    }
+                    teardownWaiters[waiter] = continuation
+                }
+            } onCancel: {
+                Task { [weak self] in
+                    await self?.cancelTeardownWaiter(waiter)
+                }
+            }
+        }
+        return !Task.isCancelled
+    }
+
+    private func cancelTeardownWaiter(_ waiter: UUID) {
+        teardownWaiters.removeValue(forKey: waiter)?.resume()
+    }
+
+    private func completeTeardown(_ teardown: UUID) {
+        guard activeTeardown == teardown else { return }
+        activeTeardown = nil
+        let waiting = teardownWaiters.values
+        teardownWaiters.removeAll()
+        waiting.forEach { $0.resume() }
     }
 
     private func resetPerConnectionState(
@@ -664,9 +739,9 @@ public actor ConnectionManager {
         let error = ConnectionManagerError.connectionCancelled
         await tearDownActiveConnection(
             generation: generation,
-            readinessError: error
+            readinessError: error,
+            finalState: .failed(error.localizedDescription)
         )
-        transition(to: .failed(error.localizedDescription))
     }
 
     private func completeMessageProcessorReadiness(
@@ -699,8 +774,10 @@ public actor ConnectionManager {
         guard isActive(session: session, generation: generation) else { return }
 
         transition(to: .disconnecting)
-        await tearDownActiveConnection(generation: generation)
-        transition(to: .failed(reason))
+        await tearDownActiveConnection(
+            generation: generation,
+            finalState: .failed(reason)
+        )
     }
 
     private func isActive(

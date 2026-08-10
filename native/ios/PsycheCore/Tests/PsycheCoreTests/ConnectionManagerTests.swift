@@ -818,6 +818,53 @@ final class ConnectionManagerTests: XCTestCase {
         await manager.disconnect()
     }
 
+    func testReconnectWaitsForPriorDisconnectTeardown() async throws {
+        let fake = FakeTransport()
+        let transport = SuspendedDisconnectTransport(base: fake)
+        let manager = makeComposition(transport: transport, token: "token").manager
+
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
+
+        let disconnect = Task {
+            await manager.disconnect()
+        }
+        await transport.waitUntilDisconnectSuspends()
+
+        let reconnectProbe = RequestCompletionProbe()
+        let reconnect = Task {
+            await manager.connect(to: testEndpoint())
+            await reconnectProbe.markComplete()
+        }
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        let attemptsDuringTeardown = await fake.connectionAttempts
+        let reconnectCompletedDuringTeardown = await reconnectProbe.isComplete
+        XCTAssertEqual(attemptsDuringTeardown.count, 1)
+        XCTAssertFalse(reconnectCompletedDuringTeardown)
+
+        await transport.releaseDisconnect()
+        await disconnect.value
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+
+        let state = await manager.state
+        let isConnected = await fake.isConnected
+        let attempts = await fake.connectionAttempts
+        let disconnectCount = await fake.disconnectCount
+        XCTAssertEqual(state, .connected)
+        XCTAssertTrue(isConnected)
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(disconnectCount, 1)
+    }
+
     func testCancellationBeforeReaderReadinessCompletesConnectAndAllowsReconnect() async throws {
         let fake = FakeTransport()
         let startGate = MessageProcessorStartGate()
@@ -1651,6 +1698,57 @@ private actor AllocatedConnectSuspensionTransport: PsycheTransport {
 
     func releaseFirstConnect() async {
         await firstConnectGate.release()
+    }
+}
+
+private actor SuspendedDisconnectTransport: PsycheTransport {
+    private let base: FakeTransport
+    private let disconnectGate = AsyncGate()
+    private var disconnectDidSuspend = false
+    private var disconnectWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(base: FakeTransport) {
+        self.base = base
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        try await base.connect(to: endpoint)
+    }
+
+    func disconnect() async {
+        disconnectDidSuspend = true
+        let waiting = disconnectWaiters
+        disconnectWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+        await disconnectGate.wait()
+        await base.disconnect()
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        try await base.send(message)
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
+    }
+
+    func waitUntilDisconnectSuspends() async {
+        guard !disconnectDidSuspend else { return }
+        await withCheckedContinuation { continuation in
+            if disconnectDidSuspend {
+                continuation.resume()
+            } else {
+                disconnectWaiters.append(continuation)
+            }
+        }
+    }
+
+    func releaseDisconnect() async {
+        await disconnectGate.release()
     }
 }
 

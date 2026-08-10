@@ -326,6 +326,40 @@ final class ControlRequestClientTests: XCTestCase {
         XCTAssertEqual(response, .ack(ControlAckResponse(requestID: "req-1", ok: false)))
     }
 
+    func testInvalidatedGenerationCannotResolvePendingRequestBeforeEndGeneration() async throws {
+        let transport = FakeTransport()
+        try await transport.connect(to: endpoint())
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        let generation = ConnectionGeneration(id: 1)
+
+        await client.beginGeneration(generation)
+        let request = Task {
+            try await client.send(
+                .workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")),
+                for: generation
+            )
+        }
+        try await waitForPendingRequest(on: client)
+
+        generation.invalidate()
+        let handled = await client.handle(
+            .ack(ControlAckResponse(requestID: "req-1")),
+            for: generation
+        )
+
+        XCTAssertFalse(handled)
+        let pendingBeforeEnd = await client.pendingRequestCount
+        XCTAssertEqual(pendingBeforeEnd, 1)
+
+        await client.endGeneration(generation)
+        do {
+            _ = try await request.value
+            XCTFail("Invalidated generation should fail through disconnect cleanup")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
+    }
+
     func testDisconnectReleasesIDsBeforeFailedCallersResume() async throws {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
