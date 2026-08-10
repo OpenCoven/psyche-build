@@ -14,6 +14,7 @@ const ACTIVE_AGENT_STATUSES = new Set(['running', 'waiting', 'blocked']);
 const IDEAL_FRAME_MS = 1000 / 60;
 const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
+const DIAGNOSTIC_TRUNCATION_MARKER = '...(truncated)';
 const DIAGNOSTIC_EXCLUSION = 'Excludes prompts, terminal contents, file contents, diffs, and browser contents.';
 
 export const METRICS = Object.freeze({
@@ -466,10 +467,17 @@ export function chooseVisibleMetrics(input) {
 
   const budget = Math.max(0, (finiteNumber(source.availableWidth) ?? 0)
     - Math.max(0, finiteNumber(source.fixedWidth) ?? 0));
+  if (budget <= 0) return [];
+
   let used = 0;
   const selected = new Set();
+  const connectionWidth = Math.max(0, finiteNumber(widths.connection) ?? 80);
+
+  selected.add('connection');
+  used = Math.min(connectionWidth, budget);
 
   for (const id of ranked) {
+    if (id === 'connection') continue;
     const width = Math.max(0, finiteNumber(widths[id]) ?? 80);
     if (used + width > budget) continue;
     selected.add(id);
@@ -596,24 +604,35 @@ function formatTrendSummary(name, values) {
   return `${name} trend: ${Math.round(finite[0])} → ${Math.round(finite[finite.length - 1])}`;
 }
 
+function countCodePoints(value) {
+  return Array.from(value).length;
+}
+
+function truncateCodePoints(value, limit, marker = DIAGNOSTIC_TRUNCATION_MARKER) {
+  const points = Array.from(value);
+  if (points.length <= limit) return value;
+
+  const markerPoints = Array.from(marker);
+  if (markerPoints.length >= limit) {
+    return markerPoints.slice(0, limit).join('');
+  }
+
+  return points.slice(0, limit - markerPoints.length).join('') + marker;
+}
+
 function buildDiagnosticsText(bodyLines, serviceLines) {
   const suffixLines = ['', 'Services:', ...serviceLines, '', DIAGNOSTIC_EXCLUSION];
   let text = [...bodyLines, ...suffixLines].join('\n');
-  if (text.length <= DIAGNOSTIC_LIMIT) return text;
+  if (countCodePoints(text) <= DIAGNOSTIC_LIMIT) return text;
 
   const truncatedBody = [...bodyLines];
   while (truncatedBody.length > 0) {
-    text = [...truncatedBody, ...suffixLines].join('\n');
-    if (text.length <= DIAGNOSTIC_LIMIT) return text;
+    text = [...truncatedBody, '', DIAGNOSTIC_TRUNCATION_MARKER, ...suffixLines].join('\n');
+    if (countCodePoints(text) <= DIAGNOSTIC_LIMIT) return text;
     truncatedBody.pop();
   }
 
-  const suffix = suffixLines.join('\n');
-  if (suffix.length >= DIAGNOSTIC_LIMIT) {
-    return suffix.slice(0, DIAGNOSTIC_LIMIT);
-  }
-
-  return suffix;
+  return truncateCodePoints(['', DIAGNOSTIC_TRUNCATION_MARKER, ...suffixLines].join('\n'), DIAGNOSTIC_LIMIT);
 }
 
 export function formatLiveDiagnostics(input) {

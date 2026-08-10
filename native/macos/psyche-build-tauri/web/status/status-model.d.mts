@@ -258,9 +258,9 @@ export function samplingDelay(input: { hidden: boolean; idleForMs: number }): nu
 export function createFrameSampler(): FrameSampler;
 
 export function chooseVisibleMetrics(input: {
-  order: MetricId[];
-  visible: MetricId[];
-  pinned: MetricId[];
+  order: readonly MetricId[];
+  visible: readonly MetricId[];
+  pinned: readonly MetricId[];
   severity: Partial<Record<MetricId, Severity>>;
   widths: Partial<Record<MetricId, number>>;
   availableWidth: number;

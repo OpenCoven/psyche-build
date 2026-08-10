@@ -312,6 +312,28 @@ describe('tauri footer status model', () => {
     });
   });
 
+  test('tracks a real multibyte character split across UTF-8 byte chunks', () => {
+    const tracker = createActivityTracker();
+    const bytes = new TextEncoder().encode('😀\nthree\n');
+
+    notePtyChunk(tracker, 'emoji', bytes.subarray(0, 2), 0);
+    notePtyChunk(tracker, 'emoji', bytes.subarray(2), 500);
+
+    expect(flushActivity(tracker, 1_000)).toEqual({
+      workspace: {
+        bytesPerSecond: 11,
+        linesPerSecond: 2,
+        operationsPerSecond: 0,
+        errors: 0,
+      },
+      threads: [{
+        threadId: 'emoji',
+        bytesPerSecond: 11,
+        linesPerSecond: 2,
+      }],
+    });
+  });
+
   test('requires sustained thresholds and hysteresis before clearing', () => {
     let state = {};
     for (let index = 0; index < 4; index += 1) {
@@ -405,6 +427,21 @@ describe('tauri footer status model', () => {
     })).toEqual(['connection', 'tasks', 'fps']);
   });
 
+  test('keeps connection visible when the remaining metric budget is narrower than its measured width', () => {
+    expect(chooseVisibleMetrics({
+      order: DEFAULT_METRIC_ORDER,
+      visible: ['connection', 'agents'],
+      pinned: [],
+      severity: {},
+      widths: {
+        connection: 90,
+        agents: 80,
+      },
+      availableWidth: 180,
+      fixedWidth: 100,
+    })).toEqual(['connection']);
+  });
+
   test('caps trends at sixty finite samples and reports the observed peak', () => {
     const values: number[] = [];
     let peak = 0;
@@ -460,7 +497,38 @@ describe('tauri footer status model', () => {
     expect(text).toContain('Excludes prompts, terminal contents, file contents, diffs, and browser contents.');
     expect(text).not.toContain('FPS: 0');
     expect(text).not.toContain('Output: 0 lines/s');
-    expect(text.length).toBeLessThanOrEqual(16_384);
+    expect(Array.from(text).length).toBeLessThanOrEqual(16_384);
+  });
+
+  test('truncates diagnostics by Unicode code points without splitting astral characters', () => {
+    const text = formatLiveDiagnostics({
+      sampledAt: 1_700_000_000_000,
+      scope: 'workspace',
+      metrics: {
+        cpuPercent: 18,
+      },
+      services: [{
+        name: `Native-${'😀'.repeat(20_000)}`,
+        status: 'ready',
+        latencyMs: 4,
+      }],
+    });
+    const hasUnpairedSurrogate = Array.from({ length: text.length }).some((_, index) => {
+      const code = text.charCodeAt(index);
+      if (code < 0xD800 || code > 0xDFFF) return false;
+      if (code <= 0xDBFF) {
+        const next = text.charCodeAt(index + 1);
+        return !(next >= 0xDC00 && next <= 0xDFFF);
+      }
+      const previous = text.charCodeAt(index - 1);
+      return !(previous >= 0xD800 && previous <= 0xDBFF);
+    });
+
+    expect(text).toContain('...(truncated)');
+    expect(text).toContain('Native-');
+    expect(hasUnpairedSurrogate).toBe(false);
+    expect(text).not.toContain('\uFFFD');
+    expect(Array.from(text).length).toBe(16_384);
   });
 
   test('uses adaptive sampling and counts dropped frames from 60Hz intervals', () => {
