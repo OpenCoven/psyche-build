@@ -12,7 +12,7 @@ const PROCESS_START_IDENTITY_TOLERANCE_SECS: u64 = 1;
 struct ProcessSample {
     pid: u32,
     parent: Option<u32>,
-    start_time_secs: u64,
+    start_time_unix_secs: u64,
     name: String,
     cpu_percent: f32,
     memory_bytes: u64,
@@ -22,27 +22,15 @@ struct ProcessSample {
 pub(crate) struct TrackedPty {
     pub thread_id: String,
     pub pid: u32,
-    pub spawn_time_secs: Option<u64>,
+    pub spawn_time_unix_secs: u64,
 }
 
 impl TrackedPty {
-    pub(crate) fn new(thread_id: impl Into<String>, pid: u32) -> Self {
+    pub(crate) fn new(thread_id: impl Into<String>, pid: u32, spawn_time_unix_secs: u64) -> Self {
         Self {
             thread_id: thread_id.into(),
             pid,
-            spawn_time_secs: None,
-        }
-    }
-
-    pub(crate) fn with_spawn_time_secs(
-        thread_id: impl Into<String>,
-        pid: u32,
-        spawn_time_secs: u64,
-    ) -> Self {
-        Self {
-            thread_id: thread_id.into(),
-            pid,
-            spawn_time_secs: Some(spawn_time_secs),
+            spawn_time_unix_secs,
         }
     }
 }
@@ -82,6 +70,8 @@ pub(crate) struct MetricsSnapshot {
     pub processes: Vec<ProcessMetrics>,
 }
 
+/// Shared, long-lived collector for repeated snapshots. `snapshot` may wait for
+/// the remaining `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` before refreshing CPU data.
 pub(crate) struct MetricsCollector {
     system: sysinfo::System,
     last_process_refresh_at: Option<Instant>,
@@ -134,7 +124,7 @@ impl MetricsCollector {
             .map(|(pid, process)| ProcessSample {
                 pid: pid.as_u32(),
                 parent: process.parent().map(|parent| parent.as_u32()),
-                start_time_secs: process.start_time(),
+                start_time_unix_secs: process.start_time(),
                 name: process.name().to_string_lossy().into_owned(),
                 cpu_percent: process.cpu_usage(),
                 memory_bytes: process.memory(),
@@ -236,12 +226,8 @@ struct ValidTrackedRoot<'a> {
 }
 
 fn tracked_root_matches_identity(root: &ProcessSample, pty: &TrackedPty) -> bool {
-    match pty.spawn_time_secs {
-        Some(spawn_time_secs) => {
-            root.start_time_secs.abs_diff(spawn_time_secs) <= PROCESS_START_IDENTITY_TOLERANCE_SECS
-        }
-        None => true,
-    }
+    root.start_time_unix_secs.abs_diff(pty.spawn_time_unix_secs)
+        <= PROCESS_START_IDENTITY_TOLERANCE_SECS
 }
 
 fn aggregate_samples(
@@ -331,7 +317,7 @@ mod tests {
     fn sample(
         pid: u32,
         parent: Option<u32>,
-        start_time_secs: u64,
+        start_time_unix_secs: u64,
         name: &str,
         cpu_percent: f32,
         memory_bytes: u64,
@@ -339,19 +325,15 @@ mod tests {
         ProcessSample {
             pid,
             parent,
-            start_time_secs,
+            start_time_unix_secs,
             name: name.to_string(),
             cpu_percent,
             memory_bytes,
         }
     }
 
-    fn tracked(thread_id: &str, pid: u32) -> TrackedPty {
-        TrackedPty::new(thread_id, pid)
-    }
-
-    fn tracked_with_spawn_time(thread_id: &str, pid: u32, spawn_time_secs: u64) -> TrackedPty {
-        TrackedPty::with_spawn_time_secs(thread_id, pid, spawn_time_secs)
+    fn tracked(thread_id: &str, pid: u32, spawn_time_unix_secs: u64) -> TrackedPty {
+        TrackedPty::new(thread_id, pid, spawn_time_unix_secs)
     }
 
     #[test]
@@ -362,7 +344,7 @@ mod tests {
             sample(21, Some(20), 100, "child-a", 80.0, 300),
             sample(30, Some(10), 100, "pty-b", 60.0, 400),
         ];
-        let tracked = vec![tracked("b", 30), tracked("a", 20)];
+        let tracked = vec![tracked("b", 30, 100), tracked("a", 20, 100)];
 
         let workspace = aggregate_samples(&samples, 10, &tracked, None, 4);
 
@@ -391,7 +373,7 @@ mod tests {
             sample(10, None, 100, "app", 40.0, 100),
             sample(20, Some(10), 100, "pty-a", 20.0, 200),
         ];
-        let tracked = vec![tracked("missing", 999), tracked("a", 20)];
+        let tracked = vec![tracked("missing", 999, 100), tracked("a", 20, 100)];
 
         let snapshot = aggregate_samples(&samples, 10, &tracked, None, 4);
 
@@ -435,7 +417,7 @@ mod tests {
             sample(10, None, 100, "app", 40.0, 100),
             sample(20, None, 105, "reused-pid", 20.0, 200),
         ];
-        let tracked = vec![tracked_with_spawn_time("stale", 20, 100)];
+        let tracked = vec![tracked("stale", 20, 100)];
 
         let snapshot = aggregate_samples(&samples, 10, &tracked, Some("stale"), 4);
 
@@ -452,7 +434,7 @@ mod tests {
             sample(30, Some(10), 100, "pty-a-2", 80.0, 300),
             sample(31, Some(30), 100, "pty-a-2-child", 20.0, 400),
         ];
-        let tracked = vec![tracked("a", 20), tracked("a", 30)];
+        let tracked = vec![tracked("a", 20, 100), tracked("a", 30, 100)];
 
         let snapshot = aggregate_samples(&samples, 10, &tracked, Some("a"), 4);
 
@@ -461,6 +443,34 @@ mod tests {
         assert_eq!(snapshot.processes[1].pid, 30);
         assert_eq!(snapshot.workspace.memory_bytes, 1_000);
         assert!((snapshot.workspace.cpu_percent - 40.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_samples_keeps_tracked_root_within_spawn_time_tolerance() {
+        let samples = vec![
+            sample(10, None, 100, "app", 20.0, 100),
+            sample(20, Some(10), 101, "pty-a", 40.0, 200),
+        ];
+        let tracked = vec![tracked("a", 20, 100)];
+
+        let snapshot = aggregate_samples(&samples, 10, &tracked, Some("a"), 4);
+
+        assert_eq!(snapshot.processes.len(), 1);
+        assert_eq!(snapshot.processes[0].thread_id, "a");
+    }
+
+    #[test]
+    fn aggregate_samples_omits_tracked_root_outside_spawn_time_tolerance() {
+        let samples = vec![
+            sample(10, None, 100, "app", 20.0, 100),
+            sample(20, Some(10), 102, "pty-a", 40.0, 200),
+        ];
+        let tracked = vec![tracked("a", 20, 100)];
+
+        let snapshot = aggregate_samples(&samples, 10, &tracked, Some("a"), 4);
+
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.workspace, AggregateMetrics::default());
     }
 
     #[test]
