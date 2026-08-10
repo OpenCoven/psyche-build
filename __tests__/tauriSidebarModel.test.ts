@@ -58,7 +58,13 @@ describe('Tauri sidebar model', () => {
   });
 
   it('derives local status with exact precedence, labels, and icons', () => {
-    expect(deriveLocalSidebarStatus({ status: 'exited' }, 10_000)).toEqual({
+    expect(deriveLocalSidebarStatus({
+      status: 'exited',
+      needsAttention: true,
+      spawning: true,
+      isWorking: true,
+      lastOutputAt: 9_999,
+    }, 10_000)).toEqual({
       key: 'exited',
       label: 'EXITED',
       icon: '×',
@@ -77,6 +83,16 @@ describe('Tauri sidebar model', () => {
       tooltip: 'Attention — waiting for your response',
     });
     expect(deriveLocalSidebarStatus({
+      status: 'running',
+      spawning: true,
+      lastOutputAt: 9_999,
+    }, 10_000)).toEqual({
+      key: 'busy',
+      label: 'BUSY',
+      icon: '↻',
+      tooltip: 'Busy — process is starting or actively working',
+    });
+    expect(deriveLocalSidebarStatus({
       status: 'starting',
       needsAttention: false,
       lastOutputAt: 9_999,
@@ -88,13 +104,23 @@ describe('Tauri sidebar model', () => {
     });
     expect(deriveLocalSidebarStatus({
       status: 'running',
-      tail: '⠹ compiling…',
+      isWorking: true,
       lastOutputAt: 1_000,
     }, 10_000)).toEqual({
       key: 'busy',
       label: 'BUSY',
       icon: '↻',
       tooltip: 'Busy — process is starting or actively working',
+    });
+    expect(deriveLocalSidebarStatus({
+      status: 'running',
+      tail: '⠹ compiling…',
+      lastOutputAt: 1_000,
+    }, 10_000)).toEqual({
+      key: 'idle',
+      label: 'IDLE',
+      icon: '–',
+      tooltip: 'Idle — process is alive and ready for input',
     });
     expect(deriveLocalSidebarStatus({
       status: 'running',
@@ -242,8 +268,13 @@ describe('Tauri sidebar model', () => {
         localSession('shell-tests', {
           name: 'shell 8',
           kind: 'shell',
+          cwd: '/repo/psyche-build-wt/packages/ui',
           lastOutputAt: 9_000,
-          launch: { command: 'vitest', args: ['--watch'] },
+          launch: {
+            command: 'vitest',
+            args: ['--watch'],
+            cwd: '/repo/psyche-build-wt/apps/web',
+          },
         }),
         localSession('agent-local', {
           name: 'Planner',
@@ -277,6 +308,8 @@ describe('Tauri sidebar model', () => {
       'reply',
       'waiting for your response',
       'harness-x',
+      '/packages/ui',
+      '/apps/web',
       '/services/api',
       'ready',
     ]) {
@@ -328,6 +361,78 @@ describe('Tauri sidebar model', () => {
       selectedKey: '',
       now: 10_000,
     }).visibleCount).toBe(2);
+
+    const shellsOnly = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-active', { kind: 'shell', lastOutputAt: 9_000 }),
+        localSession('agent-local', { kind: 'agent', lastOutputAt: 9_000 }),
+      ],
+      covenSessions: [covenSession('coven-attention', { status: 'waiting' })],
+      query: '',
+      filter: 'shells',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(shellsOnly.visibleCount).toBe(1);
+    expect(shellsOnly.branches[0].categories.map((category) => category.label)).toEqual(['Shells']);
+    expect(shellsOnly.branches[0].categories[0].rows.map((row) => row.id)).toEqual(['shell-active']);
+  });
+
+  it('exposes stable project, branch, and category keys with count and attention totals', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-active', { kind: 'shell', lastOutputAt: 9_000 }),
+        localSession('shell-idle', { kind: 'shell', lastOutputAt: 500 }),
+        localSession('agent-local', { kind: 'agent', needsAttention: true }),
+      ],
+      covenSessions: [covenSession('coven-attention', { status: 'waiting' })],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(result).toMatchObject({
+      key: 'project:psyche',
+      count: 4,
+      visibleCount: 4,
+      attentionCount: 2,
+    });
+    expect(result.branches).toHaveLength(1);
+    expect(result.branches[0]).toMatchObject({
+      key: 'branch:/repo/psyche-build-wt',
+      count: 4,
+      attentionCount: 2,
+    });
+    expect(result.branches[0].categories).toMatchObject([
+      { key: 'agents', count: 2 },
+      { key: 'shells', count: 2 },
+    ]);
+  });
+
+  it('sorts same-status rows by recency before key fallback', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('active-older', { name: 'active-older', lastOutputAt: 8_500 }),
+        localSession('active-newer', { name: 'active-newer', lastOutputAt: 9_000 }),
+        localSession('active-oldest', { name: 'active-oldest', lastOutputAt: 8_100 }),
+      ],
+      covenSessions: [],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(result.branches[0].categories[0].rows.map((row) => row.id)).toEqual([
+      'active-newer',
+      'active-older',
+      'active-oldest',
+    ]);
   });
 
   it('returns case-insensitive non-overlapping match ranges and highlights project, branch, category, title, and metadata', () => {

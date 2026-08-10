@@ -183,7 +183,10 @@ function normalizeLocalRow(project, worktree, ownedRow, thread, now) {
     value: thread,
   };
   row.selectionKey = localSidebarSelectionKey(project, thread);
-  row.searchText = rowSearchText(project, worktree, row);
+  row.searchText = rowSearchText(project, worktree, row, [
+    thread?.cwd,
+    thread?.launch?.cwd,
+  ]);
   row.titleMatches = [];
   row.metaMatches = [];
   return row;
@@ -299,7 +302,7 @@ export function deriveLocalSidebarStatus(
   if (status === 'exited') return STATUS_PRESENTATION.exited;
   if (thread?.needsAttention) return STATUS_PRESENTATION.attention;
 
-  const isWorking = Boolean(thread?.isWorking) || sidebarTailIsWorking(thread?.tail);
+  const isWorking = Boolean(thread?.isWorking);
   if (thread?.spawning || status === 'starting' || isWorking) {
     return STATUS_PRESENTATION.busy;
   }
