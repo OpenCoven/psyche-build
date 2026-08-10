@@ -1183,6 +1183,10 @@
     return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
   }
 
+  function threadCovenSessionId(thread) {
+    return thread && thread.launch && thread.launch.covenSessionId || null;
+  }
+
   function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
@@ -3783,7 +3787,7 @@
     return state.threads.find(function (thread) {
       return (!threadId || thread.id === threadId)
         && thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     }) || null;
   }
@@ -3866,7 +3870,7 @@
     var presentation = PsycheSessions.statusPresentation(session.status);
     var attached = state.threads.some(function (thread) {
       return thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     });
     var row = document.createElement("button");
