@@ -5198,8 +5198,18 @@
   }
 
   async function createTerminalPane() {
+    var project = activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting a terminal", "warn");
+      return null;
+    }
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting a terminal", "warn");
+      return null;
+    }
     if (!(await showTerminalView())) return null;
-    return spawnShellThread();
+    return spawnShellThread(project);
   }
 
   document.addEventListener("keydown", async function (e) {
