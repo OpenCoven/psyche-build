@@ -1162,7 +1162,7 @@
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
         if (state.activeThreadId === thread.id) {
-          setStatus("start failed", "error");
+          setStatus(thread.name + " failed to start: " + msg, "error");
         }
       }
       syncThreadPaneMetadata(thread);
@@ -6073,6 +6073,56 @@
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
+  }
+
+  function agentLaunchOptions() {
+    return [
+      { id: "coven-code", label: "Coven Code", command: null, args: ["chat"], kind: "coven-chat" },
+      { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
+      { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
+      { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
+      { id: "grok-build", label: "Grok Build", command: "grok", args: [], kind: "agent-grok-build" },
+    ];
+  }
+
+  async function spawnAgentThread(agentId, project) {
+    project = project || activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting an agent", "warn");
+      return null;
+    }
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting an agent", "warn");
+      return null;
+    }
+    var entry = agentLaunchOptions().find(function (option) {
+      return option.id === agentId;
+    });
+    if (!entry) {
+      setStatus("Unknown agent: " + agentId, "error");
+      return null;
+    }
+    var command = entry.command;
+    if (entry.id === "coven-code") {
+      command = state.env && state.env.coven_path;
+      if (!command) {
+        setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+        return null;
+      }
+    }
+    if (!(await showTerminalView())) return null;
+    return createThread({
+      project: project,
+      worktreePath: worktree.path,
+      name: entry.label,
+      kind: entry.kind,
+      command: command,
+      args: entry.args.slice(),
+      launchKind: entry.kind,
+      projectRoot: project.root,
+      cwd: worktree.path,
+    });
   }
 
   function covenChatLaunch(project, worktreePath) {
