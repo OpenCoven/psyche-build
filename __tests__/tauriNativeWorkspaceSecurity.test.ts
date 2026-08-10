@@ -200,4 +200,30 @@ describe('Tauri native workspace security contract', () => {
     expect(resolution).toBeGreaterThan(postSyncFault);
     expect(resolve).toContain('certify_initial_forward_recovery');
   });
+
+  test('uses durable recovery decisions for API results and restart repair', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+    const initial = functionBody(source, 'resolve_initial_workspace_after_marker_failure');
+    const prior = functionBody(source, 'resolve_prior_workspace_after_commit_failure');
+    const resolvePrior = functionBody(source, 'resolve_prior_workspace_durable_decision');
+    const restore = functionBody(source, 'restore_workspace_backup_in');
+    const startup = functionBody(source, 'certify_prior_committed_recovery');
+
+    expect(source).toContain('enum WorkspaceRecoveryDecision');
+    expect(source).not.toContain('observe_prior_workspace_restart_outcome');
+    expect(initial).toContain('initial_workspace_recovery_decision');
+    expect(initial).toContain('reassert_initial_forward_recovery_decision');
+    expect(prior).toContain('resolve_prior_workspace_durable_decision');
+    expect(resolvePrior).toContain('prior_workspace_recovery_decision');
+    expect(resolvePrior).toContain('certify_prior_workspace_forward');
+    expect(resolvePrior).toContain('certify_prior_workspace_rollback');
+
+    const reserve = restore.indexOf('pinned reserve workspace restore candidate');
+    const attempts = restore.indexOf('for attempt in 0..2');
+    const fallback = restore.lastIndexOf('reserve_file');
+    expect(reserve).toBeGreaterThanOrEqual(0);
+    expect(reserve).toBeLessThan(attempts);
+    expect(fallback).toBeGreaterThan(attempts);
+    expect(startup).toContain('restore_workspace_backup_in(workspace_dir, committed_path, path)');
+  });
 });
