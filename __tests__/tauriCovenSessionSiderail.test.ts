@@ -1589,8 +1589,10 @@ describe('Tauri Coven session project rail', () => {
     expect(localRow.querySelector('.session-close')).toBe(close);
     expect(localRow.getAttribute('role')).toBe('treeitem');
     expect(localRow.getAttribute('aria-selected')).toBe('true');
+    expect(localRow.getAttribute('aria-keyshortcuts')).toBe('Delete');
     expect(localRow.classList.contains('active')).toBe(true);
     expect(localRow.getAttribute('aria-current')).toBe('true');
+    expect(close?.getAttribute('tabindex')).toBe('-1');
     await localRow.emit('click');
     expect(renderer.settings.selectedSessionKey).toContain('psyche:/alpha');
     expect(renderer.saveSettings).toHaveBeenCalled();
@@ -1616,6 +1618,16 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.setActiveProject).not.toHaveBeenCalled();
     expect(renderer.focusThread).not.toHaveBeenCalled();
 
+    renderer.hideThread.mockClear();
+    localRow.focus();
+    const deleteEvent = await localRow.emit('keydown', { key: 'Delete' });
+    expect(deleteEvent.defaultPrevented).toBe(true);
+    expect(renderer.hideThread).toHaveBeenCalledTimes(1);
+    expect(renderer.hideThread).toHaveBeenCalledWith('local');
+    expect(renderer.setActiveProject).not.toHaveBeenCalled();
+    expect(renderer.focusThread).not.toHaveBeenCalled();
+
+    renderer.hideThread.mockClear();
     const closeEvent = await close?.emit('click');
     expect(renderer.hideThread).toHaveBeenCalledWith('local');
     expect(closeEvent?.propagationStopped).toBe(true);
@@ -1866,6 +1878,7 @@ describe('Tauri Coven session project rail', () => {
       renderer.render();
 
       const rows = renderer.sessionListEl.querySelectorAll('.session-row');
+      expect(renderer.sessionListEl.getAttribute('aria-multiselectable')).toBe('true');
       expect(rows[0].classList.contains('is-picking')).toBe(true);
       expect(rows[0].classList.contains('active')).toBe(true);
       expect(rows[0].getAttribute('aria-current')).toBe('true');
@@ -1881,6 +1894,13 @@ describe('Tauri Coven session project rail', () => {
       // Picking must not drag the canvas around under the user.
       expect(renderer.focusThread).not.toHaveBeenCalled();
       expect(renderer.picked()).toEqual(['other', 'local']);
+    });
+
+    it('removes aria-multiselectable outside picking mode', () => {
+      const renderer = createRenderer({ threads });
+      renderer.render();
+
+      expect(renderer.sessionListEl.getAttribute('aria-multiselectable')).toBeNull();
     });
 
     it('turns × into "remove from set" while a set scopes the canvas', async () => {
@@ -1916,6 +1936,34 @@ describe('Tauri Coven session project rail', () => {
 
       expect(renderer.hideThread).toHaveBeenCalledWith('other');
       expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
+    });
+
+    it('lets Delete on the focused row run the same remove-from-set action as ×', async () => {
+      const renderer = createRenderer({
+        threads,
+        focusSets: [memberSet],
+        scopingSet: { id: 'set-1', name: 'Review', threadIds: ['local'] },
+      });
+      renderer.render();
+
+      const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
+      const row = wrappers[0].querySelector('.session-row');
+      const close = wrappers[0].querySelector('.session-close');
+      row?.focus();
+
+      const deleteEvent = await row?.emit('keydown', { key: 'Delete' });
+      expect(deleteEvent?.defaultPrevented).toBe(true);
+      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
+      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
+      expect(renderer.hideThread).not.toHaveBeenCalled();
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+
+      renderer.removeFromFocusSet.mockClear();
+      const closeEvent = await close?.emit('click');
+      expect(closeEvent?.propagationStopped).toBe(true);
+      expect(renderer.removeFromFocusSet).toHaveBeenCalledTimes(1);
+      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
+      expect(renderer.focusThread).not.toHaveBeenCalled();
     });
 
     it('returns to all panes when the project header is clicked', async () => {

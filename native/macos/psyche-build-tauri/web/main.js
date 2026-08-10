@@ -3628,6 +3628,8 @@
       "aria-label",
       "Sessions by project, branch, and category"
     );
+    if (setPicking) sessionListEl.setAttribute("aria-multiselectable", "true");
+    else sessionListEl.removeAttribute("aria-multiselectable");
     sessionListEl.replaceChildren();
 
     var currentSearchQuery = sessionFilter;
@@ -3825,6 +3827,7 @@
               var picking = Boolean(setPicking);
               var picked = picking && isPicked(thread.id);
               row.dataset.threadId = thread.id;
+              row.setAttribute("aria-keyshortcuts", "Delete");
               if (picking) {
                 row.classList.add("is-picking");
                 if (picked) row.classList.add("is-picked");
@@ -3842,9 +3845,15 @@
               }
               row.addEventListener("click", activateLocalRow);
               row.addEventListener("keydown", function (event) {
-                if (!ownTreeItemKeydown(event, row) || event.key !== "Enter") return;
+                if (!ownTreeItemKeydown(event, row)) return;
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  activateLocalRow();
+                  return;
+                }
+                if (event.key !== "Delete") return;
                 event.preventDefault();
-                activateLocalRow();
+                dismissLocalRow();
               });
               function beginSessionRename(event) {
                 event.stopPropagation();
@@ -3923,11 +3932,15 @@
                   ? "Hide the pane — the session keeps running"
                   : "Hide session";
               close.setAttribute("aria-label", close.title);
+              close.setAttribute("tabindex", "-1");
               close.textContent = "×";
-              close.addEventListener("click", function (event) {
-                event.stopPropagation();
+              function dismissLocalRow() {
                 if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
                 else hideThread(thread.id);
+              }
+              close.addEventListener("click", function (event) {
+                event.stopPropagation();
+                dismissLocalRow();
               });
               row.appendChild(close);
               categoryGroup.appendChild(wrapper);

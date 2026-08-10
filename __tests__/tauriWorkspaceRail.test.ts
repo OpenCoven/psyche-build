@@ -59,6 +59,8 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(renderSessionList).toMatch(
       /sessionListEl\.setAttribute\(\s*"aria-label",\s*"Sessions by project, branch, and category"\s*\)/,
     );
+    expect(renderSessionList).toContain('sessionListEl.setAttribute("aria-multiselectable", "true")');
+    expect(renderSessionList).toContain('sessionListEl.removeAttribute("aria-multiselectable")');
     expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
     expect(indexHtml).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
   });
@@ -168,6 +170,10 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
     expect(mainJs).toContain('"[data-tree-item]"');
     expect(mainJs).not.toContain('"[data-tree-item], .session-close"');
+    expect(mainJs).toContain('row.setAttribute("aria-keyshortcuts", "Delete")');
+    expect(mainJs).toContain('close.setAttribute("tabindex", "-1")');
+    expect(mainJs).toContain('if (event.key !== "Delete") return;');
+    expect(mainJs).toContain('dismissLocalRow();');
     expect(mainJs).toContain('if (current === -1) return;');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
