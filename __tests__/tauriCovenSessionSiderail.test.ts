@@ -1241,7 +1241,7 @@ describe('Tauri Coven session project rail', () => {
 
   it('uses honest navigation semantics instead of an unimplemented ARIA tree', () => {
     expect(indexHtml).toContain(
-      '<div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project"></div>',
+      '<div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project and branch"></div>',
     );
     expect(indexHtml).not.toMatch(/id="session-list"[^>]*role="tree"/);
     const rendererSource = extractFunctionSource(mainJs, 'renderSessionList');

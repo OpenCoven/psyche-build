@@ -22,8 +22,9 @@
 - Create `__tests__/tauriSidebarModel.test.ts`
   - Unit coverage for all pure model behavior.
 - Modify `native/macos/psyche-build-tauri/web/index.html`
-  - Add compact pinned tabs/search/actions/filters markup, tree semantics, and
-    the shared status legend tooltip.
+  - Add compact pinned tabs/search/actions/filters markup and the shared status
+    legend tooltip. Keep honest navigation semantics here; Task 4 promotes the
+    container to an ARIA tree once treeitem/group rendering lands.
 - Modify `native/macos/psyche-build-tauri/web/main.js`
   - Persist sidebar tab/filter/project expansion/selection key, track recent PTY
     output and working state, build the tree through reusable functions, attach
@@ -37,7 +38,8 @@
   - Exercise rendered hierarchy, merged Coven agents, actions, search,
     persistence hooks, ARIA, and state labels through the existing fake DOM.
 - Modify `__tests__/tauriWorkspaceRail.test.ts`
-  - Update source-contract assertions for the new tree and keyboard contract.
+  - Update source-contract assertions for the pinned controls now, then move
+    the tree-role assertion into Task 4 with the keyboard/tree contract.
 - Modify `__tests__/tauriSessionAttention.test.ts`
   - Verify the sidebar working/activity state uses the existing terminal-tail
     classifier without changing attention semantics.
@@ -715,7 +717,7 @@ git commit -m "feat: add sessions sidebar model" \
 Append these assertions to `__tests__/tauriWorkspaceRail.test.ts`:
 
 ```ts
-it('pins compact tabs, search, actions, filters, and a semantic session tree', () => {
+it('pins compact tabs, search, actions, filters, and honest navigation semantics', () => {
   const html = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
   expect(html).toContain('class="sidebar-controls"');
   expect(html).toContain('class="session-search-wrap"');
@@ -724,7 +726,7 @@ it('pins compact tabs, search, actions, filters, and a semantic session tree', (
     expect(html).toContain(`data-session-filter="${filter}"`);
   }
   expect(html).toContain('id="session-status-legend"');
-  expect(html).toContain('id="session-list" role="tree"');
+  expect(html).toContain('id="session-list" role="navigation"');
   expect(html).toContain('aria-label="Create a new session"');
   expect(html).toContain('aria-label="Collapse sidebar"');
 });
@@ -841,7 +843,7 @@ In `index.html`, replace the current `.sidebar-head`, `.sidebar-tabs`, and
   </div>
 </div>
 
-<div class="session-list" id="session-list" role="tree"
+<div class="session-list" id="session-list" role="navigation"
      aria-label="Sessions grouped by project and branch"></div>
 ```
 
@@ -1061,8 +1063,14 @@ git commit -m "feat: track sidebar session activity" \
 ### Task 4: Refactor the rail into reusable tree components
 
 **Files:**
+- Modify: `native/macos/psyche-build-tauri/web/index.html:141`
 - Modify: `native/macos/psyche-build-tauri/web/main.js:2938-3645`
+- Modify: `__tests__/tauriWorkspaceRail.test.ts`
 - Modify: `__tests__/tauriCovenSessionSiderail.test.ts`
+
+Promote `#session-list` from `role="navigation"` to `role="tree"` in this task,
+in the same change that introduces the first rendered `treeitem`/`group`
+semantics and their source-contract assertion.
 
 - [ ] **Step 1: Add failing rendered-tree tests**
 

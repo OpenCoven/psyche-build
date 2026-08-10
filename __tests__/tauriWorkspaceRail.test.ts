@@ -28,7 +28,7 @@ function functionSource(source: string, name: string) {
 }
 
 describe('Tauri project/worktree/pane rail', () => {
-  it('ships pinned sidebar controls and tree semantics contracts', () => {
+  it('ships pinned sidebar controls and honest navigation semantics contracts', () => {
     expect(indexHtml).toContain('class="sidebar-controls"');
     expect(indexHtml).toContain('class="session-search-wrap"');
     expect(indexHtml).toContain('<kbd class="session-search-key">/</kbd>');
@@ -52,7 +52,7 @@ describe('Tauri project/worktree/pane rail', () => {
       /<div class="session-filter-row" role="toolbar" aria-label="Filter sessions">[\s\S]*class="session-legend-button has-tooltip"[\s\S]*<\/div>\s*<div class="sr-only" id="session-status-legend">/,
     );
     expect(indexHtml).toMatch(
-      /id="session-list"[^>]*role="tree"[^>]*aria-label="Sessions grouped by project and branch"/,
+      /id="session-list"[^>]*role="navigation"[^>]*aria-label="Sessions grouped by project and branch"/,
     );
     expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
     expect(indexHtml).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
