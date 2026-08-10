@@ -27,7 +27,12 @@ struct PaneWorkspaceView: View {
             let showsSplit = supportsSplit(proxy.size)
             VStack(spacing: 0) {
                 if let primary = primaryPane {
+                    // The terminals are the greedy part; the switcher and the
+                    // composer keep their intrinsic height instead of being
+                    // squeezed to nothing by the scroll views above them.
                     terminals(primary: primary, showsSplit: showsSplit)
+                        .frame(maxHeight: .infinity)
+                        .layoutPriority(1)
                 } else {
                     ContentUnavailableView("No pane selected", systemImage: "rectangle.stack")
                         .accessibilityIdentifier("no-pane-detail")
@@ -42,6 +47,11 @@ struct PaneWorkspaceView: View {
                         onSelect: select,
                         onSplit: splitBeside
                     )
+                }
+                if primaryPane != nil {
+                    Divider().overlay(PsycheTheme.border)
+                    PaneComposer()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

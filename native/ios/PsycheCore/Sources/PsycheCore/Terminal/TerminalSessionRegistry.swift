@@ -98,17 +98,25 @@ public final class TerminalSessionRegistry: ObservableObject {
         focusedPaneID = paneID
     }
 
-    /// Input always goes to the focused pane. Routing by anything else is how
-    /// a keystroke ends up in the wrong terminal.
-    public func send(_ data: Data) async {
-        guard let focusedPaneID, let session = sessions[focusedPaneID] else {
-            lastErrorMessage = TerminalControlError.notAttached("none").localizedDescription
-            return
+    /// Sends to the pane the caller explicitly captured while it was focused.
+    /// Looking up focus inside this async operation would let a later tap
+    /// redirect bytes that were meant for the previous pane.
+    ///
+    /// Reports whether the host took it, so a composer can keep a draft that
+    /// never made it out rather than clearing the field on a failed send.
+    @discardableResult
+    public func send(_ data: Data, toPane paneID: String) async -> Bool {
+        guard let session = sessions[paneID] else {
+            lastErrorMessage = TerminalControlError.notAttached(paneID).localizedDescription
+            return false
         }
         do {
             try await client.send(data, toStream: session.streamID)
+            lastErrorMessage = nil
+            return true
         } catch {
             lastErrorMessage = error.localizedDescription
+            return false
         }
     }
 

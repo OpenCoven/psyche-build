@@ -68,6 +68,33 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testFixtureSendFailureFlagIsReadFromLaunchArguments() {
+        XCTAssertTrue(
+            AppModel.fixtureSendFails(
+                in: ["Psyche", "-uiFixture", "multiproject", "-uiTerminalSendFailure"]
+            )
+        )
+        XCTAssertFalse(
+            AppModel.fixtureSendFails(in: ["Psyche", "-uiFixture", "multiproject"])
+        )
+    }
+
+    func testFixtureCanDeterministicallyFailTerminalSends() async {
+        let model = AppModel(
+            fixture: WorkspaceFixtures.multiproject,
+            fixtureSendFails: true
+        )
+        await model.terminalRegistry.show(primary: "web-home")
+
+        let accepted = await model.terminalRegistry.send(
+            Data("keep\r".utf8),
+            toPane: "web-home"
+        )
+
+        XCTAssertFalse(accepted)
+        XCTAssertNotNil(model.terminalRegistry.lastErrorMessage)
+    }
+
     func testPairingRecordsTheHostForLaterContext() {
         let model = AppModel(fixture: WorkspaceFixtures.multiproject)
 

@@ -274,19 +274,33 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertEqual(registry.focusedPaneID, "%1")
     }
 
-    func testFocusChoosesTheInputTarget() async {
+    func testSendTargetsTheExplicitFocusedPane() async {
         let client = FakeTerminalClient()
         let registry = TerminalSessionRegistry(client: client)
         await registry.show(primary: "%1", secondary: "%2")
 
         registry.focus("%2")
-        await registry.send(Data("ls\r".utf8))
+        await registry.send(Data("ls\r".utf8), toPane: "%2")
 
         let inputStreamID = await client.lastInputStreamID
         let inputText = await client.lastInputText
         XCTAssertEqual(registry.focusedPaneID, "%2")
         XCTAssertEqual(inputStreamID, "stream-%2")
         XCTAssertEqual(inputText, "ls\r")
+    }
+
+    func testExplicitSendTargetDoesNotDriftWithFocus() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1", secondary: "%2")
+
+        registry.focus("%1")
+        let accepted = await registry.send(Data("pwd\r".utf8), toPane: "%2")
+
+        let inputStreamID = await client.lastInputStreamID
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(registry.focusedPaneID, "%1")
+        XCTAssertEqual(inputStreamID, "stream-%2")
     }
 
     func testFocusIgnoresAPaneThatIsNotAttached() async {
@@ -311,13 +325,15 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertEqual(registry.focusedPaneID, "%1")
     }
 
-    func testInputWithNothingFocusedReportsRatherThanGuessing() async {
+    func testInputToAnUnattachedPaneReportsRatherThanGuessing() async {
         let client = FakeTerminalClient()
         let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1")
 
-        await registry.send(Data("ls\r".utf8))
+        let accepted = await registry.send(Data("ls\r".utf8), toPane: "%9")
 
         let inputStreamID = await client.lastInputStreamID
+        XCTAssertFalse(accepted)
         XCTAssertNil(inputStreamID)
         XCTAssertNotNil(registry.lastErrorMessage)
     }
@@ -333,6 +349,47 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertEqual(resize?.streamID, "stream-%2")
         XCTAssertEqual(resize?.columns, 100)
         XCTAssertEqual(resize?.rows, 40)
+    }
+
+    func testSendReportsWhetherTheHostTookIt() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1")
+
+        let accepted = await registry.send(Data("ok\r".utf8), toPane: "%1")
+        XCTAssertTrue(accepted)
+
+        await client.setSendFailure(TerminalControlError.unexpectedResponse)
+        let refused = await registry.send(Data("lost\r".utf8), toPane: "%1")
+
+        // A composer clears its draft on true and keeps it on false, so this
+        // is the difference between losing what someone typed and not.
+        XCTAssertFalse(refused)
+        XCTAssertNotNil(registry.lastErrorMessage)
+    }
+
+    func testSendWithNoAttachedTargetReportsFailureRatherThanSuccess() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+
+        let accepted = await registry.send(Data("ls\r".utf8), toPane: "%1")
+
+        XCTAssertFalse(accepted)
+    }
+
+    func testSuccessfulSendClearsAStaleSendError() async {
+        let client = FakeTerminalClient()
+        let registry = TerminalSessionRegistry(client: client)
+        await registry.show(primary: "%1")
+        await client.setSendFailure(TerminalControlError.unexpectedResponse)
+        _ = await registry.send(Data("lost".utf8), toPane: "%1")
+        XCTAssertNotNil(registry.lastErrorMessage)
+
+        await client.setSendFailure(nil)
+        let accepted = await registry.send(Data("ok".utf8), toPane: "%1")
+
+        XCTAssertTrue(accepted)
+        XCTAssertNil(registry.lastErrorMessage)
     }
 
     // MARK: - Errors
@@ -377,6 +434,7 @@ private actor FakeTerminalClient: TerminalControlling {
     private var replayMode: TerminalReplayMode = .append
     private var latestSequence: UInt64 = 0
     private var attachFailure: (any Error)?
+    private var sendFailure: (any Error)?
 
     private let frames: AsyncStream<TerminalBinaryFrame>
     private let continuation: AsyncStream<TerminalBinaryFrame>.Continuation
@@ -390,6 +448,7 @@ private actor FakeTerminalClient: TerminalControlling {
     func setReplayMode(_ mode: TerminalReplayMode) { replayMode = mode }
     func setLatestSequence(_ sequence: UInt64) { latestSequence = sequence }
     func setAttachFailure(_ error: (any Error)?) { attachFailure = error }
+    func setSendFailure(_ error: (any Error)?) { sendFailure = error }
 
     func attach(paneID: String, sinceSequence: UInt64?) async throws -> TerminalSession {
         resumePoints.append(sinceSequence)
@@ -409,6 +468,7 @@ private actor FakeTerminalClient: TerminalControlling {
     }
 
     func send(_ data: Data, toStream streamID: String) async throws {
+        if let sendFailure { throw sendFailure }
         lastInputStreamID = streamID
         lastInputText = String(decoding: data, as: UTF8.self)
     }

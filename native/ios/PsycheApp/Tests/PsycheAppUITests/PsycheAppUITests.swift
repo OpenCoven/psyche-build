@@ -145,6 +145,105 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertFalse(app.otherElements["terminal-pane-web-home"].exists)
     }
 
+    // MARK: - Composer
+
+    func testComposerAndKeyRowAreAvailableOnAnOpenPane() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        XCTAssertTrue(element("pane-composer", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("coding-key-row", in: app).waitForExistence(timeout: 10))
+        for key in ["escape", "tab", "control", "alt", "up", "down", "left", "right", "enter"] {
+            XCTAssertTrue(
+                element("terminal-key-\(key)", in: app).exists,
+                "Missing key \(key)"
+            )
+        }
+    }
+
+    func testControlAndAltButtonsExposeTheirArmedState() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        let control = element("terminal-key-control", in: app)
+        let alt = element("terminal-key-alt", in: app)
+        XCTAssertTrue(control.waitForExistence(timeout: 10))
+        XCTAssertTrue(alt.exists)
+
+        control.tap()
+        alt.tap()
+
+        XCTAssertTrue(control.isSelected)
+        XCTAssertTrue(alt.isSelected)
+    }
+
+    /// A half-typed command belongs to the terminal it was meant for. If it
+    /// surfaced in another pane it could be sent to the wrong shell.
+    func testADraftStaysWithItsOwnPane() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        let field = app.textViews["pane-composer-field"].exists
+            ? app.textViews["pane-composer-field"]
+            : app.textFields["pane-composer-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText("rm -rf build")
+
+        // Switch to another pane: its composer must be empty.
+        let other = row("pane-chip-ios-cockpit", in: app)
+        XCTAssertTrue(other.waitForExistence(timeout: 10))
+        other.tap()
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+
+        let otherField = app.textViews["pane-composer-field"].exists
+            ? app.textViews["pane-composer-field"]
+            : app.textFields["pane-composer-field"]
+        XCTAssertTrue(otherField.waitForExistence(timeout: 10))
+        XCTAssertFalse(
+            (otherField.value as? String ?? "").contains("rm -rf build"),
+            "A draft leaked into another pane"
+        )
+
+        // Back again: the original draft is still there.
+        let back = row("pane-chip-web-home", in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        back.tap()
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+
+        let restored = app.textViews["pane-composer-field"].exists
+            ? app.textViews["pane-composer-field"]
+            : app.textFields["pane-composer-field"]
+        XCTAssertTrue(restored.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            (restored.value as? String ?? "").contains("rm -rf build"),
+            "The draft did not come back with its pane"
+        )
+    }
+
+    func testFailedSendShowsAnErrorAndKeepsTheDraft() throws {
+        let app = launchApp(arguments: [
+            "-uiFixture", "multiproject", "-uiTerminalSendFailure",
+        ])
+        openWebHomePane(in: app)
+        let field = app.textViews["pane-composer-field"].exists
+            ? app.textViews["pane-composer-field"]
+            : app.textFields["pane-composer-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText("preserve this")
+
+        let send = element("pane-composer-send", in: app)
+        XCTAssertTrue(send.exists)
+        send.tap()
+
+        XCTAssertTrue(element("pane-composer-error", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-composer-error-dismiss", in: app).exists)
+        XCTAssertTrue(
+            (field.value as? String ?? "").contains("preserve this"),
+            "A failed send silently cleared the draft"
+        )
+    }
+
     // MARK: - Compact width (iPhone)
 
     func testCompactOpensANeedsYouPaneFromNowInOneTap() throws {

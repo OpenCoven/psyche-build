@@ -28,7 +28,7 @@ final class AppModel: ObservableObject {
 
     var isFixture: Bool { fixtureName != nil }
 
-    init(fixture: String? = nil) {
+    init(fixture: String? = nil, fixtureSendFails: Bool = false) {
         fixtureName = fixture
 
         guard let fixture else {
@@ -43,7 +43,9 @@ final class AppModel: ObservableObject {
         workspaceStore = DemoStore.makeWorkspaceStore(fixture: fixture)
         // A fixture terminal client, so the fixture shell renders real output
         // through the real registry without opening a socket.
-        terminalRegistry = TerminalSessionRegistry(client: FixtureTerminalClient())
+        terminalRegistry = TerminalSessionRegistry(
+            client: FixtureTerminalClient(sendFails: fixtureSendFails)
+        )
         terminalRegistry.start()
         hostName = Self.fixtureHostName
     }
@@ -64,6 +66,10 @@ final class AppModel: ObservableObject {
         }
         let name = arguments[flag + 1]
         return name.isEmpty ? nil : name
+    }
+
+    static func fixtureSendFails(in arguments: [String]) -> Bool {
+        arguments.contains("-uiTerminalSendFailure")
     }
 
     func start() async {

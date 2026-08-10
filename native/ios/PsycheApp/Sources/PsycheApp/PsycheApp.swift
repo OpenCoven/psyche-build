@@ -6,8 +6,12 @@ struct PsycheApp: App {
     @StateObject private var model: AppModel
 
     init() {
-        let fixture = AppModel.fixtureName(in: ProcessInfo.processInfo.arguments)
-        _model = StateObject(wrappedValue: AppModel(fixture: fixture))
+        let arguments = ProcessInfo.processInfo.arguments
+        let fixture = AppModel.fixtureName(in: arguments)
+        _model = StateObject(wrappedValue: AppModel(
+            fixture: fixture,
+            fixtureSendFails: AppModel.fixtureSendFails(in: arguments)
+        ))
     }
 
     var body: some Scene {

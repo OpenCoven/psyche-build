@@ -7,12 +7,17 @@ import Foundation
 /// the fixture shell exercising the same registry the live app uses.
 public actor FixtureTerminalClient: TerminalControlling {
     private let outputByPaneID: [String: String]
+    private let sendFails: Bool
     private let frames: AsyncStream<TerminalBinaryFrame>
     private let continuation: AsyncStream<TerminalBinaryFrame>.Continuation
     private var sequenceByPaneID: [String: UInt64] = [:]
 
-    public init(outputByPaneID: [String: String] = FixtureTerminalClient.defaultOutput) {
+    public init(
+        outputByPaneID: [String: String] = FixtureTerminalClient.defaultOutput,
+        sendFails: Bool = false
+    ) {
         self.outputByPaneID = outputByPaneID
+        self.sendFails = sendFails
         let stream = AsyncStream<TerminalBinaryFrame>.makeStream()
         frames = stream.stream
         continuation = stream.continuation
@@ -65,7 +70,11 @@ public actor FixtureTerminalClient: TerminalControlling {
 
     public func detach(streamID: String) async throws {}
 
-    public func send(_ data: Data, toStream streamID: String) async throws {}
+    public func send(_ data: Data, toStream streamID: String) async throws {
+        if sendFails {
+            throw TerminalControlError.unexpectedResponse
+        }
+    }
 
     public func resize(streamID: String, columns: Int, rows: Int) async throws {}
 
