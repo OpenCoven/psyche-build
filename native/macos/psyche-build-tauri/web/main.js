@@ -5577,7 +5577,7 @@
     markActiveSurface("browser");
     var browser = ensureBrowserModel(project, worktreePath);
     var tab = null;
-    if (existing || !browser.tabs.length) {
+    if (options.requireNew || existing || !browser.tabs.length) {
       tab = createBrowserTab(project, "about:blank", true);
     } else {
       renderBrowserTabs();
