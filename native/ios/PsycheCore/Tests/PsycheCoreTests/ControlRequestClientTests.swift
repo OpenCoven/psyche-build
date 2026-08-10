@@ -3,10 +3,30 @@ import XCTest
 @testable import PsycheCore
 
 final class ControlRequestClientTests: XCTestCase {
+    func testRequestBeforeGenerationActivationFailsWithoutSending() async {
+        let transport = AmbiguousFailingTransport()
+        let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+
+        do {
+            _ = try await client.send(.workspaceSnapshot(
+                ControlRequestIDOnly(requestID: "pre-v3")
+            ))
+            XCTFail("Expected a request before v3 activation to fail")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
+
+        let sent = await transport.sentMessages
+        let pending = await client.pendingRequestCount
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertEqual(pending, 0)
+    }
+
     func testCorrelatesAResponseBackToItsCaller() async throws {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -27,6 +47,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         async let second = client.send(.killPane(PaneIDControlRequest(requestID: "req-2", paneID: "pane-1")))
@@ -46,6 +67,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
         let failure = MobileProtocolErrorResponse(
             requestID: "req-1",
             code: "pane_not_found",
@@ -71,6 +93,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -103,6 +126,7 @@ final class ControlRequestClientTests: XCTestCase {
         try await transport.connect(to: endpoint())
         let scheduler = ManualScheduler()
         let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+        _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -131,6 +155,7 @@ final class ControlRequestClientTests: XCTestCase {
             scheduler: scheduler,
             timeout: timeout
         )
+        _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(
             ControlRequestIDOnly(requestID: "req-1")
@@ -151,6 +176,7 @@ final class ControlRequestClientTests: XCTestCase {
         try await transport.connect(to: endpoint())
         let scheduler = ManualScheduler()
         let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+        _ = await activateGeneration(on: client)
 
         async let response = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -169,6 +195,7 @@ final class ControlRequestClientTests: XCTestCase {
         try await transport.connect(to: endpoint())
         let scheduler = ManualScheduler()
         let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -192,6 +219,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -214,6 +242,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -232,6 +261,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         async let second = client.send(.killPane(PaneIDControlRequest(requestID: "req-2", paneID: "pane-1")))
@@ -268,12 +298,14 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
         await client.failAll()
         _ = try? await first
 
+        _ = await activateGeneration(on: client, id: 2)
         async let second = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
         await client.handle(.ack(ControlAckResponse(requestID: "req-1")))
@@ -364,6 +396,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         let first = Task {
             try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
@@ -372,6 +405,7 @@ final class ControlRequestClientTests: XCTestCase {
 
         await client.failAll()
 
+        _ = await activateGeneration(on: client, id: 2)
         let second = Task {
             try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         }
@@ -388,6 +422,7 @@ final class ControlRequestClientTests: XCTestCase {
         try await transport.connect(to: endpoint())
         let scheduler = ManualScheduler()
         let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+        _ = await activateGeneration(on: client)
         let request = Task {
             try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         }
@@ -410,6 +445,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
         let first = Task {
             try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         }
@@ -435,6 +471,7 @@ final class ControlRequestClientTests: XCTestCase {
         try await transport.connect(to: endpoint())
         let scheduler = ManualScheduler()
         let client = ControlRequestClient(transport: transport, scheduler: scheduler)
+        _ = await activateGeneration(on: client)
 
         async let first = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
@@ -444,6 +481,7 @@ final class ControlRequestClientTests: XCTestCase {
 
         await client.failAll()
 
+        _ = await activateGeneration(on: client, id: 2)
         async let second = client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
         try await waitForPendingRequest(on: client)
         await client.handle(.ack(ControlAckResponse(requestID: "req-1", ok: false)))
@@ -455,6 +493,7 @@ final class ControlRequestClientTests: XCTestCase {
     func testAmbiguousTransportFailureRetiresIDUntilDisconnect() async throws {
         let transport = AmbiguousFailingTransport()
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         do {
             _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(
@@ -480,6 +519,7 @@ final class ControlRequestClientTests: XCTestCase {
     func testTransportFailureFailsTheCaller() async {
         // Never connected, so FakeTransport.send throws.
         let client = ControlRequestClient(transport: FakeTransport(), scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         do {
             _ = try await client.send(.workspaceSnapshot(ControlRequestIDOnly(requestID: "req-1")))
@@ -495,6 +535,7 @@ final class ControlRequestClientTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: endpoint())
         let client = ControlRequestClient(transport: transport, scheduler: ManualScheduler())
+        _ = await activateGeneration(on: client)
 
         do {
             _ = try await client.send(.unknown(UnknownControlRequest(
@@ -527,6 +568,15 @@ final class ControlRequestClientTests: XCTestCase {
             port: 4242,
             certificateFingerprint: String(repeating: "a", count: 64)
         )
+    }
+
+    private func activateGeneration(
+        on client: ControlRequestClient,
+        id: UInt64 = 1
+    ) async -> ConnectionGeneration {
+        let generation = ConnectionGeneration(id: id)
+        await client.beginGeneration(generation)
+        return generation
     }
 
     /// The request registers on the actor before `send` suspends, but the

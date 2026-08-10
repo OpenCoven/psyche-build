@@ -69,6 +69,8 @@ public actor ConnectionManager {
     private var connectExecutionOwner: UUID?
     private var activeTeardown: UUID?
     private var teardownWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var lifecycleIntentEpoch: UInt64 = 0
+    private var teardownFinalStateOverride: ConnectionState?
     private var activeMessageSession: UUID?
     private var activeSnapshotRequestID: String?
     private var transportCleanupGeneration: ConnectionGeneration?
@@ -140,7 +142,9 @@ public actor ConnectionManager {
     }
 
     public func connect(to endpoint: HostEndpoint) async {
+        let intentEpoch = lifecycleIntentEpoch
         guard await waitForTeardownCompletionUnlessCancelled() else { return }
+        guard lifecycleIntentEpoch == intentEpoch else { return }
         // Guard on execution, not on state. connect() keeps awaiting past the
         // .authenticating transition and the actor yields at every await.
         guard connectExecutionOwner == nil else { return }
@@ -154,6 +158,7 @@ public actor ConnectionManager {
         }
 
         await tearDownActiveConnection()
+        guard lifecycleIntentEpoch == intentEpoch else { return }
         guard !Task.isCancelled else {
             transition(to: .failed(ConnectionManagerError.connectionCancelled.localizedDescription))
             return
@@ -271,6 +276,12 @@ public actor ConnectionManager {
     }
 
     public func disconnect() async {
+        lifecycleIntentEpoch &+= 1
+        if activeTeardown != nil {
+            transition(to: .disconnecting)
+            teardownFinalStateOverride = .disconnected
+            return
+        }
         guard state != .disconnected else {
             await resetPerConnectionState()
             return
@@ -461,10 +472,13 @@ public actor ConnectionManager {
                 generation: generation
             )
         case .projectList(let projects):
+            guard hasNegotiatedV3 else { return .ignored }
             self.projects = projects
         case .paneList(let panes), .paneListChanged(let panes):
+            guard hasNegotiatedV3 else { return .ignored }
             self.panes = panes
         case .paneOutput(let output):
+            guard hasNegotiatedV3 else { return .ignored }
             latestOutputByPane[output.paneID] = output
         case .error(let error):
             return .failed(error.message)
@@ -658,8 +672,10 @@ public actor ConnectionManager {
         if shouldDisconnectTransport {
             await transport.disconnect()
         }
-        if let finalState {
-            transition(to: finalState)
+        let resolvedFinalState = teardownFinalStateOverride ?? finalState
+        teardownFinalStateOverride = nil
+        if let resolvedFinalState {
+            transition(to: resolvedFinalState)
         }
         completeTeardown(teardown)
     }

@@ -618,6 +618,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: Fixtures.endpoint)
         let client = ControlRequestClient(transport: transport)
+        await client.beginGeneration(ConnectionGeneration(id: 1))
         let store = WorkspaceStore(controlRequests: client)
         store.applySnapshot(workspace: Fixtures.workspace(revision: 1), sequence: 1)
         store.applyEvent(workspace: Fixtures.workspace(revision: 3), sequence: 3)
@@ -643,6 +644,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let transport = FakeTransport()
         try await transport.connect(to: Fixtures.endpoint)
         let client = ControlRequestClient(transport: transport)
+        await client.beginGeneration(ConnectionGeneration(id: 1))
         let store = WorkspaceStore(controlRequests: client)
 
         async let recovered = store.requestFullSnapshot()
