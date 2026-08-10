@@ -42,6 +42,11 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+type PickerProject = {
+  id: string;
+  root: string;
+};
+
 describe('Tauri agent picker', () => {
   it('offers the fixed launch registry in product order', () => {
     const agentLaunchOptions = compileFunction<() => Array<Record<string, unknown>>>(
@@ -60,10 +65,11 @@ describe('Tauri agent picker', () => {
 
   it('launches an agent in the selected worktree', async () => {
     const createCalls: Array<Record<string, unknown>> = [];
-    const project = { id: 'project', root: '/repo' };
+    const registryArgs = ['--fixture-arg'];
+    const project: PickerProject = { id: 'project', root: '/repo' };
     const spawnAgentThread = compileFunction<(
       agentId: string,
-      project?: typeof project,
+      project?: PickerProject,
     ) => Promise<Record<string, unknown> | null>>(
       functionSource('spawnAgentThread'),
       {
@@ -71,7 +77,7 @@ describe('Tauri agent picker', () => {
         selectedWorktree: () => ({ path: '/repo/worktree' }),
         showTerminalView: async () => true,
         agentLaunchOptions: () => [
-          { id: 'codex', label: 'Codex CLI', command: 'codex', args: [], kind: 'agent-codex' },
+          { id: 'codex', label: 'Codex CLI', command: 'codex', args: registryArgs, kind: 'agent-codex' },
         ],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
@@ -84,15 +90,21 @@ describe('Tauri agent picker', () => {
 
     const result = await spawnAgentThread('codex');
 
-    expect(result).toMatchObject({
+    expect(createCalls).toHaveLength(1);
+    const created = createCalls[0]!;
+    expect(result).toBe(created);
+    expect(created).toMatchObject({
       name: 'Codex CLI',
       kind: 'agent-codex',
       command: 'codex',
-      args: [],
+      args: ['--fixture-arg'],
+      launchKind: 'agent-codex',
+      projectRoot: '/repo',
       cwd: '/repo/worktree',
       worktreePath: '/repo/worktree',
     });
-    expect(createCalls).toHaveLength(1);
+    expect(created.args).toEqual(registryArgs);
+    expect(created.args).not.toBe(registryArgs);
   });
 
   it('resolves Coven Code through the discovered Coven executable', async () => {
