@@ -7,6 +7,7 @@ const repoRoot = process.cwd();
 const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
 const panesRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web/panes');
 const footerModule = await import(pathToFileURL(join(panesRoot, 'pane-footer.mjs')).href);
+const paneTreeModule = await import(pathToFileURL(join(panesRoot, 'pane-tree.mjs')).href);
 const tauriPackage = JSON.parse(readFileSync(join(tauriRoot, 'package.json'), 'utf8')) as {
   dependencies: Record<string, string>;
 };
@@ -331,28 +332,67 @@ describe('pane metrics refresh contract', () => {
   it('polls visible agent panes only', () => {
     expect(mainJs).toMatch(/function threadWantsMetrics\(thread\)/);
     expect(mainJs).toMatch(
-      /function threadWantsMetrics\(thread\)[\s\S]*thread\.launch\.launchKind === "coven-chat"[\s\S]*canvasThreadIds\(\)\.indexOf\(thread\.id\)/,
+      /function threadWantsMetrics\(thread\)[\s\S]*isLiveThread\(thread\)[\s\S]*thread\.launch\.launchKind === "coven-chat"[\s\S]*thread\.pane\.isConnected[\s\S]*effectiveCanvasThreadIds\(\)\.indexOf\(thread\.id\)/,
     );
     expect(mainJs).toMatch(/setInterval\(refreshVisiblePaneMetrics,\s*15000\)/);
     expect(mainJs).toMatch(/var PANE_METRICS_POLL_MS = 15000;/);
   });
 
-  it('selects only visible, live, mounted Coven sessions with an exact id', () => {
-    const canvasIds = ['visible'];
-    const threadWantsMetrics = compileFunction<(thread: any) => boolean>(
-      functionSource(mainJs, 'threadWantsMetrics'),
-      { canvasThreadIds: () => canvasIds },
+  function metricsEligibility(
+    layout: Record<string, any>,
+    threads: Record<string, any>[],
+    focusSets: Record<string, any>[] = [],
+  ) {
+    const factory = Function(
+      'PsychePanes',
+      'state',
+      'activePaneLayout',
+      'seedFocusSets',
+      `"use strict";
+       var focusSets = seedFocusSets;
+       var SPAN_ORIENTATION = { column: "row", row: "column" };
+       var findFocusSet = ${functionSource(mainJs, 'findFocusSet')};
+       var scopedPaneRoot = ${functionSource(mainJs, 'scopedPaneRoot')};
+       var spanSignature = ${functionSource(mainJs, 'spanSignature')};
+       var effectivePaneRoot = ${functionSource(mainJs, 'effectivePaneRoot')};
+       var effectiveCanvasThreadIds = ${functionSource(mainJs, 'effectiveCanvasThreadIds')};
+       var isLiveThread = ${functionSource(mainJs, 'isLiveThread')};
+       return ${functionSource(mainJs, 'threadWantsMetrics')};`,
     );
-    const eligible = {
-      id: 'visible',
+    return factory(
+      paneTreeModule,
+      { threads },
+      () => layout,
+      focusSets,
+    ) as (thread: Record<string, any>) => boolean;
+  }
+
+  function eligibleThread(id: string) {
+    return {
+      id,
       hidden: false,
+      closing: false,
       status: 'running',
+      pane: { isConnected: true },
+      launch: { launchKind: 'coven-chat', covenSessionId: `session-${id}` },
+    };
+  }
+
+  it('selects only canonical live, connected Coven sessions with an exact id', () => {
+    const eligible = {
+      ...eligibleThread('visible'),
       launch: { launchKind: 'coven-chat', covenSessionId: 'session-exact' },
     };
+    const layout = { root: paneTreeModule.createLeaf('leaf-visible', 'visible') };
+    const threadWantsMetrics = metricsEligibility(layout, [eligible]);
 
     expect(threadWantsMetrics(eligible)).toBe(true);
+    expect(threadWantsMetrics({ ...eligible })).toBe(false);
     expect(threadWantsMetrics({ ...eligible, hidden: true })).toBe(false);
     expect(threadWantsMetrics({ ...eligible, status: 'exited' })).toBe(false);
+    eligible.pane.isConnected = false;
+    expect(threadWantsMetrics(eligible)).toBe(false);
+    eligible.pane.isConnected = true;
     expect(threadWantsMetrics({
       ...eligible,
       launch: { ...eligible.launch, launchKind: 'coven-attach' },
@@ -361,7 +401,41 @@ describe('pane metrics refresh contract', () => {
       ...eligible,
       launch: { ...eligible.launch, covenSessionId: '' },
     })).toBe(false);
-    expect(threadWantsMetrics({ ...eligible, id: 'detached' })).toBe(false);
+  });
+
+  it('excludes panes hidden by maximize and focus-set presentation state', () => {
+    const visible = eligibleThread('visible');
+    const excluded = eligibleThread('excluded');
+    const root = paneTreeModule.insertBelow(
+      paneTreeModule.createLeaf('leaf-visible', visible.id),
+      'leaf-visible',
+      paneTreeModule.createLeaf('leaf-excluded', excluded.id),
+      'split-root',
+    );
+    const layout: {
+      root: Record<string, any>;
+      focusedLeafId: string;
+      maximizedLeafId: string | null;
+      activeSetId: string | null;
+    } = {
+      root,
+      focusedLeafId: 'leaf-visible',
+      maximizedLeafId: 'leaf-visible',
+      activeSetId: null,
+    };
+    let threadWantsMetrics = metricsEligibility(layout, [visible, excluded]);
+
+    expect(threadWantsMetrics(visible)).toBe(true);
+    expect(threadWantsMetrics(excluded)).toBe(false);
+
+    layout.maximizedLeafId = null;
+    layout.activeSetId = 'set-visible';
+    threadWantsMetrics = metricsEligibility(layout, [visible, excluded], [{
+      id: 'set-visible',
+      threadIds: [visible.id],
+    }]);
+    expect(threadWantsMetrics(visible)).toBe(true);
+    expect(threadWantsMetrics(excluded)).toBe(false);
   });
 
   it('debounces refresh after PTY output and rechecks eligibility', () => {
@@ -419,6 +493,10 @@ describe('pane metrics refresh contract', () => {
         invoke,
         PsychePanes: { shouldApplyMetricsResponse },
         metricsErrorState: vi.fn(),
+        loadingPaneMetrics: compileFunction(
+          functionSource(mainJs, 'loadingPaneMetrics'),
+          {},
+        ),
       },
     );
     const thread = {
@@ -545,6 +623,8 @@ describe('pane metrics refresh contract', () => {
         paneFooterPopoverTrigger: null,
         paneFooterPopoverThreadId: null,
         paneFooterPopoverCleanup: null,
+        paneFooterPopover: null,
+        paneFooterPopoverOwner: null,
       },
     );
 
@@ -563,6 +643,192 @@ describe('pane metrics refresh contract', () => {
     ]);
     expect(popover.attributes.get('role')).toBe('dialog');
     expect(popover.attributes.get('aria-label')).toBe('Agent pane session usage');
+  });
+});
+
+describe('pane usage popover lifecycle', () => {
+  function popoverHarness() {
+    const createElement = () => {
+      const element = {
+        className: '',
+        hidden: false,
+        removed: false,
+        dataset: {} as Record<string, string>,
+        attributes: new Map<string, string>(),
+        children: [] as any[],
+        style: {},
+        setAttribute(name: string, value: string) { this.attributes.set(name, value); },
+        appendChild(child: any) { this.children.push(child); return child; },
+        contains(target: unknown) {
+          return target === this || this.children.includes(target);
+        },
+        getBoundingClientRect() { return { width: 300 }; },
+        focus: vi.fn(),
+        remove() { this.removed = true; },
+      };
+      return element;
+    };
+    const trigger = createElement();
+    const document = {
+      activeElement: trigger,
+      createElement,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      querySelectorAll: vi.fn(() => []),
+    };
+    const threadA = {
+      id: 'thread-a',
+      name: 'Agent A',
+      kind: 'coven-chat',
+      paneFooter: createElement(),
+      paneFooterItems: createElement(),
+      paneFooterOverflow: createElement(),
+      createPaneFooterButton: vi.fn(() => createElement()),
+    };
+    const threadB = {
+      id: 'thread-b',
+      name: 'Agent B',
+      kind: 'coven-chat',
+      paneFooter: createElement(),
+      paneFooterItems: createElement(),
+      paneFooterOverflow: createElement(),
+      createPaneFooterButton: vi.fn(() => createElement()),
+    };
+    const state = { threads: [threadA, threadB] };
+    const factory = Function(
+      'document',
+      'state',
+      'PsychePanes',
+      'paneFooterState',
+      'paneUsageRow',
+      'positionPaneFooterPopover',
+      'closePaneFooterMenu',
+      `"use strict";
+       var paneFooterPopoverCleanup = null;
+       var paneFooterPopover = null;
+       var paneFooterPopoverOwner = null;
+       var paneFooterPopoverTrigger = null;
+       var paneFooterPopoverThreadId = null;
+       var closePaneFooterPopovers = ${functionSource(mainJs, 'closePaneFooterPopovers')};
+       var closePaneUsagePopoverForFooter =
+         ${functionSource(mainJs, 'closePaneUsagePopoverForFooter')};
+       var openPaneUsagePopover = ${functionSource(mainJs, 'openPaneUsagePopover')};
+       var syncPaneFooter = ${functionSource(mainJs, 'syncPaneFooter')};
+       return {
+         openPaneUsagePopover,
+         syncPaneFooter,
+         currentPopover: function () { return paneFooterPopover; }
+       };`,
+    );
+    const harness = factory(
+      document,
+      state,
+      {
+        footerItems: () => [{ key: 'usage' }],
+        footerTier: () => 'full',
+        isAgentPaneKind: () => true,
+        hiddenFooterKeys: () => [],
+      },
+      () => ({
+        metrics: {
+          phase: 'loading',
+          sessionId: 'session-a',
+          model: null,
+          contextUsed: null,
+          contextLimit: null,
+          cumulativeInputTokens: null,
+          cumulativeOutputTokens: null,
+          spendUsd: null,
+          costKind: 'unknown',
+          updatedAt: null,
+        },
+      }),
+      () => createElement(),
+      vi.fn(),
+      vi.fn(),
+    ) as {
+      openPaneUsagePopover: (thread: typeof threadA) => ReturnType<typeof createElement>;
+      syncPaneFooter: (thread: typeof threadA) => void;
+      currentPopover: () => ReturnType<typeof createElement> | null;
+    };
+    return { harness, threadA, threadB };
+  }
+
+  it('removes an owned usage dialog before rerendering its footer trigger', () => {
+    const { harness, threadA, threadB } = popoverHarness();
+    const popover = harness.openPaneUsagePopover(threadA);
+
+    harness.syncPaneFooter(threadB);
+    expect(popover.removed).toBe(false);
+    expect(harness.currentPopover()).toBe(popover);
+
+    harness.syncPaneFooter(threadA);
+    expect(popover.removed).toBe(true);
+    expect(harness.currentPopover()).toBeNull();
+  });
+
+  it('closes on another footer action without swallowing that action', () => {
+    const calls: string[] = [];
+    const popover = { contains: () => false };
+    const trigger = { contains: () => false };
+    const handlePointerDown = compileFunction<(event: {
+      target: unknown;
+      preventDefault: () => void;
+      stopPropagation: () => void;
+    }) => void>(functionSource(mainJs, 'handlePaneFooterPopoverPointerDown'), {
+      paneFooterPopover: popover,
+      paneFooterPopoverTrigger: trigger,
+      closePaneFooterPopovers: () => { calls.push('close'); },
+    });
+    const handleClick = compileFunction<(
+      thread: { id: string },
+      item: { action: string },
+      event: { stopPropagation: () => void },
+    ) => boolean>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
+      runPaneFooterAction: () => { calls.push('action'); return true; },
+      closePaneFooterMenu: () => { calls.push('close-menu'); },
+      focusPaneAfterFooterAction: () => { calls.push('focus-pane'); },
+    });
+    const pointerEvent = {
+      target: {},
+      preventDefault: () => { calls.push('prevent'); },
+      stopPropagation: () => { calls.push('stop-pointer'); },
+    };
+
+    handlePointerDown(pointerEvent);
+    handleClick(
+      { id: 'thread-b' },
+      { action: 'copy' },
+      { stopPropagation: () => { calls.push('stop-click'); } },
+    );
+
+    expect(calls).toEqual([
+      'close',
+      'stop-click',
+      'action',
+      'close-menu',
+      'focus-pane',
+    ]);
+  });
+
+  it('keeps pointerdown inside the active trigger or dialog exempt', () => {
+    const insidePopover = {};
+    const insideTrigger = {};
+    const close = vi.fn();
+    const handlePointerDown = compileFunction<(event: { target: unknown }) => void>(
+      functionSource(mainJs, 'handlePaneFooterPopoverPointerDown'),
+      {
+        paneFooterPopover: { contains: (target: unknown) => target === insidePopover },
+        paneFooterPopoverTrigger: {
+          contains: (target: unknown) => target === insideTrigger,
+        },
+        closePaneFooterPopovers: close,
+      },
+    );
+
+    handlePointerDown({ target: insidePopover });
+    handlePointerDown({ target: insideTrigger });
+    expect(close).not.toHaveBeenCalled();
   });
 });
 
@@ -1070,6 +1336,7 @@ describe('pane footer integration contract', () => {
   it('builds footer state from the exact worktree and truthful fallback metrics', () => {
     const worktree = functionSource(mainJs, 'threadWorktree');
     const state = functionSource(mainJs, 'paneFooterState');
+    const create = functionSource(mainJs, 'createThread');
 
     expect(worktree).toMatch(/worktree\.path === thread\.worktreePath/);
     expect(worktree).toMatch(/path:\s*thread\.worktreePath \|\| null/);
@@ -1077,20 +1344,27 @@ describe('pane footer integration contract', () => {
     expect(state).toMatch(/PsychePanes\.isAgentPaneKind\(thread\.kind\)/);
     expect(state).toMatch(/thread\.launch\.metricsProvider \|\| "agent"/);
     expect(state).toMatch(/thread\.launch\.covenSessionId/);
+    expect(state).toMatch(/isEligibleCoven[\s\S]*loadingPaneMetrics\(thread\.launch\)/);
     expect(state).toMatch(/phase:\s*"ready"/);
     expect(state).toMatch(/costKind:\s*"unknown"/);
     expect(state).toContain('Session metrics are not reported by this harness');
     expect(state).toMatch(/canSwitchModel:\s*false/);
-    expect(state).not.toContain('"loading"');
+    expect(create).toMatch(
+      /metrics:\s*launch\.launchKind === "coven-chat" && launch\.covenSessionId[\s\S]*loadingPaneMetrics\(launch\)/,
+    );
   });
 
-  it('uses the launch-owned Coven identity and provider in footer state', () => {
+  it('starts eligible Coven footer metrics in a truthful loading state', () => {
     const paneFooterState = compileFunction<(thread: Record<string, unknown>) => Record<string, any>>(
       functionSource(mainJs, 'paneFooterState'),
       {
         threadWorktree: () => ({ path: '/repo', branch: 'feat/footer' }),
         PsychePanes: { isAgentPaneKind: () => true },
         shortenRoot: (value: string) => value,
+        loadingPaneMetrics: compileFunction(
+          functionSource(mainJs, 'loadingPaneMetrics'),
+          {},
+        ),
       },
     );
 
@@ -1100,12 +1374,45 @@ describe('pane footer integration contract', () => {
       worktreePath: '/repo',
       metrics: null,
       launch: {
+        launchKind: 'coven-chat',
         covenSessionId: '12345678-1234-4abc-8def-1234567890ab',
         metricsProvider: 'coven',
       },
     }).metrics).toMatchObject({
+      phase: 'loading',
       provider: 'coven',
       sessionId: '12345678-1234-4abc-8def-1234567890ab',
+      model: null,
+      contextUsed: null,
+      contextLimit: null,
+      spendUsd: null,
+      updatedAt: null,
+      error: null,
+      stale: false,
+    });
+  });
+
+  it('keeps non-Coven agent fallback behavior unchanged', () => {
+    const paneFooterState = compileFunction<(thread: Record<string, unknown>) => Record<string, any>>(
+      functionSource(mainJs, 'paneFooterState'),
+      {
+        threadWorktree: () => ({ path: '/repo', branch: 'feat/footer' }),
+        PsychePanes: { isAgentPaneKind: () => true },
+        shortenRoot: (value: string) => value,
+        loadingPaneMetrics: vi.fn(),
+      },
+    );
+
+    expect(paneFooterState({
+      id: 'thread-2',
+      kind: 'agent-copilot',
+      worktreePath: '/repo',
+      metrics: null,
+      launch: { metricsProvider: 'copilot' },
+    }).metrics).toMatchObject({
+      phase: 'ready',
+      provider: 'copilot',
+      error: 'Session metrics are not reported by this harness',
     });
   });
 
@@ -1163,6 +1470,8 @@ describe('pane footer integration contract', () => {
 
   it('syncs and releases footer resources with the pane lifecycle', () => {
     expect(functionSource(mainJs, 'syncThreadPaneMetadata')).toMatch(/syncPaneFooter\(thread\)/);
+    expect(functionSource(mainJs, 'syncPaneFooter'))
+      .toMatch(/closePaneUsagePopoverForFooter\(thread,\s*false\)[\s\S]*innerHTML = ""/);
     const detach = functionSource(mainJs, 'detachThreadPane');
     expect(detach).toMatch(/thread\.paneFooterObserver\.disconnect\(\)/);
     expect(detach).toMatch(/thread\.paneFooter = null/);
@@ -1170,5 +1479,17 @@ describe('pane footer integration contract', () => {
     expect(detach).toMatch(/thread\.paneFooterOverflow = null/);
     expect(functionSource(mainJs, 'closeThread'))
       .toMatch(/clearTimeout\(thread\.metricsRefreshTimer\)/);
+  });
+
+  it('scopes usage outside-pointer exemptions to the active dialog and trigger', () => {
+    const handler = functionSource(mainJs, 'handlePaneFooterPopoverPointerDown');
+
+    expect(handler).toMatch(/paneFooterPopover\.contains\(target\)/);
+    expect(handler).toMatch(/paneFooterPopoverTrigger\.contains\(target\)/);
+    expect(handler).toMatch(/closePaneFooterPopovers\(false\)/);
+    expect(handler).not.toContain('.terminal-pane-footer');
+    expect(mainJs).toMatch(
+      /document\.addEventListener\("pointerdown", handlePaneFooterPopoverPointerDown, true\)/,
+    );
   });
 });

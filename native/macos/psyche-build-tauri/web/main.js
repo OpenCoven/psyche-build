@@ -96,6 +96,8 @@
   var PANE_METRICS_POLL_MS = 15000;
   var paneMetricsPollTimer = 0;
   var paneFooterPopoverCleanup = null;
+  var paneFooterPopover = null;
+  var paneFooterPopoverOwner = null;
   var paneFooterPopoverTrigger = null;
   var paneFooterPopoverThreadId = null;
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
@@ -1245,7 +1247,9 @@
       stopRequested: false,
       ptyStarted: false,
       metricsGeneration: 0,
-      metrics: null,
+      metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
+        ? loadingPaneMetrics(launch)
+        : null,
       metricsRefreshTimer: 0,
     };
     commitPanePlacement(placement);
@@ -3393,15 +3397,47 @@
     }).filter(Boolean);
   }
 
+  function effectiveCanvasThreadIds() {
+    var layout = activePaneLayout();
+    var root = effectivePaneRoot(layout);
+    if (!root) return [];
+    return PsychePanes.leafIds(root).map(function (leafId) {
+      var leaf = PsychePanes.findLeafById(root, leafId);
+      return leaf ? leaf.threadId : null;
+    }).filter(Boolean);
+  }
+
   function threadWantsMetrics(thread) {
-    return Boolean(thread)
-      && !thread.closing
+    return isLiveThread(thread)
       && !thread.hidden
       && thread.status !== "exited"
       && thread.launch
       && thread.launch.launchKind === "coven-chat"
-      && canvasThreadIds().indexOf(thread.id) !== -1
+      && thread.pane
+      && thread.pane.isConnected
+      && effectiveCanvasThreadIds().indexOf(thread.id) !== -1
       && Boolean(thread.launch.covenSessionId);
+  }
+
+  function loadingPaneMetrics(launch) {
+    return {
+      phase: "loading",
+      provider: launch && launch.metricsProvider || "coven",
+      sessionId: launch && launch.covenSessionId || null,
+      model: null,
+      contextUsed: null,
+      contextLimit: null,
+      cumulativeInputTokens: null,
+      cumulativeOutputTokens: null,
+      cacheCreationTokens: null,
+      cacheReadTokens: null,
+      spendUsd: null,
+      costKind: "unknown",
+      updatedAt: null,
+      stale: false,
+      error: null,
+      canSwitchModel: false,
+    };
   }
 
   function metricsValue(previous, key) {
@@ -3437,24 +3473,7 @@
     var generation = thread.metricsGeneration;
     var sessionId = thread.launch.covenSessionId;
     if (!thread.metrics || thread.metrics.phase === "idle") {
-      thread.metrics = {
-        phase: "loading",
-        provider: "coven",
-        sessionId: sessionId,
-        model: null,
-        contextUsed: null,
-        contextLimit: null,
-        cumulativeInputTokens: null,
-        cumulativeOutputTokens: null,
-        cacheCreationTokens: null,
-        cacheReadTokens: null,
-        spendUsd: null,
-        costKind: "unknown",
-        updatedAt: null,
-        stale: false,
-        error: null,
-        canSwitchModel: false,
-      };
+      thread.metrics = loadingPaneMetrics(thread.launch);
       syncPaneFooter(thread);
     }
     try {
@@ -3577,7 +3596,12 @@
     var worktree = threadWorktree(thread);
     var isAgent = PsychePanes.isAgentPaneKind(thread.kind);
     var metrics = thread.metrics || null;
-    if (isAgent && !metrics) {
+    var isEligibleCoven = thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && Boolean(thread.launch.covenSessionId);
+    if (isEligibleCoven && !metrics) {
+      metrics = loadingPaneMetrics(thread.launch);
+    } else if (isAgent && !metrics) {
       metrics = {
         phase: "ready",
         provider: thread.launch && thread.launch.metricsProvider || "agent",
@@ -3608,6 +3632,9 @@
     var trigger = paneFooterPopoverTrigger;
     if (paneFooterPopoverCleanup) paneFooterPopoverCleanup();
     paneFooterPopoverCleanup = null;
+    if (paneFooterPopover && paneFooterPopover.remove) paneFooterPopover.remove();
+    paneFooterPopover = null;
+    paneFooterPopoverOwner = null;
     paneFooterPopoverTrigger = null;
     paneFooterPopoverThreadId = null;
     state.threads.forEach(function (thread) {
@@ -3621,6 +3648,14 @@
         (trigger.isConnected === undefined || trigger.isConnected)) {
       trigger.focus();
     }
+  }
+
+  function closePaneUsagePopoverForFooter(thread, restoreFocus) {
+    if (!thread ||
+        paneFooterPopoverThreadId !== thread.id ||
+        paneFooterPopoverOwner !== thread.paneFooter) return false;
+    closePaneFooterPopovers(restoreFocus);
+    return true;
   }
 
   function paneUsageRow(label, value) {
@@ -3702,6 +3737,8 @@
     ));
     if (metrics.stale) popover.appendChild(paneUsageRow("State", "Stale"));
     if (metrics.error) popover.appendChild(paneUsageRow("Error", metrics.error));
+    paneFooterPopover = popover;
+    paneFooterPopoverOwner = thread.paneFooter;
     paneFooterPopoverTrigger = trigger || thread.paneFooter;
     paneFooterPopoverThreadId = thread.id;
     positionPaneFooterPopover(popover, thread.paneFooter);
@@ -3919,6 +3956,7 @@
   function syncPaneFooter(thread) {
     if (!thread || !thread.paneFooter || !thread.paneFooterItems) return;
     var openOverflow = arguments[1];
+    closePaneUsagePopoverForFooter(thread, false);
     var items = PsychePanes.footerItems(paneFooterState(thread));
     var currentTier = thread.paneFooter.dataset.tier ||
       PsychePanes.footerTier(thread.paneFooter.getBoundingClientRect().width);
@@ -3968,13 +4006,15 @@
     if (first) first.focus();
   }
 
-  document.addEventListener("pointerdown", function (event) {
+  function handlePaneFooterPopoverPointerDown(event) {
+    if (!paneFooterPopover) return;
     var target = event.target;
-    if (!target || !target.closest ||
-        !target.closest(".pane-footer-popover, .terminal-pane-footer")) {
-      closePaneFooterPopovers(false);
-    }
-  }, true);
+    if (target && paneFooterPopover.contains(target)) return;
+    if (target && paneFooterPopoverTrigger &&
+        paneFooterPopoverTrigger.contains(target)) return;
+    closePaneFooterPopovers(false);
+  }
+  document.addEventListener("pointerdown", handlePaneFooterPopoverPointerDown, true);
 
   /**
    * Focus-set membership swatches. Squares, in the set's colour, so they can't

@@ -502,6 +502,10 @@ describe('native Coven launch routing', () => {
         requestAnimationFrame: (callback: () => void) => { frame = callback; },
         isLiveThread: (thread: Record<string, any>) => state.threads.includes(thread),
         spawnPty: (thread: Record<string, any>) => { calls.push(thread); },
+        loadingPaneMetrics: compileFunction(
+          functionSource('loadingPaneMetrics'),
+          {},
+        ),
       },
     );
     const thread = createThread({
@@ -516,7 +520,24 @@ describe('native Coven launch routing', () => {
     });
     expect(thread).toMatchObject({
       metricsGeneration: 0,
-      metrics: null,
+      metrics: {
+        phase: 'loading',
+        provider: 'coven',
+        sessionId: COVEN_SESSION_ID,
+        model: null,
+        contextUsed: null,
+        contextLimit: null,
+        cumulativeInputTokens: null,
+        cumulativeOutputTokens: null,
+        cacheCreationTokens: null,
+        cacheReadTokens: null,
+        spendUsd: null,
+        costKind: 'unknown',
+        updatedAt: null,
+        stale: false,
+        error: null,
+        canSwitchModel: false,
+      },
       metricsRefreshTimer: 0,
     });
     expect(frame).not.toBeNull();
