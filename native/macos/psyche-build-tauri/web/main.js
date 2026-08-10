@@ -2472,6 +2472,7 @@
     syncBrowserBounds();
     // Whether the strip overflows is a function of width, not of its contents.
     syncTabStripOverflow();
+    syncSessionListScroll();
   });
 
   // ============================================================
@@ -2576,12 +2577,24 @@
   //    continue to update the surviving project tab strip.
   // ============================================================
 
+  // The fade means "there is more below", so it has to answer whether the list
+  // can still scroll down - not merely whether it overflows. Otherwise it keeps
+  // promising content after you have already reached the bottom.
+  function syncSessionListScroll() {
+    if (!sessionListEl) return false;
+    var more = sessionListEl.scrollTop + sessionListEl.clientHeight
+      < sessionListEl.scrollHeight - 1;
+    sessionListEl.classList.toggle("has-more", more);
+    return more;
+  }
+
   function refreshSidebar() {
     refreshTabs();
     renderSessionList();
     renderPaneWorkspace();
     syncComposerChrome();
     syncDaemonStatus();
+    syncSessionListScroll();
   }
 
   // ============================================================
@@ -2597,6 +2610,9 @@
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
   var sessionListEl = document.getElementById("session-list");
   var sidebarFilesEl = document.getElementById("sidebar-files");
+  if (sessionListEl) {
+    sessionListEl.addEventListener("scroll", function () { syncSessionListScroll(); });
+  }
   var sidebarTab = "sessions";
 
   // The file tree renders lazily: switching to it is the only thing that has to

@@ -597,6 +597,44 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .session-row.starting .session-dot { animation: none; }
 }
+/* -------- Sidebar design pass, second round --------
+   Additive again; the row treatment stays as designed. */
+
+/* Group heads are buttons, so they should answer the pointer. The wash is an
+   inset shadow rather than a background, because the background is doing the
+   sticky header's opaque backdrop and must not be replaced. */
+.session-group-head {
+  border-radius: 6px;
+  transition: box-shadow var(--transition-fast), color var(--transition-fast);
+}
+.session-group-head:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.05);
+  color: var(--text-soft);
+}
+.session-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Appearance settles into a recessed card, the same language as the
+   Sessions | Files track, so the rail ends on a deliberate edge rather than
+   trailing off into loose controls. */
+.sidebar-settings {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 8px 4px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.85));
+}
+.sidebar-settings > summary { padding: 5px 0; }
+
+/* "There is more below" - driven by whether the list can still scroll down,
+   not merely by whether it overflows, so it stops promising content once you
+   reach the bottom. */
+.session-list.has-more {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+}
+
 /* -------- Sidebar design pass --------
    Additive only: the row's colourless-selection-plus-violet-bar language is
    deliberate and left alone. */
