@@ -172,7 +172,7 @@ Run:
 pnpm vitest --run __tests__/tauriBrowserDiceButton.test.ts
 ```
 
-Expected: PASS with 3 tests.
+Expected: PASS with 4 tests.
 
 - [ ] **Step 7: Commit the feature**
 
