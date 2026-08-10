@@ -1106,6 +1106,13 @@
     return applyThreadAttention(thread, { needsAttention: false, reason: null });
   }
 
+  function syncLocalSidebarStatusKeys(now) {
+    state.threads.forEach(function (thread) {
+      if (!thread) return;
+      thread.sidebarStatusKey = PsycheSessions.deriveLocalSidebarStatus(thread, now).key;
+    });
+  }
+
   function sampleThreadAttention() {
     var now = Date.now();
     var tracked = [];
@@ -1114,12 +1121,6 @@
       if (!thread || !thread.term) return;
       var tail = terminalTail(thread.term, ATTENTION_TAIL_LINES);
       thread.isWorking = PsycheSessions.sidebarTailIsWorking(tail);
-      var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);
-      var statusChanged = false;
-      if (thread.sidebarStatusKey !== nextStatus.key) {
-        thread.sidebarStatusKey = nextStatus.key;
-        statusChanged = true;
-      }
       var attentionChanged = false;
       if (!threadWantsAttentionTracking(thread)) {
         if (thread.needsAttention) {
@@ -1131,6 +1132,12 @@
           thread,
           attentionTracker.observe(thread.id, tail, now)
         );
+      }
+      var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);
+      var statusChanged = false;
+      if (thread.sidebarStatusKey !== nextStatus.key) {
+        thread.sidebarStatusKey = nextStatus.key;
+        statusChanged = true;
       }
       if (attentionChanged) {
         needsFinalRender = false;
@@ -1294,6 +1301,13 @@
       return Promise.resolve(false);
     }
     var launch = thread.launch;
+    thread.lastOutputAt = 0;
+    thread.isWorking = false;
+    thread.sidebarStatusKey = "busy";
+    attentionTracker.forget(thread.id);
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
     thread.stopRequested = false;
     thread.exitDuringStart = false;
     thread.startInFlight = true;
@@ -3322,6 +3336,7 @@
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
+    syncLocalSidebarStatusKeys(Date.now());
     // A re-render would strand an armed confirm on a row that no longer exists,
     // and an armed confirm is a question the user has not answered — drop it.
     disarmSessionClose();

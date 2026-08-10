@@ -269,11 +269,53 @@ describe('desktop shell wiring', () => {
     expect(calls).toEqual([[thread, { needsAttention: false, reason: null }]]);
   });
 
+  it('synchronizes cached sidebar status keys at the start of every sidebar render', () => {
+    const renderSource = functionSource('renderSessionList');
+    expect(renderSource).toMatch(
+      /if \(!sessionListEl\) return;[\s\S]{0,120}if \(editingContext && editingContext\.surface === "sidebar"\) return;[\s\S]{0,120}syncLocalSidebarStatusKeys\(Date\.now\(\)\);[\s\S]{0,320}disarmSessionClose\(\);/,
+    );
+
+    const source = functionSource('syncLocalSidebarStatusKeys');
+    expect(source).toMatch(
+      /thread\.sidebarStatusKey = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\)\.key;/,
+    );
+
+    const state = {
+      threads: [
+        { id: 'one', sidebarStatusKey: 'busy' },
+        { id: 'two', sidebarStatusKey: 'active' },
+      ],
+    };
+    const calls: Array<[string, number]> = [];
+    const syncLocalSidebarStatusKeys = compileFunction<(now: number) => void>(source, {
+      state,
+      PsycheSessions: {
+        deriveLocalSidebarStatus: (
+          thread: { id: string },
+          now: number,
+        ) => {
+          calls.push([thread.id, now]);
+          return { key: thread.id === 'one' ? 'idle' : 'exited' };
+        },
+      },
+    });
+
+    syncLocalSidebarStatusKeys(4_242);
+    expect(state.threads.map((thread) => thread.sidebarStatusKey)).toEqual(['idle', 'exited']);
+    expect(calls).toEqual([
+      ['one', 4_242],
+      ['two', 4_242],
+    ]);
+  });
+
   it('coalesces attention renders without dropping later status-only changes', () => {
     const source = functionSource('sampleThreadAttention');
     expect(source).toContain('var needsFinalRender = false;');
+    const statusIndex = source.indexOf('var nextStatus = PsycheSessions.deriveLocalSidebarStatus(thread, now);');
+    const attentionIndex = source.indexOf('var attentionChanged = false;');
+    expect(statusIndex).toBeGreaterThan(attentionIndex);
     expect(source).toMatch(
-      /var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}var statusChanged = false;[\s\S]{0,160}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}statusChanged = true;/,
+      /var attentionChanged = false;[\s\S]{0,520}var nextStatus = PsycheSessions\.deriveLocalSidebarStatus\(thread, now\);[\s\S]{0,200}var statusChanged = false;[\s\S]{0,160}if \(thread\.sidebarStatusKey !== nextStatus\.key\) \{[\s\S]{0,120}thread\.sidebarStatusKey = nextStatus\.key;[\s\S]{0,120}statusChanged = true;/,
     );
     expect(source).toMatch(/if \(attentionChanged\) \{[\s\S]{0,80}needsFinalRender = false;/);
     expect(source).toMatch(
@@ -283,61 +325,141 @@ describe('desktop shell wiring', () => {
       /attentionTracker\.retain\(tracked\);[\s\S]{0,160}if \(needsFinalRender\) \{[\s\S]{0,80}renderSessionList\(\);[\s\S]{0,80}syncSessionListScroll\(\);/,
     );
 
-    const runSample = (
-      threads: Array<{ id: string; term: object; sidebarStatusKey: string; nextStatusKey: string }>,
+    const harness = (
+      threads: Array<{
+        id: string;
+        term: object;
+        sidebarStatusKey: string;
+        steadyStatusKey: string;
+        needsAttention?: boolean;
+        attentionReason?: string | null;
+      }>,
       attentionById: Map<string, boolean>,
     ) => {
       const renderCalls: string[] = [];
       const syncCalls: string[] = [];
       const retained: string[] = [];
+      let renderReason = 'final';
+      let syncReason = 'final';
+      let renderOffset = 0;
+      let syncOffset = 0;
+      let retainOffset = 0;
       const state = { threads };
+      const deriveKey = (thread: {
+        needsAttention?: boolean;
+        steadyStatusKey: string;
+      }) => (thread.needsAttention ? 'attention' : thread.steadyStatusKey);
+      const renderSessionList = () => {
+        state.threads.forEach((thread) => {
+          thread.sidebarStatusKey = deriveKey(thread);
+        });
+        renderCalls.push(renderReason);
+      };
+      const syncSessionListScroll = () => {
+        syncCalls.push(syncReason);
+      };
       const sampleThreadAttention = compileFunction<() => void>(source, {
         ATTENTION_TAIL_LINES: 14,
         Date: { now: () => 1000 },
         terminalTail: () => '',
         PsycheSessions: {
           sidebarTailIsWorking: () => false,
-          deriveLocalSidebarStatus: (thread: { nextStatusKey: string }) => ({ key: thread.nextStatusKey }),
+          deriveLocalSidebarStatus: (thread: { needsAttention?: boolean; steadyStatusKey: string }) => ({
+            key: deriveKey(thread),
+          }),
         },
         threadWantsAttentionTracking: () => true,
-        clearThreadAttention: () => false,
-        applyThreadAttention: (
-          thread: { id: string },
-          next: { changed: boolean },
+        clearThreadAttention: (
+          thread: { id: string; needsAttention?: boolean; attentionReason?: string | null },
         ) => {
-          if (!next.changed) return false;
-          renderCalls.push(`attention:${thread.id}`);
-          syncCalls.push(`attention:${thread.id}`);
+          if (!thread.needsAttention) return false;
+          thread.needsAttention = false;
+          thread.attentionReason = null;
+          renderReason = `clear:${thread.id}`;
+          syncReason = renderReason;
+          renderSessionList();
+          syncSessionListScroll();
+          renderReason = 'final';
+          syncReason = 'final';
+          return true;
+        },
+        applyThreadAttention: (
+          thread: { id: string; needsAttention?: boolean; attentionReason?: string | null },
+          next: { needsAttention: boolean; reason: string | null },
+        ) => {
+          var currentReason = thread.attentionReason || null;
+          if (!!thread.needsAttention === next.needsAttention && currentReason === next.reason) {
+            return false;
+          }
+          thread.needsAttention = next.needsAttention;
+          thread.attentionReason = next.reason;
+          renderReason = `attention:${thread.id}`;
+          syncReason = renderReason;
+          renderSessionList();
+          syncSessionListScroll();
+          renderReason = 'final';
+          syncReason = 'final';
           return true;
         },
         attentionTracker: {
-          observe: (id: string) => ({ changed: attentionById.get(id) || false }),
+          observe: (id: string) => ({
+            needsAttention: attentionById.get(id) || false,
+            reason: attentionById.get(id) ? 'turn' : null,
+          }),
           retain: (ids: string[]) => retained.push(ids.join(',')),
         },
         state,
-        renderSessionList: () => { renderCalls.push('final'); },
-        syncSessionListScroll: () => { syncCalls.push('final'); },
+        renderSessionList,
+        syncSessionListScroll,
       });
 
-      sampleThreadAttention();
-      return { renderCalls, syncCalls, retained };
+      return {
+        threads,
+        sample() {
+          sampleThreadAttention();
+          const result = {
+            renderCalls: renderCalls.slice(renderOffset),
+            syncCalls: syncCalls.slice(syncOffset),
+            retained: retained.slice(retainOffset),
+          };
+          renderOffset = renderCalls.length;
+          syncOffset = syncCalls.length;
+          retainOffset = retained.length;
+          return result;
+        },
+      };
     };
 
-    expect(runSample([
-      { id: 'one', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'idle' },
-      { id: 'two', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'busy' },
-    ], new Map([['one', false], ['two', true]]))).toEqual({
+    const statusBeforeAttention = harness([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'idle' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+    ], new Map([['one', false], ['two', true]]));
+
+    expect(statusBeforeAttention.sample()).toEqual({
       renderCalls: ['attention:two'],
       syncCalls: ['attention:two'],
       retained: ['one,two'],
     });
+    expect(statusBeforeAttention.sample()).toEqual({
+      renderCalls: [],
+      syncCalls: [],
+      retained: ['one,two'],
+    });
 
-    expect(runSample([
-      { id: 'one', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'busy' },
-      { id: 'two', term: {}, sidebarStatusKey: 'busy', nextStatusKey: 'idle' },
-    ], new Map([['one', true], ['two', false]]))).toEqual({
-      renderCalls: ['attention:one', 'final'],
-      syncCalls: ['attention:one', 'final'],
+    const laterStatus = harness([
+      { id: 'one', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+      { id: 'two', term: {}, sidebarStatusKey: 'busy', steadyStatusKey: 'busy' },
+    ], new Map([['one', true], ['two', false]]));
+
+    expect(laterStatus.sample()).toEqual({
+      renderCalls: ['attention:one'],
+      syncCalls: ['attention:one'],
+      retained: ['one,two'],
+    });
+    laterStatus.threads[1].steadyStatusKey = 'idle';
+    expect(laterStatus.sample()).toEqual({
+      renderCalls: ['final'],
+      syncCalls: ['final'],
       retained: ['one,two'],
     });
   });
