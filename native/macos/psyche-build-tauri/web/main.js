@@ -958,7 +958,10 @@
       var editable = focused.isContentEditable
         || focused.tagName === "INPUT"
         || focused.tagName === "TEXTAREA";
-      if (editable && (!terminalHost || !terminalHost.contains(focused))) return true;
+      if (editable) {
+        var terminalInput = focused.closest && focused.closest(".xterm");
+        if (!terminalInput) return true;
+      }
     }
     return false;
   }
@@ -2621,6 +2624,9 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    if (thread.kind === "web" && state.activeThreadId === id) {
+      markActiveSurface("terminal");
+    }
     thread.closeStarted = true;
     thread.closing = true;
     pendingDataBuffers.delete(id);

@@ -136,6 +136,17 @@ describe('attention tracker', () => {
     expect(tracker.bell('a').needsAttention).toBe(false);
   });
 
+  it('upgrades a settled turn to an explicit question when the terminal rings', () => {
+    const tracker = createAttentionTracker();
+    tracker.observe('a', 'start', 0);
+    tracker.observe('a', 'Finished the task.\n> ', 1_000);
+    expect(tracker.observe('a', 'Finished the task.\n> ', 1_000 + SETTLE)).toEqual({
+      needsAttention: true, reason: 'turn',
+    });
+
+    expect(tracker.bell('a')).toEqual({ needsAttention: true, reason: 'question' });
+  });
+
   it('forgets sessions that are gone', () => {
     const tracker = createAttentionTracker();
     tracker.observe('a', 'start', 0);
@@ -216,6 +227,9 @@ describe('hover to focus', () => {
     expect(mainJs).toMatch(/function hoverFocusBlocked\(\)[\s\S]{0,700}is-pane-dragging/);
     expect(mainJs).toMatch(/function hoverFocusBlocked\(\)[\s\S]{0,700}if \(editingContext\) return true/);
     expect(mainJs).toMatch(/function hoverFocusBlocked\(\)[\s\S]{0,900}tagName === "INPUT"/);
+    expect(mainJs).toMatch(
+      /function hoverFocusBlocked\(\)[\s\S]{0,1200}focused\.closest\("\.xterm"\)[\s\S]{0,160}return true/,
+    );
     // Re-checked when the timer fires, not only when the pointer arrived.
     expect(mainJs).toMatch(/hoverFocusTimer = null;[\s\S]{0,300}if \(hoverFocusBlocked\(\)\) return;/);
     expect(mainJs).toMatch(/event\.pointerType && event\.pointerType !== "mouse"/);

@@ -156,9 +156,9 @@ describe('Tauri workspace panels', () => {
       expect(boundsFunction).not.toContain('state.activeThreadId');
     });
 
-    it('returns contextual shortcuts to terminal mode after the last Web pane closes', () => {
+    it('returns contextual shortcuts to terminal mode through every Web close path', () => {
       expect(mainJs).toMatch(
-        /function closeBrowserPane\(thread\)[\s\S]*wasActive[\s\S]*closeThread\(thread\.id\)[\s\S]*markActiveSurface\("terminal"\)/
+        /function closeThread\(id, options\)[\s\S]{0,700}thread\.kind === "web"[\s\S]{0,120}state\.activeThreadId === id[\s\S]{0,120}markActiveSurface\("terminal"\)/
       );
     });
 

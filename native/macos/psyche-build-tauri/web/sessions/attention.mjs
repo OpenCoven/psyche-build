@@ -184,7 +184,7 @@ export function createAttentionTracker(options) {
       if (entry.tail === null || entry.awaitingAgent) return resolve(entry);
       entry.sawActivity = true;
       entry.needsAttention = true;
-      entry.reason = entry.reason || 'question';
+      entry.reason = 'question';
       return resolve(entry);
     },
 
