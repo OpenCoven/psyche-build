@@ -10,6 +10,11 @@ const textExtensions = new Set([
   '.toml', '.ts', '.tsx', '.yaml', '.yml',
 ]);
 const stalePathPattern = /native\/macos\/psyche-build-tauri|['"]native['"]\s*,\s*['"]macos['"]\s*,\s*['"]psyche-build-tauri['"]/;
+const originalBaseCsp = "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:";
+
+function json(name: string) {
+  return JSON.parse(readFileSync(join(desktop, 'src-tauri', name), 'utf8'));
+}
 
 function stalePathReferences(): string[] {
   return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
@@ -53,5 +58,44 @@ describe('desktop Tauri layout', () => {
     expect(configText).not.toMatch(
       /disable-gpu|disable-software-rasterizer|LIBGL_ALWAYS_SOFTWARE/i,
     );
+  });
+
+  it('keeps portable opaque defaults and macOS presentation in its overlay', () => {
+    const base = json('tauri.conf.json');
+    const mac = json('tauri.macos.conf.json');
+    const win = json('tauri.windows.conf.json');
+    const linux = json('tauri.linux.conf.json');
+
+    expect(base.app.windows[0]).toMatchObject({ transparent: false, decorations: true });
+    expect(base.app).not.toHaveProperty('macOSPrivateApi');
+    expect(mac.app.windows[0]).toMatchObject({ transparent: true, titleBarStyle: 'Overlay' });
+    expect(mac.app.macOSPrivateApi).toBe(true);
+    expect(win.app.windows[0].transparent).toBe(false);
+    expect(linux.app.windows[0].transparent).toBe(false);
+    expect(base.app.security.csp).toBe(originalBaseCsp);
+
+    for (const config of [base, mac, win, linux]) {
+      const csp = config.app?.security?.csp;
+      if (!csp) continue;
+      expect(csp).not.toMatch(/unsafe-inline|unsafe-eval/);
+    }
+    for (const overlay of [mac, win, linux]) {
+      expect(overlay.app?.security?.csp).toBeUndefined();
+    }
+  });
+
+  it('keeps vibrancy target-specific while retaining Tauri build compatibility', () => {
+    const cargoToml = readFileSync(join(desktop, 'src-tauri', 'Cargo.toml'), 'utf8');
+
+    expect(cargoToml).toContain(
+      'tauri = { version = "2", features = ["macos-private-api", "unstable"] }',
+    );
+    expect(cargoToml).toContain(
+      'tauri-build validates macOSPrivateApi against this entry even though Tauri cfg-gates it off non-macOS targets.',
+    );
+    expect(cargoToml).toMatch(
+      /\[target\.'cfg\(target_os = "macos"\)'\.dependencies\][\s\S]*window-vibrancy = "0\.6"/,
+    );
+    expect(cargoToml.match(/window-vibrancy/g)).toHaveLength(1);
   });
 });

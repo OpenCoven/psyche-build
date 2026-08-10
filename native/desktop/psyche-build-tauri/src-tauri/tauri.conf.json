@@ -20,29 +20,21 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": true,
-        "transparent": true,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "transparent": false
       }
     ],
     "withGlobalTauri": true,
-    "macOSPrivateApi": true,
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns"
-    ],
-    "macOS": {
-      "minimumSystemVersion": "12.0"
-    }
+      "icons/128x128@2x.png"
+    ]
   },
   "plugins": {
     "opener": {}
