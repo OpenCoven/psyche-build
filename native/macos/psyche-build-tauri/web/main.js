@@ -892,11 +892,12 @@
     function (btn) {
       btn.addEventListener("click", function () {
         var name = btn.dataset.panelBtn;
-        if (currentLayout() === "split" && currentPanel() === name) {
+        var layout = currentLayout();
+        if (layout !== "terminal" && currentPanel() === name) {
           applyLayout("terminal");
           return;
         }
-        var panelWasVisible = currentLayout() === "split";
+        var panelWasVisible = layout === "split";
         setPanel(name, { render: false });
         applyLayout("split");
         if (panelWasVisible) renderPanel(name);

@@ -412,7 +412,7 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(collapsedDockMini.hidden).toBe(false);
 
     const activeOps: string[] = [];
-    const handlePanelButtonClick = compileFunction<
+    const handleSplitPanelButtonClick = compileFunction<
       (btn: { dataset: { panelBtn: string } }) => void
     >(extractPanelButtonClickHandler(mainJs), {
       currentLayout: () => 'split',
@@ -423,8 +423,23 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       renderPanel: (name: string) => { activeOps.push(`render:${name}`); },
     });
-    handlePanelButtonClick({ dataset: { panelBtn: 'git' } });
+    handleSplitPanelButtonClick({ dataset: { panelBtn: 'git' } });
     expect(activeOps).toEqual(['layout:terminal']);
+
+    const browserActiveOps: string[] = [];
+    const handleBrowserPanelButtonClick = compileFunction<
+      (btn: { dataset: { panelBtn: string } }) => void
+    >(extractPanelButtonClickHandler(mainJs), {
+      currentLayout: () => 'browser',
+      currentPanel: () => 'browser',
+      applyLayout: (layout: string) => { browserActiveOps.push(`layout:${layout}`); },
+      setPanel: (name: string, opts: { render: boolean }) => {
+        browserActiveOps.push(`set:${name}:${String(opts.render)}`);
+      },
+      renderPanel: (name: string) => { browserActiveOps.push(`render:${name}`); },
+    });
+    handleBrowserPanelButtonClick({ dataset: { panelBtn: 'browser' } });
+    expect(browserActiveOps).toEqual(['layout:terminal']);
 
     const hiddenOps: string[] = [];
     const reopenPanelButtonClick = compileFunction<
@@ -440,6 +455,21 @@ describe('native CodeMirror workspace editor surface', () => {
     });
     reopenPanelButtonClick({ dataset: { panelBtn: 'files' } });
     expect(hiddenOps).toEqual(['set:files:false', 'layout:split']);
+
+    const browserSwitchOps: string[] = [];
+    const switchBrowserOnlyPanelButtonClick = compileFunction<
+      (btn: { dataset: { panelBtn: string } }) => void
+    >(extractPanelButtonClickHandler(mainJs), {
+      currentLayout: () => 'browser',
+      currentPanel: () => 'browser',
+      applyLayout: (layout: string) => { browserSwitchOps.push(`layout:${layout}`); },
+      setPanel: (name: string, opts: { render: boolean }) => {
+        browserSwitchOps.push(`set:${name}:${String(opts.render)}`);
+      },
+      renderPanel: (name: string) => { browserSwitchOps.push(`render:${name}`); },
+    });
+    switchBrowserOnlyPanelButtonClick({ dataset: { panelBtn: 'files' } });
+    expect(browserSwitchOps).toEqual(['set:files:false', 'layout:split']);
 
     const visibleOps: string[] = [];
     const switchPanelButtonClick = compileFunction<
