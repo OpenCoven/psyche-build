@@ -81,7 +81,7 @@
   --pane-gap: 2px;
   --pane-min-w: 200px;
   --pane-min-h: 110px;
-  --browser-bar-h: 38px;
+  --browser-bar-h: 30px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
   --splitter-grip-h: 42px;
@@ -778,9 +778,6 @@ kbd {
 /* Icon orientation tracks browser side so the visual cue matches reality.
    Uses :has() (WebKit 15.4+ — Tauri's WebView is fine). */
 [data-browser-toggle] svg { transition: transform var(--transition-med); }
-.app:has(.detail[data-browser-side="left"])   [data-browser-toggle] svg { transform: scaleX(-1); }
-.app:has(.detail[data-browser-side="bottom"]) [data-browser-toggle] svg { transform: rotate(90deg); }
-.app:has(.detail[data-browser-side="top"])    [data-browser-toggle] svg { transform: rotate(-90deg); }
 
 .status-pill {
   font-size: 11px;
@@ -835,31 +832,50 @@ kbd {
   --terminal-min-y: 160px;
   --browser-min-y:  54px;
   --split-frac: 0.6;
-  /* The browser is its own column between the canvas and the tools dock.
-     Collapsing it zeroes the track rather than hiding the element, so the
-     native child webview's bounds go to zero with it. */
-  --browser-col: 420px;
-  --browser-col-y: 260px;
+  /* The browser is a band across the top of the workbench rather than a
+     column beside it: a preview is something you glance up at, and giving it
+     the full canvas width means it never has to be read in a 420px slot.
+     Collapsing zeroes the track rather than hiding the element, so the native
+     child webview's bounds go to zero with it. */
+  --browser-band: 300px;
   --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
               grid-template-rows    var(--transition-layout);
   will-change: grid-template-columns, grid-template-rows;
 }
 .detail.resizing { transition: none; }
-.detail[data-browser-column="collapsed"] {
-  --browser-col: 0px;
-  --browser-col-y: 0px;
-}
-.browser-column {
+.detail[data-browser-column="collapsed"] { --browser-band: 0px; }
+
+/* The band spans every column, so the canvas and the dock both sit under it
+   and it is centred on the workbench by construction. */
+.browser-band {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
-.detail[data-browser-column="collapsed"] .browser-column { border-left-color: transparent; }
-.detail[data-layout="terminal"] .browser-column { display: none; }
+.detail[data-browser-column="collapsed"] .browser-band { border-bottom-color: transparent; }
+.detail[data-layout="terminal"] .browser-band { display: none; }
+
+/* Only the lower edge can size it -- the band grows downward from the top. */
+.browser-band-resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 9px;
+  z-index: 6;
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+  transition: background var(--transition-fast);
+}
+.browser-band-resize:hover,
+.browser-band-resize:focus-visible,
+.browser-band-resize.dragging { background: rgba(var(--rgb-accent), 0.12); }
 
 .boot-error {
   color: #ff6b6b;
@@ -883,58 +899,17 @@ kbd {
 .detail[data-layout="browser"] .terminal-area,
 .detail[data-layout="browser"] .splitter { display: none; }
 
-/* split — terminal on left, browser on right (default) */
-.detail[data-layout="split"][data-browser-side="right"] {
+/* split — browser band on top, canvas and tools dock beneath it */
+.detail[data-layout="split"] {
   grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
                          var(--splitter-w)
-                         var(--browser-col)
                          minmax(var(--browser-min), 1fr);
-  grid-template-rows: 1fr;
+  grid-template-rows: var(--browser-band) minmax(var(--terminal-min-y), 1fr);
 }
-.detail[data-layout="split"][data-browser-side="right"] .terminal-area  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .splitter       { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .browser-column { grid-column: 3; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .browser-pane   { grid-column: 4; grid-row: 1; }
-
-/* split — browser on left, terminal on right */
-.detail[data-layout="split"][data-browser-side="left"] {
-  grid-template-columns: minmax(var(--browser-min), 1fr)
-                         var(--browser-col)
-                         var(--splitter-w)
-                         minmax(var(--terminal-min), var(--terminal-col));
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="split"][data-browser-side="left"] .browser-pane   { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .browser-column { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .splitter       { grid-column: 3; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .terminal-area  { grid-column: 4; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .browser-column { border-left: 0; border-right: 1px solid var(--border); }
-
-/* split — browser on bottom */
-.detail[data-layout="split"][data-browser-side="bottom"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--terminal-min-y), var(--terminal-col))
-                      var(--splitter-w)
-                      var(--browser-col-y)
-                      minmax(var(--browser-min-y), 1fr);
-}
-.detail[data-layout="split"][data-browser-side="bottom"] .terminal-area  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="bottom"] .splitter       { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="bottom"] .browser-column { grid-column: 1; grid-row: 3; }
-.detail[data-layout="split"][data-browser-side="bottom"] .browser-pane   { grid-column: 1; grid-row: 4; }
-
-/* split — browser on top */
-.detail[data-layout="split"][data-browser-side="top"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--browser-min-y), 1fr)
-                      var(--browser-col-y)
-                      var(--splitter-w)
-                      minmax(var(--terminal-min-y), var(--terminal-col));
-}
-.detail[data-layout="split"][data-browser-side="top"] .browser-pane   { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="top"] .browser-column { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="top"] .splitter       { grid-column: 1; grid-row: 3; }
-.detail[data-layout="split"][data-browser-side="top"] .terminal-area  { grid-column: 1; grid-row: 4; }
+.detail[data-layout="split"] .browser-band   { grid-column: 1 / -1; grid-row: 1; }
+.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 2; }
+.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 2; }
+.detail[data-layout="split"] .browser-pane   { grid-column: 3; grid-row: 2; }
 
 .splitter {
   background: transparent;
@@ -944,10 +919,7 @@ kbd {
   outline: none;
   transition: background var(--transition-fast);
 }
-.detail[data-browser-side="right"] .splitter,
-.detail[data-browser-side="left"]  .splitter { cursor: col-resize; }
-.detail[data-browser-side="bottom"] .splitter,
-.detail[data-browser-side="top"]    .splitter { cursor: row-resize; }
+.splitter { cursor: col-resize; }
 
 .splitter::before {
   content: '';
@@ -959,22 +931,14 @@ kbd {
               opacity var(--transition-fast), box-shadow var(--transition-fast);
 }
 /* Hairline orientation tracks browser side */
-.detail[data-browser-side="right"] .splitter::before,
-.detail[data-browser-side="left"]  .splitter::before {
+.splitter::before {
   inset: 10px auto 10px 50%;
   width: 1px;
   transform: translateX(-50%);
 }
-.detail[data-browser-side="bottom"] .splitter::before,
-.detail[data-browser-side="top"]    .splitter::before {
-  inset: 50% 10px auto 10px;
-  height: 1px;
-  transform: translateY(-50%);
-}
 
 /* Animated grip — only on col-resize where the design fits */
-.detail[data-browser-side="right"] .splitter::after,
-.detail[data-browser-side="left"]  .splitter::after {
+.splitter::after {
   content: '';
   position: absolute;
   top: 50%;
@@ -1008,18 +972,9 @@ kbd {
   opacity: 0.9;
 }
 /* hover/drag thickening — by axis */
-.detail[data-browser-side="right"] .splitter:hover::before,
-.detail[data-browser-side="right"] .splitter:focus-visible::before,
-.detail[data-browser-side="right"] .splitter.dragging::before,
-.detail[data-browser-side="left"]  .splitter:hover::before,
-.detail[data-browser-side="left"]  .splitter:focus-visible::before,
-.detail[data-browser-side="left"]  .splitter.dragging::before { width: 2px; }
-.detail[data-browser-side="bottom"] .splitter:hover::before,
-.detail[data-browser-side="bottom"] .splitter:focus-visible::before,
-.detail[data-browser-side="bottom"] .splitter.dragging::before,
-.detail[data-browser-side="top"]    .splitter:hover::before,
-.detail[data-browser-side="top"]    .splitter:focus-visible::before,
-.detail[data-browser-side="top"]    .splitter.dragging::before { height: 2px; }
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.dragging::before { width: 2px; }
 
 .splitter:hover::after,
 .splitter:focus-visible::after,
@@ -2020,12 +1975,15 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   -webkit-backdrop-filter: blur(16px);
   border-left: 1px solid var(--border);
 }
+/* Density pass: chrome rows keep their hit targets and lose their inset. The
+   canvas already speaks in 2px seams, and every extra pixel of panel padding
+   read as a gap the layout did not intend. */
 .dock-tabs {
   grid-area: 1 / 1;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 8px 4px;
+  gap: 3px;
+  padding: 3px 3px 0;
   min-width: 0;
 }
 .dock-tabs .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
@@ -2070,27 +2028,35 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .panel-files,
 .panel-diffs,
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
-.detail[data-panel="browser"] .panel-browser,
-.detail[data-panel="files"]   .panel-files,
-.detail[data-panel="git"]     .panel-git { display: grid; }
+.detail[data-panel="files"] .panel-files,
+.detail[data-panel="git"]   .panel-git { display: grid; }
+/* The browser left the dock for the top band, so it is no longer one of the
+   panels the dock switches between -- it is shown whenever the band is, and
+   `data-panel` has nothing to say about it. */
+.browser-band .panel-browser {
+  grid-area: auto;
+  display: grid;
+  /* The band is a flex column: without this the panel collapses to its
+     rows' intrinsic height and the preview gets nothing. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 /* Git owns diffs now: repository state on top, then a subheading, then the
    changed-file list and its detail. Only the last row flexes, so the git view
    keeps its natural height and scrolls on its own once it outgrows the cap. */
+/* Tabs then one section. The git view no longer has to share the column with
+   the diff list, so it drops the 38% cap that used to keep them both fed. */
 .panel-git-body {
   display: grid;
-  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
-}
-.panel-git-body > .git-view {
-  max-height: 38%;
-  border-bottom: 1px solid var(--border);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .panel-subbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 10px;
-  min-height: 26px;
+  gap: 4px;
+  padding: 0 3px 0 6px;
+  min-height: 22px;
   border-bottom: 1px solid var(--border);
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
 }
@@ -2102,11 +2068,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   color: var(--muted);
 }
 
+.pane-header.panel-bar,
 .panel-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 10px;
+  gap: 4px;
+  padding: 0 3px 0 6px;
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.86));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -2131,6 +2098,37 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   text-overflow: ellipsis;
 }
 .panel-body { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+/* The git panel's two sections use the same segmented switch as the sidebar,
+   so both rails teach one control instead of two. */
+.dock-tabs-segmented {
+  width: calc(100% - 6px);
+  margin: 3px 3px 4px;
+  padding: 2px;
+  border-radius: 9px;
+}
+.dock-tabs-segmented .sidebar-tab { height: 24px; border-radius: 7px; font-size: 11.5px; gap: 6px; }
+.sidebar-tab-count {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+.sidebar-tab-count[hidden] { display: none; }
+.git-tab-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.git-tab-panel[hidden] { display: none; }
 .panel-split { display: grid; grid-template-rows: minmax(0, 1fr); }
 .panel-split.has-detail { grid-template-rows: minmax(0, 1fr) minmax(0, 1.2fr); }
 
@@ -2416,7 +2414,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Diffs panel -------- */
 
-.diff-files { overflow: auto; min-height: 0; padding: 4px 0; scrollbar-width: thin; }
+.diff-files { overflow: auto; min-height: 0; padding: 2px 0; scrollbar-width: thin; }
 .diff-row {
   display: flex;
   align-items: center;
@@ -2509,7 +2507,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Git panel -------- */
 
-.git-view { overflow: auto; min-height: 0; padding: 10px 12px; scrollbar-width: thin; }
+.git-view { overflow: auto; min-height: 0; padding: 6px 6px 8px; scrollbar-width: thin; }
 .git-branch-line {
   display: flex;
   align-items: baseline;
@@ -2612,7 +2610,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   display: flex;
   align-items: center;
   height: var(--browser-bar-h);
-  padding: 0 10px;
+  padding: 0 4px 0 8px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.80));
   border-bottom: 1px solid var(--border);
   font-size: 11px;
@@ -3253,37 +3251,46 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .session-search { height: 28px; font-size: 12px; }
 
+/* The keyboard hints lived here permanently to teach three shortcuts; the
+   help overlay (?) already documents every one of them, so the footer is now
+   a single collapsed row that costs 22px instead of a block that costs 60. */
 .sidebar-foot {
   flex: none;
-  padding: 8px 10px 4px;
+  padding: 2px 4px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.sidebar-hints {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
 }
 .sidebar-settings > summary {
   list-style: none;
   cursor: default;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 5px;
   color: var(--muted);
-  font-size: 10.5px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  font-weight: 700;
-  padding: 2px 0;
+  font-size: 11px;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .sidebar-settings > summary::-webkit-details-marker { display: none; }
-.sidebar-settings > summary:hover { color: var(--text-soft); }
+.sidebar-settings > summary:hover { background: var(--surface-2); color: var(--text-soft); }
 .sidebar-settings[open] > summary { color: var(--text-soft); }
-.theme-row { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; }
-.bg-opacity-row { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+/* The swatch is the collapsed row's entire preview: it carries the accent, so
+   the row still says which theme is on without spelling it out. */
+.appearance-swatch {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.appearance-label { flex: 1 1 auto; min-width: 0; }
+.appearance-caret { flex: none; font-size: 9px; color: var(--faint); transition: transform var(--transition-fast); }
+.sidebar-settings[open] .appearance-caret { transform: rotate(180deg); }
+.theme-row { display: flex; align-items: center; gap: 4px; padding: 4px 5px 2px; }
+.bg-opacity-row { display: flex; align-items: center; gap: 6px; padding: 0 5px 4px; }
 .bg-opacity-label { flex: none; color: var(--muted); font-size: 11px; }
 .bg-opacity-slider { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
 .bg-opacity-value {
