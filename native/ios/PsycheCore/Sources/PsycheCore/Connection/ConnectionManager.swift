@@ -29,6 +29,7 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     case unsupportedProtocolVersion(Int)
     case messageProcessorEndedBeforeReady
     case connectionCancelled
+    case unexpectedSnapshotResponse(String)
 
     public var errorDescription: String? {
         switch self {
@@ -40,6 +41,8 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
             "The connection ended before its message processor became ready."
         case .connectionCancelled:
             "The connection was cancelled before its message processor became ready."
+        case .unexpectedSnapshotResponse(let requestID):
+            "The host returned an unexpected response to snapshot request \(requestID)."
         }
     }
 }
@@ -56,10 +59,9 @@ public actor ConnectionManager {
     private let workspaceStore: WorkspaceStore
     private let pairedHostStore: PairedHostStore
     private let messageProcessorStart: @Sendable () async -> Void
-    private var clientID: String
+    private let manualCredentials: ConnectionCredentials
+    private var activeConnection: ConnectionConfiguration?
     private let clientName: String
-    private var token: String?
-    private var activeEndpoint: HostEndpoint?
     private var welcomeIdentity: WelcomeIdentity?
     private var messageTask: Task<Void, Never>?
     private var snapshotRequestTask: Task<Void, Never>?
@@ -101,9 +103,11 @@ public actor ConnectionManager {
         self.workspaceStore = workspaceStore
         self.requestClient = requestClient
         self.pairedHostStore = pairedHostStore
-        self.clientID = clientID
+        self.manualCredentials = ConnectionCredentials(
+            clientID: clientID,
+            token: token
+        )
         self.clientName = clientName
-        self.token = token
         self.messageProcessorStart = messageProcessorStart
     }
 
@@ -126,23 +130,44 @@ public actor ConnectionManager {
     }
 
     public func connectToStoredHost() async {
+        let intentEpoch = lifecycleIntentEpoch
+        guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
+
         do {
             guard let host = try await pairedHostStore.hosts().first else { return }
-            clientID = host.clientID
-            token = host.token
-            await connect(to: host.endpoint)
+            guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
+            await connect(
+                using: ConnectionConfiguration(
+                    endpoint: host.endpoint,
+                    credentials: ConnectionCredentials(
+                        clientID: host.clientID,
+                        token: host.token
+                    )
+                ),
+                intentEpoch: intentEpoch
+            )
         } catch {
-            guard activeGeneration == nil,
-                  activeTeardown == nil,
-                  connectExecutionOwner == nil else {
-                return
-            }
+            guard canStartStoredReconnect(intentEpoch: intentEpoch) else { return }
             transition(to: .failed(error.localizedDescription))
         }
     }
 
     public func connect(to endpoint: HostEndpoint) async {
+        lifecycleIntentEpoch &+= 1
         let intentEpoch = lifecycleIntentEpoch
+        await connect(
+            using: ConnectionConfiguration(
+                endpoint: endpoint,
+                credentials: manualCredentials
+            ),
+            intentEpoch: intentEpoch
+        )
+    }
+
+    private func connect(
+        using configuration: ConnectionConfiguration,
+        intentEpoch: UInt64
+    ) async {
         guard await waitForTeardownCompletionUnlessCancelled() else { return }
         guard lifecycleIntentEpoch == intentEpoch else { return }
         // Guard on execution, not on state. connect() keeps awaiting past the
@@ -167,19 +192,19 @@ public actor ConnectionManager {
         let generation = ConnectionGeneration(id: nextConnectionGeneration)
         activeGeneration = generation
         activeConnectAttempt = attempt
+        activeConnection = configuration
         transition(to: .connecting)
 
         do {
             try await withTaskCancellationHandler {
                 try Task.checkCancellation()
                 transportCleanupGeneration = generation
-                try await transport.connect(to: endpoint)
+                try await transport.connect(to: configuration.endpoint)
                 guard isActive(attempt: attempt, generation: generation) else { return }
                 hasActiveTransport = true
                 try Task.checkCancellation()
                 await workspaceStore.beginConnection(for: generation)
                 guard isActive(attempt: attempt, generation: generation) else { return }
-                activeEndpoint = endpoint
                 transition(to: .authenticating)
                 let messages = await transport.incomingMessages()
                 guard isActive(attempt: attempt, generation: generation) else { return }
@@ -231,10 +256,10 @@ public actor ConnectionManager {
                     throw ConnectionManagerError.messageProcessorEndedBeforeReady
                 }
                 try await transport.send(.legacy(.hello(HelloPayload(
-                    clientID: clientID,
+                    clientID: configuration.credentials.clientID,
                     clientName: clientName,
                     protocolVersion: PsycheProtocolVersion.current,
-                    token: token
+                    token: configuration.credentials.token
                 ))))
                 try Task.checkCancellation()
                 try await waitForV3Negotiation(
@@ -298,12 +323,16 @@ public actor ConnectionManager {
         clientID: String? = nil,
         clientName: String? = nil
     ) async {
-        guard hasActiveTransport, let generation = activeGeneration else { return }
+        guard hasActiveTransport,
+              let generation = activeGeneration,
+              let activeConnection else {
+            return
+        }
 
         do {
             try await transport.send(.legacy(.pair(PairRequestPayload(
                 code: code,
-                clientID: clientID ?? self.clientID,
+                clientID: clientID ?? activeConnection.credentials.clientID,
                 clientName: clientName ?? self.clientName
             ))))
         } catch {
@@ -483,7 +512,7 @@ public actor ConnectionManager {
         case .error(let error):
             return .failed(error.message)
         case .pairAccepted(let payload):
-            guard let welcomeIdentity, let activeEndpoint else {
+            guard let welcomeIdentity, let activeConnection else {
                 return .failed(ConnectionManagerError.missingWelcomeIdentity.localizedDescription)
             }
             guard isActive(session: session, generation: generation),
@@ -494,8 +523,8 @@ public actor ConnectionManager {
                 let committed = try await pairedHostStore.save(PairedHost(
                     serverID: welcomeIdentity.serverID,
                     serverName: welcomeIdentity.serverName,
-                    endpoint: activeEndpoint,
-                    clientID: clientID,
+                    endpoint: activeConnection.endpoint,
+                    clientID: activeConnection.credentials.clientID,
                     token: payload.token
                 ), for: generation)
                 guard committed else { return .ignored }
@@ -508,7 +537,7 @@ public actor ConnectionManager {
                   !Task.isCancelled else {
                 return .ignored
             }
-            token = payload.token
+            self.activeConnection = activeConnection.withToken(payload.token)
             await requestInitialSnapshotIfAuthorized(
                 for: session,
                 generation: generation
@@ -555,7 +584,10 @@ public actor ConnectionManager {
         generation: ConnectionGeneration
     ) async {
         guard isActive(session: session, generation: generation) else { return }
-        guard token?.isEmpty == false, !requestedInitialSnapshot else { return }
+        guard activeConnection?.credentials.token?.isEmpty == false,
+              !requestedInitialSnapshot else {
+            return
+        }
         requestedInitialSnapshot = true
         await requestSnapshotIfNeeded(for: session, generation: generation)
     }
@@ -567,7 +599,7 @@ public actor ConnectionManager {
         guard isActive(session: session, generation: generation),
               hasActiveTransport,
               welcomeIdentity != nil,
-              token?.isEmpty == false,
+              activeConnection?.credentials.token?.isEmpty == false,
               !isSnapshotRecoveryInFlight else {
             return
         }
@@ -583,10 +615,14 @@ public actor ConnectionManager {
         let requestClient = self.requestClient
         snapshotRequestTask = Task { [weak self, requestClient] in
             do {
-                _ = try await requestClient.send(
+                let response = try await requestClient.send(
                     .workspaceSnapshot(ControlRequestIDOnly(requestID: requestID)),
                     for: generation
                 )
+                guard case let .workspaceSnapshot(result) = response,
+                      result.requestID == requestID else {
+                    throw ConnectionManagerError.unexpectedSnapshotResponse(requestID)
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -734,7 +770,7 @@ public actor ConnectionManager {
         activeSnapshotRequestID = nil
         requestedInitialSnapshot = false
         isSnapshotRecoveryInFlight = false
-        activeEndpoint = nil
+        activeConnection = nil
         welcomeIdentity = nil
         isMessageProcessorReady = false
         hasNegotiatedV3 = false
@@ -807,6 +843,14 @@ public actor ConnectionManager {
         return true
     }
 
+    private func canStartStoredReconnect(intentEpoch: UInt64) -> Bool {
+        lifecycleIntentEpoch == intentEpoch
+            && connectExecutionOwner == nil
+            && activeGeneration == nil
+            && activeTeardown == nil
+            && state == .disconnected
+    }
+
     private func transition(to newState: ConnectionState) {
         state = newState
         stateHistory.append(newState)
@@ -820,6 +864,26 @@ public actor ConnectionManager {
     private struct WelcomeIdentity {
         let serverID: String
         let serverName: String
+    }
+
+    private struct ConnectionCredentials {
+        let clientID: String
+        let token: String?
+    }
+
+    private struct ConnectionConfiguration {
+        let endpoint: HostEndpoint
+        let credentials: ConnectionCredentials
+
+        func withToken(_ token: String?) -> ConnectionConfiguration {
+            ConnectionConfiguration(
+                endpoint: endpoint,
+                credentials: ConnectionCredentials(
+                    clientID: credentials.clientID,
+                    token: token
+                )
+            )
+        }
     }
 
     private enum MessageHandlingResult: Equatable {
