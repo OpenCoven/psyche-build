@@ -12,6 +12,7 @@ const mainJs = readFileSync(
   'utf8',
 );
 const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
+const DUPLICATE_COVEN_SESSION_ID = '87654321-4321-4cba-8fed-0987654321ba';
 
 function functionSource(name: string) {
   const asyncStart = mainJs.indexOf(`async function ${name}(`);
@@ -336,6 +337,143 @@ describe('native Coven launch routing', () => {
 
     await expect(spawnCovenThread(project)).resolves.toBeNull();
     expect(creates).toBe(0);
+  });
+
+  it('duplicates Coven chat threads with a fresh secure session launch', () => {
+    const project = { id: 'project', root: '/repo' };
+    const originalLaunch = {
+      command: '/bin/coven',
+      args: ['code', '--session-id', COVEN_SESSION_ID],
+      env: { TOKEN: 'before' },
+      projectRoot: '/repo',
+      cwd: '/repo/wt',
+      launchKind: 'coven-chat',
+      covenSessionId: COVEN_SESSION_ID,
+      metricsProvider: 'coven',
+    };
+    const covenChatLaunch = compileFunction<(
+      value: { root: string },
+      path: string,
+    ) => Record<string, unknown> | null>(
+      functionSource('covenChatLaunch'),
+      {
+        selectedWorktree: () => { throw new Error('expected explicit worktree path'); },
+        makeCovenSessionId: () => DUPLICATE_COVEN_SESSION_ID,
+        state: { env: { coven_path: '/bin/coven' } },
+      },
+    );
+    let created: Record<string, any> | null = null;
+    const duplicateThread = compileFunction<(
+      value: Record<string, any>,
+    ) => Record<string, any> | null>(
+      functionSource('duplicateThread'),
+      {
+        findProject: () => project,
+        covenChatLaunch,
+        createThread: (options: Record<string, any>) => {
+          created = options;
+          return options;
+        },
+      },
+    );
+
+    const duplicate = duplicateThread({
+      id: 'thread-1',
+      projectId: project.id,
+      name: 'Coven',
+      kind: 'coven-chat',
+      worktreePath: '/repo/wt',
+      status: 'running',
+      launch: originalLaunch,
+    });
+
+    expect(created).toMatchObject({
+      project,
+      name: 'Coven copy',
+      kind: 'coven-chat',
+      worktreePath: '/repo/wt',
+    });
+    expect(duplicate?.launch).toEqual({
+      command: '/bin/coven',
+      args: ['code', '--session-id', DUPLICATE_COVEN_SESSION_ID],
+      env: {},
+      projectRoot: '/repo',
+      cwd: '/repo/wt',
+      kind: 'coven-chat',
+      launchKind: 'coven-chat',
+      covenSessionId: DUPLICATE_COVEN_SESSION_ID,
+      metricsProvider: 'coven',
+    });
+    expect(originalLaunch).toEqual({
+      command: '/bin/coven',
+      args: ['code', '--session-id', COVEN_SESSION_ID],
+      env: { TOKEN: 'before' },
+      projectRoot: '/repo',
+      cwd: '/repo/wt',
+      launchKind: 'coven-chat',
+      covenSessionId: COVEN_SESSION_ID,
+      metricsProvider: 'coven',
+    });
+  });
+
+  it('does not create a duplicate Coven chat thread when secure session generation fails', () => {
+    const project = { id: 'project', root: '/repo' };
+    const statuses: Array<{ text: string; tone: string | undefined }> = [];
+    const makeCovenSessionId = compileFunction<() => string | null>(
+      functionSource('makeCovenSessionId'),
+      {
+        window: { crypto: null },
+        setStatus: (text: string, tone?: string) => { statuses.push({ text, tone }); },
+      },
+    );
+    const covenChatLaunch = compileFunction<(
+      value: { root: string },
+      path: string,
+    ) => Record<string, unknown> | null>(
+      functionSource('covenChatLaunch'),
+      {
+        selectedWorktree: () => { throw new Error('expected explicit worktree path'); },
+        makeCovenSessionId,
+        state: { env: { coven_path: '/bin/coven' } },
+      },
+    );
+    let creates = 0;
+    const duplicateThread = compileFunction<(
+      value: Record<string, any>,
+    ) => Record<string, any> | null>(
+      functionSource('duplicateThread'),
+      {
+        findProject: () => project,
+        covenChatLaunch,
+        createThread: () => {
+          creates += 1;
+          return { id: 'unexpected' };
+        },
+      },
+    );
+
+    expect(duplicateThread({
+      id: 'thread-1',
+      projectId: project.id,
+      name: 'Coven',
+      kind: 'coven-chat',
+      worktreePath: '/repo/wt',
+      status: 'running',
+      launch: {
+        command: '/bin/coven',
+        args: ['code', '--session-id', COVEN_SESSION_ID],
+        env: {},
+        projectRoot: '/repo',
+        cwd: '/repo/wt',
+        launchKind: 'coven-chat',
+        covenSessionId: COVEN_SESSION_ID,
+        metricsProvider: 'coven',
+      },
+    })).toBeNull();
+    expect(creates).toBe(0);
+    expect(statuses).toEqual([
+      { text: 'Secure session ID generation is unavailable', tone: 'error' },
+    ]);
   });
 
   it('copies one launch descriptor onto the thread and starts from that copy only', async () => {

@@ -3056,12 +3056,18 @@
 
   function duplicateThread(thread) {
     if (!thread || thread.status === "exited") return null;
+    var project = findProject(thread.projectId);
+    var launch = thread.launch;
+    if (launch && launch.launchKind === "coven-chat") {
+      launch = covenChatLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
+      if (!launch) return null;
+    }
     return createThread({
-      project: findProject(thread.projectId),
+      project: project,
       name: thread.name + " copy",
       kind: thread.kind,
       worktreePath: thread.worktreePath,
-      launch: thread.launch,
+      launch: launch,
     });
   }
 
