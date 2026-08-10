@@ -3084,7 +3084,20 @@ mod workspace_panel_tests {
         }
         std::fs::write(tree.root.join("wide.txt"), &body).unwrap();
         run_git(path_text(&tree.root), &["add", "-A"]).unwrap();
-        run_git(path_text(&tree.root), &["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-m", "seed", "--quiet"]).unwrap();
+        run_git(
+            path_text(&tree.root),
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "seed",
+                "--quiet",
+            ],
+        )
+        .unwrap();
         let edited = body.replace("line 20\n", "line twenty\n");
         std::fs::write(tree.root.join("wide.txt"), edited).unwrap();
 
