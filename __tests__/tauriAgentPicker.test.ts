@@ -215,11 +215,12 @@ describe('Tauri agent picker', () => {
     expect(nextAgentPickerIndex(2, 1, 5)).toBe(3);
   });
 
-  it('opens the picker by resetting selection, rendering, and focusing the list', () => {
+  it('opens the picker by closing the session context menu, resetting selection, and focusing the list', () => {
     const overlay = { hidden: true };
     const previousFocus = { id: 'before-picker' };
     let renderCalls = 0;
     let focusCalls = 0;
+    let closeSessionContextMenuCalls = 0;
     const controller = compileFunctionWithState<() => boolean>(
       functionSource('openAgentPicker'),
       {
@@ -230,9 +231,11 @@ describe('Tauri agent picker', () => {
         setHelpOpen: () => undefined,
         closeNewPaneMenu: () => undefined,
         closeScopeMenu: () => undefined,
+        closeSessionContextMenu: () => { closeSessionContextMenuCalls += 1; },
       },
       {
         agentPickerOverlayEl: overlay,
+        dirtyFileDialogEl: { open: false },
         agentPickerListEl: { focus: () => { throw new Error('focus should route through focusAgentPickerList'); } },
         agentPickerIndex: 4,
         agentPickerPreviousFocus: null,
@@ -243,8 +246,42 @@ describe('Tauri agent picker', () => {
     expect(controller.snapshot().agentPickerIndex).toBe(0);
     expect(renderCalls).toBe(1);
     expect(focusCalls).toBe(1);
+    expect(closeSessionContextMenuCalls).toBe(1);
     expect(overlay.hidden).toBe(false);
     expect(controller.snapshot().agentPickerPreviousFocus).toBe(previousFocus);
+  });
+
+  it('refuses to open the picker while the native dirty-file dialog owns modality', () => {
+    const overlay = { hidden: true };
+    const originalFocus = { id: 'existing-focus' };
+    const preservedFocus = { id: 'previous-picker-focus' };
+    const calls: string[] = [];
+    const controller = compileFunctionWithState<() => boolean>(
+      functionSource('openAgentPicker'),
+      {
+        document: { activeElement: originalFocus },
+        agentPickerOpen: () => false,
+        renderAgentPicker: () => { calls.push('render'); },
+        focusAgentPickerList: () => { calls.push('focus'); },
+        setHelpOpen: () => { calls.push('help'); },
+        closeNewPaneMenu: () => { calls.push('new-pane'); },
+        closeScopeMenu: () => { calls.push('scope'); },
+        closeSessionContextMenu: () => { calls.push('context-menu'); },
+      },
+      {
+        agentPickerOverlayEl: overlay,
+        dirtyFileDialogEl: { open: true },
+        agentPickerListEl: { focus: () => { throw new Error('picker should not focus'); } },
+        agentPickerIndex: 3,
+        agentPickerPreviousFocus: preservedFocus,
+      },
+    );
+
+    expect(controller.fn()).toBe(false);
+    expect(calls).toEqual([]);
+    expect(overlay.hidden).toBe(true);
+    expect(controller.snapshot().agentPickerIndex).toBe(3);
+    expect(controller.snapshot().agentPickerPreviousFocus).toBe(preservedFocus);
   });
 
   it('uses Command-P and list keyboard controls to drive the picker', () => {
@@ -257,7 +294,7 @@ describe('Tauri agent picker', () => {
     expect(commandPIndex).toBeGreaterThan(-1);
     expect(commandPIndex).toBeLessThan(commandOIndex);
     const shortcutBlock = mainJs.slice(commandPIndex, commandPIndex + 200);
-    expect(shortcutBlock).toContain('openAgentPicker()');
+    expect(shortcutBlock).toContain('if (openAgentPicker()) e.preventDefault();');
 
     expect(mainJs).toContain('agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown)');
     const listKeydownSource = functionSource('handleAgentPickerListKeydown');
@@ -416,6 +453,7 @@ describe('Tauri agent picker', () => {
           event.stopPropagation();
           consumed.push(event.key);
         },
+        dirtyFileDialogEl: { open: false },
       },
     );
 
@@ -460,6 +498,34 @@ describe('Tauri agent picker', () => {
     })).toBe(false);
   });
 
+  it('does not hijack dirty-file dialog keys when a native dialog is open', () => {
+    const controller = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        preventDefault: () => void;
+        stopPropagation: () => void;
+      }
+    ) => boolean>(
+      functionSource('routeAgentPickerModalKeydown'),
+      {
+        agentPickerOpen: () => true,
+        openAgentPicker: () => { throw new Error('native dialogs must block picker resets'); },
+        handleAgentPickerListKeydown: () => { throw new Error('native dialogs must keep their own key handling'); },
+        consumeAgentPickerKey: () => { throw new Error('native dialogs must retain input'); },
+        dirtyFileDialogEl: { open: true },
+      },
+    );
+
+    expect(controller({
+      key: 'Escape',
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined,
+    })).toBe(false);
+  });
+
   it('keeps Command-P as a modal reset-and-refocus shortcut', () => {
     const opened: string[] = [];
     const consumed: string[] = [];
@@ -483,6 +549,7 @@ describe('Tauri agent picker', () => {
           event.stopPropagation();
           consumed.push(event.key);
         },
+        dirtyFileDialogEl: { open: false },
       },
     );
 

@@ -5231,8 +5231,7 @@
       return;
     }
     if (String(e.key).toLowerCase() === "p") {
-      e.preventDefault();
-      openAgentPicker();
+      if (openAgentPicker()) e.preventDefault();
       return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
@@ -5440,6 +5439,7 @@
 
   function routeAgentPickerModalKeydown(event) {
     if (!agentPickerOpen()) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
     if (
       (event.metaKey || event.ctrlKey) &&
       !event.altKey &&
@@ -6230,10 +6230,12 @@
 
   function openAgentPicker() {
     if (!agentPickerOverlayEl || !agentPickerListEl) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
     closeScopeMenu();
+    closeSessionContextMenu();
     agentPickerIndex = 0;
     renderAgentPicker();
     agentPickerOverlayEl.hidden = false;
