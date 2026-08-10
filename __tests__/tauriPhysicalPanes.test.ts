@@ -426,6 +426,38 @@ describe('Tauri physical terminal panes', () => {
     expect(stylesCss).toMatch(/\.terminal-pane-body/);
   });
 
+  it('refreshes the minimap in the empty-layout branch while a file stays active', () => {
+    const calls: string[] = [];
+    const activeFile = { id: 'file-a' };
+    const terminalHost = {
+      children: ['stale-pane'],
+      replaceChildren: () => {
+        terminalHost.children = [];
+        calls.push('clear');
+      },
+    };
+    const renderPaneWorkspace = compileFunction<() => void>(functionSource('renderPaneWorkspace'), {
+      terminalHost,
+      stageBrowserSurface: () => { calls.push('stage'); },
+      activePaneLayout: () => null,
+      renderTerminalEmptyState: () => { calls.push('empty'); },
+      renderPaneMinimap: (layout: unknown, file: unknown) => {
+        expect(layout).toBeNull();
+        expect(file).toBe(activeFile);
+        calls.push('minimap');
+      },
+      findOpenFile: (id: string | null) => {
+        expect(id).toBe('file-a');
+        return activeFile;
+      },
+      state: { activeFileId: 'file-a' },
+    });
+
+    renderPaneWorkspace();
+    expect(terminalHost.children).toEqual([]);
+    expect(calls).toEqual(['stage', 'clear', 'empty', 'minimap']);
+  });
+
   it('renders file tabs without depending on terminal thread visibility', () => {
     expect(functionSource('refreshTabs')).not.toMatch(/activeProjectThreads/);
   });
@@ -649,6 +681,7 @@ describe('Tauri physical terminal panes', () => {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers,
       stopThreadPty: () => { stops += 1; return Promise.resolve(true); },
       state,
@@ -717,6 +750,7 @@ describe('Tauri physical terminal panes', () => {
       forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers,
       stopThreadPty,
       state,
@@ -735,6 +769,112 @@ describe('Tauri physical terminal panes', () => {
     expect(thread.startInFlight).toBe(false);
     expect(state.threads).toEqual([]);
     expect(pendingDataBuffers.has(thread.id)).toBe(false);
+  });
+
+  it('retains file focus when closing the active underlying pane', () => {
+    const project = { id: 'project' };
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const threadB = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const state = {
+      threads: [threadA, threadB],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), { state, fileFocus });
+    let renders = 0;
+    let focused = 0;
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => threadB.id,
+      retainFileFocusAfterThreadRemoval,
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => Promise.resolve(true),
+      state,
+      fileFocus,
+      renderPaneWorkspace: () => { renders += 1; },
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => { focused += 1; },
+    });
+
+    expect(closeThread(threadA.id)).toBe(true);
+    expect(focused).toBe(0);
+    expect(state.activeFileId).toBe('file-a');
+    expect(state.activeThreadId).toBe(threadB.id);
+    expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(renders).toBe(1);
+    expect(state.threads).toEqual([threadB]);
+  });
+
+  it('retains file focus when hiding the active underlying pane', () => {
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: 'project',
+      worktreePath: '/repo',
+      hidden: false,
+    };
+    const threadB = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: 'project',
+      worktreePath: '/repo',
+      hidden: false,
+    };
+    const state = {
+      threads: [threadA, threadB],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), { state, fileFocus });
+    let renders = 0;
+    let focused = 0;
+    const hideThread = compileFunction<(id: string) => boolean>(functionSource('hideThread'), {
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => threadB.id,
+      retainFileFocusAfterThreadRemoval,
+      state,
+      fileFocus,
+      focusThread: () => { focused += 1; },
+      renderPaneWorkspace: () => { renders += 1; },
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+    });
+
+    expect(hideThread(threadA.id)).toBe(true);
+    expect(focused).toBe(0);
+    expect(state.activeFileId).toBe('file-a');
+    expect(state.activeThreadId).toBe(threadB.id);
+    expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(threadA.hidden).toBe(true);
+    expect(renders).toBe(1);
   });
 
   it('guards inactive-project hidden-session reopen behind dirty-file cancellation', async () => {

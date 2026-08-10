@@ -2817,6 +2817,7 @@
     var layout = activePaneLayout();
     if (!layout || !layout.root) {
       renderTerminalEmptyState();
+      renderPaneMinimap(layout, findOpenFile(state.activeFileId));
       return;
     }
     var root = effectivePaneRoot(layout);
@@ -3130,6 +3131,15 @@
     return closed;
   }
 
+  function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId) {
+    if (!state.activeFileId) return false;
+    state.activeThreadId = nextThreadId || null;
+    if (fileFocus.returnThreadId === removedThreadId) {
+      fileFocus.returnThreadId = nextThreadId || null;
+    }
+    return true;
+  }
+
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
@@ -3153,7 +3163,10 @@
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
-      if (nextThreadId && (!options || options.focus !== false)) {
+      if (retainFileFocusAfterThreadRemoval(id, nextThreadId)) {
+        renderPaneWorkspace();
+        if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
+      } else if (nextThreadId && (!options || options.focus !== false)) {
         focusThread(nextThreadId);
       } else {
         renderPaneWorkspace();
@@ -3174,7 +3187,9 @@
     thread.hidden = true;
     if (state.activeThreadId === id) {
       state.activeThreadId = null;
-      if (nextThreadId) focusThread(nextThreadId);
+      if (!retainFileFocusAfterThreadRemoval(id, nextThreadId) && nextThreadId) {
+        focusThread(nextThreadId);
+      }
     }
     renderPaneWorkspace();
     refreshSidebar();
