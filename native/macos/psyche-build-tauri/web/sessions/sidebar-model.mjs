@@ -225,6 +225,10 @@ function normalizeCovenRow(project, worktree, ownedRow, session) {
   return row;
 }
 
+function compareRowKeys(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function differentiateDuplicateTitles(rows) {
   const groups = new Map();
 
@@ -238,14 +242,26 @@ function differentiateDuplicateTitles(rows) {
   for (const matches of groups.values()) {
     if (matches.length < 2) continue;
 
-    const usedDetails = new Set();
-    for (const row of matches) {
-      let detail = row.command || row.discriminator || row.id || row.meta;
-      if (!detail || usedDetails.has(detail)) {
-        detail = row.id || `${row.kind} ${usedDetails.size + 1}`;
-      }
-      usedDetails.add(detail);
-      row.title = `${row.baseTitle} · ${detail}`;
+    const orderedMatches = [...matches].sort((left, right) => (
+      compareRowKeys(left.key, right.key)
+    ));
+    const ordinals = new Map(orderedMatches.map((row, index) => [row.key, String(index + 1)]));
+    const detailCollisions = new Map();
+
+    for (const row of orderedMatches) {
+      const detail = row.command || ordinals.get(row.key) || row.id || row.meta;
+      const collisionGroup = detailCollisions.get(detail) ?? [];
+      collisionGroup.push(row);
+      detailCollisions.set(detail, collisionGroup);
+    }
+
+    for (const row of orderedMatches) {
+      const detail = row.command || ordinals.get(row.key) || row.id || row.meta;
+      const collisionGroup = detailCollisions.get(detail) ?? [];
+      const uniqueDetail = collisionGroup.length > 1
+        ? `${detail} · ${collisionGroup.findIndex((match) => match.key === row.key) + 1}`
+        : detail;
+      row.title = `${row.baseTitle} · ${uniqueDetail}`;
       row.searchText = `${row.searchText}\n${lower(row.title)}`;
     }
   }

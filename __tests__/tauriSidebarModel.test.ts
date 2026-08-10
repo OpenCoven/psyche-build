@@ -51,6 +51,16 @@ function covenSession(id: string, values: Record<string, unknown> = {}) {
   };
 }
 
+function rowTitlesById(result: ReturnType<typeof buildSidebarProjectModel>) {
+  return Object.fromEntries(
+    result.branches.flatMap((branch) => (
+      branch.categories.flatMap((category) => (
+        category.rows.map((row) => [row.id, row.title] as const)
+      ))
+    )),
+  );
+}
+
 describe('Tauri sidebar model', () => {
   it('exports the supported filters and activity window', () => {
     expect(SIDEBAR_FILTERS).toEqual(['all', 'agents', 'shells', 'active', 'attention']);
@@ -227,6 +237,72 @@ describe('Tauri sidebar model', () => {
       'shell 8 · pnpm dev',
       'shell 8 · vitest --watch',
     ]);
+  });
+
+  it('uses stable ordinals for duplicate titles without commands regardless of input order', () => {
+    const localSessions = [
+      localSession('shell-z', {
+        name: 'shell 8',
+        lastOutputAt: 9_000,
+      }),
+      localSession('shell-a', {
+        name: 'shell 8',
+        lastOutputAt: 9_000,
+      }),
+    ];
+
+    const forward = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions,
+      covenSessions: [],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+    const reversed = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [...localSessions].reverse(),
+      covenSessions: [],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(rowTitlesById(forward)).toEqual({
+      'shell-a': 'shell 8 · 1',
+      'shell-z': 'shell 8 · 2',
+    });
+    expect(rowTitlesById(reversed)).toEqual(rowTitlesById(forward));
+  });
+
+  it('suffixes duplicate command details deterministically when commands collide', () => {
+    const result = buildSidebarProjectModel({
+      project: baseProject,
+      localSessions: [
+        localSession('shell-z', {
+          name: 'shell 8',
+          launch: { command: 'pnpm', args: ['dev'] },
+          lastOutputAt: 9_000,
+        }),
+        localSession('shell-a', {
+          name: 'shell 8',
+          launch: { command: 'pnpm', args: ['dev'] },
+          lastOutputAt: 9_000,
+        }),
+      ],
+      covenSessions: [],
+      query: '',
+      filter: 'all',
+      selectedKey: '',
+      now: 10_000,
+    });
+
+    expect(rowTitlesById(result)).toEqual({
+      'shell-a': 'shell 8 · pnpm dev · 1',
+      'shell-z': 'shell 8 · pnpm dev · 2',
+    });
   });
 
   it('sorts selected, attention, busy, active, idle, exited, then recency and key', () => {
