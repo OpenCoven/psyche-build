@@ -6119,7 +6119,7 @@
       kind: entry.kind,
       command: command,
       args: entry.args.slice(),
-      launchKind: entry.kind,
+      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
       projectRoot: project.root,
       cwd: worktree.path,
     });

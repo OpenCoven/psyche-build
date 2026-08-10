@@ -98,7 +98,7 @@ describe('Tauri agent picker', () => {
       kind: 'agent-codex',
       command: 'codex',
       args: ['--fixture-arg'],
-      launchKind: 'agent-codex',
+      launchKind: null,
       projectRoot: '/repo',
       cwd: '/repo/worktree',
       worktreePath: '/repo/worktree',
@@ -126,6 +126,7 @@ describe('Tauri agent picker', () => {
     const result = await spawnAgentThread('coven-code');
 
     expect(result).toMatchObject({
+      kind: 'coven-chat',
       command: '/opt/homebrew/bin/coven',
       args: ['chat'],
       launchKind: 'coven-chat',

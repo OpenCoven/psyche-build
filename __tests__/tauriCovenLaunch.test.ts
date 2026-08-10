@@ -92,6 +92,16 @@ describe('Tauri Coven launch project scope', () => {
     expect(discover).toBeGreaterThan(canonicalize);
   });
 
+  it('keeps protected launch kinds limited to Coven-only launches across the JS/Rust contract', () => {
+    expect(libRs).toContain('if !matches!(launch_kind, "coven-chat" | "coven-attach")');
+
+    const spawnAgentThread = functionSource('spawnAgentThread');
+    expect(spawnAgentThread).toContain('launchKind: entry.kind === "coven-chat" ? entry.kind : null');
+
+    const covenChatLaunch = functionSource('covenChatLaunch');
+    expect(covenChatLaunch).toContain('launchKind: "coven-chat"');
+  });
+
   it('deduplicates canonical aliases while preserving the active project identity', async () => {
     let nextId = 0;
     const migrateProjectRoot = compileFunction<(
