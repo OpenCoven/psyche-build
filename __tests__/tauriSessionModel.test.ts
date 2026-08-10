@@ -288,6 +288,22 @@ describe('Tauri Coven session model', () => {
     }
   });
 
+  test('surfaces an unavailable Coven reason when the response has no message', () => {
+    const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
+    const unavailable = model.applyCovenResponse(
+      requested.state,
+      requested.requestId,
+      {
+        status: 'unavailable',
+        reason: ' local Coven Unix socket transport is unsupported on Windows ',
+      },
+      102,
+    );
+
+    expect(unavailable.message)
+      .toBe('local Coven Unix socket transport is unsupported on Windows');
+  });
+
   test('treats a healthy empty response as ready with no sessions', () => {
     const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
     const empty = model.applyCovenResponse(

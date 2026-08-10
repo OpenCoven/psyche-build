@@ -23,11 +23,15 @@ pub(super) fn default_shell() -> (String, Vec<String>) {
         }
     }
 
+    (command_processor(), Vec::new())
+}
+
+pub(super) fn command_processor() -> String {
     let comspec = std::env::var_os("COMSPEC")
         .filter(|shell| !shell.is_empty())
         .map(|shell| shell.to_string_lossy().to_string())
         .unwrap_or_else(|| "cmd.exe".to_string());
-    (comspec, Vec::new())
+    comspec
 }
 
 pub(super) fn augmented_path() -> OsString {

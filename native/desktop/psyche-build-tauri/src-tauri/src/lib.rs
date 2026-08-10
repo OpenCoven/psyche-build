@@ -469,9 +469,11 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
 
-    let (default_command, default_args) = platform::default_shell();
-    let command = options.command.unwrap_or(default_command);
-    let args = options.args.unwrap_or(default_args);
+    let platform::LaunchDescriptor {
+        command,
+        args,
+        env: launch_env,
+    } = platform::pty_launch_descriptor(options.command, options.args)?;
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
     cmd.env("PATH", platform::augmented_path());
@@ -503,6 +505,9 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     cmd.env_remove("npm_config_prefix");
     cmd.env_remove("NPM_CONFIG_PREFIX");
     cmd.env_remove("PREFIX");
+    for (key, value) in launch_env {
+        cmd.env(key, value);
+    }
 
     resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -825,7 +830,7 @@ fn feature_flag_enabled(name: &str, default: bool) -> bool {
 
 #[tauri::command]
 fn app_environment() -> AppEnvironment {
-    let home = std::env::var("HOME").ok();
+    let home = platform::home_directory();
     let (default_shell, default_shell_args) = platform::default_shell();
     let native_workspace_v2 = feature_flag_enabled("PSYCHE_NATIVE_WORKSPACE_V2", true);
 

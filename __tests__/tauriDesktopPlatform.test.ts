@@ -130,7 +130,7 @@ describe('desktop Tauri layout', () => {
     expect(JSON.stringify(configs)).not.toMatch(/\bpython3?\b/);
   });
 
-  it('routes the platform shell program and arguments without POSIX-only frontend wrapping', () => {
+  it('routes structured targets through the native platform launch descriptor', () => {
     const libSource = readFileSync(libSourcePath, 'utf8');
     const mainSource = readFileSync(mainSourcePath, 'utf8');
     const appEnvironment = bracedItem(libSource, 'fn app_environment');
@@ -146,9 +146,11 @@ describe('desktop Tauri layout', () => {
       /AppEnvironment\s*\{[\s\S]*default_shell,[\s\S]*default_shell_args,/,
     );
     expect(ptyStart).toMatch(
-      /let\s+\(default_command,\s*default_args\)\s*=\s*platform::default_shell\(\)/,
+      /platform::pty_launch_descriptor\(options\.command,\s*options\.args\)/,
     );
-    expect(ptyStart).toMatch(/options\.args\.unwrap_or\(default_args\)/);
+    expect(ptyStart).toContain('let platform::LaunchDescriptor');
+    expect(ptyStart).toContain('cmd.args(args)');
+    expect(ptyStart).toContain('for (key, value) in launch_env');
 
     expect(spawnShellThread).toContain('command: state.env.default_shell');
     expect(spawnShellThread).toContain('args: state.env.default_shell_args');
@@ -159,6 +161,14 @@ describe('desktop Tauri layout', () => {
     expect(spawnPsycheThread).not.toMatch(
       /default_shell|\/bin\/zsh|quoted|["']exec\s|["']-l["']|["']-c["']/,
     );
+  });
+
+  it('uses the platform home contract instead of assuming HOME exists', () => {
+    const libSource = readFileSync(libSourcePath, 'utf8');
+    const appEnvironment = bracedItem(libSource, 'fn app_environment');
+
+    expect(appEnvironment).toContain('let home = platform::home_directory();');
+    expect(appEnvironment).not.toMatch(/std::env::var\(["']HOME["']\)/);
   });
 
   it('uses Windows PATHEXT when resolving extensionless executables', () => {
