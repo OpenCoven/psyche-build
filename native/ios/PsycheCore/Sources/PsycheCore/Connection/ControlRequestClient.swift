@@ -165,7 +165,7 @@ public actor ControlRequestClient: ControlRequesting {
     }
 
     func endGeneration(_ generation: ConnectionGeneration) {
-        guard activeGenerationID == generation.id else { return }
+        guard activeGenerationID == nil || activeGenerationID == generation.id else { return }
         activeGenerationID = nil
         failAllPending(with: ControlRequestError.disconnected)
     }

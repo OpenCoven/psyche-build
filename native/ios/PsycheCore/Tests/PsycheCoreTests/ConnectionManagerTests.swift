@@ -225,6 +225,100 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertFalse(composition.workspaceStore.isStale)
     }
 
+    func testPreV3ControlResponsesCannotCompleteWaitersBeforeActiveGeneration() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(transport: fake)
+        let manager = composition.manager
+        let connectTask = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        try await waitForHello(on: fake)
+        let ackProbe = RequestCompletionProbe()
+        let errorProbe = RequestCompletionProbe()
+        let otherProbe = RequestCompletionProbe()
+        let ackWaiter = controlRequest(
+            .killPane(PaneIDControlRequest(requestID: "pre-v3-ack", paneID: "pane")),
+            on: composition.requestClient,
+            probe: ackProbe
+        )
+        let errorWaiter = controlRequest(
+            .killPane(PaneIDControlRequest(requestID: "pre-v3-error", paneID: "pane")),
+            on: composition.requestClient,
+            probe: errorProbe
+        )
+        let otherWaiter = controlRequest(
+            .killPane(PaneIDControlRequest(requestID: "pre-v3-other", paneID: "pane")),
+            on: composition.requestClient,
+            probe: otherProbe
+        )
+        try await waitForPendingRequest(on: composition.requestClient, count: 3)
+
+        await fake.emit(.legacy(.welcome(WelcomePayload(
+            serverID: "host",
+            serverName: "Host",
+            protocolVersion: PsycheProtocolVersion.legacy,
+            projectName: "psyche",
+            supportedVersions: [
+                PsycheProtocolVersion.legacy,
+                PsycheProtocolVersion.current
+            ]
+        ))))
+        await fake.emit(.control(.ack(ControlAckResponse(requestID: "pre-v3-ack"))))
+        await fake.emit(.control(.error(MobileProtocolErrorResponse(
+            requestID: "pre-v3-error",
+            code: "too_early",
+            message: "Not negotiated"
+        ))))
+        await fake.emit(.control(.unknown(UnknownControlResponse(
+            type: "future.result",
+            requestID: "pre-v3-other"
+        ))))
+        await fake.emit(.legacy(.projectList([])))
+        await manager.waitForEventDrain(after: 1)
+
+        let ackCompletedBeforeV3 = await ackProbe.isComplete
+        let errorCompletedBeforeV3 = await errorProbe.isComplete
+        let otherCompletedBeforeV3 = await otherProbe.isComplete
+        let pendingBeforeV3 = await composition.requestClient.pendingRequestCount
+        let stateBeforeV3 = await manager.state
+        XCTAssertFalse(ackCompletedBeforeV3)
+        XCTAssertFalse(errorCompletedBeforeV3)
+        XCTAssertFalse(otherCompletedBeforeV3)
+        XCTAssertEqual(pendingBeforeV3, 3)
+        XCTAssertEqual(stateBeforeV3, .authenticating)
+
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await connectTask.value
+
+        let postV3Probe = RequestCompletionProbe()
+        let postV3Waiter = controlRequest(
+            .killPane(PaneIDControlRequest(requestID: "post-v3", paneID: "pane")),
+            on: composition.requestClient,
+            probe: postV3Probe
+        )
+        try await waitForPendingRequest(on: composition.requestClient, count: 4)
+        await fake.emit(.control(.ack(ControlAckResponse(requestID: "post-v3"))))
+
+        let postV3Result = await postV3Waiter.value
+        XCTAssertEqual(
+            try postV3Result.get(),
+            .ack(ControlAckResponse(requestID: "post-v3"))
+        )
+        let postV3Completed = await postV3Probe.isComplete
+        XCTAssertTrue(postV3Completed)
+
+        await manager.disconnect()
+        for waiter in [ackWaiter, errorWaiter, otherWaiter] {
+            do {
+                _ = try await waiter.value.get()
+                XCTFail("Pre-v3 response must not complete its waiter")
+            } catch {
+                XCTAssertEqual(error as? ControlRequestError, .disconnected)
+            }
+        }
+    }
+
     func testFailedTransportMovesToFailedState() async {
         let manager = makeComposition(
             transport: FakeTransport(shouldFailConnection: true)
@@ -661,6 +755,69 @@ final class ConnectionManagerTests: XCTestCase {
         XCTAssertEqual(reconnectedState, .connected)
     }
 
+    func testDisconnectDuringTransportConnectCleansOwnedResourceAndAllowsReconnect() async throws {
+        let fake = FakeTransport()
+        let transport = AllocatedConnectSuspensionTransport(base: fake)
+        let composition = makeComposition(transport: transport, token: "token")
+        let manager = composition.manager
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        await transport.waitUntilFirstConnectSuspends()
+        let connectedResource = await fake.isConnected
+        XCTAssertTrue(connectedResource)
+        let pending = Task {
+            try await composition.requestClient.send(.killPane(PaneIDControlRequest(
+                requestID: "disconnect-during-connect",
+                paneID: "pane"
+            )))
+        }
+        try await waitForPendingRequest(on: composition.requestClient)
+
+        await manager.disconnect()
+        let disconnectCount = await fake.disconnectCount
+        let connectedAfterDisconnect = await fake.isConnected
+        let disconnectedState = await manager.state
+        let pendingRequestCount = await composition.requestClient.pendingRequestCount
+        XCTAssertEqual(disconnectCount, 1)
+        XCTAssertFalse(connectedAfterDisconnect)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertEqual(disconnectedState, .disconnected)
+        XCTAssertEqual(pendingRequestCount, 0)
+        if pendingRequestCount > 0 {
+            pending.cancel()
+        }
+        do {
+            _ = try await pending.value
+            XCTFail("Disconnect should fail a request started during transport connect")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
+
+        let reconnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+        let reconnectedState = await manager.state
+        let reconnectDisconnectCount = await fake.disconnectCount
+        XCTAssertEqual(reconnectedState, .connected)
+        XCTAssertEqual(reconnectDisconnectCount, 1)
+
+        await transport.releaseFirstConnect()
+        await firstConnect.value
+        let stateAfterLateReturn = await manager.state
+        let connectedAfterLateReturn = await fake.isConnected
+        let finalDisconnectCount = await fake.disconnectCount
+        XCTAssertEqual(stateAfterLateReturn, .connected)
+        XCTAssertTrue(connectedAfterLateReturn)
+        XCTAssertEqual(finalDisconnectCount, 1)
+
+        await manager.disconnect()
+    }
+
     func testCancellationBeforeReaderReadinessCompletesConnectAndAllowsReconnect() async throws {
         let fake = FakeTransport()
         let startGate = MessageProcessorStartGate()
@@ -700,6 +857,70 @@ final class ConnectionManagerTests: XCTestCase {
         _ = try await waitForSnapshotRequest(on: fake)
         let reconnectedState = await manager.state
         XCTAssertEqual(reconnectedState, .connected)
+    }
+
+    func testCancellationDuringTransportConnectCleansOwnedResourceAndAllowsReconnect() async throws {
+        let fake = FakeTransport()
+        let transport = AllocatedConnectSuspensionTransport(base: fake)
+        let composition = makeComposition(transport: transport, token: "token")
+        let manager = composition.manager
+        let firstConnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+
+        await transport.waitUntilFirstConnectSuspends()
+        let connectedResource = await fake.isConnected
+        XCTAssertTrue(connectedResource)
+        let pending = Task {
+            try await composition.requestClient.send(.killPane(PaneIDControlRequest(
+                requestID: "cancel-during-connect",
+                paneID: "pane"
+            )))
+        }
+        try await waitForPendingRequest(on: composition.requestClient)
+
+        firstConnect.cancel()
+        try await waitForDisconnectCount(1, on: fake)
+        let expectedCancellation = ConnectionState.failed(
+            ConnectionManagerError.connectionCancelled.localizedDescription
+        )
+        await manager.waitForState(expectedCancellation)
+        let connectedAfterCancellation = await fake.isConnected
+        let pendingRequestCount = await composition.requestClient.pendingRequestCount
+        XCTAssertFalse(connectedAfterCancellation)
+        XCTAssertTrue(composition.workspaceStore.isStale)
+        XCTAssertEqual(pendingRequestCount, 0)
+        if pendingRequestCount > 0 {
+            pending.cancel()
+        }
+        do {
+            _ = try await pending.value
+            XCTFail("Cancellation should fail a request started during transport connect")
+        } catch {
+            XCTAssertEqual(error as? ControlRequestError, .disconnected)
+        }
+
+        let reconnect = Task {
+            await manager.connect(to: testEndpoint())
+        }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await reconnect.value
+        let reconnectedState = await manager.state
+        let reconnectDisconnectCount = await fake.disconnectCount
+        XCTAssertEqual(reconnectedState, .connected)
+        XCTAssertEqual(reconnectDisconnectCount, 1)
+
+        await transport.releaseFirstConnect()
+        await firstConnect.value
+        let stateAfterLateReturn = await manager.state
+        let connectedAfterLateReturn = await fake.isConnected
+        let finalDisconnectCount = await fake.disconnectCount
+        XCTAssertEqual(stateAfterLateReturn, .connected)
+        XCTAssertTrue(connectedAfterLateReturn)
+        XCTAssertEqual(finalDisconnectCount, 1)
+
+        await manager.disconnect()
     }
 
     func testCancellationAfterHelloBeforeWelcomeCleansUpAndAllowsReconnect() async throws {
@@ -1255,15 +1476,33 @@ final class ConnectionManagerTests: XCTestCase {
 
     private func waitForPendingRequest(
         on client: ControlRequestClient,
+        count: Int = 1,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
         for _ in 0..<1_000 {
-            if await client.pendingRequestCount > 0 { return }
+            if await client.pendingRequestCount >= count { return }
             await Task.yield()
         }
-        XCTFail("Timed out waiting for pending request", file: file, line: line)
+        XCTFail("Timed out waiting for \(count) pending request(s)", file: file, line: line)
         throw TestError.timedOut
+    }
+
+    private func controlRequest(
+        _ request: MobileControlRequest,
+        on client: ControlRequestClient,
+        probe: RequestCompletionProbe
+    ) -> Task<Result<MobileControlResponse, any Error>, Never> {
+        Task {
+            let result: Result<MobileControlResponse, any Error>
+            do {
+                result = .success(try await client.send(request))
+            } catch {
+                result = .failure(error)
+            }
+            await probe.markComplete()
+            return result
+        }
     }
 
     private func waitForConnectionAttempts(
@@ -1348,6 +1587,70 @@ private actor HelloCompletionGateTransport: PsycheTransport {
 
     func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
         await base.incomingBinaryFrames()
+    }
+}
+
+private actor RequestCompletionProbe {
+    private(set) var isComplete = false
+
+    func markComplete() {
+        isComplete = true
+    }
+}
+
+private actor AllocatedConnectSuspensionTransport: PsycheTransport {
+    private let base: FakeTransport
+    private let firstConnectGate = AsyncGate()
+    private var connectionCount = 0
+    private var firstConnectDidSuspend = false
+    private var firstConnectWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(base: FakeTransport) {
+        self.base = base
+    }
+
+    func connect(to endpoint: HostEndpoint) async throws {
+        connectionCount += 1
+        let shouldSuspend = connectionCount == 1
+        try await base.connect(to: endpoint)
+        guard shouldSuspend else { return }
+
+        firstConnectDidSuspend = true
+        let waiting = firstConnectWaiters
+        firstConnectWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+        await firstConnectGate.wait()
+    }
+
+    func disconnect() async {
+        await base.disconnect()
+    }
+
+    func send(_ message: MobileClientMessage) async throws {
+        try await base.send(message)
+    }
+
+    func incomingMessages() async -> AsyncStream<MobileServerMessage> {
+        await base.incomingMessages()
+    }
+
+    func incomingBinaryFrames() async -> AsyncStream<TerminalBinaryFrame> {
+        await base.incomingBinaryFrames()
+    }
+
+    func waitUntilFirstConnectSuspends() async {
+        guard !firstConnectDidSuspend else { return }
+        await withCheckedContinuation { continuation in
+            if firstConnectDidSuspend {
+                continuation.resume()
+            } else {
+                firstConnectWaiters.append(continuation)
+            }
+        }
+    }
+
+    func releaseFirstConnect() async {
+        await firstConnectGate.release()
     }
 }
 

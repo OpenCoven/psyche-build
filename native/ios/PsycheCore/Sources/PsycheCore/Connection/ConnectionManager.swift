@@ -66,10 +66,11 @@ public actor ConnectionManager {
     private var nextConnectionGeneration: UInt64 = 0
     private var activeGeneration: ConnectionGeneration?
     private var activeConnectAttempt: UUID?
+    private var connectExecutionOwner: UUID?
     private var activeMessageSession: UUID?
     private var activeSnapshotRequestID: String?
+    private var transportCleanupGeneration: ConnectionGeneration?
     private var hasActiveTransport = false
-    private var isConnectInFlight = false
     private var requestedInitialSnapshot = false
     private var isSnapshotRecoveryInFlight = false
     private var isMessageProcessorReady = false
@@ -132,12 +133,14 @@ public actor ConnectionManager {
     public func connect(to endpoint: HostEndpoint) async {
         // Guard on execution, not on state. connect() keeps awaiting past the
         // .authenticating transition and the actor yields at every await.
-        guard !isConnectInFlight else { return }
+        guard connectExecutionOwner == nil else { return }
         guard state != .disconnecting else { return }
-        isConnectInFlight = true
         let attempt = UUID()
+        connectExecutionOwner = attempt
         defer {
-            isConnectInFlight = false
+            if connectExecutionOwner == attempt {
+                connectExecutionOwner = nil
+            }
         }
 
         await tearDownActiveConnection()
@@ -154,12 +157,11 @@ public actor ConnectionManager {
         do {
             try await withTaskCancellationHandler {
                 try Task.checkCancellation()
+                transportCleanupGeneration = generation
                 try await transport.connect(to: endpoint)
                 guard isActive(attempt: attempt, generation: generation) else { return }
                 hasActiveTransport = true
                 try Task.checkCancellation()
-                await requestClient.beginGeneration(generation)
-                guard isActive(attempt: attempt, generation: generation) else { return }
                 await workspaceStore.beginConnection(for: generation)
                 guard isActive(attempt: attempt, generation: generation) else { return }
                 activeEndpoint = endpoint
@@ -436,6 +438,10 @@ public actor ConnectionManager {
                 serverID: payload.serverID,
                 serverName: payload.serverName
             )
+            await requestClient.beginGeneration(generation)
+            guard isActive(session: session, generation: generation) else {
+                return .ignored
+            }
             hasNegotiatedV3 = true
             transition(to: .connected)
             completeNegotiation(for: session, with: .success(()))
@@ -494,9 +500,7 @@ public actor ConnectionManager {
         generation: ConnectionGeneration
     ) async -> MessageHandlingResult {
         guard isActive(session: session, generation: generation) else { return .ignored }
-        if case .workspaceSnapshot = response, !hasNegotiatedV3 {
-            return .ignored
-        }
+        guard hasNegotiatedV3 else { return .ignored }
         let wasHandled = await requestClient.handle(response, for: generation)
         guard isActive(session: session, generation: generation) else { return .ignored }
 
@@ -608,15 +612,22 @@ public actor ConnectionManager {
             return
         }
         let session = activeMessageSession
+        let attempt = activeConnectAttempt
         generation.invalidate()
         activeGeneration = nil
         activeConnectAttempt = nil
+        if connectExecutionOwner == attempt {
+            connectExecutionOwner = nil
+        }
         activeMessageSession = nil
         completeMessageProcessorReadiness(for: session, with: .failure(readinessError))
         completeNegotiation(for: session, with: .failure(readinessError))
         messageTask?.cancel()
         messageTask = nil
-        let shouldDisconnectTransport = hasActiveTransport
+        let shouldDisconnectTransport = transportCleanupGeneration === generation
+        if shouldDisconnectTransport {
+            transportCleanupGeneration = nil
+        }
         hasActiveTransport = false
         await resetPerConnectionState(generation: generation)
         if shouldDisconnectTransport {
