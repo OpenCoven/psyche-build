@@ -94,6 +94,15 @@ final class DemoStore: ObservableObject {
         selectedPaneID = panes.first?.id
     }
 
+    /// Builds the deterministic store a `-uiFixture` launch runs against.
+    /// Production views take a `WorkspaceStore`, never `DemoStore`, so demo
+    /// data stays confined to previews and UI fixtures.
+    static func makeWorkspaceStore(fixture name: String) -> WorkspaceStore {
+        let store = WorkspaceStore()
+        store.applySnapshot(workspace: WorkspaceFixtures.workspace(named: name), sequence: 1)
+        return store
+    }
+
     var selectedPane: DemoPane {
         panes.first(where: { $0.id == selectedPaneID }) ?? panes[0]
     }

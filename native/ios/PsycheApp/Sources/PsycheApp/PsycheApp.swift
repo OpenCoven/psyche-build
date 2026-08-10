@@ -4,15 +4,22 @@ import SwiftUI
 @main
 struct PsycheApp: App {
     @StateObject private var store = DemoStore()
-    @StateObject private var liveComposition = MobileAppComposition.production()
+    @StateObject private var model: AppModel
+
+    init() {
+        let fixture = AppModel.fixtureName(in: ProcessInfo.processInfo.arguments)
+        _model = StateObject(wrappedValue: AppModel(fixture: fixture))
+    }
 
     var body: some Scene {
         WindowGroup {
             CockpitView()
                 .environmentObject(store)
+                .environmentObject(model)
+                .environmentObject(model.workspaceStore)
                 .preferredColorScheme(.dark)
                 .task {
-                    await liveComposition.start()
+                    await model.start()
                 }
         }
     }
