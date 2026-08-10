@@ -62,6 +62,7 @@ jobs:
   desktop-runtime:
     name: Desktop runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -107,11 +108,11 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build desktop web bundles
-        run: pnpm --dir native/desktop/psyche-build-tauri build:web
-
       - name: Verify platform-neutral desktop contracts
         run: pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts
+
+      - name: Build desktop web bundles
+        run: pnpm --dir native/desktop/psyche-build-tauri build:web
 
       - name: Verify Rust formatting
         run: cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check

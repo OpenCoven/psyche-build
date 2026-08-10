@@ -92,6 +92,8 @@ describe('desktop Tauri layout', () => {
   it('checks the desktop runtime on exactly macOS, Windows, and Linux', () => {
     const workflow = readFileSync(ciWorkflowPath, 'utf8');
     const job = workflowJob(workflow, 'desktop-runtime');
+    const bundleFreshnessGate = 'pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts';
+    const buildBundles = 'pnpm --dir native/desktop/psyche-build-tauri build:web';
 
     expect(job).toContain('runs-on: ${{ matrix.os }}');
     expect([...job.matchAll(/^\s{10}- (.+)$/gm)].map(([, runner]) => runner)).toEqual([
@@ -100,7 +102,7 @@ describe('desktop Tauri layout', () => {
       'ubuntu-24.04',
     ]);
     expect(job).toContain('pnpm install --frozen-lockfile');
-    expect(job).toContain('pnpm --dir native/desktop/psyche-build-tauri build:web');
+    expect(job).toContain(buildBundles);
     expect(job).toContain(
       'cargo fmt --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --check',
     );
@@ -110,9 +112,11 @@ describe('desktop Tauri layout', () => {
     expect(job).toContain(
       'cargo check --manifest-path native/desktop/psyche-build-tauri/src-tauri/Cargo.toml --locked',
     );
-    expect(job).toContain(
-      'pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts',
-    );
+    expect(job).toContain(bundleFreshnessGate);
+    expect(
+      job.indexOf(bundleFreshnessGate),
+      'desktop-runtime must run bundle freshness checks before the in-place build can overwrite stale committed bundles',
+    ).toBeLessThan(job.indexOf(buildBundles));
     expect(job).not.toMatch(/^\s+run: .*tauri build(?:\s|$)/gmi);
     expect(job).not.toMatch(/upload-artifact|signing|notarize|publish/i);
   });

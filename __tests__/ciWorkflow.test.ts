@@ -12,6 +12,15 @@ function workflowSource(): string {
   }
 }
 
+function workflowJobSource(source: string, name: string): string {
+  const marker = `  ${name}:\n`;
+  const start = source.indexOf(marker);
+  expect(start, `${name} job`).toBeGreaterThanOrEqual(0);
+  const remainder = source.slice(start + marker.length);
+  const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
+}
+
 describe('pull request CI workflow contract', () => {
   it('runs read-only checks for pull requests and pushes to main with stable job names', () => {
     const workflow = workflowSource();
@@ -24,7 +33,14 @@ describe('pull request CI workflow contract', () => {
     expect(workflow).toContain('cancel-in-progress: true');
     expect(workflow).toContain('name: TypeScript and Rust');
     expect(workflow).toContain('name: iOS');
-    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(2);
+    expect(workflow.match(/^\s{4}timeout-minutes: 60$/gm)).toHaveLength(3);
+  });
+
+  it('gives the desktop runtime matrix the same 60 minute timeout contract as adjacent jobs', () => {
+    const workflow = workflowSource();
+    const job = workflowJobSource(workflow, 'desktop-runtime');
+
+    expect(job).toContain('timeout-minutes: 60');
   });
 
   it('pins Node, pnpm, Rust, and every third-party action', () => {
