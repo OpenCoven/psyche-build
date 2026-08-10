@@ -1,9 +1,11 @@
 import {
   channelConfig,
   installBundleTransactional,
+  publishBuildChannel,
   runCli,
   runCommand,
   runMacosBuild,
+  validateBuildProvenance,
 } from '../scripts/build-macos-app.mjs';
 import type {
   BuildProvenance,
@@ -52,6 +54,14 @@ const devProvenance: DevBuildProvenance = {
 
 const provenanceRecords: BuildProvenance[] = [stableProvenance, devProvenance];
 void provenanceRecords;
+validateBuildProvenance(devProvenance);
+void publishBuildChannel(candidate, devChannel, devProvenance, {
+  homeDir: '/Users/test',
+  execute: async () => ({
+    stdout: '/Users/test/Applications/Psyche Build Dev.app\n',
+    stderr: '',
+  }),
+});
 
 // @ts-expect-error stable provenance requires requestedRef
 const stableWithoutRequestedRef: StableBuildProvenance = {
@@ -79,10 +89,10 @@ void runCommand('git', ['rev-parse', 'HEAD'], commandOptions);
 
 const buildDependencies: RunMacosBuildDependencies = {
   execute: async () => ({ stdout: '', stderr: '' }),
-  writeBuildProvenance: async (record) => {
+  publishBuildChannel: async (_candidatePath, _channelConfig, record) => {
     const typedRecord: BuildProvenance = record;
     void typedRecord;
-    return '/state/builds.json';
+    return record.installedPath;
   },
 };
 void runMacosBuild({ channel: 'dev' }, buildDependencies);

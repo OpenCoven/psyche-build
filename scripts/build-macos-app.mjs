@@ -43,6 +43,11 @@ const BUILD_PROVENANCE_HELPER_PATH = path.join(
   'scripts',
   'write-build-provenance.mjs',
 );
+const PUBLISH_BUILD_CHANNEL_HELPER_PATH = path.join(
+  repositoryRoot,
+  'scripts',
+  'publish-build-channel.mjs',
+);
 const LOCKF_PATH = '/usr/bin/lockf';
 const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
@@ -441,6 +446,137 @@ export async function installBundleTransactional(candidate, requestedChannelConf
   }
 }
 
+export async function publishBuildChannel(
+  candidate,
+  requestedChannelConfig,
+  record,
+  overrides = {},
+) {
+  const candidatePath = path.resolve(candidate);
+  const homeDir = path.resolve(overrides.homeDir ?? os.homedir());
+  const applicationsDir = path.join(homeDir, 'Applications');
+  const stateDir = path.join(
+    homeDir,
+    'Library',
+    'Application Support',
+    'Psyche Build Builder',
+  );
+  const installedPath = path.join(applicationsDir, requestedChannelConfig.appName);
+  const lockPath = path.join(
+    applicationsDir,
+    `.${requestedChannelConfig.appName}.publish.lock`,
+  );
+  const randomUUID = overrides.randomUUID ?? createRandomUUID;
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+  const execute = overrides.execute ?? runCommand;
+  const lockTimeoutSeconds =
+    overrides.lockTimeoutSeconds ?? DEFAULT_PROVENANCE_LOCK_TIMEOUT_SECONDS;
+
+  validateIncomingBuildProvenance(record);
+  validateChannelConfig(record.channel, requestedChannelConfig);
+  validateLockTimeoutSeconds(lockTimeoutSeconds);
+
+  if (record.installedPath !== installedPath) {
+    throw invalidIncomingBuildProvenance(
+      `channel "${record.channel}" installedPath must equal "${installedPath}"`,
+    );
+  }
+
+  const inputPath = path.join(
+    stateDir,
+    `.publish-${record.channel}.input-${randomUUID()}.json`,
+  );
+  const input = {
+    candidatePath,
+    channelConfig: requestedChannelConfig,
+    homeDir,
+    provenance: record,
+  };
+
+  await mkdirPath(applicationsDir);
+  await mkdirPath(stateDir);
+
+  let operationError;
+  let inputMayBelongToPublisher = false;
+  let publishedPath;
+
+  try {
+    try {
+      await writeFileText(
+        inputPath,
+        `${JSON.stringify(input)}\n`,
+        { exclusive: true },
+      );
+      inputMayBelongToPublisher = true;
+    } catch (error) {
+      inputMayBelongToPublisher = !isAlreadyExistsError(error);
+      throw error;
+    }
+
+    const result = await execute(
+      LOCKF_PATH,
+      [
+        '-k',
+        '-t',
+        String(lockTimeoutSeconds),
+        lockPath,
+        process.execPath,
+        PUBLISH_BUILD_CHANNEL_HELPER_PATH,
+        inputPath,
+      ],
+      { stage: `publish ${record.channel} app and provenance` },
+    );
+    publishedPath = result.stdout.trim();
+
+    if (publishedPath !== installedPath) {
+      throw new Error(
+        `Publication helper returned unexpected installed path ` +
+          `"${publishedPath}" instead of "${installedPath}"`,
+      );
+    }
+  } catch (error) {
+    operationError =
+      error?.exitCode === 75
+        ? buildPublicationLockTimeoutError(
+            error,
+            record.channel,
+            lockTimeoutSeconds,
+            lockPath,
+          )
+        : includeChildDiagnostics(error);
+  } finally {
+    if (inputMayBelongToPublisher) {
+      try {
+        await removePath(inputPath);
+      } catch (cleanupError) {
+        operationError = operationError
+          ? combineErrors(
+              operationError,
+              cleanupError,
+              'Failed to clean private app publication input file',
+            )
+          : new Error(
+              `Failed to clean private app publication input file "${inputPath}": ` +
+                describeError(cleanupError),
+              { cause: cleanupError },
+            );
+      }
+    }
+  }
+
+  if (operationError) {
+    throw operationError;
+  }
+
+  return publishedPath;
+}
+
+export function validateBuildProvenance(record) {
+  validateIncomingBuildProvenance(record);
+}
+
 export async function writeBuildProvenance(record, overrides = {}) {
   const homeDir = path.resolve(overrides.homeDir ?? os.homedir());
   const stateDir = path.join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
@@ -697,8 +833,7 @@ export async function runMacosBuild(options, deps = {}) {
   const findCandidate = deps.findCandidateApp ?? findCandidateApp;
   const readIdentity = deps.readBundleIdentity ?? readBundleIdentity;
   const smokeLaunch = deps.smokeLaunchBundle ?? smokeLaunchBundle;
-  const installBundle = deps.installBundleTransactional ?? installBundleTransactional;
-  const writeProvenance = deps.writeBuildProvenance ?? writeBuildProvenance;
+  const publish = deps.publishBuildChannel ?? publishBuildChannel;
   const now = deps.now ?? (() => new Date());
   const homeDir = path.resolve(deps.homeDir ?? os.homedir());
   const expectedConfig = channelConfig(channel);
@@ -761,28 +896,30 @@ export async function runMacosBuild(options, deps = {}) {
       await smokeLaunch(candidate, { executableName: identity.executable });
     }
 
-    const validateInstalledBundle = async (appPath, requestedConfig) => {
-      const installedIdentity = await readIdentity(appPath, execute);
-      assertBundleIdentity(appPath, installedIdentity, requestedConfig);
-    };
-    const installedPath = await installBundle(candidate, expectedConfig, {
-      homeDir,
-      validateInstalledBundle,
-    });
     const builtAt = now().toISOString();
-
     const provenance = {
       channel,
       commitSha,
       ...(channel === 'stable' ? { requestedRef } : {}),
       dirty,
       builtAt,
-      installedPath,
+      installedPath: path.join(homeDir, 'Applications', expectedConfig.appName),
       productName: expectedConfig.productName,
       bundleIdentifier: expectedConfig.bundleIdentifier,
     };
 
-    await writeProvenance(provenance, { homeDir });
+    const installedPath = await publish(
+      candidate,
+      expectedConfig,
+      provenance,
+      { homeDir },
+    );
+    if (installedPath !== provenance.installedPath) {
+      throw new Error(
+        `Published app path "${installedPath}" did not match expected path ` +
+          `"${provenance.installedPath}"`,
+      );
+    }
     result = provenance;
   } catch (error) {
     operationError = error;
@@ -1032,6 +1169,19 @@ function buildProvenanceLockTimeoutError(error, lockTimeoutSeconds, lockPath) {
   );
 }
 
+function buildPublicationLockTimeoutError(error, channel, lockTimeoutSeconds, lockPath) {
+  const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
+  const diagnostics = stderr === '' || describeError(error).includes(stderr)
+    ? describeError(error)
+    : `${describeError(error)}\n${stderr}`;
+
+  return new Error(
+    `Timed out after ${lockTimeoutSeconds} seconds waiting for ${channel} app ` +
+      `publication lock "${lockPath}": ${diagnostics}`,
+    { cause: error },
+  );
+}
+
 function includeChildDiagnostics(error) {
   if (!(error instanceof Error)) {
     return error;
@@ -1120,6 +1270,24 @@ function validateIncomingBuildProvenance(record) {
     record.channel,
     invalidIncomingBuildProvenance,
   );
+}
+
+function validateChannelConfig(channel, requestedChannelConfig) {
+  const expected = CHANNEL_CONFIG[channel];
+
+  if (
+    !requestedChannelConfig ||
+    typeof requestedChannelConfig !== 'object' ||
+    Array.isArray(requestedChannelConfig) ||
+    findUnknownField(requestedChannelConfig, ['productName', 'bundleIdentifier', 'appName']) ||
+    requestedChannelConfig.productName !== expected.productName ||
+    requestedChannelConfig.bundleIdentifier !== expected.bundleIdentifier ||
+    requestedChannelConfig.appName !== expected.appName
+  ) {
+    throw invalidIncomingBuildProvenance(
+      `channel "${channel}" configuration must exactly match the configured channel identity`,
+    );
+  }
 }
 
 function validateBuildProvenanceRecord(record, channelName, invalid) {

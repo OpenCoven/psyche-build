@@ -120,6 +120,20 @@ export interface WriteBuildProvenanceOverrides {
   lockTimeoutSeconds?: number;
 }
 
+export interface PublishBuildChannelOverrides {
+  homeDir?: string;
+  mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  writeFileText?: (
+    filePath: string,
+    content: string,
+    options?: { exclusive?: boolean },
+  ) => void | Promise<void>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  randomUUID?: () => string;
+  execute?: Runner;
+  lockTimeoutSeconds?: number;
+}
+
 export interface WriteBuildProvenanceUnlockedOverrides {
   readFileText?: (filePath: string) => string | Promise<string>;
   writeFileText?: (
@@ -176,14 +190,11 @@ export interface RunMacosBuildDependencies {
     appPath: string,
     overrides: SmokeLaunchOverrides,
   ) => Promise<void>;
-  installBundleTransactional?: (
+  publishBuildChannel?: (
     candidate: string,
     requestedChannelConfig: BuildChannelConfig,
-    overrides: InstallOverrides,
-  ) => Promise<string>;
-  writeBuildProvenance?: (
     record: BuildProvenance,
-    overrides?: WriteBuildProvenanceOverrides,
+    overrides?: PublishBuildChannelOverrides,
   ) => Promise<string>;
   now?: () => Date;
   homeDir?: string;
@@ -239,6 +250,15 @@ export function installBundleTransactional(
   requestedChannelConfig: BuildChannelConfig,
   overrides: InstallOverrides,
 ): Promise<string>;
+export function publishBuildChannel(
+  candidate: string,
+  requestedChannelConfig: BuildChannelConfig,
+  record: BuildProvenance,
+  overrides?: PublishBuildChannelOverrides,
+): Promise<string>;
+export function validateBuildProvenance(
+  record: unknown,
+): asserts record is BuildProvenance;
 export function writeBuildProvenance(
   record: BuildProvenance,
   overrides?: WriteBuildProvenanceOverrides,

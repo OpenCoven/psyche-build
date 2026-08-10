@@ -25,6 +25,7 @@ import {
   findCandidateApp,
   installBundleTransactional,
   parseBuildArguments,
+  publishBuildChannel,
   readBundleIdentity,
   resolveCommit,
   runCli,
@@ -48,6 +49,7 @@ import type {
 
 const repositoryRoot = process.cwd();
 const scriptPath = join(repositoryRoot, 'scripts/build-macos-app.mjs');
+const publishHelperPath = join(repositoryRoot, 'scripts/publish-build-channel.mjs');
 const provenanceHelperPath = join(repositoryRoot, 'scripts/write-build-provenance.mjs');
 const tauriRelativeCwd = 'native/macos/psyche-build-tauri';
 const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
@@ -120,12 +122,155 @@ function createAppBundle(root: string, relativePath: string, marker: string): st
   return appPath;
 }
 
+function createIdentifiedAppBundle(
+  root: string,
+  relativePath: string,
+  marker: string,
+  identity: BundleIdentity,
+): string {
+  const appPath = createAppBundle(root, relativePath, marker);
+  writeFileSync(
+    join(appPath, 'Contents', 'Info.plist'),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>${identity.name}</string>
+  <key>CFBundleIdentifier</key>
+  <string>${identity.identifier}</string>
+  <key>CFBundleExecutable</key>
+  <string>${identity.executable}</string>
+</dict>
+</plist>
+`,
+    'utf8',
+  );
+  writeFileSync(join(appPath, 'Contents', 'MacOS', identity.executable), '', {
+    mode: 0o755,
+  });
+  return appPath;
+}
+
 function readAppMarker(appPath: string): string {
   return readFileSync(join(appPath, 'Contents', 'marker.txt'), 'utf8');
 }
 
 function copyBundle(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
+}
+
+function createGatedPlutilDirectory(root: string): string {
+  const binDir = join(root, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    join(binDir, 'plutil'),
+    `#!/bin/sh
+if [ -n "$PSYCHE_TEST_PLUTIL_STARTED_PATH" ]; then
+  printf started > "$PSYCHE_TEST_PLUTIL_STARTED_PATH"
+fi
+info_path=
+for argument in "$@"; do
+  info_path="$argument"
+done
+if [ "$2" = "CFBundleName" ] &&
+   [ -n "$PSYCHE_TEST_FINAL_PATH" ] &&
+   [ "$(dirname "$(dirname "$info_path")")" = "$PSYCHE_TEST_FINAL_PATH" ]; then
+  printf ready > "$PSYCHE_TEST_READY_PATH"
+  while [ ! -e "$PSYCHE_TEST_RELEASE_PATH" ]; do
+    sleep 0.05
+  done
+  if [ "$PSYCHE_TEST_FAIL_FINAL_IDENTITY" = "1" ]; then
+    printf "Wrong Product"
+    exit 0
+  fi
+fi
+exec /usr/bin/plutil "$@"
+`,
+    { encoding: 'utf8', mode: 0o755 },
+  );
+  return binDir;
+}
+
+type PublicationProcessResult = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+function spawnChannelPublisher(
+  candidatePath: string,
+  requestedChannelConfig: ReturnType<typeof channelConfig>,
+  provenance: BuildProvenance,
+  homeDir: string,
+  env: NodeJS.ProcessEnv = {},
+): {
+  completion: Promise<PublicationProcessResult>;
+} {
+  const childScript = `
+    import { writeFile } from 'node:fs/promises';
+
+    const input = JSON.parse(process.env.PSYCHE_PUBLICATION_DRIVER_INPUT);
+    if (input.startedPath) {
+      await writeFile(input.startedPath, 'started');
+    }
+    try {
+      const { publishBuildChannel } = await import(input.moduleUrl);
+      const installedPath = await publishBuildChannel(
+        input.candidatePath,
+        input.channelConfig,
+        input.provenance,
+        {
+          homeDir: input.homeDir,
+          lockTimeoutSeconds: 5,
+        },
+      );
+      process.stdout.write(installedPath + '\\n');
+    } catch (error) {
+      process.stderr.write(
+        (error instanceof Error ? error.stack ?? error.message : String(error)) + '\\n',
+      );
+      process.exitCode = 1;
+    }
+  `;
+  const child = spawnChild(
+    process.execPath,
+    ['--input-type=module', '--eval', childScript],
+    {
+      env: {
+        ...process.env,
+        ...env,
+        PSYCHE_PUBLICATION_DRIVER_INPUT: JSON.stringify({
+          moduleUrl: pathToFileURL(scriptPath).href,
+          candidatePath,
+          channelConfig: requestedChannelConfig,
+          provenance,
+          homeDir,
+          startedPath: env.PSYCHE_TEST_PUBLISH_STARTED_PATH,
+        }),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  const completion = new Promise<PublicationProcessResult>((resolveChild, rejectChild) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', rejectChild);
+    child.on('close', (code, signal) => {
+      resolveChild({ code, signal, stdout, stderr });
+    });
+  });
+
+  return { completion };
 }
 
 function spawnProvenanceWriter(
@@ -237,6 +382,21 @@ async function waitForPaths(paths: readonly string[]): Promise<void> {
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 1));
   }
   throw new Error(`Timed out waiting for paths: ${paths.join(', ')}`);
+}
+
+async function waitForPathOrPublicationFailure(
+  readyPath: string,
+  completion: Promise<PublicationProcessResult>,
+): Promise<void> {
+  await Promise.race([
+    waitForPaths([readyPath]),
+    completion.then((result) => {
+      throw new Error(
+        `Publication exited before "${readyPath}" was created: ` +
+          `${JSON.stringify(result)}`,
+      );
+    }),
+  ]);
 }
 
 function runGit(repository: string, args: string[]): string {
@@ -1354,6 +1514,472 @@ describe('macOS build channels', () => {
     });
   });
 
+  describe('publishBuildChannel', () => {
+    const stableIdentity: BundleIdentity = {
+      name: 'Psyche Build',
+      identifier: 'dev.opencoven.psyche',
+      executable: 'psyche-build',
+    };
+    const devIdentity: BundleIdentity = {
+      name: 'Psyche Build Dev',
+      identifier: 'dev.opencoven.psyche.dev',
+      executable: 'psyche-build-dev',
+    };
+    const devRecord = {
+      channel: 'dev' as const,
+      commitSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      dirty: true,
+      builtAt: '2026-08-10T11:00:00.000Z',
+      installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+      productName: 'Psyche Build Dev',
+      bundleIdentifier: 'dev.opencoven.psyche.dev',
+    };
+
+    it('uses the exact channel lockf arguments and a private mode-0600 input file', async () => {
+      const homeDir = createScratchDirectory('publish-lockf-arguments');
+      const applicationsDir = join(homeDir, 'Applications');
+      const stateDir = join(
+        homeDir,
+        'Library',
+        'Application Support',
+        'Psyche Build Builder',
+      );
+      const candidatePath = createAppBundle(
+        createScratchDirectory('publish-candidate'),
+        'Psyche Build Dev.app',
+        'candidate',
+      );
+      const installedPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const record = { ...devRecord, installedPath };
+      const inputPath = join(stateDir, '.publish-dev.input-fixed-input.json');
+      const lockPath = join(applicationsDir, '.Psyche Build Dev.app.publish.lock');
+      const removedPaths: string[] = [];
+      const execute = vi.fn(async (
+        _command: string,
+        args: readonly string[],
+      ): Promise<CommandResult> => {
+        expect(statSync(inputPath).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(inputPath, 'utf8'))).toEqual({
+          candidatePath,
+          channelConfig: channelConfig('dev'),
+          homeDir,
+          provenance: record,
+        });
+        expect(args).not.toContain(JSON.stringify(record));
+        expect(args).not.toContain(candidatePath);
+        expect(args.every((argument) => !argument.includes(record.commitSha))).toBe(true);
+        return { stdout: `${installedPath}\n`, stderr: '' };
+      });
+
+      await expect(
+        publishBuildChannel(
+          candidatePath,
+          channelConfig('dev'),
+          record,
+          {
+            homeDir,
+            execute,
+            lockTimeoutSeconds: 7,
+            randomUUID: () => 'fixed-input',
+            removePath: async (targetPath: string) => {
+              removedPaths.push(targetPath);
+              rmSync(targetPath, { recursive: true, force: true });
+            },
+          },
+        ),
+      ).resolves.toBe(installedPath);
+
+      expect(execute).toHaveBeenCalledWith(
+        '/usr/bin/lockf',
+        [
+          '-k',
+          '-t',
+          '7',
+          lockPath,
+          process.execPath,
+          publishHelperPath,
+          inputPath,
+        ],
+        { stage: 'publish dev app and provenance' },
+      );
+      expect(removedPaths).toEqual([inputPath]);
+      expect(existsSync(inputPath)).toBe(false);
+    });
+
+    it('reports a bounded channel lock timeout and does not mask it with input cleanup failure', async () => {
+      const homeDir = createScratchDirectory('publish-lock-timeout');
+      const applicationsDir = join(homeDir, 'Applications');
+      const candidatePath = createAppBundle(
+        createScratchDirectory('publish-timeout-candidate'),
+        'Psyche Build Dev.app',
+        'candidate',
+      );
+      const record = {
+        ...devRecord,
+        installedPath: join(applicationsDir, 'Psyche Build Dev.app'),
+      };
+      const lockPath = join(applicationsDir, '.Psyche Build Dev.app.publish.lock');
+      const timeoutError = Object.assign(new Error('lockf failed'), {
+        exitCode: 75,
+        stderr: `lockf: ${lockPath}: already locked`,
+      });
+
+      const error = await publishBuildChannel(
+        candidatePath,
+        channelConfig('dev'),
+        record,
+        {
+          homeDir,
+          execute: async () => {
+            throw timeoutError;
+          },
+          lockTimeoutSeconds: 2,
+          randomUUID: () => 'timeout-input',
+          removePath: async () => {
+            throw new Error('private input cleanup failed');
+          },
+        },
+      ).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error?.message).toMatch(
+        /Timed out after 2 seconds waiting for dev app publication lock/i,
+      );
+      expect(error?.message).toContain(lockPath);
+      expect(error?.message).toContain('already locked');
+      expect(error?.message).toContain('private input cleanup failed');
+      expect(error?.cause).toBeInstanceOf(Error);
+      expect((error?.cause as Error).message).toMatch(
+        /Timed out after 2 seconds waiting for dev app publication lock/i,
+      );
+    });
+
+    it('reports helper-specific usage instead of running the normal build CLI', () => {
+      const result = spawnSync(process.execPath, [publishHelperPath], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain(
+        'publish-build-channel requires exactly one private input-file path',
+      );
+      expect(result.stderr).not.toContain('Build channel must be "stable" or "dev"');
+    });
+
+    it('keeps the installed app and reports it explicitly when provenance publication fails', async () => {
+      const homeDir = createScratchDirectory('publish-provenance-failure');
+      const applicationsDir = join(homeDir, 'Applications');
+      const stateDir = join(
+        homeDir,
+        'Library',
+        'Application Support',
+        'Psyche Build Builder',
+      );
+      const statePath = join(stateDir, 'builds.json');
+      const candidatePath = createIdentifiedAppBundle(
+        createScratchDirectory('publish-provenance-failure-candidate'),
+        'Psyche Build Dev.app',
+        'installed-before-provenance-failure',
+        devIdentity,
+      );
+      const installedPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const record = { ...devRecord, installedPath };
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(statePath, '{"version":2,"channels":{}}\n', 'utf8');
+
+      const error = await publishBuildChannel(
+        candidatePath,
+        channelConfig('dev'),
+        record,
+        { homeDir },
+      ).then(
+        () => undefined,
+        (failure) => failure as Error & { stdout?: string },
+      );
+
+      expect(error?.message).toContain(
+        `App installed at "${installedPath}", but build provenance publication failed`,
+      );
+      expect(error?.message).toContain('Invalid build provenance file');
+      expect(error?.stdout).toBe('');
+      expect(readAppMarker(installedPath)).toBe('installed-before-provenance-failure');
+      expect(readFileSync(statePath, 'utf8')).toBe('{"version":2,"channels":{}}\n');
+    }, 15_000);
+
+    it('serializes same-channel install through provenance so the installed marker and SHA correspond', async () => {
+      const homeDir = createScratchDirectory('publish-same-channel');
+      const applicationsDir = join(homeDir, 'Applications');
+      const statePath = join(
+        homeDir,
+        'Library',
+        'Application Support',
+        'Psyche Build Builder',
+        'builds.json',
+      );
+      const installedPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const lockPath = join(applicationsDir, '.Psyche Build Dev.app.publish.lock');
+      const controls = createScratchDirectory('publish-same-channel-controls');
+      const binDir = createGatedPlutilDirectory(controls);
+      const readyPath = join(controls, 'a-final-ready');
+      const releasePath = join(controls, 'release-a');
+      const bStartedPath = join(controls, 'b-started');
+      const candidateA = createIdentifiedAppBundle(
+        createScratchDirectory('publish-same-channel-a'),
+        'Psyche Build Dev.app',
+        'candidate-a',
+        devIdentity,
+      );
+      const candidateB = createIdentifiedAppBundle(
+        createScratchDirectory('publish-same-channel-b'),
+        'Psyche Build Dev.app',
+        'candidate-b',
+        devIdentity,
+      );
+      const recordA = {
+        ...devRecord,
+        commitSha: 'a'.repeat(40),
+        builtAt: '2026-08-10T11:00:00.000Z',
+        installedPath,
+      };
+      const recordB = {
+        ...devRecord,
+        commitSha: 'b'.repeat(40),
+        builtAt: '2026-08-10T11:00:01.000Z',
+        installedPath,
+      };
+      const publisherA = spawnChannelPublisher(
+        candidateA,
+        channelConfig('dev'),
+        recordA,
+        homeDir,
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          PSYCHE_TEST_FINAL_PATH: installedPath,
+          PSYCHE_TEST_READY_PATH: readyPath,
+          PSYCHE_TEST_RELEASE_PATH: releasePath,
+        },
+      );
+
+      await waitForPathOrPublicationFailure(readyPath, publisherA.completion);
+      expect(readAppMarker(installedPath)).toBe('candidate-a');
+
+      const publisherB = spawnChannelPublisher(
+        candidateB,
+        channelConfig('dev'),
+        recordB,
+        homeDir,
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          PSYCHE_TEST_PUBLISH_STARTED_PATH: bStartedPath,
+        },
+      );
+      await waitForPaths([bStartedPath]);
+      const contendingLock = spawnSync(
+        '/usr/bin/lockf',
+        ['-t', '0', lockPath, '/usr/bin/true'],
+        { encoding: 'utf8' },
+      );
+      writeFileSync(releasePath, 'release', 'utf8');
+      const [resultA, resultB] = await Promise.all([
+        publisherA.completion,
+        publisherB.completion,
+      ]);
+
+      expect(contendingLock.status).toBe(75);
+      expect(resultA).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(resultB).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(readAppMarker(installedPath)).toBe('candidate-b');
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).channels.dev).toEqual(recordB);
+    }, 15_000);
+
+    it('prevents a failed concurrent rollback from removing another same-channel app', async () => {
+      const homeDir = createScratchDirectory('publish-rollback-isolation');
+      const applicationsDir = join(homeDir, 'Applications');
+      const statePath = join(
+        homeDir,
+        'Library',
+        'Application Support',
+        'Psyche Build Builder',
+        'builds.json',
+      );
+      const installedPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const lockPath = join(applicationsDir, '.Psyche Build Dev.app.publish.lock');
+      const controls = createScratchDirectory('publish-rollback-controls');
+      const binDir = createGatedPlutilDirectory(controls);
+      const readyPath = join(controls, 'failing-final-ready');
+      const releasePath = join(controls, 'release-failing');
+      const succeedingStartedPath = join(controls, 'succeeding-started');
+      const failingCandidate = createIdentifiedAppBundle(
+        createScratchDirectory('publish-rollback-failing'),
+        'Psyche Build Dev.app',
+        'failing-candidate',
+        devIdentity,
+      );
+      const succeedingCandidate = createIdentifiedAppBundle(
+        createScratchDirectory('publish-rollback-succeeding'),
+        'Psyche Build Dev.app',
+        'succeeding-candidate',
+        devIdentity,
+      );
+      const failingRecord = {
+        ...devRecord,
+        commitSha: 'c'.repeat(40),
+        builtAt: '2026-08-10T11:00:02.000Z',
+        installedPath,
+      };
+      const succeedingRecord = {
+        ...devRecord,
+        commitSha: 'd'.repeat(40),
+        builtAt: '2026-08-10T11:00:03.000Z',
+        installedPath,
+      };
+      const failingPublisher = spawnChannelPublisher(
+        failingCandidate,
+        channelConfig('dev'),
+        failingRecord,
+        homeDir,
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          PSYCHE_TEST_FINAL_PATH: installedPath,
+          PSYCHE_TEST_READY_PATH: readyPath,
+          PSYCHE_TEST_RELEASE_PATH: releasePath,
+          PSYCHE_TEST_FAIL_FINAL_IDENTITY: '1',
+        },
+      );
+
+      await waitForPathOrPublicationFailure(readyPath, failingPublisher.completion);
+      const succeedingPublisher = spawnChannelPublisher(
+        succeedingCandidate,
+        channelConfig('dev'),
+        succeedingRecord,
+        homeDir,
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          PSYCHE_TEST_PUBLISH_STARTED_PATH: succeedingStartedPath,
+        },
+      );
+      await waitForPaths([succeedingStartedPath]);
+      const contendingLock = spawnSync(
+        '/usr/bin/lockf',
+        ['-t', '0', lockPath, '/usr/bin/true'],
+        { encoding: 'utf8' },
+      );
+      writeFileSync(releasePath, 'release', 'utf8');
+      const [failingResult, succeedingResult] = await Promise.all([
+        failingPublisher.completion,
+        succeedingPublisher.completion,
+      ]);
+
+      expect(contendingLock.status).toBe(75);
+      expect(failingResult.code).toBe(1);
+      expect(failingResult.stderr).toContain('Bundle identity mismatch');
+      expect(succeedingResult).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(readAppMarker(installedPath)).toBe('succeeding-candidate');
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).channels.dev).toEqual(
+        succeedingRecord,
+      );
+    }, 15_000);
+
+    it('lets stable and dev publication locks proceed independently and preserves both records', async () => {
+      const homeDir = createScratchDirectory('publish-distinct-channels');
+      const applicationsDir = join(homeDir, 'Applications');
+      const statePath = join(
+        homeDir,
+        'Library',
+        'Application Support',
+        'Psyche Build Builder',
+        'builds.json',
+      );
+      const stableInstalledPath = join(applicationsDir, 'Psyche Build.app');
+      const devInstalledPath = join(applicationsDir, 'Psyche Build Dev.app');
+      const controls = createScratchDirectory('publish-distinct-controls');
+      const binDir = createGatedPlutilDirectory(controls);
+      const stableReadyPath = join(controls, 'stable-final-ready');
+      const stableReleasePath = join(controls, 'release-stable');
+      const stableCandidate = createIdentifiedAppBundle(
+        createScratchDirectory('publish-distinct-stable'),
+        'Psyche Build.app',
+        'stable-candidate',
+        stableIdentity,
+      );
+      const devCandidate = createIdentifiedAppBundle(
+        createScratchDirectory('publish-distinct-dev'),
+        'Psyche Build Dev.app',
+        'dev-candidate',
+        devIdentity,
+      );
+      const stableRecord = {
+        channel: 'stable' as const,
+        commitSha: 'e'.repeat(40),
+        requestedRef: 'release/v1',
+        dirty: false,
+        builtAt: '2026-08-10T11:00:04.000Z',
+        installedPath: stableInstalledPath,
+        productName: 'Psyche Build',
+        bundleIdentifier: 'dev.opencoven.psyche',
+      };
+      const distinctDevRecord = {
+        ...devRecord,
+        commitSha: 'f'.repeat(40),
+        builtAt: '2026-08-10T11:00:05.000Z',
+        installedPath: devInstalledPath,
+      };
+      const stablePublisher = spawnChannelPublisher(
+        stableCandidate,
+        channelConfig('stable'),
+        stableRecord,
+        homeDir,
+        {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          PSYCHE_TEST_FINAL_PATH: stableInstalledPath,
+          PSYCHE_TEST_READY_PATH: stableReadyPath,
+          PSYCHE_TEST_RELEASE_PATH: stableReleasePath,
+        },
+      );
+
+      await waitForPathOrPublicationFailure(
+        stableReadyPath,
+        stablePublisher.completion,
+      );
+      const devPublisher = spawnChannelPublisher(
+        devCandidate,
+        channelConfig('dev'),
+        distinctDevRecord,
+        homeDir,
+        { PATH: `${binDir}:${process.env.PATH ?? ''}` },
+      );
+      const devBeforeStableRelease = await Promise.race([
+        devPublisher.completion.then((result) => ({ result, timedOut: false })),
+        new Promise<{ result?: never; timedOut: true }>((resolveTimeout) => {
+          setTimeout(() => resolveTimeout({ timedOut: true }), 3_000);
+        }),
+      ]);
+      writeFileSync(stableReleasePath, 'release', 'utf8');
+      const [stableResult, devResult] = await Promise.all([
+        stablePublisher.completion,
+        devPublisher.completion,
+      ]);
+
+      expect(devBeforeStableRelease.timedOut).toBe(false);
+      expect(stableResult).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(devResult).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(readAppMarker(stableInstalledPath)).toBe('stable-candidate');
+      expect(readAppMarker(devInstalledPath)).toBe('dev-candidate');
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({
+        version: 1,
+        channels: {
+          dev: distinctDevRecord,
+          stable: stableRecord,
+        },
+      });
+    }, 15_000);
+  });
+
   describe('writeBuildProvenance', () => {
     const stableRecord = {
       channel: 'stable' as const,
@@ -1788,22 +2414,20 @@ describe('macOS build channels', () => {
       const smokeLaunch = vi.fn(
         async (_appPath: string, _overrides: SmokeLaunchOverrides): Promise<void> => {},
       );
-      const install = vi.fn(
+      const publish = vi.fn(
         async (
-          installedCandidate: string,
+          publishedCandidate: string,
           requestedConfig: ReturnType<typeof channelConfig>,
-          overrides: InstallOverrides,
+          record: BuildProvenance,
+          overrides?: { homeDir?: string },
         ) => {
-          expect(installedCandidate).toBe(candidate);
+          expect(publishedCandidate).toBe(candidate);
           expect(requestedConfig).toEqual(channelConfig('stable'));
-          await Promise.resolve(
-            overrides.validateInstalledBundle('/staging/Psyche Build.app', requestedConfig),
-          );
-          await Promise.resolve(overrides.validateInstalledBundle(installedPath, requestedConfig));
+          expect(record.installedPath).toBe(installedPath);
+          expect(overrides).toEqual({ homeDir: virtualHome });
           return installedPath;
         },
       );
-      const writeProvenance = vi.fn(async (_record: BuildProvenance) => '/state/builds.json');
       const dependencies = {
         execute,
         makeTemporaryDirectory: vi.fn(async () => tempRoot),
@@ -1811,8 +2435,7 @@ describe('macOS build channels', () => {
         findCandidateApp: vi.fn(async () => candidate),
         readBundleIdentity: readIdentity,
         smokeLaunchBundle: smokeLaunch,
-        installBundleTransactional: install,
-        writeBuildProvenance: writeProvenance,
+        publishBuildChannel: publish,
         now: () => new Date(builtAt),
         homeDir: virtualHome,
       } satisfies RunMacosBuildDependencies;
@@ -1876,16 +2499,14 @@ describe('macOS build channels', () => {
         bundleDir,
         'Psyche Build.app',
       );
-      expect(readIdentity.mock.calls.map(([appPath]) => appPath)).toEqual([
-        candidate,
-        '/staging/Psyche Build.app',
-        installedPath,
-      ]);
+      expect(readIdentity.mock.calls.map(([appPath]) => appPath)).toEqual([candidate]);
       expect(smokeLaunch).toHaveBeenCalledWith(candidate, {
         executableName: stableIdentity.executable,
       });
       expect(removePath).toHaveBeenLastCalledWith(tempRoot);
-      expect(writeProvenance).toHaveBeenCalledWith(
+      expect(publish).toHaveBeenCalledWith(
+        candidate,
+        channelConfig('stable'),
         {
           channel: 'stable',
           commitSha: stableSha,
@@ -1913,15 +2534,9 @@ describe('macOS build channels', () => {
     it('force-removes only its added stable worktree after failure and does not install', async () => {
       const tempRoot = '/workspace/.build-temp/stable-failure';
       const sourceRoot = join(tempRoot, 'source');
-      const install = vi.fn(
-        async (
-          _candidate: string,
-          _config: ReturnType<typeof channelConfig>,
-          _overrides: InstallOverrides,
-        ): Promise<string> => {
-          throw new Error('install should not run');
-        },
-      );
+      const publish = vi.fn(async (): Promise<string> => {
+        throw new Error('publication should not run');
+      });
       const execute = vi.fn(
         async (command: string, args: readonly string[]): Promise<CommandResult> => {
           if (command === 'git' && args.includes('rev-parse')) {
@@ -1945,7 +2560,7 @@ describe('macOS build channels', () => {
             execute,
             makeTemporaryDirectory: async () => tempRoot,
             removePath: async () => {},
-            installBundleTransactional: install,
+            publishBuildChannel: publish,
           },
         ),
       ).rejects.toThrow('build command failed');
@@ -1965,7 +2580,7 @@ describe('macOS build channels', () => {
         ],
       ]);
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('prune');
-      expect(install).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
     });
 
     it('builds dev from the current checkout with a temporary config and no stable-only gates', async () => {
@@ -1991,19 +2606,7 @@ describe('macOS build channels', () => {
       const smokeLaunch = vi.fn(
         async (_appPath: string, _overrides: SmokeLaunchOverrides): Promise<void> => {},
       );
-      const install = vi.fn(
-        async (
-          _candidate: string,
-          requestedConfig: ReturnType<typeof channelConfig>,
-          overrides: InstallOverrides,
-        ) => {
-          await Promise.resolve(
-            overrides.validateInstalledBundle('/staging/Psyche Build Dev.app', requestedConfig),
-          );
-          await Promise.resolve(overrides.validateInstalledBundle(installedPath, requestedConfig));
-          return installedPath;
-        },
-      );
+      const publish = vi.fn(async () => installedPath);
       const dependencies = {
         execute,
         makeTemporaryDirectory: vi.fn(async () => tempRoot),
@@ -2014,8 +2617,7 @@ describe('macOS build channels', () => {
           async (_appPath: string, _execute?: Runner): Promise<BundleIdentity> => devIdentity,
         ),
         smokeLaunchBundle: smokeLaunch,
-        installBundleTransactional: install,
-        writeBuildProvenance: vi.fn(async () => '/state/builds.json'),
+        publishBuildChannel: publish,
         now: () => new Date(builtAt),
         homeDir: virtualHome,
       } satisfies RunMacosBuildDependencies;
@@ -2063,6 +2665,20 @@ describe('macOS build channels', () => {
       expect(smokeLaunch).not.toHaveBeenCalled();
       expect(dependencies.removePath).toHaveBeenNthCalledWith(1, candidate);
       expect(dependencies.removePath).toHaveBeenLastCalledWith(tempRoot);
+      expect(publish).toHaveBeenCalledWith(
+        candidate,
+        channelConfig('dev'),
+        {
+          channel: 'dev',
+          commitSha: devSha,
+          dirty: true,
+          builtAt,
+          installedPath,
+          productName: 'Psyche Build Dev',
+          bundleIdentifier: 'dev.opencoven.psyche.dev',
+        },
+        { homeDir: virtualHome },
+      );
       expect(result).toEqual({
         channel: 'dev',
         commitSha: devSha,
@@ -2083,8 +2699,7 @@ describe('macOS build channels', () => {
         'Psyche Build Dev.app',
       );
       const removePath = vi.fn(async () => {});
-      const install = vi.fn(async () => '/should-not-install');
-      const writeProvenance = vi.fn(async () => '/should-not-write');
+      const publish = vi.fn(async () => '/should-not-publish');
 
       await expect(
         runMacosBuild(
@@ -2102,14 +2717,12 @@ describe('macOS build channels', () => {
             makeTemporaryDirectory: async () => tempRoot,
             removePath,
             writeDevTauriConfig: async () => configPath,
-            installBundleTransactional: install,
-            writeBuildProvenance: writeProvenance,
+            publishBuildChannel: publish,
           },
         ),
       ).rejects.toThrow('dev build failed');
 
-      expect(install).not.toHaveBeenCalled();
-      expect(writeProvenance).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
       expect(removePath).toHaveBeenNthCalledWith(1, candidate);
       expect(removePath).toHaveBeenLastCalledWith(tempRoot);
     });
@@ -2123,8 +2736,7 @@ describe('macOS build channels', () => {
         'Psyche Build Dev.app',
       );
       const removePath = vi.fn(async () => {});
-      const install = vi.fn(async () => '/should-not-install');
-      const writeProvenance = vi.fn(async () => '/should-not-write');
+      const publish = vi.fn(async () => '/should-not-publish');
 
       await expect(
         runMacosBuild(
@@ -2141,14 +2753,12 @@ describe('macOS build channels', () => {
             writeDevTauriConfig: async () => configPath,
             findCandidateApp: async () => candidate,
             readBundleIdentity: async () => stableIdentity,
-            installBundleTransactional: install,
-            writeBuildProvenance: writeProvenance,
+            publishBuildChannel: publish,
           },
         ),
       ).rejects.toThrow(/Bundle identity mismatch/);
 
-      expect(install).not.toHaveBeenCalled();
-      expect(writeProvenance).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
       expect(removePath).toHaveBeenLastCalledWith(tempRoot);
     });
 
@@ -2173,12 +2783,12 @@ describe('macOS build channels', () => {
             writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
             findCandidateApp: async () => candidate,
             readBundleIdentity: async () => devIdentity,
-            installBundleTransactional: async () => {
+            publishBuildChannel: async () => {
               installed = true;
-              return installedPath;
-            },
-            writeBuildProvenance: async () => {
-              throw new Error('provenance write failed');
+              throw new Error(
+                `App installed at "${installedPath}", but build provenance publication failed: ` +
+                  'provenance write failed',
+              );
             },
             homeDir: virtualHome,
           },
@@ -2248,8 +2858,7 @@ describe('macOS build channels', () => {
             writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
             findCandidateApp: async () => '/workspace/Psyche Build Dev.app',
             readBundleIdentity: async () => devIdentity,
-            installBundleTransactional: async () => installedPath,
-            writeBuildProvenance: async () => '/state/builds.json',
+            publishBuildChannel: async () => installedPath,
             homeDir: virtualHome,
           },
         ),
