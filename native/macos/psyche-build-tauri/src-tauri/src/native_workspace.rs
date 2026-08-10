@@ -179,30 +179,36 @@ pub(crate) fn save_workspace_to(path: &Path, value: &Value) -> Result<(), String
         value,
         |_| Ok(()),
         |_| Ok(()),
+        |_| Ok(()),
         sync_workspace_directory,
         restore_workspace_backup_in,
+        create_rollback_backup_in,
         create_rollback_backup_in,
         rename_workspace_path_in,
     )
 }
 
-fn save_workspace_to_inner<F, K, G, H, I, J>(
+fn save_workspace_to_inner<F, L, K, G, H, I, J, M>(
     path: &Path,
     value: &Value,
     before_rename: F,
+    before_publication: L,
     mut sync_created_directory: K,
     mut sync_parent_directory: G,
     mut restore_workspace_backup: H,
     create_rollback_backup: I,
-    mut rename_workspace_path: J,
+    mut recreate_pending_rollback: J,
+    mut rename_workspace_path: M,
 ) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
+    L: FnOnce(&Path) -> Result<(), String>,
     K: FnMut(&Path) -> Result<(), String>,
     G: FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
     H: FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
     I: FnOnce(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
     J: FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    M: FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 {
     validate_workspace(value)
         .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
@@ -325,12 +331,14 @@ where
         return Err(identity_error);
     }
 
-    if let Err(replace_error) = rename_regular_workspace_path(
+    if let Err(replace_error) = publish_opened_workspace_file(
         &workspace_dir,
+        &temp_file,
         temp_guard.path.as_path(),
         path,
         "workspace temp",
         "workspace",
+        before_publication,
         &mut rename_workspace_path,
     ) {
         let restore_error = rollback_workspace_after_failed_save(
@@ -366,7 +374,7 @@ where
         return Err(save_error);
     }
 
-    if let Err(commit_error) = mark_rollback_committed(
+    if let Err(commit_error) = mark_rollback_committed_with(
         &workspace_dir,
         path,
         transaction_pending_path,
@@ -374,6 +382,7 @@ where
         parent,
         &mut sync_parent_directory,
         &mut restore_workspace_backup,
+        &mut recreate_pending_rollback,
         &mut rename_workspace_path,
     ) {
         if !had_workspace {
@@ -1077,6 +1086,35 @@ fn rename_regular_workspace_path(
         ));
     }
     regular_file_exists(workspace_dir, destination, destination_context)?;
+    rename(workspace_dir, source, destination)?;
+    if !regular_file_exists(workspace_dir, destination, destination_context)? {
+        return Err(format!(
+            "{destination_context} '{}' is missing after rename",
+            destination.display()
+        ));
+    }
+    Ok(())
+}
+
+fn publish_opened_workspace_file(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    source: &Path,
+    destination: &Path,
+    source_context: &str,
+    destination_context: &str,
+    before_publication: impl FnOnce(&Path) -> Result<(), String>,
+    rename: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, source, source_context)? {
+        return Err(format!(
+            "{source_context} '{}' is missing",
+            source.display()
+        ));
+    }
+    regular_file_exists(workspace_dir, destination, destination_context)?;
+    before_publication(source)?;
+    verify_opened_regular_file(workspace_dir, source_file, source, source_context)?;
     rename(workspace_dir, source, destination)?;
     if !regular_file_exists(workspace_dir, destination, destination_context)? {
         return Err(format!(
@@ -1938,6 +1976,33 @@ fn rollback_workspace_after_failed_save(
         )
         .map_err(|error| format!("rollback restoration failed: {error}"))?;
         Ok(())
+    } else if regular_file_exists(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )? {
+        restore_prior_workspace_state(
+            workspace_dir,
+            committed_path,
+            path,
+            restore_workspace_backup,
+        )
+        .map_err(|error| {
+            format!(
+                "restore failed workspace '{}' from committed rollback '{}': {}",
+                path.display(),
+                committed_path.display(),
+                error
+            )
+        })?;
+        sync_parent_directory(workspace_dir, parent).map_err(|error| {
+            format!(
+                "sync restoration of failed workspace '{}' from committed rollback '{}': {}",
+                path.display(),
+                committed_path.display(),
+                error
+            )
+        })
     } else if regular_file_exists(workspace_dir, path, "workspace")? {
         unlink_workspace_path(workspace_dir, path, "workspace")
             .map_err(|e| format!("remove failed workspace '{}': {}", path.display(), e))?;
@@ -1961,6 +2026,31 @@ fn mark_rollback_committed(
     parent: &Path,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
     restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut recreate_pending_rollback = create_rollback_backup_in;
+    mark_rollback_committed_with(
+        workspace_dir,
+        path,
+        pending_path,
+        committed_path,
+        parent,
+        sync_parent_directory,
+        restore_workspace_backup,
+        &mut recreate_pending_rollback,
+        rename_workspace_path,
+    )
+}
+
+fn mark_rollback_committed_with(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    parent: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    recreate_pending_rollback: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
     rename_workspace_path: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
     if !regular_file_exists(workspace_dir, pending_path, "workspace pending rollback")? {
@@ -2017,6 +2107,7 @@ fn mark_rollback_committed(
                 ),
                 sync_parent_directory,
                 restore_workspace_backup,
+                recreate_pending_rollback,
             );
         }
         return Err(format!(
@@ -2044,6 +2135,7 @@ fn mark_rollback_committed(
         ),
         sync_parent_directory,
         restore_workspace_backup,
+        recreate_pending_rollback,
     )
 }
 
@@ -2056,8 +2148,9 @@ fn preserve_pending_after_uncertain_commit(
     failure: String,
     sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
     restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+    recreate_pending_rollback: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    match create_rollback_backup_in(workspace_dir, committed_path, pending_path) {
+    match recreate_pending_rollback(workspace_dir, committed_path, pending_path) {
         Ok(()) => match sync_parent_directory(workspace_dir, parent) {
             Ok(()) => Err(format!(
                 "{failure}; pending rollback durably preserved at '{}'",
@@ -2438,6 +2531,7 @@ where
         value,
         before_rename,
         |_| Ok(()),
+        |_| Ok(()),
         move |workspace_dir, parent| {
             sync_transaction_directory(parent)?;
             workspace_dir.sync()
@@ -2447,6 +2541,61 @@ where
             restore_workspace_backup_in(workspace_dir, backup, destination)
         },
         create_rollback_backup_in,
+        create_rollback_backup_in,
+        rename_workspace_path_in,
+    )
+}
+
+#[cfg(test)]
+fn workspace_save_to_test_hook_before_publication<F>(
+    path: &Path,
+    value: &Value,
+    before_publication: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    save_workspace_to_inner(
+        path,
+        value,
+        |_| Ok(()),
+        before_publication,
+        |_| Ok(()),
+        sync_workspace_directory,
+        restore_workspace_backup_in,
+        create_rollback_backup_in,
+        create_rollback_backup_in,
+        rename_workspace_path_in,
+    )
+}
+
+#[cfg(test)]
+fn workspace_save_to_test_hook_with_recreation_fault<G, I>(
+    path: &Path,
+    value: &Value,
+    mut sync_transaction_directory: G,
+    mut recreate_pending_rollback: I,
+) -> Result<(), String>
+where
+    G: FnMut(&Path) -> Result<(), String>,
+    I: FnMut(&Path, &Path) -> Result<(), String>,
+{
+    save_workspace_to_inner(
+        path,
+        value,
+        |_| Ok(()),
+        |_| Ok(()),
+        |_| Ok(()),
+        move |workspace_dir, parent| {
+            sync_transaction_directory(parent)?;
+            workspace_dir.sync()
+        },
+        restore_workspace_backup_in,
+        create_rollback_backup_in,
+        move |workspace_dir, source, destination| {
+            recreate_pending_rollback(source, destination)?;
+            create_rollback_backup_in(workspace_dir, source, destination)
+        },
         rename_workspace_path_in,
     )
 }
@@ -2482,6 +2631,7 @@ where
         value,
         before_rename,
         |_| Ok(()),
+        |_| Ok(()),
         move |workspace_dir, parent| {
             sync_transaction_directory(parent)?;
             workspace_dir.sync()
@@ -2494,6 +2644,7 @@ where
             create_rollback_backup(source, backup)?;
             create_rollback_backup_in(workspace_dir, source, backup)
         },
+        create_rollback_backup_in,
         rename_workspace_path_in,
     )
 }
@@ -2520,6 +2671,7 @@ where
         value,
         before_rename,
         |_| Ok(()),
+        |_| Ok(()),
         move |workspace_dir, parent| {
             sync_transaction_directory(parent)?;
             workspace_dir.sync()
@@ -2532,6 +2684,7 @@ where
             create_rollback_backup(source, backup)?;
             create_rollback_backup_in(workspace_dir, source, backup)
         },
+        create_rollback_backup_in,
         move |workspace_dir, source, destination| {
             rename_workspace_path(source, destination)?;
             rename_workspace_path_in(workspace_dir, source, destination)
@@ -2552,9 +2705,11 @@ where
         path,
         value,
         |_| Ok(()),
+        |_| Ok(()),
         sync_created_directory,
         sync_workspace_directory,
         restore_workspace_backup_in,
+        create_rollback_backup_in,
         create_rollback_backup_in,
         rename_workspace_path_in,
     )
@@ -3025,7 +3180,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn native_workspace_tests_rejects_swapped_temp_inode_before_publication() {
+    fn native_workspace_tests_rejects_temp_inode_swap_at_final_publication_boundary() {
         let (_dir, path) = temp_workspace_path();
         let previous = workspace_with_project("previous");
         let previous_bytes =
@@ -3034,17 +3189,15 @@ mod tests {
         let attacker_bytes = serde_json::to_vec(&workspace_with_project("attacker"))
             .expect("serialize attacker workspace");
 
-        let error = workspace_save_to_test_hook(
+        let error = workspace_save_to_test_hook_before_publication(
             &path,
             &workspace_with_project("attempted"),
             |temp| {
                 fs::remove_file(temp).map_err(|error| error.to_string())?;
                 fs::write(temp, &attacker_bytes).map_err(|error| error.to_string())
             },
-            sync_parent_directory,
-            restore_workspace_backup,
         )
-        .expect_err("swapped temp inode must fail before publication");
+        .expect_err("final-boundary temp inode swap must fail publication");
 
         assert!(error.contains("workspace temp"), "{error}");
         assert!(error.contains("changed"), "{error}");
@@ -3714,6 +3867,64 @@ mod tests {
         let parent = path.parent().expect("parent");
         assert!(cleanup_artifacts(parent).is_empty());
         assert!(rollback_artifacts(parent).is_empty());
+    }
+
+    #[test]
+    fn native_workspace_tests_initial_save_cascading_finalization_failure_is_deterministic() {
+        let (_dir, path) = temp_workspace_path();
+        let attempted = workspace_with_project("attempted");
+        let attempted_bytes =
+            serde_json::to_vec(&attempted).expect("serialize attempted workspace");
+        let pending = absent_pending_path(&path);
+        let committed = absent_committed_path(&path);
+        let mut sync_calls = 0;
+
+        let result = workspace_save_to_test_hook_with_recreation_fault(
+            &path,
+            &attempted,
+            |_| {
+                sync_calls += 1;
+                if sync_calls == 3 {
+                    return Err("injected marker commit sync failure".to_string());
+                }
+                if sync_calls == 4 {
+                    return Err("injected workspace deletion sync failure".to_string());
+                }
+                Ok(())
+            },
+            |source, destination| {
+                assert_eq!(source, committed);
+                assert_eq!(destination, pending);
+                Err("injected pending marker recreation failure".to_string())
+            },
+        );
+
+        if sync_calls < 5 {
+            fs::write(&path, &attempted_bytes)
+                .expect("simulate restart retaining the durable workspace publication");
+        }
+        sync_parent_directory_standalone(path.parent().expect("parent"))
+            .expect("sync simulated restart state");
+        let restarted = load_workspace_from(&path).expect("restart recovery");
+
+        match result {
+            Err(error) => {
+                assert!(error.contains("injected marker commit sync failure"));
+                assert!(error.contains("injected pending marker recreation failure"));
+                assert!(error.contains("injected workspace deletion sync failure"));
+                assert_eq!(
+                    restarted, None,
+                    "an initial save that returns Err must remain absent after restart"
+                );
+            }
+            Ok(()) => {
+                assert_eq!(
+                    restarted,
+                    Some(attempted),
+                    "a retained new workspace is permitted only when save returns Ok"
+                );
+            }
+        }
     }
 
     #[test]

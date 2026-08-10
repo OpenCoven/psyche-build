@@ -117,17 +117,23 @@ describe('Tauri native workspace security contract', () => {
     expect(functionBody(source, 'workspace_directory_entries')).toContain('libc::fdopendir');
   });
 
-  test('pins and revalidates the synced temp inode immediately before publication', async () => {
+  test('pins and revalidates the synced temp inode at the final publication boundary', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const save = functionBody(source, 'save_workspace_to_inner');
+    const publish = functionBody(source, 'publish_opened_workspace_file');
 
     const tempSync = save.indexOf('.sync_all()');
-    const revalidation = save.indexOf('verify_opened_regular_file');
-    const publication = save.indexOf('rename_regular_workspace_path');
+    const publication = save.indexOf('publish_opened_workspace_file');
+    const faultHook = publish.indexOf('before_publication(source)');
+    const revalidation = publish.indexOf('verify_opened_regular_file');
+    const rename = publish.indexOf('rename(workspace_dir, source, destination)');
 
     expect(tempSync).toBeGreaterThanOrEqual(0);
-    expect(revalidation).toBeGreaterThan(tempSync);
-    expect(publication).toBeGreaterThan(revalidation);
+    expect(publication).toBeGreaterThan(tempSync);
+    expect(faultHook).toBeGreaterThanOrEqual(0);
+    expect(revalidation).toBeGreaterThan(faultHook);
+    expect(rename).toBeGreaterThan(revalidation);
     expect(save.slice(tempSync, publication)).not.toContain('drop(temp_file)');
+    expect(publish.slice(revalidation, rename)).not.toContain('regular_file_exists');
   });
 });
