@@ -69,6 +69,10 @@ struct CovenSessionSummary {
     project_root: String,
     cwd: Option<String>,
     harness: Option<String>,
+    model: Option<String>,
+    current_task: Option<String>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
     title: Option<String>,
     status: Option<String>,
     created_at: Option<String>,
@@ -999,6 +1003,10 @@ fn normalize_session(
         project_root: project_scope.project_root.clone(),
         cwd,
         harness: optional_string(fields, "harness", "harness")?,
+        model: optional_string(fields, "model", "model")?,
+        current_task: optional_string(fields, "currentTask", "current_task")?,
+        input_tokens: optional_u64(fields, "inputTokens", "input_tokens"),
+        output_tokens: optional_u64(fields, "outputTokens", "output_tokens"),
         title: optional_string(fields, "title", "title")?,
         status: optional_string(fields, "status", "status")?,
         created_at: optional_string(fields, "createdAt", "created_at")?,
@@ -1031,6 +1039,13 @@ fn optional_string(
     }
     let value = value.as_str()?.trim();
     Some((!value.is_empty()).then(|| value.to_string()))
+}
+
+fn optional_u64(fields: &Map<String, Value>, camel_case: &str, snake_case: &str) -> Option<u64> {
+    fields
+        .get(camel_case)
+        .or_else(|| fields.get(snake_case))
+        .and_then(Value::as_u64)
 }
 
 #[cfg(test)]
@@ -1607,6 +1622,10 @@ mod tests {
                 project_root: "/project".to_string(),
                 cwd: None,
                 harness: None,
+                model: None,
+                current_task: None,
+                input_tokens: None,
+                output_tokens: None,
                 title: None,
                 status: Some("active".to_string()),
                 created_at: None,
@@ -1625,6 +1644,10 @@ mod tests {
                     "projectRoot": "/project",
                     "cwd": null,
                     "harness": null,
+                    "model": null,
+                    "currentTask": null,
+                    "inputTokens": null,
+                    "outputTokens": null,
                     "title": null,
                     "status": "active",
                     "createdAt": null,
@@ -1689,6 +1712,10 @@ mod tests {
                     "projectRoot": project,
                     "cwd": "  ",
                     "harness": "  codex  ",
+                    "model": "  claude-sonnet  ",
+                    "currentTask": "  review tests  ",
+                    "inputTokens": 11,
+                    "outputTokens": 7,
                     "title": "  title  ",
                     "status": "  active  ",
                     "createdAt": "  c1  ",
@@ -1698,25 +1725,49 @@ mod tests {
                 {
                     "id": "snake",
                     "project_root": project,
+                    "model": "gpt-5.5",
+                    "current_task": "answer follow-up",
+                    "input_tokens": 22,
+                    "output_tokens": 9,
                     "created_at": "c2",
                     "updated_at": "u2",
                     "archived_at": "a2"
+                },
+                {
+                    "id": "invalid-tokens",
+                    "projectRoot": project,
+                    "inputTokens": "99",
+                    "outputTokens": -1
                 }
             ]
         });
 
         let sessions = normalize_sessions(payload, &requested).unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
         assert_eq!(sessions[0].harness.as_deref(), Some("codex"));
+        assert_eq!(sessions[0].model.as_deref(), Some("claude-sonnet"));
+        assert_eq!(sessions[0].current_task.as_deref(), Some("review tests"));
+        assert_eq!(sessions[0].input_tokens, Some(11));
+        assert_eq!(sessions[0].output_tokens, Some(7));
         assert_eq!(sessions[0].title.as_deref(), Some("title"));
         assert_eq!(sessions[0].status.as_deref(), Some("active"));
         assert_eq!(sessions[0].created_at.as_deref(), Some("c1"));
         assert_eq!(sessions[0].updated_at.as_deref(), Some("u1"));
         assert_eq!(sessions[0].archived_at.as_deref(), Some("a1"));
         assert_eq!(sessions[0].cwd, None);
+        assert_eq!(sessions[1].model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            sessions[1].current_task.as_deref(),
+            Some("answer follow-up")
+        );
+        assert_eq!(sessions[1].input_tokens, Some(22));
+        assert_eq!(sessions[1].output_tokens, Some(9));
         assert_eq!(sessions[1].created_at.as_deref(), Some("c2"));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("u2"));
         assert_eq!(sessions[1].archived_at.as_deref(), Some("a2"));
+        assert_eq!(sessions[2].id, "invalid-tokens");
+        assert_eq!(sessions[2].input_tokens, None);
+        assert_eq!(sessions[2].output_tokens, None);
     }
 
     #[test]

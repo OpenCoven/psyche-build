@@ -291,6 +291,16 @@
       return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
     }, []);
   }
+  function allCovenSessionsForProject(project) {
+    var roots = [project.root].concat(
+      (project.worktrees || []).map(function (worktree) { return worktree.path; })
+    ).filter(function (root, index, candidates) {
+      return root && candidates.indexOf(root) === index;
+    });
+    return roots.reduce(function (sessions, root) {
+      return sessions.concat(covenDiscovery.allSessionsByProject.get(root) || []);
+    }, []);
+  }
   async function refreshCovenSessions() {
     if (document.visibilityState === "hidden" || state.projects.length === 0) {
       return covenDiscovery;
@@ -886,13 +896,18 @@
     payload = payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
+    var stoppedByUser = thread.stopRequested;
     thread.ptyStarted = false;
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
     }
     thread.stopRequested = false;
     thread.spawning = false;
-    thread.status = "exited";
+    thread.finishedAt = Date.now();
+    thread.exitCode = payload.code == null ? null : payload.code;
+    thread.status = stoppedByUser || payload.code == null || payload.code === 0
+      ? "exited"
+      : "failed";
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
@@ -1169,6 +1184,9 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      startedAt: Date.now(),
+      finishedAt: null,
+      exitCode: null,
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
@@ -1256,6 +1274,9 @@
     thread.startInFlight = true;
     thread.status = "starting";
     thread.spawning = true;
+    thread.startedAt = Date.now();
+    thread.finishedAt = null;
+    thread.exitCode = null;
     syncThreadPaneMetadata(thread);
     refreshSidebar();
     refreshTabs();
@@ -1285,7 +1306,6 @@
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
         thread.ptyStarted = false;
-        thread.status = "exited";
         thread.spawning = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
@@ -1323,7 +1343,6 @@
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
         thread.ptyStarted = false;
-        thread.status = "exited";
         thread.spawning = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
@@ -1347,6 +1366,8 @@
       } else {
         thread.ptyStarted = false;
         thread.status = "failed";
+        thread.finishedAt = Date.now();
+        thread.exitCode = null;
         if (thread.term) {
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }

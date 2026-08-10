@@ -117,6 +117,10 @@ describe('tauri footer status model', () => {
           title: 'Codex',
           harness: 'codex',
           status: 'running',
+          model: 'gpt-5.5',
+          currentTask: 'Answering follow-up',
+          inputTokens: 12,
+          outputTokens: 34,
         },
         {
           id: 'session-3',
@@ -154,6 +158,9 @@ describe('tauri footer status model', () => {
     });
     expect(summary.agents.find((agent) => agent.id === 'coven:session-2')).toMatchObject({
       name: 'Codex',
+      model: 'gpt-5.5',
+      currentTask: 'Answering follow-up',
+      tokens: { input: 12, output: 34 },
       status: 'running',
       runtimeMs: null,
     });

@@ -6,9 +6,17 @@ const libSourcePath = resolve(
   process.cwd(),
   'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
 );
+const mainSourcePath = resolve(
+  process.cwd(),
+  'native/macos/psyche-build-tauri/web/main.js',
+);
 const cargoTomlPath = resolve(
   process.cwd(),
   'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
+);
+const covenSessionsPath = resolve(
+  process.cwd(),
+  'native/macos/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
 );
 
 function bracedBody(source: string, start: number): string {
@@ -35,9 +43,11 @@ function functionBody(source: string, functionName: string): string {
 
 describe('Tauri workspace metrics native contract', () => {
   test('wires PTY identity retention and the async metrics command', async () => {
-    const [libSource, cargoToml] = await Promise.all([
+    const [libSource, cargoToml, mainSource, covenSessions] = await Promise.all([
       readFile(libSourcePath, 'utf8'),
       readFile(cargoTomlPath, 'utf8'),
+      readFile(mainSourcePath, 'utf8'),
+      readFile(covenSessionsPath, 'utf8'),
     ]);
 
     expect(cargoToml).toMatch(/\bsysinfo = "0\.36\.1"/);
@@ -88,6 +98,38 @@ describe('Tauri workspace metrics native contract', () => {
     expect(metricsStateRegistrationIndex).toBeLessThan(invokeHandlerIndex);
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*git_log,\s*workspace_metrics,\s*[\s\S]*\]/,
+    );
+
+    expect(covenSessions).toMatch(
+      /struct\s+CovenSessionSummary\s*\{[\s\S]*model:\s*Option<String>,[\s\S]*current_task:\s*Option<String>,[\s\S]*input_tokens:\s*Option<u64>,[\s\S]*output_tokens:\s*Option<u64>,[\s\S]*\}/,
+    );
+    expect(covenSessions).toContain(
+      'fn optional_u64(fields: &Map<String, Value>, camel_case: &str, snake_case: &str) -> Option<u64> {',
+    );
+    expect(covenSessions).toContain('.and_then(Value::as_u64)');
+    expect(covenSessions).toMatch(
+      /model:\s*optional_string\(fields,\s*"model",\s*"model"\)\?,[\s\S]*current_task:\s*optional_string\(fields,\s*"currentTask",\s*"current_task"\)\?,[\s\S]*input_tokens:\s*optional_u64\(fields,\s*"inputTokens",\s*"input_tokens"\),[\s\S]*output_tokens:\s*optional_u64\(fields,\s*"outputTokens",\s*"output_tokens"\),/,
+    );
+
+    expect(mainSource).toMatch(
+      /function\s+createThread\s*\([\s\S]*startedAt:\s*Date\.now\(\)\s*,[\s\S]*finishedAt:\s*null\s*,[\s\S]*exitCode:\s*null\s*,/,
+    );
+
+    expect(mainSource).toMatch(
+      /function\s+spawnPty\s*\([\s\S]*thread\.startedAt\s*=\s*Date\.now\(\)\s*;[\s\S]*thread\.finishedAt\s*=\s*null\s*;[\s\S]*thread\.exitCode\s*=\s*null\s*;/,
+    );
+    expect(mainSource).toMatch(
+      /function\s+spawnPty\s*\([\s\S]*thread\.ptyStarted\s*=\s*false\s*;[\s\S]*thread\.status\s*=\s*"failed"\s*;[\s\S]*thread\.finishedAt\s*=\s*Date\.now\(\)\s*;[\s\S]*thread\.exitCode\s*=\s*null\s*;/,
+    );
+
+    expect(mainSource).toMatch(
+      /function\s+handlePtyExit\s*\([\s\S]*var\s+stoppedByUser\s*=\s*thread\.stopRequested\s*;/,
+    );
+    expect(mainSource).toMatch(
+      /function\s+handlePtyExit\s*\([\s\S]*thread\.finishedAt\s*=\s*Date\.now\(\)\s*;[\s\S]*thread\.exitCode\s*=\s*payload\.code == null \? null : payload\.code\s*;/,
+    );
+    expect(mainSource).toMatch(
+      /function\s+handlePtyExit\s*\([\s\S]*thread\.status\s*=\s*stoppedByUser \|\| payload\.code == null \|\| payload\.code === 0\s*\?\s*"exited"\s*:\s*"failed"\s*;/,
     );
   });
 });
