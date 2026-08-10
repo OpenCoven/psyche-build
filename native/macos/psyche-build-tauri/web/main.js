@@ -5379,43 +5379,52 @@
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
 
+  function consumeAgentPickerKey(event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleAgentPickerListKeydown(event) {
+    var count = agentLaunchOptions().length;
+    if (event.key === "ArrowDown") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, -1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Home") {
+      agentPickerIndex = 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "End") {
+      agentPickerIndex = count ? count - 1 : 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Enter") {
+      consumeAgentPickerKey(event);
+      launchSelectedAgent();
+      return true;
+    }
+    if (event.key === "Escape") {
+      consumeAgentPickerKey(event);
+      closeAgentPicker();
+      return true;
+    }
+    return false;
+  }
+
   if (agentPickerListEl) {
-    agentPickerListEl.addEventListener("keydown", function (event) {
-      var count = agentLaunchOptions().length;
-      if (event.key === "ArrowDown") {
-        agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
-        renderAgentPicker();
-        event.preventDefault();
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, -1, count);
-        renderAgentPicker();
-        event.preventDefault();
-        return;
-      }
-      if (event.key === "Home") {
-        agentPickerIndex = 0;
-        renderAgentPicker();
-        event.preventDefault();
-        return;
-      }
-      if (event.key === "End") {
-        agentPickerIndex = count ? count - 1 : 0;
-        renderAgentPicker();
-        event.preventDefault();
-        return;
-      }
-      if (event.key === "Enter") {
-        event.preventDefault();
-        launchSelectedAgent();
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeAgentPicker();
-      }
-    });
+    agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown);
   }
   if (agentPickerOverlayEl) {
     agentPickerOverlayEl.addEventListener("pointerdown", function (event) {

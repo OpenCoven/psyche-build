@@ -254,15 +254,74 @@ describe('Tauri agent picker', () => {
     const shortcutBlock = mainJs.slice(commandPIndex, commandPIndex + 200);
     expect(shortcutBlock).toContain('openAgentPicker()');
 
-    const listKeydownIndex = mainJs.indexOf('agentPickerListEl.addEventListener("keydown"');
-    expect(listKeydownIndex).toBeGreaterThan(-1);
-    const listKeydownBlock = mainJs.slice(listKeydownIndex, listKeydownIndex + 1200);
-    expect(listKeydownBlock).toContain('event.key === "ArrowDown"');
-    expect(listKeydownBlock).toContain('event.key === "ArrowUp"');
-    expect(listKeydownBlock).toContain('event.key === "Home"');
-    expect(listKeydownBlock).toContain('event.key === "End"');
-    expect(listKeydownBlock).toContain('event.key === "Enter"');
-    expect(listKeydownBlock).toContain('event.key === "Escape"');
+    expect(mainJs).toContain('agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown)');
+    const listKeydownSource = functionSource('handleAgentPickerListKeydown');
+    expect(listKeydownSource).toContain('event.key === "ArrowDown"');
+    expect(listKeydownSource).toContain('event.key === "ArrowUp"');
+    expect(listKeydownSource).toContain('event.key === "Home"');
+    expect(listKeydownSource).toContain('event.key === "End"');
+    expect(listKeydownSource).toContain('event.key === "Enter"');
+    expect(listKeydownSource).toContain('event.key === "Escape"');
+  });
+
+  it('stops propagation for picker-owned keys, especially Escape', () => {
+    let renderCalls = 0;
+    let launchCalls = 0;
+    let closeCalls = 0;
+    const consumeEvents: string[] = [];
+    const controller = compileFunctionWithState<
+      (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => boolean
+    >(
+      functionSource('handleAgentPickerListKeydown'),
+      {
+        agentLaunchOptions: () => [
+          { id: 'coven-code' },
+          { id: 'copilot' },
+          { id: 'codex' },
+        ],
+        nextAgentPickerIndex: (current: number, delta: number, count: number) =>
+          (((current + delta) % count) + count) % count,
+        renderAgentPicker: () => { renderCalls += 1; },
+        launchSelectedAgent: () => { launchCalls += 1; },
+        closeAgentPicker: () => { closeCalls += 1; },
+        consumeAgentPickerKey: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeEvents.push(event.key);
+        },
+      },
+      { agentPickerIndex: 1 },
+    );
+
+    const makeEvent = (key: string) => {
+      const calls = { prevented: 0, stopped: 0 };
+      return {
+        event: {
+          key,
+          preventDefault: () => { calls.prevented += 1; },
+          stopPropagation: () => { calls.stopped += 1; },
+        },
+        calls,
+      };
+    };
+
+    const down = makeEvent('ArrowDown');
+    expect(controller.fn(down.event)).toBe(true);
+    expect(down.calls).toEqual({ prevented: 1, stopped: 1 });
+    expect(controller.snapshot().agentPickerIndex).toBe(2);
+
+    const enter = makeEvent('Enter');
+    expect(controller.fn(enter.event)).toBe(true);
+    expect(enter.calls).toEqual({ prevented: 1, stopped: 1 });
+
+    const escape = makeEvent('Escape');
+    expect(controller.fn(escape.event)).toBe(true);
+    expect(escape.calls).toEqual({ prevented: 1, stopped: 1 });
+
+    expect(renderCalls).toBe(1);
+    expect(launchCalls).toBe(1);
+    expect(closeCalls).toBe(1);
+    expect(consumeEvents).toEqual(['ArrowDown', 'Enter', 'Escape']);
   });
 
   it('launches the selected agent from the picker', () => {
