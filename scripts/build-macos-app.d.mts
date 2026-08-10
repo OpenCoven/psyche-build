@@ -46,6 +46,21 @@ export interface BundleIdentity {
   executable: string;
 }
 
+export interface DevBuildSnapshotRequest {
+  sourceRoot: string;
+  tempRoot: string;
+  devConfigPath: string;
+}
+
+export interface DevBuildSnapshotInput extends DevBuildSnapshotRequest {
+  snapshotPath: string;
+}
+
+export interface DevBuildSnapshot {
+  snapshotPath: string;
+  identity: BundleIdentity;
+}
+
 export interface TauriWindowConfig {
   label?: string;
   title?: string;
@@ -134,6 +149,27 @@ export interface PublishBuildChannelOverrides {
   lockTimeoutSeconds?: number;
 }
 
+export interface BuildDevAppSnapshotOverrides {
+  execute?: Runner;
+  mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  writeFileText?: (
+    filePath: string,
+    content: string,
+    options?: { exclusive?: boolean },
+  ) => void | Promise<void>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  randomUUID?: () => string;
+  lockTimeoutSeconds?: number;
+}
+
+export interface RunDevBuildSnapshotUnlockedOverrides {
+  execute?: Runner;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  findCandidateApp?: (bundleDir: string, expectedAppName: string) => Promise<string>;
+  readBundleIdentity?: (appPath: string, execute?: Runner) => Promise<BundleIdentity>;
+}
+
 export interface WriteBuildProvenanceUnlockedOverrides {
   readFileText?: (filePath: string) => string | Promise<string>;
   writeFileText?: (
@@ -184,6 +220,10 @@ export interface RunMacosBuildDependencies {
   makeTemporaryDirectory?: (prefix: string) => string | Promise<string>;
   removePath?: (targetPath: string) => void | Promise<void>;
   writeDevTauriConfig?: (sourceRoot: string, tempRoot: string) => Promise<string>;
+  buildDevAppSnapshot?: (
+    input: DevBuildSnapshotRequest,
+    overrides?: Pick<BuildDevAppSnapshotOverrides, 'execute'>,
+  ) => Promise<DevBuildSnapshot>;
   findCandidateApp?: (bundleDir: string, expectedAppName: string) => Promise<string>;
   readBundleIdentity?: (appPath: string, execute?: Runner) => Promise<BundleIdentity>;
   smokeLaunchBundle?: (
@@ -239,6 +279,14 @@ export function writeDevTauriConfig(
   sourceRoot: string,
   tempRoot: string,
 ): Promise<string>;
+export function buildDevAppSnapshot(
+  input: DevBuildSnapshotRequest,
+  overrides?: BuildDevAppSnapshotOverrides,
+): Promise<DevBuildSnapshot>;
+export function runDevBuildSnapshotUnlocked(
+  input: DevBuildSnapshotInput,
+  overrides?: RunDevBuildSnapshotUnlockedOverrides,
+): Promise<DevBuildSnapshot>;
 export function findCandidateApp(bundleDir: string, expectedAppName: string): Promise<string>;
 export function assertBundleIdentity(
   appPath: string,

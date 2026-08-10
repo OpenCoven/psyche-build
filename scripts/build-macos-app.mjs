@@ -48,12 +48,19 @@ const PUBLISH_BUILD_CHANNEL_HELPER_PATH = path.join(
   'scripts',
   'publish-build-channel.mjs',
 );
+const DEV_BUILD_HELPER_PATH = path.join(
+  repositoryRoot,
+  'scripts',
+  'build-dev-app.mjs',
+);
 const LOCKF_PATH = '/usr/bin/lockf';
 const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
 const DEFAULT_PROVENANCE_LOCK_TIMEOUT_SECONDS = 5;
 const MAX_PROVENANCE_LOCK_TIMEOUT_SECONDS = 60;
+const DEFAULT_DEV_BUILD_LOCK_TIMEOUT_SECONDS = 600;
+const MAX_DEV_BUILD_LOCK_TIMEOUT_SECONDS = 3_600;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 const TEMP_BUILD_PREFIX = 'psyche-build-macos-';
 const BUILD_CHANNELS = ['stable', 'dev'];
@@ -269,6 +276,148 @@ export async function writeDevTauriConfig(sourceRoot, tempRoot) {
     }
     throw error;
   }
+}
+
+export async function buildDevAppSnapshot(input, overrides = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('buildDevAppSnapshot input must be an object');
+  }
+
+  const sourceRoot = path.resolve(input.sourceRoot);
+  const tempRoot = path.resolve(input.tempRoot);
+  const devConfigPath = path.resolve(input.devConfigPath);
+  const targetDir = path.join(
+    sourceRoot,
+    'native/macos/psyche-build-tauri/src-tauri/target',
+  );
+  const lockPath = path.join(targetDir, '.psyche-build-dev.lock');
+  const randomUUID = overrides.randomUUID ?? createRandomUUID;
+  const uuid = randomUUID();
+  const inputPath = path.join(tempRoot, `.dev-build.input-${uuid}.json`);
+  const snapshotPath = path.join(
+    tempRoot,
+    `.dev-build.snapshot-${uuid}`,
+    CHANNEL_CONFIG.dev.appName,
+  );
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+  const execute = overrides.execute ?? runCommand;
+  const lockTimeoutSeconds =
+    overrides.lockTimeoutSeconds ?? DEFAULT_DEV_BUILD_LOCK_TIMEOUT_SECONDS;
+  const privateInput = {
+    sourceRoot,
+    tempRoot,
+    devConfigPath,
+    snapshotPath,
+  };
+
+  validateDevBuildLockTimeoutSeconds(lockTimeoutSeconds);
+  await mkdirPath(targetDir);
+  await mkdirPath(tempRoot);
+
+  let operationError;
+  let inputMayBelongToBuilder = false;
+  let snapshot;
+
+  try {
+    try {
+      await writeFileText(
+        inputPath,
+        `${JSON.stringify(privateInput)}\n`,
+        { exclusive: true },
+      );
+      inputMayBelongToBuilder = true;
+    } catch (error) {
+      inputMayBelongToBuilder = !isAlreadyExistsError(error);
+      throw error;
+    }
+
+    const result = await execute(
+      LOCKF_PATH,
+      [
+        '-k',
+        '-t',
+        String(lockTimeoutSeconds),
+        lockPath,
+        process.execPath,
+        DEV_BUILD_HELPER_PATH,
+        inputPath,
+      ],
+      { stage: 'build and snapshot dev app' },
+    );
+    snapshot = parseDevBuildSnapshotOutput(result.stdout, snapshotPath);
+  } catch (error) {
+    operationError =
+      error?.exitCode === 75
+        ? buildDevBuildLockTimeoutError(error, lockTimeoutSeconds, lockPath)
+        : includeChildDiagnostics(error);
+  } finally {
+    if (inputMayBelongToBuilder) {
+      try {
+        await removePath(inputPath);
+      } catch (cleanupError) {
+        operationError = operationError
+          ? combineErrors(
+              operationError,
+              cleanupError,
+              'Failed to clean private dev build input file',
+            )
+          : new Error(
+              `Failed to clean private dev build input file "${inputPath}": ` +
+                describeError(cleanupError),
+              { cause: cleanupError },
+            );
+      }
+    }
+  }
+
+  if (operationError) {
+    throw operationError;
+  }
+
+  return snapshot;
+}
+
+export async function runDevBuildSnapshotUnlocked(input, overrides = {}) {
+  const sourceRoot = path.resolve(input.sourceRoot);
+  const tempRoot = path.resolve(input.tempRoot);
+  const devConfigPath = path.resolve(input.devConfigPath);
+  const snapshotPath = path.resolve(input.snapshotPath);
+  const bundleDir = path.join(sourceRoot, BUNDLE_RELATIVE_PATH);
+  const expectedConfig = channelConfig('dev');
+  const expectedCandidate = path.join(bundleDir, expectedConfig.appName);
+  const execute = overrides.execute ?? runCommand;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const findCandidate = overrides.findCandidateApp ?? findCandidateApp;
+  const readIdentity = overrides.readBundleIdentity ?? readBundleIdentity;
+
+  if (!pathIsInside(tempRoot, snapshotPath)) {
+    throw new Error(`Dev snapshot path must be inside temporary root "${tempRoot}"`);
+  }
+
+  await removePath(expectedCandidate);
+
+  for (const [command, args, relativeCwd] of buildCommandsFor('dev', {
+    devConfigPath,
+  })) {
+    await execute(command, args, {
+      cwd: path.resolve(sourceRoot, relativeCwd),
+      stage: `run dev validation/build command: ${command} ${args.join(' ')}`,
+    });
+  }
+
+  const candidate = await findCandidate(bundleDir, expectedConfig.appName);
+  const identity = await readIdentity(candidate, execute);
+  assertBundleIdentity(candidate, identity, expectedConfig);
+
+  await mkdirPath(path.dirname(snapshotPath));
+  await execute('ditto', [candidate, snapshotPath], {
+    stage: 'snapshot dev app bundle with ditto',
+  });
+
+  return { snapshotPath, identity };
 }
 
 export function buildCommandsFor(channel, options = {}) {
@@ -830,6 +979,7 @@ export async function runMacosBuild(options, deps = {}) {
     deps.makeTemporaryDirectory ?? defaultMakeBuildTemporaryDirectory;
   const removePath = deps.removePath ?? defaultRemovePath;
   const writeDevConfig = deps.writeDevTauriConfig ?? writeDevTauriConfig;
+  const buildDevSnapshot = deps.buildDevAppSnapshot ?? buildDevAppSnapshot;
   const findCandidate = deps.findCandidateApp ?? findCandidateApp;
   const readIdentity = deps.readBundleIdentity ?? readBundleIdentity;
   const smokeLaunch = deps.smokeLaunchBundle ?? smokeLaunchBundle;
@@ -871,26 +1021,32 @@ export async function runMacosBuild(options, deps = {}) {
 
     const devConfigPath =
       channel === 'dev' ? await writeDevConfig(sourceRoot, tempRoot) : undefined;
-    const bundleDir = path.join(sourceRoot, BUNDLE_RELATIVE_PATH);
-    const expectedCandidate = path.join(bundleDir, expectedConfig.appName);
+    let candidate;
+    let identity;
 
-    await removePath(expectedCandidate);
+    if (channel === 'dev') {
+      const snapshot = await buildDevSnapshot(
+        { sourceRoot, tempRoot, devConfigPath },
+        { execute },
+      );
+      candidate = snapshot.snapshotPath;
+      identity = snapshot.identity;
+    } else {
+      const bundleDir = path.join(sourceRoot, BUNDLE_RELATIVE_PATH);
+      const expectedCandidate = path.join(bundleDir, expectedConfig.appName);
+      await removePath(expectedCandidate);
 
-    const buildCommands =
-      channel === 'stable'
-        ? buildCommandsFor('stable')
-        : buildCommandsFor('dev', { devConfigPath });
+      for (const [command, args, relativeCwd] of buildCommandsFor('stable')) {
+        await execute(command, args, {
+          cwd: path.resolve(sourceRoot, relativeCwd),
+          stage: `run ${channel} validation/build command: ${command} ${args.join(' ')}`,
+        });
+      }
 
-    for (const [command, args, relativeCwd] of buildCommands) {
-      await execute(command, args, {
-        cwd: path.resolve(sourceRoot, relativeCwd),
-        stage: `run ${channel} validation/build command: ${command} ${args.join(' ')}`,
-      });
+      candidate = await findCandidate(bundleDir, expectedConfig.appName);
+      identity = await readIdentity(candidate, execute);
+      assertBundleIdentity(candidate, identity, expectedConfig);
     }
-
-    const candidate = await findCandidate(bundleDir, expectedConfig.appName);
-    const identity = await readIdentity(candidate, execute);
-    assertBundleIdentity(candidate, identity, expectedConfig);
 
     if (channel === 'stable') {
       await smokeLaunch(candidate, { executableName: identity.executable });
@@ -1126,6 +1282,16 @@ function isEnoentError(error) {
   return Boolean(error) && typeof error === 'object' && error.code === 'ENOENT';
 }
 
+function pathIsInside(parentPath, childPath) {
+  const relativePath = path.relative(parentPath, childPath);
+  return (
+    relativePath !== '' &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath)
+  );
+}
+
 async function copyBundleWithDitto(source, destination) {
   await runCommand('ditto', [source, destination], {
     stage: 'copy app bundle with ditto',
@@ -1182,6 +1348,19 @@ function buildPublicationLockTimeoutError(error, channel, lockTimeoutSeconds, lo
   );
 }
 
+function buildDevBuildLockTimeoutError(error, lockTimeoutSeconds, lockPath) {
+  const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
+  const diagnostics = stderr === '' || describeError(error).includes(stderr)
+    ? describeError(error)
+    : `${describeError(error)}\n${stderr}`;
+
+  return new Error(
+    `Timed out after ${lockTimeoutSeconds} seconds waiting for dev build lock ` +
+      `"${lockPath}": ${diagnostics}`,
+    { cause: error },
+  );
+}
+
 function includeChildDiagnostics(error) {
   if (!(error instanceof Error)) {
     return error;
@@ -1196,6 +1375,58 @@ function includeChildDiagnostics(error) {
     new Error(`${error.message}\nstderr:\n${stderr}`, { cause: error }),
     error,
   );
+}
+
+function parseDevBuildSnapshotOutput(stdout, expectedSnapshotPath) {
+  let output;
+
+  try {
+    output = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(
+      `Dev build helper returned invalid JSON: ${describeError(error)}`,
+      { cause: error },
+    );
+  }
+
+  const unknownKey = findUnknownField(output, ['snapshotPath', 'identity']);
+  const identityUnknownKey = findUnknownField(
+    output?.identity,
+    ['name', 'identifier', 'executable'],
+  );
+
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    Array.isArray(output) ||
+    unknownKey ||
+    output.snapshotPath !== expectedSnapshotPath ||
+    !output.identity ||
+    typeof output.identity !== 'object' ||
+    Array.isArray(output.identity) ||
+    identityUnknownKey ||
+    typeof output.identity.name !== 'string' ||
+    typeof output.identity.identifier !== 'string' ||
+    typeof output.identity.executable !== 'string' ||
+    output.identity.executable.trim() === ''
+  ) {
+    throw new Error(
+      `Dev build helper returned an invalid snapshot result for ` +
+        `"${expectedSnapshotPath}"`,
+    );
+  }
+
+  const identity = {
+    name: output.identity.name,
+    identifier: output.identity.identifier,
+    executable: output.identity.executable,
+  };
+  assertBundleIdentity(expectedSnapshotPath, identity, CHANNEL_CONFIG.dev);
+
+  return {
+    snapshotPath: expectedSnapshotPath,
+    identity,
+  };
 }
 
 async function readExistingBuildProvenance(statePath, readFileText) {
@@ -1391,6 +1622,19 @@ function validateLockTimeoutSeconds(value) {
     throw new Error(
       `lockTimeoutSeconds must be an integer between 0 and ` +
         `${MAX_PROVENANCE_LOCK_TIMEOUT_SECONDS}`,
+    );
+  }
+}
+
+function validateDevBuildLockTimeoutSeconds(value) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_DEV_BUILD_LOCK_TIMEOUT_SECONDS
+  ) {
+    throw new Error(
+      `lockTimeoutSeconds must be an integer between 0 and ` +
+        `${MAX_DEV_BUILD_LOCK_TIMEOUT_SECONDS}`,
     );
   }
 }

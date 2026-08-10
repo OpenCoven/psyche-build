@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   assertBundleIdentity,
+  buildDevAppSnapshot,
   buildCommandsFor,
   channelConfig,
   createDevTauriConfig,
@@ -28,6 +29,7 @@ import {
   publishBuildChannel,
   readBundleIdentity,
   resolveCommit,
+  runDevBuildSnapshotUnlocked,
   runCli,
   runCommand,
   runMacosBuild,
@@ -36,6 +38,7 @@ import {
   writeDevTauriConfig,
   writeBuildProvenance,
 } from '../scripts/build-macos-app.mjs';
+import { runBuildDevAppHelper } from '../scripts/build-dev-app.mjs';
 import type {
   BuildProvenance,
   BundleIdentity,
@@ -49,6 +52,7 @@ import type {
 
 const repositoryRoot = process.cwd();
 const scriptPath = join(repositoryRoot, 'scripts/build-macos-app.mjs');
+const devBuildHelperPath = join(repositoryRoot, 'scripts/build-dev-app.mjs');
 const publishHelperPath = join(repositoryRoot, 'scripts/publish-build-channel.mjs');
 const provenanceHelperPath = join(repositoryRoot, 'scripts/write-build-provenance.mjs');
 const tauriRelativeCwd = 'native/macos/psyche-build-tauri';
@@ -254,6 +258,84 @@ function spawnChannelPublisher(
     },
   );
   const completion = new Promise<PublicationProcessResult>((resolveChild, rejectChild) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', rejectChild);
+    child.on('close', (code, signal) => {
+      resolveChild({ code, signal, stdout, stderr });
+    });
+  });
+
+  return { completion };
+}
+
+type DevSnapshotProcessResult = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+function spawnDevSnapshotBuilder(
+  sourceRoot: string,
+  tempRoot: string,
+  devConfigPath: string,
+  env: NodeJS.ProcessEnv,
+): {
+  completion: Promise<DevSnapshotProcessResult>;
+} {
+  const childScript = `
+    import { writeFile } from 'node:fs/promises';
+
+    const input = JSON.parse(process.env.PSYCHE_DEV_SNAPSHOT_DRIVER_INPUT);
+    if (input.startedPath) {
+      await writeFile(input.startedPath, 'started');
+    }
+    try {
+      const { buildDevAppSnapshot } = await import(input.moduleUrl);
+      const result = await buildDevAppSnapshot(
+        {
+          sourceRoot: input.sourceRoot,
+          tempRoot: input.tempRoot,
+          devConfigPath: input.devConfigPath,
+        },
+        { lockTimeoutSeconds: 5 },
+      );
+      process.stdout.write(JSON.stringify(result) + '\\n');
+    } catch (error) {
+      process.stderr.write(
+        (error instanceof Error ? error.stack ?? error.message : String(error)) + '\\n',
+      );
+      process.exitCode = 1;
+    }
+  `;
+  const child = spawnChild(
+    process.execPath,
+    ['--input-type=module', '--eval', childScript],
+    {
+      env: {
+        ...process.env,
+        ...env,
+        PSYCHE_DEV_SNAPSHOT_DRIVER_INPUT: JSON.stringify({
+          moduleUrl: pathToFileURL(scriptPath).href,
+          sourceRoot,
+          tempRoot,
+          devConfigPath,
+          startedPath: env.PSYCHE_TEST_DEV_DRIVER_STARTED_PATH,
+        }),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  const completion = new Promise<DevSnapshotProcessResult>((resolveChild, rejectChild) => {
     let stdout = '';
     let stderr = '';
     child.stdout?.setEncoding('utf8');
@@ -934,6 +1016,482 @@ describe('macOS build channels', () => {
         'dev builds require a devConfigPath',
       );
     });
+  });
+
+  describe('buildDevAppSnapshot', () => {
+    it('uses the exact dev-build lockf arguments and a private mode-0600 input file', async () => {
+      const sourceRoot = createScratchDirectory('dev-snapshot-source');
+      const tempRoot = createScratchDirectory('dev-snapshot-temp');
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const targetDir = join(
+        sourceRoot,
+        'native/macos/psyche-build-tauri/src-tauri/target',
+      );
+      const lockPath = join(targetDir, '.psyche-build-dev.lock');
+      const inputPath = join(tempRoot, '.dev-build.input-fixed.json');
+      const snapshotPath = join(
+        tempRoot,
+        '.dev-build.snapshot-fixed',
+        'Psyche Build Dev.app',
+      );
+      const candidatePath = join(
+        sourceRoot,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+        'Psyche Build Dev.app',
+      );
+      const identity: BundleIdentity = {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      };
+      const removedPaths: string[] = [];
+      writeFileSync(configPath, '{}\n', 'utf8');
+
+      const execute = vi.fn(async (
+        _command: string,
+        args: readonly string[],
+      ): Promise<CommandResult> => {
+        expect(statSync(inputPath).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(inputPath, 'utf8'))).toEqual({
+          sourceRoot,
+          tempRoot,
+          devConfigPath: configPath,
+          snapshotPath,
+        });
+        expect(args).not.toContain(JSON.stringify({
+          sourceRoot,
+          tempRoot,
+          devConfigPath: configPath,
+          snapshotPath,
+        }));
+        expect(args).not.toContain(candidatePath);
+        return {
+          stdout: `${JSON.stringify({
+            snapshotPath,
+            identity,
+          })}\n`,
+          stderr: '',
+        };
+      });
+
+      await expect(
+        buildDevAppSnapshot(
+          { sourceRoot, tempRoot, devConfigPath: configPath },
+          {
+            execute,
+            lockTimeoutSeconds: 7,
+            randomUUID: () => 'fixed',
+            removePath: async (targetPath: string) => {
+              removedPaths.push(targetPath);
+              rmSync(targetPath, { recursive: true, force: true });
+            },
+          },
+        ),
+      ).resolves.toEqual({
+        snapshotPath,
+        identity,
+      });
+
+      expect(execute).toHaveBeenCalledWith(
+        '/usr/bin/lockf',
+        [
+          '-k',
+          '-t',
+          '7',
+          lockPath,
+          process.execPath,
+          join(repositoryRoot, 'scripts/build-dev-app.mjs'),
+          inputPath,
+        ],
+        { stage: 'build and snapshot dev app' },
+      );
+      expect(removedPaths).toEqual([inputPath]);
+      expect(existsSync(inputPath)).toBe(false);
+    });
+
+    it('removes the stale candidate and snapshots the validated helper build with ditto', async () => {
+      const sourceRoot = '/workspace/psyche-build';
+      const tempRoot = '/workspace/.build-temp/dev-helper';
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const bundleDir = join(
+        sourceRoot,
+        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+      );
+      const candidatePath = join(bundleDir, 'Psyche Build Dev.app');
+      const snapshotPath = join(
+        tempRoot,
+        '.dev-build.snapshot-helper',
+        'Psyche Build Dev.app',
+      );
+      const snapshotParent = resolve(snapshotPath, '..');
+      const identity: BundleIdentity = {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      };
+      const execute = vi.fn(async (): Promise<CommandResult> => ({
+        stdout: '',
+        stderr: '',
+      }));
+      const removePath = vi.fn(async () => {});
+      const mkdirPath = vi.fn(async () => {});
+      const findCandidate = vi.fn(async () => candidatePath);
+      const readIdentity = vi.fn(async () => identity);
+
+      await expect(
+        runDevBuildSnapshotUnlocked(
+          {
+            sourceRoot,
+            tempRoot,
+            devConfigPath: configPath,
+            snapshotPath,
+          },
+          {
+            execute,
+            removePath,
+            mkdirPath,
+            findCandidateApp: findCandidate,
+            readBundleIdentity: readIdentity,
+          },
+        ),
+      ).resolves.toEqual({ snapshotPath, identity });
+
+      expect(removePath).toHaveBeenCalledWith(candidatePath);
+      expect(mkdirPath).toHaveBeenCalledWith(snapshotParent);
+      expect(execute.mock.calls).toEqual([
+        ...buildCommandsFor('dev', { devConfigPath: configPath }).map(
+          ([command, args, relativeCwd]) => [
+            command,
+            args,
+            {
+              cwd: resolve(sourceRoot, relativeCwd),
+              stage: `run dev validation/build command: ${command} ${args.join(' ')}`,
+            },
+          ],
+        ),
+        [
+          'ditto',
+          [candidatePath, snapshotPath],
+          { stage: 'snapshot dev app bundle with ditto' },
+        ],
+      ]);
+      expect(findCandidate).toHaveBeenCalledWith(bundleDir, 'Psyche Build Dev.app');
+      expect(readIdentity).toHaveBeenCalledWith(candidatePath, execute);
+    });
+
+    it('reports helper-specific usage instead of running the normal build CLI', () => {
+      const result = spawnSync(process.execPath, [devBuildHelperPath], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain(
+        'build-dev-app requires exactly one private input-file path',
+      );
+      expect(result.stderr).not.toContain('Build channel must be "stable" or "dev"');
+    });
+
+    it('reads the private input before running the unlocked snapshot operation', async () => {
+      const sourceRoot = createScratchDirectory('dev-helper-input-source');
+      const tempRoot = createScratchDirectory('dev-helper-input-temp');
+      const inputPath = join(tempRoot, '.dev-build.input-test.json');
+      const input = {
+        sourceRoot,
+        tempRoot,
+        devConfigPath: join(tempRoot, 'tauri.dev.json'),
+        snapshotPath: join(
+          tempRoot,
+          '.dev-build.snapshot-test',
+          'Psyche Build Dev.app',
+        ),
+      };
+      const identity: BundleIdentity = {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      };
+      writeFileSync(inputPath, `${JSON.stringify(input)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      const runUnlocked = vi.fn(async () => ({
+        snapshotPath: input.snapshotPath,
+        identity,
+      }));
+
+      await expect(
+        runBuildDevAppHelper(
+          [inputPath],
+          { runDevBuildSnapshotUnlocked: runUnlocked },
+        ),
+      ).resolves.toEqual({
+        snapshotPath: input.snapshotPath,
+        identity,
+      });
+      expect(runUnlocked).toHaveBeenCalledWith(input);
+    });
+
+    it('removes the private input after helper failure and includes child diagnostics', async () => {
+      const sourceRoot = createScratchDirectory('dev-helper-failure-source');
+      const tempRoot = createScratchDirectory('dev-helper-failure-temp');
+      const inputPath = join(tempRoot, '.dev-build.input-helper-failure.json');
+      const helperError = Object.assign(new Error('dev helper failed'), {
+        stderr: 'tauri build exploded',
+      });
+
+      const error = await buildDevAppSnapshot(
+        {
+          sourceRoot,
+          tempRoot,
+          devConfigPath: join(tempRoot, 'tauri.dev.json'),
+        },
+        {
+          execute: async () => {
+            throw helperError;
+          },
+          randomUUID: () => 'helper-failure',
+        },
+      ).then(
+        () => undefined,
+        (failure: unknown) => failure as Error,
+      );
+
+      expect(error?.message).toContain('dev helper failed');
+      expect(error?.message).toContain('tauri build exploded');
+      expect(existsSync(inputPath)).toBe(false);
+    });
+
+    it('reports a bounded dev-build timeout together with private-input cleanup failure', async () => {
+      const sourceRoot = createScratchDirectory('dev-helper-timeout-source');
+      const tempRoot = createScratchDirectory('dev-helper-timeout-temp');
+      const lockPath = join(
+        sourceRoot,
+        'native/macos/psyche-build-tauri/src-tauri/target/.psyche-build-dev.lock',
+      );
+      const timeoutError = Object.assign(new Error('lockf failed'), {
+        exitCode: 75,
+        stderr: `lockf: ${lockPath}: already locked`,
+      });
+
+      const error = await buildDevAppSnapshot(
+        {
+          sourceRoot,
+          tempRoot,
+          devConfigPath: join(tempRoot, 'tauri.dev.json'),
+        },
+        {
+          execute: async () => {
+            throw timeoutError;
+          },
+          lockTimeoutSeconds: 2,
+          randomUUID: () => 'timeout',
+          removePath: async () => {
+            throw new Error('private input cleanup failed');
+          },
+        },
+      ).then(
+        () => undefined,
+        (failure: unknown) => failure as Error,
+      );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error?.message).toMatch(
+        /Timed out after 2 seconds waiting for dev build lock/i,
+      );
+      expect(error?.message).toContain(lockPath);
+      expect(error?.message).toContain('already locked');
+      expect(error?.message).toContain('private input cleanup failed');
+      expect(error?.cause).toBeInstanceOf(Error);
+      expect((error?.cause as Error).message).toMatch(
+        /Timed out after 2 seconds waiting for dev build lock/i,
+      );
+    });
+
+    it('fails a successful helper operation when private-input cleanup fails', async () => {
+      const sourceRoot = createScratchDirectory('dev-helper-cleanup-source');
+      const tempRoot = createScratchDirectory('dev-helper-cleanup-temp');
+      const snapshotPath = join(
+        tempRoot,
+        '.dev-build.snapshot-cleanup',
+        'Psyche Build Dev.app',
+      );
+      const identity: BundleIdentity = {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      };
+
+      await expect(
+        buildDevAppSnapshot(
+          {
+            sourceRoot,
+            tempRoot,
+            devConfigPath: join(tempRoot, 'tauri.dev.json'),
+          },
+          {
+            execute: async () => ({
+              stdout: `${JSON.stringify({ snapshotPath, identity })}\n`,
+              stderr: '',
+            }),
+            randomUUID: () => 'cleanup',
+            removePath: async () => {
+              throw new Error('private input cleanup failed');
+            },
+          },
+        ),
+      ).rejects.toThrow(/Failed to clean private dev build input file.*private input cleanup failed/);
+    });
+
+    it('keeps each concurrent dev record paired with its own immutable snapshot under the helper lock', async () => {
+      const sourceRoot = createScratchDirectory('concurrent-dev-source');
+      const tempRootA = createScratchDirectory('concurrent-dev-a');
+      const tempRootB = createScratchDirectory('concurrent-dev-b');
+      const controls = createScratchDirectory('concurrent-dev-controls');
+      const binDir = join(controls, 'bin');
+      const tauriRoot = join(sourceRoot, tauriRelativeCwd);
+      const candidatePath = join(
+        tauriRoot,
+        'src-tauri/target/release/bundle/macos/Psyche Build Dev.app',
+      );
+      const lockPath = join(
+        tauriRoot,
+        'src-tauri/target/.psyche-build-dev.lock',
+      );
+      const configPathA = join(tempRootA, 'tauri.dev.json');
+      const configPathB = join(tempRootB, 'tauri.dev.json');
+      const snapshotStartedA = join(controls, 'a-snapshot-started');
+      const releaseSnapshotA = join(controls, 'release-a-snapshot');
+      const driverStartedB = join(controls, 'b-driver-started');
+      const buildStartedB = join(controls, 'b-build-started');
+
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(tauriRoot, { recursive: true });
+      writeFileSync(configPathA, '{"build":"A"}\n', 'utf8');
+      writeFileSync(configPathB, '{"build":"B"}\n', 'utf8');
+      writeFileSync(
+        join(binDir, 'pnpm'),
+        `#!/bin/sh
+if [ "$1" = "build:web" ]; then
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "tauri" ] && [ "$3" = "build" ]; then
+  mkdir -p "$PSYCHE_FAKE_CANDIDATE/Contents/MacOS"
+  printf '%s' "$PSYCHE_FAKE_BUILD_MARKER" > "$PSYCHE_FAKE_CANDIDATE/Contents/marker.txt"
+  printf executable > "$PSYCHE_FAKE_CANDIDATE/Contents/MacOS/psyche-build-dev"
+  if [ -n "$PSYCHE_FAKE_BUILD_STARTED_PATH" ]; then
+    printf started > "$PSYCHE_FAKE_BUILD_STARTED_PATH"
+  fi
+  exit 0
+fi
+printf 'unexpected pnpm command: %s\\n' "$*" >&2
+exit 64
+`,
+        { encoding: 'utf8', mode: 0o755 },
+      );
+      writeFileSync(
+        join(binDir, 'plutil'),
+        `#!/bin/sh
+case "$2" in
+  CFBundleName) printf 'Psyche Build Dev' ;;
+  CFBundleIdentifier) printf 'dev.opencoven.psyche.dev' ;;
+  CFBundleExecutable) printf 'psyche-build-dev' ;;
+  *) printf 'unexpected plist key: %s\\n' "$2" >&2; exit 64 ;;
+esac
+`,
+        { encoding: 'utf8', mode: 0o755 },
+      );
+      writeFileSync(
+        join(binDir, 'ditto'),
+        `#!/bin/sh
+if [ "$PSYCHE_FAKE_BUILD_MARKER" = "A" ]; then
+  printf started > "$PSYCHE_TEST_SNAPSHOT_STARTED_PATH"
+  while [ ! -e "$PSYCHE_TEST_SNAPSHOT_RELEASE_PATH" ]; do
+    sleep 0.01
+  done
+fi
+/bin/cp -R "$1" "$2"
+`,
+        { encoding: 'utf8', mode: 0o755 },
+      );
+
+      const commonEnv = {
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        PSYCHE_FAKE_CANDIDATE: candidatePath,
+      };
+      const builderA = spawnDevSnapshotBuilder(
+        sourceRoot,
+        tempRootA,
+        configPathA,
+        {
+          ...commonEnv,
+          PSYCHE_FAKE_BUILD_MARKER: 'A',
+          PSYCHE_TEST_SNAPSHOT_STARTED_PATH: snapshotStartedA,
+          PSYCHE_TEST_SNAPSHOT_RELEASE_PATH: releaseSnapshotA,
+        },
+      );
+
+      await Promise.race([
+        waitForPaths([snapshotStartedA]),
+        builderA.completion.then((result) => {
+          throw new Error(`Builder A exited before snapshot gate: ${JSON.stringify(result)}`);
+        }),
+      ]);
+      expect(readAppMarker(candidatePath)).toBe('A');
+
+      const builderB = spawnDevSnapshotBuilder(
+        sourceRoot,
+        tempRootB,
+        configPathB,
+        {
+          ...commonEnv,
+          PSYCHE_FAKE_BUILD_MARKER: 'B',
+          PSYCHE_TEST_DEV_DRIVER_STARTED_PATH: driverStartedB,
+          PSYCHE_FAKE_BUILD_STARTED_PATH: buildStartedB,
+        },
+      );
+      await waitForPaths([driverStartedB]);
+
+      const contendingLock = spawnSync(
+        '/usr/bin/lockf',
+        ['-t', '0', lockPath, '/usr/bin/true'],
+        { encoding: 'utf8' },
+      );
+      expect(contendingLock.status).toBe(75);
+      expect(existsSync(buildStartedB)).toBe(false);
+
+      writeFileSync(releaseSnapshotA, 'release', 'utf8');
+      const [resultA, resultB] = await Promise.all([
+        builderA.completion,
+        builderB.completion,
+      ]);
+
+      expect(resultA).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(resultB).toMatchObject({ code: 0, signal: null, stderr: '' });
+      const snapshotA = JSON.parse(resultA.stdout) as {
+        snapshotPath: string;
+        identity: BundleIdentity;
+      };
+      const snapshotB = JSON.parse(resultB.stdout) as {
+        snapshotPath: string;
+        identity: BundleIdentity;
+      };
+      const recordA = { build: 'A', snapshotPath: snapshotA.snapshotPath };
+      const recordB = { build: 'B', snapshotPath: snapshotB.snapshotPath };
+
+      expect(readAppMarker(recordA.snapshotPath)).toBe(recordA.build);
+      expect(readAppMarker(recordB.snapshotPath)).toBe(recordB.build);
+      expect(recordA.snapshotPath).not.toBe(recordB.snapshotPath);
+      expect(snapshotA.identity.identifier).toBe('dev.opencoven.psyche.dev');
+      expect(snapshotB.identity.identifier).toBe('dev.opencoven.psyche.dev');
+      expect(
+        readdirSync(tempRootA).some((entry) => entry.startsWith('.dev-build.input-')),
+      ).toBe(false);
+      expect(
+        readdirSync(tempRootB).some((entry) => entry.startsWith('.dev-build.input-')),
+      ).toBe(false);
+    }, 15_000);
   });
 
   describe('findCandidateApp', () => {
@@ -2591,6 +3149,7 @@ describe('macOS build channels', () => {
         'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
       );
       const candidate = join(bundleDir, 'Psyche Build Dev.app');
+      const snapshot = join(tempRoot, 'dev-snapshot', 'Psyche Build Dev.app');
       const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
       const execute = vi.fn(
         async (command: string, args: readonly string[]): Promise<CommandResult> => {
@@ -2612,10 +3171,10 @@ describe('macOS build channels', () => {
         makeTemporaryDirectory: vi.fn(async () => tempRoot),
         removePath: vi.fn(async () => {}),
         writeDevTauriConfig: vi.fn(async () => configPath),
-        findCandidateApp: vi.fn(async () => candidate),
-        readBundleIdentity: vi.fn(
-          async (_appPath: string, _execute?: Runner): Promise<BundleIdentity> => devIdentity,
-        ),
+        buildDevAppSnapshot: vi.fn(async () => ({
+          snapshotPath: snapshot,
+          identity: devIdentity,
+        })),
         smokeLaunchBundle: smokeLaunch,
         publishBuildChannel: publish,
         now: () => new Date(builtAt),
@@ -2649,24 +3208,21 @@ describe('macOS build channels', () => {
           ['status', '--porcelain'],
           { cwd: virtualRepository, stage: 'inspect source status' },
         ],
-        ...buildCommandsFor('dev', { devConfigPath: configPath }).map(
-          ([command, args, relativeCwd]) => [
-            command,
-            args,
-            {
-              cwd: resolve(virtualRepository, relativeCwd),
-              stage: `run dev validation/build command: ${command} ${args.join(' ')}`,
-            },
-          ],
-        ),
       ]);
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('worktree');
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('test');
       expect(smokeLaunch).not.toHaveBeenCalled();
-      expect(dependencies.removePath).toHaveBeenNthCalledWith(1, candidate);
       expect(dependencies.removePath).toHaveBeenLastCalledWith(tempRoot);
+      expect(dependencies.buildDevAppSnapshot).toHaveBeenCalledWith(
+        {
+          sourceRoot: virtualRepository,
+          tempRoot,
+          devConfigPath: configPath,
+        },
+        { execute },
+      );
       expect(publish).toHaveBeenCalledWith(
-        candidate,
+        snapshot,
         channelConfig('dev'),
         {
           channel: 'dev',
@@ -2690,14 +3246,87 @@ describe('macOS build channels', () => {
       });
     });
 
+    it('uses the locked dev snapshot builder by default and publishes only its snapshot', async () => {
+      const sourceRoot = createScratchDirectory('run-dev-default-source');
+      const tempRoot = createScratchDirectory('run-dev-default-temp');
+      const configPath = join(tempRoot, 'tauri.dev.json');
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+      const identity: BundleIdentity = {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      };
+      let snapshotPath = '';
+      const execute = vi.fn(
+        async (
+          command: string,
+          args: readonly string[],
+        ): Promise<CommandResult> => {
+          if (command === 'git' && args.includes('rev-parse')) {
+            return { stdout: `${devSha}\n`, stderr: '' };
+          }
+          if (command === 'git' && args[0] === 'status') {
+            return { stdout: '', stderr: '' };
+          }
+          if (command === '/usr/bin/lockf') {
+            const inputPath = String(args.at(-1));
+            const input = JSON.parse(readFileSync(inputPath, 'utf8')) as {
+              snapshotPath: string;
+            };
+            snapshotPath = input.snapshotPath;
+            mkdirSync(join(snapshotPath, 'Contents'), { recursive: true });
+            writeFileSync(join(snapshotPath, 'Contents', 'marker.txt'), 'snapshot', 'utf8');
+            return {
+              stdout: `${JSON.stringify({ snapshotPath, identity })}\n`,
+              stderr: '',
+            };
+          }
+          throw new Error(`Unexpected direct dev command: ${command} ${args.join(' ')}`);
+        },
+      );
+      const publish = vi.fn(async (publishedCandidate: string) => {
+        expect(readAppMarker(publishedCandidate)).toBe('snapshot');
+        return installedPath;
+      });
+
+      const result = await runMacosBuild(
+        { channel: 'dev', repositoryRoot: sourceRoot },
+        {
+          execute,
+          makeTemporaryDirectory: async () => tempRoot,
+          removePath: async (targetPath) => {
+            rmSync(targetPath, { recursive: true, force: true });
+          },
+          writeDevTauriConfig: async () => configPath,
+          publishBuildChannel: publish,
+          now: () => new Date(builtAt),
+          homeDir: virtualHome,
+        },
+      );
+
+      expect(snapshotPath).toContain(`${tempRoot}/.dev-build.snapshot-`);
+      expect(publish).toHaveBeenCalledWith(
+        snapshotPath,
+        channelConfig('dev'),
+        {
+          channel: 'dev',
+          commitSha: devSha,
+          dirty: false,
+          builtAt,
+          installedPath,
+          productName: 'Psyche Build Dev',
+          bundleIdentifier: 'dev.opencoven.psyche.dev',
+        },
+        { homeDir: virtualHome },
+      );
+      expect(execute.mock.calls.some(([command]) => command === 'pnpm')).toBe(false);
+      expect(result.installedPath).toBe(installedPath);
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
     it('does not install or record provenance when a dev build command fails and cleans the config root', async () => {
       const tempRoot = '/workspace/.build-temp/dev-build-failure';
       const configPath = join(tempRoot, 'tauri.dev.json');
-      const candidate = join(
-        virtualRepository,
-        'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
-        'Psyche Build Dev.app',
-      );
       const removePath = vi.fn(async () => {});
       const publish = vi.fn(async () => '/should-not-publish');
 
@@ -2709,21 +3338,20 @@ describe('macOS build channels', () => {
               if (command === 'git' && args.includes('rev-parse')) {
                 return { stdout: `${devSha}\n`, stderr: '' };
               }
-              if (command === 'pnpm') {
-                throw new Error('dev build failed');
-              }
               return { stdout: '', stderr: '' };
             },
             makeTemporaryDirectory: async () => tempRoot,
             removePath,
             writeDevTauriConfig: async () => configPath,
+            buildDevAppSnapshot: async () => {
+              throw new Error('dev build failed');
+            },
             publishBuildChannel: publish,
           },
         ),
       ).rejects.toThrow('dev build failed');
 
       expect(publish).not.toHaveBeenCalled();
-      expect(removePath).toHaveBeenNthCalledWith(1, candidate);
       expect(removePath).toHaveBeenLastCalledWith(tempRoot);
     });
 
@@ -2751,8 +3379,11 @@ describe('macOS build channels', () => {
             makeTemporaryDirectory: async () => tempRoot,
             removePath,
             writeDevTauriConfig: async () => configPath,
-            findCandidateApp: async () => candidate,
-            readBundleIdentity: async () => stableIdentity,
+            buildDevAppSnapshot: async () => {
+              throw new Error(
+                `Bundle identity mismatch for "${candidate}": wrong stable identity`,
+              );
+            },
             publishBuildChannel: publish,
           },
         ),
@@ -2781,8 +3412,10 @@ describe('macOS build channels', () => {
             makeTemporaryDirectory: async () => tempRoot,
             removePath: async () => {},
             writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
-            findCandidateApp: async () => candidate,
-            readBundleIdentity: async () => devIdentity,
+            buildDevAppSnapshot: async () => ({
+              snapshotPath: candidate,
+              identity: devIdentity,
+            }),
             publishBuildChannel: async () => {
               installed = true;
               throw new Error(

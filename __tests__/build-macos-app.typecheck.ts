@@ -1,15 +1,19 @@
 import {
+  buildDevAppSnapshot,
   channelConfig,
   installBundleTransactional,
   publishBuildChannel,
   runCli,
   runCommand,
+  runDevBuildSnapshotUnlocked,
   runMacosBuild,
   validateBuildProvenance,
 } from '../scripts/build-macos-app.mjs';
 import type {
   BuildProvenance,
   CommandOptions,
+  DevBuildSnapshotInput,
+  DevBuildSnapshotRequest,
   DevBuildProvenance,
   RunCliDependencies,
   RunMacosBuildDependencies,
@@ -87,8 +91,43 @@ const commandOptions: CommandOptions = {
 };
 void runCommand('git', ['rev-parse', 'HEAD'], commandOptions);
 
+const devSnapshotRequest: DevBuildSnapshotRequest = {
+  sourceRoot: '/workspace/psyche-build',
+  tempRoot: '/workspace/.build-temp/dev',
+  devConfigPath: '/workspace/.build-temp/dev/tauri.dev.json',
+};
+const devSnapshotInput: DevBuildSnapshotInput = {
+  ...devSnapshotRequest,
+  snapshotPath:
+    '/workspace/.build-temp/dev/.dev-build.snapshot-id/Psyche Build Dev.app',
+};
+void buildDevAppSnapshot(devSnapshotRequest, {
+  execute: async () => ({
+    stdout: JSON.stringify({
+      snapshotPath: devSnapshotInput.snapshotPath,
+      identity: {
+        name: 'Psyche Build Dev',
+        identifier: 'dev.opencoven.psyche.dev',
+        executable: 'psyche-build-dev',
+      },
+    }),
+    stderr: '',
+  }),
+});
+void runDevBuildSnapshotUnlocked(devSnapshotInput, {
+  execute: async () => ({ stdout: '', stderr: '' }),
+});
+
 const buildDependencies: RunMacosBuildDependencies = {
   execute: async () => ({ stdout: '', stderr: '' }),
+  buildDevAppSnapshot: async () => ({
+    snapshotPath: devSnapshotInput.snapshotPath,
+    identity: {
+      name: 'Psyche Build Dev',
+      identifier: 'dev.opencoven.psyche.dev',
+      executable: 'psyche-build-dev',
+    },
+  }),
   publishBuildChannel: async (_candidatePath, _channelConfig, record) => {
     const typedRecord: BuildProvenance = record;
     void typedRecord;
