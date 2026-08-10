@@ -26,6 +26,7 @@ const scriptFilePath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptFilePath), '..');
 const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
+const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 
 export function parseBuildArguments(argv) {
@@ -159,6 +160,7 @@ export async function smokeLaunchBundle(appPath, overrides) {
   const args = [...(overrides.args ?? [])];
   const smokeMs = overrides.smokeMs ?? DEFAULT_SMOKE_MS;
   const termTimeoutMs = overrides.termTimeoutMs ?? DEFAULT_TERM_TIMEOUT_MS;
+  const postKillTimeoutMs = overrides.postKillTimeoutMs ?? DEFAULT_POST_KILL_TIMEOUT_MS;
   const sleep = overrides.sleep ?? defaultSleep;
   const makeTemporaryHome = overrides.makeTemporaryHome ?? defaultMakeTemporaryHome;
   const removeTemporaryHome = overrides.removeTemporaryHome ?? defaultRemoveTemporaryHome;
@@ -166,17 +168,25 @@ export async function smokeLaunchBundle(appPath, overrides) {
   const executablePath = path.join(appPath, 'Contents', 'MacOS', executableName);
 
   let operationError;
+  let stdout = () => '';
+  let stderr = () => '';
 
   try {
-    const child = (overrides.spawnProcess ?? defaultSpawnProcess)(executablePath, args, {
-      env: {
-        ...process.env,
-        ...temporaryHomeEnvironment(tempHome),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const stdout = collectStreamOutput(child.stdout);
-    const stderr = collectStreamOutput(child.stderr);
+    let child;
+    try {
+      child = (overrides.spawnProcess ?? defaultSpawnProcess)(executablePath, args, {
+        env: {
+          ...process.env,
+          ...temporaryHomeEnvironment(tempHome),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      throw new StartupSmokeFailure(error);
+    }
+
+    stdout = collectStreamOutput(child.stdout);
+    stderr = collectStreamOutput(child.stderr);
     const exitPromise = waitForProcessExit(child);
     const smokeResult = await Promise.race([
       exitPromise.then((exit) => ({ type: 'exit', exit })),
@@ -195,10 +205,17 @@ export async function smokeLaunchBundle(appPath, overrides) {
 
     if (termResult.type === 'timeout') {
       child.kill('SIGKILL');
-      await exitPromise;
+      const killResult = await Promise.race([
+        exitPromise.then((exit) => ({ type: 'exit', exit })),
+        sleep(postKillTimeoutMs).then(() => ({ type: 'timeout' })),
+      ]);
+
+      if (killResult.type === 'timeout') {
+        throw new Error(buildPostKillTimeoutMessage(appPath, postKillTimeoutMs, child.pid));
+      }
     }
   } catch (error) {
-    operationError = error;
+    operationError = normalizeSmokeLaunchError(appPath, error, stdout(), stderr());
   }
 
   try {
@@ -289,7 +306,7 @@ function waitForProcessExit(child) {
     };
     const onError = (error) => {
       cleanup();
-      reject(error);
+      reject(new StartupSmokeFailure(error));
     };
     const cleanup = () => {
       child.off('close', onClose);
@@ -299,6 +316,14 @@ function waitForProcessExit(child) {
     child.once('close', onClose);
     child.once('error', onError);
   });
+}
+
+function normalizeSmokeLaunchError(appPath, error, stdout, stderr) {
+  if (error instanceof StartupSmokeFailure) {
+    return new Error(buildStartupSmokeErrorMessage(appPath, error.cause, stdout, stderr));
+  }
+
+  return error;
 }
 
 function buildEarlyExitMessage(appPath, smokeMs, exit, stdout, stderr) {
@@ -317,6 +342,30 @@ function buildEarlyExitMessage(appPath, smokeMs, exit, stdout, stderr) {
   return sections.join('\n');
 }
 
+function buildStartupSmokeErrorMessage(appPath, error, stdout, stderr) {
+  const sections = [`Startup smoke failed for "${appPath}": ${describeError(error)}.`];
+
+  if (stdout !== '') {
+    sections.push(`stdout:\n${stdout.trimEnd()}`);
+  }
+
+  if (stderr !== '') {
+    sections.push(`stderr:\n${stderr.trimEnd()}`);
+  }
+
+  return sections.join('\n');
+}
+
+function buildPostKillTimeoutMessage(appPath, postKillTimeoutMs, childPid) {
+  const childDescription =
+    typeof childPid === 'number' ? `child process ${childPid}` : 'child process';
+
+  return (
+    `Smoke launch failed for "${appPath}": ${childDescription} ` +
+    `did not exit within ${postKillTimeoutMs}ms after SIGKILL.`
+  );
+}
+
 function describeExit(exit) {
   if (exit.signal) {
     return `signal ${exit.signal}`;
@@ -329,6 +378,14 @@ function describeExit(exit) {
 
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+class StartupSmokeFailure extends Error {
+  constructor(cause) {
+    super(describeError(cause));
+    this.name = 'StartupSmokeFailure';
+    this.cause = cause;
+  }
 }
 
 function isEntrypoint() {

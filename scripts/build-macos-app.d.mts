@@ -22,7 +22,7 @@ export interface BuildChannelConfig {
 export interface BundleIdentity {
   name: string;
   identifier: string;
-  executableName?: string | null;
+  executable?: string | null;
 }
 
 export interface TauriWindowConfig {
@@ -48,6 +48,7 @@ export interface SmokeLaunchOverrides {
   args?: readonly string[];
   smokeMs?: number;
   termTimeoutMs?: number;
+  postKillTimeoutMs?: number;
   spawnProcess?: (
     command: string,
     args: readonly string[],

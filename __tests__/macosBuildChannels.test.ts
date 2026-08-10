@@ -107,6 +107,7 @@ function createFakeChildProcess(
   writeStdout: (value: string) => void;
   writeStderr: (value: string) => void;
   close: (code?: number | null, signal?: NodeJS.Signals | null) => void;
+  fail: (error: Error) => void;
 } {
   const child = new EventEmitter() as FakeChildProcess;
   child.stdout = new PassThrough();
@@ -126,6 +127,9 @@ function createFakeChildProcess(
     },
     close(code: number | null = 0, signal: NodeJS.Signals | null = null) {
       child.emit('close', code, signal);
+    },
+    fail(error: Error) {
+      child.emit('error', error);
     },
   };
 }
@@ -346,13 +350,46 @@ describe('macOS build channels', () => {
   });
 
   describe('assertBundleIdentity', () => {
-    it('rejects when the app bundle does not match the requested channel identity', () => {
+    it('rejects when the app basename does not match the requested channel identity', () => {
       expect(() =>
         assertBundleIdentity(
           '/Applications/Psyche Build Dev.app',
           {
+            name: 'Psyche Build',
+            identifier: 'dev.opencoven.psyche',
+            executable: 'Psyche Build',
+          },
+          channelConfig('stable'),
+        ),
+      ).toThrow(
+        'actual appName="Psyche Build Dev" identity.name="Psyche Build" identity.identifier="dev.opencoven.psyche"',
+      );
+    });
+
+    it('rejects when CFBundleName does not match the requested channel identity', () => {
+      expect(() =>
+        assertBundleIdentity(
+          '/Applications/Psyche Build.app',
+          {
             name: 'Psyche Build Dev',
+            identifier: 'dev.opencoven.psyche',
+            executable: 'Psyche Build',
+          },
+          channelConfig('stable'),
+        ),
+      ).toThrow(
+        'actual appName="Psyche Build" identity.name="Psyche Build Dev" identity.identifier="dev.opencoven.psyche"',
+      );
+    });
+
+    it('rejects when the bundle identifier does not match the requested channel identity', () => {
+      expect(() =>
+        assertBundleIdentity(
+          '/Applications/Psyche Build.app',
+          {
+            name: 'Psyche Build',
             identifier: 'dev.opencoven.psyche.dev',
+            executable: 'Psyche Build',
           },
           channelConfig('stable'),
         ),
@@ -361,20 +398,62 @@ describe('macOS build channels', () => {
       );
       expect(() =>
         assertBundleIdentity(
-          '/Applications/Psyche Build Dev.app',
+          '/Applications/Psyche Build.app',
           {
-            name: 'Psyche Build Dev',
+            name: 'Psyche Build',
             identifier: 'dev.opencoven.psyche.dev',
+            executable: 'Psyche Build',
           },
           channelConfig('stable'),
         ),
       ).toThrow(
-        'actual appName="Psyche Build Dev" identity.name="Psyche Build Dev" identity.identifier="dev.opencoven.psyche.dev"',
+        'actual appName="Psyche Build" identity.name="Psyche Build" identity.identifier="dev.opencoven.psyche.dev"',
       );
     });
   });
 
   describe('smokeLaunchBundle', () => {
+    it('fails with a startup-smoke error when spawning throws synchronously and still cleans up', async () => {
+      const spawnProcess = vi.fn(() => {
+        throw new Error('spawn EPERM');
+      });
+      const removeTemporaryHome = vi.fn(async () => {});
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        spawnProcess,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome,
+      });
+
+      await expect(launch).rejects.toThrow(/startup smoke/i);
+      await expect(launch).rejects.toThrow(/spawn EPERM/);
+      expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
+    });
+
+    it('fails with a startup-smoke error when the child emits an error and still cleans up', async () => {
+      const child = createFakeChildProcess();
+      const spawnProcess = vi.fn(() => child.child);
+      const removeTemporaryHome = vi.fn(async () => {});
+
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        spawnProcess,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome,
+      });
+
+      await tick();
+      child.writeStdout('booting\n');
+      child.writeStderr('permission denied\n');
+      child.fail(new Error('spawn EACCES'));
+
+      await expect(launch).rejects.toThrow(/startup smoke/i);
+      await expect(launch).rejects.toThrow(/spawn EACCES/);
+      await expect(launch).rejects.toThrow(/booting/);
+      await expect(launch).rejects.toThrow(/permission denied/);
+      expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
+    });
+
     it('fails on early exit, reports output, skips termination, and cleans up the temporary home', async () => {
       const child = createFakeChildProcess();
       const sleep = createSleepController();
@@ -469,6 +548,47 @@ describe('macOS build channels', () => {
 
       expect(child.child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
       expect(child.child.kill).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails explicitly and still cleans up when the child does not exit after SIGKILL', async () => {
+      const child = createFakeChildProcess();
+      const sleep = createSleepController();
+      const removeTemporaryHome = vi.fn(async () => {});
+      const pending = Symbol('pending');
+
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        spawnProcess: vi.fn(() => child.child),
+        sleep: sleep.sleep,
+        smokeMs: 50,
+        termTimeoutMs: 60,
+        postKillTimeoutMs: 70,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome,
+      });
+      const launchOutcome = launch.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      );
+
+      await tick();
+      await sleep.resolveNext(50);
+      expect(child.child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+
+      await sleep.resolveNext(60);
+      expect(child.child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+
+      await sleep.resolveNext(70);
+
+      const outcome = await Promise.race([
+        launchOutcome,
+        tick().then(() => pending),
+      ]);
+
+      expect(outcome).not.toBe(pending);
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toContain('did not exit within 70ms after SIGKILL');
+      expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
     });
   });
 
