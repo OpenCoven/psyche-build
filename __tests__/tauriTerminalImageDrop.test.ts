@@ -58,16 +58,21 @@ describe('terminal image drop helpers', () => {
       x: 150,
       y: 90,
     });
+    expect(inputModule.physicalToCssPosition({ x: 0, y: -20 }, 2)).toEqual({
+      x: 0,
+      y: -10,
+    });
   });
 
-  it('rejects invalid or non-positive coordinates and scale factors', () => {
+  it('rejects invalid coordinates and scale factors', () => {
     expect(inputModule.physicalToCssPosition({ x: 1, y: 2 }, 0)).toBeNull();
     expect(inputModule.physicalToCssPosition({ x: 1, y: 2 }, -1)).toBeNull();
     expect(inputModule.physicalToCssPosition({ x: 1, y: 2 }, Number.NaN)).toBeNull();
+    expect(inputModule.physicalToCssPosition({ x: 1, y: 2 }, Number.POSITIVE_INFINITY)).toBeNull();
     expect(inputModule.physicalToCssPosition({ x: Number.NaN, y: 2 }, 2)).toBeNull();
+    expect(inputModule.physicalToCssPosition({ x: Number.POSITIVE_INFINITY, y: 2 }, 2)).toBeNull();
     expect(inputModule.physicalToCssPosition({ x: 1, y: Number.POSITIVE_INFINITY }, 2)).toBeNull();
-    expect(inputModule.physicalToCssPosition({ x: 0, y: 2 }, 2)).toBeNull();
-    expect(inputModule.physicalToCssPosition({ x: 1, y: -2 }, 2)).toBeNull();
+    expect(inputModule.physicalToCssPosition({ x: Number.NaN, y: Number.NaN }, 2)).toBeNull();
     expect(inputModule.physicalToCssPosition(null, 2)).toBeNull();
   });
 });

@@ -34,9 +34,7 @@ export function physicalToCssPosition(position, scaleFactor) {
     !Number.isFinite(factor) ||
     factor <= 0 ||
     !Number.isFinite(x) ||
-    x <= 0 ||
-    !Number.isFinite(y) ||
-    y <= 0
+    !Number.isFinite(y)
   ) {
     return null;
   }
