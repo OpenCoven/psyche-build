@@ -1050,6 +1050,64 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(selections).toEqual([{ reload: true }]);
   });
 
+  it('enters file focus once and preserves the original return pane across file tabs', () => {
+    const state = {
+      activeFileId: null as string | null,
+      activeThreadId: 'thread-a',
+    };
+    const fileFocus = { returnThreadId: null as string | null };
+    const classes = new Set<string>();
+    const minimapCalls: Array<{ layout: unknown; fileId: string }> = [];
+    const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
+    const fileViewEl = { hidden: true };
+    const terminalHost = { hidden: false };
+    const enterFileFocus = compileFunction<
+      (file: { id: string }) => void
+    >(extractFunctionSource(mainJs, 'enterFileFocus'), {
+      state,
+      fileFocus,
+      terminalArea: {
+        classList: {
+          add: (name: string) => classes.add(name),
+        },
+      },
+      fileViewEl,
+      terminalHost,
+      activePaneLayout: () => layout,
+      renderPaneMinimap: (value: unknown, file: { id: string }) => {
+        minimapCalls.push({ layout: value, fileId: file.id });
+      },
+    });
+
+    enterFileFocus({ id: 'file-a' });
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(state.activeFileId).toBe('file-a');
+    expect(fileViewEl.hidden).toBe(false);
+    expect(terminalHost.hidden).toBe(true);
+    expect(classes).toContain('is-file-focused');
+
+    state.activeThreadId = 'thread-b';
+    enterFileFocus({ id: 'file-b' });
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(state.activeFileId).toBe('file-b');
+    expect(minimapCalls).toEqual([
+      { layout, fileId: 'file-a' },
+      { layout, fileId: 'file-b' },
+    ]);
+    expect(extractFunctionSource(mainJs, 'enterFileFocus')).not.toMatch(
+      /applyLayout|data\.layout|sidebar/
+    );
+  });
+
+  it('reserves the focus-mode minimap column for the fullscreen file editor', () => {
+    expect(stylesCss).toMatch(
+      /\.terminal-area\.is-file-focused \.file-view\s*\{[^}]*grid-column:\s*1;/
+    );
+    expect(stylesCss).toMatch(
+      /\.terminal-area\.is-file-focused \.pane-minimap\s*\{[^}]*grid-column:\s*2;/
+    );
+  });
+
   it('guards navigation, project removal, and native window close before mutation', () => {
     for (const name of ['activateFileTab', 'closeFileTab', 'removeProject', 'showTerminalView']) {
       expect(mainJs).toMatch(new RegExp(`async function ${name}\\(`));
@@ -1057,7 +1115,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const activateFileTabSource = extractFunctionSource(mainJs, 'activateFileTab');
     expect(activateFileTabSource).toMatch(/await guardDirtyFile\(/);
     expect(activateFileTabSource).toMatch(/if \(!canActivate\) return false;[\s\S]*activateFileTabNow\(id\)/);
-    expect(mainJs).toMatch(/function activateFileTabNow\(id\)[\s\S]*state\.activeFileId = id/);
+    expect(extractFunctionSource(mainJs, 'activateFileTabNow')).toMatch(/enterFileFocus\(file\)/);
     expect(extractFunctionSource(mainJs, 'closeFileTab')).toMatch(
       /await guardDirtyFile\(file\)[\s\S]*if \(!canClose\) return false;[\s\S]*state\.openFiles =/
     );

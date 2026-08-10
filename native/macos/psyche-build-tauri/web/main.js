@@ -77,6 +77,11 @@
      *  Refreshed on boot and on project switch via `agent_skills`. */
     agentSkills: [],
   };
+  // File focus is presentation-only. Open files persist through state.openFiles,
+  // but the pane to return to belongs only to the current interaction.
+  var fileFocus = {
+    returnThreadId: null,
+  };
   var paneLayouts = new Map();
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
@@ -3922,6 +3927,19 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
+  function enterFileFocus(file) {
+    if (!file) return false;
+    if (!state.activeFileId) {
+      fileFocus.returnThreadId = state.activeThreadId || null;
+    }
+    state.activeFileId = file.id;
+    terminalArea.classList.add("is-file-focused");
+    fileViewEl.hidden = false;
+    terminalHost.hidden = true;
+    renderPaneMinimap(activePaneLayout(), file);
+    return true;
+  }
+
   async function openFileTab(path, project) {
     project = project || activeProject();
     if (!project) return;
@@ -3984,10 +4002,8 @@
   function activateFileTabNow(id) {
     var file = findOpenFile(id);
     if (!file) return false;
-    state.activeFileId = id;
+    enterFileFocus(file);
     markActiveSurface("terminal");
-    if (fileViewEl) fileViewEl.hidden = false;
-    if (terminalHost) terminalHost.hidden = true;
     refreshTabs();
     renderFileView();
     return true;

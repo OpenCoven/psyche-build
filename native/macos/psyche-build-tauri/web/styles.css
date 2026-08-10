@@ -2186,6 +2186,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .terminal-host { grid-row: 3; grid-column: 1; }
 .file-view     { grid-row: 3; grid-column: 1 / -1; }
 .pane-minimap  { grid-row: 3; grid-column: 2; }
+.terminal-area.is-file-focused .file-view {
+  grid-column: 1;
+}
+.terminal-area.is-file-focused .pane-minimap {
+  grid-column: 2;
+}
 
 .file-view[hidden] { display: none; }
 .file-view {
