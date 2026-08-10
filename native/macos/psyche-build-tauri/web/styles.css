@@ -3602,3 +3602,43 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .diff-sep-expand:hover { color: #c4b5fd; }
 .diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
 .diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }
+
+/* -------- Tools on the canvas --------
+   A tool pane is a pane like any other; only its body differs, holding the
+   surface that was in the dock rather than a terminal. */
+
+.terminal-pane.is-tool .terminal-pane-glyph { color: var(--accent); }
+.tool-pane-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.tool-pane-body > .panel-git-body { flex: 1 1 auto; min-height: 0; }
+
+/* While a tool is being dragged out of the dock the canvas is the target, so
+   panes recede the same way they do when one is being repositioned. */
+body.is-tool-dragging .terminal-pane { transition: opacity var(--transition-fast); opacity: 0.65; }
+
+.dock-popped-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.dock-popped-note[hidden] { display: none; }
+.dock-popped-note button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.dock-popped-note button:hover { background: var(--surface-2); color: var(--text); }
+.dock-popped-note button:focus-visible { outline: none; box-shadow: var(--focus-ring); }

@@ -234,4 +234,45 @@ describe('Tauri workspace panels', () => {
       expect(mainJs).toMatch(/if \(!\(options && options\.keepContext\)\) diffContext = null;/);
     });
   });
+
+  describe('dock to canvas', () => {
+    it('moves one live surface rather than rendering it twice', () => {
+      // Two renderings of the git panel could diverge; one element with two
+      // possible homes cannot.
+      expect(indexHtml).toContain('id="git-surface"');
+      expect(mainJs).toMatch(/function dockGitSurface\(\)[\s\S]*gitPanelEl\.appendChild\(gitSurfaceEl\)/);
+      expect(mainJs).toMatch(/thread\.kind === "git" && thread\.toolBody && gitSurfaceEl/);
+      // Only one git surface exists in the markup.
+      expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
+    });
+
+    it('offers pop-out and drag from the same control', () => {
+      expect(indexHtml).toMatch(/id="git-pop-out"[\s\S]*draggable="true"/);
+      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("click"[\s\S]*popOutGitPane\(\)/);
+      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("dragstart"[\s\S]*text\/x-psyche-tool/);
+    });
+
+    it('lands a dropped tool where it was dropped', () => {
+      expect(mainJs).toMatch(/terminalHost\.addEventListener\("drop"[\s\S]*popOutGitPane\(target\)/);
+      expect(mainJs).toMatch(/movePaneTo\(id, dropTarget\.threadId, dropTarget\.position\)/);
+    });
+
+    it('shares one drop indicator with the pane drag', () => {
+      // A second visual language for the same gesture would be noise.
+      expect(mainJs).toMatch(/function showPaneDropIndicator\(rect, position\)/);
+      expect(mainJs).toMatch(/var showIndicator = showPaneDropIndicator;/);
+      expect(mainJs.match(/className = "pane-drop-indicator"/g)).toHaveLength(1);
+    });
+
+    it('hands the surface back before the pane is torn down', () => {
+      // Removing the pane first would take the surface out of the document
+      // with it.
+      expect(mainJs).toMatch(/function closeToolPane\(thread\)[\s\S]*dockGitSurface\(\)[\s\S]*detachThreadPane\(thread\)/);
+    });
+
+    it('files a tool pane as a tool, not an agent', () => {
+      expect(mainJs).toMatch(/var TOOL_KINDS = \["git", "web"\];/);
+      expect(mainJs).toMatch(/\["Tools", function \(t\) \{ return TOOL_KINDS\.indexOf/);
+    });
+  });
 });
