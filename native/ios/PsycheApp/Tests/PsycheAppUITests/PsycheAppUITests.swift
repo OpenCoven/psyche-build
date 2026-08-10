@@ -78,6 +78,73 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertTrue(label.contains("needs you"), label)
     }
 
+    // MARK: - Terminal workspace
+
+    /// Opening a pane has to show its terminal, not an empty frame. The
+    /// fixture client replays canned output so this asserts real content.
+    func testOpeningAPaneRendersItsTerminalOutput() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS[c] %@", "Waiting for review input")
+            ).firstMatch.waitForExistence(timeout: 10)
+        )
+    }
+
+    /// With two terminals possible, "where does my typing go" has to be
+    /// answerable without guessing.
+    func testTheShownTerminalIsMarkedFocused() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        let terminal = element("terminal-pane-web-home", in: app)
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            element("terminal-focus-badge-web-home", in: app).waitForExistence(timeout: 10)
+        )
+        XCTAssertTrue(terminal.isSelected, "The focused terminal must carry the selected trait")
+    }
+
+    /// A pane that is not on screen must not have a terminal behind it — that
+    /// would attach a stream nobody is looking at.
+    func testHiddenPanesHaveNoTerminalView() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+
+        XCTAssertFalse(app.otherElements["terminal-pane-ios-cockpit"].exists)
+        XCTAssertFalse(app.otherElements["terminal-pane-bridge-protocol"].exists)
+    }
+
+    /// The switcher previews panes from the workspace snapshot, so every pane
+    /// is reachable without any of them owning a terminal.
+    func testPaneSwitcherOffersEveryPaneWithoutRenderingThem() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        XCTAssertTrue(element("pane-switcher", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-chip-ios-cockpit", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pane-chip-bridge-protocol", in: app).exists)
+        XCTAssertFalse(app.otherElements["terminal-pane-ios-cockpit"].exists)
+    }
+
+    /// Switching panes swaps which terminal exists rather than adding one.
+    func testSwitchingPanesReplacesTheRenderedTerminal() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        XCTAssertTrue(element("terminal-pane-web-home", in: app).waitForExistence(timeout: 10))
+
+        let chip = row("pane-chip-ios-cockpit", in: app)
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        chip.tap()
+
+        XCTAssertTrue(element("terminal-pane-ios-cockpit", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(app.otherElements["terminal-pane-web-home"].exists)
+    }
+
     // MARK: - Compact width (iPhone)
 
     func testCompactOpensANeedsYouPaneFromNowInOneTap() throws {
@@ -214,6 +281,13 @@ final class PsycheAppUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Reaches the terminal workspace from whichever shell is on screen.
+    private func openWebHomePane(in app: XCUIApplication) {
+        let paneRow = row("now-pane-web-home", in: app)
+        XCTAssertTrue(paneRow.waitForExistence(timeout: 10))
+        paneRow.tap()
+    }
 
     /// Always launches the fixture root.
     ///

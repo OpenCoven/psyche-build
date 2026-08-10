@@ -13,6 +13,10 @@ struct PaneWorkspaceView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private let requestedPrimaryPaneID: String?
+    /// The pane this view was opened with is honoured once. Re-applying it on
+    /// every change would let the pushed pane overrule the switcher, so
+    /// choosing another pane would snap straight back.
+    @State private var didApplyRequestedPane = false
 
     init(primaryPaneID: String? = nil) {
         requestedPrimaryPaneID = primaryPaneID
@@ -43,12 +47,19 @@ struct PaneWorkspaceView: View {
         }
         .navigationTitle(primaryPane?.title ?? primaryPane?.id ?? "Pane")
         .navigationBarTitleDisplayMode(.inline)
+        // `.contain` matters: an identifier on this container otherwise masks
+        // the ones on the terminals and the switcher inside it, leaving them
+        // unqueryable — and untestable.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(
             primaryPane.map { "pane-workspace-\($0.id)" } ?? "pane-workspace"
         )
         .task(id: workspaceKey) {
-            if let requestedPrimaryPaneID, store.primaryPaneID != requestedPrimaryPaneID {
-                store.primaryPaneID = requestedPrimaryPaneID
+            if !didApplyRequestedPane {
+                didApplyRequestedPane = true
+                if let requestedPrimaryPaneID, store.primaryPaneID != requestedPrimaryPaneID {
+                    store.primaryPaneID = requestedPrimaryPaneID
+                }
             }
             await syncRegistry()
         }
