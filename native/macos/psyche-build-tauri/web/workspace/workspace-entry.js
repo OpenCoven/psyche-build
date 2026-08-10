@@ -1,5 +1,6 @@
 export {
   importWorkspaceV2,
+  isSafeCovenAttachmentId,
   reconcileSessions,
   sanitizePaneTree,
   sanitizeSessionDescriptor,

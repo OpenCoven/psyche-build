@@ -1,4 +1,5 @@
-const SAFE_SESSION_ID = /^[A-Za-z0-9._:-]{1,96}$/;
+const SAFE_WORKSPACE_SESSION_ID = /^[A-Za-z0-9._:-]{1,96}$/;
+const SAFE_COVEN_ATTACHMENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ALLOWED_KINDS = new Set(['shell', 'psyche', 'coven-chat', 'coven-attach']);
 const COLUMN = 'column';
 const ROW = 'row';
@@ -12,7 +13,15 @@ function safeString(value) {
 }
 
 function safeId(value) {
-  return typeof value === 'string' && SAFE_SESSION_ID.test(value) ? value : null;
+  return typeof value === 'string' && SAFE_WORKSPACE_SESSION_ID.test(value) ? value : null;
+}
+
+export function isSafeCovenAttachmentId(value) {
+  return typeof value === 'string' && SAFE_COVEN_ATTACHMENT_ID.test(value);
+}
+
+function safeCovenAttachmentId(value) {
+  return isSafeCovenAttachmentId(value) ? value : null;
 }
 
 function normalizeKind(value) {
@@ -132,7 +141,7 @@ export function sanitizeSessionDescriptor(saved) {
   if (name) descriptor.name = name;
 
   if (launchKind === 'coven-attach') {
-    const covenSessionId = safeId(saved.covenSessionId);
+    const covenSessionId = safeCovenAttachmentId(saved.covenSessionId);
     if (!covenSessionId) return null;
     descriptor.covenSessionId = covenSessionId;
   }

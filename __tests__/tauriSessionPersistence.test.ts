@@ -114,6 +114,55 @@ describe('Tauri workspace persistence model', () => {
     ).toBeNull();
   });
 
+  test('accepts only safe Coven attachment identifiers', () => {
+    expect(workspaceModel.isSafeCovenAttachmentId('a'.repeat(128))).toBe(true);
+    expect(workspaceModel.isSafeCovenAttachmentId('a'.repeat(129))).toBe(false);
+    expect(workspaceModel.isSafeCovenAttachmentId('space id')).toBe(false);
+    expect(workspaceModel.isSafeCovenAttachmentId('slash/id')).toBe(false);
+    expect(workspaceModel.isSafeCovenAttachmentId('café')).toBe(false);
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'attach-safe',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'coven-attach',
+        launchKind: 'coven-attach',
+        covenSessionId: 'a'.repeat(128),
+      }),
+    ).toEqual({
+      id: 'attach-safe',
+      projectId: 'project-a',
+      worktreePath: '/repo',
+      kind: 'coven-attach',
+      launchKind: 'coven-attach',
+      hidden: false,
+      covenSessionId: 'a'.repeat(128),
+    });
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'attach-long',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'coven-attach',
+        launchKind: 'coven-attach',
+        covenSessionId: 'a'.repeat(129),
+      }),
+    ).toBeNull();
+
+    expect(
+      workspaceModel.sanitizeSessionDescriptor({
+        id: 'attach-unsafe',
+        projectId: 'project-a',
+        worktreePath: '/repo',
+        kind: 'coven-attach',
+        launchKind: 'coven-attach',
+        covenSessionId: 'space id',
+      }),
+    ).toBeNull();
+  });
+
   test('collapses malformed, unknown, and duplicate pane leaves', () => {
     expect(
       workspaceModel.sanitizePaneTree(
@@ -597,6 +646,7 @@ describe('Tauri workspace persistence model', () => {
     );
     expect(Object.keys(workspaceEntry).sort()).toEqual([
       'importWorkspaceV2',
+      'isSafeCovenAttachmentId',
       'reconcileSessions',
       'sanitizePaneTree',
       'sanitizeSessionDescriptor',
