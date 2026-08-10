@@ -5526,6 +5526,7 @@
     return project.browsersByWorktree[root];
   }
   function makeBrowserTabId() { return "bt" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
+  var DICE_BROWSER_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1&pp=ygUJcmljayByb2xsoAcB0gcJCckLAYcqIYzv";
   function tabTitle(url) {
     if (!url || url === "about:blank") return "New tab";
     try { return new URL(url).hostname || url; } catch (_) { return url; }
@@ -5583,6 +5584,11 @@
     syncProjectBrowser();
     if (urlInput) urlInput.focus();
     return tab || currentBrowserTab(project);
+  }
+  async function openDiceBrowserTab() {
+    var tab = await openBlankBrowserTab();
+    if (!tab) return;
+    await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
   listen("browser:shortcut-new-tab", function () {
     markActiveSurface("browser");
@@ -5670,6 +5676,7 @@
   });
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex > 0) { tab.historyIndex -= 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex < tab.history.length - 1) { tab.historyIndex += 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
+  document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   window.addEventListener("beforeunload", saveWorkspaceNow);
