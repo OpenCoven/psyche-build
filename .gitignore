@@ -11,7 +11,18 @@ playwright-report/
 test-results/
 
 .worktrees/
-native/
+
+# native/ holds the macOS Tauri app and the iOS app, and both are tracked. A
+# blanket `native/` ignore made git skip them during a worktree scan, so every
+# commit touching them needed `git add -f` and `git add -A` silently missed
+# them entirely. Ignore the build output instead.
+native/**/target/
+native/ios/.build/
+native/ios/.derivedData/
+native/macos/psyche-build-tauri/src-tauri/gen/schemas/
+**/xcuserdata/
+**/DerivedData/
+
 .vercel/
 /.superpowers
 /.opencode
