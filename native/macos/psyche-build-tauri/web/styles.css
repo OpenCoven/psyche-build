@@ -1605,14 +1605,36 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .pane-footer-popover {
   position: fixed;
-  z-index: 1200;
+  z-index: 150;
   min-width: 190px;
   max-width: min(320px, calc(100vw - 16px));
   overflow: hidden;
+  padding: 7px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: rgba(var(--rgb-s2), 0.98);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), 0.98);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  color: var(--text-soft);
+}
+.pane-usage-popover {
+  display: grid;
+  gap: 2px;
+}
+.pane-usage-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 5px;
+  font-size: 11px;
+}
+.pane-usage-row span {
+  color: var(--muted);
+}
+.pane-usage-row strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 500;
 }
 .pane-footer-menu {
   display: flex;

@@ -93,6 +93,11 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
+  var PANE_METRICS_POLL_MS = 15000;
+  var paneMetricsPollTimer = 0;
+  var paneFooterPopoverCleanup = null;
+  var paneFooterPopoverTrigger = null;
+  var paneFooterPopoverThreadId = null;
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
   // overflowing. 200x137 includes the fixed 27px footer rail.
@@ -919,6 +924,7 @@
       arr.push(bytes);
       pendingDataBuffers.set(payload.thread_id, arr);
     }
+    schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
   function handlePtyExit(payload) {
@@ -2927,6 +2933,11 @@
 
   function detachThreadPane(thread) {
     if (!thread) return null;
+    if (typeof paneFooterPopoverThreadId !== "undefined" &&
+        paneFooterPopoverThreadId === thread.id &&
+        typeof closePaneFooterPopovers === "function") {
+      closePaneFooterPopovers(false);
+    }
     if (typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
     if (thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
     thread.paneFooterObserver = null;
@@ -2970,6 +2981,11 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
     pendingDataBuffers.delete(id);
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
@@ -3002,6 +3018,11 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
     var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
     if (state.activeThreadId === id) {
@@ -3372,6 +3393,132 @@
     }).filter(Boolean);
   }
 
+  function threadWantsMetrics(thread) {
+    return Boolean(thread)
+      && !thread.closing
+      && !thread.hidden
+      && thread.status !== "exited"
+      && thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && canvasThreadIds().indexOf(thread.id) !== -1
+      && Boolean(thread.launch.covenSessionId);
+  }
+
+  function metricsValue(previous, key) {
+    return previous && previous[key] !== undefined ? previous[key] : null;
+  }
+
+  function metricsErrorState(thread, error) {
+    var previous = thread.metrics;
+    return {
+      phase: "error",
+      provider: previous && previous.provider ||
+        thread.launch && thread.launch.metricsProvider || "coven",
+      sessionId: thread.launch && thread.launch.covenSessionId || null,
+      model: metricsValue(previous, "model"),
+      contextUsed: metricsValue(previous, "contextUsed"),
+      contextLimit: metricsValue(previous, "contextLimit"),
+      cumulativeInputTokens: metricsValue(previous, "cumulativeInputTokens"),
+      cumulativeOutputTokens: metricsValue(previous, "cumulativeOutputTokens"),
+      cacheCreationTokens: metricsValue(previous, "cacheCreationTokens"),
+      cacheReadTokens: metricsValue(previous, "cacheReadTokens"),
+      spendUsd: metricsValue(previous, "spendUsd"),
+      costKind: previous && previous.costKind || "unknown",
+      updatedAt: metricsValue(previous, "updatedAt"),
+      stale: Boolean(previous && (previous.phase === "ready" || previous.stale)),
+      error: String(error),
+      canSwitchModel: false,
+    };
+  }
+
+  async function refreshPaneMetrics(thread) {
+    if (!threadWantsMetrics(thread)) return false;
+    thread.metricsGeneration += 1;
+    var generation = thread.metricsGeneration;
+    var sessionId = thread.launch.covenSessionId;
+    if (!thread.metrics || thread.metrics.phase === "idle") {
+      thread.metrics = {
+        phase: "loading",
+        provider: "coven",
+        sessionId: sessionId,
+        model: null,
+        contextUsed: null,
+        contextLimit: null,
+        cumulativeInputTokens: null,
+        cumulativeOutputTokens: null,
+        cacheCreationTokens: null,
+        cacheReadTokens: null,
+        spendUsd: null,
+        costKind: "unknown",
+        updatedAt: null,
+        stale: false,
+        error: null,
+        canSwitchModel: false,
+      };
+      syncPaneFooter(thread);
+    }
+    try {
+      var metrics = await invoke("pane_session_metrics", {
+        projectRoot: thread.launch.projectRoot,
+        project_root: thread.launch.projectRoot,
+        cwd: thread.worktreePath,
+        sessionId: sessionId,
+        session_id: sessionId,
+      });
+      var response = {
+        threadId: thread.id,
+        generation: generation,
+        sessionId: metrics.sessionId,
+      };
+      if (!threadWantsMetrics(thread) ||
+          !PsychePanes.shouldApplyMetricsResponse(thread, response)) return false;
+      thread.metrics = {
+        phase: "ready",
+        provider: metrics.provider || "coven",
+        sessionId: metrics.sessionId,
+        model: metrics.model,
+        contextUsed: metrics.contextUsed,
+        contextLimit: metrics.contextLimit,
+        cumulativeInputTokens: metrics.cumulativeInputTokens,
+        cumulativeOutputTokens: metrics.cumulativeOutputTokens,
+        cacheCreationTokens: metrics.cacheCreationTokens,
+        cacheReadTokens: metrics.cacheReadTokens,
+        spendUsd: metrics.spendUsd,
+        costKind: metrics.costKind || "unknown",
+        updatedAt: metrics.updatedAt,
+        stale: false,
+        error: null,
+        canSwitchModel: false,
+      };
+      syncPaneFooter(thread);
+      return true;
+    } catch (error) {
+      if (thread.metricsGeneration !== generation ||
+          !threadWantsMetrics(thread) ||
+          thread.launch.covenSessionId !== sessionId) return false;
+      thread.metrics = metricsErrorState(thread, error);
+      syncPaneFooter(thread);
+      return false;
+    }
+  }
+
+  function schedulePaneMetricsRefresh(thread, delay) {
+    if (!thread) return;
+    if (thread.metricsRefreshTimer) clearTimeout(thread.metricsRefreshTimer);
+    thread.metricsRefreshTimer = 0;
+    if (!threadWantsMetrics(thread)) return;
+    thread.metricsRefreshTimer = setTimeout(function () {
+      thread.metricsRefreshTimer = 0;
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    }, delay);
+  }
+
+  function refreshVisiblePaneMetrics() {
+    state.threads.forEach(function (thread) {
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    });
+  }
+
   /** Sidebar and menu glyph for a pane kind. */
   function paneGlyphFor(kind) {
     if (kind === "shell") return "❯_";
@@ -3457,6 +3604,122 @@
     };
   }
 
+  function closePaneFooterPopovers(restoreFocus) {
+    var trigger = paneFooterPopoverTrigger;
+    if (paneFooterPopoverCleanup) paneFooterPopoverCleanup();
+    paneFooterPopoverCleanup = null;
+    paneFooterPopoverTrigger = null;
+    paneFooterPopoverThreadId = null;
+    state.threads.forEach(function (thread) {
+      closePaneFooterMenu(thread, false);
+    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".pane-footer-popover"),
+      function (popover) { popover.remove(); }
+    );
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
+    }
+  }
+
+  function paneUsageRow(label, value) {
+    var row = document.createElement("div");
+    row.className = "pane-usage-row";
+    var key = document.createElement("span");
+    key.textContent = label;
+    var detail = document.createElement("strong");
+    detail.textContent = value;
+    row.appendChild(key);
+    row.appendChild(detail);
+    return row;
+  }
+
+  function positionPaneFooterPopover(popover, anchor) {
+    document.body.appendChild(popover);
+    var anchorRect = anchor.getBoundingClientRect();
+    var maxWidth = Math.max(0, Math.min(320, window.innerWidth - 16));
+    popover.style.maxWidth = maxWidth + "px";
+    var popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(8, Math.min(
+      window.innerWidth - popoverRect.width - 8,
+      anchorRect.right - popoverRect.width
+    )) + "px";
+    popover.style.top = Math.max(
+      8,
+      anchorRect.top - popoverRect.height - 6
+    ) + "px";
+  }
+
+  function openPaneUsagePopover(thread) {
+    var trigger = document.activeElement;
+    if (thread.paneFooterMenu && trigger &&
+        thread.paneFooterMenu.contains(trigger)) {
+      trigger = thread.paneFooterOverflow;
+    }
+    closePaneFooterPopovers(false);
+    var metrics = paneFooterState(thread).metrics || {};
+    var notReported = "Not reported by Coven";
+    var popover = document.createElement("div");
+    popover.className = "pane-footer-popover pane-usage-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", thread.name + " session usage");
+    popover.setAttribute("tabindex", "-1");
+    popover.appendChild(paneUsageRow("Provider", "Coven"));
+    popover.appendChild(paneUsageRow("Model", metrics.model || notReported));
+    popover.appendChild(paneUsageRow(
+      "Session",
+      metrics.sessionId || "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Context",
+      Number.isFinite(metrics.contextUsed) && Number.isFinite(metrics.contextLimit)
+        ? metrics.contextUsed + " / " + metrics.contextLimit + " tokens"
+        : notReported
+    ));
+    popover.appendChild(paneUsageRow(
+      "Input tokens",
+      Number.isFinite(metrics.cumulativeInputTokens)
+        ? String(metrics.cumulativeInputTokens)
+        : "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Output tokens",
+      Number.isFinite(metrics.cumulativeOutputTokens)
+        ? String(metrics.cumulativeOutputTokens)
+        : "Not available"
+    ));
+    var spend = notReported;
+    if (Number.isFinite(metrics.spendUsd)) {
+      spend = "$" + metrics.spendUsd.toFixed(4);
+      if (metrics.costKind === "local-estimate") spend += " · Local estimate";
+    }
+    popover.appendChild(paneUsageRow("Spend", spend));
+    popover.appendChild(paneUsageRow(
+      "Updated",
+      metrics.updatedAt ||
+        (metrics.phase === "loading" ? "Loading…" : "Not available")
+    ));
+    if (metrics.stale) popover.appendChild(paneUsageRow("State", "Stale"));
+    if (metrics.error) popover.appendChild(paneUsageRow("Error", metrics.error));
+    paneFooterPopoverTrigger = trigger || thread.paneFooter;
+    paneFooterPopoverThreadId = thread.id;
+    positionPaneFooterPopover(popover, thread.paneFooter);
+
+    function onUsageKeyDown(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterPopovers(true);
+    }
+    document.addEventListener("keydown", onUsageKeyDown, true);
+    paneFooterPopoverCleanup = function () {
+      document.removeEventListener("keydown", onUsageKeyDown, true);
+    };
+    popover.focus();
+    return popover;
+  }
+
   function paneFooterActionValue(item) {
     return item && typeof item.fullValue === "string" ? item.fullValue : "";
   }
@@ -3475,7 +3738,11 @@
     if (item.action === "reveal") {
       return revealPaneWorktree(paneFooterActionValue(item));
     }
-    if (item.action === "usage" || item.action === "model-details") {
+    if (item.action === "usage") {
+      openPaneUsagePopover(thread);
+      return true;
+    }
+    if (item.action === "model-details") {
       toast(item.label + " is not reported");
       return false;
     }
@@ -3507,6 +3774,7 @@
   function handlePaneFooterItemClick(thread, item, event, fromOverflowMenu) {
     event.stopPropagation();
     var result = runPaneFooterAction(thread, item);
+    if (item && item.action === "usage") return result;
     closePaneFooterMenu(thread, Boolean(fromOverflowMenu));
     focusPaneAfterFooterAction(thread);
     return result;
@@ -3669,6 +3937,7 @@
     closePaneFooterMenu(thread, false);
     if (!openOverflow || hiddenItems.length === 0) return;
 
+    closePaneFooterPopovers(false);
     var menu = document.createElement("div");
     menu.className = "pane-footer-popover pane-footer-menu";
     menu.setAttribute("role", "menu");
@@ -3678,16 +3947,9 @@
       button.setAttribute("role", "menuitem");
       menu.appendChild(button);
     });
-    document.body.appendChild(menu);
     thread.paneFooterMenu = menu;
     thread.paneFooterOverflow.setAttribute("aria-expanded", "true");
-    var anchor = thread.paneFooterOverflow.getBoundingClientRect();
-    var menuRect = menu.getBoundingClientRect();
-    menu.style.left = Math.max(8, Math.min(
-      anchor.right - menuRect.width,
-      window.innerWidth - menuRect.width - 8
-    )) + "px";
-    menu.style.top = Math.max(8, anchor.top - menuRect.height - 4) + "px";
+    positionPaneFooterPopover(menu, thread.paneFooterOverflow);
 
     function onOutsidePointerDown(event) {
       if (menu.contains(event.target) || thread.paneFooterOverflow.contains(event.target)) return;
@@ -3705,6 +3967,14 @@
     var first = paneFooterMenuItems(menu)[0];
     if (first) first.focus();
   }
+
+  document.addEventListener("pointerdown", function (event) {
+    var target = event.target;
+    if (!target || !target.closest ||
+        !target.closest(".pane-footer-popover, .terminal-pane-footer")) {
+      closePaneFooterPopovers(false);
+    }
+  }, true);
 
   /**
    * Focus-set membership swatches. Squares, in the set's colour, so they can't
@@ -7290,6 +7560,9 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
+    paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
+    refreshVisiblePaneMetrics();
   }
 
   invoke("app_environment")
