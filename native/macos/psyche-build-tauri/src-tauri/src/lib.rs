@@ -252,18 +252,26 @@ fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, S
     })
 }
 
+fn pty_cwd_candidate(canonical_root: &Path, cwd: &str) -> PathBuf {
+    let requested = Path::new(cwd);
+    if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    }
+}
+
+// Test-only variant of `open_pty_cwd` that takes the linked worktrees as an
+// argument instead of shelling out to `git worktree list`, so the containment
+// checks can be exercised without a real multi-worktree repo on disk.
+#[cfg(test)]
 fn open_pty_cwd_with_worktrees(
     project_root: &str,
     cwd: &str,
     linked_worktrees: &[PathBuf],
 ) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
-    let requested = Path::new(cwd);
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        canonical_root.join(requested)
-    };
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
     let opened = open_pty_cwd_candidate(&candidate, cwd)?;
     validate_opened_pty_cwd(
         &canonical_root,
@@ -274,6 +282,7 @@ fn open_pty_cwd_with_worktrees(
     Ok(opened)
 }
 
+#[cfg(test)]
 fn resolve_pty_cwd_with_worktrees(
     project_root: &str,
     cwd: &str,
@@ -300,12 +309,7 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
-    let requested = Path::new(cwd);
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        canonical_root.join(requested)
-    };
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
     let opened = open_pty_cwd_candidate(&candidate, cwd)?;
     if opened.canonical_path.starts_with(&canonical_root) {
         return Ok(opened);
@@ -321,6 +325,7 @@ fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     Ok(opened)
 }
 
+#[cfg(test)]
 fn resolve_pty_cwd(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
     open_pty_cwd(project_root, cwd).map(|opened| opened.canonical_path)
 }
