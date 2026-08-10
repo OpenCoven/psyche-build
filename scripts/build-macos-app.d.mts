@@ -1,5 +1,4 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import type { Stats } from 'node:fs';
 
 export type BuildChannel = 'stable' | 'dev';
 
@@ -110,10 +109,19 @@ export interface InstallOverrides {
 export interface WriteBuildProvenanceOverrides {
   homeDir?: string;
   mkdirPath?: (directoryPath: string) => void | Promise<void>;
+  writeFileText?: (
+    filePath: string,
+    content: string,
+    options?: { exclusive?: boolean },
+  ) => void | Promise<void>;
+  removePath?: (targetPath: string) => void | Promise<void>;
+  randomUUID?: () => string;
+  execute?: Runner;
+  lockTimeoutSeconds?: number;
+}
+
+export interface WriteBuildProvenanceUnlockedOverrides {
   readFileText?: (filePath: string) => string | Promise<string>;
-  readlinkPath?: (symlinkPath: string) => string | Promise<string>;
-  symlinkPath?: (target: string, symlinkPath: string) => void | Promise<void>;
-  unlinkPath?: (targetPath: string) => void | Promise<void>;
   writeFileText?: (
     filePath: string,
     content: string,
@@ -121,15 +129,6 @@ export interface WriteBuildProvenanceOverrides {
   ) => void | Promise<void>;
   renamePath?: (sourcePath: string, destinationPath: string) => void | Promise<void>;
   removePath?: (targetPath: string) => void | Promise<void>;
-  statPath?: (
-    targetPath: string,
-  ) => Pick<Stats, 'mtimeMs' | 'isFile'> | Promise<Pick<Stats, 'mtimeMs' | 'isFile'>>;
-  sleep?: (ms: number) => Promise<void>;
-  nowMs?: () => number;
-  isProcessAlive?: (pid: number) => boolean | Promise<boolean>;
-  lockTimeoutMs?: number;
-  lockRetryMs?: number;
-  staleLockMs?: number;
   randomUUID?: () => string;
 }
 
@@ -243,6 +242,11 @@ export function installBundleTransactional(
 export function writeBuildProvenance(
   record: BuildProvenance,
   overrides?: WriteBuildProvenanceOverrides,
+): Promise<string>;
+export function writeBuildProvenanceUnlocked(
+  statePath: string,
+  record: BuildProvenance,
+  overrides?: WriteBuildProvenanceUnlockedOverrides,
 ): Promise<string>;
 export function smokeLaunchBundle(
   appPath: string,

@@ -6,13 +6,9 @@ import {
   mkdtemp,
   mkdir,
   readFile,
-  readlink,
   readdir,
   rename,
   rm,
-  stat,
-  symlink,
-  unlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -42,12 +38,17 @@ const CHANNEL_CONFIG = {
 
 const scriptFilePath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptFilePath), '..');
+const BUILD_PROVENANCE_HELPER_PATH = path.join(
+  repositoryRoot,
+  'scripts',
+  'write-build-provenance.mjs',
+);
+const LOCKF_PATH = '/usr/bin/lockf';
 const DEFAULT_SMOKE_MS = 5_000;
 const DEFAULT_TERM_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_KILL_TIMEOUT_MS = 2_000;
-const DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS = 5_000;
-const DEFAULT_PROVENANCE_LOCK_RETRY_MS = 50;
-const DEFAULT_PROVENANCE_STALE_LOCK_MS = 30_000;
+const DEFAULT_PROVENANCE_LOCK_TIMEOUT_SECONDS = 5;
+const MAX_PROVENANCE_LOCK_TIMEOUT_SECONDS = 60;
 const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 const TEMP_BUILD_PREFIX = 'psyche-build-macos-';
 const BUILD_CHANNELS = ['stable', 'dev'];
@@ -446,114 +447,147 @@ export async function writeBuildProvenance(record, overrides = {}) {
   const statePath = path.join(stateDir, 'builds.json');
   const lockPath = `${statePath}.lock`;
   const randomUUID = overrides.randomUUID ?? createRandomUUID;
-  const ownerToken = randomUUID();
+  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
+  const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
+  const removePath = overrides.removePath ?? defaultRemovePath;
+  const execute = overrides.execute ?? runCommand;
+  const lockTimeoutSeconds =
+    overrides.lockTimeoutSeconds ?? DEFAULT_PROVENANCE_LOCK_TIMEOUT_SECONDS;
+
+  validateIncomingBuildProvenance(record);
+  validateLockTimeoutSeconds(lockTimeoutSeconds);
+  const inputPath = path.join(
+    stateDir,
+    `.builds.json.input-${randomUUID()}.json`,
+  );
+  await mkdirPath(stateDir);
+
+  let operationError;
+  let inputMayBelongToWriter = false;
+
+  try {
+    try {
+      await writeFileText(
+        inputPath,
+        `${JSON.stringify(record)}\n`,
+        { exclusive: true },
+      );
+      inputMayBelongToWriter = true;
+    } catch (error) {
+      inputMayBelongToWriter = !isAlreadyExistsError(error);
+      throw error;
+    }
+
+    await execute(
+      LOCKF_PATH,
+      [
+        '-k',
+        '-t',
+        String(lockTimeoutSeconds),
+        lockPath,
+        process.execPath,
+        BUILD_PROVENANCE_HELPER_PATH,
+        statePath,
+        inputPath,
+      ],
+      { stage: 'write build provenance' },
+    );
+  } catch (error) {
+    operationError =
+      error?.exitCode === 75
+        ? buildProvenanceLockTimeoutError(error, lockTimeoutSeconds, lockPath)
+        : includeChildDiagnostics(error);
+  } finally {
+    if (inputMayBelongToWriter) {
+      try {
+        await removePath(inputPath);
+      } catch (cleanupError) {
+        if (operationError) {
+          operationError = combineErrors(
+            operationError,
+            cleanupError,
+            'Failed to clean private build provenance input file',
+          );
+        } else {
+          operationError = new Error(
+            `Failed to clean private build provenance input file "${inputPath}": ` +
+              describeError(cleanupError),
+            { cause: cleanupError },
+          );
+        }
+      }
+    }
+  }
+
+  if (operationError) {
+    throw operationError;
+  }
+
+  return statePath;
+}
+
+export async function writeBuildProvenanceUnlocked(statePath, record, overrides = {}) {
+  const absoluteStatePath = path.resolve(statePath);
+  const stateDir = path.dirname(absoluteStatePath);
+  const randomUUID = overrides.randomUUID ?? createRandomUUID;
   const tempPath = path.join(
     stateDir,
-    `.builds.json.${ownerToken}.tmp`,
+    `.builds.json.${randomUUID()}.tmp`,
   );
-  const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
   const readFileText = overrides.readFileText ?? defaultReadFileText;
-  const readlinkPath = overrides.readlinkPath ?? defaultReadlinkPath;
-  const symlinkPath = overrides.symlinkPath ?? defaultSymlinkPath;
-  const unlinkPath = overrides.unlinkPath ?? defaultUnlinkPath;
   const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
   const renamePath = overrides.renamePath ?? defaultRenamePath;
   const removePath = overrides.removePath ?? defaultRemovePath;
-  const statPath = overrides.statPath ?? defaultStatPath;
-  const sleep = overrides.sleep ?? defaultSleep;
-  const nowMs = overrides.nowMs ?? Date.now;
-  const isProcessAlive = overrides.isProcessAlive ?? defaultIsProcessAlive;
-  const lockTimeoutMs =
-    overrides.lockTimeoutMs ?? DEFAULT_PROVENANCE_LOCK_TIMEOUT_MS;
-  const lockRetryMs = overrides.lockRetryMs ?? DEFAULT_PROVENANCE_LOCK_RETRY_MS;
-  const staleLockMs =
-    overrides.staleLockMs ?? DEFAULT_PROVENANCE_STALE_LOCK_MS;
+  let operationError;
+  let tempMayBelongToWriter = false;
 
   validateIncomingBuildProvenance(record);
-  validateLockTimingOption('lockTimeoutMs', lockTimeoutMs, true);
-  validateLockTimingOption('lockRetryMs', lockRetryMs, false);
-  validateLockTimingOption('staleLockMs', staleLockMs, false);
-  await mkdirPath(stateDir);
-
-  let lockOwner;
-  let operationError;
-  let releaseError;
 
   try {
-    lockOwner = await acquireBuildProvenanceLock(lockPath, {
-      readFileText,
-      readlinkPath,
-      symlinkPath,
-      unlinkPath,
-      writeFileText,
-      renamePath,
-      statPath,
-      sleep,
-      nowMs,
-      isProcessAlive,
-      randomUUID,
-      ownerToken,
-      ownerPid: process.pid,
-      lockTimeoutMs,
-      lockRetryMs,
-      staleLockMs,
-    });
-
     const nextState = {
       version: 1,
       channels: {
-        ...(await readExistingBuildProvenance(statePath, readFileText)),
+        ...(await readExistingBuildProvenance(absoluteStatePath, readFileText)),
         [record.channel]: record,
       },
     };
 
-    await writeFileText(tempPath, `${JSON.stringify(nextState, null, 2)}\n`);
-    await renamePath(tempPath, statePath);
+    try {
+      await writeFileText(
+        tempPath,
+        `${JSON.stringify(nextState, null, 2)}\n`,
+        { exclusive: true },
+      );
+      tempMayBelongToWriter = true;
+    } catch (error) {
+      tempMayBelongToWriter = !isAlreadyExistsError(error);
+      throw error;
+    }
+    await renamePath(tempPath, absoluteStatePath);
+    tempMayBelongToWriter = false;
   } catch (error) {
     operationError = error;
-
-    if (lockOwner) {
+  } finally {
+    if (tempMayBelongToWriter) {
       try {
         await removePath(tempPath);
       } catch (cleanupError) {
-        operationError = combineErrors(
-          operationError,
-          cleanupError,
-          'Failed to clean temporary provenance file',
-        );
-      }
-    }
-  } finally {
-    if (lockOwner) {
-      try {
-        await releaseBuildProvenanceLock(lockPath, lockOwner, {
-          readlinkPath,
-          unlinkPath,
-        });
-      } catch (error) {
-        releaseError = error;
+        operationError = operationError
+          ? combineErrors(
+              operationError,
+              cleanupError,
+              'Failed to clean temporary provenance file',
+            )
+          : cleanupError;
       }
     }
   }
 
-  if (operationError && releaseError) {
-    throw combineErrors(
-      operationError,
-      releaseError,
-      'Failed to release build provenance lock',
-    );
-  }
   if (operationError) {
     throw operationError;
   }
-  if (releaseError) {
-    throw new Error(
-      `Failed to release build provenance lock "${lockPath}": ${describeError(releaseError)}`,
-      { cause: releaseError },
-    );
-  }
 
-  return statePath;
+  return absoluteStatePath;
 }
 
 export async function smokeLaunchBundle(appPath, overrides) {
@@ -977,18 +1011,6 @@ async function defaultReadFileText(filePath) {
   return readFile(filePath, 'utf8');
 }
 
-async function defaultReadlinkPath(symlinkPath) {
-  return readlink(symlinkPath);
-}
-
-async function defaultSymlinkPath(target, symlinkPath) {
-  await symlink(target, symlinkPath);
-}
-
-async function defaultUnlinkPath(targetPath) {
-  await unlink(targetPath);
-}
-
 async function defaultWriteFileText(filePath, content, options = {}) {
   await writeFile(filePath, content, {
     encoding: 'utf8',
@@ -997,298 +1019,33 @@ async function defaultWriteFileText(filePath, content, options = {}) {
   });
 }
 
-async function defaultStatPath(targetPath) {
-  return stat(targetPath);
-}
+function buildProvenanceLockTimeoutError(error, lockTimeoutSeconds, lockPath) {
+  const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
+  const diagnostics = stderr === '' || describeError(error).includes(stderr)
+    ? describeError(error)
+    : `${describeError(error)}\n${stderr}`;
 
-async function defaultIsProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === 'ESRCH') {
-      return false;
-    }
-    if (error?.code === 'EPERM') {
-      return true;
-    }
-    throw error;
-  }
-}
-
-async function acquireBuildProvenanceLock(lockPath, options) {
-  const startedAt = options.nowMs();
-  const owner = {
-    token: options.ownerToken,
-    pid: options.ownerPid,
-    createdAt: new Date(startedAt).toISOString(),
-  };
-  const ownerTarget = buildProvenanceLockOwnerTarget(
-    lockPath,
-    options.ownerToken,
-  );
-  const ownerPath = path.join(path.dirname(lockPath), ownerTarget);
-  let ownerFileMayBelongToContender = false;
-  let waitedMs = 0;
-
-  try {
-    try {
-      await options.writeFileText(
-        ownerPath,
-        `${JSON.stringify(owner)}\n`,
-        { exclusive: true },
-      );
-      ownerFileMayBelongToContender = true;
-    } catch (error) {
-      ownerFileMayBelongToContender = !isAlreadyExistsError(error);
-      throw error;
-    }
-
-    while (true) {
-      try {
-        await options.symlinkPath(ownerTarget, lockPath);
-        return { ...owner, ownerPath, ownerTarget };
-      } catch (error) {
-        if (!isAlreadyExistsError(error)) {
-          throw error;
-        }
-      }
-
-      const staleLock = await inspectStaleBuildProvenanceLock(lockPath, options);
-      if (
-        staleLock &&
-        (await recoverStaleBuildProvenanceLock(lockPath, staleLock, options))
-      ) {
-        continue;
-      }
-
-      const currentTime = options.nowMs();
-      const clockElapsedMs =
-        Number.isFinite(startedAt) && Number.isFinite(currentTime)
-          ? Math.max(0, currentTime - startedAt)
-          : 0;
-      const elapsedMs = Math.max(clockElapsedMs, waitedMs);
-
-      if (elapsedMs >= options.lockTimeoutMs) {
-        throw new Error(
-          `Timed out after ${options.lockTimeoutMs}ms waiting for build provenance lock "${lockPath}"`,
-        );
-      }
-
-      const retryDelayMs = Math.min(
-        options.lockRetryMs,
-        options.lockTimeoutMs - elapsedMs,
-      );
-      await options.sleep(retryDelayMs);
-      waitedMs += retryDelayMs;
-    }
-  } catch (error) {
-    if (ownerFileMayBelongToContender) {
-      try {
-        await options.unlinkPath(ownerPath);
-      } catch (cleanupError) {
-        if (!isEnoentError(cleanupError)) {
-          throw combineErrors(
-            error,
-            cleanupError,
-            'Failed to clean unpublished build provenance lock owner',
-          );
-        }
-      }
-    }
-    throw error;
-  }
-}
-
-async function recoverStaleBuildProvenanceLock(lockPath, staleLock, options) {
-  const quarantinePath = buildStaleLockRecoveryPath(
-    lockPath,
-    options.randomUUID(),
-  );
-  const currentTarget = await readBuildProvenanceLockTarget(
-    lockPath,
-    options.readlinkPath,
-  );
-  if (currentTarget !== staleLock.ownerTarget) {
-    return false;
-  }
-
-  try {
-    await options.renamePath(lockPath, quarantinePath);
-  } catch (error) {
-    if (isEnoentError(error) || isAlreadyExistsError(error)) {
-      return false;
-    }
-    throw error;
-  }
-
-  let cleanupError;
-  for (const targetPath of [quarantinePath, staleLock.ownerPath]) {
-    try {
-      await options.unlinkPath(targetPath);
-    } catch (error) {
-      if (!isEnoentError(error)) {
-        cleanupError = cleanupError
-          ? combineErrors(
-              cleanupError,
-              error,
-              'Failed to clean recovered build provenance lock',
-            )
-          : error;
-      }
-    }
-  }
-
-  if (cleanupError) throw cleanupError;
-  return true;
-}
-
-async function inspectStaleBuildProvenanceLock(lockPath, options) {
-  try {
-    const ownerTarget = await options.readlinkPath(lockPath);
-    const ownerPath = buildProvenanceLockOwnerPath(lockPath, ownerTarget);
-    if (!ownerPath) {
-      return undefined;
-    }
-
-    const [owner, ownerStat] = await Promise.all([
-      readBuildProvenanceLockOwner(ownerPath, options.readFileText),
-      options.statPath(ownerPath),
-    ]);
-    if (
-      !owner ||
-      ownerTarget !== buildProvenanceLockOwnerTarget(lockPath, owner.token)
-    ) {
-      return undefined;
-    }
-
-    if (typeof ownerStat.isFile === 'function' && !ownerStat.isFile()) {
-      return undefined;
-    }
-
-    const createdAtMs = Date.parse(owner.createdAt);
-    const newestOwnerTimestamp = Math.max(createdAtMs, ownerStat.mtimeMs);
-    if (options.nowMs() - newestOwnerTimestamp < options.staleLockMs) {
-      return undefined;
-    }
-
-    if (await options.isProcessAlive(owner.pid)) {
-      return undefined;
-    }
-
-    return { owner, ownerPath, ownerTarget };
-  } catch (error) {
-    if (isEnoentError(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-}
-
-async function readBuildProvenanceLockTarget(lockPath, readlinkPath) {
-  try {
-    return await readlinkPath(lockPath);
-  } catch (error) {
-    if (isEnoentError(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-}
-
-function buildStaleLockRecoveryPath(lockPath, recoveryToken) {
-  return `${lockPath}.recover-${recoveryToken}`;
-}
-
-async function releaseBuildProvenanceLock(lockPath, expectedOwner, options) {
-  let releaseError;
-  let lockUnlinked = false;
-
-  try {
-    const ownerTarget = await readBuildProvenanceLockTarget(
-      lockPath,
-      options.readlinkPath,
-    );
-    if (ownerTarget !== expectedOwner.ownerTarget) {
-      throw new Error(
-        `Build provenance lock ownership changed before release for "${lockPath}"`,
-      );
-    }
-    await options.unlinkPath(lockPath);
-    lockUnlinked = true;
-  } catch (error) {
-    releaseError = error;
-  }
-
-  if (lockUnlinked || isBuildProvenanceOwnershipLoss(releaseError)) {
-    try {
-      await options.unlinkPath(expectedOwner.ownerPath);
-    } catch (cleanupError) {
-      if (!isEnoentError(cleanupError)) {
-        releaseError = releaseError
-          ? combineErrors(
-              releaseError,
-              cleanupError,
-              'Failed to clean build provenance lock owner',
-            )
-          : cleanupError;
-      }
-    }
-  }
-
-  if (releaseError) {
-    throw releaseError;
-  }
-}
-
-function isBuildProvenanceOwnershipLoss(error) {
-  return (
-    error instanceof Error &&
-    error.message.includes('ownership changed before release')
+  return new Error(
+    `Timed out after ${lockTimeoutSeconds} seconds waiting for build provenance lock ` +
+      `"${lockPath}": ${diagnostics}`,
+    { cause: error },
   );
 }
 
-async function readBuildProvenanceLockOwner(ownerPath, readFileText) {
-  try {
-    const raw = await readFileText(ownerPath);
-    const owner = JSON.parse(raw);
-
-    if (
-      !owner ||
-      typeof owner !== 'object' ||
-      Array.isArray(owner) ||
-      typeof owner.token !== 'string' ||
-      owner.token === '' ||
-      !Number.isSafeInteger(owner.pid) ||
-      owner.pid <= 0 ||
-      typeof owner.createdAt !== 'string' ||
-      !isExactIsoTimestamp(owner.createdAt)
-    ) {
-      return undefined;
-    }
-
-    return owner;
-  } catch (error) {
-    if (isEnoentError(error) || error instanceof SyntaxError) {
-      return undefined;
-    }
-    throw error;
+function includeChildDiagnostics(error) {
+  if (!(error instanceof Error)) {
+    return error;
   }
-}
 
-function buildProvenanceLockOwnerTarget(lockPath, ownerToken) {
-  return `${path.basename(lockPath)}.owner-${ownerToken}.json`;
-}
-
-function buildProvenanceLockOwnerPath(lockPath, ownerTarget) {
-  if (
-    ownerTarget !== path.basename(ownerTarget) ||
-    !ownerTarget.startsWith(`${path.basename(lockPath)}.owner-`) ||
-    !ownerTarget.endsWith('.json')
-  ) {
-    return undefined;
+  const stderr = typeof error.stderr === 'string' ? error.stderr.trim() : '';
+  if (stderr === '' || error.message.includes(stderr)) {
+    return error;
   }
-  return path.join(path.dirname(lockPath), ownerTarget);
+
+  return Object.assign(
+    new Error(`${error.message}\nstderr:\n${stderr}`, { cause: error }),
+    error,
+  );
 }
 
 async function readExistingBuildProvenance(statePath, readFileText) {
@@ -1457,12 +1214,16 @@ function findUnknownField(value, allowedKeys) {
   return Object.keys(value).find((key) => !allowed.has(key));
 }
 
-function validateLockTimingOption(name, value, allowZero) {
-  const validRange = allowZero ? value >= 0 : value > 0;
-
-  if (!Number.isFinite(value) || !validRange) {
-    const requirement = allowZero ? 'a nonnegative finite number' : 'a positive finite number';
-    throw new Error(`${name} must be ${requirement}`);
+function validateLockTimeoutSeconds(value) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_PROVENANCE_LOCK_TIMEOUT_SECONDS
+  ) {
+    throw new Error(
+      `lockTimeoutSeconds must be an integer between 0 and ` +
+        `${MAX_PROVENANCE_LOCK_TIMEOUT_SECONDS}`,
+    );
   }
 }
 

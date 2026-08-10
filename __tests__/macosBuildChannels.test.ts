@@ -2,27 +2,17 @@ import { EventEmitter } from 'node:events';
 import {
   cpSync,
   existsSync,
-  lstatSync,
   mkdirSync,
-  readlinkSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
-  symlinkSync,
-  unlinkSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import { spawn as spawnChild, spawnSync } from 'node:child_process';
-import {
-  readlink as readlinkAsync,
-  rename as renameAsync,
-  symlink as symlinkAsync,
-  unlink as unlinkAsync,
-} from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { rename as renameAsync } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -58,6 +48,7 @@ import type {
 
 const repositoryRoot = process.cwd();
 const scriptPath = join(repositoryRoot, 'scripts/build-macos-app.mjs');
+const provenanceHelperPath = join(repositoryRoot, 'scripts/write-build-provenance.mjs');
 const tauriRelativeCwd = 'native/macos/psyche-build-tauri';
 const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
 const manifestPath = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
@@ -137,36 +128,6 @@ function copyBundle(source: string, destination: string): void {
   cpSync(source, destination, { recursive: true });
 }
 
-function writeLockOwner(
-  lockPath: string,
-  token: string,
-  pid: number,
-  createdAt = new Date().toISOString(),
-): { ownerPath: string; ownerTarget: string } {
-  const ownerTarget = `builds.json.lock.owner-${token}.json`;
-  const ownerPath = join(dirname(lockPath), ownerTarget);
-  mkdirSync(dirname(lockPath), { recursive: true });
-  writeFileSync(
-    ownerPath,
-    `${JSON.stringify({ token, pid, createdAt })}\n`,
-    { encoding: 'utf8', mode: 0o600 },
-  );
-  symlinkSync(ownerTarget, lockPath);
-  return { ownerPath, ownerTarget };
-}
-
-function pathExistsIncludingDanglingSymlink(targetPath: string): boolean {
-  try {
-    lstatSync(targetPath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
-    }
-    throw error;
-  }
-}
-
 function spawnProvenanceWriter(
   record: BuildProvenance,
   homeDir: string,
@@ -178,7 +139,9 @@ function spawnProvenanceWriter(
     import { writeFile } from 'node:fs/promises';
     import { setTimeout as sleep } from 'node:timers/promises';
 
-    const [moduleUrl, recordJson, homeDir, readyPath, startPath] = process.argv.slice(1);
+    const { moduleUrl, recordJson, homeDir, readyPath, startPath } = JSON.parse(
+      process.env.PSYCHE_PROVENANCE_WRITER_INPUT,
+    );
     await writeFile(readyPath, 'ready');
     while (!existsSync(startPath)) {
       await sleep(1);
@@ -186,8 +149,7 @@ function spawnProvenanceWriter(
     const { writeBuildProvenance } = await import(moduleUrl);
     await writeBuildProvenance(JSON.parse(recordJson), {
       homeDir,
-      lockRetryMs: 1,
-      lockTimeoutMs: 5_000,
+      lockTimeoutSeconds: 5,
     });
   `;
   const child = spawnChild(
@@ -196,13 +158,20 @@ function spawnProvenanceWriter(
       '--input-type=module',
       '--eval',
       childScript,
-      pathToFileURL(scriptPath).href,
-      JSON.stringify(record),
-      homeDir,
-      readyPath,
-      startPath,
     ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
+    {
+      env: {
+        ...process.env,
+        PSYCHE_PROVENANCE_WRITER_INPUT: JSON.stringify({
+          moduleUrl: pathToFileURL(scriptPath).href,
+          recordJson: JSON.stringify(record),
+          homeDir,
+          readyPath,
+          startPath,
+        }),
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
   );
 
   return new Promise<void>((resolveChild, rejectChild) => {
@@ -222,6 +191,40 @@ function spawnProvenanceWriter(
           `provenance child exited with code ${String(code)} signal ${String(signal)}: ${stderr}`,
         ),
       );
+    });
+  });
+}
+
+function spawnLockfProcess(
+  lockPath: string,
+  childScript: string,
+  childArgs: string[],
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }> {
+  const child = spawnChild(
+    '/usr/bin/lockf',
+    [
+      '-k',
+      '-t',
+      '5',
+      lockPath,
+      process.execPath,
+      '--input-type=module',
+      '--eval',
+      childScript,
+      ...childArgs,
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] },
+  );
+
+  return new Promise((resolveChild, rejectChild) => {
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', rejectChild);
+    child.on('close', (code, signal) => {
+      resolveChild({ code, signal, stderr });
     });
   });
 }
@@ -1448,392 +1451,235 @@ describe('macOS build channels', () => {
       expect(existsSync(stateDir)).toBe(false);
     });
 
-    it('rejects an unknown incoming field without changing existing state', async () => {
-      const homeDir = createScratchDirectory('provenance-invalid-incoming-unchanged');
-      const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
-      const before = readFileSync(provenancePath, 'utf8');
+    it('invokes lockf with an exact argument array and never puts record JSON on the command line', async () => {
+      const homeDir = createScratchDirectory('provenance-lockf-arguments');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const statePath = join(stateDir, 'builds.json');
+      const inputPath = join(stateDir, '.builds.json.input-fixed-input.json');
+      const lockPath = `${statePath}.lock`;
+      const execute = vi.fn(async (
+        _command: string,
+        _args: readonly string[],
+        _options?: CommandOptions,
+      ): Promise<CommandResult> => ({ stdout: '', stderr: '' }));
 
       await expect(
-        writeBuildProvenance(
-          { ...devRecord, futureField: 'unsupported' } as unknown as BuildProvenance,
-          { homeDir },
-        ),
-      ).rejects.toThrow(/dev.*unknown field "futureField"/i);
-      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          execute,
+          lockTimeoutSeconds: 7,
+          randomUUID: () => 'fixed-input',
+        }),
+      ).resolves.toBe(statePath);
+
+      expect(execute).toHaveBeenCalledWith(
+        '/usr/bin/lockf',
+        [
+          '-k',
+          '-t',
+          '7',
+          lockPath,
+          process.execPath,
+          provenanceHelperPath,
+          statePath,
+          inputPath,
+        ],
+        { stage: 'write build provenance' },
+      );
+      const invokedArgs = execute.mock.calls[0]?.[1] ?? [];
+      expect(invokedArgs).not.toContain(JSON.stringify(devRecord));
+      expect(invokedArgs.every((argument) => !argument.includes(devRecord.commitSha))).toBe(true);
     });
 
-    it('preserves stable and dev provenance independently', async () => {
+    it('writes a unique mode-0600 private input file and removes only that input', async () => {
+      const homeDir = createScratchDirectory('provenance-private-input');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const inputPath = join(stateDir, '.builds.json.input-private-input.json');
+      const removedPaths: string[] = [];
+      const execute = vi.fn(async (
+        _command: string,
+        args: readonly string[],
+      ): Promise<CommandResult> => {
+        expect(args.at(-1)).toBe(inputPath);
+        expect(statSync(inputPath).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(inputPath, 'utf8'))).toEqual(devRecord);
+        return { stdout: '', stderr: '' };
+      });
+
+      await writeBuildProvenance(devRecord, {
+        homeDir,
+        execute,
+        randomUUID: () => 'private-input',
+        removePath: async (targetPath: string) => {
+          removedPaths.push(targetPath);
+          rmSync(targetPath, { recursive: true, force: true });
+        },
+      });
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(removedPaths).toEqual([inputPath]);
+      expect(existsSync(inputPath)).toBe(false);
+    });
+
+    it('reports an explicit bounded lockf timeout and cleans the private input', async () => {
+      const homeDir = createScratchDirectory('provenance-lockf-timeout');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const inputPath = join(stateDir, '.builds.json.input-timeout-input.json');
+      const timeoutError = Object.assign(new Error('lockf failed'), {
+        exitCode: 75,
+        stderr: 'lockf: builds.json.lock: already locked',
+      });
+      const execute = vi.fn(async () => {
+        throw timeoutError;
+      });
+
+      await expect(
+        writeBuildProvenance(devRecord, {
+          homeDir,
+          execute,
+          lockTimeoutSeconds: 2,
+          randomUUID: () => 'timeout-input',
+        }),
+      ).rejects.toThrow(/Timed out after 2 seconds.*build provenance lock.*already locked/is);
+      expect(existsSync(inputPath)).toBe(false);
+    });
+
+    it.each([-1, 61, 1.5, Number.POSITIVE_INFINITY])(
+      'rejects an unbounded lock timeout of %s before creating state',
+      async (lockTimeoutSeconds) => {
+        const homeDir = createScratchDirectory('provenance-invalid-timeout');
+        const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+
+        await expect(
+          writeBuildProvenance(devRecord, { homeDir, lockTimeoutSeconds }),
+        ).rejects.toThrow(/lockTimeoutSeconds.*integer between 0 and 60/i);
+        expect(existsSync(stateDir)).toBe(false);
+      },
+    );
+
+    it('propagates helper diagnostics and leaves malformed existing state unchanged', async () => {
+      const homeDir = createScratchDirectory('provenance-helper-failure');
+      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
+      const statePath = join(stateDir, 'builds.json');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(statePath, '{"version":2,"channels":{}}\n', 'utf8');
+      const before = readFileSync(statePath, 'utf8');
+
+      const error = await writeBuildProvenance(devRecord, { homeDir }).then(
+        () => undefined,
+        (failure) => failure as Error & { stderr?: string },
+      );
+
+      expect(error?.message).toContain('write-build-provenance.mjs');
+      expect(error?.message).toContain('Invalid build provenance file');
+      expect(error?.stderr).toContain('Invalid build provenance file');
+      expect(readFileSync(statePath, 'utf8')).toBe(before);
+      expect(readdirSync(stateDir).sort()).toEqual(['builds.json', 'builds.json.lock']);
+    });
+
+    it('preserves primary helper and private-input cleanup failures together', async () => {
+      const homeDir = createScratchDirectory('provenance-primary-cleanup-failure');
+      const execute = vi.fn(async () => {
+        throw Object.assign(new Error('helper failed'), {
+          exitCode: 1,
+          stderr: 'helper diagnostic',
+        });
+      });
+      const removePath = vi.fn(async () => {
+        throw new Error('input cleanup failed');
+      });
+
+      const error = await writeBuildProvenance(devRecord, {
+        homeDir,
+        execute,
+        removePath,
+        randomUUID: () => 'aggregate-input',
+      }).then(
+        () => undefined,
+        (failure) => failure as Error,
+      );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(error?.message).toContain('helper failed');
+      expect(error?.message).toContain('helper diagnostic');
+      expect(error?.message).toContain('Failed to clean private build provenance input file');
+      expect(error?.message).toContain('input cleanup failed');
+      expect((error as AggregateError).errors).toHaveLength(2);
+      expect(removePath).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves stable and dev provenance independently with strict existing-state validation', async () => {
       const homeDir = createScratchDirectory('provenance-preservation');
-      const provenancePath = await writeBuildProvenance(stableRecord, { homeDir });
+      const statePath = await writeBuildProvenance(stableRecord, { homeDir });
       const secondPath = await writeBuildProvenance(devRecord, { homeDir });
 
-      expect(secondPath).toBe(provenancePath);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+      expect(secondPath).toBe(statePath);
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({
         version: 1,
         channels: {
           stable: stableRecord,
           dev: devRecord,
         },
       });
-    });
-
-    it('publishes a fully populated unique owner file before exposing its lock symlink', async () => {
-      const homeDir = createScratchDirectory('provenance-lock-owner');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const lockPath = join(stateDir, 'builds.json.lock');
-      const owners: unknown[] = [];
-      const lockTargets: string[] = [];
-
-      for (const [record, token] of [
-        [stableRecord, 'stable-owner-token'],
-        [devRecord, 'dev-owner-token'],
-      ] as const) {
-        await writeBuildProvenance(record, {
-          homeDir,
-          randomUUID: () => token,
-          symlinkPath: async (target: string, symlinkPath: string) => {
-            expect(symlinkPath).toBe(lockPath);
-            lockTargets.push(target);
-            owners.push(
-              JSON.parse(readFileSync(join(stateDir, target), 'utf8')),
-            );
-            await symlinkAsync(target, symlinkPath);
-          },
-        });
-      }
-
-      expect(lockTargets).toEqual([
-        'builds.json.lock.owner-stable-owner-token.json',
-        'builds.json.lock.owner-dev-owner-token.json',
+      expect(readdirSync(join(statePath, '..')).sort()).toEqual([
+        'builds.json',
+        'builds.json.lock',
       ]);
-      expect(owners).toHaveLength(2);
-      expect(owners).toEqual([
-        {
-          token: 'stable-owner-token',
-          pid: process.pid,
-          createdAt: expect.any(String),
-        },
-        {
-          token: 'dev-owner-token',
-          pid: process.pid,
-          createdAt: expect.any(String),
-        },
-      ]);
-      expect(
-        owners.every(
-          (owner) =>
-            new Date((owner as { createdAt: string }).createdAt).toISOString() ===
-            (owner as { createdAt: string }).createdAt,
-        ),
-      ).toBe(true);
-      expect(existsSync(lockPath)).toBe(false);
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('rejects malformed provenance files without changing them', async () => {
-      const homeDir = createScratchDirectory('provenance-invalid-file');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(provenancePath, '{"version":2,"channels":{}}', 'utf8');
-      const before = readFileSync(provenancePath, 'utf8');
-
-      await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
-        /Invalid build provenance file/,
-      );
-      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
-    });
-
-    it('rejects unknown top-level provenance fields without changing the file', async () => {
-      const homeDir = createScratchDirectory('provenance-unknown-top-level');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(
-        provenancePath,
-        `${JSON.stringify({
-          version: 1,
-          channels: { stable: stableRecord },
-          futureField: true,
-        }, null, 2)}\n`,
-        'utf8',
-      );
-      const before = readFileSync(provenancePath, 'utf8');
-
-      await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(
-        /unknown top-level field "futureField"/i,
-      );
-      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
     });
 
     it.each([
       {
-        name: 'null stable record',
-        state: { version: 1, channels: { stable: null } },
-        errorPattern: /Invalid build provenance file .* channel "stable" must be an object/i,
+        name: 'unknown top-level field',
+        state: { version: 1, channels: { stable: stableRecord }, futureField: true },
+        errorPattern: /unknown top-level field "futureField"/i,
       },
       {
-        name: 'mismatched dev channel record',
-        state: {
-          version: 1,
-          channels: {
-            stable: stableRecord,
-            dev: {
-              ...devRecord,
-              channel: 'stable',
-            },
-          },
-        },
-        errorPattern:
-          /Invalid build provenance file .* channel "dev" record must contain channel="dev"/i,
+        name: 'unknown channel',
+        state: { version: 1, channels: { preview: devRecord } },
+        errorPattern: /unknown channel "preview"/i,
       },
       {
-        name: 'malformed dev record',
-        state: {
-          version: 1,
-          channels: {
-            stable: stableRecord,
-            dev: {
-              ...devRecord,
-              commitSha: 'SHORTSHA',
-              requestedRef: 42,
-            },
-          },
-        },
-        errorPattern:
-          /Invalid build provenance file .* channel "dev" record must contain a 40-character lowercase hexadecimal commitSha/i,
-      },
-      {
-        name: 'stable record without requestedRef',
+        name: 'stable record missing requestedRef',
         state: {
           version: 1,
           channels: {
             stable: (({ requestedRef: _requestedRef, ...record }) => record)(stableRecord),
           },
         },
-        errorPattern: /Invalid build provenance file .*stable.*requestedRef.*nonblank/i,
+        errorPattern: /stable.*requestedRef.*nonblank/i,
       },
       {
         name: 'dev record with requestedRef',
         state: {
           version: 1,
-          channels: {
-            dev: {
-              ...devRecord,
-              requestedRef: 'HEAD',
-            },
-          },
+          channels: { dev: { ...devRecord, requestedRef: 'HEAD' } },
         },
-        errorPattern: /Invalid build provenance file .*dev.*requestedRef.*forbidden/i,
+        errorPattern: /dev.*requestedRef.*forbidden/i,
       },
       {
-        name: 'stable record with an unknown field',
+        name: 'record with unknown field',
         state: {
           version: 1,
-          channels: {
-            stable: {
-              ...stableRecord,
-              futureField: true,
-            },
-          },
+          channels: { dev: { ...devRecord, futureField: true } },
         },
-        errorPattern: /Invalid build provenance file .*stable.*unknown field "futureField"/i,
+        errorPattern: /dev.*unknown field "futureField"/i,
       },
-      {
-        name: 'dev record with an unknown field',
-        state: {
-          version: 1,
-          channels: {
-            dev: {
-              ...devRecord,
-              futureField: true,
-            },
-          },
-        },
-        errorPattern: /Invalid build provenance file .*dev.*unknown field "futureField"/i,
-      },
-      {
-        name: 'non-canonical timestamp',
-        state: {
-          version: 1,
-          channels: {
-            dev: {
-              ...devRecord,
-              builtAt: '2026-08-10T11:00:00Z',
-            },
-          },
-        },
-        errorPattern: /Invalid build provenance file .* exact ISO timestamp/i,
-      },
-      {
-        name: 'relative installed path',
-        state: {
-          version: 1,
-          channels: {
-            dev: {
-              ...devRecord,
-              installedPath: 'Applications/Psyche Build Dev.app',
-            },
-          },
-        },
-        errorPattern: /Invalid build provenance file .* absolute installedPath/i,
-      },
-      {
-        name: 'wrong stable identity',
-        state: {
-          version: 1,
-          channels: {
-            stable: {
-              ...stableRecord,
-              productName: 'Psyche Build Dev',
-            },
-          },
-        },
-        errorPattern: /Invalid build provenance file .* productName="Psyche Build"/i,
-      },
-      {
-        name: 'unknown channel key',
-        state: {
-          version: 1,
-          channels: {
-            stable: stableRecord,
-            preview: {
-              ...devRecord,
-              channel: 'dev',
-            },
-          },
-        },
-        errorPattern: /Invalid build provenance file .* unknown channel "preview"/i,
-      },
-    ])('rejects $name without changing the file', async ({ state, errorPattern }) => {
-      const homeDir = createScratchDirectory('provenance-channel-validation');
+    ])('rejects existing state with an exact-key violation: $name', async ({ state, errorPattern }) => {
+      const homeDir = createScratchDirectory('provenance-existing-validation');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
+      const statePath = join(stateDir, 'builds.json');
       mkdirSync(stateDir, { recursive: true });
-      writeFileSync(provenancePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-      const before = readFileSync(provenancePath, 'utf8');
+      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+      const before = readFileSync(statePath, 'utf8');
 
       await expect(writeBuildProvenance(devRecord, { homeDir })).rejects.toThrow(errorPattern);
-      expect(readFileSync(provenancePath, 'utf8')).toBe(before);
-    });
-
-    it('does not publish the lock before exclusive owner metadata creation completes', async () => {
-      const homeDir = createScratchDirectory('provenance-owner-publication-gap');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      let markOwnerWriteStarted = () => {};
-      let releaseOwnerWrite = () => {};
-      const ownerWriteStarted = new Promise<void>((resolveStarted) => {
-        markOwnerWriteStarted = resolveStarted;
-      });
-      const ownerWriteGate = new Promise<void>((resolveGate) => {
-        releaseOwnerWrite = resolveGate;
-      });
-
-      const stableWrite = writeBuildProvenance(stableRecord, {
-        homeDir,
-        randomUUID: () => 'publication-gap-owner',
-        lockRetryMs: 1,
-        lockTimeoutMs: 500,
-        staleLockMs: 1,
-        isProcessAlive: async () => false,
-        writeFileText: async (
-          filePath: string,
-          content: string,
-          options?: { exclusive?: boolean },
-        ) => {
-          if (options?.exclusive) {
-            markOwnerWriteStarted();
-            await ownerWriteGate;
-          }
-          writeFileSync(filePath, content, {
-            encoding: 'utf8',
-            mode: 0o600,
-            ...(options?.exclusive ? { flag: 'wx' } : {}),
-          });
-        },
-      });
-      await ownerWriteStarted;
-
-      const lockWasPublishedBeforeOwner = pathExistsIncludingDanglingSymlink(lockPath);
-      const devWrite = writeBuildProvenance(devRecord, {
-        homeDir,
-        randomUUID: () => 'publication-gap-successor',
-        lockRetryMs: 1,
-        lockTimeoutMs: 500,
-      });
-      await tick();
-      releaseOwnerWrite();
-      const results = await Promise.allSettled([stableWrite, devWrite]);
-
-      expect(lockWasPublishedBeforeOwner).toBe(false);
-      expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
-        version: 1,
-        channels: {
-          dev: devRecord,
-          stable: stableRecord,
-        },
-      });
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('serializes concurrent stable and dev updates so neither record is lost', async () => {
-      const homeDir = createScratchDirectory('provenance-concurrent');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      let releaseFirstWrite = () => {};
-      let markFirstWriting = () => {};
-      const firstWriteGate = new Promise<void>((resolveGate) => {
-        releaseFirstWrite = resolveGate;
-      });
-      const firstWriting = new Promise<void>((resolveWriting) => {
-        markFirstWriting = resolveWriting;
-      });
-
-      const stableWrite = writeBuildProvenance(stableRecord, {
-        homeDir,
-        lockRetryMs: 1,
-        writeFileText: async (
-          filePath: string,
-          content: string,
-          options?: { exclusive?: boolean },
-        ) => {
-          if (options?.exclusive) {
-            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-            return;
-          }
-          markFirstWriting();
-          await firstWriteGate;
-          writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-        },
-      });
-      await firstWriting;
-
-      const devWrite = writeBuildProvenance(devRecord, {
-        homeDir,
-        lockRetryMs: 1,
-      });
-      await tick();
-      releaseFirstWrite();
-      await Promise.all([stableWrite, devWrite]);
-
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
-        version: 1,
-        channels: {
-          stable: stableRecord,
-          dev: devRecord,
-        },
-      });
-      expect(existsSync(lockPath)).toBe(false);
+      expect(readFileSync(statePath, 'utf8')).toBe(before);
     });
 
     it('preserves stable and dev records across concurrent processes', async () => {
       const homeDir = createScratchDirectory('provenance-cross-process');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
+      const statePath = join(stateDir, 'builds.json');
       const startPath = join(homeDir, 'start');
       const stableReadyPath = join(homeDir, 'stable-ready');
       const devReadyPath = join(homeDir, 'dev-ready');
@@ -1854,761 +1700,43 @@ describe('macOS build channels', () => {
       writeFileSync(startPath, 'start', 'utf8');
       await Promise.all([stableWrite, devWrite]);
 
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
+      expect(JSON.parse(readFileSync(statePath, 'utf8'))).toEqual({
         version: 1,
         channels: {
           stable: stableRecord,
           dev: devRecord,
         },
       });
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
+      expect(readdirSync(stateDir).sort()).toEqual(['builds.json', 'builds.json.lock']);
+    }, 15_000);
 
-    it('times out while a fresh provenance lock is held by another process', async () => {
-      const homeDir = createScratchDirectory('provenance-lock-timeout');
+    it('releases the kernel lock after a child crash so an immediate writer succeeds', async () => {
+      const homeDir = createScratchDirectory('provenance-child-crash');
       const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const { ownerTarget } = writeLockOwner(lockPath, 'fresh-owner', 4242);
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          lockTimeoutMs: 0,
-          staleLockMs: 60_000,
-        }),
-      ).rejects.toThrow(/Timed out.*provenance lock/i);
-      expect(existsSync(provenancePath)).toBe(false);
-      expect(readlinkSync(lockPath)).toBe(ownerTarget);
-    });
-
-    it('bounds lock retries even when the injected clock does not advance', async () => {
-      const homeDir = createScratchDirectory('provenance-static-clock-timeout');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const lockPath = join(stateDir, 'builds.json.lock');
-      const sleep = vi.fn(async () => {});
-      const { ownerTarget } = writeLockOwner(
-        lockPath,
-        'static-clock-owner',
-        4242,
-        new Date(1_000).toISOString(),
-      );
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          nowMs: () => 1_000,
-          sleep,
-          lockTimeoutMs: 3,
-          lockRetryMs: 1,
-          staleLockMs: 60_000,
-        }),
-      ).rejects.toThrow(/Timed out after 3ms.*provenance lock/i);
-      expect(sleep).toHaveBeenCalledTimes(3);
-      expect(readlinkSync(lockPath)).toBe(ownerTarget);
-    });
-
-    it('times out without removing an old lock whose owner process is alive', async () => {
-      const homeDir = createScratchDirectory('provenance-live-old-lock');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath, ownerTarget } = writeLockOwner(
-        lockPath,
-        'live-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(ownerPath, staleTime, staleTime);
-      const isProcessAlive = vi.fn(async (pid: number) => {
-        expect(pid).toBe(4242);
-        return true;
-      });
-      const unlinkedPaths: string[] = [];
-      const unlinkPath = vi.fn(async (targetPath: string) => {
-        unlinkedPaths.push(targetPath);
-        await unlinkAsync(targetPath);
-      });
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          lockTimeoutMs: 0,
-          staleLockMs: 10,
-          isProcessAlive,
-          unlinkPath,
-        }),
-      ).rejects.toThrow(/Timed out.*provenance lock/i);
-      expect(isProcessAlive).toHaveBeenCalledTimes(1);
-      expect(unlinkedPaths).not.toContain(lockPath);
-      expect(unlinkedPaths).not.toContain(ownerPath);
-      expect(JSON.parse(readFileSync(ownerPath, 'utf8'))).toEqual({
-        token: 'live-owner',
-        pid: 4242,
-        createdAt: staleTime.toISOString(),
-      });
-      expect(readlinkSync(lockPath)).toBe(ownerTarget);
-      expect(existsSync(provenancePath)).toBe(false);
-    });
-
-    it('recovers an old lock whose owner process is dead', async () => {
-      const homeDir = createScratchDirectory('provenance-dead-stale-lock');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath } = writeLockOwner(
-        lockPath,
-        'dead-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(ownerPath, staleTime, staleTime);
-      const isProcessAlive = vi.fn(async (pid: number) => {
-        expect(pid).toBe(4242);
-        return false;
-      });
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          lockRetryMs: 1,
-          lockTimeoutMs: 50,
-          staleLockMs: 10,
-          isProcessAlive,
-        }),
-      ).resolves.toBe(provenancePath);
-      expect(isProcessAlive).toHaveBeenCalled();
-      expect(existsSync(lockPath)).toBe(false);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('reclaims a dead stale lock despite an orphaned prior recovery artifact', async () => {
-      const homeDir = createScratchDirectory('provenance-orphaned-stale-recovery');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath } = writeLockOwner(
-        lockPath,
-        'dead-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(ownerPath, staleTime, staleTime);
-      const orphanRecoveryPath = `${lockPath}.recover-dead-owner`;
-      writeFileSync(orphanRecoveryPath, 'orphaned recovery claim\n', 'utf8');
-      const tokens = ['new-owner', 'new-recovery-attempt'];
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => tokens.shift() ?? 'unexpected-token',
-          lockRetryMs: 1,
-          lockTimeoutMs: 50,
-          staleLockMs: 10,
-          isProcessAlive: async () => false,
-        }),
-      ).resolves.toBe(provenancePath);
-
-      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
-      expect(existsSync(ownerPath)).toBe(false);
-      expect(readFileSync(orphanRecoveryPath, 'utf8')).toBe('orphaned recovery claim\n');
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-    });
-
-    it('allows a successor after a stale recovery winner crashes before quarantine cleanup', async () => {
-      const homeDir = createScratchDirectory('provenance-stale-recovery-winner-crash');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath } = writeLockOwner(
-        lockPath,
-        'dead-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(ownerPath, staleTime, staleTime);
-      const winnerTokens = ['recovery-winner', 'winner-attempt'];
-      let quarantinePath = '';
-
-      await expect(
-        writeBuildProvenance(stableRecord, {
-          homeDir,
-          randomUUID: () => winnerTokens.shift() ?? 'unexpected-winner-token',
-          lockRetryMs: 1,
-          lockTimeoutMs: 50,
-          staleLockMs: 10,
-          isProcessAlive: async () => false,
-          renamePath: async (sourcePath: string, destinationPath: string) => {
-            await renameAsync(sourcePath, destinationPath);
-            if (sourcePath === lockPath) {
-              quarantinePath = destinationPath;
-              throw new Error('simulated recovery winner crash');
-            }
-          },
-        }),
-      ).rejects.toThrow(/simulated recovery winner crash/);
-
-      expect(quarantinePath).toBe(`${lockPath}.recover-winner-attempt`);
-      expect(pathExistsIncludingDanglingSymlink(quarantinePath)).toBe(true);
-      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'successor',
-          lockRetryMs: 1,
-          lockTimeoutMs: 50,
-        }),
-      ).resolves.toBe(provenancePath);
-
-      expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(false);
-      expect(pathExistsIncludingDanglingSymlink(quarantinePath)).toBe(true);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-    });
-
-    it.each(['malformed', 'missing'] as const)(
-      'times out safely for an old lock with %s owner metadata',
-      async (ownerState) => {
-        const homeDir = createScratchDirectory(`provenance-${ownerState}-stale-lock`);
-        const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-        const provenancePath = join(stateDir, 'builds.json');
-        const lockPath = `${provenancePath}.lock`;
-        mkdirSync(stateDir, { recursive: true });
-        const ownerTarget = `builds.json.lock.owner-${ownerState}.json`;
-        const ownerPath = join(stateDir, ownerTarget);
-        if (ownerState === 'malformed') {
-          writeFileSync(ownerPath, '{"token":', 'utf8');
-        }
-        symlinkSync(ownerTarget, lockPath);
-        const staleTime = new Date(Date.now() - 60_000);
-        if (ownerState === 'malformed') {
-          utimesSync(ownerPath, staleTime, staleTime);
-        }
-        const isProcessAlive = vi.fn(async () => false);
-
-        await expect(
-          writeBuildProvenance(devRecord, {
-            homeDir,
-            lockRetryMs: 1,
-            lockTimeoutMs: 3,
-            staleLockMs: 10,
-            isProcessAlive,
-          }),
-        ).rejects.toThrow(/Timed out after 3ms.*provenance lock/i);
-        expect(isProcessAlive).not.toHaveBeenCalled();
-        expect(readlinkSync(lockPath)).toBe(ownerTarget);
-        expect(pathExistsIncludingDanglingSymlink(lockPath)).toBe(true);
-        expect(existsSync(provenancePath)).toBe(false);
-      },
-    );
-
-    it('lets only one of two stale contenders quarantine the observed symlink', async () => {
-      const homeDir = createScratchDirectory('provenance-concurrent-stale-lock');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath, ownerTarget } = writeLockOwner(
-        lockPath,
-        'dead-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(ownerPath, staleTime, staleTime);
-
-      let livenessChecks = 0;
-      let releaseLivenessChecks = () => {};
-      const bothCheckingLiveness = new Promise<void>((resolveChecks) => {
-        releaseLivenessChecks = resolveChecks;
-      });
-      const isProcessAlive = vi.fn(async (pid: number) => {
-        if (pid === process.pid) {
-          return true;
-        }
-        livenessChecks += 1;
-        if (livenessChecks === 2) {
-          releaseLivenessChecks();
-        }
-        await bothCheckingLiveness;
-        return false;
-      });
-      let oldTargetReads = 0;
-      let releasePreRenameReads = () => {};
-      const bothPreRenameReads = new Promise<void>((resolveReads) => {
-        releasePreRenameReads = resolveReads;
-      });
-      const readlinkPath = async (targetPath: string) => {
-        const target = await readlinkAsync(targetPath);
-        if (targetPath === lockPath && target === ownerTarget) {
-          oldTargetReads += 1;
-          if (oldTargetReads === 4) {
-            releasePreRenameReads();
-          }
-          if (oldTargetReads > 2) {
-            await bothPreRenameReads;
-          }
-        }
-        return target;
-      };
-      let markFirstLockMoved = () => {};
-      let markSecondRenameAttempted = () => {};
-      const firstLockMoved = new Promise<void>((resolveMoved) => {
-        markFirstLockMoved = resolveMoved;
-      });
-      const secondRenameAttempted = new Promise<void>((resolveAttempted) => {
-        markSecondRenameAttempted = resolveAttempted;
-      });
-      const renames: Array<[string, string]> = [];
-      let quarantineRenameAttempts = 0;
-      const renamePath = async (sourcePath: string, destinationPath: string) => {
-        if (
-          sourcePath === lockPath &&
-          destinationPath.includes('.recover-')
-        ) {
-          quarantineRenameAttempts += 1;
-          if (quarantineRenameAttempts === 1) {
-            await renameAsync(sourcePath, destinationPath);
-            renames.push([sourcePath, destinationPath]);
-            markFirstLockMoved();
-            await secondRenameAttempted;
-            return;
-          }
-          await firstLockMoved;
-          try {
-            await renameAsync(sourcePath, destinationPath);
-          } finally {
-            markSecondRenameAttempted();
-          }
-          renames.push([sourcePath, destinationPath]);
-          return;
-        }
-        await renameAsync(sourcePath, destinationPath);
-        renames.push([sourcePath, destinationPath]);
-      };
-
-      await Promise.all([
-        writeBuildProvenance(stableRecord, {
-          homeDir,
-          randomUUID: () => 'stable-contender',
-          lockRetryMs: 1,
-          lockTimeoutMs: 500,
-          staleLockMs: 10,
-          isProcessAlive,
-          readlinkPath,
-          renamePath,
-        }),
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'dev-contender',
-          lockRetryMs: 1,
-          lockTimeoutMs: 500,
-          staleLockMs: 10,
-          isProcessAlive,
-          readlinkPath,
-          renamePath,
-        }),
-      ]);
-
-      const quarantineRenames = renames.filter(
-        ([sourcePath, destinationPath]) =>
-          sourcePath === lockPath && destinationPath.includes('.recover-'),
-      );
-      expect(quarantineRenames).toHaveLength(1);
-      expect(quarantineRenameAttempts).toBe(2);
-      expect(
-        renames.some(
-          ([sourcePath, destinationPath]) =>
-            sourcePath.includes('.recover-') && destinationPath === lockPath,
-        ),
-      ).toBe(false);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
-        version: 1,
-        channels: {
-          stable: stableRecord,
-          dev: devRecord,
-        },
-      });
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('allows a successor to acquire while a recovered owner file is being cleaned', async () => {
-      const homeDir = createScratchDirectory('provenance-successor-during-stale-cleanup');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const staleTime = new Date(Date.now() - 60_000);
-      const { ownerPath: staleOwnerPath } = writeLockOwner(
-        lockPath,
-        'dead-owner',
-        4242,
-        staleTime.toISOString(),
-      );
-      utimesSync(staleOwnerPath, staleTime, staleTime);
-
-      let markStaleOwnerCleanup = () => {};
-      let releaseStaleOwnerCleanup = () => {};
-      const staleOwnerCleanupStarted = new Promise<void>((resolveStarted) => {
-        markStaleOwnerCleanup = resolveStarted;
-      });
-      const staleOwnerCleanupGate = new Promise<void>((resolveGate) => {
-        releaseStaleOwnerCleanup = resolveGate;
-      });
-      const stableWrite = writeBuildProvenance(stableRecord, {
-        homeDir,
-        randomUUID: () => 'stale-recovery-contender',
-        lockRetryMs: 1,
-        lockTimeoutMs: 500,
-        staleLockMs: 10,
-        isProcessAlive: async (pid: number) => pid === process.pid,
-        unlinkPath: async (targetPath: string) => {
-          if (targetPath === staleOwnerPath) {
-            markStaleOwnerCleanup();
-            await staleOwnerCleanupGate;
-          }
-          await unlinkAsync(targetPath);
-        },
-      });
-      await staleOwnerCleanupStarted;
-
-      let markSuccessorWriting = () => {};
-      let releaseSuccessorWrite = () => {};
-      const successorWriting = new Promise<void>((resolveWriting) => {
-        markSuccessorWriting = resolveWriting;
-      });
-      const successorWriteGate = new Promise<void>((resolveGate) => {
-        releaseSuccessorWrite = resolveGate;
-      });
-      const devWrite = writeBuildProvenance(devRecord, {
-        homeDir,
-        randomUUID: () => 'cleanup-successor',
-        lockRetryMs: 1,
-        lockTimeoutMs: 500,
-        writeFileText: async (
-          filePath: string,
-          content: string,
-          options?: { exclusive?: boolean },
-        ) => {
-          if (!options?.exclusive) {
-            markSuccessorWriting();
-            await successorWriteGate;
-          }
-          writeFileSync(filePath, content, {
-            encoding: 'utf8',
-            mode: 0o600,
-            ...(options?.exclusive ? { flag: 'wx' } : {}),
-          });
-        },
-      });
-      await successorWriting;
-
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-cleanup-successor.json',
-      );
-      releaseStaleOwnerCleanup();
-      await tick();
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-cleanup-successor.json',
-      );
-      releaseSuccessorWrite();
-      await Promise.all([stableWrite, devWrite]);
-
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
-        version: 1,
-        channels: {
-          dev: devRecord,
-          stable: stableRecord,
-        },
-      });
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('cleans up atomic temp files when writing the provenance file fails', async () => {
-      const homeDir = createScratchDirectory('provenance-write-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-
-      await expect(
-        writeBuildProvenance(stableRecord, {
-          homeDir,
-          randomUUID: () => 'write-failure',
-          writeFileText: async (
-            filePath: string,
-            content: string,
-            options?: { exclusive?: boolean },
-          ) => {
-            if (options?.exclusive) {
-              writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-              return;
-            }
-            throw new Error('write failed');
-          },
-        }),
-      ).rejects.toThrow(/write failed/);
-
-      expect(readdirSync(stateDir)).toEqual([]);
-      expect(existsSync(join(stateDir, 'builds.json.lock'))).toBe(false);
-    });
-
-    it('cleans up atomic temp files when renaming the provenance file fails', async () => {
-      const homeDir = createScratchDirectory('provenance-rename-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
+      const statePath = join(stateDir, 'builds.json');
+      const lockPath = `${statePath}.lock`;
+      const readyPath = join(homeDir, 'crash-ready');
+      const startPath = join(homeDir, 'crash-start');
       mkdirSync(stateDir, { recursive: true });
-      writeFileSync(provenancePath, JSON.stringify({ version: 1, channels: { stable: stableRecord } }), 'utf8');
+      const crashScript = `
+        import { existsSync } from 'node:fs';
+        import { writeFile } from 'node:fs/promises';
+        import { setTimeout as sleep } from 'node:timers/promises';
+        const [readyPath, startPath] = process.argv.slice(1);
+        await writeFile(readyPath, 'ready');
+        while (!existsSync(startPath)) await sleep(1);
+        process.kill(process.pid, 'SIGKILL');
+      `;
+      const crashingLock = spawnLockfProcess(lockPath, crashScript, [readyPath, startPath]);
+      await waitForPaths([readyPath]);
+      writeFileSync(startPath, 'crash', 'utf8');
+      const crashResult = await crashingLock;
 
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'rename-failure',
-          renamePath: async (sourcePath: string, destinationPath: string) => {
-            if (destinationPath === provenancePath) {
-              throw new Error('rename failed');
-            }
-            await renameAsync(sourcePath, destinationPath);
-          },
-        }),
-      ).rejects.toThrow(/rename failed/);
-
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8'))).toEqual({
-        version: 1,
-        channels: {
-          stable: stableRecord,
-        },
-      });
-      expect(readdirSync(stateDir)).toEqual(['builds.json']);
-    });
-
-    it('removes only its owner file when lock publication fails', async () => {
-      const homeDir = createScratchDirectory('provenance-lock-publication-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'publication-failure',
-          symlinkPath: async () => {
-            throw new Error('symlink publication failed');
-          },
-        }),
-      ).rejects.toThrow(/symlink publication failed/);
-
-      expect(readdirSync(stateDir)).toEqual([]);
-    });
-
-    it('cleans a partially written owner file before lock publication', async () => {
-      const homeDir = createScratchDirectory('provenance-owner-write-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'partial-owner',
-          writeFileText: async (
-            filePath: string,
-            content: string,
-            options?: { exclusive?: boolean },
-          ) => {
-            writeFileSync(filePath, content, {
-              encoding: 'utf8',
-              mode: 0o600,
-              ...(options?.exclusive ? { flag: 'wx' } : {}),
-            });
-            if (options?.exclusive) {
-              throw new Error('owner write failed');
-            }
-          },
-        }),
-      ).rejects.toThrow(/owner write failed/);
-
-      expect(readdirSync(stateDir)).toEqual([]);
-    });
-
-    it('preserves a pre-existing owner file when exclusive creation loses', async () => {
-      const homeDir = createScratchDirectory('provenance-owner-file-collision');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const ownerPath = join(
-        stateDir,
-        'builds.json.lock.owner-colliding-owner.json',
-      );
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(ownerPath, 'pre-existing owner\n', 'utf8');
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'colliding-owner',
-        }),
-      ).rejects.toMatchObject({ code: 'EEXIST' });
-
-      expect(readFileSync(ownerPath, 'utf8')).toBe('pre-existing owner\n');
-      expect(readdirSync(stateDir)).toEqual([
-        'builds.json.lock.owner-colliding-owner.json',
-      ]);
-    });
-
-    it('never deletes a successor acquired after its lock symlink is unlinked', async () => {
-      const homeDir = createScratchDirectory('provenance-release-successor');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      let lockUnlinks = 0;
-      let ownLockUnlinked = false;
-
-      await expect(
-        writeBuildProvenance(devRecord, {
-          homeDir,
-          randomUUID: () => 'releasing-owner',
-          readlinkPath: async (targetPath: string) => {
-            if (targetPath === lockPath && ownLockUnlinked) {
-              throw new Error('lock path read after release');
-            }
-            return readlinkAsync(targetPath);
-          },
-          unlinkPath: async (targetPath: string) => {
-            if (targetPath === lockPath) {
-              lockUnlinks += 1;
-              await unlinkAsync(targetPath);
-              ownLockUnlinked = true;
-              writeLockOwner(lockPath, 'release-successor', 9999);
-              return;
-            }
-            await unlinkAsync(targetPath);
-          },
-        }),
-      ).resolves.toBe(provenancePath);
-
-      expect(lockUnlinks).toBe(1);
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-release-successor.json',
-      );
-      expect(
-        existsSync(join(stateDir, 'builds.json.lock.owner-releasing-owner.json')),
-      ).toBe(false);
-    });
-
-    it('preserves a replacement lock when ownership changes before release', async () => {
-      const homeDir = createScratchDirectory('provenance-release-owner-mismatch');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-      const originalOwnerPath = join(
-        stateDir,
-        'builds.json.lock.owner-original-owner.json',
-      );
-      let replacementOwnerPath = '';
-
-      const error = await writeBuildProvenance(devRecord, {
-        homeDir,
-        randomUUID: () => 'original-owner',
-        writeFileText: async (
-          filePath: string,
-          content: string,
-          options?: { exclusive?: boolean },
-        ) => {
-          writeFileSync(filePath, content, {
-            encoding: 'utf8',
-            mode: 0o600,
-            ...(options?.exclusive ? { flag: 'wx' } : {}),
-          });
-          if (!options?.exclusive) {
-            unlinkSync(lockPath);
-            replacementOwnerPath = writeLockOwner(
-              lockPath,
-              'replacement-owner',
-              9999,
-            ).ownerPath;
-          }
-        },
-      }).then(
-        () => undefined,
-        (failure) => failure as Error,
-      );
-
-      expect(error?.message).toMatch(/release.*ownership|ownership.*release/i);
-      expect(JSON.parse(readFileSync(replacementOwnerPath, 'utf8'))).toEqual({
-        token: 'replacement-owner',
-        pid: 9999,
-        createdAt: expect.any(String),
-      });
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-replacement-owner.json',
-      );
-      expect(existsSync(originalOwnerPath)).toBe(false);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-    });
-
-    it('reports lock release failures after an otherwise successful write', async () => {
-      const homeDir = createScratchDirectory('provenance-release-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const provenancePath = join(stateDir, 'builds.json');
-      const lockPath = `${provenancePath}.lock`;
-
-      const error = await writeBuildProvenance(devRecord, {
-        homeDir,
-        randomUUID: () => 'release-failure',
-        unlinkPath: async (targetPath: string) => {
-          if (targetPath === lockPath) {
-            throw new Error('release failed');
-          }
-          await unlinkAsync(targetPath);
-        },
-      }).then(
-        () => undefined,
-        (failure) => failure as Error,
-      );
-
-      expect(error?.message).toContain('Failed to release build provenance lock');
-      expect(error?.message).toContain('release failed');
-      expect(error?.cause).toBeInstanceOf(Error);
-      expect(JSON.parse(readFileSync(provenancePath, 'utf8')).channels.dev).toEqual(devRecord);
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-release-failure.json',
-      );
-    });
-
-    it('preserves write and lock release failures together', async () => {
-      const homeDir = createScratchDirectory('provenance-write-release-failure');
-      const stateDir = join(homeDir, 'Library', 'Application Support', 'Psyche Build Builder');
-      const lockPath = join(stateDir, 'builds.json.lock');
-
-      const error = await writeBuildProvenance(devRecord, {
-        homeDir,
-        randomUUID: () => 'write-release-failure',
-        writeFileText: async (
-          filePath: string,
-          content: string,
-          options?: { exclusive?: boolean },
-        ) => {
-          if (options?.exclusive) {
-            writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-            return;
-          }
-          throw new Error('write failed');
-        },
-        unlinkPath: async (targetPath: string) => {
-          if (targetPath === lockPath) {
-            throw new Error('release failed');
-          }
-          await unlinkAsync(targetPath);
-        },
-      }).then(
-        () => undefined,
-        (failure) => failure as Error,
-      );
-
-      expect(error).toBeInstanceOf(AggregateError);
-      expect(error?.message).toContain('write failed');
-      expect(error?.message).toContain('Failed to release build provenance lock');
-      expect(error?.message).toContain('release failed');
-      expect((error as AggregateError).errors).toHaveLength(2);
-      expect(readlinkSync(lockPath)).toBe(
-        'builds.json.lock.owner-write-release-failure.json',
-      );
-    });
+      expect(crashResult.code).not.toBe(0);
+      await expect(writeBuildProvenance(devRecord, { homeDir })).resolves.toBe(statePath);
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).channels.dev).toEqual(devRecord);
+      expect(existsSync(lockPath)).toBe(true);
+    }, 15_000);
   });
 
   describe('runMacosBuild', () => {
