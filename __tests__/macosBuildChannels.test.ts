@@ -1,13 +1,19 @@
-import { readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  assertBundleIdentity,
   buildCommandsFor,
   channelConfig,
   createDevTauriConfig,
+  findCandidateApp,
   parseBuildArguments,
+  smokeLaunchBundle,
 } from '../scripts/build-macos-app.mjs';
 
 const repositoryRoot = process.cwd();
@@ -16,6 +22,7 @@ const tauriRelativeCwd = 'native/macos/psyche-build-tauri';
 const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
 const manifestPath = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
 const devConfigPath = resolve(repositoryRoot, 'native/macos/psyche-build-tauri/dev.tauri.generated.json');
+const scratchRoot = join(repositoryRoot, '.agent-test-artifacts', 'macos-build-channels');
 
 const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
   scripts: Record<string, string>;
@@ -51,6 +58,86 @@ const macosTauriConfig = JSON.parse(
     'utf8',
   ),
 ) as TauriConfig;
+
+let scratchSequence = 0;
+const scratchDirs: string[] = [];
+
+const tick = () => new Promise<void>((resolveTick) => setImmediate(resolveTick));
+
+function createBundleDirectory(relativePaths: string[]): string {
+  const bundleDir = join(scratchRoot, String(scratchSequence++));
+  scratchDirs.push(bundleDir);
+
+  for (const relativePath of relativePaths) {
+    mkdirSync(join(bundleDir, relativePath), { recursive: true });
+  }
+
+  return bundleDir;
+}
+
+function createSleepController() {
+  const pending: Array<{ ms: number; resolve: () => void }> = [];
+  const sleep = vi.fn((ms: number) => new Promise<void>((resolveSleep) => {
+    pending.push({ ms, resolve: resolveSleep });
+  }));
+
+  return {
+    sleep,
+    pending,
+    async resolveNext(expectedMs: number) {
+      const next = pending.shift();
+      expect(next?.ms).toBe(expectedMs);
+      next?.resolve();
+      await tick();
+    },
+  };
+}
+
+type FakeChildProcess = ChildProcess &
+  EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    kill: ChildProcess['kill'];
+  };
+
+function createFakeChildProcess(
+  onKill?: (signal: NodeJS.Signals | number | undefined) => void,
+): {
+  child: FakeChildProcess;
+  writeStdout: (value: string) => void;
+  writeStderr: (value: string) => void;
+  close: (code?: number | null, signal?: NodeJS.Signals | null) => void;
+} {
+  const child = new EventEmitter() as FakeChildProcess;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = vi.fn((signal?: NodeJS.Signals | number) => {
+    onKill?.(signal);
+    return true;
+  }) as ChildProcess['kill'];
+
+  return {
+    child,
+    writeStdout(value: string) {
+      child.stdout.write(value);
+    },
+    writeStderr(value: string) {
+      child.stderr.write(value);
+    },
+    close(code: number | null = 0, signal: NodeJS.Signals | null = null) {
+      child.emit('close', code, signal);
+    },
+  };
+}
+
+afterEach(() => {
+  while (scratchDirs.length > 0) {
+    const dir = scratchDirs.pop();
+    if (dir) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 describe('macOS build channels', () => {
   it('defines stable and dev app build scripts and preserves production identity', () => {
@@ -222,6 +309,166 @@ describe('macOS build channels', () => {
       expect(() => buildCommandsForRuntime('dev')).toThrow(
         'dev builds require a devConfigPath',
       );
+    });
+  });
+
+  describe('findCandidateApp', () => {
+    it('returns the only matching app bundle and does not recurse into the matched app', async () => {
+      const bundleDir = createBundleDirectory([
+        'Psyche Build.app/Contents/MacOS',
+        'Psyche Build.app/Contents/Hidden/Psyche Build.app',
+        'nested/Other.app',
+      ]);
+
+      await expect(findCandidateApp(bundleDir, 'Psyche Build.app')).resolves.toBe(
+        join(bundleDir, 'Psyche Build.app'),
+      );
+    });
+
+    it('rejects when the expected app is missing', async () => {
+      const bundleDir = createBundleDirectory(['nested/Other.app']);
+
+      await expect(findCandidateApp(bundleDir, 'Psyche Build.app')).rejects.toThrow(
+        'Expected exactly one "Psyche Build.app" bundle, found 0',
+      );
+    });
+
+    it('rejects when multiple matching apps exist', async () => {
+      const bundleDir = createBundleDirectory([
+        'Psyche Build.app',
+        'nested/Psyche Build.app',
+      ]);
+
+      await expect(findCandidateApp(bundleDir, 'Psyche Build.app')).rejects.toThrow(
+        'Expected exactly one "Psyche Build.app" bundle, found 2',
+      );
+    });
+  });
+
+  describe('assertBundleIdentity', () => {
+    it('rejects when the app bundle does not match the requested channel identity', () => {
+      expect(() =>
+        assertBundleIdentity(
+          '/Applications/Psyche Build Dev.app',
+          {
+            name: 'Psyche Build Dev',
+            identifier: 'dev.opencoven.psyche.dev',
+          },
+          channelConfig('stable'),
+        ),
+      ).toThrow(
+        'expected productName="Psyche Build" bundleIdentifier="dev.opencoven.psyche"',
+      );
+      expect(() =>
+        assertBundleIdentity(
+          '/Applications/Psyche Build Dev.app',
+          {
+            name: 'Psyche Build Dev',
+            identifier: 'dev.opencoven.psyche.dev',
+          },
+          channelConfig('stable'),
+        ),
+      ).toThrow(
+        'actual appName="Psyche Build Dev" identity.name="Psyche Build Dev" identity.identifier="dev.opencoven.psyche.dev"',
+      );
+    });
+  });
+
+  describe('smokeLaunchBundle', () => {
+    it('fails on early exit, reports output, skips termination, and cleans up the temporary home', async () => {
+      const child = createFakeChildProcess();
+      const sleep = createSleepController();
+      const spawnProcess = vi.fn(() => child.child);
+      const makeTemporaryHome = vi.fn(async () => '/virtual/home');
+      const removeTemporaryHome = vi.fn(async () => {});
+
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        args: ['--smoke'],
+        spawnProcess,
+        sleep: sleep.sleep,
+        makeTemporaryHome,
+        removeTemporaryHome,
+      });
+
+      await tick();
+      child.writeStdout('booting\n');
+      child.writeStderr('boom\n');
+      child.close(23, null);
+
+      await expect(launch).rejects.toThrow(/exit code 23/);
+      await expect(launch).rejects.toThrow(/booting/);
+      await expect(launch).rejects.toThrow(/boom/);
+      expect(child.child.kill).not.toHaveBeenCalled();
+      expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
+      expect(spawnProcess).toHaveBeenCalledWith(
+        '/Applications/Psyche Build.app/Contents/MacOS/Psyche Build',
+        ['--smoke'],
+        expect.objectContaining({
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: expect.objectContaining({
+            HOME: '/virtual/home',
+            TMPDIR: '/virtual/home/tmp',
+            XDG_CONFIG_HOME: '/virtual/home/.config',
+            XDG_CACHE_HOME: '/virtual/home/.cache',
+            XDG_DATA_HOME: '/virtual/home/.local/share',
+          }),
+        }),
+      );
+    });
+
+    it('waits through the smoke window, terminates with SIGTERM, and cleans up on success', async () => {
+      const child = createFakeChildProcess((signal) => {
+        if (signal === 'SIGTERM') {
+          child.close(0, 'SIGTERM');
+        }
+      });
+      const sleep = createSleepController();
+      const spawnProcess = vi.fn(() => child.child);
+      const removeTemporaryHome = vi.fn(async () => {});
+
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        spawnProcess,
+        sleep: sleep.sleep,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome,
+      });
+
+      await tick();
+      await sleep.resolveNext(5000);
+      await launch;
+
+      expect(child.child.kill).toHaveBeenCalledTimes(1);
+      expect(child.child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(removeTemporaryHome).toHaveBeenCalledWith('/virtual/home');
+    });
+
+    it('sends SIGKILL only if the app ignores SIGTERM', async () => {
+      const child = createFakeChildProcess((signal) => {
+        if (signal === 'SIGKILL') {
+          child.close(null, 'SIGKILL');
+        }
+      });
+      const sleep = createSleepController();
+
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        spawnProcess: vi.fn(() => child.child),
+        sleep: sleep.sleep,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome: async () => {},
+      });
+
+      await tick();
+      await sleep.resolveNext(5000);
+      expect(child.child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+
+      await sleep.resolveNext(5000);
+      await launch;
+
+      expect(child.child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      expect(child.child.kill).toHaveBeenCalledTimes(2);
     });
   });
 

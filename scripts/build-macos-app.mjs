@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -21,6 +24,9 @@ const CHANNEL_CONFIG = {
 
 const scriptFilePath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptFilePath), '..');
+const DEFAULT_SMOKE_MS = 5_000;
+const DEFAULT_TERM_TIMEOUT_MS = 5_000;
+const TEMP_HOME_PREFIX = 'psyche-build-smoke-';
 
 export function parseBuildArguments(argv) {
   const tokens = argv.filter((value) => value !== '--');
@@ -102,6 +108,227 @@ export function buildCommandsFor(channel, options = {}) {
       TAURI_CWD,
     ],
   ];
+}
+
+export async function findCandidateApp(bundleDir, expectedAppName) {
+  const matches = [];
+  await collectCandidateApps(path.resolve(bundleDir), expectedAppName, matches);
+
+  if (matches.length !== 1) {
+    throw new Error(`Expected exactly one "${expectedAppName}" bundle, found ${matches.length}`);
+  }
+
+  return matches[0];
+}
+
+export function assertBundleIdentity(appPath, identity, expectedChannelConfig) {
+  const actual = {
+    appName: path.basename(appPath, '.app'),
+    name: identity.name,
+    identifier: identity.identifier,
+  };
+  const expected = {
+    productName: expectedChannelConfig.productName,
+    bundleIdentifier: expectedChannelConfig.bundleIdentifier,
+  };
+
+  if (
+    actual.appName === expected.productName &&
+    actual.name === expected.productName &&
+    actual.identifier === expected.bundleIdentifier
+  ) {
+    return;
+  }
+
+  throw new Error(
+    `Bundle identity mismatch for "${appPath}": ` +
+      `expected productName="${expected.productName}" ` +
+      `bundleIdentifier="${expected.bundleIdentifier}"; ` +
+      `actual appName="${actual.appName}" ` +
+      `identity.name="${actual.name}" ` +
+      `identity.identifier="${actual.identifier}"`,
+  );
+}
+
+export async function smokeLaunchBundle(appPath, overrides) {
+  const executableName = overrides?.executableName?.trim();
+  if (!executableName) {
+    throw new Error('smokeLaunchBundle requires a nonblank executableName');
+  }
+
+  const args = [...(overrides.args ?? [])];
+  const smokeMs = overrides.smokeMs ?? DEFAULT_SMOKE_MS;
+  const termTimeoutMs = overrides.termTimeoutMs ?? DEFAULT_TERM_TIMEOUT_MS;
+  const sleep = overrides.sleep ?? defaultSleep;
+  const makeTemporaryHome = overrides.makeTemporaryHome ?? defaultMakeTemporaryHome;
+  const removeTemporaryHome = overrides.removeTemporaryHome ?? defaultRemoveTemporaryHome;
+  const tempHome = await Promise.resolve(makeTemporaryHome());
+  const executablePath = path.join(appPath, 'Contents', 'MacOS', executableName);
+
+  let operationError;
+
+  try {
+    const child = (overrides.spawnProcess ?? defaultSpawnProcess)(executablePath, args, {
+      env: {
+        ...process.env,
+        ...temporaryHomeEnvironment(tempHome),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout = collectStreamOutput(child.stdout);
+    const stderr = collectStreamOutput(child.stderr);
+    const exitPromise = waitForProcessExit(child);
+    const smokeResult = await Promise.race([
+      exitPromise.then((exit) => ({ type: 'exit', exit })),
+      sleep(smokeMs).then(() => ({ type: 'smoke' })),
+    ]);
+
+    if (smokeResult.type === 'exit') {
+      throw new Error(buildEarlyExitMessage(appPath, smokeMs, smokeResult.exit, stdout(), stderr()));
+    }
+
+    child.kill('SIGTERM');
+    const termResult = await Promise.race([
+      exitPromise.then((exit) => ({ type: 'exit', exit })),
+      sleep(termTimeoutMs).then(() => ({ type: 'timeout' })),
+    ]);
+
+    if (termResult.type === 'timeout') {
+      child.kill('SIGKILL');
+      await exitPromise;
+    }
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    await Promise.resolve(removeTemporaryHome(tempHome));
+  } catch (cleanupError) {
+    if (operationError instanceof Error) {
+      throw new Error(
+        `${operationError.message}\nFailed to remove temporary home "${tempHome}": ${describeError(cleanupError)}`,
+      );
+    }
+    throw cleanupError;
+  }
+
+  if (operationError) {
+    throw operationError;
+  }
+}
+
+async function collectCandidateApps(currentDir, expectedAppName, matches) {
+  const entries = await readdir(currentDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const entryPath = path.join(currentDir, entry.name);
+    if (entry.name === expectedAppName) {
+      matches.push(entryPath);
+      continue;
+    }
+
+    await collectCandidateApps(entryPath, expectedAppName, matches);
+  }
+}
+
+function temporaryHomeEnvironment(tempHome) {
+  return {
+    HOME: tempHome,
+    TMPDIR: path.join(tempHome, 'tmp'),
+    XDG_CONFIG_HOME: path.join(tempHome, '.config'),
+    XDG_CACHE_HOME: path.join(tempHome, '.cache'),
+    XDG_DATA_HOME: path.join(tempHome, '.local', 'share'),
+  };
+}
+
+async function defaultMakeTemporaryHome() {
+  const tempHome = await mkdtemp(path.join(os.tmpdir(), TEMP_HOME_PREFIX));
+  const env = temporaryHomeEnvironment(tempHome);
+
+  await Promise.all([
+    mkdir(env.TMPDIR, { recursive: true }),
+    mkdir(env.XDG_CONFIG_HOME, { recursive: true }),
+    mkdir(env.XDG_CACHE_HOME, { recursive: true }),
+    mkdir(env.XDG_DATA_HOME, { recursive: true }),
+  ]);
+
+  return tempHome;
+}
+
+async function defaultRemoveTemporaryHome(tempHome) {
+  await rm(tempHome, { recursive: true, force: true });
+}
+
+function defaultSpawnProcess(command, args, options) {
+  return spawn(command, args, options);
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function collectStreamOutput(stream) {
+  let output = '';
+
+  stream?.on('data', (chunk) => {
+    output += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+  });
+
+  return () => output;
+}
+
+function waitForProcessExit(child) {
+  return new Promise((resolve, reject) => {
+    const onClose = (code, signal) => {
+      cleanup();
+      resolve({ code, signal });
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      child.off('close', onClose);
+      child.off('error', onError);
+    };
+
+    child.once('close', onClose);
+    child.once('error', onError);
+  });
+}
+
+function buildEarlyExitMessage(appPath, smokeMs, exit, stdout, stderr) {
+  const sections = [
+    `Smoke launch failed for "${appPath}": exited before ${smokeMs}ms smoke window with ${describeExit(exit)}.`,
+  ];
+
+  if (stdout !== '') {
+    sections.push(`stdout:\n${stdout.trimEnd()}`);
+  }
+
+  if (stderr !== '') {
+    sections.push(`stderr:\n${stderr.trimEnd()}`);
+  }
+
+  return sections.join('\n');
+}
+
+function describeExit(exit) {
+  if (exit.signal) {
+    return `signal ${exit.signal}`;
+  }
+  if (typeof exit.code === 'number') {
+    return `exit code ${exit.code}`;
+  }
+  return 'an unknown exit';
+}
+
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isEntrypoint() {
