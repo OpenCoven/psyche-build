@@ -4,6 +4,10 @@ import Foundation
 public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
     case noControlRequests
     case unexpectedResponse
+    case unknownProject(String)
+    case unknownPane(String)
+    case targetNotInProject(String)
+    case rejected
 
     public var errorDescription: String? {
         switch self {
@@ -11,6 +15,14 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
             "This workspace is not connected to a host."
         case .unexpectedResponse:
             "The host answered the workspace request with something else."
+        case .unknownProject(let projectID):
+            "Project \(projectID) is not published by this host."
+        case .unknownPane(let paneID):
+            "Pane \(paneID) is not published by this host."
+        case .targetNotInProject(let cwd):
+            "\(cwd) is not this project's root or one of its worktrees."
+        case .rejected:
+            "The host refused the request."
         }
     }
 }
@@ -136,6 +148,104 @@ public final class WorkspaceStore: ObservableObject {
             applySnapshot(workspace: result.workspace, sequence: result.sequence)
         }
         return result.workspace
+    }
+
+    // MARK: - Commands
+
+    /// Creates a pane in a published project, at that project's root or one of
+    /// its worktrees.
+    ///
+    /// The target is checked here as well as on the host: a client sending an
+    /// unpublished target has a bug worth reporting immediately rather than a
+    /// round trip later.
+    @discardableResult
+    public func createPane(
+        kind: PaneCreateKind,
+        projectID: String,
+        cwd: String,
+        idempotencyKey: String = UUID().uuidString,
+        branch: String? = nil,
+        startPointBranch: String? = nil,
+        agent: String? = nil,
+        title: String? = nil,
+        prompt: String? = nil
+    ) async throws -> PaneSpawnedResponse {
+        let requests = try requireControlRequests()
+        try requireLaunchTarget(projectID: projectID, cwd: cwd)
+
+        let response = try await requests.send(.spawnPane(MobilePaneSpawnRequest(
+            requestID: await requests.nextRequestID(),
+            idempotencyKey: idempotencyKey,
+            kind: kind,
+            projectID: projectID,
+            cwd: cwd,
+            branch: branch,
+            startPointBranch: startPointBranch,
+            agent: agent,
+            title: title,
+            prompt: prompt,
+            existingWorktree: nil
+        )))
+        guard case let .paneSpawned(result) = response else {
+            throw WorkspaceStoreError.unexpectedResponse
+        }
+        return result
+    }
+
+    public func renamePane(_ paneID: String, title: String?, agent: String? = nil) async throws {
+        let requests = try requireControlRequests()
+        try requirePublishedPane(paneID)
+
+        try requireAck(await requests.send(.paneMeta(PaneMetaRequest(
+            requestID: await requests.nextRequestID(),
+            id: paneID,
+            title: title,
+            agent: agent
+        ))))
+    }
+
+    /// Stops the pane's process. The worktree and branch survive — this is not
+    /// a cleanup, and the UI must not present it as one.
+    public func stopPane(_ paneID: String) async throws {
+        let requests = try requireControlRequests()
+        try requirePublishedPane(paneID)
+
+        try requireAck(await requests.send(.killPane(PaneIDControlRequest(
+            requestID: await requests.nextRequestID(),
+            paneID: paneID
+        ))))
+    }
+
+    // MARK: - Command helpers
+
+    private func requireControlRequests() throws -> any ControlRequesting {
+        guard let controlRequests else { throw WorkspaceStoreError.noControlRequests }
+        return controlRequests
+    }
+
+    /// An ack that says it failed is not a success. Accepting any response as
+    /// one is how a refused command ends up looking like it worked.
+    private func requireAck(_ response: MobileControlResponse) throws {
+        guard case let .ack(ack) = response else {
+            throw WorkspaceStoreError.unexpectedResponse
+        }
+        guard ack.ok else { throw WorkspaceStoreError.rejected }
+    }
+
+    private func requireLaunchTarget(projectID: String, cwd: String) throws {
+        guard let project = workspace?.projects.first(where: { $0.id == projectID }) else {
+            throw WorkspaceStoreError.unknownProject(projectID)
+        }
+        let isPublishedTarget = project.root == cwd
+            || project.worktrees.contains { $0.path == cwd }
+        guard isPublishedTarget else {
+            throw WorkspaceStoreError.targetNotInProject(cwd)
+        }
+    }
+
+    private func requirePublishedPane(_ paneID: String) throws {
+        let isPublished = Self.allPanes(in: workspace).contains { $0.pane.id == paneID }
+        guard isPublished else { throw WorkspaceStoreError.unknownPane(paneID) }
     }
 
     /// Offline state stays on screen but must never look live. The last
