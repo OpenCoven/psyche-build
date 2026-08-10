@@ -235,6 +235,61 @@ kbd {
 .session-search::-webkit-search-cancel-button { -webkit-appearance: none; }
 .sidebar-head .rail-btn { width: 26px; height: 26px; border-radius: 7px; }
 
+/* -------- Sidebar sections: Sessions | Files --------
+   The file tree used to be a right-dock panel. It now shares the left rail
+   with the session list, one at a time, so the explorer sits where an
+   explorer belongs and the dock keeps Git and Web. */
+
+.sidebar-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: none;
+  width: 100%;
+  padding: 0 6px 6px;
+}
+.sidebar-tab {
+  flex: 1 1 0;
+  height: 24px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.sidebar-tab:hover { background: var(--surface-2); color: var(--text); }
+.sidebar-tab.is-active {
+  background: rgba(var(--rgb-accent), 0.14);
+  color: var(--text);
+}
+.sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.sidebar-files {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+.sidebar-files[hidden] { display: none; }
+.sidebar-subbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 24px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-subbar .panel-crumb { flex: 1 1 auto; min-width: 0; }
+.sidebar-files .file-tree { flex: 1 1 auto; }
+
+.session-list[hidden] { display: none; }
 .session-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -1717,7 +1772,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .file-view[hidden] { display: none; }
 .file-view {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* tab strip · toolbar · path · editor · status */
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: var(--surface-solid);

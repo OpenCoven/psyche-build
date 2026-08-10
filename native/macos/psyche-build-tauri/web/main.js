@@ -653,7 +653,7 @@
   );
   var browserCollapseBtn = document.getElementById("browser-collapse");
   var BROWSER_SIDES = ["right", "bottom", "left", "top"];
-  var PANELS = ["browser", "files", "git"];
+  var PANELS = ["browser", "git"];
   // Diffs used to be its own tab. It now lives inside the git panel, so every
   // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
   // to the tab that actually shows it.
@@ -833,8 +833,7 @@
     syncPanelButtons();
   }
   function renderPanel(name) {
-    if (name === "files") renderFilesPanel();
-    else if (name === "git") {
+    if (name === "git") {
       // One tab, two sections: repository state above, changed files below.
       renderGitPanel();
       renderDiffsPanel();
@@ -2083,6 +2082,35 @@
   var bgOpacityInput = document.getElementById("bg-opacity");
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
   var sessionListEl = document.getElementById("session-list");
+  var sidebarFilesEl = document.getElementById("sidebar-files");
+  var sidebarTab = "sessions";
+
+  // The file tree renders lazily: switching to it is the only thing that has to
+  // ask the filesystem, and the sessions rail should not pay for that.
+  function setSidebarTab(name) {
+    sidebarTab = name === "files" ? "files" : "sessions";
+    if (sessionListEl) sessionListEl.hidden = sidebarTab !== "sessions";
+    if (sidebarFilesEl) sidebarFilesEl.hidden = sidebarTab !== "files";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-sidebar-tab]"),
+      function (btn) {
+        var active = btn.dataset.sidebarTab === sidebarTab;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      }
+    );
+    if (sidebarTab === "files") renderFilesPanel();
+    return sidebarTab;
+  }
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-sidebar-tab]"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        setSidebarTab(btn.dataset.sidebarTab);
+      });
+    }
+  );
   var sessionSearchEl = document.getElementById("session-search");
   var sessionFilter = "";
 

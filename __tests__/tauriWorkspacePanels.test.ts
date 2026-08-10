@@ -68,12 +68,24 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('exposes the three right-rail panels, with diffs folded into git', () => {
-    for (const panel of ['browser', 'files', 'git']) {
+  it('exposes the two right-rail panels, with diffs folded into git and files moved left', () => {
+    for (const panel of ['browser', 'git']) {
       expect(indexHtml).toContain(`data-panel-btn="${panel}"`);
     }
     // Diffs is no longer a tab of its own...
     expect(indexHtml).not.toContain('data-panel-btn="diffs"');
+    // ...and Files left the dock entirely for the sidebar.
+    expect(indexHtml).not.toContain('data-panel-btn="files"');
+    const sidebar = indexHtml.slice(
+      indexHtml.indexOf('class="rail sidebar"'),
+      indexHtml.indexOf('</aside>'),
+    );
+    expect(sidebar).toContain('data-sidebar-tab="sessions"');
+    expect(sidebar).toContain('data-sidebar-tab="files"');
+    expect(sidebar).toContain('id="file-tree"');
+    // File tabs belong to the file view now, not the whole terminal area.
+    const fileView = indexHtml.slice(indexHtml.indexOf('class="file-view"'));
+    expect(fileView.slice(0, fileView.indexOf('</div>') + 6)).toContain('id="tab-strip"');
     // ...but its markup still exists, inside the git panel, with the element
     // ids the diff renderer writes into.
     const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
