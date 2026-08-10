@@ -1778,6 +1778,43 @@ fn read_workspace_artifact_bytes(
     Ok(bytes)
 }
 
+fn read_workspace_restore_source_bytes(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let Some(mut file) = open_existing_regular_file(workspace_dir, path, context, false)? else {
+        return Err(format!("{context} '{}' is missing", path.display()));
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect {context} '{}': {}", path.display(), error))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(format!(
+            "read {context} '{}' changed length: read {} of {} bytes",
+            path.display(),
+            bytes.len(),
+            metadata.len()
+        ));
+    }
+    verify_opened_regular_file(workspace_dir, &file, path, context)?;
+    Ok(bytes)
+}
+
+fn read_optional_workspace_artifact_bytes(
+    workspace_dir: &SecureWorkspaceDir,
+    path: &Path,
+    context: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    if !regular_file_exists(workspace_dir, path, context)? {
+        return Ok(None);
+    }
+    read_workspace_artifact_bytes(workspace_dir, path, context).map(Some)
+}
+
 fn verify_workspace_artifact_bytes(
     workspace_dir: &SecureWorkspaceDir,
     path: &Path,
@@ -2581,7 +2618,7 @@ fn resolve_prior_workspace_after_commit_failure(
         Err(error) => error,
     };
 
-    match certify_prior_workspace_rollback(
+    let final_rollback_error = match certify_prior_workspace_rollback(
         workspace_dir,
         prior_bytes,
         path,
@@ -2592,18 +2629,200 @@ fn resolve_prior_workspace_after_commit_failure(
         restore_workspace_backup,
         recreate_pending_rollback,
     ) {
+        Ok(()) => {
+            return Err(format!(
+                "{failure}; pending recovery certification failed: {pending_error}; \
+                 initial rollback certification failed: {rollback_error}; \
+                 forward certification failed: {forward_error}"
+            ))
+        }
+        Err(error) => error,
+    };
+
+    match certify_prior_workspace_from_remaining_rollback(
+        workspace_dir,
+        prior_bytes,
+        path,
+        parent,
+        pending_path,
+        committed_path,
+        sync_parent_directory,
+        restore_workspace_backup,
+    ) {
         Ok(()) => Err(format!(
-            "{failure}; pending recovery certification failed: {pending_error}; \
-             initial rollback certification failed: {rollback_error}; \
-             forward certification failed: {forward_error}"
-        )),
-        Err(final_rollback_error) => Err(format!(
             "{failure}; pending recovery certification failed: {pending_error}; \
              initial rollback certification failed: {rollback_error}; \
              forward certification failed: {forward_error}; \
              final rollback certification failed: {final_rollback_error}"
         )),
+        Err(remaining_rollback_error) => {
+            let resolution_failure = format!(
+                "{failure}; pending recovery certification failed: {pending_error}; \
+                 initial rollback certification failed: {rollback_error}; \
+                 forward certification failed: {forward_error}; \
+                 final rollback certification failed: {final_rollback_error}; \
+                 remaining rollback resolution failed: {remaining_rollback_error}"
+            );
+            match observe_prior_workspace_restart_outcome(
+                workspace_dir,
+                expected_bytes,
+                prior_bytes,
+                path,
+                pending_path,
+                committed_path,
+                forward_path,
+            ) {
+                Ok(PriorWorkspaceOutcome::Forward) => Ok(()),
+                Ok(PriorWorkspaceOutcome::Prior) => Err(resolution_failure),
+                Err(observation_error) => Err(format!(
+                    "{resolution_failure}; final restart-state observation failed: \
+                     {observation_error}"
+                )),
+            }
+        }
     }
+}
+
+fn certify_prior_workspace_from_remaining_rollback(
+    workspace_dir: &SecureWorkspaceDir,
+    prior_bytes: &[u8],
+    path: &Path,
+    parent: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    sync_parent_directory: &mut impl FnMut(&SecureWorkspaceDir, &Path) -> Result<(), String>,
+    restore_workspace_backup: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for (recovery_path, context) in [
+        (pending_path, "workspace pending rollback"),
+        (committed_path, "workspace committed rollback"),
+    ] {
+        match regular_file_exists(workspace_dir, recovery_path, context) {
+            Ok(false) => {
+                failures.push(format!(
+                    "{context} '{}' is missing",
+                    recovery_path.display()
+                ));
+                continue;
+            }
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+            Ok(true) => {}
+        }
+        if let Err(error) =
+            verify_workspace_artifact_bytes(workspace_dir, recovery_path, prior_bytes, context)
+        {
+            failures.push(error);
+            continue;
+        }
+        if let Err(error) = restore_workspace_backup(workspace_dir, recovery_path, path) {
+            failures.push(format!(
+                "restore prior workspace '{}' from remaining {context} '{}': {}",
+                path.display(),
+                recovery_path.display(),
+                error
+            ));
+            continue;
+        }
+        if let Err(error) = sync_parent_directory(workspace_dir, parent) {
+            failures.push(format!(
+                "sync prior workspace '{}' restored from remaining {context} '{}': {}",
+                path.display(),
+                recovery_path.display(),
+                error
+            ));
+            continue;
+        }
+        if let Err(error) =
+            verify_workspace_artifact_bytes(workspace_dir, recovery_path, prior_bytes, context)
+        {
+            failures.push(error);
+            continue;
+        }
+        if let Err(error) =
+            verify_workspace_artifact_bytes(workspace_dir, path, prior_bytes, "workspace")
+        {
+            failures.push(error);
+            continue;
+        }
+        return Ok(());
+    }
+    Err(failures.join("; "))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PriorWorkspaceOutcome {
+    Prior,
+    Forward,
+}
+
+fn observe_prior_workspace_restart_outcome(
+    workspace_dir: &SecureWorkspaceDir,
+    expected_bytes: &[u8],
+    prior_bytes: &[u8],
+    path: &Path,
+    pending_path: &Path,
+    committed_path: &Path,
+    forward_path: &Path,
+) -> Result<PriorWorkspaceOutcome, String> {
+    let pending = read_optional_workspace_artifact_bytes(
+        workspace_dir,
+        pending_path,
+        "workspace pending rollback",
+    )?;
+    let committed = read_optional_workspace_artifact_bytes(
+        workspace_dir,
+        committed_path,
+        "workspace committed rollback",
+    )?;
+    let forward = read_optional_workspace_artifact_bytes(
+        workspace_dir,
+        forward_path,
+        "workspace forward rollback",
+    )?;
+    let workspace = read_optional_workspace_artifact_bytes(workspace_dir, path, "workspace")?;
+
+    if let Some(pending) = pending {
+        if pending == prior_bytes {
+            return Ok(PriorWorkspaceOutcome::Prior);
+        }
+        return Err(format!(
+            "pending rollback '{}' does not contain the exact prior workspace",
+            pending_path.display()
+        ));
+    }
+
+    let Some(workspace) = workspace else {
+        return Err(format!("workspace '{}' is missing", path.display()));
+    };
+    if workspace == prior_bytes {
+        if committed.is_some() && forward.is_some() && committed.as_deref() != Some(prior_bytes) {
+            return Err(format!(
+                "workspace '{}' is prior but committed rollback '{}' does not match it",
+                path.display(),
+                committed_path.display()
+            ));
+        }
+        return Ok(PriorWorkspaceOutcome::Prior);
+    }
+    if workspace != expected_bytes {
+        return Err(format!(
+            "workspace '{}' matches neither exact prior nor verified forward bytes",
+            path.display()
+        ));
+    }
+    if let Some(forward) = forward {
+        if forward != expected_bytes {
+            return Err(format!(
+                "forward rollback '{}' does not contain the exact new workspace",
+                forward_path.display()
+            ));
+        }
+    }
+    Ok(PriorWorkspaceOutcome::Forward)
 }
 
 fn certify_prior_pending_recovery(
@@ -3018,40 +3237,147 @@ fn restore_workspace_backup_in(
     backup_path: &Path,
     path: &Path,
 ) -> Result<(), String> {
-    if !regular_file_exists(workspace_dir, backup_path, "workspace rollback backup")? {
-        return Err(format!(
-            "workspace rollback backup '{}' is missing",
-            backup_path.display()
-        ));
-    }
-    regular_file_exists(workspace_dir, path, "workspace")?;
-    let candidate_path = workspace_restore_candidate_path(path)?;
-    let mut candidate_guard = create_snapshot_candidate_with_in(
+    let expected_bytes = read_workspace_restore_source_bytes(
         workspace_dir,
         backup_path,
-        &candidate_path,
-        hard_link_workspace_path,
-        std::io::copy,
+        "workspace rollback backup",
     )?;
-    rename_regular_workspace_path(
+    regular_file_exists(workspace_dir, path, "workspace")?;
+    let mut failures = Vec::new();
+    for attempt in 0..2 {
+        let candidate_path = workspace_restore_candidate_path(path)?;
+        let candidate = if attempt == 0 {
+            create_snapshot_candidate_with_in(
+                workspace_dir,
+                backup_path,
+                &candidate_path,
+                hard_link_workspace_path,
+                std::io::copy,
+            )
+        } else {
+            create_restore_candidate_from_bytes(workspace_dir, &candidate_path, &expected_bytes)
+        };
+        let mut candidate_guard = match candidate {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        let candidate_file = open_existing_regular_file(
+            workspace_dir,
+            &candidate_path,
+            "workspace restore candidate",
+            false,
+        )?
+        .ok_or_else(|| {
+            format!(
+                "workspace restore candidate '{}' disappeared",
+                candidate_path.display()
+            )
+        })?;
+        match publish_opened_restore_candidate(
+            workspace_dir,
+            &candidate_file,
+            &expected_bytes,
+            &candidate_path,
+            path,
+            &mut |workspace_dir, source, destination| {
+                rename_workspace_path_in(workspace_dir, source, destination).map_err(|e| {
+                    format!(
+                        "restore workspace from rollback '{}' to '{}': {}",
+                        backup_path.display(),
+                        path.display(),
+                        e
+                    )
+                })
+            },
+        ) {
+            Ok(()) => {
+                candidate_guard.commit();
+                return Ok(());
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+    Err(format!(
+        "restore exact workspace bytes from rollback '{}' failed after bounded pinned publication: {}",
+        backup_path.display(),
+        failures.join("; ")
+    ))
+}
+
+fn create_restore_candidate_from_bytes<'a>(
+    workspace_dir: &'a SecureWorkspaceDir,
+    candidate_path: &Path,
+    expected_bytes: &[u8],
+) -> Result<TempFileGuard<'a>, String> {
+    let mut candidate =
+        open_new_workspace_file(workspace_dir, candidate_path, "restore candidate")?;
+    let candidate_guard = TempFileGuard::new(workspace_dir, candidate_path.to_path_buf());
+    candidate.write_all(expected_bytes).map_err(|error| {
+        format!(
+            "write trusted workspace restore candidate '{}': {}",
+            candidate_path.display(),
+            error
+        )
+    })?;
+    candidate.flush().map_err(|error| {
+        format!(
+            "flush trusted workspace restore candidate '{}': {}",
+            candidate_path.display(),
+            error
+        )
+    })?;
+    candidate.sync_all().map_err(|error| {
+        format!(
+            "sync trusted workspace restore candidate '{}': {}",
+            candidate_path.display(),
+            error
+        )
+    })?;
+    Ok(candidate_guard)
+}
+
+fn publish_opened_restore_candidate(
+    workspace_dir: &SecureWorkspaceDir,
+    source_file: &File,
+    expected_bytes: &[u8],
+    source: &Path,
+    destination: &Path,
+    rename: &mut impl FnMut(&SecureWorkspaceDir, &Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !regular_file_exists(workspace_dir, source, "workspace restore candidate")? {
+        return Err(format!(
+            "workspace restore candidate '{}' is missing",
+            source.display()
+        ));
+    }
+    regular_file_exists(workspace_dir, destination, "workspace")?;
+    verify_opened_workspace_artifact(
         workspace_dir,
-        &candidate_path,
-        path,
+        source_file,
+        source,
+        expected_bytes,
         "workspace restore candidate",
-        "workspace",
-        &mut |workspace_dir, source, destination| {
-            rename_workspace_path_in(workspace_dir, source, destination).map_err(|e| {
-                format!(
-                    "restore workspace from pending rollback '{}' to '{}': {}",
-                    backup_path.display(),
-                    path.display(),
-                    e
-                )
-            })
-        },
     )?;
-    candidate_guard.commit();
-    Ok(())
+    #[cfg(test)]
+    run_post_restore_verification_pre_rename_fault(source)?;
+    rename(workspace_dir, source, destination)?;
+    verify_opened_workspace_artifact(
+        workspace_dir,
+        source_file,
+        destination,
+        expected_bytes,
+        "workspace restore candidate",
+    )
+    .map_err(|error| {
+        format!(
+            "verify restored workspace '{}': {}",
+            destination.display(),
+            error
+        )
+    })
 }
 
 fn rename_workspace_path_in(
@@ -4264,6 +4590,8 @@ where
 thread_local! {
     static POST_VERIFICATION_PRE_RENAME_REPLACEMENT: RefCell<Option<Vec<u8>>> =
         const { RefCell::new(None) };
+    static POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT: RefCell<Option<Vec<u8>>> =
+        const { RefCell::new(None) };
     static POST_INITIAL_FORWARD_SYNC_FAULT: RefCell<Option<PostInitialForwardSyncFault>> =
         const { RefCell::new(None) };
     static MARKER_FILE_FAULT: RefCell<Option<MarkerFileFaultPlan>> = const { RefCell::new(None) };
@@ -4272,6 +4600,17 @@ thread_local! {
 #[cfg(test)]
 fn run_post_verification_pre_rename_fault(path: &Path) -> Result<(), String> {
     POST_VERIFICATION_PRE_RENAME_REPLACEMENT.with(|replacement| {
+        let Some(replacement) = replacement.borrow_mut().take() else {
+            return Ok(());
+        };
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+        fs::write(path, replacement).map_err(|error| error.to_string())
+    })
+}
+
+#[cfg(test)]
+fn run_post_restore_verification_pre_rename_fault(path: &Path) -> Result<(), String> {
+    POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT.with(|replacement| {
         let Some(replacement) = replacement.borrow_mut().take() else {
             return Ok(());
         };
@@ -4544,6 +4883,29 @@ fn workspace_save_to_test_swap_after_final_verification_before_rename(
         .with(|pending| pending.borrow_mut().take().is_some());
     if missed {
         Err("expected post-verification pre-rename fault point was not reached".to_string())
+    } else {
+        result
+    }
+}
+
+#[cfg(test)]
+fn with_restore_candidate_swap<T>(
+    replacement: Vec<u8>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT.with(|pending| {
+        assert!(
+            pending.borrow().is_none(),
+            "post-restore-verification pre-rename fault already installed"
+        );
+        *pending.borrow_mut() = Some(replacement);
+    });
+
+    let result = operation();
+    let missed = POST_RESTORE_VERIFICATION_PRE_RENAME_REPLACEMENT
+        .with(|pending| pending.borrow_mut().take().is_some());
+    if missed {
+        Err("expected post-restore-verification pre-rename fault point was not reached".to_string())
     } else {
         result
     }
@@ -5258,6 +5620,91 @@ mod tests {
             previous_bytes
         );
         assert!(cleanup_artifacts(path.parent().expect("parent")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_in_process_rollback_repairs_exact_window_candidate_swap() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        let previous_bytes =
+            serde_json::to_vec_pretty(&previous).expect("serialize exact previous workspace");
+        fs::write(&path, &previous_bytes).expect("write previous workspace");
+        let attacker_bytes = serde_json::to_vec(&workspace_with_project("attacker"))
+            .expect("serialize attacker workspace");
+        let mut sync_calls = 0;
+
+        let error = with_restore_candidate_swap(attacker_bytes.clone(), || {
+            workspace_save_to_test_hook(
+                &path,
+                &workspace_with_project("updated"),
+                |_| Ok(()),
+                |_| {
+                    sync_calls += 1;
+                    if sync_calls == 2 {
+                        Err("injected workspace sync failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                restore_workspace_backup,
+            )
+        })
+        .expect_err("failed save must report its original sync failure");
+
+        assert!(
+            !error.contains("fault point was not reached"),
+            "the exact restore check-to-rename hook must run: {error}"
+        );
+        assert!(error.contains("injected workspace sync failure"), "{error}");
+        assert_eq!(
+            fs::read(&path).expect("read in-process rollback"),
+            previous_bytes
+        );
+        assert_ne!(
+            fs::read(&path).expect("read non-attacker workspace"),
+            attacker_bytes
+        );
+        assert_eq!(
+            load_workspace_from(&path).expect("restart recovery"),
+            Some(previous)
+        );
+        assert_eq!(
+            fs::read(&path).expect("read restarted rollback"),
+            previous_bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_workspace_tests_restart_rollback_repairs_exact_window_candidate_swap() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        let previous_bytes =
+            serde_json::to_vec_pretty(&previous).expect("serialize exact previous workspace");
+        let updated_bytes =
+            serde_json::to_vec(&workspace_with_project("updated")).expect("serialize updated");
+        let attacker_bytes = serde_json::to_vec(&workspace_with_project("attacker"))
+            .expect("serialize attacker workspace");
+        fs::write(&path, &updated_bytes).expect("write uncommitted workspace");
+        fs::write(pending_path(&path), &previous_bytes).expect("write pending rollback");
+        sync_parent_directory_standalone(path.parent().expect("parent"))
+            .expect("sync restart state");
+
+        let restarted =
+            with_restore_candidate_swap(attacker_bytes.clone(), || load_workspace_from(&path))
+                .expect("restart recovery must repair a swapped restore candidate");
+
+        assert_eq!(restarted, Some(previous));
+        assert_eq!(
+            fs::read(&path).expect("read restarted rollback"),
+            previous_bytes
+        );
+        assert_ne!(
+            fs::read(&path).expect("read non-attacker workspace"),
+            attacker_bytes
+        );
+        assert!(rollback_artifacts(path.parent().expect("parent")).is_empty());
     }
 
     #[cfg(unix)]
@@ -6284,6 +6731,68 @@ mod tests {
                     fs::read(&path).expect("read restored prior workspace"),
                     previous_bytes
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn native_workspace_tests_prior_final_resolution_matches_exact_restart_bytes() {
+        let (_dir, path) = temp_workspace_path();
+        let previous = workspace_with_project("previous");
+        let previous_bytes =
+            serde_json::to_vec_pretty(&previous).expect("serialize exact previous bytes");
+        fs::write(&path, &previous_bytes).expect("write previous workspace");
+        let updated = workspace_with_project("updated");
+        let updated_bytes = serde_json::to_vec(&updated).expect("serialize updated workspace");
+        let mut sync_calls = 0;
+        let mut recreation_calls = 0;
+
+        let result = workspace_save_to_test_hook_with_recreation_fault(
+            &path,
+            &updated,
+            |_| {
+                sync_calls += 1;
+                match sync_calls {
+                    3 => Err("injected committed marker sync failure".to_string()),
+                    4 => Err("injected restored rollback sync failure".to_string()),
+                    5 => Err("injected forced forward certification sync failure".to_string()),
+                    6 => {
+                        fs::write(&path, &updated_bytes).map_err(|error| {
+                            format!("restore restart-selected forward workspace: {error}")
+                        })?;
+                        Err("injected final remaining rollback sync failure".to_string())
+                    }
+                    _ => Ok(()),
+                }
+            },
+            |source, destination| {
+                recreation_calls += 1;
+                assert_eq!(source, committed_path(&path));
+                assert_eq!(destination, pending_path(&path));
+                Err(format!(
+                    "injected pending rollback recreation failure #{recreation_calls}"
+                ))
+            },
+        );
+
+        assert!(
+            (5..=8).contains(&sync_calls),
+            "final resolution must remain bounded, observed {sync_calls} syncs"
+        );
+        assert!(
+            (3..=5).contains(&recreation_calls),
+            "all rollback recovery copies must be traced, observed {recreation_calls} recreations"
+        );
+        let restarted = load_workspace_from(&path).expect("restart recovery");
+        let restarted_bytes = fs::read(&path).expect("read restarted workspace");
+        match result {
+            Ok(()) => {
+                assert_eq!(restarted, Some(updated));
+                assert_eq!(restarted_bytes, updated_bytes);
+            }
+            Err(_) => {
+                assert_eq!(restarted, Some(previous));
+                assert_eq!(restarted_bytes, previous_bytes);
             }
         }
     }

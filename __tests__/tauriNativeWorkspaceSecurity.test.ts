@@ -141,6 +141,32 @@ describe('Tauri native workspace security contract', () => {
     expect(publish.slice(revalidation, rename)).not.toContain('regular_file_exists');
   });
 
+  test('pins rollback restore candidates across the exact check-to-rename window', async () => {
+    const source = await readFile(sourcePath, 'utf8');
+
+    expect(source).toContain('run_post_restore_verification_pre_rename_fault');
+    const restore = functionBody(source, 'restore_workspace_backup_in');
+    const publish = functionBody(source, 'publish_opened_restore_candidate');
+    const finalCheck = publish.indexOf('verify_opened_workspace_artifact');
+    const exactWindowHook = publish.indexOf(
+      'run_post_restore_verification_pre_rename_fault(source)',
+    );
+    const rename = publish.indexOf('rename(workspace_dir, source, destination)');
+    const installedCheck = publish.indexOf(
+      'verify_opened_workspace_artifact',
+      finalCheck + 1,
+    );
+
+    expect(restore).toContain('publish_opened_restore_candidate');
+    expect(restore).toContain('read_workspace_restore_source_bytes');
+    expect(restore).toContain('create_restore_candidate_from_bytes');
+    expect(finalCheck).toBeGreaterThanOrEqual(0);
+    expect(exactWindowHook).toBeGreaterThan(finalCheck);
+    expect(rename).toBeGreaterThan(exactWindowHook);
+    expect(installedCheck).toBeGreaterThan(rename);
+    expect(publish.slice(finalCheck, rename)).not.toContain('regular_file_exists');
+  });
+
   test('requires directory durability before initial forward certification succeeds', async () => {
     const source = await readFile(sourcePath, 'utf8');
     const commit = functionBody(source, 'commit_initial_workspace_forward');
