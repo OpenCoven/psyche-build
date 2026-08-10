@@ -571,45 +571,46 @@ describe('Tauri physical terminal panes', () => {
     expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
   });
 
-  it('guards contextual terminal creation behind dirty-file navigation', async () => {
-    const terminalHost = { hidden: true };
-    let spawned = 0;
-    let focused = 0;
-    const acceptedCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+  it('creates a shell only after the terminal view is revealed', async () => {
+    const calls: string[] = [];
+    const visible = deferred<boolean>();
+    const acceptedCreate = compileFunction<() => Promise<{ kind: string } | null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => {
-          terminalHost.hidden = false;
-          expect(terminalHost.hidden).toBe(false);
-          spawned += 1;
-          focused += 1;
-          return { kind: 'coven-chat' };
+        showTerminalView: async () => {
+          calls.push('show:start');
+          const result = await visible.promise;
+          calls.push(`show:end:${result}`);
+          return result;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'shell' };
         },
       },
     );
-    await expect(acceptedCreate()).resolves.toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+    const pendingCreate = acceptedCreate();
+    await Promise.resolve();
+    expect(calls).toEqual(['show:start']);
+    visible.resolve(true);
+    await expect(pendingCreate).resolves.toEqual({ kind: 'shell' });
+    expect(calls).toEqual(['show:start', 'show:end:true', 'spawn']);
 
-    terminalHost.hidden = true;
-    const canceledCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+    const canceledCreate = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => null,
+        showTerminalView: async () => {
+          calls.push('show:cancel');
+          return false;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn:cancel');
+          return { kind: 'wrong' };
+        },
       },
     );
     await expect(canceledCreate()).resolves.toBeNull();
-    expect(terminalHost.hidden).toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+    expect(calls).toEqual(['show:start', 'show:end:true', 'spawn', 'show:cancel']);
   });
 
   it('cancels a queued PTY start when the thread closes before animation frame', () => {

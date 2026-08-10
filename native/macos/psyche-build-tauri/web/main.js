@@ -4251,8 +4251,7 @@
   }
 
   async function runNewShellCommand() {
-    if (!(await prepareDefaultThreadCreation())) return null;
-    return spawnShellThread();
+    return createTerminalPane();
   }
 
   async function runNewPsycheCommand() {
@@ -5000,9 +4999,8 @@
     if (urlInput) urlInput.focus();
     return tab || currentBrowserTab(project);
   }
-  listen("browser:shortcut-new-tab", function () {
-    markActiveSurface("browser");
-    openBlankBrowserTab();
+  listen("browser:shortcut-terminal-pane", function () {
+    createTerminalPane();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
@@ -5199,12 +5197,9 @@
     return showTerminalView();
   }
 
-  async function createContextualTab() {
-    if (activeSurface === "browser") {
-      await openBlankBrowserTab();
-      return true;
-    }
-    return (await spawnCovenThread()) ? true : null;
+  async function createTerminalPane() {
+    if (!(await showTerminalView())) return null;
+    return spawnShellThread();
   }
 
   document.addEventListener("keydown", async function (e) {
@@ -5214,10 +5209,11 @@
       await handleExplicitFileSave(e);
       return;
     }
-    // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
+    // ⌘T always opens a plain login shell in the terminal canvas.
     if (String(e.key).toLowerCase() === "t") {
-      await createContextualTab();
-      e.preventDefault(); return;
+      e.preventDefault();
+      await createTerminalPane();
+      return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
@@ -5328,7 +5324,7 @@
     if (trigger) trigger.setAttribute("aria-expanded", "false");
   }
   function toggleNewPaneMenu() {
-    if (!newPaneMenuEl) { createContextualTab(); return; }
+    if (!newPaneMenuEl) { createTerminalPane(); return; }
     var open = newPaneMenuEl.hidden;
     if (open) {
       var project = activeProject();

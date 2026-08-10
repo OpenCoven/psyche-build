@@ -12,13 +12,17 @@ const tauriConfig = JSON.parse(
 );
 
 describe('Tauri desktop tab shortcuts', () => {
-  it('routes Command+T based on the last focused desktop surface', () => {
-    expect(mainJs).toMatch(/var\s+activeSurface\s*=\s*"terminal";/);
-    expect(mainJs).toMatch(/function\s+createContextualTab\(\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"terminal"\s*\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"browser"\s*\)/);
+  it('routes Command+T to terminal panes globally', () => {
+    expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
     expect(mainJs).toMatch(
-      /if\s*\(\s*activeSurface\s*===\s*"browser"\s*\)[\s\S]*openBlankBrowserTab\(\);[\s\S]*return\s*\(await spawnCovenThread\(\)\)\s*\?\s*true\s*:\s*null;/
+      /async function createTerminalPane\(\)\s*\{[\s\S]*await showTerminalView\(\)[\s\S]*return spawnShellThread\(\);[\s\S]*\}/
+    );
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"[\s\S]*e\.preventDefault\(\);[\s\S]*await createTerminalPane\(\);/
+    );
+    expect(mainJs).not.toMatch(/function\s+createContextualTab\(\)/);
+    expect(mainJs).not.toMatch(
+      /if\s*\(\s*String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"\s*\)\s*\{[^}]*openBlankBrowserTab\(\)/
     );
   });
 
@@ -52,12 +56,15 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews request a new browser tab with Command+T', () => {
-    expect(tauriLib).toMatch(/browser:shortcut-new-tab/);
+  it('lets embedded browser webviews request a terminal pane with Command+T', () => {
+    expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
+    expect(tauriLib).not.toMatch(/browser:shortcut-new-tab/);
     expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
     expect(tauriLib).toMatch(/function\(browserLabel\)/);
     expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
-    expect(mainJs).toMatch(/listen\(\s*"browser:shortcut-new-tab"/);
+    expect(mainJs).toMatch(
+      /listen\(\s*"browser:shortcut-terminal-pane",\s*function\s*\(\)\s*\{[\s\S]*createTerminalPane\(\);[\s\S]*\}\s*\)\.catch/
+    );
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {
