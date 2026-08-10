@@ -3465,10 +3465,10 @@
     });
   }
 
-  function handlePaneFooterItemClick(thread, item, event) {
+  function handlePaneFooterItemClick(thread, item, event, fromOverflowMenu) {
     event.stopPropagation();
     var result = runPaneFooterAction(thread, item);
-    closePaneFooterMenu(thread, true);
+    closePaneFooterMenu(thread, Boolean(fromOverflowMenu));
     focusPaneAfterFooterAction(thread);
     return result;
   }
@@ -3575,7 +3575,7 @@
       button.appendChild(label);
       button.appendChild(value);
       button.addEventListener("click", function (event) {
-        handlePaneFooterItemClick(thread, item, event);
+        handlePaneFooterItemClick(thread, item, event, role === "menuitem");
       });
       return button;
     };

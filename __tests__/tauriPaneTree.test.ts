@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createContext, runInContext } from 'node:vm';
 import { describe, expect, test } from 'vitest';
 
 const panesRoot = join(
@@ -8,6 +10,17 @@ const panesRoot = join(
 );
 const panes = await import(pathToFileURL(join(panesRoot, 'pane-tree.mjs')).href);
 const entry = await import(pathToFileURL(join(panesRoot, 'pane-entry.js')).href);
+const panesBundleSource = readFileSync(join(
+  process.cwd(),
+  'native/macos/psyche-build-tauri/web/panes.bundle.js',
+), 'utf8');
+const bundleContext: Record<string, unknown> = {};
+bundleContext.globalThis = bundleContext;
+bundleContext.window = bundleContext;
+bundleContext.self = bundleContext;
+createContext(bundleContext);
+runInContext(panesBundleSource, bundleContext);
+const bundle = bundleContext.PsychePanes as Record<string, unknown>;
 
 describe('Tauri physical pane tree', () => {
   const minimums = { width: 320, height: 120, separator: 6 };
@@ -37,6 +50,20 @@ describe('Tauri physical pane tree', () => {
       'spanLayout',
       'splitOrientation',
     ]);
+  });
+
+  test('ships the committed pane bundle with the same footer helpers', () => {
+    expect(Object.keys(bundle).sort()).toEqual(Object.keys(entry).sort());
+    expect(bundle).toMatchObject({
+      FOOTER_TIERS: expect.any(Object),
+      footerItems: expect.any(Function),
+      footerTier: expect.any(Function),
+      formatContext: expect.any(Function),
+      formatSpend: expect.any(Function),
+      hiddenFooterKeys: expect.any(Function),
+      isAgentPaneKind: expect.any(Function),
+      shouldApplyMetricsResponse: expect.any(Function),
+    });
   });
 
   test('creates terminal leaves', () => {

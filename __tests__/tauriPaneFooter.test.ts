@@ -633,7 +633,7 @@ describe('pane footer interaction behavior', () => {
     ]);
   });
 
-  it('focuses footer chrome on pointerdown but defers inactive button focus until after click action dispatch', () => {
+  it('focuses footer chrome on pointerdown but defers inactive visible-button focus until after click action dispatch', () => {
     const thread = { id: 'thread-a' };
     const state = { activeThreadId: 'thread-b' };
     const calls: string[] = [];
@@ -660,6 +660,7 @@ describe('pane footer interaction behavior', () => {
       threadValue: typeof thread,
       item: Record<string, unknown>,
       event: { stopPropagation: () => void },
+      fromOverflowMenu?: boolean,
     ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
       closePaneFooterMenu: (_thread: typeof thread, restoreFocus: boolean) => {
         calls.push(`close-menu:${restoreFocus}`);
@@ -699,12 +700,12 @@ describe('pane footer interaction behavior', () => {
       fullValue: 'session-123',
     }, {
       stopPropagation: () => { calls.push('stop:click'); },
-    });
+    }, false);
     expect(calls).toEqual([
       'stop:button',
       'stop:click',
       'run-action',
-      'close-menu:true',
+      'close-menu:false',
       'schedule-focus',
       'queue-focus',
     ]);
@@ -717,10 +718,65 @@ describe('pane footer interaction behavior', () => {
       'stop:button',
       'stop:click',
       'run-action',
-      'close-menu:true',
+      'close-menu:false',
       'schedule-focus',
       'queue-focus',
       'focus:thread-a',
+    ]);
+  });
+
+  it('restores overflow-trigger focus only for overflow menu activations', () => {
+    const thread = { id: 'thread-a' };
+    const calls: string[] = [];
+    const handlePaneFooterItemClick = compileFunction<(
+      threadValue: typeof thread,
+      item: Record<string, unknown>,
+      event: { stopPropagation: () => void },
+      fromOverflowMenu?: boolean,
+    ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
+      closePaneFooterMenu: (_thread: typeof thread, restoreFocus: boolean) => {
+        calls.push(`close-menu:${restoreFocus}`);
+        if (restoreFocus) calls.push('focus-trigger');
+      },
+      runPaneFooterAction: () => {
+        calls.push('run-action');
+        return true;
+      },
+      focusPaneAfterFooterAction: () => {
+        calls.push('focus-pane');
+      },
+    });
+
+    handlePaneFooterItemClick(thread, {
+      label: 'Branch',
+      action: 'copy',
+      value: 'feat/footer',
+      fullValue: 'feat/footer',
+    }, {
+      stopPropagation: () => { calls.push('stop:visible'); },
+    }, false);
+    expect(calls).toEqual([
+      'stop:visible',
+      'run-action',
+      'close-menu:false',
+      'focus-pane',
+    ]);
+
+    calls.length = 0;
+    handlePaneFooterItemClick(thread, {
+      label: 'Session ID',
+      action: 'copy',
+      value: '12345678',
+      fullValue: 'session-123',
+    }, {
+      stopPropagation: () => { calls.push('stop:overflow'); },
+    }, true);
+    expect(calls).toEqual([
+      'stop:overflow',
+      'run-action',
+      'close-menu:true',
+      'focus-trigger',
+      'focus-pane',
     ]);
   });
 });
@@ -785,7 +841,7 @@ describe('pane footer integration contract', () => {
     expect(create).toMatch(/className = "terminal-pane-footer-overflow"/);
     expect(create).toMatch(/data-footer-key|dataset\.footerKey/);
     expect(create).toMatch(/paneFooterItemDescription\(item\)/);
-    expect(create).toMatch(/handlePaneFooterItemClick\(thread, item, event\)/);
+    expect(create).toMatch(/handlePaneFooterItemClick\(thread, item, event, role === "menuitem"\)/);
     expect(create).toMatch(/handlePaneFooterPointerDown\(thread, event\)/);
     expect(create).toMatch(/new ResizeObserver[\s\S]*PsychePanes\.footerTier/);
     expect(create).toMatch(/observer\.observe\(thread\.pane \|\| footer\)/);
@@ -804,7 +860,7 @@ describe('pane footer integration contract', () => {
     expect(sync).toMatch(/setAttribute\("role", "menuitem"\)/);
     expect(sync).toMatch(/thread\.createPaneFooterButton\(item, "menuitem"\)/);
     expect(functionSource(mainJs, 'createPaneFooter'))
-      .toMatch(/handlePaneFooterItemClick\(thread, item, event\)/);
+      .toMatch(/handlePaneFooterItemClick\(thread, item, event, role === "menuitem"\)/);
     expect(moveFocus).toMatch(/key === "ArrowUp"/);
     expect(moveFocus).toMatch(/key === "ArrowDown"/);
     expect(moveFocus).toMatch(/key === "Home"/);
