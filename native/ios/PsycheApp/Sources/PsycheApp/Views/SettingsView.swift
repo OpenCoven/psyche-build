@@ -17,6 +17,7 @@ struct SettingsView: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Connection status, \(statusText)")
+                .accessibilityIdentifier("settings-status")
 
                 LabeledContent("Host") {
                     Text(model.hostName ?? "Not paired")
@@ -24,6 +25,7 @@ struct SettingsView: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Host, \(model.hostName ?? "not paired")")
+                .accessibilityIdentifier("settings-host")
 
                 if let lastConfirmedAt = store.lastConfirmedAt {
                     LabeledContent("Last confirmed") {

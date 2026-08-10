@@ -3,7 +3,6 @@ import SwiftUI
 
 @main
 struct PsycheApp: App {
-    @StateObject private var store = DemoStore()
     @StateObject private var model: AppModel
 
     init() {
@@ -14,7 +13,6 @@ struct PsycheApp: App {
     var body: some Scene {
         WindowGroup {
             CockpitView()
-                .environmentObject(store)
                 .environmentObject(model)
                 .environmentObject(model.workspaceStore)
                 .preferredColorScheme(.dark)
