@@ -814,6 +814,43 @@ describe('macOS build channels', () => {
       expect(failure?.cause).toBeInstanceOf(Error);
     });
 
+    it('aborts the active command and preserves partial child diagnostics', async () => {
+      const controller = new AbortController();
+      const command = runCommand(
+        process.execPath,
+        [
+          '-e',
+          'process.stdout.write("child started"); setTimeout(() => process.exit(0), 250)',
+        ],
+        {
+          cwd: repositoryRoot,
+          stage: 'exercise command cancellation',
+          signal: controller.signal,
+        },
+      );
+      setTimeout(
+        () => controller.abort(new Error('test requested command cancellation')),
+        20,
+      );
+
+      const failure = await command.then(
+        () => undefined,
+        (error) =>
+          error as Error & {
+            code?: string;
+            stdout?: string;
+          },
+      );
+
+      expect(failure).toBeDefined();
+      expect(failure?.message).toContain('exercise command cancellation');
+      expect(failure?.message).toMatch(/abort/i);
+      expect(failure?.message).toContain('child started');
+      expect(failure?.code).toBe('ABORT_ERR');
+      expect(failure?.stdout).toBe('child started');
+      expect(failure?.cause).toBeInstanceOf(Error);
+    });
+
     it('resolves a ref containing spaces as one git argument', async () => {
       const sha = 'a'.repeat(40);
       const execute = vi.fn(
@@ -2956,6 +2993,55 @@ fi
       executable: 'psyche-build-dev',
     };
 
+    function createCommittedSource(label: string): string {
+      const sourceRoot = createScratchDirectory(label);
+      runGit(sourceRoot, ['init', '--quiet']);
+      runGit(sourceRoot, ['config', 'user.name', 'Psyche Build Tests']);
+      runGit(sourceRoot, ['config', 'user.email', 'tests@example.invalid']);
+      writeFileSync(join(sourceRoot, 'tracked.txt'), 'committed source\n', 'utf8');
+      runGit(sourceRoot, ['add', 'tracked.txt']);
+      runGit(sourceRoot, ['commit', '--quiet', '-m', 'initial source']);
+      return sourceRoot;
+    }
+
+    async function runDevBuildWithSourceMutation(
+      label: string,
+      prepare: (sourceRoot: string) => void,
+      mutateDuringBuild: (sourceRoot: string) => void,
+    ): Promise<{
+      completion: Promise<unknown>;
+      publish: ReturnType<typeof vi.fn>;
+      tempRoot: string;
+    }> {
+      const sourceRoot = createCommittedSource(label);
+      const tempRoot = createScratchDirectory(`${label}-temp`);
+      const snapshotPath = join(tempRoot, 'snapshot', 'Psyche Build Dev.app');
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+      prepare(sourceRoot);
+      const publish = vi.fn(async () => installedPath);
+
+      const completion = runMacosBuild(
+        { channel: 'dev', repositoryRoot: sourceRoot },
+        {
+          execute: runCommand,
+          makeTemporaryDirectory: async () => tempRoot,
+          removePath: async (targetPath) => {
+            rmSync(targetPath, { recursive: true, force: true });
+          },
+          writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
+          buildDevAppSnapshot: async () => {
+            mutateDuringBuild(sourceRoot);
+            return { snapshotPath, identity: devIdentity };
+          },
+          publishBuildChannel: publish,
+          now: () => new Date(builtAt),
+          homeDir: virtualHome,
+        },
+      );
+
+      return { completion, publish, tempRoot };
+    }
+
     it('runs the exact stable workflow in an isolated source child and records provenance', async () => {
       const tempRoot = '/workspace/.build-temp/stable-1';
       const sourceRoot = join(tempRoot, 'source');
@@ -3340,6 +3426,102 @@ fi
       expect(existsSync(tempRoot)).toBe(false);
     });
 
+    it('rejects a dev snapshot when clean source advances to a new commit', async () => {
+      const { completion, publish, tempRoot } = await runDevBuildWithSourceMutation(
+        'dev-source-new-commit',
+        () => {},
+        (sourceRoot) => {
+          writeFileSync(join(sourceRoot, 'tracked.txt'), 'new committed source\n', 'utf8');
+          runGit(sourceRoot, ['add', 'tracked.txt']);
+          runGit(sourceRoot, ['commit', '--quiet', '-m', 'source changed during build']);
+        },
+      );
+
+      await expect(completion).rejects.toThrow(/dev source changed.*build|build.*dev source changed/i);
+      expect(publish).not.toHaveBeenCalled();
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
+    it('rejects changed dirty content even when status and paths stay the same', async () => {
+      const { completion, publish, tempRoot } = await runDevBuildWithSourceMutation(
+        'dev-source-dirty-content',
+        (sourceRoot) => {
+          writeFileSync(join(sourceRoot, 'tracked.txt'), 'dirty version one\n', 'utf8');
+        },
+        (sourceRoot) => {
+          writeFileSync(join(sourceRoot, 'tracked.txt'), 'dirty version two\n', 'utf8');
+        },
+      );
+
+      await expect(completion).rejects.toThrow(/dev source changed.*build|build.*dev source changed/i);
+      expect(publish).not.toHaveBeenCalled();
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
+    it('rejects changed untracked content even when its status and path stay the same', async () => {
+      const { completion, publish, tempRoot } = await runDevBuildWithSourceMutation(
+        'dev-source-untracked-content',
+        (sourceRoot) => {
+          writeFileSync(join(sourceRoot, 'draft.txt'), 'untracked version one\n', 'utf8');
+        },
+        (sourceRoot) => {
+          writeFileSync(join(sourceRoot, 'draft.txt'), 'untracked version two\n', 'utf8');
+        },
+      );
+
+      await expect(completion).rejects.toThrow(/dev source changed.*build|build.*dev source changed/i);
+      expect(publish).not.toHaveBeenCalled();
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
+    it('allows build:web to change tracked generated bundles without rejecting publication', async () => {
+      const generatedBundle =
+        'native/macos/psyche-build-tauri/web/editor.bundle.js';
+      const sourceRoot = createCommittedSource('dev-source-generated-output');
+      mkdirSync(join(sourceRoot, 'native/macos/psyche-build-tauri/web'), {
+        recursive: true,
+      });
+      writeFileSync(join(sourceRoot, generatedBundle), 'generated version one\n', 'utf8');
+      runGit(sourceRoot, ['add', generatedBundle]);
+      runGit(sourceRoot, ['commit', '--quiet', '-m', 'add generated bundle']);
+      const tempRoot = createScratchDirectory('dev-source-generated-output-temp');
+      const snapshotPath = join(tempRoot, 'snapshot', 'Psyche Build Dev.app');
+      const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
+      const publish = vi.fn(async () => installedPath);
+
+      await expect(
+        runMacosBuild(
+          { channel: 'dev', repositoryRoot: sourceRoot },
+          {
+            execute: runCommand,
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath: async (targetPath) => {
+              rmSync(targetPath, { recursive: true, force: true });
+            },
+            writeDevTauriConfig: async () => join(tempRoot, 'dev.json'),
+            buildDevAppSnapshot: async () => {
+              writeFileSync(
+                join(sourceRoot, generatedBundle),
+                'generated version two\n',
+                'utf8',
+              );
+              return { snapshotPath, identity: devIdentity };
+            },
+            publishBuildChannel: publish,
+            now: () => new Date(builtAt),
+            homeDir: virtualHome,
+          },
+        ),
+      ).resolves.toMatchObject({
+        channel: 'dev',
+        commitSha: runGit(sourceRoot, ['rev-parse', 'HEAD']).trim(),
+        dirty: false,
+      });
+
+      expect(publish).toHaveBeenCalledOnce();
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
     it('does not install or record provenance when a dev build command fails and cleans the config root', async () => {
       const tempRoot = '/workspace/.build-temp/dev-build-failure';
       const configPath = join(tempRoot, 'tauri.dev.json');
@@ -3599,6 +3781,142 @@ fi
       expect(runBuild).toHaveBeenCalledOnce();
       expect(stdout).toEqual([]);
       expect(stderr).toEqual(['build exploded']);
+    });
+
+    it.each([
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+    ] as const)(
+      'aborts a long stable child on %s, waits for cleanup, and returns %i',
+      async (signalName, expectedExitCode) => {
+        const signalTarget = new EventEmitter();
+        const tempRoot = `/workspace/.build-temp/stable-${signalName.toLowerCase()}`;
+        const sourceRoot = join(tempRoot, 'source');
+        const stdout: string[] = [];
+        const stderr: string[] = [];
+        const events: string[] = [];
+        const publish = vi.fn(async () => '/should-not-install');
+        let markChildStarted = () => {};
+        const childStarted = new Promise<void>((resolveStarted) => {
+          markChildStarted = resolveStarted;
+        });
+        let abortCount = 0;
+
+        const execute = vi.fn(
+          async (
+            command: string,
+            args: readonly string[],
+            options: CommandOptions = {},
+          ): Promise<CommandResult> => {
+            if (command === 'git' && args.includes('rev-parse')) {
+              return { stdout: `${'c'.repeat(40)}\n`, stderr: '' };
+            }
+            if (command === 'git' && args[0] === 'worktree' && args[1] === 'add') {
+              events.push('worktree-add');
+              return { stdout: '', stderr: '' };
+            }
+            if (command === 'pnpm' && args[0] === 'install') {
+              events.push('stable-child-started');
+              markChildStarted();
+              if (!options.signal) {
+                throw new Error('stable child did not receive an AbortSignal');
+              }
+              await new Promise<never>((_resolve, reject) => {
+                options.signal?.addEventListener(
+                  'abort',
+                  () => {
+                    abortCount += 1;
+                    events.push('stable-child-aborted');
+                    reject(
+                      new Error(
+                        `Stage: long stable child\nCommand: pnpm install\n` +
+                          `cause: aborted by ${signalName}`,
+                      ),
+                    );
+                  },
+                  { once: true },
+                );
+              });
+            }
+            if (command === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+              events.push(`worktree-remove:${args.join(' ')}`);
+              expect(options.signal).toBeUndefined();
+              return { stdout: '', stderr: '' };
+            }
+            return { stdout: '', stderr: '' };
+          },
+        );
+        const removePath = vi.fn(async (targetPath: string) => {
+          events.push(`remove:${targetPath}`);
+        });
+        const runBuild = vi.fn(async (options: Parameters<typeof runMacosBuild>[0]) =>
+          runMacosBuild(options, {
+            execute,
+            makeTemporaryDirectory: async () => tempRoot,
+            removePath,
+            publishBuildChannel: publish,
+          }),
+        );
+
+        const completion = runCli(['stable', 'release/v1'], {
+          runBuild,
+          stdout: (line) => stdout.push(line),
+          stderr: (line) => stderr.push(line),
+          signalTarget,
+        } as RunCliDependencies);
+
+        await childStarted;
+        signalTarget.emit(signalName, signalName);
+        signalTarget.emit(signalName, signalName);
+
+        await expect(completion).resolves.toBe(expectedExitCode);
+        expect(abortCount).toBe(1);
+        expect(events).toContain('stable-child-aborted');
+        expect(events).toContain(
+          `worktree-remove:worktree remove --force ${sourceRoot}`,
+        );
+        expect(events.indexOf('stable-child-aborted')).toBeLessThan(
+          events.indexOf(`worktree-remove:worktree remove --force ${sourceRoot}`),
+        );
+        expect(removePath).toHaveBeenCalledOnce();
+        expect(removePath).toHaveBeenCalledWith(tempRoot);
+        expect(publish).not.toHaveBeenCalled();
+        expect(stdout).toEqual([]);
+        expect(stderr.join('\n')).toContain('long stable child');
+        expect(stderr.join('\n')).toContain(`aborted by ${signalName}`);
+        expect(signalTarget.listenerCount('SIGINT')).toBe(0);
+        expect(signalTarget.listenerCount('SIGTERM')).toBe(0);
+      },
+    );
+
+    it('removes cancellation listeners after normal completion', async () => {
+      const signalTarget = new EventEmitter();
+      let receivedSignal: AbortSignal | undefined;
+      const runBuild = vi.fn(async (options: Parameters<typeof runMacosBuild>[0]) => {
+        receivedSignal = options.signal;
+        return {
+          channel: 'dev' as const,
+          commitSha: 'd'.repeat(40),
+          dirty: false,
+          builtAt: '2026-08-10T18:00:00.000Z',
+          installedPath: '/Users/test/Applications/Psyche Build Dev.app',
+          productName: 'Psyche Build Dev',
+          bundleIdentifier: 'dev.opencoven.psyche.dev',
+        };
+      });
+
+      await expect(
+        runCli(['dev'], {
+          runBuild,
+          stdout: () => {},
+          stderr: () => {},
+          signalTarget,
+        } as RunCliDependencies),
+      ).resolves.toBe(0);
+
+      expect(receivedSignal).toBeInstanceOf(AbortSignal);
+      expect(signalTarget.listenerCount('SIGINT')).toBe(0);
+      expect(signalTarget.listenerCount('SIGTERM')).toBe(0);
     });
 
     it('names the missing stable ref on stderr, exits nonzero, and prints no install success', () => {

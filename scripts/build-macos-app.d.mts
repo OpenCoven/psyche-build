@@ -46,6 +46,12 @@ export interface BundleIdentity {
   executable: string;
 }
 
+export interface DevSourceFingerprint {
+  commitSha: string;
+  dirty: boolean;
+  digest: string;
+}
+
 export interface DevBuildSnapshotRequest {
   sourceRoot: string;
   tempRoot: string;
@@ -83,6 +89,7 @@ export interface CommandOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   stage?: string;
+  signal?: AbortSignal;
 }
 
 export interface CommandResult {
@@ -151,6 +158,7 @@ export interface PublishBuildChannelOverrides {
 
 export interface BuildDevAppSnapshotOverrides {
   execute?: Runner;
+  signal?: AbortSignal;
   mkdirPath?: (directoryPath: string) => void | Promise<void>;
   writeFileText?: (
     filePath: string,
@@ -164,6 +172,7 @@ export interface BuildDevAppSnapshotOverrides {
 
 export interface RunDevBuildSnapshotUnlockedOverrides {
   execute?: Runner;
+  signal?: AbortSignal;
   removePath?: (targetPath: string) => void | Promise<void>;
   mkdirPath?: (directoryPath: string) => void | Promise<void>;
   findCandidateApp?: (bundleDir: string, expectedAppName: string) => Promise<string>;
@@ -184,6 +193,7 @@ export interface WriteBuildProvenanceUnlockedOverrides {
 
 export interface SmokeLaunchOverrides {
   executableName: string;
+  signal?: AbortSignal;
   args?: readonly string[];
   smokeMs?: number;
   termTimeoutMs?: number;
@@ -205,12 +215,14 @@ export interface StableRunMacosBuildOptions {
   channel: 'stable';
   ref: string;
   repositoryRoot?: string;
+  signal?: AbortSignal;
 }
 
 export interface DevRunMacosBuildOptions {
   channel: 'dev';
   ref?: never;
   repositoryRoot?: string;
+  signal?: AbortSignal;
 }
 
 export type RunMacosBuildOptions = StableRunMacosBuildOptions | DevRunMacosBuildOptions;
@@ -222,7 +234,7 @@ export interface RunMacosBuildDependencies {
   writeDevTauriConfig?: (sourceRoot: string, tempRoot: string) => Promise<string>;
   buildDevAppSnapshot?: (
     input: DevBuildSnapshotRequest,
-    overrides?: Pick<BuildDevAppSnapshotOverrides, 'execute'>,
+    overrides?: Pick<BuildDevAppSnapshotOverrides, 'execute' | 'signal'>,
   ) => Promise<DevBuildSnapshot>;
   findCandidateApp?: (bundleDir: string, expectedAppName: string) => Promise<string>;
   readBundleIdentity?: (appPath: string, execute?: Runner) => Promise<BundleIdentity>;
@@ -248,6 +260,11 @@ export type RunMacosBuildResult =
   | StableRunMacosBuildResult
   | DevRunMacosBuildResult;
 
+export interface BuildSignalTarget {
+  on(event: 'SIGINT' | 'SIGTERM', listener: () => void): this;
+  off(event: 'SIGINT' | 'SIGTERM', listener: () => void): this;
+}
+
 export interface RunCliDependencies {
   runBuild?: (
     options: RunMacosBuildOptions,
@@ -255,6 +272,7 @@ export interface RunCliDependencies {
   ) => Promise<RunMacosBuildResult>;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
+  signalTarget?: BuildSignalTarget;
 }
 
 export function parseBuildArguments(argv: readonly string[]): ParsedBuildArguments;
@@ -271,6 +289,10 @@ export function resolveCommit(
   execute?: Runner,
 ): Promise<string>;
 export function sourceIsDirty(root: string, execute?: Runner): Promise<boolean>;
+export function captureDevSourceFingerprint(
+  root: string,
+  execute?: Runner,
+): Promise<DevSourceFingerprint>;
 export function readBundleIdentity(
   appPath: string,
   execute?: Runner,

@@ -75,13 +75,13 @@
   --tab-h: 30px;
   --command-h: 46px;
   --composer-h: 54px;
-  --dock-tabs-h: 40px;
   --session-row-h: 44px;
   --pane-head-h: 32px;
+  --pane-foot-h: 27px;
   --pane-gap: 2px;
   --pane-min-w: 200px;
-  --pane-min-h: 110px;
-  --browser-bar-h: 38px;
+  --pane-min-h: 137px;
+  --browser-bar-h: 30px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
   --splitter-grip-h: 42px;
@@ -138,11 +138,15 @@ kbd {
 .workbench {
   position: relative;
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0px;
   min-height: 0;
   overflow: hidden;
 }
-.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w); }
+.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) 0px; }
+.app[data-dock="collapsed"] .workbench { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w); }
+.app[data-sidebar="collapsed"][data-dock="collapsed"] .workbench {
+  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w);
+}
 .app[data-sidebar="collapsed"] .sidebar { display: none; }
 .app[data-sidebar="open"] .sidebar-mini { display: none; }
 
@@ -246,6 +250,78 @@ kbd {
 .session-search::-webkit-search-cancel-button { -webkit-appearance: none; }
 .sidebar-head .rail-btn { width: 26px; height: 26px; border-radius: 7px; }
 
+/* -------- Sidebar sections: Sessions | Files --------
+   The file tree used to be a right-dock panel. It now shares the left rail
+   with the session list, one at a time, so the explorer sits where an
+   explorer belongs and the dock keeps Git and Web. */
+
+/* Segmented control: a recessed track holding two pills, where the selected
+   one lifts out of it with an accent edge. The track is darker than the rail
+   so the inactive half reads as a groove rather than a button. */
+.sidebar-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: none;
+  box-sizing: border-box;
+  width: calc(100% - 12px);
+  margin: 0 6px 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92));
+}
+.sidebar-tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sidebar-tab svg { flex: none; opacity: 0.85; }
+.sidebar-tab:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
+.sidebar-tab.is-active {
+  background: rgba(var(--rgb-accent), 0.15);
+  border-color: rgba(var(--rgb-accent), 0.55);
+  color: #f8f5ff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.sidebar-tab.is-active svg { color: var(--accent); opacity: 1; }
+.sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.sidebar-files {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+.sidebar-files[hidden] { display: none; }
+.sidebar-subbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 24px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-subbar .panel-crumb { flex: 1 1 auto; min-width: 0; }
+.sidebar-files .file-tree { flex: 1 1 auto; }
+
+.session-list[hidden] { display: none; }
 .session-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -449,6 +525,21 @@ kbd {
 }
 .session-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
+/* A row waiting on the user keeps its badge legible at every state the row can
+   be in, including active — being the pane you are looking at is not the same
+   as having answered it. The tint is deliberately faint: the `!` is the signal,
+   this only stops the row reading as ordinary while it scrolls past. */
+.session-row.needs-attention .session-title { color: var(--text); }
+.session-row.needs-attention::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(251, 191, 36, 0.06);
+  pointer-events: none;
+}
+.session-title-row > .session-attention-badge { flex: none; }
+
 .session-dot {
   width: 7px;
   height: 7px;
@@ -521,6 +612,105 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .session-row.starting .session-dot { animation: none; }
 }
+/* -------- Sidebar design pass, second round --------
+   Additive again; the row treatment stays as designed. */
+
+/* Group heads are buttons, so they should answer the pointer. The wash is an
+   inset shadow rather than a background, because the background is doing the
+   sticky header's opaque backdrop and must not be replaced. */
+.session-group-head {
+  border-radius: 6px;
+  transition: box-shadow var(--transition-fast), color var(--transition-fast);
+}
+.session-group-head:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.05);
+  color: var(--text-soft);
+}
+.session-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Appearance settles into a recessed card, the same language as the
+   Sessions | Files track, so the rail ends on a deliberate edge rather than
+   trailing off into loose controls. */
+.sidebar-settings {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 8px 4px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.85));
+}
+.sidebar-settings > summary { padding: 5px 0; }
+
+/* "There is more below" - driven by whether the list can still scroll down,
+   not merely by whether it overflows, so it stops promising content once you
+   reach the bottom. */
+.session-list.has-more {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+}
+
+/* -------- Sidebar design pass --------
+   Additive only: the row's colourless-selection-plus-violet-bar language is
+   deliberate and left alone. */
+
+/* A long list scrolls *under* its project header rather than past it, so you
+   never lose track of which project the rows below belong to. */
+.session-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.94));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Search reads as a search field before it is focused. background-color rather
+   than the background shorthand, so the icon survives the focus state. */
+.session-search {
+  padding-left: 28px;
+  background-color: var(--surface-2);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239a9aa3' stroke-width='1.5'%3E%3Ccircle cx='7' cy='7' r='4.25'/%3E%3Cpath d='M10.2 10.2 13.5 13.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 9px center;
+  background-size: 13px 13px;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+.session-search:focus {
+  background-color: var(--surface-3);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.14);
+}
+
+/* AGENTS / COVEN carry a trailing hairline, so sections separate without
+   spending vertical space on gaps. */
+.session-subsection-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-subsection-label::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+  opacity: 0.55;
+}
+
+/* The selected worktree gets the same violet edge the active row uses, so
+   "where am I" reads at a glance instead of only from a 6% wash. */
+.session-worktree-group { position: relative; }
+.session-worktree-group.selected::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(var(--rgb-accent), 0.5);
+}
+
 .session-empty {
   padding: 10px 10px;
   font-size: 12.5px;
@@ -641,9 +831,6 @@ kbd {
 /* Icon orientation tracks browser side so the visual cue matches reality.
    Uses :has() (WebKit 15.4+ — Tauri's WebView is fine). */
 [data-browser-toggle] svg { transition: transform var(--transition-med); }
-.app:has(.detail[data-browser-side="left"])   [data-browser-toggle] svg { transform: scaleX(-1); }
-.app:has(.detail[data-browser-side="bottom"]) [data-browser-toggle] svg { transform: rotate(90deg); }
-.app:has(.detail[data-browser-side="top"])    [data-browser-toggle] svg { transform: rotate(-90deg); }
 
 .status-pill {
   font-size: 11px;
@@ -689,14 +876,10 @@ kbd {
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  /* Pane mins are relaxed from the old 360/320 so a narrow window can't push
-     the terminal under the painted child webview (which is z-ordered above
-     the DOM via macOS APIs). The splitter clamp picks the right pair based
-     on browser side. */
+  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
+     the Git dock. Browser surfaces now tile inside the canvas itself. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  --terminal-min-y: 160px;
-  --browser-min-y:  54px;
   --split-frac: 0.6;
   --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
@@ -704,7 +887,6 @@ kbd {
   will-change: grid-template-columns, grid-template-rows;
 }
 .detail.resizing { transition: none; }
-
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
@@ -712,64 +894,24 @@ kbd {
   white-space: pre-wrap;
 }
 
-/* terminal-only & browser-only: hide unused side */
+/* The canvas is always present; the Git dock is the only optional side. */
 .detail[data-layout="terminal"] {
   grid-template-columns: 1fr;
   grid-template-rows: 1fr;
 }
-.detail[data-layout="terminal"] .browser-pane,
+.detail[data-layout="terminal"] .git-dock,
 .detail[data-layout="terminal"] .splitter { display: none; }
 
-.detail[data-layout="browser"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="browser"] .terminal-area,
-.detail[data-layout="browser"] .splitter { display: none; }
-
-/* split — terminal on left, browser on right (default) */
-.detail[data-layout="split"][data-browser-side="right"] {
+/* split — canvas, resize seam, Git dock */
+.detail[data-layout="split"] {
   grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
                          var(--splitter-w)
                          minmax(var(--browser-min), 1fr);
   grid-template-rows: 1fr;
 }
-.detail[data-layout="split"][data-browser-side="right"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .browser-pane  { grid-column: 3; grid-row: 1; }
-
-/* split — browser on left, terminal on right */
-.detail[data-layout="split"][data-browser-side="left"] {
-  grid-template-columns: minmax(var(--browser-min), 1fr)
-                         var(--splitter-w)
-                         minmax(var(--terminal-min), var(--terminal-col));
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="split"][data-browser-side="left"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .terminal-area { grid-column: 3; grid-row: 1; }
-
-/* split — browser on bottom */
-.detail[data-layout="split"][data-browser-side="bottom"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--terminal-min-y), var(--terminal-col))
-                      var(--splitter-w)
-                      minmax(var(--browser-min-y), 1fr);
-}
-.detail[data-layout="split"][data-browser-side="bottom"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="bottom"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="bottom"] .browser-pane  { grid-column: 1; grid-row: 3; }
-
-/* split — browser on top */
-.detail[data-layout="split"][data-browser-side="top"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--browser-min-y), 1fr)
-                      var(--splitter-w)
-                      minmax(var(--terminal-min-y), var(--terminal-col));
-}
-.detail[data-layout="split"][data-browser-side="top"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="top"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="top"] .terminal-area { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 1; }
+.detail[data-layout="split"] .git-dock       { grid-column: 3; grid-row: 1; }
 
 .splitter {
   background: transparent;
@@ -779,10 +921,7 @@ kbd {
   outline: none;
   transition: background var(--transition-fast);
 }
-.detail[data-browser-side="right"] .splitter,
-.detail[data-browser-side="left"]  .splitter { cursor: col-resize; }
-.detail[data-browser-side="bottom"] .splitter,
-.detail[data-browser-side="top"]    .splitter { cursor: row-resize; }
+.splitter { cursor: col-resize; }
 
 .splitter::before {
   content: '';
@@ -794,22 +933,14 @@ kbd {
               opacity var(--transition-fast), box-shadow var(--transition-fast);
 }
 /* Hairline orientation tracks browser side */
-.detail[data-browser-side="right"] .splitter::before,
-.detail[data-browser-side="left"]  .splitter::before {
+.splitter::before {
   inset: 10px auto 10px 50%;
   width: 1px;
   transform: translateX(-50%);
 }
-.detail[data-browser-side="bottom"] .splitter::before,
-.detail[data-browser-side="top"]    .splitter::before {
-  inset: 50% 10px auto 10px;
-  height: 1px;
-  transform: translateY(-50%);
-}
 
 /* Animated grip — only on col-resize where the design fits */
-.detail[data-browser-side="right"] .splitter::after,
-.detail[data-browser-side="left"]  .splitter::after {
+.splitter::after {
   content: '';
   position: absolute;
   top: 50%;
@@ -843,18 +974,9 @@ kbd {
   opacity: 0.9;
 }
 /* hover/drag thickening — by axis */
-.detail[data-browser-side="right"] .splitter:hover::before,
-.detail[data-browser-side="right"] .splitter:focus-visible::before,
-.detail[data-browser-side="right"] .splitter.dragging::before,
-.detail[data-browser-side="left"]  .splitter:hover::before,
-.detail[data-browser-side="left"]  .splitter:focus-visible::before,
-.detail[data-browser-side="left"]  .splitter.dragging::before { width: 2px; }
-.detail[data-browser-side="bottom"] .splitter:hover::before,
-.detail[data-browser-side="bottom"] .splitter:focus-visible::before,
-.detail[data-browser-side="bottom"] .splitter.dragging::before,
-.detail[data-browser-side="top"]    .splitter:hover::before,
-.detail[data-browser-side="top"]    .splitter:focus-visible::before,
-.detail[data-browser-side="top"]    .splitter.dragging::before { height: 2px; }
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.dragging::before { width: 2px; }
 
 .splitter:hover::after,
 .splitter:focus-visible::after,
@@ -904,6 +1026,16 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
+  scroll-behavior: smooth;
+}
+/* Applied only when the strip really does scroll, so a half-tab reads as
+   "there is more" instead of looking clipped. */
+.tab-strip.is-overflowing {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-strip { scroll-behavior: auto; }
 }
 .tab {
   display: flex;
@@ -924,6 +1056,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   color: #f8f5ff;
   background: rgba(255, 255, 255, 0.10);
 }
+.tab.active { border-right-color: transparent; }
+.tab:has(+ .tab.active) { border-right-color: transparent; }
+.tab:last-child { border-right: 0; }
 .tab.active::after {
   content: '';
   position: absolute;
@@ -932,19 +1067,30 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   background: linear-gradient(90deg, var(--accent), var(--accent-strong));
   box-shadow: 0 0 6px var(--accent-glow);
 }
+/* Dot and close occupy the same slot: the dirty state is what you need at
+   rest, the close is what you need under the cursor, and swapping them in
+   place keeps the strip from reflowing on hover. */
+.tab-end {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .tab .dot {
+  position: absolute;
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--muted);
-  flex: 0 0 6px;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  background: var(--text-soft);
+  transition: opacity var(--transition-fast), background var(--transition-fast);
 }
-.tab.running .dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
-.tab.exited  .dot { background: var(--error); }
+.tab.active .dot { background: var(--accent); }
 .tab .close {
-  width: 16px;
-  height: 16px;
+  position: absolute;
+  inset: 0;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
@@ -954,10 +1100,13 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border: 0;
   font-size: 14px;
   line-height: 1;
-  opacity: 0.6;
+  opacity: 0;
   transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
 }
+/* Hover reveals the close and retires the dot. The active tab keeps its dot,
+   because that is exactly the file whose unsaved state matters most. */
 .tab:hover .close { opacity: 1; }
+.tab:hover .dot { opacity: 0; }
 .tab .close:hover { background: var(--surface-3); color: var(--text); }
 .tab-add {
   display: inline-flex;
@@ -1018,7 +1167,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane {
   display: grid;
-  grid-template-rows: 24px minmax(0, 1fr);
+  grid-template-rows: 24px minmax(0, 1fr) var(--pane-foot-h);
   min-width: var(--pane-min-w);
   min-height: var(--pane-min-h);
   height: 100%;
@@ -1073,6 +1222,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   overflow: hidden;
   padding: 4px 6px;
 }
+.terminal-pane.is-web .terminal-pane-body {
+  padding: 0;
+}
+.terminal-pane-glyph.is-web {
+  color: var(--accent);
+}
 .term-instance {
   position: relative;
 }
@@ -1094,7 +1249,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
    restyle the frames it lays out to match the workspace redesign. */
 
 .terminal-pane {
-  grid-template-rows: var(--pane-head-h) minmax(0, 1fr);
+  grid-template-rows: var(--pane-head-h) minmax(0, 1fr) var(--pane-foot-h);
   border-radius: 4px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.86));
   /* Panes degrade on their own width, not the window's: a pane can be narrow
@@ -1111,12 +1266,39 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.22);
 }
 
-/* Six tracks: glyph · label · status · span · maximise · close. The label is
-   the only flexible one, so the buttons keep their footprint at any width
-   instead of being squeezed out of the row. */
+/* A pane waiting on the user is the only thing allowed to outrank the focus
+   ring: violet marks where you are, amber marks where you are needed. It holds
+   even on the focused pane, because the answer is still outstanding until the
+   user types -- opening the pane is not replying to it. */
+.terminal-pane.needs-attention,
+.terminal-pane.focused.needs-attention {
+  border-color: rgba(251, 191, 36, 0.6);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.28);
+}
+.terminal-pane.needs-attention .terminal-pane-header {
+  background: rgba(251, 191, 36, 0.09);
+}
+/* Worded chip, matching how every other pane state is spelled out rather than
+   left to colour alone. */
+.terminal-pane-attention {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Seven tracks: glyph · label · attention · status · span · maximise · close.
+   The label is the only flexible one, so the buttons keep their footprint at
+   any width instead of being squeezed out of the row. The attention chip is
+   hidden (display:none) unless the pane is waiting, so its track collapses to
+   nothing rather than reserving space for a state most panes never reach. */
 .terminal-pane-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
@@ -1231,6 +1413,51 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-span:hover,
 .terminal-pane-max:hover,
 .terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
+
+/* -------- Pane chrome design pass (additive) --------
+
+   Three buttons at 22px each is a third of a 200px pane's header spent on
+   controls you are not using. They now rest at zero opacity and appear on
+   hover, on keyboard focus inside the pane, and permanently on the focused
+   pane - the one you are actually driving. Opacity rather than display keeps
+   the grid tracks reserved, so nothing reflows as they appear. */
+.terminal-pane-span,
+.terminal-pane-max,
+.terminal-pane-close {
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast),
+              color var(--transition-fast);
+}
+.terminal-pane:hover .terminal-pane-span,
+.terminal-pane:hover .terminal-pane-max,
+.terminal-pane:hover .terminal-pane-close,
+.terminal-pane:focus-within .terminal-pane-span,
+.terminal-pane:focus-within .terminal-pane-max,
+.terminal-pane:focus-within .terminal-pane-close,
+.terminal-pane.focused .terminal-pane-span,
+.terminal-pane.focused .terminal-pane-max,
+.terminal-pane.focused .terminal-pane-close { opacity: 1; }
+/* Never let a keyboard user tab to something they cannot see. */
+.terminal-pane-span:focus-visible,
+.terminal-pane-max:focus-visible,
+.terminal-pane-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Unfocused panes recede so the focused one reads instantly in a grid of
+   them. The title stays legible - this dims chrome, not content. */
+.terminal-pane:not(.focused) .terminal-pane-title { color: var(--text-soft); }
+.terminal-pane:not(.focused) .terminal-pane-glyph { opacity: 0.7; }
+
+/* A hairline under the header so terminal content scrolls beneath an edge
+   rather than butting straight into it. */
+.terminal-pane-header {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+  position: relative;
+  z-index: 1;
+}
 .terminal-pane-span:focus-visible,
 .terminal-pane-max:focus-visible,
 .terminal-pane-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
@@ -1254,6 +1481,180 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   transition: background var(--transition-fast);
 }
 .terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
+
+.terminal-pane-footer {
+  display: flex;
+  min-width: 0;
+  height: var(--pane-foot-h);
+  overflow: hidden;
+  flex-wrap: nowrap;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.018);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.terminal-pane-footer-items {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+.terminal-pane-footer-item,
+.terminal-pane-footer-overflow,
+.pane-footer-menu-item {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.terminal-pane-footer-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  overflow: hidden;
+}
+.terminal-pane-footer-item[data-footer-key="branch"],
+.terminal-pane-footer-item[data-footer-key="worktree"] {
+  flex: 1 1 120px;
+}
+.terminal-pane-footer-item[data-footer-key="pane"],
+.terminal-pane-footer-item[data-footer-key="model"],
+.terminal-pane-footer-item[data-footer-key="session"],
+.terminal-pane-footer-item[data-footer-key="context"],
+.terminal-pane-footer-item[data-footer-key="spend"] {
+  flex: 0 1 auto;
+  max-width: 132px;
+}
+.pane-footer-item-label {
+  flex: none;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pane-footer-item-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+}
+.terminal-pane-footer-item:hover,
+.terminal-pane-footer-overflow:hover,
+.pane-footer-menu-item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.terminal-pane-footer-item:active,
+.terminal-pane-footer-overflow:active,
+.pane-footer-menu-item:active {
+  background: var(--accent-soft);
+}
+.terminal-pane-footer-item:focus-visible,
+.terminal-pane-footer-overflow:focus-visible,
+.pane-footer-menu-item:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.terminal-pane-footer-overflow {
+  display: inline-flex;
+  flex: 0 0 27px;
+  align-items: center;
+  justify-content: center;
+  border-right: 0;
+  border-left: 1px solid var(--border);
+  font-size: 13px;
+}
+.terminal-pane-footer[data-tier="full"] .terminal-pane-footer-overflow,
+.terminal-pane-footer-overflow[hidden] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-session"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="session"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="spend"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="context"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="core"] [data-footer-key="model"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="model"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="pane"] {
+  display: none;
+}
+.pane-footer-popover {
+  position: fixed;
+  z-index: 150;
+  box-sizing: border-box;
+  min-width: 190px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), 0.98);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  color: var(--text-soft);
+}
+.pane-usage-popover {
+  display: grid;
+  gap: 2px;
+}
+.pane-usage-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 5px;
+  font-size: 11px;
+}
+.pane-usage-row span {
+  color: var(--muted);
+}
+.pane-usage-row strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.pane-footer-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.pane-footer-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 28px;
+  padding: 0 8px;
+  border-right: 0;
+  border-radius: 4px;
+  text-align: left;
+}
 
 /* -------- 2D tiling: row splits and drag-to-reposition --------
    The pane tree lays out both axes; these rules turn a split's orientation into
@@ -1361,6 +1762,31 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 /* Picking dims the canvas and rings the picks. The overlay is a real button so
    the click never reaches the terminal underneath. */
 .terminal-pane { position: relative; }
+.terminal-pane.image-drop-target {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--rgb-accent), 0.28),
+    0 0 0 1px rgba(var(--rgb-accent), 0.16);
+}
+.terminal-pane.image-drop-target::after {
+  content: "Drop images to insert paths";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--rgb-accent), 0.26);
+  border-radius: 999px;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .terminal-pane.is-picking { opacity: 0.55; }
 .terminal-pane.is-picked {
   opacity: 1;
@@ -1446,6 +1872,20 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .minimap-dot.running { background: var(--ok); }
 .minimap-dot.starting { background: var(--warn); }
 .minimap-dot.exited { background: var(--error); }
+.minimap-dot.file {
+  background: var(--accent);
+  box-shadow: 0 0 7px var(--accent-glow);
+}
+/* Focus mode draws one pane and hides the rest, so the minimap is the only
+   place a waiting pane can still be seen. It wins over the status colour and
+   grows a ring, because at 5px a hue swap alone is not a signal. */
+.minimap-dot.attention {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.28);
+}
+.minimap-pane:has(.minimap-dot.attention) {
+  border-color: rgba(251, 191, 36, 0.45);
+}
 /* A blank slab, not a live preview: it reads as "a pane is here" at 66px wide
    without paying to render a second terminal. */
 .minimap-body {
@@ -1768,10 +2208,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Browser pane -------- */
 
-/* The tools dock hosts stacked panels (files / git / browser). The active one
-   is picked via .detail[data-panel], and every panel shares one grid cell so
-   switching never reflows the dock. */
-.browser-pane {
+/* Git is the only fixed tools dock. */
+.git-dock {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 1fr;
@@ -1782,12 +2220,16 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   -webkit-backdrop-filter: blur(16px);
   border-left: 1px solid var(--border);
 }
+/* Density pass: chrome rows keep their hit targets and lose their inset. The
+   canvas already speaks in 2px seams, and every extra pixel of panel padding
+   read as a gap the layout did not intend. */
+.panel-bar .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
 .dock-tab-count {
   font-size: 8.5px;
   font-weight: 700;
   color: var(--warn);
+  transform: translateY(-3px);
 }
-.dock-mini .dock-tab-count { position: absolute; top: 2px; right: 2px; transform: none; }
 .dock-tab-count[hidden] { display: none; }
 .panel {
   grid-area: 1 / 1;
@@ -1796,31 +2238,36 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   min-height: 0;
   overflow: hidden;
 }
-.panel-browser { grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) 1fr; }
 .panel-files,
 .panel-diffs,
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
-.detail[data-panel="browser"] .panel-browser,
-.detail[data-panel="files"]   .panel-files,
-.detail[data-panel="git"]     .panel-git { display: grid; }
+.detail[data-panel="git"] .panel-git { display: grid; }
+.browser-surface {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
+  grid-template-areas: "bar" "tabs" "preview";
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
 
 /* Git owns diffs now: repository state on top, then a subheading, then the
    changed-file list and its detail. Only the last row flexes, so the git view
    keeps its natural height and scrolls on its own once it outgrows the cap. */
+/* Tabs then one section. The git view no longer has to share the column with
+   the diff list, so it drops the 38% cap that used to keep them both fed. */
 .panel-git-body {
   display: grid;
-  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
-}
-.panel-git-body > .git-view {
-  max-height: 38%;
-  border-bottom: 1px solid var(--border);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .panel-subbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 10px;
-  min-height: 26px;
+  gap: 4px;
+  padding: 0 3px 0 6px;
+  min-height: 22px;
   border-bottom: 1px solid var(--border);
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
 }
@@ -1832,11 +2279,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   color: var(--muted);
 }
 
+.pane-header.panel-bar,
 .panel-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 10px;
+  gap: 4px;
+  padding: 0 3px 0 6px;
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.86));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -1861,6 +2309,37 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   text-overflow: ellipsis;
 }
 .panel-body { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+/* The git panel's two sections use the same segmented switch as the sidebar,
+   so both rails teach one control instead of two. */
+.dock-tabs-segmented {
+  width: calc(100% - 6px);
+  margin: 3px 3px 4px;
+  padding: 2px;
+  border-radius: 9px;
+}
+.dock-tabs-segmented .sidebar-tab { height: 24px; border-radius: 7px; font-size: 11.5px; gap: 6px; }
+.sidebar-tab-count {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+.sidebar-tab-count[hidden] { display: none; }
+.git-tab-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.git-tab-panel[hidden] { display: none; }
 .panel-split { display: grid; grid-template-rows: minmax(0, 1fr); }
 .panel-split.has-detail { grid-template-rows: minmax(0, 1fr) minmax(0, 1.2fr); }
 
@@ -1911,11 +2390,18 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .terminal-host { grid-row: 3; grid-column: 1; }
 .file-view     { grid-row: 3; grid-column: 1 / -1; }
 .pane-minimap  { grid-row: 3; grid-column: 2; }
+.terminal-area.is-file-focused .file-view {
+  grid-column: 1;
+}
+.terminal-area.is-file-focused .pane-minimap {
+  grid-column: 2;
+}
 
 .file-view[hidden] { display: none; }
 .file-view {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* tab strip · toolbar · path · editor · status */
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: var(--surface-solid);
@@ -2145,7 +2631,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Diffs panel -------- */
 
-.diff-files { overflow: auto; min-height: 0; padding: 4px 0; scrollbar-width: thin; }
+.diff-files { overflow: auto; min-height: 0; padding: 2px 0; scrollbar-width: thin; }
 .diff-row {
   display: flex;
   align-items: center;
@@ -2238,7 +2724,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Git panel -------- */
 
-.git-view { overflow: auto; min-height: 0; padding: 10px 12px; scrollbar-width: thin; }
+.git-view { overflow: auto; min-height: 0; padding: 6px 6px 8px; scrollbar-width: thin; }
 .git-branch-line {
   display: flex;
   align-items: baseline;
@@ -2341,7 +2827,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   display: flex;
   align-items: center;
   height: var(--browser-bar-h);
-  padding: 0 10px;
+  padding: 0 4px 0 8px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.80));
   border-bottom: 1px solid var(--border);
   font-size: 11px;
@@ -2552,8 +3038,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: rgba(255,255,255,0.10);
   box-shadow: 0 -1px 0 rgba(255,255,255,0.06) inset;
 }
-.detail[data-layout="split"] .browser-pane,
-.detail[data-layout="browser"] .browser-pane {
+.detail[data-layout="split"] .git-dock {
   animation: browser-pane-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes browser-pane-in {
@@ -2614,20 +3099,10 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 8px;
 }
 
-/* The dock is a single cell that all three panels share; the browser panel is
-   the only one that owns a bar, tab strip, and preview stack inside it. */
-.browser-pane {
+.git-dock {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
-}
-.panel-browser {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
-  grid-template-areas:
-    "bar"
-    "tabs"
-    "preview";
 }
 .panel-files,
 .panel-diffs,
@@ -2749,9 +3224,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   padding: 0 8px;
   color: rgba(245,242,251,0.34);
   letter-spacing: 0.04em;
-}
-.detail[data-layout="browser"] .browser-pane {
-  grid-template-columns: minmax(0, 1fr);
 }
 .browser-tab { position: relative; }
 .browser-tab:hover .browser-tab-title,
@@ -2924,7 +3396,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 :root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
 :root[data-surface="solid"] .composer,
-:root[data-surface="solid"] .browser-pane,
+:root[data-surface="solid"] .git-dock,
 :root[data-surface="solid"] .browser-bar,
 :root[data-surface="solid"] .panel-bar,
 :root[data-surface="solid"] .palette {
@@ -2981,37 +3453,46 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 .session-search { height: 28px; font-size: 12px; }
 
+/* The keyboard hints lived here permanently to teach three shortcuts; the
+   help overlay (?) already documents every one of them, so the footer is now
+   a single collapsed row that costs 22px instead of a block that costs 60. */
 .sidebar-foot {
   flex: none;
-  padding: 8px 10px 4px;
+  padding: 2px 4px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-.sidebar-hints {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
 }
 .sidebar-settings > summary {
   list-style: none;
   cursor: default;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 5px;
   color: var(--muted);
-  font-size: 10.5px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  font-weight: 700;
-  padding: 2px 0;
+  font-size: 11px;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .sidebar-settings > summary::-webkit-details-marker { display: none; }
-.sidebar-settings > summary:hover { color: var(--text-soft); }
+.sidebar-settings > summary:hover { background: var(--surface-2); color: var(--text-soft); }
 .sidebar-settings[open] > summary { color: var(--text-soft); }
-.theme-row { display: flex; align-items: center; gap: 6px; padding: 6px 0 4px; }
-.bg-opacity-row { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+/* The swatch is the collapsed row's entire preview: it carries the accent, so
+   the row still says which theme is on without spelling it out. */
+.appearance-swatch {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.appearance-label { flex: 1 1 auto; min-width: 0; }
+.appearance-caret { flex: none; font-size: 9px; color: var(--faint); transition: transform var(--transition-fast); }
+.sidebar-settings[open] .appearance-caret { transform: rotate(180deg); }
+.theme-row { display: flex; align-items: center; gap: 4px; padding: 4px 5px 2px; }
+.bg-opacity-row { display: flex; align-items: center; gap: 6px; padding: 0 5px 4px; }
 .bg-opacity-label { flex: none; color: var(--muted); font-size: 11px; }
 .bg-opacity-slider { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
 .bg-opacity-value {
@@ -3229,4 +3710,227 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 5px;
   padding: 1px 7px;
   white-space: nowrap;
+}
+
+/* -------- Diff viewer --------
+   Split and stacked share one model, so they share one palette and one row
+   metric; only the track layout differs. Added and removed text carry their
+   own foreground against a 9% wash, which stays AA on bg/1 -- colour alone
+   never marks a line, the +/- marker and the gutters do. */
+
+.diff-layout-toggle {
+  display: inline-flex;
+  flex: none;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.diff-layout-btn {
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.diff-layout-btn:hover { color: var(--text); }
+.diff-layout-btn.is-active { background: rgba(255, 255, 255, 0.10); color: var(--text); }
+.diff-layout-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.diff-rows {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+.diff-row { display: grid; }
+.diff-rows[data-layout="stacked"] .diff-row { grid-template-columns: 34px 34px 16px minmax(0, 1fr); }
+.diff-rows[data-layout="split"]   .diff-row { grid-template-columns: 30px minmax(0, 1fr) 30px minmax(0, 1fr); }
+
+.diff-gutter {
+  padding-right: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  user-select: none;
+}
+.diff-rows[data-layout="stacked"] .diff-gutter-new { border-right: 1px solid rgba(255, 255, 255, 0.05); }
+.diff-marker { color: var(--muted); text-align: center; user-select: none; }
+
+.diff-text {
+  min-width: 0;
+  padding: 0 8px 0 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-rows[data-layout="split"] .diff-text:first-of-type { border-right: 1px solid var(--border); }
+
+.diff-row.diff-add    .diff-text, .diff-text.diff-add    { background: rgba(52, 211, 153, 0.09); color: #8fe3b8; }
+.diff-row.diff-delete .diff-text, .diff-text.diff-delete { background: rgba(248, 113, 113, 0.09); color: #f0a3a3; }
+.diff-row.diff-add    .diff-marker { color: var(--ok); }
+.diff-row.diff-delete .diff-marker { color: var(--error); }
+.diff-gutter.diff-add    { background: rgba(52, 211, 153, 0.05); }
+.diff-gutter.diff-delete { background: rgba(248, 113, 113, 0.05); }
+/* The cell opposite a pure add or delete. Tinted rather than blank so the gap
+   reads as "nothing here", not as an unstyled row. */
+.diff-text.diff-empty { background: rgba(255, 255, 255, 0.015); }
+
+/* Word-level marks sit on top of the line wash, so the changed tokens read
+   without having to compare two lines character by character. */
+.diff-add .diff-word, .diff-text.diff-add .diff-word { background: rgba(52, 211, 153, 0.30); border-radius: 3px; }
+.diff-delete .diff-word, .diff-text.diff-delete .diff-word { background: rgba(248, 113, 113, 0.32); border-radius: 3px; }
+
+.diff-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+}
+.diff-sep-mark { letter-spacing: 2px; }
+.diff-sep-spacer { flex: 1 1 auto; }
+.diff-sep-expand {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: inherit;
+}
+.diff-sep-expand:hover { color: #c4b5fd; }
+.diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
+.diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }
+
+/* -------- Tools on the canvas --------
+   A tool pane is a pane like any other; only its body differs, holding the
+   surface that was in the dock rather than a terminal. */
+
+.terminal-pane.is-tool .terminal-pane-glyph { color: var(--accent); }
+.tool-pane-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.tool-pane-body > .panel-git-body { flex: 1 1 auto; min-height: 0; }
+
+/* While a tool is being dragged out of the dock the canvas is the target, so
+   panes recede the same way they do when one is being repositioned. */
+body.is-tool-dragging .terminal-pane { transition: opacity var(--transition-fast); opacity: 0.65; }
+
+.dock-popped-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.dock-popped-note[hidden] { display: none; }
+.dock-popped-note button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.dock-popped-note button:hover { background: var(--surface-2); color: var(--text); }
+.dock-popped-note button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* -------- Voice call bar --------
+   Green because a call is a live, benign state -- the same green the running
+   dot uses. It sits above the composer like the palette does, so the composer
+   never moves when a call starts. */
+
+.call-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: 10px;
+  background: rgba(14, 20, 18, 0.97);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  animation: menu-rise 150ms ease-out;
+}
+.call-bar[hidden] { display: none; }
+.call-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  animation: session-dot-pulse 1.4s ease-in-out infinite;
+}
+.call-title { flex: none; font-weight: 600; color: var(--text); }
+.call-target { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-soft); font-weight: 400; }
+.call-wave { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.call-wave i {
+  width: 2.5px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ok);
+  animation: call-wave 900ms ease-in-out infinite;
+}
+.call-wave i:nth-child(2) { animation-delay: 120ms; }
+.call-wave i:nth-child(3) { animation-delay: 240ms; }
+.call-wave i:nth-child(4) { animation-delay: 360ms; }
+.call-wave i:nth-child(5) { animation-delay: 480ms; }
+@keyframes call-wave { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+
+/* Muted stops the waveform: the one honest thing it can show. */
+.call-bar.is-muted .call-wave i { animation: none; transform: scaleY(0.3); opacity: 0.5; }
+.call-bar.is-muted .call-dot { animation: none; opacity: 0.5; }
+
+.call-note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.call-spacer { flex: 1 1 auto; }
+.call-timer { flex: none; color: var(--text-soft); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.call-btn {
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 3px 11px;
+}
+.call-btn:hover { background: rgba(255, 255, 255, 0.10); }
+.call-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.call-end {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.13);
+  color: #f4a6a6;
+  font-weight: 600;
+}
+.call-end:hover { background: rgba(248, 113, 113, 0.22); }
+.composer-call-btn[aria-pressed="true"] { color: var(--ok); border-color: rgba(52, 211, 153, 0.5); }
+
+@media (prefers-reduced-motion: reduce) {
+  .call-bar { animation: none; }
+  .call-dot, .call-wave i { animation: none; }
 }

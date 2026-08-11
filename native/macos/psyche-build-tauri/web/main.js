@@ -41,7 +41,9 @@
 
   var invoke = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
-  var openUrl = (window.__TAURI__.opener && window.__TAURI__.opener.openUrl) || null;
+  var opener = window.__TAURI__.opener || null;
+  var clipboardManager = window.__TAURI__.clipboardManager || null;
+  var openUrl = (opener && opener.openUrl) || null;
   var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
@@ -77,7 +79,14 @@
      *  Refreshed on boot and on project switch via `agent_skills`. */
     agentSkills: [],
   };
+  // File focus is presentation-only. Open files persist through state.openFiles,
+  // but the pane to return to belongs only to the current interaction.
+  var fileFocus = {
+    returnThreadId: null,
+  };
   var paneLayouts = new Map();
+  var imageDropScaleFactor = 1;
+  var imageDropTarget = null;
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
@@ -86,18 +95,26 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
+  var PANE_METRICS_POLL_MS = 15000;
+  var paneMetricsPollTimer = 0;
+  var paneFooterPopoverCleanup = null;
+  var paneFooterPopover = null;
+  var paneFooterPopoverOwner = null;
+  var paneFooterPopoverTrigger = null;
+  var paneFooterPopoverThreadId = null;
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
-  // overflowing. 200x110 is the density the redesign tiles at.
-  var PANE_MINIMUMS = { width: 200, height: 110, separator: 6 };
+  // overflowing. 200x137 includes the fixed 27px footer rail.
+  var PANE_MINIMUMS = { width: 200, height: 137, separator: 6 };
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") {
+    if (document.hidden || document.visibilityState === "hidden") {
       saveWorkspaceNow();
       stopCovenPolling();
     } else {
       startCovenPolling();
     }
+    syncPaneMetricsVisibility();
   }
 
   /**
@@ -597,13 +614,15 @@
   var urlInput = document.getElementById("url");
   var browserTabStrip = document.getElementById("browser-tab-strip");
   var terminalArea = document.querySelector(".terminal-area");
-  var browserPane = document.querySelector(".browser-pane");
+  var browserSurface = document.getElementById("browser-surface");
+  var browserSurfaceStaging = document.getElementById("browser-surface-staging");
   var activeSurface = "terminal";
 
   var appEl = document.getElementById("app");
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
+  var dockMiniEl = document.getElementById("rail-right");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
@@ -618,6 +637,88 @@
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
   var dockGitCountEl = document.getElementById("dock-git-count");
+
+  // -------- Voice call bar --------
+  // Board 4's call bar. The bar, its timer and its mute state are real UI; what
+  // does not exist yet is a voice transport. There is no getUserMedia, no
+  // speech recogniser and no audio path to an agent anywhere in this app, so a
+  // call is a local session that shows the designed chrome and says plainly
+  // that it is not carrying audio. When a transport lands, `startCall` is where
+  // it attaches -- nothing below fakes a connection or a peer.
+
+  var callBarEl = document.getElementById("call-bar");
+  var callTargetEl = document.getElementById("call-target");
+  var callTimerEl = document.getElementById("call-timer");
+  var callNoteEl = document.getElementById("call-note");
+  var callMuteBtn = document.getElementById("call-mute");
+  var callEndBtn = document.getElementById("call-end");
+  var composerCallEl = document.getElementById("composer-call");
+
+  var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+
+  function formatCallTime(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var minutes = Math.floor(total / 60);
+    var seconds = total % 60;
+    return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+  }
+
+  function paintCallBar() {
+    if (!callBarEl) return;
+    callBarEl.hidden = !callState.active;
+    callBarEl.classList.toggle("is-muted", callState.muted);
+    if (composerCallEl) composerCallEl.setAttribute("aria-pressed", callState.active ? "true" : "false");
+    // Painted whether or not the bar is showing: leaving the control reading
+    // "Unmute" after a call ends would have the next call open mislabelled.
+    if (callMuteBtn) {
+      callMuteBtn.textContent = callState.muted ? "Unmute" : "Mute";
+      callMuteBtn.setAttribute("aria-pressed", callState.muted ? "true" : "false");
+    }
+    if (!callState.active) return;
+    if (callTimerEl) callTimerEl.textContent = formatCallTime(Date.now() - callState.startedAt);
+  }
+
+  function startCall() {
+    if (callState.active) return false;
+    var thread = findThread(state.activeThreadId);
+    callState.active = true;
+    callState.muted = false;
+    callState.startedAt = Date.now();
+    if (callTargetEl) callTargetEl.textContent = thread ? thread.name : "no pane focused";
+    // Say what is actually true rather than "the agent hears your terminal":
+    // nothing is listening, and a bar that implied otherwise would be a lie
+    // told in the UI.
+    if (callNoteEl) callNoteEl.textContent = "no voice transport yet — chrome only";
+    paintCallBar();
+    callState.timer = setInterval(paintCallBar, 1000);
+    return true;
+  }
+
+  function endCall() {
+    if (!callState.active) return false;
+    clearInterval(callState.timer);
+    callState.timer = 0;
+    callState.active = false;
+    callState.muted = false;
+    paintCallBar();
+    return true;
+  }
+
+  function toggleCallMute() {
+    if (!callState.active) return false;
+    callState.muted = !callState.muted;
+    paintCallBar();
+    return callState.muted;
+  }
+
+  if (composerCallEl) {
+    composerCallEl.addEventListener("click", function () {
+      if (callState.active) endCall();
+      else startCall();
+    });
+  }
+  if (callMuteBtn) callMuteBtn.addEventListener("click", toggleCallMute);
+  if (callEndBtn) callEndBtn.addEventListener("click", endCall);
 
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
@@ -634,6 +735,43 @@
     }, 2600);
   }
 
+  async function copyPaneFooterValue(label, value) {
+    if (!value) {
+      toast(label + " is not reported");
+      return false;
+    }
+    if (!clipboardManager || typeof clipboardManager.writeText !== "function") {
+      setStatus("Clipboard support is unavailable", "error");
+      return false;
+    }
+    try {
+      await clipboardManager.writeText(value);
+      toast(label + " copied");
+      return true;
+    } catch (error) {
+      setStatus("Copy failed: " + String(error), "error");
+      return false;
+    }
+  }
+
+  async function revealPaneWorktree(path) {
+    if (!path) {
+      setStatus("Worktree path is unavailable", "error");
+      return false;
+    }
+    if (!opener || typeof opener.revealItemInDir !== "function") {
+      setStatus("Finder reveal is unavailable", "error");
+      return false;
+    }
+    try {
+      await opener.revealItemInDir(path);
+      return true;
+    } catch (error) {
+      setStatus("Reveal failed: " + String(error), "error");
+      return false;
+    }
+  }
+
   function markActiveSurface(surface) {
     activeSurface = surface === "browser" ? "browser" : "terminal";
     if (detail) detail.dataset.activeSurface = activeSurface;
@@ -643,9 +781,9 @@
     terminalArea.addEventListener("pointerdown", function () { markActiveSurface("terminal"); }, true);
     terminalArea.addEventListener("focusin", function () { markActiveSurface("terminal"); }, true);
   }
-  if (browserPane) {
-    browserPane.addEventListener("pointerdown", function () { markActiveSurface("browser"); }, true);
-    browserPane.addEventListener("focusin", function () { markActiveSurface("browser"); }, true);
+  if (browserSurface) {
+    browserSurface.addEventListener("pointerdown", function () { markActiveSurface("browser"); }, true);
+    browserSurface.addEventListener("focusin", function () { markActiveSurface("browser"); }, true);
   }
 
   function setStatus(text, level) {
@@ -687,21 +825,11 @@
   }
 
   // ============================================================
-  // 4. Layout — single collapse trigger replaces the 3-button switcher.
-  //    State is split across two data attributes on `#detail`:
-  //      data-layout       = "terminal" | "split" | "browser"
-  //      data-browser-side = "right" | "bottom" | "left" | "top"
-  //    `--split-frac` is always the fraction of the *terminal* pane in split.
+  // 4. Layout — canvas plus an optional Git dock.
+  //    `--split-frac` is always the fraction of the canvas in split.
   // ============================================================
 
-  // Every [data-browser-toggle] control (titlebar chrome button + right rail)
-  // reflects and drives the same split/terminal state.
-  var browserToggleBtns = Array.prototype.slice.call(
-    document.querySelectorAll("[data-browser-toggle]")
-  );
-  var browserCollapseBtn = document.getElementById("browser-collapse");
-  var BROWSER_SIDES = ["right", "bottom", "left", "top"];
-  var PANELS = ["browser", "files", "git"];
+  var PANELS = ["git"];
   // Diffs used to be its own tab. It now lives inside the git panel, so every
   // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
   // to the tab that actually shows it.
@@ -714,7 +842,6 @@
   var detailStyleRule = null;
 
   function currentLayout() { return detail.dataset.layout || "terminal"; }
-  function currentSide()   { return detail.dataset.browserSide || "right"; }
   function getDetailStyleRule() {
     if (detailStyleRule) return detailStyleRule;
     for (var i = 0; i < document.styleSheets.length; i++) {
@@ -746,7 +873,7 @@
     // first-class surface now, not an occasional overlay. Saved projects keep
     // whatever layout they were left in.
     if (!project.layout) {
-      project.layout = { mode: "split", side: "right", splitFrac: 0.62, panel: "git" };
+      project.layout = { mode: "split", splitFrac: 0.62, panel: "git" };
     }
     return project.layout;
   }
@@ -755,7 +882,6 @@
     var layout = ensureProjectLayout(project);
     if (!layout) return;
     layout.mode = currentLayout();
-    layout.side = currentSide();
     layout.splitFrac = currentSplitFrac();
     layout.panel = currentPanel();
     saveWorkspaceSoon();
@@ -765,9 +891,8 @@
     if (!layout) return;
     var previousLayout = currentLayout();
     setDetailSplitFrac(layout.splitFrac || 0.6);
-    // Set the panel before the layout so syncBrowserBounds sees the right one.
-    setPanel(layout.panel || project.panel || "browser", { render: false });
-    applyLayout(layout.mode || "terminal", { side: layout.side || "right", persist: false });
+    setPanel(layout.panel || project.panel || "git", { render: false });
+    applyLayout(layout.mode === "split" ? "split" : "terminal", { persist: false });
     // Panels read from the project root, so re-render for the project we just
     // switched to rather than showing the previous one's tree/diff/log.
     if (previousLayout === "split" && currentLayout() === "split") {
@@ -777,25 +902,13 @@
 
   function applyLayout(layout, opts) {
     var previousLayout = currentLayout();
-    var side = (opts && opts.side) || currentSide();
-    // Back-compat: older slash commands still pass "splitV" — treat as split-right.
-    if (layout === "splitV") { layout = "split"; side = "right"; }
+    if (layout === "splitV") layout = "split";
+    if (layout !== "split") layout = "terminal";
     detail.dataset.layout = layout;
-    detail.dataset.browserSide = side;
-    if (layout === "browser") markActiveSurface("browser");
-    else if (layout === "terminal") markActiveSurface("terminal");
     if (!opts || opts.persist !== false) rememberProjectLayout();
-    browserToggleBtns.forEach(function (btn) {
-      btn.setAttribute("aria-pressed", layout === "split" ? "true" : "false");
-    });
     syncPanelButtons();
-    // For role="separator", orientation describes the line: vertical for
-    // a left/right divider, horizontal for a top/bottom divider.
     var splitterEl = document.getElementById("splitter");
-    if (splitterEl) {
-      var isHorizontalDivider = side === "bottom" || side === "top";
-      splitterEl.setAttribute("aria-orientation", isHorizontalDivider ? "horizontal" : "vertical");
-    }
+    if (splitterEl) splitterEl.setAttribute("aria-orientation", "vertical");
     syncDockChrome();
     handlePanelLayoutTransition(previousLayout, layout);
     requestAnimationFrame(function () {
@@ -804,12 +917,11 @@
     });
   }
 
-  // The dock is "open" in any layout that shows it — split, and browser-only.
-  // The right rail stays visible in every state; only the app-level data
-  // attribute changes so CSS can react to the dock being open or collapsed.
+  // Collapsing the Git dock hands its column to the mini rail.
   function syncDockChrome() {
     var open = currentLayout() !== "terminal";
     if (appEl) appEl.dataset.dock = open ? "open" : "collapsed";
+    if (dockMiniEl) dockMiniEl.hidden = open;
   }
 
   function handlePanelLayoutTransition(previousLayout, nextLayout) {
@@ -822,40 +934,19 @@
     }
   }
 
-  function toggleBrowser() {
+  function toggleDock() {
     applyLayout(currentLayout() === "split" ? "terminal" : "split");
   }
-  function cycleBrowserSide(direction) {
-    var idx = BROWSER_SIDES.indexOf(currentSide());
-    if (idx < 0) idx = 0;
-    var step = direction === -1 ? -1 : 1;
-    var next = BROWSER_SIDES[(idx + step + BROWSER_SIDES.length) % BROWSER_SIDES.length];
-    applyLayout("split", { side: next });
-  }
-
-  browserToggleBtns.forEach(function (btn) {
-    btn.addEventListener("click", toggleBrowser);
-    // Right-click cycles side without changing visibility on/off.
-    btn.addEventListener("contextmenu", function (e) {
-      e.preventDefault();
-      cycleBrowserSide(e.shiftKey ? -1 : 1);
-    });
-  });
-  if (browserCollapseBtn) {
-    browserCollapseBtn.addEventListener("click", function () {
-      applyLayout("terminal");
-    });
-  }
   // ---- Right-rail panel switching ----
-  // The rail is a radio group over the right pane's four panels. Clicking the
+  // The rail is a radio group over the dock's panels. Clicking the
   // panel that is already showing collapses the pane, so one button both opens
   // and closes — the usual activity-bar behaviour.
   function currentPanel() {
     var p = detail.dataset.panel;
-    return PANELS.indexOf(p) === -1 ? "browser" : p;
+    return PANELS.indexOf(p) === -1 ? PANELS[0] : p;
   }
   function syncPanelButtons() {
-    var open = currentLayout() !== "terminal";
+    var open = currentLayout() === "split";
     var panel = currentPanel();
     Array.prototype.forEach.call(
       document.querySelectorAll("[data-panel-btn]"),
@@ -869,19 +960,16 @@
   }
   function setPanel(name, opts) {
     name = resolvePanelName(name);
-    if (PANELS.indexOf(name) === -1) name = "browser";
+    if (PANELS.indexOf(name) === -1) name = PANELS[0];
     detail.dataset.panel = name;
     var project = activeProject();
     if (project) project.panel = name;
     if (!opts || opts.render !== false) renderPanel(name);
-    // The browser is a native child webview layered over the DOM — it has to be
-    // hidden whenever a different panel owns the pane, or it paints on top.
     syncBrowserBounds();
     syncPanelButtons();
   }
   function renderPanel(name) {
-    if (name === "files") renderFilesPanel();
-    else if (name === "git") {
+    if (name === "git") {
       // One tab, two sections: repository state above, changed files below.
       renderGitPanel();
       renderDiffsPanel();
@@ -892,24 +980,15 @@
     function (btn) {
       btn.addEventListener("click", function () {
         var name = btn.dataset.panelBtn;
-        var layout = currentLayout();
-        if (layout !== "terminal" && currentPanel() === name) {
+        if (currentLayout() === "split" && currentPanel() === name) {
           applyLayout("terminal");
           return;
         }
-        var panelWasVisible = layout === "split";
+        var panelWasVisible = currentLayout() === "split";
         setPanel(name, { render: false });
         applyLayout("split");
         if (panelWasVisible) renderPanel(name);
       });
-      // Right-click cycles which edge the dock sits on, as it did on the old
-      // titlebar toggle.
-      if (btn.dataset.panelBtn === "browser") {
-        btn.addEventListener("contextmenu", function (e) {
-          e.preventDefault();
-          cycleBrowserSide(e.shiftKey ? -1 : 1);
-        });
-      }
     }
   );
 
@@ -932,6 +1011,7 @@
       arr.push(bytes);
       pendingDataBuffers.set(payload.thread_id, arr);
     }
+    schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
   function handlePtyExit(payload) {
@@ -945,6 +1025,9 @@
     thread.stopRequested = false;
     thread.spawning = false;
     thread.status = "exited";
+    // An exited pane is not waiting on an answer, it is over. Leaving the badge
+    // would send the user to a pane with nothing to say.
+    clearThreadAttention(thread);
     syncThreadPaneMetadata(thread);
     if (thread.term) {
       thread.term.write("\r\n\x1b[2;90m[process exited]\x1b[0m\r\n");
@@ -968,6 +1051,332 @@
     return null;
   }
 
+  function acceptsImageDrop(thread) {
+    return !!thread
+      && thread.kind !== "web"
+      && !thread.closing
+      && !thread.closeStarted
+      && thread.status === "running"
+      && thread.ptyStarted === true;
+  }
+
+  function resolveImageDropTarget(position, scaleFactor) {
+    var cssPosition = PsycheTerminalInput.physicalToCssPosition(position, scaleFactor);
+    if (!cssPosition) return null;
+    var element = document.elementFromPoint(cssPosition.x, cssPosition.y);
+    var pane = element && typeof element.closest === "function"
+      ? element.closest(".terminal-pane[data-thread-id]")
+      : null;
+    if (!pane) return null;
+    var thread = findThread(pane.dataset.threadId);
+    return acceptsImageDrop(thread) ? thread : null;
+  }
+
+  function clearImageDropTarget() {
+    if (imageDropTarget && imageDropTarget.pane) {
+      imageDropTarget.pane.classList.remove("image-drop-target");
+    }
+    imageDropTarget = null;
+  }
+
+  function setImageDropTarget(thread) {
+    if (thread === imageDropTarget) return;
+    clearImageDropTarget();
+    if (!acceptsImageDrop(thread) || !thread.pane) return;
+    imageDropTarget = thread;
+    thread.pane.classList.add("image-drop-target");
+  }
+
+  async function insertDroppedImages(thread, paths) {
+    var insertion = PsycheTerminalInput.buildImageDropInsertion(paths);
+    if (!insertion.accepted.length) {
+      toast("No supported images in this drop");
+      return false;
+    }
+
+    try {
+      if (!(await focusThread(thread.id))) {
+        setStatus("image drop focus failed", "warn");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop focus failed", "warn");
+      return false;
+    }
+
+    thread = findThread(thread.id);
+    if (!acceptsImageDrop(thread)) {
+      setStatus("image drop target is no longer available", "warn");
+      return false;
+    }
+
+    try {
+      if (!(await sendToThread(thread, insertion.text))) {
+        setStatus("image drop write failed", "error");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop write failed", "error");
+      return false;
+    }
+
+    if (insertion.skipped.length) {
+      toast(
+        "Inserted " + insertion.accepted.length + " image" +
+        (insertion.accepted.length === 1 ? "" : "s") +
+        "; skipped " + insertion.skipped.length + " unsupported file" +
+        (insertion.skipped.length === 1 ? "" : "s")
+      );
+    }
+    return true;
+  }
+
+  async function handleTerminalImageDropEvent(event) {
+    var payload = event && event.payload ? event.payload : {};
+    if (payload.type === "leave") {
+      clearImageDropTarget();
+      return false;
+    }
+    if (payload.type !== "enter" && payload.type !== "over" && payload.type !== "drop") {
+      return false;
+    }
+
+    var thread = resolveImageDropTarget(payload.position, imageDropScaleFactor);
+    setImageDropTarget(thread);
+    if (payload.type !== "drop") return !!thread;
+
+    clearImageDropTarget();
+    if (!thread) {
+      toast("Drop images onto a running terminal pane");
+      return false;
+    }
+    return insertDroppedImages(thread, Array.isArray(payload.paths) ? payload.paths : []);
+  }
+
+  async function installTerminalImageDrop() {
+    if (!currentWindow ||
+        typeof currentWindow.scaleFactor !== "function" ||
+        typeof currentWindow.onDragDropEvent !== "function") {
+      setStatus("image drop unavailable: Tauri window API missing", "warn");
+      return false;
+    }
+
+    try {
+      var scaleFactor = await currentWindow.scaleFactor();
+      if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+        throw new Error("invalid window scale factor");
+      }
+      imageDropScaleFactor = scaleFactor;
+      if (typeof currentWindow.onScaleChanged === "function") {
+        await currentWindow.onScaleChanged(function (event) {
+          var nextScaleFactor = event && event.payload && event.payload.scaleFactor;
+          if (Number.isFinite(nextScaleFactor) && nextScaleFactor > 0) {
+            imageDropScaleFactor = nextScaleFactor;
+          }
+          clearImageDropTarget();
+        });
+      }
+      await currentWindow.onDragDropEvent(handleTerminalImageDropEvent);
+      window.addEventListener("blur", clearImageDropTarget);
+      return true;
+    } catch (error) {
+      clearImageDropTarget();
+      setStatus("image drop unavailable: " + String(error), "warn");
+      return false;
+    }
+  }
+
+  function findBrowserPane(projectId, worktreePath) {
+    return state.threads.find(function (thread) {
+      return thread.kind === "web" && thread.projectId === projectId &&
+        thread.worktreePath === worktreePath;
+    }) || null;
+  }
+
+  // ============================================================
+  // 5a. Hover to focus
+  // ============================================================
+
+  // Focus follows the mouse across the canvas: resting over a pane makes it the
+  // one that types, with no click. One delegated listener on the host rather
+  // than a handler per pane, so it covers terminal and browser panes alike and
+  // survives the canvas being re-tiled.
+  //
+  // Every guard here exists because hover is an *accidental* gesture -- the
+  // pointer crosses panes on the way to somewhere else, and it must not be
+  // able to interrupt something the user is deliberately doing.
+
+  var HOVER_FOCUS_DWELL_MS = 140;
+  var hoverFocusTimer = null;
+
+  function cancelHoverFocus() {
+    if (hoverFocusTimer === null) return;
+    clearTimeout(hoverFocusTimer);
+    hoverFocusTimer = null;
+  }
+
+  function hoverFocusBlocked() {
+    // Mid-drag the pointer is over panes it is not choosing, and re-tiling
+    // under a live drag would drop the gesture.
+    if (document.body.classList.contains("is-pane-dragging")) return true;
+    // An inline rename and a modal both own the keyboard; taking it back would
+    // discard what the user is part-way through.
+    if (editingContext) return true;
+    if (document.querySelector(".session-context-menu")) return true;
+    // The composer, the URL bar, a palette query: text the user is typing into
+    // is never worth losing to a stray pointer resting on the canvas.
+    var focused = document.activeElement;
+    if (focused && focused !== document.body) {
+      var editable = focused.isContentEditable
+        || focused.tagName === "INPUT"
+        || focused.tagName === "TEXTAREA";
+      if (editable) {
+        var terminalInput = focused.closest && focused.closest(".xterm");
+        if (!terminalInput) return true;
+      }
+    }
+    return false;
+  }
+
+  if (terminalHost) {
+    terminalHost.addEventListener("pointerover", function (event) {
+      // Touch and pen have no hover: for them a tap already means "focus this".
+      if (event.pointerType && event.pointerType !== "mouse") return;
+      var paneEl = event.target && event.target.closest
+        ? event.target.closest(".terminal-pane")
+        : null;
+      cancelHoverFocus();
+      if (!paneEl || !paneEl.dataset.threadId) return;
+      var threadId = paneEl.dataset.threadId;
+      if (threadId === state.activeThreadId) return;
+      hoverFocusTimer = setTimeout(function () {
+        hoverFocusTimer = null;
+        // Re-checked on fire, not just on entry: the dwell is long enough for a
+        // drag to start or a dialog to open after the pointer arrived.
+        if (hoverFocusBlocked()) return;
+        if (threadId === state.activeThreadId) return;
+        if (!findThread(threadId)) return;
+        focusThread(threadId);
+      }, HOVER_FOCUS_DWELL_MS);
+    });
+    terminalHost.addEventListener("pointerleave", cancelHoverFocus);
+  }
+
+  // ============================================================
+  // 5b. "This pane is waiting on you"
+  // ============================================================
+
+  // A pane that has asked the user something and gone quiet is the one state
+  // the app must never let scroll past. The rail already knew how to *count*
+  // sessions needing attention, but nothing ever set the flag on a local pane,
+  // so the badges only ever lit for daemon-reported Coven sessions. This is
+  // where local panes earn it: sample the visible tail, and when it settles
+  // with no sign of work in flight, the turn is the user's.
+  //
+  // Shells are exempt. A prompt sitting at `$` is idle, not waiting -- flagging
+  // that would put a permanent badge on every terminal in the app.
+
+  var ATTENTION_SAMPLE_MS = 700;
+  var ATTENTION_TAIL_LINES = 14;
+  var attentionTracker = PsycheSessions.createAttentionTracker();
+
+  function threadWantsAttentionTracking(thread) {
+    return !!thread
+      && (thread.kind || "shell") !== "shell"
+      && thread.kind !== "web"
+      && !thread.closing
+      && !thread.closeStarted
+      && thread.status !== "exited";
+  }
+
+  /**
+   * The last `lines` non-empty rows of what the terminal is actually showing.
+   * Read off the buffer rather than accumulated PTY bytes so redraws, cursor
+   * moves and cleared spinners are already resolved into what the user sees.
+   */
+  function terminalTail(term, lines) {
+    if (!term || !term.buffer || !term.buffer.active) return "";
+    var buffer = term.buffer.active;
+    var end = buffer.baseY + buffer.cursorY;
+    var out = [];
+    for (var row = end; row >= 0 && out.length < lines; row--) {
+      var line = buffer.getLine(row);
+      if (!line) continue;
+      var text = line.translateToString(true);
+      if (!text.trim() && out.length === 0) continue;
+      out.push(text);
+    }
+    return out.reverse().join("\n");
+  }
+
+  /**
+   * Push a session's attention state onto every surface that shows it. Only the
+   * rail is re-rendered wholesale; the pane and its minimap entry are touched
+   * in place, because this runs on a timer and re-tiling the canvas under a
+   * user mid-drag would be worse than the badge it is trying to draw.
+   */
+  function applyThreadAttention(thread, next) {
+    var was = !!thread.needsAttention;
+    var wasReason = thread.attentionReason || null;
+    if (was === next.needsAttention && wasReason === next.reason) return false;
+    thread.needsAttention = next.needsAttention;
+    thread.attentionReason = next.reason;
+    syncThreadAttentionChrome(thread);
+    renderSessionList();
+    syncSessionListScroll();
+    return true;
+  }
+
+  function syncThreadAttentionChrome(thread) {
+    if (!thread) return;
+    if (thread.pane) {
+      thread.pane.classList.toggle("needs-attention", !!thread.needsAttention);
+    }
+    if (thread.paneAttention) {
+      var label = PsycheSessions.attentionLabel(thread.attentionReason);
+      thread.paneAttention.hidden = !thread.needsAttention;
+      thread.paneAttention.textContent = thread.needsAttention ? label : "";
+      thread.paneAttention.title = label;
+      thread.paneAttention.setAttribute("aria-label", label);
+    }
+    var minimapDot = terminalArea &&
+      terminalArea.querySelector('.minimap-pane[data-thread-id="' + thread.id + '"] .minimap-dot');
+    if (minimapDot) minimapDot.classList.toggle("attention", !!thread.needsAttention);
+  }
+
+  function noteThreadInput(thread, text) {
+    if (!thread || !threadWantsAttentionTracking(thread)) return;
+    var next = text === "\x03"
+      ? attentionTracker.interrupt(thread.id)
+      : attentionTracker.userInput(thread.id);
+    applyThreadAttention(thread, next);
+  }
+
+  function clearThreadAttention(thread) {
+    if (!thread) return;
+    attentionTracker.forget(thread.id);
+    applyThreadAttention(thread, { needsAttention: false, reason: null });
+  }
+
+  function sampleThreadAttention() {
+    var now = Date.now();
+    var tracked = [];
+    state.threads.forEach(function (thread) {
+      if (!threadWantsAttentionTracking(thread) || !thread.term) {
+        if (thread && thread.needsAttention) clearThreadAttention(thread);
+        return;
+      }
+      tracked.push(thread.id);
+      applyThreadAttention(
+        thread,
+        attentionTracker.observe(thread.id, terminalTail(thread.term, ATTENTION_TAIL_LINES), now)
+      );
+    });
+    attentionTracker.retain(tracked);
+  }
+
+  setInterval(sampleThreadAttention, ATTENTION_SAMPLE_MS);
+
   // ============================================================
   // 6. Threads — create / focus / close
   // ============================================================
@@ -977,8 +1386,36 @@
     threadCounter += 1;
     return "t" + Date.now().toString(36) + "-" + threadCounter;
   }
+  function makeCovenSessionId() {
+    var cryptoApi = window.crypto;
+    if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+      try {
+        return cryptoApi.randomUUID();
+      } catch (_) {}
+    }
+    if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
+      try {
+        var bytes = new Uint8Array(16);
+        cryptoApi.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        var hex = "";
+        for (var i = 0; i < bytes.length; i++) {
+          hex += bytes[i].toString(16).padStart(2, "0");
+        }
+        return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+          hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+      } catch (_) {}
+    }
+    setStatus("Secure session ID generation is unavailable", "error");
+    return null;
+  }
   function isLiveThread(thread) {
     return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
+  }
+
+  function threadCovenSessionId(thread) {
+    return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
   function createThread(opts) {
@@ -992,6 +1429,7 @@
       cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
       launchKind: opts.launchKind || null,
       covenSessionId: opts.covenSessionId || null,
+      metricsProvider: opts.metricsProvider || null,
     };
     var launch = {
       command: sourceLaunch.command,
@@ -1002,6 +1440,7 @@
         (project && activeWorkspaceRoot(project)) || null,
       launchKind: sourceLaunch.launchKind || null,
       covenSessionId: sourceLaunch.covenSessionId || null,
+      metricsProvider: sourceLaunch.metricsProvider || opts.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
@@ -1030,6 +1469,11 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      metricsGeneration: 0,
+      metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
+        ? loadingPaneMetrics(launch)
+        : null,
+      metricsRefreshTimer: 0,
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
@@ -1046,6 +1490,50 @@
       spawnPty(thread);
     });
     return thread;
+  }
+
+  async function createBrowserPane(project) {
+    project = project || activeProject();
+    if (!project) return null;
+    if (!(await showTerminalView())) return null;
+    var worktreePath = activeWorkspaceRoot(project);
+    var existing = findBrowserPane(project.id, worktreePath);
+    if (existing) {
+      await focusThread(existing.id);
+      return existing;
+    }
+    await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+    var id = makeThreadId();
+    var placement = preparePanePlacement(id, project.id, worktreePath);
+    if (!placement) {
+      setStatus("Not enough space for another pane", "warn");
+      return null;
+    }
+    var pane = {
+      id: id,
+      projectId: project.id,
+      worktreePath: worktreePath,
+      name: "Web",
+      kind: "web",
+      status: "running",
+      spawning: false,
+      term: null,
+      fit: null,
+      host: null,
+      pane: null,
+      closing: false,
+      closeStarted: false,
+      startInFlight: false,
+      stopRequested: false,
+      ptyStarted: false,
+    };
+    commitPanePlacement(placement);
+    state.threads.push(pane);
+    mountBrowserPane(pane);
+    await focusThread(id);
+    refreshSidebar();
+    refreshTabs();
+    return pane;
   }
 
   function stopThreadPty(thread) {
@@ -1304,6 +1792,347 @@
     }, true);
   }
 
+  function stageBrowserSurface() {
+    if (browserSurfaceStaging && browserSurface &&
+        browserSurface.parentElement !== browserSurfaceStaging) {
+      browserSurfaceStaging.appendChild(browserSurface);
+    }
+  }
+
+  // -------- Tools on the canvas --------
+  // The git surface is a single element with two possible homes: the dock, or a
+  // pane. Moving it rather than rendering it twice is what keeps the two in
+  // sync -- there is only ever one of it, so there is nothing to diverge.
+
+  var gitSurfaceEl = document.getElementById("git-surface");
+  var gitPanelEl = document.querySelector(".panel-git");
+  var gitPoppedNoteEl = document.getElementById("git-popped-note");
+
+  /** The thread holding the git pane, if it is popped out. */
+  function gitPaneThread() {
+    for (var i = 0; i < state.threads.length; i++) {
+      if (state.threads[i].kind === "git" && !state.threads[i].closing) return state.threads[i];
+    }
+    return null;
+  }
+
+  function syncGitDockChrome() {
+    var popped = Boolean(gitPaneThread());
+    if (gitPoppedNoteEl) gitPoppedNoteEl.hidden = !popped;
+    var popBtn = document.getElementById("git-pop-out");
+    if (popBtn) popBtn.hidden = popped;
+  }
+
+  /** Put the surface back in the dock, wherever it currently is. */
+  function dockGitSurface() {
+    if (gitSurfaceEl && gitPanelEl && gitSurfaceEl.parentElement !== gitPanelEl) {
+      gitPanelEl.appendChild(gitSurfaceEl);
+    }
+    syncGitDockChrome();
+  }
+
+  function mountToolPane(thread) {
+    var pane = document.createElement("section");
+    pane.className = "terminal-pane is-tool";
+    pane.dataset.threadId = thread.id;
+    var header = document.createElement("header");
+    header.className = "terminal-pane-header";
+    var glyph = document.createElement("span");
+    glyph.className = "terminal-pane-glyph is-tool";
+    glyph.textContent = "\u2387";
+    glyph.setAttribute("aria-hidden", "true");
+    var label = document.createElement("span");
+    label.className = "terminal-pane-label";
+    var title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    title.id = "terminal-pane-title-" + thread.id;
+    title.textContent = thread.name;
+    pane.setAttribute("aria-labelledby", title.id);
+    var meta = document.createElement("span");
+    meta.className = "terminal-pane-meta";
+    label.appendChild(title);
+    label.appendChild(meta);
+    var status = document.createElement("span");
+    status.className = "terminal-pane-status";
+    var span = document.createElement("button");
+    span.type = "button";
+    span.className = "terminal-pane-span";
+    span.addEventListener("click", function (event) {
+      event.stopPropagation();
+      cyclePaneSpan(thread);
+    });
+    var maximize = document.createElement("button");
+    maximize.type = "button";
+    maximize.className = "terminal-pane-max";
+    maximize.addEventListener("click", function (event) {
+      event.stopPropagation();
+      togglePaneMaximize(thread);
+    });
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "terminal-pane-close";
+    close.title = "Return Git to the dock";
+    close.setAttribute("aria-label", "Return Git to the dock");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeToolPane(thread);
+    });
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(thread, event);
+    });
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(thread);
+    });
+    header.appendChild(glyph);
+    header.appendChild(label);
+    header.appendChild(status);
+    header.appendChild(span);
+    header.appendChild(maximize);
+    header.appendChild(close);
+    var body = document.createElement("div");
+    body.className = "terminal-pane-body tool-pane-body";
+    body.addEventListener("pointerdown", function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    }, true);
+    pane.appendChild(header);
+    pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
+    thread.host = body;
+    thread.toolBody = body;
+    thread.paneTitle = title;
+    thread.paneMeta = meta;
+    thread.paneStatus = status;
+    thread.paneSpan = span;
+    thread.paneMax = maximize;
+    thread.paneClose = close;
+    syncThreadPaneMetadata(thread);
+    renderPaneWorkspace();
+  }
+
+  /**
+   * Open Git as a pane. `dropTarget` optionally places it next to an existing
+   * pane, which is how a drag from the dock lands where it was dropped.
+   */
+  async function popOutGitPane(dropTarget) {
+    var existing = gitPaneThread();
+    if (existing) { await focusThread(existing.id); return existing; }
+    var project = activeProject();
+    if (!project) { setStatus("No project open", "warn"); return null; }
+    var worktreePath = activeWorkspaceRoot(project);
+    var id = makeThreadId();
+    var placement = preparePanePlacement(id, project.id, worktreePath);
+    if (!placement) {
+      setStatus("Not enough space for another pane", "warn");
+      return null;
+    }
+    var thread = {
+      id: id,
+      projectId: project.id,
+      worktreePath: worktreePath,
+      name: "Git",
+      kind: "git",
+      status: "",
+      spawning: false,
+      term: null,
+      fit: null,
+      host: null,
+      pane: null,
+      closing: false,
+      closeStarted: false,
+      startInFlight: false,
+      stopRequested: false,
+      ptyStarted: false,
+    };
+    commitPanePlacement(placement);
+    state.threads.push(thread);
+    mountToolPane(thread);
+    if (dropTarget && dropTarget.threadId && dropTarget.position) {
+      movePaneTo(id, dropTarget.threadId, dropTarget.position);
+    }
+    await focusThread(id);
+    syncGitDockChrome();
+    refreshSidebar();
+    return thread;
+  }
+
+  /** Close the pane and hand the surface back to the dock. */
+  function closeToolPane(thread) {
+    if (!thread || thread.closeStarted) return;
+    thread.closeStarted = true;
+    thread.closing = true;
+    // Move the surface home before the pane is torn down, or it would be
+    // removed from the document along with its container.
+    dockGitSurface();
+    forgetThreadInSets(thread.id);
+    var nextThreadId = detachThreadPane(thread);
+    state.threads = state.threads.filter(function (t) { return t.id !== thread.id; });
+    if (thread.pane && thread.pane.parentNode) thread.pane.parentNode.removeChild(thread.pane);
+    if (state.activeThreadId === thread.id) state.activeThreadId = nextThreadId;
+    syncGitDockChrome();
+    renderPaneWorkspace();
+    refreshSidebar();
+    saveWorkspaceSoon();
+  }
+
+  // Click pops out; dragging the same control onto the canvas pops out where it
+  // lands. One affordance, two gestures, so the tab does not need a second
+  // control for the second gesture.
+  var gitPopOutBtn = document.getElementById("git-pop-out");
+  if (gitPopOutBtn) {
+    gitPopOutBtn.addEventListener("click", function () { popOutGitPane(); });
+    gitPopOutBtn.addEventListener("dragstart", function (event) {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData("text/x-psyche-tool", "git");
+      event.dataTransfer.effectAllowed = "move";
+      document.body.classList.add("is-tool-dragging");
+    });
+    gitPopOutBtn.addEventListener("dragend", function () {
+      document.body.classList.remove("is-tool-dragging");
+      clearPaneDropIndicator();
+    });
+  }
+  var gitDockBackBtn = document.getElementById("git-dock-back");
+  if (gitDockBackBtn) {
+    gitDockBackBtn.addEventListener("click", function () {
+      var thread = gitPaneThread();
+      if (thread) closeToolPane(thread);
+    });
+  }
+
+  function toolDropTargetAt(clientX, clientY) {
+    var hit = paneElementAt(clientX, clientY);
+    if (!hit) return null;
+    return {
+      threadId: hit.thread.id,
+      position: paneDropZone(hit.rect, clientX, clientY),
+      rect: hit.rect,
+    };
+  }
+
+  if (terminalHost) {
+    terminalHost.addEventListener("dragover", function (event) {
+      if (!event.dataTransfer || event.dataTransfer.types.indexOf("text/x-psyche-tool") === -1) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      var target = toolDropTargetAt(event.clientX, event.clientY);
+      // Reuse the pane-drag indicator so a tool lands with the same affordance
+      // as moving a pane; a second visual language here would be noise.
+      if (target) showPaneDropIndicator(target.rect, target.position);
+      else clearPaneDropIndicator();
+    });
+    terminalHost.addEventListener("dragleave", function (event) {
+      if (event.target === terminalHost) clearPaneDropIndicator();
+    });
+    terminalHost.addEventListener("drop", function (event) {
+      if (!event.dataTransfer || event.dataTransfer.getData("text/x-psyche-tool") !== "git") return;
+      event.preventDefault();
+      var target = toolDropTargetAt(event.clientX, event.clientY);
+      clearPaneDropIndicator();
+      document.body.classList.remove("is-tool-dragging");
+      popOutGitPane(target);
+    });
+  }
+
+  function mountBrowserPane(thread) {
+    var pane = document.createElement("section");
+    pane.className = "terminal-pane is-web";
+    pane.dataset.threadId = thread.id;
+    var header = document.createElement("header");
+    header.className = "terminal-pane-header";
+    var glyph = document.createElement("span");
+    glyph.className = "terminal-pane-glyph is-web";
+    glyph.textContent = paneGlyphFor("web");
+    glyph.setAttribute("aria-hidden", "true");
+    var label = document.createElement("span");
+    label.className = "terminal-pane-label";
+    var title = document.createElement("span");
+    title.className = "terminal-pane-title";
+    title.id = "terminal-pane-title-" + thread.id;
+    title.textContent = thread.name;
+    pane.setAttribute("aria-labelledby", title.id);
+    var meta = document.createElement("span");
+    meta.className = "terminal-pane-meta";
+    label.appendChild(title);
+    label.appendChild(meta);
+    var status = document.createElement("span");
+    status.className = "terminal-pane-status";
+    applyPaneStatus(status, thread.status);
+    var span = document.createElement("button");
+    span.type = "button";
+    span.className = "terminal-pane-span";
+    span.addEventListener("click", function (event) {
+      event.stopPropagation();
+      cyclePaneSpan(thread);
+    });
+    var maximize = document.createElement("button");
+    maximize.type = "button";
+    maximize.className = "terminal-pane-max";
+    maximize.addEventListener("click", function (event) {
+      event.stopPropagation();
+      togglePaneMaximize(thread);
+    });
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "terminal-pane-close";
+    close.title = "Close Web pane";
+    close.setAttribute("aria-label", "Close Web pane");
+    close.textContent = "×";
+    close.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeBrowserPane(thread);
+    });
+    header.addEventListener("pointerdown", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      startPaneReposition(thread, event);
+    });
+    header.addEventListener("dblclick", function (event) {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      event.preventDefault();
+      togglePaneMaximize(thread);
+    });
+    header.addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      openSessionContextMenu(event, [
+        { label: "Hide", run: function () { hideThread(thread.id); } },
+        { label: "Close", danger: true, run: function () { closeBrowserPane(thread); } },
+      ]);
+    });
+    header.appendChild(glyph);
+    header.appendChild(label);
+    header.appendChild(status);
+    header.appendChild(span);
+    header.appendChild(maximize);
+    header.appendChild(close);
+    var body = document.createElement("div");
+    body.className = "terminal-pane-body browser-pane-body";
+    body.addEventListener("pointerdown", function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    }, true);
+    pane.appendChild(header);
+    pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
+    pane.addEventListener("pointerdown", function (event) {
+      handlePanePointerDown(thread, body, close, event);
+    });
+    thread.host = body;
+    thread.browserBody = body;
+    thread.paneTitle = title;
+    thread.paneMeta = meta;
+    thread.paneStatus = status;
+    thread.paneSpan = span;
+    thread.paneMax = maximize;
+    thread.paneClose = close;
+    syncThreadPaneMetadata(thread);
+    renderPaneWorkspace();
+  }
+
   function mountTerminal(thread) {
     var pane = document.createElement("section");
     pane.className = "terminal-pane";
@@ -1356,6 +2185,12 @@
       event.stopPropagation();
       closeThread(thread.id);
     });
+    // Worded, not a bare dot, and ahead of the status chip: a pane waiting on
+    // the user outranks "running" as the thing its header should be saying.
+    var attention = document.createElement("span");
+    attention.className = "terminal-pane-attention";
+    attention.hidden = true;
+    thread.paneAttention = attention;
     // The header doubles as the pane's drag handle. Buttons inside it keep
     // their own click behaviour; the gesture only starts once the pointer has
     // travelled far enough to not be a click.
@@ -1365,6 +2200,7 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
+    header.appendChild(attention);
     header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
@@ -1401,10 +2237,11 @@
     body.appendChild(container);
     pane.appendChild(header);
     pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     pane.addEventListener("pointerdown", function (event) {
       handlePanePointerDown(thread, body, close, event);
     });
-    thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
@@ -1457,14 +2294,15 @@
       }
     } catch (_) { /* canvas fallback is fine */ }
 
-    term.onData(function (data) {
-      var bytes = Array.from(new TextEncoder().encode(data));
-      invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-        function (err) {
-          term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
-        }
-      );
-    });
+    term.onData(function (data) { sendToThread(thread, data); });
+    // Agents ring the bell for exactly one reason -- they want the user back --
+    // so it is trusted immediately instead of waiting for the tail to settle.
+    if (typeof term.onBell === "function") {
+      term.onBell(function () {
+        if (!threadWantsAttentionTracking(thread)) return;
+        applyThreadAttention(thread, attentionTracker.bell(thread.id));
+      });
+    }
     term.onResize(function (size) {
       invoke("pty_resize", {
         threadId: thread.id,
@@ -1558,6 +2396,43 @@
     return true;
   }
 
+  // The drop highlight is shared by both drags -- repositioning a pane and
+  // dragging a tool out of the dock -- so the two gestures read identically.
+  // Fixed positioning takes the client rects as-is, so it needs no positioned
+  // ancestor and cannot be clipped by a pane's own overflow.
+  var paneDropIndicator = null;
+
+  function showPaneDropIndicator(rect, position) {
+    if (!paneDropIndicator) {
+      paneDropIndicator = document.createElement("div");
+      paneDropIndicator.className = "pane-drop-indicator";
+      paneDropIndicator.setAttribute("aria-hidden", "true");
+      document.body.appendChild(paneDropIndicator);
+    }
+    var left = rect.left;
+    var top = rect.top;
+    var width = rect.width;
+    var height = rect.height;
+    if (position === "left" || position === "right") {
+      width = rect.width / 2;
+      if (position === "right") left = rect.left + width;
+    } else {
+      height = rect.height / 2;
+      if (position === "below") top = rect.top + height;
+    }
+    paneDropIndicator.style.left = left + "px";
+    paneDropIndicator.style.top = top + "px";
+    paneDropIndicator.style.width = width + "px";
+    paneDropIndicator.style.height = height + "px";
+    paneDropIndicator.hidden = false;
+  }
+
+  function clearPaneDropIndicator() {
+    if (!paneDropIndicator) return;
+    paneDropIndicator.remove();
+    paneDropIndicator = null;
+  }
+
   function startPaneReposition(thread, event) {
     if (!terminalHost || event.button !== 0 || !thread || !thread.pane) return;
     // A lone pane has nothing to be repositioned against.
@@ -1568,39 +2443,14 @@
     var startY = event.clientY;
     var dragging = false;
     var drop = null;
-    var indicator = null;
 
     function beginDrag() {
       dragging = true;
-      indicator = document.createElement("div");
-      indicator.className = "pane-drop-indicator";
-      indicator.setAttribute("aria-hidden", "true");
-      indicator.hidden = true;
-      document.body.appendChild(indicator);
       document.body.classList.add("is-pane-dragging");
       thread.pane.classList.add("is-dragging");
     }
 
-    // Fixed positioning takes the client rects as-is, so the highlight needs no
-    // positioned ancestor and cannot be clipped by a pane's own overflow.
-    function showIndicator(rect, position) {
-      var left = rect.left;
-      var top = rect.top;
-      var width = rect.width;
-      var height = rect.height;
-      if (position === "left" || position === "right") {
-        width = rect.width / 2;
-        if (position === "right") left = rect.left + width;
-      } else {
-        height = rect.height / 2;
-        if (position === "below") top = rect.top + height;
-      }
-      indicator.style.left = left + "px";
-      indicator.style.top = top + "px";
-      indicator.style.width = width + "px";
-      indicator.style.height = height + "px";
-      indicator.hidden = false;
-    }
+    var showIndicator = showPaneDropIndicator;
 
     function onPointerMove(moveEvent) {
       if (moveEvent.pointerId !== pointerId) return;
@@ -1614,7 +2464,7 @@
       var hit = paneElementAt(moveEvent.clientX, moveEvent.clientY);
       if (!hit || hit.thread.id === thread.id) {
         drop = null;
-        indicator.hidden = true;
+        clearPaneDropIndicator();
         return;
       }
       var position = paneDropZone(hit.rect, moveEvent.clientX, moveEvent.clientY);
@@ -1639,8 +2489,7 @@
       if (!dragging) return;
       document.body.classList.remove("is-pane-dragging");
       thread.pane.classList.remove("is-dragging");
-      if (indicator && indicator.parentNode) indicator.parentNode.removeChild(indicator);
-      indicator = null;
+      clearPaneDropIndicator();
       dragging = false;
       if (drop) movePaneTo(thread.id, drop.threadId, drop.position);
     }
@@ -2019,6 +2868,13 @@
   function renderPaneNode(node, splitRatios) {
     if (node.type === "leaf") {
       var thread = findThread(node.threadId);
+      if (thread && thread.kind === "web" && thread.browserBody && browserSurface) {
+        thread.browserBody.appendChild(browserSurface);
+      }
+      if (thread && thread.kind === "git" && thread.toolBody && gitSurfaceEl &&
+          gitSurfaceEl.parentElement !== thread.toolBody) {
+        thread.toolBody.appendChild(gitSurfaceEl);
+      }
       return thread && thread.pane ? thread.pane : document.createDocumentFragment();
     }
     var ratio = splitRatios.get(node.id);
@@ -2042,10 +2898,12 @@
 
   function renderPaneWorkspace() {
     if (!terminalHost) return;
+    stageBrowserSurface();
     terminalHost.replaceChildren();
     var layout = activePaneLayout();
     if (!layout || !layout.root) {
       renderTerminalEmptyState();
+      renderPaneMinimap(layout, findOpenFile(state.activeFileId));
       return;
     }
     var root = effectivePaneRoot(layout);
@@ -2070,8 +2928,9 @@
       syncThreadPaneMetadata(thread);
     });
     renderSetPickBar();
-    renderPaneMinimap(layout);
+    renderPaneMinimap(layout, findOpenFile(state.activeFileId));
     scheduleVisiblePaneFit();
+    requestAnimationFrame(syncBrowserBounds);
   }
 
   /**
@@ -2163,10 +3022,43 @@
    * Focus mode hides every pane but one, so the minimap is how the others stay
    * reachable — a carousel of the panes the canvas is no longer drawing.
    */
-  function renderPaneMinimap(layout) {
+  function paneMinimapItems(layout, activeFile) {
+    var items = [];
+    if (activeFile) {
+      items.push({
+        kind: "file",
+        id: activeFile.id,
+        label: activeFile.name,
+        detail: activeFile.rel,
+        current: true,
+        thread: null,
+      });
+    }
+    if (!layout || !layout.root) return items;
+
+    PsychePanes.leafIds(scopedPaneRoot(layout)).forEach(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      var thread = leaf && findThread(leaf.threadId);
+      if (!thread) return;
+      items.push({
+        kind: "pane",
+        id: thread.id,
+        label: thread.name,
+        detail: (thread.status || "") +
+          (thread.needsAttention
+            ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
+            : ""),
+        current: !activeFile && layout.maximizedLeafId === leafId,
+        thread: thread,
+      });
+    });
+    return items;
+  }
+
+  function renderPaneMinimap(layout, activeFile) {
     if (!terminalArea) return;
     var rail = terminalArea.querySelector(".pane-minimap");
-    if (!layout || !layout.maximizedLeafId) {
+    if (!activeFile && (!layout || !layout.maximizedLeafId)) {
       if (rail) rail.remove();
       return;
     }
@@ -2177,26 +3069,28 @@
       terminalArea.appendChild(rail);
     }
     rail.replaceChildren();
-    var scopedIds = PsychePanes.leafIds(scopedPaneRoot(layout));
-    scopedIds.forEach(function (leafId) {
-      var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread) return;
+    paneMinimapItems(layout, activeFile).forEach(function (item) {
       var entry = document.createElement("button");
       entry.type = "button";
       entry.className = "minimap-pane" +
-        (layout.maximizedLeafId === leafId ? " is-current" : "");
-      entry.title = thread.name + " — " + (thread.status || "") +
-        " · click to focus this pane";
+        (item.kind === "file" ? " is-file" : "") +
+        (item.current ? " is-current" : "");
+      if (item.kind === "pane") entry.dataset.threadId = item.thread.id;
+      entry.title = item.kind === "file"
+        ? item.detail + " · current file"
+        : item.label + " — " + item.detail + " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
       var head = document.createElement("span");
       head.className = "minimap-head";
       var glyph = document.createElement("span");
       glyph.className = "minimap-glyph";
-      glyph.textContent = paneGlyphFor(thread.kind);
+      glyph.textContent = item.kind === "file" ? "F" : paneGlyphFor(item.thread.kind);
       var dot = document.createElement("span");
-      dot.className = "minimap-dot " + sessionStatusClass(thread);
+      dot.className = item.kind === "file"
+        ? "minimap-dot file"
+        : "minimap-dot " + sessionStatusClass(item.thread) +
+          (item.thread.needsAttention ? " attention" : "");
       head.appendChild(glyph);
       head.appendChild(dot);
 
@@ -2204,16 +3098,28 @@
       body.className = "minimap-body";
       var name = document.createElement("span");
       name.className = "minimap-name";
-      name.textContent = thread.name;
+      name.textContent = item.label;
 
       entry.appendChild(head);
       entry.appendChild(body);
       entry.appendChild(name);
-      entry.addEventListener("click", function () {
-        layout.maximizedLeafId = leafId;
-        layout.focusedLeafId = leafId;
-        focusThread(thread.id);
-      });
+      if (item.kind === "file") {
+        entry.addEventListener("click", function () {
+          restoreFileEditorFocus();
+        });
+      } else {
+        entry.addEventListener("click", async function () {
+          var leaf = PsychePanes.findLeafByThreadId(layout.root, item.thread.id);
+          if (!leaf) return;
+          if (state.activeFileId) {
+            await returnFromFileFocus(item.thread.id, true);
+            return;
+          }
+          layout.maximizedLeafId = leaf.id;
+          layout.focusedLeafId = leaf.id;
+          focusThread(item.thread.id);
+        });
+      }
       rail.appendChild(entry);
     });
   }
@@ -2222,7 +3128,7 @@
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
-    markActiveSurface("terminal");
+    markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
     // stay in sync if the user clicked into a different project's thread.
@@ -2242,6 +3148,7 @@
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
       if (thread.term) thread.term.focus();
+      syncBrowserBounds();
     });
 
     setProjectStatus(project, statusLevel(thread.status));
@@ -2264,6 +3171,7 @@
     if (thread.paneStatus) {
       applyPaneStatus(thread.paneStatus, thread.status);
     }
+    if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
     var leaf = layout && layout.root
       ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
@@ -2273,12 +3181,28 @@
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
-      thread.paneClose.setAttribute("aria-label", "Stop and close " + thread.name);
+      thread.paneClose.setAttribute(
+        "aria-label",
+        thread.kind === "web" ? "Close Web pane" : "Stop and close " + thread.name
+      );
     }
   }
 
   function detachThreadPane(thread) {
     if (!thread) return null;
+    if (typeof paneFooterPopoverThreadId !== "undefined" &&
+        paneFooterPopoverThreadId === thread.id &&
+        typeof closePaneFooterPopovers === "function") {
+      closePaneFooterPopovers(false);
+    }
+    if (typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
+    if (thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
+    thread.paneFooterObserver = null;
+    thread.paneFooter = null;
+    thread.paneFooterItems = null;
+    thread.paneFooterOverflow = null;
+    thread.paneFooterMenuTrigger = null;
+    thread.createPaneFooterButton = null;
     var key = paneLayoutKey(thread.projectId, thread.worktreePath);
     var layout = paneLayouts.get(key);
     if (!layout || !layout.root) return null;
@@ -2298,17 +3222,51 @@
     return nextLeaf ? nextLeaf.threadId : null;
   }
 
+  function closeBrowserPane(thread) {
+    if (!thread || thread.kind !== "web") return false;
+    var wasActive = state.activeThreadId === thread.id;
+    stageBrowserSurface();
+    var closed = closeThread(thread.id);
+    if (closed && wasActive) markActiveSurface("terminal");
+    return closed;
+  }
+
+  function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId, projectId) {
+    if (!state.activeFileId) return false;
+    state.activeThreadId = nextThreadId || null;
+    if (fileFocus.returnThreadId === removedThreadId) {
+      fileFocus.returnThreadId = nextThreadId || null;
+    }
+    var project = findProject(projectId);
+    if (project) {
+      project.lastActiveThreadId = nextThreadId || null;
+      if (nextThreadId) {
+        var nextThread = findThread(nextThreadId);
+        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+      }
+    }
+    return true;
+  }
+
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    if (thread.kind === "web" && state.activeThreadId === id) {
+      markActiveSurface("terminal");
+    }
     thread.closeStarted = true;
     thread.closing = true;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
     pendingDataBuffers.delete(id);
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
-    if (!thread.startInFlight) stopThreadPty(thread);
+    if (thread.kind !== "web" && !thread.startInFlight) stopThreadPty(thread);
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -2318,7 +3276,10 @@
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
-      if (nextThreadId && (!options || options.focus !== false)) {
+      if (retainFileFocusAfterThreadRemoval(id, nextThreadId, closingProjectId)) {
+        renderPaneWorkspace();
+        if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
+      } else if (nextThreadId && (!options || options.focus !== false)) {
         focusThread(nextThreadId);
       } else {
         renderPaneWorkspace();
@@ -2335,11 +3296,18 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
     var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
     if (state.activeThreadId === id) {
       state.activeThreadId = null;
-      if (nextThreadId) focusThread(nextThreadId);
+      if (!retainFileFocusAfterThreadRemoval(id, nextThreadId, thread.projectId) && nextThreadId) {
+        focusThread(nextThreadId);
+      }
     }
     renderPaneWorkspace();
     refreshSidebar();
@@ -2360,6 +3328,11 @@
     }
     thread.hidden = false;
     commitPanePlacement(placement);
+    if (thread.pane && !thread.paneFooter) {
+      var staleFooter = thread.pane.querySelector(".terminal-pane-footer");
+      if (staleFooter) staleFooter.remove();
+      thread.pane.appendChild(createPaneFooter(thread));
+    }
     project.lastActiveThreadId = thread.id;
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
@@ -2388,12 +3361,18 @@
 
   function duplicateThread(thread) {
     if (!thread || thread.status === "exited") return null;
+    var project = findProject(thread.projectId);
+    var launch = thread.launch;
+    if (launch && launch.launchKind === "coven-chat") {
+      launch = covenChatLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
+      if (!launch) return null;
+    }
     return createThread({
-      project: findProject(thread.projectId),
+      project: project,
       name: thread.name + " copy",
       kind: thread.kind,
       worktreePath: thread.worktreePath,
-      launch: thread.launch,
+      launch: launch,
     });
   }
 
@@ -2471,6 +3450,9 @@
   window.addEventListener("resize", function () {
     scheduleVisiblePaneFit();
     syncBrowserBounds();
+    // Whether the strip overflows is a function of width, not of its contents.
+    syncTabStripOverflow();
+    syncSessionListScroll();
   });
 
   // ============================================================
@@ -2575,12 +3557,24 @@
   //    continue to update the surviving project tab strip.
   // ============================================================
 
+  // The fade means "there is more below", so it has to answer whether the list
+  // can still scroll down - not merely whether it overflows. Otherwise it keeps
+  // promising content after you have already reached the bottom.
+  function syncSessionListScroll() {
+    if (!sessionListEl) return false;
+    var more = sessionListEl.scrollTop + sessionListEl.clientHeight
+      < sessionListEl.scrollHeight - 1;
+    sessionListEl.classList.toggle("has-more", more);
+    return more;
+  }
+
   function refreshSidebar() {
     refreshTabs();
     renderSessionList();
     renderPaneWorkspace();
     syncComposerChrome();
     syncDaemonStatus();
+    syncSessionListScroll();
   }
 
   // ============================================================
@@ -2595,6 +3589,66 @@
   var bgOpacityInput = document.getElementById("bg-opacity");
   var bgOpacityValueEl = document.getElementById("bg-opacity-value");
   var sessionListEl = document.getElementById("session-list");
+  var sidebarFilesEl = document.getElementById("sidebar-files");
+  if (sessionListEl) {
+    sessionListEl.addEventListener("scroll", function () { syncSessionListScroll(); });
+  }
+  var sidebarTab = "sessions";
+
+  // The file tree renders lazily: switching to it is the only thing that has to
+  // ask the filesystem, and the sessions rail should not pay for that.
+  function setSidebarTab(name) {
+    sidebarTab = name === "files" ? "files" : "sessions";
+    if (sessionListEl) sessionListEl.hidden = sidebarTab !== "sessions";
+    if (sidebarFilesEl) sidebarFilesEl.hidden = sidebarTab !== "files";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-sidebar-tab]"),
+      function (btn) {
+        var active = btn.dataset.sidebarTab === sidebarTab;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      }
+    );
+    if (sidebarTab === "files") renderFilesPanel();
+    return sidebarTab;
+  }
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-sidebar-tab]"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        setSidebarTab(btn.dataset.sidebarTab);
+      });
+    }
+  );
+
+  // The git panel uses the same segmented switch as the sidebar: Changes is the
+  // working tree and its diffs, Commit is the branch state and history. Two
+  // rails, one control to learn.
+  var gitTab = "changes";
+  function setGitTab(name) {
+    gitTab = name === "commit" ? "commit" : "changes";
+    var changes = document.getElementById("git-tab-changes");
+    var commit = document.getElementById("git-tab-commit");
+    if (changes) changes.hidden = gitTab !== "changes";
+    if (commit) commit.hidden = gitTab !== "commit";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-git-tab]"),
+      function (btn) {
+        var active = btn.dataset.gitTab === gitTab;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      }
+    );
+    return gitTab;
+  }
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-git-tab]"),
+    function (btn) {
+      btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
+    }
+  );
   var sessionSearchEl = document.getElementById("session-search");
   var sessionFilter = "";
 
@@ -2617,6 +3671,168 @@
       var leaf = PsychePanes.findLeafById(layout.root, leafId);
       return leaf ? leaf.threadId : null;
     }).filter(Boolean);
+  }
+
+  function effectiveCanvasThreadIds() {
+    var layout = activePaneLayout();
+    var root = effectivePaneRoot(layout);
+    if (!root) return [];
+    return PsychePanes.leafIds(root).map(function (leafId) {
+      var leaf = PsychePanes.findLeafById(root, leafId);
+      return leaf ? leaf.threadId : null;
+    }).filter(Boolean);
+  }
+
+  function threadWantsMetrics(thread) {
+    return !document.hidden
+      && terminalHost
+      && terminalHost.isConnected
+      && !terminalHost.hidden
+      && isLiveThread(thread)
+      && !thread.hidden
+      && thread.status !== "exited"
+      && thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && thread.pane
+      && thread.pane.isConnected
+      && terminalHost.contains(thread.pane)
+      && effectiveCanvasThreadIds().indexOf(thread.id) !== -1
+      && Boolean(thread.launch.covenSessionId);
+  }
+
+  function loadingPaneMetrics(launch) {
+    return {
+      phase: "loading",
+      provider: launch && launch.metricsProvider || "coven",
+      sessionId: launch && launch.covenSessionId || null,
+      model: null,
+      contextUsed: null,
+      contextLimit: null,
+      cumulativeInputTokens: null,
+      cumulativeOutputTokens: null,
+      cacheCreationTokens: null,
+      cacheReadTokens: null,
+      spendUsd: null,
+      costKind: "unknown",
+      updatedAt: null,
+      stale: false,
+      error: null,
+      canSwitchModel: false,
+    };
+  }
+
+  function metricsValue(previous, key) {
+    return previous && previous[key] !== undefined ? previous[key] : null;
+  }
+
+  function metricsErrorState(thread, error) {
+    var previous = thread.metrics;
+    return {
+      phase: "error",
+      provider: previous && previous.provider ||
+        thread.launch && thread.launch.metricsProvider || "coven",
+      sessionId: thread.launch && thread.launch.covenSessionId || null,
+      model: metricsValue(previous, "model"),
+      contextUsed: metricsValue(previous, "contextUsed"),
+      contextLimit: metricsValue(previous, "contextLimit"),
+      cumulativeInputTokens: metricsValue(previous, "cumulativeInputTokens"),
+      cumulativeOutputTokens: metricsValue(previous, "cumulativeOutputTokens"),
+      cacheCreationTokens: metricsValue(previous, "cacheCreationTokens"),
+      cacheReadTokens: metricsValue(previous, "cacheReadTokens"),
+      spendUsd: metricsValue(previous, "spendUsd"),
+      costKind: previous && previous.costKind || "unknown",
+      updatedAt: metricsValue(previous, "updatedAt"),
+      stale: Boolean(previous && (previous.phase === "ready" || previous.stale)),
+      error: String(error),
+      canSwitchModel: false,
+    };
+  }
+
+  async function refreshPaneMetrics(thread) {
+    if (!threadWantsMetrics(thread)) return false;
+    thread.metricsGeneration += 1;
+    var generation = thread.metricsGeneration;
+    var sessionId = thread.launch.covenSessionId;
+    if (!thread.metrics || thread.metrics.phase === "idle") {
+      thread.metrics = loadingPaneMetrics(thread.launch);
+      syncPaneFooter(thread);
+    }
+    try {
+      var metrics = await invoke("pane_session_metrics", {
+        projectRoot: thread.launch.projectRoot,
+        project_root: thread.launch.projectRoot,
+        cwd: thread.worktreePath,
+        sessionId: sessionId,
+        session_id: sessionId,
+      });
+      var response = {
+        threadId: thread.id,
+        generation: generation,
+        sessionId: metrics.sessionId,
+      };
+      if (!threadWantsMetrics(thread) ||
+          !PsychePanes.shouldApplyMetricsResponse(thread, response)) return false;
+      thread.metrics = {
+        phase: "ready",
+        provider: metrics.provider || "coven",
+        sessionId: metrics.sessionId,
+        model: metrics.model,
+        contextUsed: metrics.contextUsed,
+        contextLimit: metrics.contextLimit,
+        cumulativeInputTokens: metrics.cumulativeInputTokens,
+        cumulativeOutputTokens: metrics.cumulativeOutputTokens,
+        cacheCreationTokens: metrics.cacheCreationTokens,
+        cacheReadTokens: metrics.cacheReadTokens,
+        spendUsd: metrics.spendUsd,
+        costKind: metrics.costKind || "unknown",
+        updatedAt: metrics.updatedAt,
+        stale: false,
+        error: null,
+        canSwitchModel: false,
+      };
+      syncPaneFooter(thread);
+      return true;
+    } catch (error) {
+      if (thread.metricsGeneration !== generation ||
+          !threadWantsMetrics(thread) ||
+          thread.launch.covenSessionId !== sessionId) return false;
+      thread.metrics = metricsErrorState(thread, error);
+      syncPaneFooter(thread);
+      return false;
+    }
+  }
+
+  function schedulePaneMetricsRefresh(thread, delay) {
+    if (!thread) return;
+    if (thread.metricsRefreshTimer) clearTimeout(thread.metricsRefreshTimer);
+    thread.metricsRefreshTimer = 0;
+    if (!threadWantsMetrics(thread)) return;
+    thread.metricsRefreshTimer = setTimeout(function () {
+      thread.metricsRefreshTimer = 0;
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    }, delay);
+  }
+
+  function refreshVisiblePaneMetrics() {
+    state.threads.forEach(function (thread) {
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    });
+  }
+
+  function syncPaneMetricsVisibility() {
+    if (document.hidden || !terminalHost ||
+        !terminalHost.isConnected || terminalHost.hidden) {
+      state.threads.forEach(function (thread) {
+        thread.metricsGeneration = (thread.metricsGeneration || 0) + 1;
+        if (thread.metricsRefreshTimer) {
+          clearTimeout(thread.metricsRefreshTimer);
+          thread.metricsRefreshTimer = 0;
+        }
+      });
+      return false;
+    }
+    refreshVisiblePaneMetrics();
+    return true;
   }
 
   /** Sidebar and menu glyph for a pane kind. */
@@ -2659,6 +3875,468 @@
     }
     return shortenRoot(path);
   }
+
+  function threadWorktree(thread) {
+    var project = thread && findProject(thread.projectId);
+    var worktrees = (project && project.worktrees) || [];
+    var exact = worktrees.find(function (worktree) {
+      return worktree.path === thread.worktreePath;
+    });
+    if (exact) return exact;
+    return {
+      path: thread.worktreePath || null,
+      branch: null,
+    };
+  }
+
+  function paneFooterState(thread) {
+    var worktree = threadWorktree(thread);
+    var isAgent = PsychePanes.isAgentPaneKind(thread.kind);
+    var metrics = thread.metrics || null;
+    var isEligibleCoven = thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && Boolean(thread.launch.covenSessionId);
+    if (isEligibleCoven && !metrics) {
+      metrics = loadingPaneMetrics(thread.launch);
+    } else if (isAgent && !metrics) {
+      metrics = {
+        phase: "ready",
+        provider: thread.launch && thread.launch.metricsProvider || "agent",
+        sessionId: thread.launch && thread.launch.covenSessionId || null,
+        model: null,
+        contextUsed: null,
+        contextLimit: null,
+        spendUsd: null,
+        tokens: null,
+        costKind: "unknown",
+        updatedAt: null,
+        stale: false,
+        error: "Session metrics are not reported by this harness",
+        canSwitchModel: false,
+      };
+    }
+    return {
+      kind: thread.kind || "shell",
+      branch: worktree.branch || null,
+      worktreeLabel: shortenRoot(worktree.path || thread.worktreePath || ""),
+      worktreePath: worktree.path || null,
+      paneId: thread.id,
+      metrics: metrics,
+    };
+  }
+
+  function closePaneFooterPopovers(restoreFocus) {
+    var trigger = paneFooterPopoverTrigger;
+    if (paneFooterPopoverCleanup) paneFooterPopoverCleanup();
+    paneFooterPopoverCleanup = null;
+    if (paneFooterPopover && paneFooterPopover.remove) paneFooterPopover.remove();
+    paneFooterPopover = null;
+    paneFooterPopoverOwner = null;
+    paneFooterPopoverTrigger = null;
+    paneFooterPopoverThreadId = null;
+    state.threads.forEach(function (thread) {
+      closePaneFooterMenu(thread, false);
+    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".pane-footer-popover"),
+      function (popover) { popover.remove(); }
+    );
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
+    }
+  }
+
+  function closePaneUsagePopoverForFooter(thread, restoreFocus) {
+    if (!thread ||
+        paneFooterPopoverThreadId !== thread.id ||
+        paneFooterPopoverOwner !== thread.paneFooter) return false;
+    closePaneFooterPopovers(restoreFocus);
+    return true;
+  }
+
+  function paneUsageRow(label, value) {
+    var row = document.createElement("div");
+    row.className = "pane-usage-row";
+    var key = document.createElement("span");
+    key.textContent = label;
+    var detail = document.createElement("strong");
+    detail.textContent = value;
+    row.appendChild(key);
+    row.appendChild(detail);
+    return row;
+  }
+
+  function positionPaneFooterPopover(popover, anchor) {
+    document.body.appendChild(popover);
+    var margin = 8;
+    var gap = 6;
+    var anchorRect = anchor.getBoundingClientRect();
+    var maxWidth = Math.max(0, Math.min(320, window.innerWidth - 16));
+    popover.style.maxWidth = maxWidth + "px";
+    var viewportMaxHeight = Math.max(0, window.innerHeight - margin * 2);
+    popover.style.maxHeight = viewportMaxHeight + "px";
+    var popoverRect = popover.getBoundingClientRect();
+    var spaceAbove = Math.max(0, anchorRect.top - gap - margin);
+    var spaceBelow = Math.max(
+      0,
+      window.innerHeight - anchorRect.bottom - gap - margin
+    );
+    var placeAbove = popoverRect.height <= spaceAbove ||
+      spaceAbove >= spaceBelow;
+    var availableHeight = placeAbove ? spaceAbove : spaceBelow;
+    popover.style.maxHeight = Math.min(
+      viewportMaxHeight,
+      availableHeight
+    ) + "px";
+    popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(margin, Math.min(
+      window.innerWidth - popoverRect.width - margin,
+      anchorRect.right - popoverRect.width
+    )) + "px";
+    var preferredTop = placeAbove
+      ? anchorRect.top - popoverRect.height - gap
+      : anchorRect.bottom + gap;
+    popover.style.top = Math.max(margin, Math.min(
+      window.innerHeight - popoverRect.height - margin,
+      preferredTop
+    )) + "px";
+  }
+
+  function openPaneUsagePopover(thread, trigger) {
+    closePaneFooterPopovers(false);
+    var metrics = paneFooterState(thread).metrics || {};
+    var notReported = "Not reported by Coven";
+    var popover = document.createElement("div");
+    popover.className = "pane-footer-popover pane-usage-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", thread.name + " session usage");
+    popover.setAttribute("tabindex", "-1");
+    popover.appendChild(paneUsageRow("Provider", "Coven"));
+    popover.appendChild(paneUsageRow("Model", metrics.model || notReported));
+    popover.appendChild(paneUsageRow(
+      "Session",
+      metrics.sessionId || "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Context",
+      Number.isFinite(metrics.contextUsed) && Number.isFinite(metrics.contextLimit)
+        ? metrics.contextUsed + " / " + metrics.contextLimit + " tokens"
+        : notReported
+    ));
+    popover.appendChild(paneUsageRow(
+      "Input tokens",
+      Number.isFinite(metrics.cumulativeInputTokens)
+        ? String(metrics.cumulativeInputTokens)
+        : "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Output tokens",
+      Number.isFinite(metrics.cumulativeOutputTokens)
+        ? String(metrics.cumulativeOutputTokens)
+        : "Not available"
+    ));
+    var spend = notReported;
+    if (Number.isFinite(metrics.spendUsd)) {
+      spend = "$" + metrics.spendUsd.toFixed(4);
+      if (metrics.costKind === "local-estimate") spend += " · Local estimate";
+    }
+    popover.appendChild(paneUsageRow("Spend", spend));
+    popover.appendChild(paneUsageRow(
+      "Updated",
+      metrics.updatedAt ||
+        (metrics.phase === "loading" ? "Loading…" : "Not available")
+    ));
+    if (metrics.stale) popover.appendChild(paneUsageRow("State", "Stale"));
+    if (metrics.error) popover.appendChild(paneUsageRow("Error", metrics.error));
+    paneFooterPopover = popover;
+    paneFooterPopoverOwner = thread.paneFooter;
+    paneFooterPopoverTrigger = trigger || null;
+    paneFooterPopoverThreadId = thread.id;
+    positionPaneFooterPopover(popover, trigger || thread.paneFooter);
+
+    function onUsageKeyDown(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterPopovers(true);
+    }
+    document.addEventListener("keydown", onUsageKeyDown, true);
+    paneFooterPopoverCleanup = function () {
+      document.removeEventListener("keydown", onUsageKeyDown, true);
+    };
+    popover.focus();
+    return popover;
+  }
+
+  function paneFooterActionValue(item) {
+    return item && typeof item.fullValue === "string" ? item.fullValue : "";
+  }
+
+  function paneFooterItemDescription(item) {
+    if (!item) return "";
+    var value = item.a11yValue || paneFooterActionValue(item) || item.value || "not reported";
+    return item.label + ": " + value;
+  }
+
+  function runPaneFooterAction(thread, item, trigger) {
+    if (!item) return false;
+    if (item.action === "copy") {
+      return copyPaneFooterValue(item.label, paneFooterActionValue(item));
+    }
+    if (item.action === "reveal") {
+      return revealPaneWorktree(paneFooterActionValue(item));
+    }
+    if (item.action === "usage") {
+      openPaneUsagePopover(thread, trigger);
+      return true;
+    }
+    if (item.action === "model-details") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    if (item.action === "switch-model") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    toast(item.label + " is not reported");
+    return false;
+  }
+
+  function handlePaneFooterPointerDown(thread, event) {
+    var target = event.target;
+    if (target && target.closest && target.closest("button")) {
+      event.stopPropagation();
+      return;
+    }
+    if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    event.stopPropagation();
+  }
+
+  function focusPaneAfterFooterAction(thread) {
+    if (!thread || state.activeThreadId === thread.id) return;
+    requestAnimationFrame(function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    });
+  }
+
+  function handlePaneFooterItemClick(thread, item, event, fromOverflowMenu) {
+    event.stopPropagation();
+    var trigger = fromOverflowMenu
+      ? (thread.paneFooterMenuTrigger || thread.paneFooterOverflow)
+      : event.currentTarget;
+    var result = runPaneFooterAction(thread, item, trigger);
+    if (item && item.action === "usage") return result;
+    closePaneFooterMenu(thread, Boolean(fromOverflowMenu));
+    focusPaneAfterFooterAction(thread);
+    return result;
+  }
+
+  function closePaneFooterMenu(thread, restoreFocus) {
+    if (!thread) return;
+    var trigger = thread.paneFooterMenuTrigger || thread.paneFooterOverflow;
+    if (thread.paneFooterMenuCleanup) {
+      thread.paneFooterMenuCleanup();
+      thread.paneFooterMenuCleanup = null;
+    }
+    if (thread.paneFooterMenu && thread.paneFooterMenu.parentNode) {
+      thread.paneFooterMenu.parentNode.removeChild(thread.paneFooterMenu);
+    }
+    thread.paneFooterMenu = null;
+    thread.paneFooterMenuTrigger = null;
+    if (thread.paneFooterOverflow) {
+      thread.paneFooterOverflow.setAttribute("aria-expanded", "false");
+    }
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
+    }
+  }
+
+  function paneFooterMenuItems(menu) {
+    if (!menu || !menu.querySelectorAll) return [];
+    return Array.prototype.filter.call(
+      menu.querySelectorAll('[role="menuitem"]'),
+      function (button) {
+        return !button.disabled;
+      }
+    );
+  }
+
+  function movePaneFooterMenuFocus(menu, key) {
+    var buttons = paneFooterMenuItems(menu);
+    if (!buttons.length) return false;
+    var current = document.activeElement;
+    var currentIndex = buttons.indexOf(current);
+    var nextIndex = 0;
+    if (key === "Home") {
+      nextIndex = 0;
+    } else if (key === "End") {
+      nextIndex = buttons.length - 1;
+    } else if (key === "ArrowUp") {
+      nextIndex = currentIndex === -1
+        ? buttons.length - 1
+        : (currentIndex + buttons.length - 1) % buttons.length;
+    } else if (key === "ArrowDown") {
+      nextIndex = currentIndex === -1
+        ? 0
+        : (currentIndex + 1) % buttons.length;
+    } else {
+      return false;
+    }
+    buttons[nextIndex].focus();
+    return true;
+  }
+
+  function handlePaneFooterMenuKeyDown(thread, menu, event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterMenu(thread, true);
+      return true;
+    }
+    if (!movePaneFooterMenuFocus(menu, event.key)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  function createPaneFooter(thread) {
+    var footer = document.createElement("footer");
+    footer.className = "terminal-pane-footer";
+    footer.setAttribute("aria-label", "Pane details");
+    footer.dataset.tier = PsychePanes.footerTier(0);
+
+    var itemsHost = document.createElement("div");
+    itemsHost.className = "terminal-pane-footer-items";
+    var overflow = document.createElement("button");
+    overflow.type = "button";
+    overflow.className = "terminal-pane-footer-overflow";
+    overflow.textContent = "\u2026";
+    overflow.title = "More pane details";
+    overflow.setAttribute("aria-label", "More pane details");
+    overflow.setAttribute("aria-haspopup", "menu");
+    overflow.setAttribute("aria-expanded", "false");
+    overflow.hidden = true;
+
+    thread.createPaneFooterButton = function (item, role) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = role === "menuitem"
+        ? "pane-footer-menu-item"
+        : "terminal-pane-footer-item";
+      button.dataset.footerKey = item.key;
+      var description = paneFooterItemDescription(item);
+      button.title = description;
+      button.setAttribute("aria-label", description);
+      if (role) button.setAttribute("role", role);
+      var label = document.createElement("span");
+      label.className = "pane-footer-item-label";
+      label.textContent = item.label;
+      var value = document.createElement("span");
+      value.className = "pane-footer-item-value";
+      value.textContent = item.value;
+      button.appendChild(label);
+      button.appendChild(value);
+      button.addEventListener("click", function (event) {
+        handlePaneFooterItemClick(thread, item, event, role === "menuitem");
+      });
+      return button;
+    };
+
+    footer.addEventListener("pointerdown", function (event) {
+      handlePaneFooterPointerDown(thread, event);
+    });
+    overflow.addEventListener("click", function (event) {
+      event.stopPropagation();
+      syncPaneFooter(thread, true, event.currentTarget);
+    });
+    footer.appendChild(itemsHost);
+    footer.appendChild(overflow);
+
+    thread.paneFooter = footer;
+    thread.paneFooterItems = itemsHost;
+    thread.paneFooterOverflow = overflow;
+    var observer = null;
+    if (typeof ResizeObserver === "function") {
+      observer = new ResizeObserver(function (entries) {
+        var width = entries[0] && entries[0].contentRect
+          ? entries[0].contentRect.width
+          : footer.getBoundingClientRect().width;
+        footer.dataset.tier = PsychePanes.footerTier(width);
+        syncPaneFooter(thread);
+      });
+      observer.observe(thread.pane || footer);
+    }
+    thread.paneFooterObserver = observer;
+    syncPaneFooter(thread);
+    return footer;
+  }
+
+  function syncPaneFooter(thread) {
+    if (!thread || !thread.paneFooter || !thread.paneFooterItems) return;
+    var openOverflow = arguments[1];
+    var overflowTrigger = arguments[2] || thread.paneFooterOverflow;
+    closePaneUsagePopoverForFooter(thread, false);
+    var items = PsychePanes.footerItems(paneFooterState(thread));
+    var currentTier = thread.paneFooter.dataset.tier ||
+      PsychePanes.footerTier(thread.paneFooter.getBoundingClientRect().width);
+    var isAgentPaneKind = PsychePanes.isAgentPaneKind(thread.kind);
+    var hiddenKeys = PsychePanes.hiddenFooterKeys(currentTier, isAgentPaneKind);
+    var hiddenItems = items.filter(function (item) {
+      return hiddenKeys.indexOf(item.key) !== -1;
+    });
+
+    thread.paneFooterItems.innerHTML = "";
+    items.forEach(function (item) {
+      thread.paneFooterItems.appendChild(thread.createPaneFooterButton(item));
+    });
+    thread.paneFooterOverflow.hidden = hiddenItems.length === 0;
+
+    closePaneFooterMenu(thread, false);
+    if (!openOverflow || hiddenItems.length === 0) return;
+
+    closePaneFooterPopovers(false);
+    var menu = document.createElement("div");
+    menu.className = "pane-footer-popover pane-footer-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Hidden pane details");
+    hiddenItems.forEach(function (item) {
+      var button = thread.createPaneFooterButton(item, "menuitem");
+      button.setAttribute("role", "menuitem");
+      menu.appendChild(button);
+    });
+    thread.paneFooterMenu = menu;
+    thread.paneFooterMenuTrigger = overflowTrigger;
+    thread.paneFooterOverflow.setAttribute("aria-expanded", "true");
+    positionPaneFooterPopover(menu, overflowTrigger);
+
+    function onOutsidePointerDown(event) {
+      if (menu.contains(event.target) || overflowTrigger.contains(event.target)) return;
+      closePaneFooterMenu(thread, false);
+    }
+    function onMenuKeyDown(event) {
+      handlePaneFooterMenuKeyDown(thread, menu, event);
+    }
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    document.addEventListener("keydown", onMenuKeyDown, true);
+    thread.paneFooterMenuCleanup = function () {
+      document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+      document.removeEventListener("keydown", onMenuKeyDown, true);
+    };
+    var first = paneFooterMenuItems(menu)[0];
+    if (first) first.focus();
+  }
+
+  function handlePaneFooterPopoverPointerDown(event) {
+    if (!paneFooterPopover) return;
+    var target = event.target;
+    if (target && paneFooterPopover.contains(target)) return;
+    if (target && paneFooterPopoverTrigger &&
+        paneFooterPopoverTrigger.contains(target)) return;
+    closePaneFooterPopovers(false);
+  }
+  document.addEventListener("pointerdown", handlePaneFooterPopoverPointerDown, true);
 
   /**
    * Focus-set membership swatches. Squares, in the set's colour, so they can't
@@ -2741,7 +4419,7 @@
     return state.threads.find(function (thread) {
       return (!threadId || thread.id === threadId)
         && thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     }) || null;
   }
@@ -2811,6 +4489,7 @@
         worktreePath: worktree.path,
         launchKind: "coven-attach",
         covenSessionId: session.id,
+        metricsProvider: session.harness || "coven",
       });
     }).finally(function () {
       covenAttachInFlight.delete(key);
@@ -2823,7 +4502,7 @@
     var presentation = PsycheSessions.statusPresentation(session.status);
     var attached = state.threads.some(function (thread) {
       return thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     });
     var row = document.createElement("button");
@@ -3030,7 +4709,14 @@
         // Rows are grouped by what the pane actually is, so a worktree with a
         // mix of agent harnesses and plain shells reads at a glance.
         var groupedThreads = [];
-        [["Agents", function (t) { return (t.kind || "shell") !== "shell"; }],
+        // A tool pane is neither an agent nor a shell: filing Git under Agents
+        // would claim a model is running in it.
+        var TOOL_KINDS = ["git", "web"];
+        [["Agents", function (t) {
+           var kind = t.kind || "shell";
+           return kind !== "shell" && TOOL_KINDS.indexOf(kind) === -1;
+         }],
+         ["Tools", function (t) { return TOOL_KINDS.indexOf(t.kind || "shell") !== -1; }],
          ["Shells", function (t) { return (t.kind || "shell") === "shell"; }]]
           .forEach(function (kindGroup) {
             var hits = threads.filter(kindGroup[1]);
@@ -3056,9 +4742,13 @@
           var kind = thread.kind || "shell";
           var picking = Boolean(setPicking);
           var picked = picking && isPicked(thread.id);
+          var attentionLabel = thread.needsAttention
+            ? PsycheSessions.attentionLabel(thread.attentionReason)
+            : "";
           row.className = "session-row " + sessionStatusClass(thread) +
             " kind-" + (kind === "shell" ? "shell" : "agent") +
             (state.activeThreadId === thread.id ? " active" : "") +
+            (thread.needsAttention ? " needs-attention" : "") +
             (picking ? " is-picking" : "") + (picked ? " is-picked" : "");
           row.dataset.threadId = thread.id;
           if (state.activeThreadId === thread.id) row.setAttribute("aria-current", "true");
@@ -3066,6 +4756,7 @@
           row.title = picking
             ? (picked ? "Remove " : "Include ") + thread.name + " in the set"
             : thread.name + " — " + worktree.path +
+              (attentionLabel ? " · " + attentionLabel : "") +
               (onCanvas ? " · on the canvas" : " · click to put it back on the canvas") +
               " · double-click to rename";
           var chipMarkup = "";
@@ -3081,6 +4772,14 @@
             '<span class="session-text">' +
               '<span class="session-title-row">' +
                 '<span class="session-title">' + escapeHtml(thread.name) + "</span>" +
+                // Same `!` the Coven rows and the group counts use, so one mark
+                // means one thing throughout the rail. It rides in the title
+                // row rather than the status column because the title is the
+                // part of the row that survives every width.
+                (attentionLabel
+                  ? '<span class="session-attention-badge" title="' + escapeHtml(attentionLabel) +
+                    '" aria-label="' + escapeHtml(attentionLabel) + '">!</span>'
+                  : "") +
                 (onCanvas
                   ? '<span class="session-oncanvas" title="On the canvas" aria-label="On the canvas">' +
                       '<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">' +
@@ -3354,10 +5053,12 @@
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
+    var restoredTerminalView = false;
     if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
       state.activeFileId = null;
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
+      restoredTerminalView = true;
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
@@ -3376,6 +5077,7 @@
       }
     }
     refreshTabs();
+    if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
     return true;
@@ -3486,6 +5188,7 @@
       bind(dirtyFileDialogEl, "keydown", function (event) {
         if (event.key === "Escape") {
           event.preventDefault();
+          event.stopPropagation();
           settle(fallback);
         }
       });
@@ -3506,6 +5209,98 @@
 
   function findOpenFile(id) {
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
+  }
+
+  function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot) {
+    return !!thread &&
+      !thread.hidden &&
+      thread.projectId === project.id &&
+      thread.worktreePath === workspaceRoot &&
+      !!PsychePanes.findLeafByThreadId(root, thread.id);
+  }
+
+  function resolveFileFocusThreadId(preferredId) {
+    var project = activeProject();
+    var layout = activePaneLayout();
+    if (!project || !layout || !layout.root) return null;
+    var root = scopedPaneRoot(layout);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var preferred = preferredId ? findThread(preferredId) : null;
+    if (fileFocusThreadIsAvailable(preferred, root, project, workspaceRoot)) {
+      return preferred.id;
+    }
+
+    var focused = layout.focusedLeafId
+      ? PsychePanes.findLeafById(root, layout.focusedLeafId)
+      : null;
+    var focusedThread = focused ? findThread(focused.threadId) : null;
+    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot)) {
+      return focusedThread.id;
+    }
+
+    var leafIds = PsychePanes.leafIds(root);
+    for (var i = 0; i < leafIds.length; i++) {
+      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+      var thread = leaf ? findThread(leaf.threadId) : null;
+      if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot)) {
+        return thread.id;
+      }
+    }
+    return null;
+  }
+
+  function enterFileFocus(file) {
+    if (!file) return false;
+    if (!state.activeFileId) {
+      fileFocus.returnThreadId = state.activeThreadId || null;
+    }
+    state.activeFileId = file.id;
+    terminalArea.classList.add("is-file-focused");
+    fileViewEl.hidden = false;
+    terminalHost.hidden = true;
+    syncPaneMetricsVisibility();
+    renderPaneMinimap(activePaneLayout(), file);
+    return true;
+  }
+
+  function clearFileFocusPresentation() {
+    state.activeFileId = null;
+    fileFocus.returnThreadId = null;
+    terminalArea.classList.remove("is-file-focused");
+    fileViewEl.hidden = true;
+    terminalHost.hidden = false;
+    syncPaneMetricsVisibility();
+  }
+
+  async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
+    if (!state.activeFileId) return false;
+    var activeFile = findOpenFile(state.activeFileId);
+    var destinationId = resolveFileFocusThreadId(
+      explicitThreadId || fileFocus.returnThreadId
+    );
+    if (destinationId) {
+      var layout = activePaneLayout();
+      var leaf = layout && layout.root
+        ? PsychePanes.findLeafByThreadId(layout.root, destinationId)
+        : null;
+      var previousMaximizedLeafId = layout ? layout.maximizedLeafId : null;
+      var previousFocusedLeafId = layout ? layout.focusedLeafId : null;
+      if (maximizeDestination && layout && leaf) {
+        layout.maximizedLeafId = leaf.id;
+        layout.focusedLeafId = leaf.id;
+      }
+      var focused = await focusThread(destinationId);
+      if (!focused && maximizeDestination && layout) {
+        layout.maximizedLeafId = previousMaximizedLeafId;
+        layout.focusedLeafId = previousFocusedLeafId;
+        renderPaneMinimap(layout, activeFile);
+      }
+      return focused;
+    }
+    if (!(await showTerminalView())) return false;
+    renderPaneWorkspace();
+    refreshSidebar();
+    return true;
   }
 
   async function openFileTab(path, project) {
@@ -3570,10 +5365,8 @@
   function activateFileTabNow(id) {
     var file = findOpenFile(id);
     if (!file) return false;
-    state.activeFileId = id;
+    enterFileFocus(file);
     markActiveSurface("terminal");
-    if (fileViewEl) fileViewEl.hidden = false;
-    if (terminalHost) terminalHost.hidden = true;
     refreshTabs();
     renderFileView();
     return true;
@@ -3594,9 +5387,7 @@
       state.activeThreadId = nextThreadId;
       renderPaneWorkspace();
       restoreProjectLayout(project);
-      // A stored browser-only layout hides the terminal area that owns the
-      // editor. Change only the live surface; keep the project's saved layout.
-      applyLayout("terminal", { side: currentSide(), persist: false });
+      applyLayout("terminal", { persist: false });
       loadAgentSkills();
       syncProjectBrowser();
       saveWorkspaceSoon();
@@ -3638,9 +5429,8 @@
       fileNavigationInFlight = false;
     }
     if (!canShowTerminal) return false;
-    state.activeFileId = null;
-    if (fileViewEl) fileViewEl.hidden = true;
-    if (terminalHost) terminalHost.hidden = false;
+    clearFileFocusPresentation();
+    renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;
@@ -3666,11 +5456,9 @@
     var next = remaining[Math.min(idx, remaining.length - 1)];
     if (next) activateFileTabNow(next.id);
     else {
-      state.activeFileId = null;
-      if (fileViewEl) fileViewEl.hidden = true;
-      if (terminalHost) terminalHost.hidden = false;
+      clearFileFocusPresentation();
       refreshTabs();
-      requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
+      renderPaneWorkspace();
     }
     return true;
   }
@@ -3972,6 +5760,24 @@
     return state.openFiles.filter(function (f) { return f.projectId === pid; });
   }
 
+  // The edge fade is only honest when the strip actually scrolls, so it is
+  // driven by measurement rather than applied unconditionally.
+  function syncTabStripOverflow() {
+    if (!tabStripEl) return false;
+    var overflowing = tabStripEl.scrollWidth > tabStripEl.clientWidth + 1;
+    tabStripEl.classList.toggle("is-overflowing", overflowing);
+    return overflowing;
+  }
+
+  // With overflow, the active tab can sit off-screen after a ⌘-number jump.
+  function scrollActiveTabIntoView() {
+    if (!tabStripEl) return false;
+    var active = tabStripEl.querySelector(".tab.active");
+    if (!active || typeof active.scrollIntoView !== "function") return false;
+    active.scrollIntoView({ block: "nearest", inline: "nearest" });
+    return true;
+  }
+
   function refreshTabs() {
     if (editingContext && editingContext.surface === "tabs") return;
     tabStripEl.innerHTML = "";
@@ -3987,13 +5793,24 @@
       tab.className = "tab" + (isActive ? " active" : "");
       tab.dataset.fileId = file.id;
       tab.title = file.rel + (idx < 9 ? "  (\u2318" + (idx + 1) + ")" : "");
+      // Dot and close share one 16px slot so revealing the close button on
+      // hover cannot shift the strip sideways.
       tab.innerHTML =
         '<span class="label">' + escapeHtml(file.name) + "</span>" +
+        '<span class="tab-end">' +
         (file.dirty ? '<span class="dot dirty-dot" title="Unsaved changes" aria-label="Unsaved changes"></span>' : "") +
-        '<button class="close" title="Close file (\u2318W)">\u00d7</button>';
+        '<button class="close" title="Close file (\u2318W)" aria-label="Close ' +
+        escapeHtml(file.name) + '">\u00d7</button>' +
+        "</span>";
       tab.addEventListener("click", async function (e) {
         if (e.target.classList.contains("close")) return;
         await activateFileTab(file.id);
+      });
+      // Middle-click closes, the way every other tab strip behaves.
+      tab.addEventListener("auxclick", async function (e) {
+        if (e.button !== 1) return;
+        e.preventDefault();
+        await closeFileTab(file.id);
       });
       tab.querySelector(".close").addEventListener("click", async function (e) {
         e.stopPropagation();
@@ -4001,6 +5818,8 @@
       });
       tabStripEl.appendChild(tab);
     });
+    syncTabStripOverflow();
+    scrollActiveTabIntoView();
   }
 
   // ============================================================
@@ -4127,13 +5946,13 @@
     },
     {
       cmd: "/split",
-      desc: "Toggle between terminal-only and split layout",
-      run: function () { toggleBrowser(); },
+      desc: "Toggle the Git tools dock",
+      run: function () { toggleDock(); },
     },
     {
       cmd: "/browser",
-      desc: "Switch to browser-only layout",
-      run: function () { applyLayout("browser"); },
+      desc: "Open or focus the Web pane",
+      run: function () { openBlankBrowserTab(); },
     },
     {
       cmd: "/terminal",
@@ -4431,10 +6250,21 @@
     });
   }
   function sendToThread(thread, text) {
+    if (!thread || thread.kind === "web") return Promise.resolve(false);
+    noteThreadInput(thread, text);
     var bytes = Array.from(new TextEncoder().encode(text));
-    invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-      function () {}
-    );
+    return invoke("pty_write", {
+      threadId: thread.id,
+      thread_id: thread.id,
+      bytes: bytes,
+    }).then(function () {
+      return true;
+    }).catch(function (err) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      }
+      return false;
+    });
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
@@ -4672,7 +6502,7 @@
         for (var j = 0; j < browser.tabs.length; j++) {
           var tab = browser.tabs[j];
           if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
-            return { project: project, browser: browser, tab: tab };
+            return { project: project, worktreePath: workspaceRoots[w], browser: browser, tab: tab };
           }
         }
       }
@@ -4708,8 +6538,12 @@
     var payload = event.payload || {};
     markBrowserTabLoaded(payload.label, payload.url, payload.title);
   }).catch(function () {});
-  listen("browser:focus", function () {
+  listen("browser:focus", function (event) {
     markActiveSurface("browser");
+    var payload = event.payload || {};
+    var pair = browserTabForNativeLabel(payload.label);
+    var pane = pair && findBrowserPane(pair.project.id, pair.worktreePath);
+    if (pane && state.activeThreadId !== pane.id) focusThread(pane.id);
   }).catch(function () {});
   function ensureBrowserModel(project, workspaceRoot) {
     if (!project) return null;
@@ -4721,6 +6555,7 @@
     return project.browsersByWorktree[root];
   }
   function makeBrowserTabId() { return "bt" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
+  var DICE_BROWSER_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1&pp=ygUJcmljayByb2xsoAcB0gcJCckLAYcqIYzv";
   function tabTitle(url) {
     if (!url || url === "about:blank") return "New tab";
     try { return new URL(url).hostname || url; } catch (_) { return url; }
@@ -4760,7 +6595,31 @@
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
   }
-  function openBlankBrowserTab() { markActiveSurface("browser"); createBrowserTab(activeProject(), "about:blank", true); applyLayout("split"); syncProjectBrowser(); if (urlInput) urlInput.focus(); }
+  async function openBlankBrowserTab(options) {
+    options = options || {};
+    var project = activeProject();
+    if (!project) return null;
+    var worktreePath = activeWorkspaceRoot(project);
+    var existing = findBrowserPane(project.id, worktreePath);
+    var pane = await createBrowserPane(project);
+    if (!pane) return null;
+    markActiveSurface("browser");
+    var browser = ensureBrowserModel(project, worktreePath);
+    var tab = null;
+    if (options.requireNew || existing || !browser.tabs.length) {
+      tab = createBrowserTab(project, "about:blank", true);
+    } else {
+      renderBrowserTabs();
+    }
+    syncProjectBrowser();
+    if (urlInput) urlInput.focus();
+    return tab || (options.requireNew ? null : currentBrowserTab(project));
+  }
+  async function openDiceBrowserTab() {
+    var tab = await openBlankBrowserTab({ requireNew: true });
+    if (!tab) return;
+    await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
+  }
   listen("browser:shortcut-new-tab", function () {
     markActiveSurface("browser");
     openBlankBrowserTab();
@@ -4799,7 +6658,15 @@
     if (preview) preview.classList.toggle("loading", !!(tab && tab.loading));
     updateBrowserControls();
   }
-  function visibleBrowserBounds() { var rect = preview.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; if (detail.dataset.layout === "terminal") return null; if (currentPanel() !== "browser") return null; return { x: rect.left, y: rect.top, w: rect.width, h: rect.height }; }
+  function visibleBrowserBounds() {
+    var project = activeProject();
+    var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
+    if (!pane || pane.hidden || !pane.pane || !pane.pane.isConnected ||
+        !preview.isConnected || browserSurface.parentElement !== pane.browserBody) return null;
+    var rect = preview.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+  }
   function syncProjectBrowser() { renderBrowserTabs(); syncBrowserBounds(); }
   function syncBrowserBounds() {
     var project = activeProject(); var tab = currentBrowserTab(project); var label = browserLabelForTab(project, tab); var b = visibleBrowserBounds();
@@ -4807,12 +6674,13 @@
     invoke("browser_hide_all_except", { label: label }).catch(function () {});
     invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
   }
-  function navigateBrowser(rawUrl, opts) {
+  async function navigateBrowser(rawUrl, opts) {
     opts = opts || {}; var project = activeProject(); if (!project) return;
+    var pane = await createBrowserPane(project); if (!pane) return;
     var browser = ensureBrowserModel(project); var tab = opts.tabId ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
     if (!tab) tab = createBrowserTab(project, rawUrl || "about:blank", true); if (!tab) return;
     browser.activeTabId = tab.id;
-    var b = visibleBrowserBounds(); if (!b) { applyLayout("split"); b = visibleBrowserBounds(); if (!b) return; }
+    var b = visibleBrowserBounds(); if (!b) return;
     var normalised = normaliseUrl(rawUrl); if (!normalised) return;
     tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
     var label = browserLabelForTab(project, tab);
@@ -4838,16 +6706,16 @@
   });
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex > 0) { tab.historyIndex -= 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex < tab.history.length - 1) { tab.historyIndex += 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
+  document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
   window.addEventListener("beforeunload", saveWorkspaceNow);
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
-  // -------- Resizable splitter between terminal-area and browser-pane --------
+  // -------- Resizable splitter between canvas and Git dock --------
   //
-  // Pointer-events implementation with axis-aware clamping. The clamp picks
-  // x or y mins from CSS based on `data-browser-side`, so the splitter
-  // physically resists collapse on whichever axis is active.
+  // Pointer events use horizontal clamping so neither side can collapse past
+  // its CSS minimum while the divider is dragged.
   //
   // Overflow note: while dragging, `.detail.resizing` disables the
   // grid-template transition so the layout snaps instantly to each
@@ -4858,23 +6726,21 @@
     var dragging = false;
     var splitFrame = 0;
 
+    // The splitter only ever divides the canvas from the tools dock now, so
+    // the clamp is always horizontal.
     function splitClampBounds() {
       var rect = detail.getBoundingClientRect();
       var styles = window.getComputedStyle(detail);
-      var side = currentSide();
-      var horizontal = side === "right" || side === "left";
-      var size = horizontal ? rect.width : rect.height;
-      var termMin = parseFloat(styles.getPropertyValue(horizontal ? "--terminal-min" : "--terminal-min-y"))
-                    || (horizontal ? 220 : 160);
-      var brMin   = parseFloat(styles.getPropertyValue(horizontal ? "--browser-min"  : "--browser-min-y"))
-                    || (horizontal ? 220 : 160);
+      var size = rect.width;
+      var termMin = parseFloat(styles.getPropertyValue("--terminal-min")) || 220;
+      var brMin   = parseFloat(styles.getPropertyValue("--browser-min")) || 220;
       var splitW  = parseFloat(styles.getPropertyValue("--splitter-w")) || 10;
       var min = Math.max(0.2, termMin / size);
       var max = Math.min(0.85, (size - brMin - splitW) / size);
       if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
         min = 0.2; max = 0.85;
       }
-      return { rect: rect, min: min, max: max, side: side, horizontal: horizontal };
+      return { rect: rect, min: min, max: max };
     }
 
     function scheduleSplitLayoutSync() {
@@ -4900,11 +6766,7 @@
     // leading-edge sides (left/top) so the divider always tracks the pointer.
     function splitFracFromEvent(e) {
       var b = splitClampBounds();
-      if (b.side === "right")  return (e.clientX - b.rect.left)   / b.rect.width;
-      if (b.side === "left")   return (b.rect.right - e.clientX)  / b.rect.width;
-      if (b.side === "bottom") return (e.clientY - b.rect.top)    / b.rect.height;
-      if (b.side === "top")    return (b.rect.bottom - e.clientY) / b.rect.height;
-      return 0.6;
+      return (e.clientX - b.rect.left) / b.rect.width;
     }
 
     splitter.addEventListener("pointerdown", function (e) {
@@ -4912,10 +6774,8 @@
       dragging = true;
       splitter.classList.add("dragging");
       detail.classList.add("resizing");
-      var side = currentSide();
-      var axis = (side === "bottom" || side === "top") ? "y" : "x";
       document.body.classList.add("split-resizing");
-      document.body.dataset.axis = axis;
+      document.body.dataset.axis = "x";
       try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
       e.preventDefault();
     });
@@ -4945,12 +6805,7 @@
       if (currentLayout() !== "split") return;
       var current = currentSplitFrac();
       var step = e.shiftKey ? 0.01 : 0.04;
-      var side = currentSide();
-      var grow, shrink;
-      if      (side === "right")  { grow = "ArrowRight"; shrink = "ArrowLeft"; }
-      else if (side === "left")   { grow = "ArrowLeft";  shrink = "ArrowRight"; }
-      else if (side === "bottom") { grow = "ArrowDown";  shrink = "ArrowUp"; }
-      else                        { grow = "ArrowUp";    shrink = "ArrowDown"; }
+      var grow = "ArrowRight", shrink = "ArrowLeft";
       if (e.key === shrink)    { setSplitFrac(current - step); e.preventDefault(); }
       else if (e.key === grow) { setSplitFrac(current + step); e.preventDefault(); }
     });
@@ -4966,10 +6821,8 @@
   }
 
   async function createContextualTab() {
-    if (currentLayout() === "browser") markActiveSurface("browser");
-    else if (currentLayout() === "terminal") markActiveSurface("terminal");
     if (activeSurface === "browser") {
-      openBlankBrowserTab();
+      await openBlankBrowserTab();
       return true;
     }
     return (await spawnCovenThread()) ? true : null;
@@ -4997,7 +6850,7 @@
       return;
     }
     if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
-    if (e.key === "\\") { toggleBrowser(); e.preventDefault(); return; }
+    if (e.key === "\\") { toggleDock(); e.preventDefault(); return; }
     // ⌘B collapses the sessions sidebar.
     if (e.code === "KeyB" && !e.altKey && !e.shiftKey) { toggleSidebar(); e.preventDefault(); return; }
     // ⌃1–9 addresses the panes on the canvas; ⌘1–9 stays on file tabs.
@@ -5009,10 +6862,9 @@
         return;
       }
     }
-    // ⌘⌥B toggles browser; ⌘⇧B cycles side. We match by `code` so option-B
-    // (which produces ∫ on macOS) still resolves to KeyB.
-    if (e.code === "KeyB" && e.altKey)   { toggleBrowser(); e.preventDefault(); return; }
-    if (e.code === "KeyB" && e.shiftKey) { cycleBrowserSide(1); e.preventDefault(); return; }
+    // ⌘⌥B toggles the Git tools dock. Match by code so option-B (which
+    // produces ∫ on macOS) still resolves to KeyB.
+    if (e.code === "KeyB" && e.altKey) { toggleDock(); e.preventDefault(); return; }
     // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
     // no files open they fall back to projects, which the sidebar also drives.
     if (e.key === "[") { e.preventDefault(); await switchTab(-1); return; }
@@ -5030,9 +6882,8 @@
   }, true);
   // ---- Side rails ----
   // Each rail button is a click affordance for a shortcut that already exists;
-  // they call the same functions the ⌘-handlers above do, so there is no second
-  // code path to keep in sync. #rail-browser-toggle is wired via
-  // [data-browser-toggle] alongside the titlebar button.
+  // They call the same functions the ⌘-handlers above do, so there is no
+  // second code path to keep in sync.
   function onRailClick(id, handler) {
     var el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
@@ -5066,6 +6917,7 @@
       setSidebarOpen(true);
     });
   }
+  onRailClick("dock-collapse", function () { applyLayout("terminal"); });
 
   // Sidebar width is a CSS custom property so the grid, the rails and the
   // splitter clamps all read one number.
@@ -5126,9 +6978,9 @@
     await runNewThreadCommand();
     toast("Agent pane opened — coven chat");
   });
-  onMenuClick("new-pane-web", function () {
-    openBlankBrowserTab();
-    toast("Browser opened in the tools dock");
+  onMenuClick("new-pane-web", async function () {
+    await openBlankBrowserTab();
+    toast("Web pane opened");
   });
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
@@ -5155,12 +7007,12 @@
     ["Resize a pane split", "drag the divider"],
     ["New shell pane", "/new-shell"],
     ["New agent pane (coven chat)", "⌘T"],
-    ["New browser tab", "⌘⌥B then +"],
+    ["New browser tab", "focus Web, then ⌘T"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
     ["Save the open file", "⌘S"],
-    ["Cycle the dock side", "⌘⇧B"],
+    ["Leave a fullscreen file", "esc"],
     ["This overlay", "?"],
   ];
   function renderHelpRows() {
@@ -5186,13 +7038,13 @@
   }
 
   // `?` is only a shortcut when nothing text-like has focus.
-  document.addEventListener("keydown", function (event) {
+  document.addEventListener("keydown", async function (event) {
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → focus mode.
+    // help → menus → set picking → armed confirm → file return → focus mode.
     if (event.key === "Escape") {
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
@@ -5202,6 +7054,14 @@
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
+      // A call is the most transient thing on screen after a menu, and ending
+      // it is always safe: nothing is transmitting.
+      if (endCall()) return;
+      if (state.activeFileId) {
+        event.preventDefault();
+        await returnFromFileFocus();
+        return;
+      }
       if (!typing && exitPaneMaximize()) return;
       return;
     }
@@ -5220,12 +7080,19 @@
   var fileTreeEl = document.getElementById("file-tree");
   var filesCrumbEl = document.getElementById("files-crumb");
   var diffFilesEl = document.getElementById("diff-files");
-  var diffEditorHostEl = document.getElementById("diff-editor-host");
+  var diffRowsEl = document.getElementById("diff-rows");
   var diffMetadataEl = document.getElementById("diff-metadata");
   var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
   /** Working-tree file count, mirrored onto the dock's Git tab. */
+  var gitChangesCountEl = document.getElementById("git-changes-count");
   function setDockGitCount(count) {
+    // The count rides both the dock tab and the Changes tab, so the number of
+    // pending changes is legible whether or not the panel is open.
+    if (gitChangesCountEl) {
+      gitChangesCountEl.textContent = String(count || 0);
+      gitChangesCountEl.hidden = !count;
+    }
     if (!dockGitCountEl) return;
     dockGitCountEl.textContent = String(count || 0);
     dockGitCountEl.hidden = !count;
@@ -5241,11 +7108,10 @@
   var diffCache = window.PsycheCodeEditor.createLruCache(6);
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
-  var diffViewer = window.PsycheCodeEditor.createDiffViewer({ parent: diffEditorHostEl });
 
-  function diffCacheKey(projectId, workspaceRoot, path, staged) {
+  function diffCacheKey(projectId, workspaceRoot, path, staged, context) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
-      (staged ? "staged" : "unstaged");
+      (staged ? "staged" : "unstaged") + "\0" + (context === undefined || context === null ? "default" : context);
   }
 
   function invalidateProjectDiffs(projectId) {
@@ -5369,7 +7235,8 @@
   }
 
   function resetDiffDetail(message) {
-    diffViewer.clear();
+    parsedDiffFiles = [];
+    if (diffRowsEl) diffRowsEl.replaceChildren();
     if (diffMetadataEl) diffMetadataEl.textContent = message || "";
     if (diffTruncationEl) {
       diffTruncationEl.hidden = true;
@@ -5386,14 +7253,158 @@
     }
   }
 
+  // Split and stacked are two renderings of one parsed model, so switching is a
+  // redraw rather than a re-parse -- which is what lets the toggle keep its
+  // place and stay instant on a large diff.
+  var diffLayout = "split";
+  var parsedDiffFiles = [];
+
+  function diffSegmentsInto(target, segments) {
+    (segments || []).forEach(function (segment) {
+      var span = document.createElement("span");
+      if (segment.changed) span.className = "diff-word";
+      span.textContent = segment.text;
+      target.appendChild(span);
+    });
+  }
+
+  // Context lines the viewer last asked git for. null means git's default (3),
+  // which is what every diff starts at.
+  var diffContext = null;
+
+  function diffSeparatorRow(row) {
+    var separator = document.createElement("div");
+    separator.className = "diff-sep";
+    var mark = document.createElement("span");
+    mark.className = "diff-sep-mark";
+    mark.textContent = "\u22ef";
+    var label = document.createElement("span");
+    label.textContent = row.hidden + " unmodified line" + (row.hidden === 1 ? "" : "s");
+    separator.appendChild(mark);
+    separator.appendChild(label);
+    var spacer = document.createElement("span");
+    spacer.className = "diff-sep-spacer";
+    separator.appendChild(spacer);
+    var expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "diff-sep-expand";
+    expand.textContent = "expand";
+    expand.title = "Show the " + row.hidden + " hidden line" +
+      (row.hidden === 1 ? "" : "s") + " around this change";
+    expand.addEventListener("click", function () {
+      // Ask for enough context to close the largest remaining gap, so one
+      // click opens the file rather than creeping toward it.
+      var widest = row.hidden;
+      parsedDiffFiles.forEach(function (file) {
+        PsycheDiffs.stackedRows(file).forEach(function (each) {
+          if (each.type === "separator" && each.hidden > widest) widest = each.hidden;
+        });
+      });
+      diffContext = Math.min(2000, widest + 3);
+      refreshSelectedDiff();
+    });
+    separator.appendChild(expand);
+    return separator;
+  }
+
+  function renderStackedDiff(host, rows) {
+    rows.forEach(function (row) {
+      if (row.type === "separator") { host.appendChild(diffSeparatorRow(row)); return; }
+      var line = document.createElement("div");
+      line.className = "diff-row diff-" + row.kind;
+      var oldNo = document.createElement("span");
+      oldNo.className = "diff-gutter";
+      oldNo.textContent = row.oldNo === undefined ? "" : String(row.oldNo);
+      var newNo = document.createElement("span");
+      newNo.className = "diff-gutter diff-gutter-new";
+      newNo.textContent = row.newNo === undefined ? "" : String(row.newNo);
+      var marker = document.createElement("span");
+      marker.className = "diff-marker";
+      marker.textContent = row.kind === "add" ? "+" : row.kind === "delete" ? "\u2212" : "";
+      var text = document.createElement("span");
+      text.className = "diff-text";
+      diffSegmentsInto(text, row.segments);
+      line.appendChild(oldNo);
+      line.appendChild(newNo);
+      line.appendChild(marker);
+      line.appendChild(text);
+      host.appendChild(line);
+    });
+  }
+
+  function renderSplitDiff(host, rows) {
+    rows.forEach(function (row) {
+      if (row.type === "separator") { host.appendChild(diffSeparatorRow(row)); return; }
+      var line = document.createElement("div");
+      line.className = "diff-row diff-split-row";
+      [["left", row.left], ["right", row.right]].forEach(function (pair) {
+        var side = pair[1];
+        var gutter = document.createElement("span");
+        gutter.className = "diff-gutter";
+        var text = document.createElement("span");
+        // An empty cell opposite a pure add or delete is what keeps the two
+        // columns aligned; it is styled, not blank, so the gap reads as absence.
+        text.className = "diff-text diff-" + (side ? side.kind : "empty");
+        if (side) {
+          gutter.textContent = side.no === undefined ? "" : String(side.no);
+          gutter.classList.add("diff-" + side.kind);
+          diffSegmentsInto(text, side.segments);
+        }
+        line.appendChild(gutter);
+        line.appendChild(text);
+      });
+      host.appendChild(line);
+    });
+  }
+
+  function paintDiffRows() {
+    if (!diffRowsEl) return;
+    diffRowsEl.replaceChildren();
+    var file = parsedDiffFiles[0];
+    if (!file) return;
+    if (file.binary) {
+      var note = document.createElement("div");
+      note.className = "diff-empty";
+      note.textContent = "Binary file — no textual diff";
+      diffRowsEl.appendChild(note);
+      return;
+    }
+    var rows = diffLayout === "stacked"
+      ? PsycheDiffs.stackedRows(file)
+      : PsycheDiffs.splitRows(file);
+    diffRowsEl.dataset.layout = diffLayout;
+    if (diffLayout === "stacked") renderStackedDiff(diffRowsEl, rows);
+    else renderSplitDiff(diffRowsEl, rows);
+  }
+
+  function setDiffLayout(name) {
+    diffLayout = name === "stacked" ? "stacked" : "split";
+    [["diff-view-split", "split"], ["diff-view-stacked", "stacked"]].forEach(function (pair) {
+      var btn = document.getElementById(pair[0]);
+      if (!btn) return;
+      var active = pair[1] === diffLayout;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    paintDiffRows();
+    return diffLayout;
+  }
+
+  [["diff-view-split", "split"], ["diff-view-stacked", "stacked"]].forEach(function (pair) {
+    var btn = document.getElementById(pair[0]);
+    if (btn) btn.addEventListener("click", function () { setDiffLayout(pair[1]); });
+  });
+
   function renderDiffResult(result) {
     var text = result && typeof result.text === "string" ? result.text : "";
     var lines = Number(result && result.lines) || 0;
     var bytes = Number(result && result.bytes) || 0;
-    diffViewer.setDiff({ text: text });
+    parsedDiffFiles = PsycheDiffs.parseUnifiedDiff(text);
+    paintDiffRows();
     if (diffMetadataEl) {
+      var stat = PsycheDiffs.diffStat(parsedDiffFiles);
       diffMetadataEl.textContent = text.trim()
-        ? lines + " lines · " + formatDiffBytes(bytes)
+        ? "+" + stat.additions + " \u2212" + stat.deletions + " · " + lines + " lines · " + formatDiffBytes(bytes)
         : "No textual diff · " + lines + " lines · " + formatDiffBytes(bytes);
     }
     if (diffTruncationEl) {
@@ -5466,7 +7477,7 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f));
+      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext);
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
@@ -5478,16 +7489,28 @@
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f)) === selectedDiffKey;
+      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
     }) || status.files[0];
     showDiff(project, target);
   }
 
-  async function showDiff(project, entry) {
-    if (!project || !entry || !diffEditorHostEl) return;
+  var shownDiffTarget = null;
+
+  /** Re-fetch whatever is on screen, at the current context width. */
+  function refreshSelectedDiff() {
+    if (!shownDiffTarget) return;
+    showDiff(shownDiffTarget.project, shownDiffTarget.entry, { keepContext: true });
+  }
+
+  async function showDiff(project, entry, options) {
+    if (!project || !entry || !diffRowsEl) return;
+    // A new file starts narrow again: an expansion belongs to the view you
+    // expanded, not to the panel.
+    if (!(options && options.keepContext)) diffContext = null;
+    shownDiffTarget = { project: project, entry: entry };
     if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged);
+    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged, diffContext);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
@@ -5506,6 +7529,7 @@
         root: activeWorkspaceRoot(project),
         path: entry.path,
         staged: staged,
+        context: diffContext,
       });
       if (!currentDiffRequestMatches(project.id, key, generation)) return;
       diffCache.set(key, result);
@@ -5834,15 +7858,18 @@
 
   function covenChatLaunch(project, worktreePath) {
     var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
+    var sessionId = makeCovenSessionId();
+    if (!sessionId) return null;
     return {
       command: state.env.coven_path,
-      args: ["chat"],
+      args: ["code", "--session-id", sessionId],
       env: {},
       projectRoot: project.root,
       cwd: worktree.path,
       kind: "coven-chat",
       launchKind: "coven-chat",
-      covenSessionId: null,
+      covenSessionId: sessionId,
+      metricsProvider: "coven",
     };
   }
 
@@ -5865,6 +7892,7 @@
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    if (!launch) return null;
     return createThread({
       project: currentProject,
       worktreePath: launch.cwd,
@@ -5974,6 +8002,7 @@
 
   async function boot(env) {
     state.env = env || {};
+    await installTerminalImageDrop();
     var saved = readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
@@ -6002,6 +8031,9 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
+    paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
+    refreshVisiblePaneMetrics();
   }
 
   invoke("app_environment")

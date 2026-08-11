@@ -1,11 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 /**
- * The three web bundles are build output that is committed, so nothing but a
+ * The committed web bundles are generated build output, so nothing but a
  * test stops them drifting from the sources they were built from. This rebuilds
  * each one with the *same* flags the build script uses -- parsed out of
  * package.json rather than restated here, so changing the build cannot leave
@@ -13,7 +12,21 @@ import { afterAll, describe, expect, it } from 'vitest';
  */
 const packageRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
 const webRoot = join(packageRoot, 'web');
-const esbuild = join(packageRoot, 'node_modules/.bin/esbuild');
+
+/**
+ * Where the esbuild binary lands depends on how the workspace was installed:
+ * a fresh clone gives the member its own node_modules, while an install that
+ * can dedupe against an existing one may only hoist it to the workspace root.
+ * Assuming a single location made this check fail with "esbuild is not
+ * installed" in a perfectly good tree, so try both before giving up.
+ */
+function resolveEsbuild(): string | null {
+  const candidates = [
+    join(packageRoot, 'node_modules/.bin/esbuild'),
+    join(process.cwd(), 'node_modules/.bin/esbuild'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
 
 const buildScript = (
   JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
@@ -35,7 +48,9 @@ function parseBuildScript(script: string): BundleStep[] {
 }
 
 const steps = parseBuildScript(buildScript);
-const scratch = mkdtempSync(join(tmpdir(), 'psyche-bundles-'));
+const scratch = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
+rmSync(scratch, { recursive: true, force: true });
+mkdirSync(scratch, { recursive: true });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
@@ -43,7 +58,9 @@ describe('committed web bundles', () => {
     // If a bundle stops being produced, the freshness checks below would have
     // nothing to compare and would quietly pass.
     expect(steps.map((step) => step.outfile).sort()).toEqual([
+      'web/diffs.bundle.js',
       'web/editor.bundle.js',
+      'web/input.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
     ]);
@@ -64,7 +81,8 @@ describe('committed web bundles', () => {
       const committed = join(packageRoot, step.outfile);
       expect(existsSync(committed), `${step.outfile} is missing — run pnpm build:web`).toBe(true);
 
-      if (!existsSync(esbuild)) {
+      const esbuild = resolveEsbuild();
+      if (!esbuild) {
         throw new Error(
           'esbuild is not installed for psyche-build-tauri. Run `pnpm install` at the ' +
             'repo root — it is a workspace member, so a root install provides it.',

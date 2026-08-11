@@ -22,6 +22,36 @@ describe('Tauri desktop tab shortcuts', () => {
     );
   });
 
+  it('swaps the dirty dot for the close control in one non-reflowing slot', () => {
+    // Both controls live in the same fixed-width slot, so revealing one cannot
+    // shift the strip.
+    expect(mainJs).toMatch(/<span class="tab-end">/);
+    expect(stylesCss).toMatch(/\.tab-end \{[^}]*flex: 0 0 16px/);
+    expect(stylesCss).toMatch(/\.tab \.dot \{[^}]*position: absolute/);
+    expect(stylesCss).toMatch(/\.tab \.close \{[^}]*position: absolute/);
+    expect(stylesCss).toContain('.tab:hover .close { opacity: 1; }');
+    expect(stylesCss).toContain('.tab:hover .dot { opacity: 0; }');
+    // The active tab keeps its dot: that is the file whose unsaved state matters.
+    expect(stylesCss).not.toMatch(/\.tab\.active \.dot \{[^}]*opacity: 0/);
+  });
+
+  it('closes a file tab on middle click', () => {
+    expect(mainJs).toMatch(
+      /addEventListener\("auxclick",[\s\S]*e\.button !== 1[\s\S]*closeFileTab\(file\.id\)/
+    );
+  });
+
+  it('fades the strip edges only while it actually overflows', () => {
+    expect(mainJs).toMatch(
+      /function syncTabStripOverflow\(\)[\s\S]*scrollWidth > tabStripEl\.clientWidth \+ 1[\s\S]*toggle\("is-overflowing"/
+    );
+    expect(mainJs).toMatch(/function scrollActiveTabIntoView\(\)[\s\S]*scrollIntoView/);
+    // Refreshing the strip and resizing the window both re-measure.
+    expect(mainJs).toMatch(/syncTabStripOverflow\(\);\n    scrollActiveTabIntoView\(\);/);
+    expect(stylesCss).toMatch(/\.tab-strip\.is-overflowing \{[^}]*mask-image/);
+    expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
+  });
+
   it('lets embedded browser webviews request a new browser tab with Command+T', () => {
     expect(tauriLib).toMatch(/browser:shortcut-new-tab/);
     expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
@@ -94,7 +124,9 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('keeps browser tabs thin and collapsible under narrow browser panes', () => {
     expect(stylesCss).toMatch(/--browser-tab-h:\s*22px;/);
-    expect(stylesCss).toMatch(/grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) 1fr;/);
+    expect(stylesCss).toMatch(
+      /\.browser-surface\s*\{[^}]*grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) minmax\(0, 1fr\);/s
+    );
     expect(stylesCss).toMatch(/\.browser-tab\s*\{[\s\S]*?min-width:\s*34px;[\s\S]*?flex:\s*1 1 118px;/);
     expect(stylesCss).toMatch(/\.browser-tab-title\s*\{[\s\S]*?min-width:\s*0;/);
   });

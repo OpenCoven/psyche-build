@@ -16,12 +16,22 @@ const indexHtml = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
   'utf8',
 );
-const PsycheSessions = await import(
-  pathToFileURL(join(
+/**
+ * The `PsycheSessions` global the shell sees is the *bundle*, and session-entry
+ * re-exports two modules into it. Standing in with only the session model made
+ * the rail renderer look like it could not reach `attentionLabel` when in the
+ * app it always can, so the stand-in is assembled the same way the bundle is.
+ */
+const PsycheSessions = {
+  ...(await import(pathToFileURL(join(
     repoRoot,
     'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
-  )).href,
-);
+  )).href)),
+  ...(await import(pathToFileURL(join(
+    repoRoot,
+    'native/macos/psyche-build-tauri/web/sessions/attention.mjs',
+  )).href)),
+};
 
 function extractFunctionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -310,7 +320,10 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   hidden?: boolean;
-  covenSessionId?: string | null;
+  launch?: {
+    covenSessionId?: string | null;
+    launchKind?: string | null;
+  };
   worktreePath?: string;
   kind?: string;
 };
@@ -412,6 +425,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'sessionSetSwatches'),
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
+    extractFunctionSource(mainJs, 'threadCovenSessionId'),
     extractFunctionSource(mainJs, 'createCovenSessionRow'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
@@ -520,7 +534,7 @@ describe('Tauri Coven session project rail', () => {
         name: 'Attached locally',
         status: 'running',
         kind: 'coven-attach',
-        covenSessionId: 'remote',
+        launch: { launchKind: 'coven-attach', covenSessionId: 'remote' },
         worktreePath: '/alpha',
       }],
       sessions: [{
@@ -654,7 +668,8 @@ describe('Tauri Coven session project rail', () => {
         { id: 'local', projectId: 'alpha', name: 'Local plan', status: 'running' },
         {
           id: 'attached', projectId: 'alpha', name: 'Existing attachment', status: 'running',
-          kind: 'coven-attach', covenSessionId: 'alpha-daemon',
+          kind: 'coven-attach',
+          launch: { launchKind: 'coven-attach', covenSessionId: 'alpha-daemon' },
         },
       ],
     });

@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID as createRandomUUID } from 'node:crypto';
+import { createHash, randomUUID as createRandomUUID } from 'node:crypto';
 import {
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
+  readlink,
   readdir,
   rename,
   rm,
@@ -76,6 +78,11 @@ const BUILD_PROVENANCE_BASE_RECORD_KEYS = [
 ];
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const COMMAND_MAX_BUFFER = 20 * 1024 * 1024;
+const DEV_SOURCE_PATHSPECS = [
+  ':(top,glob)**',
+  ':(top,glob,exclude)**/target/**',
+  ':(top,glob,exclude)**/node_modules/**',
+];
 const executeFile = promisify(execFile);
 
 export function parseBuildArguments(argv) {
@@ -134,6 +141,7 @@ export async function runCommand(command, args, options = {}) {
     const result = await executeFile(command, args, {
       cwd: options.cwd,
       env: options.env,
+      signal: options.signal,
       encoding: 'utf8',
       maxBuffer: COMMAND_MAX_BUFFER,
     });
@@ -165,6 +173,9 @@ export async function runCommand(command, args, options = {}) {
     }
     if (signal !== undefined) {
       sections.push(`signal ${signal}`);
+    }
+    if (options.signal?.aborted) {
+      sections.push(`abort reason: ${describeError(options.signal.reason)}`);
     }
     sections.push(
       `stdout:\n${stdout}`,
@@ -226,6 +237,107 @@ export async function sourceIsDirty(root, execute = runCommand) {
     stage: 'inspect source status',
   });
   return result.stdout.length > 0;
+}
+
+export async function captureDevSourceFingerprint(root, execute = runCommand) {
+  const absoluteRoot = path.resolve(root);
+  const commitSha = await resolveCommit(absoluteRoot, 'HEAD', execute);
+  const status = await execute(
+    'git',
+    [
+      'status',
+      '--porcelain=v2',
+      '-z',
+      '--untracked-files=all',
+      '--',
+      ...DEV_SOURCE_PATHSPECS,
+    ],
+    {
+      cwd: absoluteRoot,
+      stage: 'capture dev source status',
+    },
+  );
+  const stagedDiff = await execute(
+    'git',
+    [
+      'diff',
+      '--cached',
+      '--binary',
+      '--full-index',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-renames',
+      '--',
+      ...DEV_SOURCE_PATHSPECS,
+    ],
+    {
+      cwd: absoluteRoot,
+      stage: 'capture staged dev source content',
+    },
+  );
+  const worktreeDiff = await execute(
+    'git',
+    [
+      'diff',
+      '--binary',
+      '--full-index',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-renames',
+      '--',
+      ...DEV_SOURCE_PATHSPECS,
+    ],
+    {
+      cwd: absoluteRoot,
+      stage: 'capture worktree dev source content',
+    },
+  );
+  const stagedPaths = await execute(
+    'git',
+    ['diff', '--cached', '--name-only', '-z', '--no-renames', '--', ...DEV_SOURCE_PATHSPECS],
+    {
+      cwd: absoluteRoot,
+      stage: 'list staged dev source paths',
+    },
+  );
+  const worktreePaths = await execute(
+    'git',
+    ['diff', '--name-only', '-z', '--no-renames', '--', ...DEV_SOURCE_PATHSPECS],
+    {
+      cwd: absoluteRoot,
+      stage: 'list worktree dev source paths',
+    },
+  );
+  const untrackedPaths = await execute(
+    'git',
+    ['ls-files', '--others', '--exclude-standard', '-z', '--', ...DEV_SOURCE_PATHSPECS],
+    {
+      cwd: absoluteRoot,
+      stage: 'list untracked dev source paths',
+    },
+  );
+  const sourcePaths = [
+    ...new Set([
+      ...parseNulSeparatedPaths(stagedPaths.stdout),
+      ...parseNulSeparatedPaths(worktreePaths.stdout),
+      ...parseNulSeparatedPaths(untrackedPaths.stdout),
+    ]),
+  ].sort();
+  const hash = createHash('sha256');
+
+  appendFingerprintPart(hash, 'commit', commitSha);
+  appendFingerprintPart(hash, 'status', status.stdout);
+  appendFingerprintPart(hash, 'staged-diff', stagedDiff.stdout);
+  appendFingerprintPart(hash, 'worktree-diff', worktreeDiff.stdout);
+  for (const relativePath of sourcePaths) {
+    await appendSourcePathFingerprint(hash, absoluteRoot, relativePath);
+  }
+
+  return {
+    commitSha,
+    dirty: status.stdout.length > 0,
+    digest: hash.digest('hex'),
+  };
 }
 
 export async function readBundleIdentity(appPath, execute = runCommand) {
@@ -302,7 +414,10 @@ export async function buildDevAppSnapshot(input, overrides = {}) {
   const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
   const writeFileText = overrides.writeFileText ?? defaultWriteFileText;
   const removePath = overrides.removePath ?? defaultRemovePath;
-  const execute = overrides.execute ?? runCommand;
+  const execute = withAbortSignal(
+    overrides.execute ?? runCommand,
+    overrides.signal,
+  );
   const lockTimeoutSeconds =
     overrides.lockTimeoutSeconds ?? DEFAULT_DEV_BUILD_LOCK_TIMEOUT_SECONDS;
   const privateInput = {
@@ -387,7 +502,10 @@ export async function runDevBuildSnapshotUnlocked(input, overrides = {}) {
   const bundleDir = path.join(sourceRoot, BUNDLE_RELATIVE_PATH);
   const expectedConfig = channelConfig('dev');
   const expectedCandidate = path.join(bundleDir, expectedConfig.appName);
-  const execute = overrides.execute ?? runCommand;
+  const execute = withAbortSignal(
+    overrides.execute ?? runCommand,
+    overrides.signal,
+  );
   const removePath = overrides.removePath ?? defaultRemovePath;
   const mkdirPath = overrides.mkdirPath ?? defaultCreateDirectory;
   const findCandidate = overrides.findCandidateApp ?? findCandidateApp;
@@ -904,6 +1022,7 @@ export async function smokeLaunchBundle(appPath, overrides) {
           ...temporaryHomeEnvironment(tempHome),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
+        ...(overrides.signal ? { signal: overrides.signal } : {}),
       });
     } catch (error) {
       throw new StartupSmokeFailure(error);
@@ -961,6 +1080,7 @@ export async function smokeLaunchBundle(appPath, overrides) {
 export async function runMacosBuild(options, deps = {}) {
   const channel = options?.channel;
   const absoluteRepositoryRoot = path.resolve(options?.repositoryRoot ?? repositoryRoot);
+  const signal = options?.signal;
 
   if (channel !== 'stable' && channel !== 'dev') {
     throw new Error('runMacosBuild channel must be "stable" or "dev"');
@@ -975,6 +1095,7 @@ export async function runMacosBuild(options, deps = {}) {
   }
 
   const execute = deps.execute ?? runCommand;
+  const executeActive = withAbortSignal(execute, signal);
   const makeTemporaryDirectory =
     deps.makeTemporaryDirectory ?? defaultMakeBuildTemporaryDirectory;
   const removePath = deps.removePath ?? defaultRemovePath;
@@ -996,19 +1117,21 @@ export async function runMacosBuild(options, deps = {}) {
   let stableWorktreeAdded = false;
 
   try {
-    const commitSha = await resolveCommit(
-      absoluteRepositoryRoot,
-      channel === 'stable' ? requestedRef : 'HEAD',
-      execute,
-    );
-    const dirty =
-      channel === 'dev' ? await sourceIsDirty(absoluteRepositoryRoot, execute) : false;
+    throwIfAborted(signal, 'starting the macOS build');
+    const initialDevSource =
+      channel === 'dev'
+        ? await captureDevSourceFingerprint(absoluteRepositoryRoot, executeActive)
+        : undefined;
+    const commitSha =
+      initialDevSource?.commitSha ??
+      await resolveCommit(absoluteRepositoryRoot, requestedRef, executeActive);
+    const dirty = initialDevSource?.dirty ?? false;
 
     tempRoot = path.resolve(await makeTemporaryDirectory(TEMP_BUILD_PREFIX));
 
     if (channel === 'stable') {
       sourceRoot = path.join(tempRoot, 'source');
-      await execute(
+      await executeActive(
         'git',
         ['worktree', 'add', '--detach', sourceRoot, commitSha],
         {
@@ -1027,8 +1150,22 @@ export async function runMacosBuild(options, deps = {}) {
     if (channel === 'dev') {
       const snapshot = await buildDevSnapshot(
         { sourceRoot, tempRoot, devConfigPath },
-        { execute },
+        signal
+          ? { execute, signal }
+          : { execute },
       );
+      const finalDevSource = await captureDevSourceFingerprint(
+        absoluteRepositoryRoot,
+        executeActive,
+      );
+      if (finalDevSource.digest !== initialDevSource.digest) {
+        throw new Error(
+          `Dev source changed while waiting for or building the immutable snapshot; ` +
+            `refusing publication.\n` +
+            `Before fingerprint: ${initialDevSource.digest}\n` +
+            `After fingerprint: ${finalDevSource.digest}`,
+        );
+      }
       candidate = snapshot.snapshotPath;
       identity = snapshot.identity;
     } else {
@@ -1037,21 +1174,25 @@ export async function runMacosBuild(options, deps = {}) {
       await removePath(expectedCandidate);
 
       for (const [command, args, relativeCwd] of buildCommandsFor('stable')) {
-        await execute(command, args, {
+        await executeActive(command, args, {
           cwd: path.resolve(sourceRoot, relativeCwd),
           stage: `run ${channel} validation/build command: ${command} ${args.join(' ')}`,
         });
       }
 
       candidate = await findCandidate(bundleDir, expectedConfig.appName);
-      identity = await readIdentity(candidate, execute);
+      identity = await readIdentity(candidate, executeActive);
       assertBundleIdentity(candidate, identity, expectedConfig);
     }
 
     if (channel === 'stable') {
-      await smokeLaunch(candidate, { executableName: identity.executable });
+      await smokeLaunch(candidate, {
+        executableName: identity.executable,
+        ...(signal ? { signal } : {}),
+      });
     }
 
+    throwIfAborted(signal, 'publishing the macOS build');
     const builtAt = now().toISOString();
     const provenance = {
       channel,
@@ -1068,7 +1209,9 @@ export async function runMacosBuild(options, deps = {}) {
       candidate,
       expectedConfig,
       provenance,
-      { homeDir },
+      signal
+        ? { homeDir, execute: executeActive }
+        : { homeDir },
     );
     if (installedPath !== provenance.installedPath) {
       throw new Error(
@@ -1280,6 +1423,86 @@ function combineErrors(primaryError, secondaryError, secondaryContext) {
 
 function isEnoentError(error) {
   return Boolean(error) && typeof error === 'object' && error.code === 'ENOENT';
+}
+
+function withAbortSignal(execute, signal) {
+  if (!signal) {
+    return execute;
+  }
+  return (command, args, options = {}) =>
+    execute(command, args, {
+      ...options,
+      signal,
+    });
+}
+
+function throwIfAborted(signal, stage) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error(
+    `macOS build aborted while ${stage}: ${describeError(signal.reason)}`,
+    { cause: signal.reason },
+  );
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  throw error;
+}
+
+function parseNulSeparatedPaths(output) {
+  return output.split('\0').filter((relativePath) => relativePath !== '');
+}
+
+function appendFingerprintPart(hash, label, value) {
+  const data = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
+  hash.update(Buffer.from(`${label.length}:${label}:${data.length}:`, 'utf8'));
+  hash.update(data);
+}
+
+async function appendSourcePathFingerprint(hash, root, relativePath) {
+  const absolutePath = path.resolve(root, relativePath);
+  if (absolutePath !== root && !pathIsInside(root, absolutePath)) {
+    throw new Error(
+      `Git returned dev source path outside repository root: "${relativePath}"`,
+    );
+  }
+
+  let stats;
+  try {
+    stats = await lstat(absolutePath);
+  } catch (error) {
+    if (isEnoentError(error)) {
+      appendFingerprintPart(hash, 'source-path', relativePath);
+      appendFingerprintPart(hash, 'source-metadata', 'missing');
+      return;
+    }
+    throw error;
+  }
+
+  const type = stats.isFile()
+    ? 'file'
+    : stats.isSymbolicLink()
+      ? 'symlink'
+      : stats.isDirectory()
+        ? 'directory'
+        : 'other';
+  appendFingerprintPart(hash, 'source-path', relativePath);
+  appendFingerprintPart(
+    hash,
+    'source-metadata',
+    JSON.stringify({
+      type,
+      mode: stats.mode & 0o177777,
+      size: stats.size,
+    }),
+  );
+
+  if (type === 'file') {
+    appendFingerprintPart(hash, 'source-content', await readFile(absolutePath));
+  } else if (type === 'symlink') {
+    appendFingerprintPart(hash, 'source-content', await readlink(absolutePath));
+  }
 }
 
 function pathIsInside(parentPath, childPath) {
@@ -1663,6 +1886,10 @@ function isAlreadyExistsError(error) {
   return Boolean(error) && typeof error === 'object' && error.code === 'EEXIST';
 }
 
+function signalExitCode(signalName) {
+  return signalName === 'SIGINT' ? 130 : 143;
+}
+
 class StartupSmokeFailure extends Error {
   constructor(cause) {
     super(describeError(cause));
@@ -1682,17 +1909,42 @@ export async function runCli(argv, deps = {}) {
   const runBuild = deps.runBuild ?? runMacosBuild;
   const stdout = deps.stdout ?? ((line) => console.log(line));
   const stderr = deps.stderr ?? ((line) => console.error(line));
+  const signalTarget = deps.signalTarget ?? process;
+  const controller = new AbortController();
+  let receivedSignal;
+  const handleSignal = (signalName) => {
+    if (receivedSignal) {
+      return;
+    }
+    receivedSignal = signalName;
+    controller.abort(new Error(`macOS build cancelled by ${signalName}`));
+  };
+  const handleSigint = () => handleSignal('SIGINT');
+  const handleSigterm = () => handleSignal('SIGTERM');
 
   try {
     const options = parseBuildArguments(argv);
-    const result = await runBuild({ ...options, repositoryRoot });
+    signalTarget.on('SIGINT', handleSigint);
+    signalTarget.on('SIGTERM', handleSigterm);
+    const result = await runBuild({
+      ...options,
+      repositoryRoot,
+      signal: controller.signal,
+    });
+    if (receivedSignal) {
+      stderr(describeError(controller.signal.reason));
+      return signalExitCode(receivedSignal);
+    }
     const sourceState = result.dirty ? 'dirty source' : 'clean source';
     stdout(`Installed ${result.productName} at ${result.installedPath}`);
     stdout(`Source ${result.commitSha} (${sourceState})`);
     return 0;
   } catch (error) {
     stderr(error instanceof Error ? error.message : String(error));
-    return 1;
+    return receivedSignal ? signalExitCode(receivedSignal) : 1;
+  } finally {
+    signalTarget.off('SIGINT', handleSigint);
+    signalTarget.off('SIGTERM', handleSigterm);
   }
 }
 
