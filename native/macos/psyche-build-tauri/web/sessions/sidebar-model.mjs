@@ -108,6 +108,14 @@ function localRowType(thread) {
   return (thread?.kind || 'shell') === 'shell' ? 'shells' : 'agents';
 }
 
+// A tool pane is neither an agent nor a shell: filing Git under Agents would
+// claim a model is running in it.
+const TOOL_KINDS = ['git', 'web'];
+
+function isToolRow(row) {
+  return TOOL_KINDS.indexOf(text(row?.kind)) !== -1;
+}
+
 function localRowTitle(thread) {
   return text(thread?.name || thread?.title || thread?.id);
 }
@@ -445,10 +453,12 @@ export function buildSidebarProjectModel(options) {
 
       if (visibleRows.length === 0) return null;
 
-      const agentRows = visibleRows.filter((row) => row.type === 'agents');
+      const agentRows = visibleRows.filter((row) => row.type === 'agents' && !isToolRow(row));
+      const toolRows = visibleRows.filter((row) => row.type === 'agents' && isToolRow(row));
       const shellRows = visibleRows.filter((row) => row.type === 'shells');
       const categories = [
         agentRows.length ? buildCategory('Agents', '✳', agentRows, normalizedQuery) : null,
+        toolRows.length ? buildCategory('Tools', '◍', toolRows, normalizedQuery) : null,
         shellRows.length ? buildCategory('Shells', '❯_', shellRows, normalizedQuery) : null,
       ].filter(Boolean);
 

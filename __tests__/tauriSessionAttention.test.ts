@@ -147,6 +147,24 @@ describe('attention tracker', () => {
       .needsAttention).toBe(true);
   });
 
+  it('treats an interrupt as a fresh settle window instead of an immediate badge', () => {
+    const tracker = createAttentionTracker();
+    tracker.observe('a', '> ', 0);
+    expect(tracker.observe('a', '✻ Working… (esc to interrupt)', 1_000)).toEqual({
+      needsAttention: false, reason: null,
+    });
+
+    expect(tracker.interrupt('a')).toEqual({ needsAttention: false, reason: null });
+
+    expect(tracker.observe('a', '> ', 2_000)).toEqual({ needsAttention: false, reason: null });
+    expect(tracker.observe('a', '> ', 2_000 + SETTLE - 1)).toEqual({
+      needsAttention: false, reason: null,
+    });
+    expect(tracker.observe('a', '> ', 2_000 + SETTLE)).toEqual({
+      needsAttention: true, reason: 'turn',
+    });
+  });
+
   it('trusts the bell immediately, but not before the session has done anything', () => {
     const tracker = createAttentionTracker();
     expect(tracker.bell('a').needsAttention).toBe(false);
@@ -474,8 +492,70 @@ describe('desktop shell wiring', () => {
     );
   });
 
-  it('clears attention on the keystroke, the bell and on exit', () => {
-    expect(mainJs).toMatch(/term\.onData\(function \(data\) \{[\s\S]{0,300}noteThreadUserInput\(thread\)/);
+  it('routes terminal input through the attention-aware sender', () => {
+    expect(mainJs).toMatch(
+      /term\.onData\(function \(data\) \{\s*sendToThread\(thread, data\);\s*\}\);/
+    );
+    expect(
+      mainJs.match(
+        /\{ label: "Interrupt", run: function \(\) \{ sendToThread\(thread, "\\x03"\); \} \}/g
+      )
+    ).toHaveLength(2);
+  });
+
+  it('distinguishes interrupts from answers before applying attention state', () => {
+    const eligible = { id: 'eligible', trackAttention: true };
+    const ineligible = { id: 'ineligible', trackAttention: false };
+    const interruptState = { needsAttention: false, reason: 'interrupt' };
+    const userInputState = { needsAttention: false, reason: 'answer' };
+    const trackerCalls: string[] = [];
+    const eligibilityChecks: string[] = [];
+    const applied: Array<[typeof eligible, typeof interruptState | typeof userInputState]> = [];
+    const noteThreadInput = compileFunction<
+      (thread: typeof eligible | null, text: string) => void
+    >(functionSource('noteThreadInput'), {
+      threadWantsAttentionTracking(thread: typeof eligible) {
+        eligibilityChecks.push(thread.id);
+        return thread.trackAttention;
+      },
+      attentionTracker: {
+        interrupt(id: string) {
+          trackerCalls.push(`interrupt:${id}`);
+          return interruptState;
+        },
+        userInput(id: string) {
+          trackerCalls.push(`userInput:${id}`);
+          return userInputState;
+        },
+      },
+      applyThreadAttention(
+        thread: typeof eligible,
+        next: typeof interruptState | typeof userInputState,
+      ) {
+        applied.push([thread, next]);
+      },
+    });
+
+    noteThreadInput(eligible, '\x03');
+    noteThreadInput(eligible, 'answer');
+    noteThreadInput(eligible, '\x03more');
+    noteThreadInput(ineligible, '\x03');
+    noteThreadInput(null, 'ignored');
+
+    expect(eligibilityChecks).toEqual(['eligible', 'eligible', 'eligible', 'ineligible']);
+    expect(trackerCalls).toEqual([
+      'interrupt:eligible',
+      'userInput:eligible',
+      'userInput:eligible',
+    ]);
+    expect(applied).toEqual([
+      [eligible, interruptState],
+      [eligible, userInputState],
+      [eligible, userInputState],
+    ]);
+  });
+
+  it('clears attention on the bell and on exit', () => {
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
     expect(mainJs).toMatch(
       /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
