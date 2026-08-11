@@ -10,24 +10,63 @@ const indexHtml = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/w
 const tauriConfig = JSON.parse(
   readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
+const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
+const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
 
 describe('Tauri desktop tab shortcuts', () => {
-  it('routes Command+T based on the last focused desktop surface', () => {
-    expect(mainJs).toMatch(/var\s+activeSurface\s*=\s*"terminal";/);
-    expect(mainJs).toMatch(/function\s+createContextualTab\(\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"terminal"\s*\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"browser"\s*\)/);
+  it('routes Command+T to terminal panes globally', () => {
+    expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
     expect(mainJs).toMatch(
-      /if\s*\(\s*activeSurface\s*===\s*"browser"\s*\)[\s\S]*openBlankBrowserTab\(\);[\s\S]*return\s*\(await spawnCovenThread\(\)\)\s*\?\s*true\s*:\s*null;/
+      /async function createTerminalPane\(\)\s*\{[\s\S]*var project = activeProject\(\);[\s\S]*if \(!project \|\| !project\.root\)\s*\{[\s\S]*setStatus\("Open a project before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*var worktree = selectedWorktree\(project\);[\s\S]*if \(!worktree \|\| !worktree\.path\)\s*\{[\s\S]*setStatus\("Select an available worktree before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*await showTerminalView\(\)[\s\S]*return spawnShellThread\(project\);[\s\S]*\}/
+    );
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"[\s\S]*e\.preventDefault\(\);[\s\S]*await createTerminalPane\(\);/
+    );
+    expect(mainJs).not.toMatch(forbiddenContextualTabFn);
+    expect(mainJs).not.toMatch(
+      /if\s*\(\s*String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"\s*\)\s*\{[^}]*openBlankBrowserTab\(\)/
     );
   });
 
-  it('lets embedded browser webviews request a new browser tab with Command+T', () => {
-    expect(tauriLib).toMatch(/browser:shortcut-new-tab/);
+  it('swaps the dirty dot for the close control in one non-reflowing slot', () => {
+    // Both controls live in the same fixed-width slot, so revealing one cannot
+    // shift the strip.
+    expect(mainJs).toMatch(/<span class="tab-end">/);
+    expect(stylesCss).toMatch(/\.tab-end \{[^}]*flex: 0 0 16px/);
+    expect(stylesCss).toMatch(/\.tab \.dot \{[^}]*position: absolute/);
+    expect(stylesCss).toMatch(/\.tab \.close \{[^}]*position: absolute/);
+    expect(stylesCss).toContain('.tab:hover .close { opacity: 1; }');
+    expect(stylesCss).toContain('.tab:hover .dot { opacity: 0; }');
+    // The active tab keeps its dot: that is the file whose unsaved state matters.
+    expect(stylesCss).not.toMatch(/\.tab\.active \.dot \{[^}]*opacity: 0/);
+  });
+
+  it('closes a file tab on middle click', () => {
+    expect(mainJs).toMatch(
+      /addEventListener\("auxclick",[\s\S]*e\.button !== 1[\s\S]*closeFileTab\(file\.id\)/
+    );
+  });
+
+  it('fades the strip edges only while it actually overflows', () => {
+    expect(mainJs).toMatch(
+      /function syncTabStripOverflow\(\)[\s\S]*scrollWidth > tabStripEl\.clientWidth \+ 1[\s\S]*toggle\("is-overflowing"/
+    );
+    expect(mainJs).toMatch(/function scrollActiveTabIntoView\(\)[\s\S]*scrollIntoView/);
+    // Refreshing the strip and resizing the window both re-measure.
+    expect(mainJs).toMatch(/syncTabStripOverflow\(\);\n    scrollActiveTabIntoView\(\);/);
+    expect(stylesCss).toMatch(/\.tab-strip\.is-overflowing \{[^}]*mask-image/);
+    expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
+  });
+
+  it('lets embedded browser webviews request a terminal pane with Command+T', () => {
+    expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
+    expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
     expect(tauriLib).toMatch(/function\(browserLabel\)/);
     expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
-    expect(mainJs).toMatch(/listen\(\s*"browser:shortcut-new-tab"/);
+    expect(mainJs).toMatch(
+      /listen\(\s*"browser:shortcut-terminal-pane",\s*function\s*\(\)\s*\{[\s\S]*createTerminalPane\(\);[\s\S]*\}\s*\)\.catch/
+    );
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {
@@ -94,7 +133,9 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('keeps browser tabs thin and collapsible under narrow browser panes', () => {
     expect(stylesCss).toMatch(/--browser-tab-h:\s*22px;/);
-    expect(stylesCss).toMatch(/grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) 1fr;/);
+    expect(stylesCss).toMatch(
+      /\.browser-surface\s*\{[^}]*grid-template-rows:\s*var\(--browser-bar-h\) var\(--browser-tab-h\) minmax\(0, 1fr\);/s
+    );
     expect(stylesCss).toMatch(/\.browser-tab\s*\{[\s\S]*?min-width:\s*34px;[\s\S]*?flex:\s*1 1 118px;/);
     expect(stylesCss).toMatch(/\.browser-tab-title\s*\{[\s\S]*?min-width:\s*0;/);
   });

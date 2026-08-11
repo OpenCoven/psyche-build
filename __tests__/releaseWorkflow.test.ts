@@ -172,7 +172,12 @@ describe('macOS release workflow contract', () => {
         mkdirSync(fakeBin);
         writeFileSync(
           fakeChmod,
-          `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+          // GNU coreutils ahead of /usr/bin on PATH gives GNU stat, where -f means
+          // --file-system, so the BSD form silently reported the wrong thing. GNU is
+          // tried first because BSD stat rejects -c outright, which makes the
+          // fallback unambiguous; the reverse order does not, since GNU -f succeeds
+          // for the file argument while failing on the format.
+          `#!/bin/bash\nmode="$(stat -c '%a' "$2" 2>/dev/null || stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
         );
         writeFileSync(fakeSecurity, '#!/bin/bash\nexit 0\n');
         chmodSync(fakeChmod, 0o755);
@@ -290,7 +295,12 @@ describe('macOS release workflow contract', () => {
       mkdirSync(fakeBin);
       writeFileSync(
         fakeChmod,
-        `#!/bin/bash\nmode="$(stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
+        // GNU coreutils ahead of /usr/bin on PATH gives GNU stat, where -f means
+          // --file-system, so the BSD form silently reported the wrong thing. GNU is
+          // tried first because BSD stat rejects -c outright, which makes the
+          // fallback unambiguous; the reverse order does not, since GNU -f succeeds
+          // for the file argument while failing on the format.
+          `#!/bin/bash\nmode="$(stat -c '%a' "$2" 2>/dev/null || stat -f '%Lp' "$2")"\n[ "$mode" = "600" ] || exit 91\nexec /bin/chmod "$@"\n`,
       );
       chmodSync(fakeChmod, 0o755);
       writeFileSync(githubEnv, '');

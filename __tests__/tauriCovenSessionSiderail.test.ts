@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
@@ -16,12 +16,22 @@ const indexHtml = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
   'utf8',
 );
-const PsycheSessions = await import(
-  pathToFileURL(join(
+/**
+ * The `PsycheSessions` global the shell sees is the *bundle*, and session-entry
+ * re-exports two modules into it. Standing in with only the session model made
+ * the rail renderer look like it could not reach `attentionLabel` when in the
+ * app it always can, so the stand-in is assembled the same way the bundle is.
+ */
+const PsycheSessions = {
+  ...(await import(pathToFileURL(join(
     repoRoot,
     'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
-  )).href,
-);
+  )).href)),
+  ...(await import(pathToFileURL(join(
+    repoRoot,
+    'native/macos/psyche-build-tauri/web/sessions/attention.mjs',
+  )).href)),
+};
 
 function extractFunctionSource(source: string, name: string) {
   const asyncStart = source.indexOf(`async function ${name}(`);
@@ -85,6 +95,7 @@ class FakeElement {
   autocomplete = '';
   focused = false;
   selected = false;
+  hidden = false;
   private ownText = '';
   private html = '';
 
@@ -135,11 +146,13 @@ class FakeElement {
     const title = /<span class="session-title">([\s\S]*?)<\/span>/.exec(this.html);
     const sub = /<span class="session-sub">([\s\S]*?)<\/span>/.exec(this.html);
     if (!title || !sub) return;
-    const glyph = /<span class="session-glyph">([\s\S]*?)<\/span>/.exec(this.html);
+    // The glyph carries git-state classes, so keep the class list verbatim
+    // rather than flattening it back to the bare hook.
+    const glyph = /<span class="(session-glyph[^"]*)"[^>]*>([\s\S]*?)<\/span>/.exec(this.html);
     if (glyph) {
       const glyphElement = new FakeElement('span');
-      glyphElement.className = 'session-glyph';
-      glyphElement.textContent = decodeHtml(glyph[1]);
+      glyphElement.className = glyph[1];
+      glyphElement.textContent = decodeHtml(glyph[2]);
       this.appendChild(glyphElement);
     }
     const text = new FakeElement('span');
@@ -154,6 +167,16 @@ class FakeElement {
       const onCanvas = new FakeElement('span');
       onCanvas.className = 'session-oncanvas';
       titleRow.appendChild(onCanvas);
+    }
+    // Focus-set membership swatches, one per set the pane belongs to.
+    for (const match of this.html.matchAll(
+      /<span class="session-set-swatch" data-set="(\d)" title="([^"]*)"/g,
+    )) {
+      const swatch = new FakeElement('span');
+      swatch.className = 'session-set-swatch';
+      swatch.dataset.set = match[1];
+      swatch.title = decodeHtml(match[2]);
+      titleRow.appendChild(swatch);
     }
     const subElement = new FakeElement('span');
     subElement.className = 'session-sub';
@@ -194,6 +217,14 @@ class FakeElement {
     this.children.splice(index, 1);
     child.parentNode = null;
     return child;
+  }
+
+  get isConnected() {
+    return this.parentNode !== null;
+  }
+
+  remove() {
+    if (this.parentNode) this.parentNode.removeChild(this);
   }
 
   replaceChildren(...children: FakeElement[]) {
@@ -289,7 +320,10 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   hidden?: boolean;
-  covenSessionId?: string | null;
+  launch?: {
+    covenSessionId?: string | null;
+    launchKind?: string | null;
+  };
   worktreePath?: string;
   kind?: string;
 };
@@ -316,6 +350,9 @@ function createRenderer(options: {
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
   realEdit?: boolean;
   canvasThreadIds?: string[];
+  focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
+  scopingSet?: { id: string; name: string; threadIds: string[] } | null;
+  setPicking?: { key: string; picked: string[] } | null;
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div');
@@ -358,13 +395,37 @@ function createRenderer(options: {
   const setStatus = vi.fn();
   const onCanvasIds = options.canvasThreadIds ?? [];
   const canvasThreadIds = vi.fn(() => onCanvasIds);
+  // Focus sets: the membership model is real (setsForThread / isPicked run from
+  // main.js), while the actions that need a live pane layout are spied.
+  const focusSets = options.focusSets ?? [];
+  const scopingSet = options.scopingSet ?? null;
+  const removeFromFocusSet = vi.fn();
+  const applySetScopeForThread = vi.fn();
+  const activateFocusSet = vi.fn();
+  const clearFocusSet = vi.fn();
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
   const sources = [
+    'var SESSION_CLOSE_SECONDS = 3;',
+    'var armedSessionClose = null;',
+    'var focusSets = seedFocusSets;',
+    'var setPicking = seedSetPicking;',
+    extractFunctionSource(mainJs, 'paneLayoutKey'),
+    extractFunctionSource(mainJs, 'findFocusSet'),
+    extractFunctionSource(mainJs, 'setsForThread'),
+    extractFunctionSource(mainJs, 'isPicked'),
+    extractFunctionSource(mainJs, 'toggleSetPick'),
+    extractFunctionSource(mainJs, 'isDormantThread'),
     extractFunctionSource(mainJs, 'covenSessionsForProject'),
     extractFunctionSource(mainJs, 'covenInlineState'),
     extractFunctionSource(mainJs, 'covenToneClass'),
+    extractFunctionSource(mainJs, 'sessionGitState'),
+    extractFunctionSource(mainJs, 'sessionLaneLabel'),
+    extractFunctionSource(mainJs, 'sessionSetSwatches'),
+    extractFunctionSource(mainJs, 'disarmSessionClose'),
+    extractFunctionSource(mainJs, 'armSessionClose'),
+    extractFunctionSource(mainJs, 'threadCovenSessionId'),
     extractFunctionSource(mainJs, 'createCovenSessionRow'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
@@ -373,11 +434,17 @@ function createRenderer(options: {
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
     'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
     'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
-    'canvasThreadIds', 'paneGlyphFor',
+    'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval',
+    'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
+    'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
-      setDiscovery: function (value) { covenDiscovery = value; }
+      setDiscovery: function (value) { covenDiscovery = value; },
+      armSessionClose: armSessionClose,
+      disarmSessionClose: disarmSessionClose,
+      toggleSetPick: toggleSetPick,
+      picked: function () { return setPicking ? setPicking.picked.slice() : null; }
     };`,
   )(
     document,
@@ -409,10 +476,26 @@ function createRenderer(options: {
     setStatus,
     canvasThreadIds,
     paneGlyphFor,
+    setInterval,
+    clearInterval,
+    focusSets,
+    options.setPicking ?? null,
+    () => { harness.render(); },
+    () => scopingSet,
+    removeFromFocusSet,
+    applySetScopeForThread,
+    activateFocusSet,
+    clearFocusSet,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
+    armSessionClose: (
+      wrapper: FakeElement, close: FakeElement, thread: { id: string; name: string },
+    ) => void;
+    disarmSessionClose: () => void;
+    toggleSetPick: (threadId: string) => void;
+    picked: () => string[] | null;
   };
 
   return {
@@ -421,6 +504,11 @@ function createRenderer(options: {
     sessionListEl,
     state,
     discovery,
+    focusSets,
+    removeFromFocusSet,
+    applySetScopeForThread,
+    activateFocusSet,
+    clearFocusSet,
     setActiveProject,
     focusThread,
     closeThread,
@@ -446,7 +534,7 @@ describe('Tauri Coven session project rail', () => {
         name: 'Attached locally',
         status: 'running',
         kind: 'coven-attach',
-        covenSessionId: 'remote',
+        launch: { launchKind: 'coven-attach', covenSessionId: 'remote' },
         worktreePath: '/alpha',
       }],
       sessions: [{
@@ -541,6 +629,35 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelector('.session-empty')).toBeNull();
   });
 
+  it('drops exited threads from the rail while keeping failed ones visible', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      threads: [
+        { id: 'live', projectId: 'alpha', name: 'Still running', status: 'running' },
+        { id: 'starting', projectId: 'alpha', name: 'Booting', status: 'starting' },
+        { id: 'crashed', projectId: 'alpha', name: 'Crashed', status: 'failed' },
+        { id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' },
+      ],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-row').map((row) => row.dataset.threadId))
+      .toEqual(['live', 'starting', 'crashed']);
+    expect(renderer.sessionListEl.textContent).not.toContain('Finished');
+  });
+
+  it('drops a project group whose threads have all exited', () => {
+    const renderer = createRenderer({
+      projects: [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
+      threads: [{ id: 'done', projectId: 'alpha', name: 'Finished', status: 'exited' }],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelector('.session-row')).toBeNull();
+  });
+
   it('groups local threads by pane kind, in input order, without empty project headers', () => {
     const renderer = createRenderer({
       projects: [
@@ -551,7 +668,8 @@ describe('Tauri Coven session project rail', () => {
         { id: 'local', projectId: 'alpha', name: 'Local plan', status: 'running' },
         {
           id: 'attached', projectId: 'alpha', name: 'Existing attachment', status: 'running',
-          kind: 'coven-attach', covenSessionId: 'alpha-daemon',
+          kind: 'coven-attach',
+          launch: { launchKind: 'coven-attach', covenSessionId: 'alpha-daemon' },
         },
       ],
     });
@@ -817,6 +935,219 @@ describe('Tauri Coven session project rail', () => {
     expect(wrapper?.querySelector('.session-close')?.title).toBe('Hide session');
   });
 
+  it('leads each row with the lane\'s git state and names the branch in the meta line', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [{ path: '/alpha/wt', branch: 'feat/tiling', dirty: true }],
+      }] as never,
+      threads: [{
+        id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+        worktreePath: '/alpha/wt',
+      }] as never,
+    });
+    renderer.render();
+
+    const glyph = renderer.sessionListEl.querySelector('.session-glyph');
+    expect(glyph?.textContent).toBe('±');
+    expect(glyph?.className).toContain('git-dirty');
+    // Colour is never the only carrier: the tooltip says the same thing.
+    const html = renderer.sessionListEl.querySelector('.session-row')?.innerHTML ?? '';
+    expect(html).toContain('title="Uncommitted changes"');
+    // The kind lives in the meta line now that the glyph carries git state.
+    expect(renderer.sessionListEl.querySelector('.session-sub')?.textContent)
+      .toBe('shell · feat/tiling');
+  });
+
+  it('marks a clean lane without implying there is work in it', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'alpha', name: 'Alpha', root: '/alpha',
+        worktrees: [{ path: '/alpha/wt', branch: 'main', dirty: false }],
+      }] as never,
+      threads: [{
+        id: 'local', projectId: 'alpha', name: 'Local', status: 'running',
+        worktreePath: '/alpha/wt',
+      }] as never,
+    });
+    renderer.render();
+
+    const glyph = renderer.sessionListEl.querySelector('.session-glyph');
+    expect(glyph?.textContent).toBe('⎇');
+    expect(glyph?.className).toContain('git-clean');
+  });
+
+  it('renders no set swatches for a pane that belongs to no focus set', () => {
+    const renderer = createRenderer({
+      threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+    });
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelector('.session-row')?.innerHTML ?? '')
+      .not.toContain('session-set-swatch');
+  });
+
+  describe('focus sets', () => {
+    const threads = [
+      { id: 'local', projectId: 'alpha', name: 'Local', status: 'running', worktreePath: '/alpha' },
+      { id: 'other', projectId: 'alpha', name: 'Other', status: 'running', worktreePath: '/alpha' },
+    ] as never;
+    // Sets are filed under the pane layout key, which paneLayoutKey builds as
+    // projectId + NUL + worktreePath.
+    const key = 'alpha /alpha';
+    const memberSet = {
+      id: 'set-1', index: 2, name: 'Review', key, threadIds: ['local'],
+    };
+
+    it('marks membership with the set\'s coloured square and names it', () => {
+      const renderer = createRenderer({ threads, focusSets: [memberSet] });
+      renderer.render();
+
+      const rows = renderer.sessionListEl.querySelectorAll('.session-row');
+      const swatch = rows[0].querySelector('.session-set-swatch');
+      expect(swatch?.dataset.set).toBe('2');
+      // Colour is never the only carrier — the tooltip names the set.
+      expect(swatch?.title).toBe('In Review');
+      expect(rows[1].querySelector('.session-set-swatch')).toBeNull();
+    });
+
+    it('scopes the canvas to a member\'s set when the row is clicked', async () => {
+      const renderer = createRenderer({ threads, focusSets: [memberSet] });
+      renderer.render();
+
+      await renderer.sessionListEl.querySelectorAll('.session-row')[0].emit('click');
+
+      expect(renderer.applySetScopeForThread).toHaveBeenCalled();
+      expect(renderer.focusThread).toHaveBeenCalledWith('local');
+    });
+
+    it('turns rows into checkboxes while picking, without focusing anything', async () => {
+      const renderer = createRenderer({
+        threads,
+        setPicking: { key, picked: ['local'] },
+      });
+      renderer.render();
+
+      const rows = renderer.sessionListEl.querySelectorAll('.session-row');
+      expect(rows[0].classList.contains('is-picked')).toBe(true);
+      expect(rows[0].getAttribute('aria-pressed')).toBe('true');
+      expect(rows[1].classList.contains('is-picking')).toBe(true);
+      expect(rows[1].getAttribute('aria-pressed')).toBe('false');
+      expect(rows[1].title).toBe('Include Other in the set');
+
+      await rows[1].emit('click');
+
+      // Picking must not drag the canvas around under the user.
+      expect(renderer.focusThread).not.toHaveBeenCalled();
+      expect(renderer.picked()).toEqual(['local', 'other']);
+    });
+
+    it('turns × into "remove from set" while a set scopes the canvas', async () => {
+      const renderer = createRenderer({
+        threads,
+        focusSets: [memberSet],
+        scopingSet: { id: 'set-1', name: 'Review', threadIds: ['local'] },
+      });
+      renderer.render();
+
+      const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
+      const close = wrappers[0].querySelector('.session-close');
+      expect(close?.title).toBe('Remove from Review — the pane stays open');
+
+      await close?.emit('click');
+
+      expect(renderer.removeFromFocusSet).toHaveBeenCalledWith('set-1', 'local');
+      // The pane is not going anywhere — only its membership changed.
+      expect(renderer.hideThread).not.toHaveBeenCalled();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('leaves × as hide for a pane the scoping set does not contain', async () => {
+      const renderer = createRenderer({
+        threads,
+        focusSets: [memberSet],
+        scopingSet: { id: 'set-1', name: 'Review', threadIds: ['local'] },
+      });
+      renderer.render();
+
+      const wrappers = renderer.sessionListEl.querySelectorAll('.session-row-wrap');
+      await wrappers[1].querySelector('.session-close')?.emit('click');
+
+      expect(renderer.hideThread).toHaveBeenCalledWith('other');
+      expect(renderer.removeFromFocusSet).not.toHaveBeenCalled();
+    });
+
+    it('returns to all panes when the project header is clicked', async () => {
+      const renderer = createRenderer({ threads, focusSets: [memberSet] });
+      renderer.render();
+
+      await renderer.sessionListEl.querySelector('.session-group-head')?.emit('click');
+
+      expect(renderer.clearFocusSet).toHaveBeenCalled();
+    });
+  });
+
+  describe('timed close confirm', () => {
+    function armed() {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
+      const close = wrapper.querySelector('.session-close')!;
+      renderer.armSessionClose(wrapper, close, { id: 'local', name: 'Local' });
+      return { renderer, wrapper, close };
+    }
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('replaces the × with a counting confirm instead of closing', () => {
+      const { renderer, wrapper, close } = armed();
+
+      const confirm = wrapper.querySelector('.session-close-confirm');
+      expect(confirm?.textContent).toBe('Close · 3');
+      expect(close.hidden).toBe(true);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1000);
+      expect(confirm?.textContent).toBe('Close · 2');
+    });
+
+    it('closes only on a second, deliberate click', async () => {
+      const { renderer, wrapper } = armed();
+
+      const confirm = wrapper.querySelector('.session-close-confirm')!;
+      const event = await confirm.emit('click');
+
+      expect(renderer.closeThread).toHaveBeenCalledWith('local');
+      expect(event.propagationStopped).toBe(true);
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+    });
+
+    it('cancels itself when the countdown runs out', () => {
+      const { renderer, wrapper, close } = armed();
+
+      vi.advanceTimersByTime(3000);
+
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(close.hidden).toBe(false);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('drops an armed confirm when the sidebar re-renders under it', () => {
+      const { renderer, wrapper } = armed();
+
+      renderer.render();
+
+      expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+      // The stale interval must not resurrect anything after the re-render.
+      vi.advanceTimersByTime(5000);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+  });
+
   it('mounts the real local rename input beside controls and restores activation after settle', async () => {
     const renderer = createRenderer({
       activeThreadId: 'local',
@@ -889,8 +1220,15 @@ describe('Tauri Coven session project rail', () => {
     expect(styles).toMatch(/\.session-row-wrap:hover\s+\.session-row:not\(\.active\)/);
     expect(styles).not.toMatch(/\.session-row-wrap:hover\s+\.session-row\s*\{/);
     expect(styles).toMatch(
-      /\.session-row,\s*\.session-coven-row\s*\{[^}]*padding:\s*6px 8px;[^}]*border-radius:\s*8px;/s,
+      /\.session-row,\s*\.session-coven-row\s*\{[^}]*padding:\s*6px 8px;[^}]*border-radius:\s*7px;/s,
     );
+    // The 44px row is the sidebar's scanning rhythm.
+    expect(styles).toMatch(/\.session-row\s*\{\s*min-height:\s*var\(--session-row-h\);/);
+    // Selection is a neutral fill; only the focus bar is violet.
+    expect(styles).toMatch(/\.session-row\.active\s*\{[^}]*background:\s*var\(--surface-3\);/s);
+    expect(styles).toMatch(/\.session-glyph\.git-dirty\s*\{\s*color:\s*var\(--warn\);/);
+    expect(styles).toMatch(/\.session-set-swatch\s*\{[^}]*border-radius:\s*2px;/s);
+    expect(styles).toMatch(/\.session-close-confirm\s*\{[^}]*animation:\s*close-confirm-slide/s);
     expect(styles).toMatch(/\.session-row-wrap\s*\{[^}]*position:\s*relative;/s);
     expect(styles).toMatch(/\.session-row\.inline-edit-hidden\s*\{[^}]*visibility:\s*hidden;/s);
     expect(styles).toMatch(/\.session-row-wrap\s*>\s*\.inline-edit\s*\{[^}]*position:\s*absolute;/s);

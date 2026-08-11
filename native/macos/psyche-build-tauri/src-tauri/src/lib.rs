@@ -20,9 +20,11 @@ use tauri::{
 };
 
 mod coven_sessions;
+mod pane_metrics;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use pane_metrics::PaneSessionMetrics;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -252,18 +254,26 @@ fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, S
     })
 }
 
+fn pty_cwd_candidate(canonical_root: &Path, cwd: &str) -> PathBuf {
+    let requested = Path::new(cwd);
+    if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    }
+}
+
+// Test-only variant of `open_pty_cwd` that takes the linked worktrees as an
+// argument instead of shelling out to `git worktree list`, so the containment
+// checks can be exercised without a real multi-worktree repo on disk.
+#[cfg(test)]
 fn open_pty_cwd_with_worktrees(
     project_root: &str,
     cwd: &str,
     linked_worktrees: &[PathBuf],
 ) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
-    let requested = Path::new(cwd);
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        canonical_root.join(requested)
-    };
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
     let opened = open_pty_cwd_candidate(&candidate, cwd)?;
     validate_opened_pty_cwd(
         &canonical_root,
@@ -274,6 +284,7 @@ fn open_pty_cwd_with_worktrees(
     Ok(opened)
 }
 
+#[cfg(test)]
 fn resolve_pty_cwd_with_worktrees(
     project_root: &str,
     cwd: &str,
@@ -300,12 +311,7 @@ fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     let canonical_root = canonical_project_root(project_root)?;
-    let requested = Path::new(cwd);
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        canonical_root.join(requested)
-    };
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
     let opened = open_pty_cwd_candidate(&candidate, cwd)?;
     if opened.canonical_path.starts_with(&canonical_root) {
         return Ok(opened);
@@ -321,6 +327,7 @@ fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
     Ok(opened)
 }
 
+#[cfg(test)]
 fn resolve_pty_cwd(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
     open_pty_cwd(project_root, cwd).map(|opened| opened.canonical_path)
 }
@@ -355,12 +362,23 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-chat" => {
-            if options.coven_session_id.is_some() {
-                return Err("coven-chat does not accept a session id".to_string());
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-chat requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-chat session id is unsafe".to_string());
             }
             match options.args.as_deref() {
-                Some([verb]) if verb == "chat" => Ok(()),
-                _ => Err("coven-chat requires exactly one 'chat' argument".to_string()),
+                Some([verb, flag, argument])
+                    if verb == "code" && flag == "--session-id" && argument == session_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(
+                    "coven-chat requires exactly 'code --session-id' and the validated session id"
+                        .to_string(),
+                ),
             }
         }
         "coven-attach" => {
@@ -391,6 +409,35 @@ fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn pane_session_metrics(
+    project_root: String,
+    cwd: String,
+    session_id: String,
+) -> Result<PaneSessionMetrics, String> {
+    if !is_safe_session_id(&session_id) {
+        return Err("session id is unsafe".to_string());
+    }
+    let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
+    let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
+    let canonical_cwd = resolved_cwd.canonical_path;
+    let path = augmented_path().to_string();
+
+    match tauri::async_runtime::spawn_blocking(move || {
+        pane_metrics::load_coven_metrics(
+            &coven,
+            &canonical_cwd,
+            &session_id,
+            std::ffi::OsStr::new(&path),
+        )
+    })
+    .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => Err(format!("failed to join Coven metrics task: {error}")),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -627,7 +674,7 @@ fn ensure_browser(
                               if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-new-tab", {{ label: browserLabel, url: location.href }});
+                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);
@@ -2047,11 +2094,15 @@ fn bounded_diff(text: String) -> GitDiffResult {
     }
 }
 
+/// Upper bound on `-U` context lines a caller may request.
+const MAX_DIFF_CONTEXT: u32 = 2000;
+
 #[tauri::command]
 fn git_diff(
     root: String,
     path: Option<String>,
     staged: Option<bool>,
+    context: Option<u32>,
 ) -> Result<GitDiffResult, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
@@ -2060,6 +2111,12 @@ fn git_diff(
         "--no-color".into(),
         "--relative".into(),
     ];
+    // Context lines, for expanding a hunk in place. Clamped rather than passed
+    // through: the value reaches a subprocess argument, and an unbounded one
+    // would let the caller ask git to render an arbitrarily large diff.
+    if let Some(lines) = context {
+        args.push(format!("-U{}", lines.min(MAX_DIFF_CONTEXT)));
+    }
     if staged.unwrap_or(false) {
         args.push("--cached".into());
     }
@@ -2140,8 +2197,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pane_session_metrics,
             canonical_project_path,
             pty_write,
             pty_resize,
@@ -2318,12 +2377,18 @@ mod workspace_panel_tests {
     #[test]
     fn accepts_exact_native_coven_chat_and_attach_launches() {
         let coven = "/canonical/bin/coven";
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some(session_id),
+            Some(coven),
+            Some(&["code", "--session-id", session_id]),
+        );
         let attach = launch_options(
             Some("coven-attach"),
-            Some("release:fix_01.a-b"),
+            Some(session_id),
             Some(coven),
-            Some(&["attach", "release:fix_01.a-b"]),
+            Some(&["attach", session_id]),
         );
 
         assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
@@ -2345,19 +2410,54 @@ mod workspace_panel_tests {
                 Some("coven-chat"),
                 None,
                 Some(coven),
-                Some(&["chat", "extra"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                Some("unexpected"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some(coven),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                None,
+                Some("../unsafe"),
+                Some(coven),
+                Some(&["code", "--session-id", "../unsafe"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some("/wrong/coven"),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&["code", "12345678-1234-4abc-8def-1234567890ab"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                    "extra",
+                ]),
             ),
             launch_options(
                 Some("coven-attach"),
@@ -2389,7 +2489,16 @@ mod workspace_panel_tests {
         for options in invalid {
             assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
         }
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some("12345678-1234-4abc-8def-1234567890ab"),
+            Some(coven),
+            Some(&[
+                "code",
+                "--session-id",
+                "12345678-1234-4abc-8def-1234567890ab",
+            ]),
+        );
         assert!(validate_coven_launch_with(&chat, None).is_err());
     }
 
@@ -2936,6 +3045,7 @@ mod workspace_panel_tests {
             path_text(&project).to_string(),
             Some("inside.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         assert!(diff.text.contains("+inside changed"));
@@ -2992,6 +3102,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("large.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -3023,6 +3134,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("untracked.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -3045,6 +3157,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("notes.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         let expected = "--- /dev/null\n+++ b/notes.txt\n+one\n+two\n";
@@ -3053,6 +3166,62 @@ mod workspace_panel_tests {
         assert_eq!(diff.bytes, expected.len() as u64);
         assert_eq!(diff.lines, expected.lines().count() as u64);
         assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_diff_widens_context_and_clamps_the_request() {
+        let tree = TempTree::new("git-diff-context");
+        run_git(path_text(&tree.root), &["init", "--quiet"]).unwrap();
+        let mut body = String::new();
+        for index in 0..40 {
+            body.push_str(&format!("line {}\n", index));
+        }
+        std::fs::write(tree.root.join("wide.txt"), &body).unwrap();
+        run_git(path_text(&tree.root), &["add", "-A"]).unwrap();
+        run_git(
+            path_text(&tree.root),
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "seed",
+                "--quiet",
+            ],
+        )
+        .unwrap();
+        let edited = body.replace("line 20\n", "line twenty\n");
+        std::fs::write(tree.root.join("wide.txt"), edited).unwrap();
+
+        let narrow = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+        let wide = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(30),
+        )
+        .unwrap();
+        // More context means more surrounding lines for the same one-line edit.
+        assert!(wide.text.lines().count() > narrow.text.lines().count());
+
+        // Beyond the cap the request is clamped, not honoured: the argument
+        // reaches a subprocess and an unbounded one is not ours to forward.
+        let clamped = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(u32::MAX),
+        )
+        .unwrap();
+        assert!(clamped.text.contains("line twenty"));
     }
 
     #[test]

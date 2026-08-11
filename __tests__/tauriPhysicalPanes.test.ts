@@ -269,6 +269,7 @@ describe('Tauri physical terminal panes', () => {
       'requestAnimationFrame',
       'terminalHost',
       'activePaneLayout',
+      'effectivePaneRoot',
       'PsychePanes',
       'measuredTerminalHost',
       'PANE_MINIMUMS',
@@ -283,6 +284,7 @@ describe('Tauri physical terminal panes', () => {
       raf: (callback: () => void) => number,
       host: typeof terminalHost,
       activeLayout: () => typeof layout,
+      effectiveRoot: (value: typeof layout) => unknown,
       panes: { layoutRects: () => { leaves: Array<{ threadId: string }> } },
       measure: () => Record<string, number>,
       minimums: Record<string, number>,
@@ -293,6 +295,7 @@ describe('Tauri physical terminal panes', () => {
       (callback) => { queued.push(callback); return queued.length; },
       terminalHost,
       () => layout,
+      (value) => value && value.root,
       {
         layoutRects: () => ({
           leaves: [
@@ -345,7 +348,7 @@ describe('Tauri physical terminal panes', () => {
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
     expect(mainJs).toMatch(/var paneCounter = 0;/);
-    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 320, height: 120, separator: 6 \};/);
+    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 200, height: 137, separator: 6 \};/);
     expect(functionSource('paneLayoutKey')).toMatch(/projectId[\s\S]*worktreePath/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.createLeaf/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.insertBelow/);
@@ -384,18 +387,18 @@ describe('Tauri physical terminal panes', () => {
   it('focuses from pane chrome without duplicating body focus or racing close', () => {
     const thread = { id: 'thread-a' };
     const bodyTarget = { id: 'body-target' };
-    const retryTarget = { id: 'retry-target' };
     const closeTarget = { id: 'close-target' };
-    const headerTarget = { id: 'header-target' };
+    const headerTarget = { id: 'header-target', closest: () => null };
+    // Any other header button — focusing on its pointerdown would detach the
+    // pane before pointerup and swallow the click it was about to receive.
+    const spanTarget = { id: 'span-target', closest: (sel: string) => sel === 'button' ? spanTarget : null };
     const body = { contains: (target: unknown) => target === bodyTarget };
-    const retry = { contains: (target: unknown) => target === retryTarget };
     const close = { contains: (target: unknown) => target === closeTarget };
     const state = { activeThreadId: 'thread-b' };
     const focused: string[] = [];
     const handlePanePointerDown = compileFunction<(
       value: typeof thread,
       bodyElement: typeof body,
-      retryElement: typeof retry,
       closeElement: typeof close,
       event: { target: unknown },
     ) => void>(functionSource('handlePanePointerDown'), {
@@ -403,11 +406,11 @@ describe('Tauri physical terminal panes', () => {
       focusThread: (id: string) => { focused.push(id); },
     });
 
-    handlePanePointerDown(thread, body, retry, close, { target: bodyTarget });
-    handlePanePointerDown(thread, body, retry, close, { target: retryTarget });
-    handlePanePointerDown(thread, body, retry, close, { target: closeTarget });
+    handlePanePointerDown(thread, body, close, { target: bodyTarget });
+    handlePanePointerDown(thread, body, close, { target: closeTarget });
+    handlePanePointerDown(thread, body, close, { target: spanTarget });
     expect(focused).toEqual([]);
-    handlePanePointerDown(thread, body, retry, close, { target: headerTarget });
+    handlePanePointerDown(thread, body, close, { target: headerTarget });
     expect(focused).toEqual([thread.id]);
   });
 
@@ -421,6 +424,38 @@ describe('Tauri physical terminal panes', () => {
     expect(stylesCss).not.toMatch(/\.term-instance\.active\s*\{\s*visibility:\s*visible/);
     expect(stylesCss).toMatch(/\.terminal-pane\.focused/);
     expect(stylesCss).toMatch(/\.terminal-pane-body/);
+  });
+
+  it('refreshes the minimap in the empty-layout branch while a file stays active', () => {
+    const calls: string[] = [];
+    const activeFile = { id: 'file-a' };
+    const terminalHost = {
+      children: ['stale-pane'],
+      replaceChildren: () => {
+        terminalHost.children = [];
+        calls.push('clear');
+      },
+    };
+    const renderPaneWorkspace = compileFunction<() => void>(functionSource('renderPaneWorkspace'), {
+      terminalHost,
+      stageBrowserSurface: () => { calls.push('stage'); },
+      activePaneLayout: () => null,
+      renderTerminalEmptyState: () => { calls.push('empty'); },
+      renderPaneMinimap: (layout: unknown, file: unknown) => {
+        expect(layout).toBeNull();
+        expect(file).toBe(activeFile);
+        calls.push('minimap');
+      },
+      findOpenFile: (id: string | null) => {
+        expect(id).toBe('file-a');
+        return activeFile;
+      },
+      state: { activeFileId: 'file-a' },
+    });
+
+    renderPaneWorkspace();
+    expect(terminalHost.children).toEqual([]);
+    expect(calls).toEqual(['stage', 'clear', 'empty', 'minimap']);
   });
 
   it('renders file tabs without depending on terminal thread visibility', () => {
@@ -507,22 +542,45 @@ describe('Tauri physical terminal panes', () => {
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
     const attributes = new Map<string, string>();
+    const statusAttributes = new Map<string, string>();
     const thread = {
       id: 'thread-a', projectId: 'project', name: 'Psyche', status: 'starting',
       paneTitle: { textContent: '' },
-      paneStatus: { textContent: '' },
+      paneStatus: {
+        textContent: '', className: '', title: '',
+        setAttribute: (name: string, value: string) => statusAttributes.set(name, value),
+      },
       paneClose: { setAttribute: (name: string, value: string) => attributes.set(name, value) },
     };
-    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
-      functionSource('syncThreadPaneMetadata'),
+    const applyPaneStatus = compileFunction<(element: unknown, status: string) => void>(
+      functionSource('applyPaneStatus'),
       {},
     );
+    const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
+      functionSource('syncThreadPaneMetadata'),
+      {
+        applyPaneStatus,
+        threadLaneLabel: () => 'main',
+        // No pane tree in this harness: the span/maximise controls have nothing
+        // to reflect, which is exactly the detached-pane case.
+        paneLayoutForThread: () => null,
+        PsychePanes: { findLeafByThreadId: () => null },
+        syncPaneSpanControl: () => undefined,
+        syncPaneMaxControl: () => undefined,
+      },
+    );
+    // Running is shown as a dot, so the label moves to the class and aria-label
+    // and the visible text goes away.
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('running');
+    expect(thread.paneStatus.textContent).toBe('');
+    expect(thread.paneStatus.className).toBe('terminal-pane-status running');
+    expect(statusAttributes.get('aria-label')).toBe('running');
+    // Every other state keeps its word.
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
     expect(thread.paneStatus.textContent).toBe('exited');
+    expect(thread.paneStatus.className).toBe('terminal-pane-status exited');
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
@@ -545,45 +603,121 @@ describe('Tauri physical terminal panes', () => {
     expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
   });
 
-  it('guards contextual terminal creation behind dirty-file navigation', async () => {
-    const terminalHost = { hidden: true };
-    let spawned = 0;
-    let focused = 0;
-    const acceptedCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+  it('creates a shell only after validating the active project, worktree, and terminal reveal', async () => {
+    const calls: string[] = [];
+    const visible = deferred<boolean>();
+    const project = { id: 'project', root: '/repo' };
+    const worktree = { path: '/repo' };
+    const acceptedCreate = compileFunction<() => Promise<{ kind: string } | null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => {
-          terminalHost.hidden = false;
-          expect(terminalHost.hidden).toBe(false);
-          spawned += 1;
-          focused += 1;
-          return { kind: 'coven-chat' };
+        activeProject: () => {
+          calls.push('project');
+          return project;
+        },
+        selectedWorktree: (candidate: { id: string; root: string }) => {
+          calls.push(`worktree:${candidate.id}`);
+          return worktree;
+        },
+        showTerminalView: async () => {
+          calls.push('show:start');
+          const result = await visible.promise;
+          calls.push(`show:end:${result}`);
+          return result;
+        },
+        spawnShellThread: (candidate: { id: string; root: string }) => {
+          calls.push(`spawn:${candidate.id}`);
+          return { kind: 'shell' };
+        },
+        setStatus: () => {
+          calls.push('status');
         },
       },
     );
-    await expect(acceptedCreate()).resolves.toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+    const pendingCreate = acceptedCreate();
+    await Promise.resolve();
+    expect(calls).toEqual(['project', 'worktree:project', 'show:start']);
+    visible.resolve(true);
+    await expect(pendingCreate).resolves.toEqual({ kind: 'shell' });
+    expect(calls).toEqual(['project', 'worktree:project', 'show:start', 'show:end:true', 'spawn:project']);
+  });
 
-    terminalHost.hidden = true;
-    const canceledCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+  it('cancels shell creation when terminal reveal is rejected by dirty-file flow', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => null,
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        selectedWorktree: () => ({ path: '/repo' }),
+        showTerminalView: async () => {
+          calls.push('show:false');
+          return false;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: () => {
+          calls.push('status');
+        },
       },
     );
-    await expect(canceledCreate()).resolves.toBeNull();
-    expect(terminalHost.hidden).toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['show:false']);
+  });
+
+  it('warns instead of creating a shell when there is no active project', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => null,
+        selectedWorktree: () => {
+          calls.push('worktree');
+          return { path: '/repo' };
+        },
+        showTerminalView: async () => {
+          calls.push('show');
+          return true;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: (text: string, level: string) => {
+          calls.push(`status:${level}:${text}`);
+        },
+      },
+    );
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['status:warn:Open a project before starting a terminal']);
+  });
+
+  it('warns instead of creating a shell when no worktree path is available', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        selectedWorktree: () => ({ branch: 'main' }),
+        showTerminalView: async () => {
+          calls.push('show');
+          return true;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: (text: string, level: string) => {
+          calls.push(`status:${level}:${text}`);
+        },
+      },
+    );
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['status:warn:Select an available worktree before starting a terminal']);
   });
 
   it('cancels a queued PTY start when the thread closes before animation frame', () => {
@@ -620,8 +754,10 @@ describe('Tauri physical terminal panes', () => {
     const thread = createThread({ project, command: '/bin/zsh' });
     pendingDataBuffers.set('thread-a', [new Uint8Array([1])]);
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers,
       stopThreadPty: () => { stops += 1; return Promise.resolve(true); },
       state,
@@ -687,8 +823,10 @@ describe('Tauri physical terminal panes', () => {
     const starting = spawnPty(thread);
     expect(thread.startInFlight).toBe(true);
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers,
       stopThreadPty,
       state,
@@ -707,6 +845,188 @@ describe('Tauri physical terminal panes', () => {
     expect(thread.startInFlight).toBe(false);
     expect(state.threads).toEqual([]);
     expect(pendingDataBuffers.has(thread.id)).toBe(false);
+  });
+
+  it('retains file focus when closing the active underlying pane', () => {
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const threadB = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo-next',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const state = {
+      threads: [threadA, threadB],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    let renders = 0;
+    let focused = 0;
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => threadB.id,
+      retainFileFocusAfterThreadRemoval,
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => Promise.resolve(true),
+      state,
+      fileFocus,
+      renderPaneWorkspace: () => { renders += 1; },
+      setProjectStatus: () => undefined,
+      findProject: () => project,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => { focused += 1; },
+    });
+
+    expect(closeThread(threadA.id)).toBe(true);
+    expect(focused).toBe(0);
+    expect(state.activeFileId).toBe('file-a');
+    expect(state.activeThreadId).toBe(threadB.id);
+    expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(project.lastActiveThreadId).toBe(threadB.id);
+    expect(project.selectedWorktreePath).toBe(threadB.worktreePath);
+    expect(renders).toBe(1);
+    expect(state.threads).toEqual([threadB]);
+  });
+
+  it('retains file focus when hiding the active underlying pane', () => {
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      hidden: false,
+    };
+    const threadB = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo-next',
+      hidden: false,
+    };
+    const state = {
+      threads: [threadA, threadB],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    let renders = 0;
+    let focused = 0;
+    const hideThread = compileFunction<(id: string) => boolean>(functionSource('hideThread'), {
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => threadB.id,
+      retainFileFocusAfterThreadRemoval,
+      state,
+      fileFocus,
+      focusThread: () => { focused += 1; },
+      renderPaneWorkspace: () => { renders += 1; },
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+    });
+
+    expect(hideThread(threadA.id)).toBe(true);
+    expect(focused).toBe(0);
+    expect(state.activeFileId).toBe('file-a');
+    expect(state.activeThreadId).toBe(threadB.id);
+    expect(fileFocus.returnThreadId).toBe(threadB.id);
+    expect(project.lastActiveThreadId).toBe(threadB.id);
+    expect(project.selectedWorktreePath).toBe(threadB.worktreePath);
+    expect(threadA.hidden).toBe(true);
+    expect(renders).toBe(1);
+  });
+
+  it('clears file-focus project metadata when there is no replacement pane', () => {
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'thread-a',
+      selectedWorktreePath: '/repo',
+    };
+    const threadA = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      closeStarted: false,
+      closing: false,
+      startInFlight: false,
+      term: { dispose: () => undefined },
+    };
+    const state = {
+      threads: [threadA],
+      activeThreadId: threadA.id as string | null,
+      activeFileId: 'file-a',
+    };
+    const fileFocus = { returnThreadId: threadA.id as string | null };
+    const retainFileFocusAfterThreadRemoval = compileFunction<
+      (removedThreadId: string, nextThreadId: string | null, projectId: string | null) => boolean
+    >(functionSource('retainFileFocusAfterThreadRemoval'), {
+      state,
+      fileFocus,
+      findProject: (id: string) => (id === project.id ? project : null),
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+    });
+    const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
+      findThread: (id: string) => state.threads.find((thread) => thread.id === id) || null,
+      detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval,
+      pendingDataBuffers: new Map(),
+      stopThreadPty: () => Promise.resolve(true),
+      state,
+      renderPaneWorkspace: () => undefined,
+      setProjectStatus: () => undefined,
+      findProject: (id: string) => (id === project.id ? project : null),
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      focusThread: () => undefined,
+    });
+
+    expect(closeThread(threadA.id)).toBe(true);
+    expect(state.activeThreadId).toBeNull();
+    expect(fileFocus.returnThreadId).toBeNull();
+    expect(project.lastActiveThreadId).toBeNull();
+    expect(project.selectedWorktreePath).toBe('/repo');
   });
 
   it('guards inactive-project hidden-session reopen behind dirty-file cancellation', async () => {
@@ -896,5 +1216,367 @@ describe('Tauri physical terminal panes', () => {
     );
     await expect(runNewPsycheCommand()).resolves.toBeNull();
     expect(spawned).toBe(0);
+  });
+
+  describe('span and focus modes', () => {
+    type Leaf = { type: 'leaf'; id: string; threadId: string };
+    type Layout = {
+      root: Record<string, unknown>;
+      focusedLeafId: string | null;
+      spanMode?: string | null;
+      spanRoot?: unknown;
+      spanSignature?: string | null;
+      maximizedLeafId?: string | null;
+      activeSetId?: string | null;
+    };
+
+    function tree(): Record<string, unknown> {
+      return {
+        type: 'split', id: 'split-1', orientation: 'column', ratio: 0.5,
+        first: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' },
+        second: { type: 'leaf', id: 'leaf-b', threadId: 'thread-b' },
+      };
+    }
+
+    type FocusSet = { id: string; index: number; name: string; key: string; threadIds: string[] };
+
+    function compileModeHelpers(
+      layout: Layout,
+      extras: Record<string, unknown> = {},
+      sets: FocusSet[] = [],
+    ) {
+      const factory = Function(
+        'PsychePanes', 'activePaneLayout', 'paneLayoutFor', 'state',
+        'focusThread', 'renderPaneWorkspace', 'seedSets',
+        `"use strict";
+         var SPAN_ORIENTATION = { column: "row", row: "column" };
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         var scopedPaneRoot = ${functionSource('scopedPaneRoot')};
+         var spanSignature = ${functionSource('spanSignature')};
+         var effectivePaneRoot = ${functionSource('effectivePaneRoot')};
+         var paneLayoutForThread = ${functionSource('paneLayoutForThread')};
+         var cyclePaneSpan = ${functionSource('cyclePaneSpan')};
+         var togglePaneMaximize = ${functionSource('togglePaneMaximize')};
+         var exitPaneMaximize = ${functionSource('exitPaneMaximize')};
+         return { effectivePaneRoot, scopedPaneRoot, cyclePaneSpan, togglePaneMaximize,
+                  exitPaneMaximize };`,
+      );
+      return factory(
+        PsychePanes,
+        () => layout,
+        () => layout,
+        { activeThreadId: 'thread-a', ...(extras.state as object ?? {}) },
+        extras.focusThread ?? (() => undefined),
+        extras.renderPaneWorkspace ?? (() => undefined),
+        sets,
+      ) as {
+        effectivePaneRoot: (value: Layout) => Record<string, unknown> | null;
+        scopedPaneRoot: (value: Layout) => Record<string, unknown> | null;
+        cyclePaneSpan: (thread: { id: string }) => void;
+        togglePaneMaximize: (thread: { id: string }) => void;
+        exitPaneMaximize: () => boolean;
+      };
+    }
+
+    it('resolves the recorded return pane, then focused pane, then first pane', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-b' };
+      const threads = new Map([
+        ['thread-a', {
+          id: 'thread-a', projectId: 'project', worktreePath: '/repo', hidden: false,
+        }],
+        ['thread-b', {
+          id: 'thread-b', projectId: 'project', worktreePath: '/repo', hidden: false,
+        }],
+      ]);
+      const project = { id: 'project' };
+      const fileFocusThreadIsAvailable = compileFunction<
+        (
+          thread: Record<string, unknown> | null,
+          root: Record<string, unknown>,
+          value: typeof project,
+          workspaceRoot: string,
+        ) => boolean
+      >(functionSource('fileFocusThreadIsAvailable'), { PsychePanes });
+      const resolveFileFocusThreadId = compileFunction<
+        (preferredId?: string | null) => string | null
+      >(functionSource('resolveFileFocusThreadId'), {
+        activeProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
+        activePaneLayout: () => layout,
+        scopedPaneRoot: (value: Layout) => value.root,
+        findThread: (id: string) => threads.get(id) || null,
+        PsychePanes,
+        fileFocusThreadIsAvailable,
+      });
+
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-a');
+      threads.get('thread-a')!.hidden = true;
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-b');
+      layout.focusedLeafId = 'leaf-missing';
+      expect(resolveFileFocusThreadId('thread-a')).toBe('thread-b');
+      threads.get('thread-b')!.hidden = true;
+      expect(resolveFileFocusThreadId('thread-a')).toBeNull();
+    });
+
+    it('lists the active file before pane entries in the minimap helper', () => {
+      const threads = new Map([
+        ['thread-a', { id: 'thread-a', name: 'Agent', status: 'running' }],
+        [
+          'thread-b',
+          {
+            id: 'thread-b',
+            name: 'Tests',
+            status: 'running',
+            needsAttention: true,
+            attentionReason: 'waiting-on-user',
+          },
+        ],
+      ]);
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('leaf-a', 'thread-a'),
+          'leaf-a',
+          PsychePanes.createLeaf('leaf-b', 'thread-b'),
+          'split-a',
+        ),
+        focusedLeafId: 'leaf-a',
+      };
+      const paneMinimapItems = compileFunction<
+        (value: Layout, activeFile: { id: string; name: string; rel: string } | null) => Array<unknown>
+      >(functionSource('paneMinimapItems'), {
+        scopedPaneRoot: (value: Layout) => value.root,
+        PsychePanes,
+        findThread: (id: string) => threads.get(id) || null,
+        PsycheSessions: { attentionLabel: () => 'Waiting for you' },
+      });
+
+      expect(paneMinimapItems(layout, {
+        id: 'file-a',
+        name: 'Button.tsx',
+        rel: 'src/Button.tsx',
+      })).toEqual([
+        {
+          kind: 'file',
+          id: 'file-a',
+          label: 'Button.tsx',
+          detail: 'src/Button.tsx',
+          current: true,
+          thread: null,
+        },
+        {
+          kind: 'pane',
+          id: 'thread-a',
+          label: 'Agent',
+          detail: 'running',
+          current: false,
+          thread: threads.get('thread-a'),
+        },
+        {
+          kind: 'pane',
+          id: 'thread-b',
+          label: 'Tests',
+          detail: 'running · Waiting for you',
+          current: false,
+          thread: threads.get('thread-b'),
+        },
+      ]);
+    });
+
+      it('cycles tiled → full column → full row → tiled without editing the tiled tree', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+        const snapshot = JSON.stringify(layout.root);
+        const helpers = compileModeHelpers(layout);
+
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('column');
+      // Mode "column" means the pane gets a column, so the top split runs across.
+      expect(helpers.effectivePaneRoot(layout)).toMatchObject({ orientation: 'row' });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('row');
+      expect(helpers.effectivePaneRoot(layout)).toMatchObject({ orientation: 'column' });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBeNull();
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      expect(JSON.stringify(layout.root)).toBe(snapshot);
+    });
+
+    it('restarts the cycle when a different pane is spanned', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+      const helpers = compileModeHelpers(layout, { state: { activeThreadId: 'thread-a' } });
+
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      helpers.cyclePaneSpan({ id: 'thread-a' });
+      expect(layout.spanMode).toBe('row');
+
+      // Spanning a different pane starts from the first mode again rather than
+      // inheriting where the previous pane had got to — otherwise one click on
+      // a fresh pane could land it straight back in tiled.
+      helpers.cyclePaneSpan({ id: 'thread-b' });
+      expect(layout.spanMode).toBe('column');
+      expect(layout.focusedLeafId).toBe('leaf-b');
+    });
+
+    it('caches the derived tree until membership or the spanned pane changes', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', spanMode: 'column' };
+      const helpers = compileModeHelpers(layout);
+
+      const first = helpers.effectivePaneRoot(layout);
+      // Same inputs: the same object, so a divider drag on it survives a render.
+      expect(helpers.effectivePaneRoot(layout)).toBe(first);
+
+      layout.focusedLeafId = 'leaf-b';
+      expect(helpers.effectivePaneRoot(layout)).not.toBe(first);
+    });
+
+    it('renders only the maximised pane and restores the tiling on exit', () => {
+      const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a' };
+      const helpers = compileModeHelpers(layout);
+
+      helpers.togglePaneMaximize({ id: 'thread-b' });
+      expect(layout.maximizedLeafId).toBe('leaf-b');
+      const maximized = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+      expect(maximized.type).toBe('leaf');
+      expect(maximized.threadId).toBe('thread-b');
+
+      expect(helpers.exitPaneMaximize()).toBe(true);
+      expect(layout.maximizedLeafId).toBeNull();
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      // Nothing to leave: esc must fall through to the next cascade step.
+      expect(helpers.exitPaneMaximize()).toBe(false);
+    });
+
+    it('drops a maximised pane that is no longer in the tree', () => {
+      const layout: Layout = {
+        root: tree(), focusedLeafId: 'leaf-a', maximizedLeafId: 'leaf-gone',
+      };
+      const helpers = compileModeHelpers(layout);
+
+      expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
+    it('maximising wins over spanning, so focus mode is always one pane', () => {
+      const layout: Layout = {
+        root: tree(), focusedLeafId: 'leaf-a', spanMode: 'column', maximizedLeafId: 'leaf-a',
+      };
+      const helpers = compileModeHelpers(layout);
+
+      expect((helpers.effectivePaneRoot(layout) as unknown as Leaf).type).toBe('leaf');
+    });
+
+    it('resizes the derived tree while spanning so visible dividers move', () => {
+      expect(functionSource('updateActiveSplit'))
+        .toMatch(/var spanning = Boolean\(layout\.spanMode\)[\s\S]*if \(spanning\) layout\.spanRoot = nextRoot;/);
+    });
+
+    describe('focus-set scoping', () => {
+      const set = (threadIds: string[]): FocusSet => ({
+        id: 'set-1', index: 1, name: 'Set 1', key: 'k', threadIds,
+      });
+
+      it('draws only the set\'s panes without editing the tiling', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const snapshot = JSON.stringify(layout.root);
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-b'])]);
+
+        const scoped = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+        expect(scoped.type).toBe('leaf');
+        expect(scoped.threadId).toBe('thread-b');
+        expect(JSON.stringify(layout.root)).toBe(snapshot);
+      });
+
+      it('stops scoping when the set has lost every pane', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const helpers = compileModeHelpers(layout, {}, [set([])]);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('stops scoping when the set names panes that are no longer tiled', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1' };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-gone'])]);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('ignores an activeSetId that names no set at all', () => {
+        const layout: Layout = { root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'ghost' };
+        const helpers = compileModeHelpers(layout, {}, []);
+
+        expect(helpers.effectivePaneRoot(layout)).toBe(layout.root);
+        expect(layout.activeSetId).toBeNull();
+      });
+
+      it('spans within the set, not around it', () => {
+        // Three panes, two of them in the set: spanning inside the set must
+        // stack only the set's other member beside the spanned pane.
+        const root = PsychePanes.insertBelow(
+          tree(), 'leaf-b', PsychePanes.createLeaf('leaf-c', 'thread-c'), 'split-2',
+        );
+        const layout: Layout = {
+          root, focusedLeafId: 'leaf-a', spanMode: 'column', activeSetId: 'set-1',
+        };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-a', 'thread-c'])]);
+
+        const spanned = helpers.effectivePaneRoot(layout);
+        expect(PsychePanes.leafIds(spanned)).toEqual(['leaf-a', 'leaf-c']);
+      });
+
+      it('keeps focus mode above scoping — one pane means one pane', () => {
+        const layout: Layout = {
+          root: tree(), focusedLeafId: 'leaf-a', activeSetId: 'set-1', maximizedLeafId: 'leaf-a',
+        };
+        const helpers = compileModeHelpers(layout, {}, [set(['thread-b'])]);
+
+        const shown = helpers.effectivePaneRoot(layout) as unknown as Leaf;
+        expect(shown.threadId).toBe('thread-a');
+      });
+    });
+  });
+
+  describe('pane frame', () => {
+    it('gives the header a track per child so its buttons never clip', () => {
+      // Seven since the attention chip joined: a header with more children than
+      // tracks wraps the close button onto a second row, which is exactly the
+      // state a pane is in when it most needs to look deliberate.
+      expect(stylesCss).toMatch(
+        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto auto;/s,
+      );
+      expect(functionSource('mountTerminal')).toMatch(
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+      );
+    });
+
+    it('degrades on its own width rather than the window\'s', () => {
+      expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*container-type:\s*inline-size;[^}]*container-name:\s*pane;/s);
+      expect(stylesCss).toMatch(/@container pane \(max-width: 460px\)\s*\{\s*\.terminal-pane-meta\s*\{\s*display:\s*none;/);
+      expect(stylesCss).toMatch(/@container pane \(max-width: 300px\)/);
+    });
+
+    it('keeps the CSS pane floor and the tree\'s minimums in agreement', () => {
+      expect(stylesCss).toMatch(/--pane-min-w:\s*200px;/);
+      expect(stylesCss).toMatch(/--pane-min-h:\s*137px;/);
+      expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*min-width:\s*var\(--pane-min-w\);[^}]*min-height:\s*var\(--pane-min-h\);/s);
+    });
+
+    it('words every status but running, which stays a static dot', () => {
+      expect(stylesCss).toMatch(/\.terminal-pane-status\s*\{[^}]*border-radius:\s*999px;/s);
+      expect(stylesCss).toMatch(/\.terminal-pane-status\.running\s*\{[^}]*border-radius:\s*50%;/s);
+      // Board 5 gives the only pulse to "needs you"; running is steady.
+      expect(stylesCss).not.toMatch(/\.terminal-pane-status\.running\s*\{[^}]*animation:/s);
+    });
+
+    it('double-clicking the header enters focus mode, but not on its buttons', () => {
+      expect(functionSource('mountTerminal')).toMatch(
+        /header\.addEventListener\("dblclick"[\s\S]*closest\("button"\)\) return;[\s\S]*togglePaneMaximize\(thread\)/,
+      );
+    });
   });
 });
