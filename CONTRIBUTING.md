@@ -42,6 +42,36 @@ node ./psyche doctor --fix
 
 `psyche doctor --fix` applies safe tmux repairs, backs up an existing `~/.tmux.conf`, and only edits the psyche-managed block.
 
+## Local macOS App Channels
+
+Build a protected daily-use app from an explicit tested Git ref:
+
+```sh
+pnpm app:stable -- <git-ref>
+```
+
+The stable command builds the resolved commit in a temporary detached worktree,
+runs the full desktop verification gate, smoke-launches the candidate with
+temporary local data, and transactionally replaces
+`~/Applications/Psyche Build.app` only after every check passes.
+
+Build the current checkout as a separate experimental app:
+
+```sh
+pnpm app:dev
+```
+
+This fast path accepts a dirty checkout, skips the stable-only full gate and
+startup smoke, and replaces only `~/Applications/Psyche Build Dev.app`.
+The stable app uses bundle identifier `dev.opencoven.psyche`; the dev app uses
+`dev.opencoven.psyche.dev`, keeping preferences, WebView data, caches, and
+restored state isolated between channels. Neither command automatically opens
+the installed app.
+
+Local commands do not create a signed or notarized public release. These
+commands produce local application bundles only; use `docs/RELEASE.md` for the
+publication workflow.
+
 ## Recommended Daily Workflow
 
 1. Keep one long-lived maintainer checkout for running local Psyche Build (`pnpm dev`).

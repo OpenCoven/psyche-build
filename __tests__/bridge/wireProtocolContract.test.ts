@@ -4,11 +4,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CLIENT_MESSAGE_TYPES,
+  MOBILE_CONTROL_REQUEST_TYPES,
+  MOBILE_CONTROL_RESPONSE_TYPES,
   SERVER_MESSAGE_TYPES,
   type ClientMessage,
   type ServerMessage,
 } from '../../src/services/bridge/wireProtocol.js';
-import { CLIENT_FIXTURES, SERVER_FIXTURES } from '../../protocol-fixtures/fixtures.js';
+import { CLIENT_FIXTURES, MOBILE_CONTROL_FIXTURES, SERVER_FIXTURES } from '../../protocol-fixtures/fixtures.js';
 import { serialize } from '../../scripts/generate-protocol-fixtures.js';
 
 /**
@@ -35,10 +37,21 @@ function loadFixtures(file: string): Record<string, { type: string; payload: unk
 
 const clientFixtures = loadFixtures('client-messages.json');
 const serverFixtures = loadFixtures('server-messages.json');
+const mobileControlFixtures = loadFixtures('mobile-control.json');
 
 /** Fixture keys may carry a `_variant` suffix; the wire type is the `type` field. */
 function typesCovered(fixtures: Record<string, { type: string }>): Set<string> {
   return new Set(Object.values(fixtures).map((message) => message.type));
+}
+
+function nestedControlTypesCovered(
+  fixtures: Record<string, { type: string; payload: unknown }>,
+): Set<string> {
+  return new Set(
+    Object.values(fixtures)
+      .filter((message) => message.type === 'control')
+      .map((message) => (message.payload as { type: string }).type),
+  );
 }
 
 describe('wire protocol contract', () => {
@@ -46,13 +59,13 @@ describe('wire protocol contract', () => {
     // The anti-drift check. Add a case to the union and this names it as
     // missing until a fixture exists for the Swift side to decode too.
     it('covers every client message type', () => {
-      const covered = typesCovered(clientFixtures);
+      const covered = new Set([...typesCovered(clientFixtures), ...typesCovered(mobileControlFixtures)]);
       const missing = CLIENT_MESSAGE_TYPES.filter((type) => !covered.has(type));
       expect(missing).toEqual([]);
     });
 
     it('covers every server message type', () => {
-      const covered = typesCovered(serverFixtures);
+      const covered = new Set([...typesCovered(serverFixtures), ...typesCovered(mobileControlFixtures)]);
       const missing = SERVER_MESSAGE_TYPES.filter((type) => !covered.has(type));
       expect(missing).toEqual([]);
     });
@@ -67,6 +80,31 @@ describe('wire protocol contract', () => {
     it('has no fixture for an undeclared server type', () => {
       const declared = new Set<string>(SERVER_MESSAGE_TYPES);
       expect([...typesCovered(serverFixtures)].filter((t) => !declared.has(t))).toEqual([]);
+    });
+
+    it('has no mobile control fixture for an undeclared top-level type', () => {
+      const declared = new Set<string>([...CLIENT_MESSAGE_TYPES, ...SERVER_MESSAGE_TYPES]);
+      expect([...typesCovered(mobileControlFixtures)].filter((t) => !declared.has(t))).toEqual([]);
+    });
+
+    it('covers every supported nested mobile control request type', () => {
+      const covered = nestedControlTypesCovered(mobileControlFixtures);
+      expect(MOBILE_CONTROL_REQUEST_TYPES.filter((type) => !covered.has(type))).toEqual([]);
+    });
+
+    it('covers every supported nested mobile control response type', () => {
+      const covered = nestedControlTypesCovered(mobileControlFixtures);
+      expect(MOBILE_CONTROL_RESPONSE_TYPES.filter((type) => !covered.has(type))).toEqual([]);
+    });
+
+    it('has no unsupported nested mobile control fixture type', () => {
+      const declared = new Set<string>([
+        ...MOBILE_CONTROL_REQUEST_TYPES,
+        ...MOBILE_CONTROL_RESPONSE_TYPES,
+      ]);
+      expect(
+        [...nestedControlTypesCovered(mobileControlFixtures)].filter((type) => !declared.has(type)),
+      ).toEqual([]);
     });
   });
 
@@ -101,6 +139,15 @@ describe('wire protocol contract', () => {
     });
   });
 
+  describe('mobile control fixtures', () => {
+    it.each(Object.keys(mobileControlFixtures))('%s uses a declared top-level envelope', (name) => {
+      const message = mobileControlFixtures[name] as ClientMessage | ServerMessage;
+      expect(typeof message.type).toBe('string');
+      expect([...new Set<string>([...CLIENT_MESSAGE_TYPES, ...SERVER_MESSAGE_TYPES])]).toContain(message.type);
+      expect((message as { payload: unknown }).payload).toBeTruthy();
+    });
+  });
+
   describe('round-trip', () => {
     // Swift's JSONEncoder/JSONDecoder must reproduce the same value. If this
     // side cannot round-trip a fixture, the fixture is malformed and the Swift
@@ -112,6 +159,11 @@ describe('wire protocol contract', () => {
 
     it.each([...Object.keys(serverFixtures)])('server: %s survives re-encoding', (name) => {
       const original = serverFixtures[name];
+      expect(JSON.parse(JSON.stringify(original))).toEqual(original);
+    });
+
+    it.each([...Object.keys(mobileControlFixtures)])('mobile control: %s survives re-encoding', (name) => {
+      const original = mobileControlFixtures[name];
       expect(JSON.parse(JSON.stringify(original))).toEqual(original);
     });
   });
@@ -157,6 +209,11 @@ describe('wire protocol contract', () => {
     it('server-messages.json is up to date', () => {
       const onDisk = fs.readFileSync(path.join(FIXTURE_DIR, 'server-messages.json'), 'utf8');
       expect(onDisk).toBe(serialize(SERVER_FIXTURES));
+    });
+
+    it('mobile-control.json is up to date', () => {
+      const onDisk = fs.readFileSync(path.join(FIXTURE_DIR, 'mobile-control.json'), 'utf8');
+      expect(onDisk).toBe(serialize(MOBILE_CONTROL_FIXTURES));
     });
   });
 

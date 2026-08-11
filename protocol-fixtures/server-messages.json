@@ -134,7 +134,11 @@
       "projectName": "psyche-build",
       "protocolVersion": 2,
       "serverId": "srv-1",
-      "serverName": "psyche-build"
+      "serverName": "psyche-build",
+      "supportedVersions": [
+        2,
+        3
+      ]
     },
     "type": "welcome"
   },
@@ -143,7 +147,11 @@
       "projectName": null,
       "protocolVersion": 2,
       "serverId": "srv-1",
-      "serverName": "psyche-build"
+      "serverName": "psyche-build",
+      "supportedVersions": [
+        2,
+        3
+      ]
     },
     "type": "welcome"
   }

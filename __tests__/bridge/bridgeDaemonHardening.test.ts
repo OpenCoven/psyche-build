@@ -49,6 +49,7 @@ class RecordingHub extends PaneStreamHub {
 
 let running: BridgeDaemon[] = [];
 let clients: WebSocket[] = [];
+let daemonCounter = 0;
 
 afterEach(async () => {
   for (const c of clients) {
@@ -62,9 +63,10 @@ afterEach(async () => {
 function startDaemon(overrides: Record<string, unknown> = {}) {
   const hub = new RecordingHub("test-session");
   const pairing = new PairingFlow();
+  daemonCounter += 1;
   const daemon = new BridgeDaemon({
     serverId: "test-srv",
-    serverName: "test",
+    serverName: `test-${daemonCounter}`,
     projectName: "psyche",
     sessionName: "test-session",
     hubFactory: () => hub,

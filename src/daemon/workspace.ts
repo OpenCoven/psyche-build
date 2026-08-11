@@ -5,6 +5,8 @@ import { listPanes } from './panes.js';
 import type { CovenSessionSummary, PaneSummary } from './protocol.js';
 import {
   buildWorkspaceSnapshot,
+  normalizeWorkspaceRoot,
+  normalizeWorkspaceWorktrees,
   readProjectWorktrees,
   type GitWorktreeSnapshotInput,
   type WorkspaceSnapshot,
@@ -29,13 +31,19 @@ export async function readDaemonWorkspaceSnapshot(
   projectRoot: string,
   deps: DaemonWorkspaceDeps = defaultDeps,
 ): Promise<WorkspaceSnapshot> {
-  const worktrees = deps.readWorktrees(projectRoot);
+  const normalizedProjectRoot = normalizeWorkspaceRoot(projectRoot);
+  const worktrees = normalizeWorkspaceWorktrees(
+    normalizedProjectRoot,
+    deps.readWorktrees(projectRoot),
+  );
   const covenRoots = Array.from(new Set([
-    projectRoot,
-    ...worktrees.filter((worktree) => !worktree.missing).map((worktree) => worktree.path),
+    normalizedProjectRoot,
+    ...worktrees
+      .filter((worktree) => !worktree.missing)
+      .map((worktree) => worktree.path),
   ]));
   const [panes, covenGroups] = await Promise.all([
-    deps.listPanes(projectRoot),
+    deps.listPanes(normalizedProjectRoot),
     Promise.all(covenRoots.map((root) => deps.listCovenSessions(root).catch(() => []))),
   ]);
   const covenSessions = Array.from(
@@ -45,9 +53,9 @@ export async function readDaemonWorkspaceSnapshot(
   return buildWorkspaceSnapshot({
     revision: deps.revision(),
     projects: [{
-      id: projectRoot,
-      root: projectRoot,
-      title: path.basename(projectRoot),
+      id: normalizedProjectRoot,
+      root: normalizedProjectRoot,
+      title: path.basename(normalizedProjectRoot),
       worktrees,
       panes: panes.map((pane) => ({
         id: pane.id,
