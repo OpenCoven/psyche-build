@@ -12,6 +12,8 @@ describe('workspace snapshot protocol fixture', () => {
     expect(response.type).toBe('workspace.snapshot.result');
     if (response.type !== 'workspace.snapshot.result') return;
     expect(response.workspace.projects[0].worktrees).toHaveLength(2);
+    expect(response.workspace.projects[0].worktrees[0].panes[0].lastActivity)
+      .toBe('2026-08-03T02:12:00.000Z');
     expect(response.workspace.projects[0].projectPanes[0].recoverability)
       .toBe('missing-worktree');
   });

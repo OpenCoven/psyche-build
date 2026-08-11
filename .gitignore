@@ -9,6 +9,7 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.derived-data/
 
 .worktrees/
 

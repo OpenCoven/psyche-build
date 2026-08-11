@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 import type { CovenSessionSummary } from '../daemon/protocol.js';
@@ -29,6 +29,7 @@ export interface WorkspacePaneInput {
   agent?: string;
   status: string;
   needsAttention?: boolean;
+  lastActivity?: string;
 }
 
 export interface PaneSnapshot extends Omit<WorkspacePaneInput, 'kind'> {
@@ -57,6 +58,20 @@ export interface WorkspaceSnapshot {
   projects: ProjectSnapshot[];
 }
 
+export type DeepReadonly<T> =
+  T extends (...args: never[]) => unknown
+    ? T
+    : T extends readonly (infer Item)[]
+      ? readonly DeepReadonly<Item>[]
+      : T extends object
+        ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+        : T;
+
+export type ReadonlyPaneSnapshot = DeepReadonly<PaneSnapshot>;
+export type ReadonlyWorktreeSnapshot = DeepReadonly<WorktreeSnapshot>;
+export type ReadonlyProjectSnapshot = DeepReadonly<ProjectSnapshot>;
+export type ReadonlyWorkspaceSnapshot = DeepReadonly<WorkspaceSnapshot>;
+
 export interface WorkspaceProjectInput {
   id: string;
   root: string;
@@ -70,6 +85,9 @@ export interface BuildWorkspaceSnapshotInput {
   revision: number;
   projects: WorkspaceProjectInput[];
 }
+
+const ISO_DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_ZONED_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 export function parseGitWorktreePorcelain(raw: string): GitWorktreeSnapshotInput[] {
   const blocks = raw
@@ -127,6 +145,11 @@ export function parseGitWorktreePorcelain(raw: string): GitWorktreeSnapshotInput
 }
 
 export type GitRunner = (cwd: string, args: string[]) => string;
+export type AsyncGitRunner = (cwd: string, args: string[]) => Promise<string>;
+
+const ASYNC_GIT_CONCURRENCY = 4;
+let activeAsyncGitCalls = 0;
+const asyncGitWaiters: Array<() => void> = [];
 
 export function readProjectWorktrees(
   projectRoot: string,
@@ -151,11 +174,84 @@ export function readProjectWorktrees(
   });
 }
 
+export async function readProjectWorktreesAsync(
+  projectRoot: string,
+  runGit: AsyncGitRunner = defaultAsyncGitRunner,
+): Promise<GitWorktreeSnapshotInput[]> {
+  const worktrees = parseGitWorktreePorcelain(
+    await runGitWithPermit(runGit, projectRoot, ['worktree', 'list', '--porcelain']),
+  );
+
+  return Promise.all(worktrees.map(async (worktree) => {
+    if (worktree.prunable || worktree.bare) return worktree;
+    try {
+      const status = await runGitWithPermit(runGit, worktree.path, [
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=normal',
+      ]);
+      return { ...worktree, dirty: status.trim().length > 0 };
+    } catch {
+      return { ...worktree, missing: true };
+    }
+  }));
+}
+
+async function runGitWithPermit(
+  runGit: AsyncGitRunner,
+  cwd: string,
+  args: string[],
+): Promise<string> {
+  await acquireAsyncGitPermit();
+  try {
+    return await runGit(cwd, args);
+  } finally {
+    releaseAsyncGitPermit();
+  }
+}
+
+function acquireAsyncGitPermit(): Promise<void> {
+  if (activeAsyncGitCalls < ASYNC_GIT_CONCURRENCY) {
+    activeAsyncGitCalls += 1;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    asyncGitWaiters.push(resolve);
+  });
+}
+
+function releaseAsyncGitPermit(): void {
+  const next = asyncGitWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  activeAsyncGitCalls -= 1;
+}
+
 function defaultGitRunner(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function defaultAsyncGitRunner(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 5_000,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
   });
 }
 
@@ -166,8 +262,88 @@ export function buildWorkspaceSnapshot(input: BuildWorkspaceSnapshotInput): Work
   };
 }
 
+export function normalizeWorkspaceRoot(projectRoot: string): string {
+  const trimmed = projectRoot.trim();
+  return path.resolve(trimmed || projectRoot);
+}
+
+export function normalizeWorkspaceWorktrees(
+  projectRoot: string,
+  worktrees: readonly GitWorktreeSnapshotInput[],
+): GitWorktreeSnapshotInput[] {
+  const normalizedProjectRoot = normalizeWorkspaceRoot(projectRoot);
+  const duplicatesByPath = new Map<string, GitWorktreeSnapshotInput[]>();
+
+  for (const worktree of worktrees) {
+    const normalized = {
+      ...worktree,
+      path: normalizeWorkspaceRoot(worktree.path),
+    };
+    const duplicates = duplicatesByPath.get(normalized.path) ?? [];
+    duplicates.push(normalized);
+    duplicatesByPath.set(normalized.path, duplicates);
+  }
+
+  return [...duplicatesByPath.entries()]
+    .map(([normalizedPath, duplicates]) => mergeDuplicateWorktrees(
+      normalizedPath,
+      normalizedProjectRoot,
+      duplicates,
+    ))
+    .sort((left, right) => compareWorktreePaths(left.path, right.path, normalizedProjectRoot));
+}
+
+export function normalizeIsoDateString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (ISO_DATE_ONLY.test(trimmed)) return undefined;
+
+  const match = ISO_ZONED_DATE_TIME.exec(trimmed);
+  if (!match) return undefined;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth(year, month)
+    || hour > 23
+    || minute > 59
+    || second > 59
+  ) {
+    return undefined;
+  }
+
+  if (offset !== 'Z') {
+    const offsetHour = Number(offset.slice(1, 3));
+    const offsetMinute = Number(offset.slice(4, 6));
+    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
+      return undefined;
+    }
+  }
+
+  const date = new Date(trimmed);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+export function normalizeIsoEpochMilliseconds(value: number | undefined): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
 function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
-  const worktrees: WorktreeSnapshot[] = project.worktrees.map((worktree) => ({
+  const worktrees: WorktreeSnapshot[] = normalizeWorkspaceWorktrees(project.root, project.worktrees)
+    .map((worktree) => ({
     ...worktree,
     panes: [],
     runningCount: 0,
@@ -210,14 +386,17 @@ function buildProjectSnapshot(project: WorkspaceProjectInput): ProjectSnapshot {
 }
 
 function covenSessionPane(session: CovenSessionSummary): PaneSnapshot {
+  const cwd = trimmedString(session.cwd);
+  const id = trimmedString(session.id);
   return {
-    id: session.id,
-    cwd: session.cwd ?? session.projectRoot,
-    title: session.title,
+    id: id ?? session.id,
+    cwd: cwd ? normalizeWorkspaceRoot(cwd) : normalizeWorkspaceRoot(session.projectRoot),
+    title: trimmedString(session.title) ?? '',
     kind: 'coven-session',
-    agent: session.harness,
-    status: session.status,
-    needsAttention: session.status === 'waiting',
+    agent: trimmedString(session.harness) ?? '',
+    status: trimmedString(session.status) ?? '',
+    needsAttention: trimmedString(session.status) === 'waiting',
+    lastActivity: normalizeIsoDateString(session.updatedAt),
     recoverability: 'healthy',
   };
 }
@@ -232,10 +411,110 @@ function mostSpecificWorktree(
 }
 
 function isInsideOrEqual(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
+  const relative = path.relative(normalizeWorkspaceRoot(parent), normalizeWorkspaceRoot(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function isRunning(status: string): boolean {
   return ['starting', 'running', 'working', 'analyzing'].includes(status);
+}
+
+/**
+ * Sort duplicate aliases by how informative they are, then by a fully
+ * normalized payload tie-breaker. The first record becomes the canonical
+ * branch/head/detached winner; safety flags are merged conservatively so a
+ * true missing/locked/prunable/dirty/bare bit is never dropped.
+ */
+function mergeDuplicateWorktrees(
+  normalizedPath: string,
+  normalizedProjectRoot: string,
+  duplicates: readonly GitWorktreeSnapshotInput[],
+): GitWorktreeSnapshotInput {
+  const ordered = [...duplicates].sort(compareDuplicateWorktreeCandidates);
+  const winner = ordered[0];
+
+  return {
+    ...winner,
+    path: normalizedPath,
+    head: trimmedString(winner.head) ?? winner.head,
+    branch: trimmedString(winner.branch),
+    isMain: normalizedPath === normalizedProjectRoot || duplicates.some((worktree) => worktree.isMain),
+    detached: winner.detached,
+    bare: duplicates.some((worktree) => worktree.bare),
+    locked: duplicates.some((worktree) => worktree.locked),
+    lockReason: trimmedString(winner.lockReason) ?? firstDefined(ordered.map((worktree) => trimmedString(worktree.lockReason))),
+    prunable: duplicates.some((worktree) => worktree.prunable),
+    pruneReason: trimmedString(winner.pruneReason) ?? firstDefined(ordered.map((worktree) => trimmedString(worktree.pruneReason))),
+    dirty: duplicates.some((worktree) => worktree.dirty),
+    missing: duplicates.some((worktree) => worktree.missing),
+  };
+}
+
+function compareDuplicateWorktreeCandidates(
+  left: GitWorktreeSnapshotInput,
+  right: GitWorktreeSnapshotInput,
+): number {
+  const leftScore = duplicateWorktreeScore(left);
+  const rightScore = duplicateWorktreeScore(right);
+  if (leftScore !== rightScore) return rightScore - leftScore;
+
+  return compareStrings(stableWorktreeRecord(left), stableWorktreeRecord(right));
+}
+
+function duplicateWorktreeScore(worktree: GitWorktreeSnapshotInput): number {
+  return (worktree.isMain ? 32 : 0)
+    + (trimmedString(worktree.branch) ? 16 : 0)
+    + (trimmedString(worktree.head) ? 8 : 0)
+    + (trimmedString(worktree.lockReason) ? 4 : 0)
+    + (trimmedString(worktree.pruneReason) ? 2 : 0)
+    + (!worktree.detached ? 1 : 0);
+}
+
+function stableWorktreeRecord(worktree: GitWorktreeSnapshotInput): string {
+  return JSON.stringify({
+    path: normalizeWorkspaceRoot(worktree.path),
+    head: trimmedString(worktree.head) ?? '',
+    branch: trimmedString(worktree.branch) ?? '',
+    isMain: worktree.isMain,
+    detached: worktree.detached,
+    bare: worktree.bare,
+    locked: worktree.locked,
+    lockReason: trimmedString(worktree.lockReason) ?? '',
+    prunable: worktree.prunable,
+    pruneReason: trimmedString(worktree.pruneReason) ?? '',
+    dirty: worktree.dirty,
+    missing: worktree.missing,
+  });
+}
+
+function compareWorktreePaths(
+  leftPath: string,
+  rightPath: string,
+  normalizedProjectRoot: string,
+): number {
+  const leftIsProjectRoot = leftPath === normalizedProjectRoot;
+  const rightIsProjectRoot = rightPath === normalizedProjectRoot;
+  if (leftIsProjectRoot !== rightIsProjectRoot) return leftIsProjectRoot ? -1 : 1;
+  return compareStrings(leftPath, rightPath);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function trimmedString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function firstDefined<T>(values: readonly (T | undefined)[]): T | undefined {
+  return values.find((value): value is T => value !== undefined);
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

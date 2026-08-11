@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CLIENT_FIXTURES,
+  MOBILE_CONTROL_FIXTURES,
   SERVER_FIXTURES,
   WORKSPACE_SNAPSHOT_FIXTURE,
 } from '../protocol-fixtures/fixtures.js';
@@ -35,6 +36,7 @@ export function serialize(fixtures: unknown): string {
 
 export const OUTPUTS = [
   ['client-messages.json', CLIENT_FIXTURES],
+  ['mobile-control.json', MOBILE_CONTROL_FIXTURES],
   ['server-messages.json', SERVER_FIXTURES],
   ['workspace-snapshot.json', WORKSPACE_SNAPSHOT_FIXTURE],
 ] as const;

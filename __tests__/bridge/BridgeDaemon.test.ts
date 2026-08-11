@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BridgeDaemon } from "../../src/services/bridge/BridgeDaemon";
 import { PaneStreamHub } from "../../src/services/bridge/PaneStreamHub";
 import { PairingFlow } from "../../src/services/bridge/PairingFlow";
 import { WebSocket } from "ws";
 import {
+  LEGACY_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
   type PaneSnapshot,
   type Project,
   type Ritual,
@@ -51,6 +53,148 @@ class NoopPaneStreamHub extends PaneStreamHub {
 const noopHubFactory = (sessionName: string) => new NoopPaneStreamHub(sessionName);
 
 describe("BridgeDaemon", () => {
+  it("passes the active TLS fingerprint to Bonjour publication", async () => {
+    const bonjour = {
+      publish: vi.fn(),
+      stop: vi.fn(async () => {}),
+    };
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test-host",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      bonjourFactory: () => bonjour,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+
+    try {
+      const started = await daemon.start();
+
+      expect(bonjour.publish).toHaveBeenCalledWith({
+        name: "test-host",
+        port: started.port,
+        serverId: "test-srv",
+        fingerprint: started.fingerprint,
+      });
+    } finally {
+      await daemon.stop();
+    }
+  });
+
+  it("sends a legacy v2 welcome before hello and no duplicate welcome for v2", async () => {
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const welcomes: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type === "welcome") {
+          welcomes.push(message);
+        }
+        if (welcomes.length === 1 && message.type === "welcome") {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: {
+              clientId: "v2-client",
+              clientName: "v2",
+              protocolVersion: LEGACY_PROTOCOL_VERSION,
+              token: null,
+            },
+          }));
+          client.send(JSON.stringify({
+            type: "ping",
+            payload: { token: "v2-negotiated" },
+          }));
+        } else if (message.type === "pong") {
+          resolve();
+        }
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(welcomes).toEqual([{
+      type: "welcome",
+      payload: {
+        serverId: "test-srv",
+        serverName: "test",
+        protocolVersion: LEGACY_PROTOCOL_VERSION,
+        projectName: "psyche",
+        supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+      },
+    }]);
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("sends a negotiated v3 welcome after a v3 hello", async () => {
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      paneProvider: () => [],
+      projectProvider: () => [],
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const welcomes: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("message", (raw) => {
+        const message = JSON.parse(raw.toString("utf8"));
+        if (message.type !== "welcome") return;
+        welcomes.push(message);
+        if (welcomes.length === 1) {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: {
+              clientId: "v3-client",
+              clientName: "v3",
+              protocolVersion: PROTOCOL_VERSION,
+              token: null,
+            },
+          }));
+        } else {
+          resolve();
+        }
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(welcomes.map((message) => message.payload.protocolVersion)).toEqual([
+      LEGACY_PROTOCOL_VERSION,
+      PROTOCOL_VERSION,
+    ]);
+    expect(welcomes.every((message) =>
+      JSON.stringify(message.payload.supportedVersions) === JSON.stringify(SUPPORTED_PROTOCOL_VERSIONS)
+    )).toBe(true);
+
+    client.close();
+    await daemon.stop();
+  });
+
   it("requires authentication before listPanes/listProjects", async () => {
     const daemon = new BridgeDaemon({
       serverId: "test-srv",
@@ -90,9 +234,211 @@ describe("BridgeDaemon", () => {
     await daemon.stop();
   });
 
-  it("answers listPanes/listProjects for authenticated clients", async () => {
+  it.each([LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION])(
+    "answers listPanes/listProjects for authenticated hello protocol v%s clients",
+    async (protocolVersion) => {
+      const tokenStore = new FakeTokenStore() as any;
+      const knownToken = `list-test-token-v${protocolVersion}`;
+      tokenStore.records = [{
+        token: knownToken,
+        clientId: "c",
+        clientName: "c",
+        pairedAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      }];
+
+      const daemon = new BridgeDaemon({
+        serverId: "test-srv",
+        serverName: "test",
+        projectName: "psyche",
+        sessionName: "test-session",
+        hubFactory: noopHubFactory,
+        paneProvider: () => [{
+          id: "%legacy",
+          displayName: "Legacy pane",
+          kind: "worktree",
+          projectId: "legacy-project",
+          projectName: "Legacy project",
+          worktreePath: "/legacy",
+          agent: null,
+          status: "idle",
+        }],
+        projectProvider: () => [{
+          id: "legacy-project",
+          displayName: "Legacy project",
+          attentionCount: 0,
+        }],
+        workspaceProvider: () => {
+          throw new Error("canonical provider should not serve legacy list routes");
+        },
+        ...noopRituals,
+        tokenStore,
+      });
+      const { port } = await daemon.start();
+      const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+      const received: any[] = [];
+      await new Promise<void>((resolve, reject) => {
+        client.on("open", () => {
+          client.send(JSON.stringify({
+            type: "hello",
+            payload: { clientId: "c", clientName: "c", protocolVersion, token: knownToken },
+          }));
+          client.send(JSON.stringify({ type: "listPanes", payload: {} }));
+          client.send(JSON.stringify({ type: "listProjects", payload: {} }));
+        });
+        client.on("message", (raw) => {
+          const m = JSON.parse(raw.toString("utf8"));
+          received.push(m);
+          if (m.type === "projectList") resolve();
+        });
+        client.on("close", (_code, reason) => reject(new Error(`unexpected close: ${reason.toString()}`)));
+        client.on("error", reject);
+        setTimeout(() => reject(new Error("timeout")), 2000);
+      });
+      expect(received.find((x: any) => x.type === "paneList").payload).toEqual([
+        expect.objectContaining({ id: "%legacy", displayName: "Legacy pane" }),
+      ]);
+      expect(received.find((x: any) => x.type === "projectList").payload).toEqual([
+        {
+          id: "legacy-project",
+          displayName: "Legacy project",
+          attentionCount: 0,
+        },
+      ]);
+      expect([...((daemon as any).listener.activeSessions as Set<any>)][0]?.protocolVersion).toBe(protocolVersion);
+      client.close();
+      await daemon.stop();
+    }
+  );
+
+  it("rejects unauthenticated control before invoking the workspace provider", async () => {
+    let providerCalls = 0;
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => {
+        providerCalls += 1;
+        return WORKSPACE_SNAPSHOT_FIXTURE.workspace;
+      },
+      ...noopRituals,
+      tokenStore: new FakeTokenStore() as any,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: null },
+        }));
+        client.send(JSON.stringify({
+          type: "control",
+          payload: { type: "workspace.snapshot", requestId: "workspace-1" },
+        }));
+      });
+      client.on("message", (raw) => {
+        const m = JSON.parse(raw.toString("utf8"));
+        received.push(m);
+        if (m.type === "control") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(providerCalls).toBe(0);
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "error",
+        requestId: "workspace-1",
+        code: "not_authenticated",
+        message: "pair first",
+      },
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("rejects authenticated v2 control with a protocol mismatch", async () => {
     const tokenStore = new FakeTokenStore() as any;
-    const knownToken = "list-test-token";
+    const knownToken = "control-v2-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    let providerCalls = 0;
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: () => {
+        providerCalls += 1;
+        return WORKSPACE_SNAPSHOT_FIXTURE.workspace;
+      },
+      ...noopRituals,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: LEGACY_PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "after-hello" } }));
+      });
+      client.on("message", (raw) => {
+        const m = JSON.parse(raw.toString("utf8"));
+        received.push(m);
+        if (m.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: { type: "workspace.snapshot", requestId: "workspace-v2" },
+          }));
+        }
+        if (m.type === "control") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(providerCalls).toBe(0);
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "error",
+        requestId: "workspace-v2",
+        code: "protocol_mismatch",
+        message: "control requires negotiated protocol v3",
+      },
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("rejects authenticated v3 control when no gateway is available", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "control-unavailable-token";
     tokenStore.records = [{
       token: knownToken,
       clientId: "c",
@@ -107,8 +453,136 @@ describe("BridgeDaemon", () => {
       projectName: "psyche",
       sessionName: "test-session",
       hubFactory: noopHubFactory,
-      paneProvider: () => { throw new Error("legacy pane provider should not run"); },
-      projectProvider: () => { throw new Error("legacy project provider should not run"); },
+      paneProvider: () => [],
+      projectProvider: () => [],
+      ...noopRituals,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "after-hello" } }));
+      });
+      client.on("message", (raw) => {
+        const m = JSON.parse(raw.toString("utf8"));
+        received.push(m);
+        if (m.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: { type: "workspace.snapshot", requestId: "workspace-unavailable" },
+          }));
+        }
+        if (m.type === "control") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "error",
+        requestId: "workspace-unavailable",
+        code: "control_unavailable",
+        message: "workspace control is not available",
+      },
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("answers authenticated v3 workspace snapshot control requests", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "control-workspace-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+
+    const workspace = structuredClone(WORKSPACE_SNAPSHOT_FIXTURE.workspace);
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: async () => workspace,
+      ...noopRituals,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "after-hello" } }));
+      });
+      client.on("message", (raw) => {
+        const m = JSON.parse(raw.toString("utf8"));
+        received.push(m);
+        if (m.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: { type: "workspace.snapshot", requestId: "workspace-ok" },
+          }));
+        }
+        if (m.type === "control") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "mobile.workspace.snapshot.result",
+        requestId: "workspace-ok",
+        sequence: 0,
+        workspace,
+      },
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("returns a typed control error with requestId for unsupported v3 control", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "control-unsupported-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
       workspaceProvider: () => WORKSPACE_SNAPSHOT_FIXTURE.workspace,
       ...noopRituals,
       tokenStore,
@@ -116,25 +590,106 @@ describe("BridgeDaemon", () => {
     const { port } = await daemon.start();
     const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
     const received: any[] = [];
+
     await new Promise<void>((resolve, reject) => {
       client.on("open", () => {
         client.send(JSON.stringify({
           type: "hello",
           payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
         }));
-        client.send(JSON.stringify({ type: "listPanes", payload: {} }));
-        client.send(JSON.stringify({ type: "listProjects", payload: {} }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "after-hello" } }));
       });
       client.on("message", (raw) => {
         const m = JSON.parse(raw.toString("utf8"));
         received.push(m);
-        if (m.type === "projectList") resolve();
+        if (m.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: { type: "files.list", requestId: "unsupported-1", paneId: "%3" },
+          }));
+        }
+        if (m.type === "control") resolve();
       });
       client.on("error", reject);
       setTimeout(() => reject(new Error("timeout")), 2000);
     });
-    expect(received.find((x: any) => x.type === "paneList").payload).toHaveLength(3);
-    expect(received.find((x: any) => x.type === "projectList").payload[0].id).toBe("project-1");
+
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "error",
+        requestId: "unsupported-1",
+        code: "command_not_supported",
+        message: "mobile control command is not supported yet: files.list",
+      },
+    });
+
+    client.close();
+    await daemon.stop();
+  });
+
+  it("surfaces gateway/provider failures as typed control errors", async () => {
+    const tokenStore = new FakeTokenStore() as any;
+    const knownToken = "control-provider-failure-token";
+    tokenStore.records = [{
+      token: knownToken,
+      clientId: "c",
+      clientName: "c",
+      pairedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+
+    const daemon = new BridgeDaemon({
+      serverId: "test-srv",
+      serverName: "test",
+      projectName: "psyche",
+      sessionName: "test-session",
+      hubFactory: noopHubFactory,
+      paneProvider: () => [],
+      projectProvider: () => [],
+      workspaceProvider: async () => {
+        throw new Error("workspace exploded");
+      },
+      ...noopRituals,
+      tokenStore,
+    });
+    const { port } = await daemon.start();
+    const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("open", () => {
+        client.send(JSON.stringify({
+          type: "hello",
+          payload: { clientId: "c", clientName: "c", protocolVersion: PROTOCOL_VERSION, token: knownToken },
+        }));
+        client.send(JSON.stringify({ type: "ping", payload: { token: "after-hello" } }));
+      });
+      client.on("message", (raw) => {
+        const m = JSON.parse(raw.toString("utf8"));
+        received.push(m);
+        if (m.type === "pong") {
+          client.send(JSON.stringify({
+            type: "control",
+            payload: { type: "workspace.snapshot", requestId: "workspace-fail" },
+          }));
+        }
+        if (m.type === "control") resolve();
+      });
+      client.on("error", reject);
+      setTimeout(() => reject(new Error("timeout")), 2000);
+    });
+
+    expect(received.find((message) => message.type === "control")).toEqual({
+      type: "control",
+      payload: {
+        type: "error",
+        requestId: "workspace-fail",
+        code: "internal_error",
+        message: "workspace exploded",
+      },
+    });
+
     client.close();
     await daemon.stop();
   });
@@ -357,6 +912,9 @@ describe("BridgeDaemon", () => {
     });
     const { port } = await daemon.start();
     const client = new WebSocket(`wss://127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const received: any[] = [];
+    const mismatch = `protocol mismatch: client=99 supported=${SUPPORTED_PROTOCOL_VERSIONS.join(",")}`;
+    let closeReason = "";
     await new Promise<void>((resolve, reject) => {
       client.on("open", () => {
         client.send(JSON.stringify({
@@ -364,9 +922,21 @@ describe("BridgeDaemon", () => {
           payload: { clientId: "c", clientName: "c", protocolVersion: 99, token: null },
         }));
       });
-      client.on("close", () => resolve());
+      client.on("message", (raw) => {
+        received.push(JSON.parse(raw.toString("utf8")));
+      });
+      client.on("close", (_code, reason) => {
+        closeReason = reason.toString();
+        resolve();
+      });
+      client.on("error", reject);
       setTimeout(() => reject(new Error("expected close")), 2000);
     });
+    expect(received).toContainEqual({
+      type: "error",
+      payload: { code: "closing", message: mismatch },
+    });
+    expect(closeReason).toBe(mismatch);
     await daemon.stop();
   });
 
