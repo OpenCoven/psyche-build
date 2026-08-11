@@ -237,11 +237,13 @@
     if (thread) project.lastActiveThreadId = thread.id;
   }
   async function activateProjectWorktree(project, worktreePath, options) {
+    var refreshStatus = !options || options.refreshStatus !== false;
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     project.selectedWorktreePath = worktreePath;
     if (project.id !== state.activeProjectId) {
-      if (!(await setActiveProject(project.id, options))) {
+      var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      if (!(await setActiveProject(project.id, projectOptions))) {
         project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
@@ -254,7 +256,9 @@
     refreshSidebar();
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (typeof refreshStatusController === "function") refreshStatusController();
+    if (refreshStatus && typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
   function measuredTerminalHost() {
@@ -453,6 +457,7 @@
     return Boolean(thread) && thread.status === "exited";
   }
   async function setActiveProject(id, options) {
+    var refreshStatus = !options || options.refreshStatus !== false;
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
     state.activeProjectId = id;
@@ -471,7 +476,8 @@
         ? project.lastActiveThreadId
         : (threads[0] ? threads[0].id : null);
     if (nextId) {
-      await focusThread(nextId);
+      var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      await focusThread(nextId, focusOptions);
     } else {
       state.activeThreadId = null;
       renderPaneWorkspace();
@@ -485,7 +491,9 @@
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
-    if (typeof refreshStatusController === "function") refreshStatusController();
+    if (refreshStatus && typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
   var projectCounter = 0;
@@ -3025,7 +3033,7 @@
     });
   }
 
-  async function focusThread(id) {
+  async function focusThread(id, options) {
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
@@ -3053,7 +3061,10 @@
     });
 
     setProjectStatus(project, statusLevel(thread.status));
-    if (typeof refreshStatusController === "function") refreshStatusController();
+    if ((!options || options.refreshStatus !== false) &&
+        typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
 

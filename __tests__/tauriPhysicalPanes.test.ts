@@ -864,6 +864,227 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
+  it('refreshes an inactive-project worktree switch once after nested project activation', async () => {
+    const project = {
+      id: 'project',
+      selectedWorktreePath: '/old',
+      lastActiveThreadId: 'thread-a',
+    };
+    const state = {
+      activeProjectId: 'other',
+      activeThreadId: null as string | null,
+      threads: [{
+        id: 'thread-a',
+        projectId: project.id,
+        worktreePath: '/target',
+        hidden: false,
+      }],
+    };
+    const options = { ensureCoven: false };
+    const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    let refreshes = 0;
+    const setActiveProject = compileFunction<(
+      id: string,
+      callOptions?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('setActiveProject'), {
+      state,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+      focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
+        focusCalls.push({ id, options: focusOptions });
+        state.activeThreadId = id;
+        return true;
+      },
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncProjectBrowser: () => undefined,
+      ensureProjectCoven: async () => null,
+      setStatus: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project,
+      path: string,
+      callOptions?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => true,
+      state,
+      setActiveProject,
+      activatePaneLayoutFocus: () => undefined,
+      renderPaneWorkspace: () => undefined,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+
+    await expect(activateProjectWorktree(project, '/target', options)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBe('thread-a');
+    expect(project.selectedWorktreePath).toBe('/target');
+    expect(focusCalls).toEqual([
+      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+    ]);
+    expect(refreshes).toBe(1);
+    expect(options).toEqual({ ensureCoven: false });
+  });
+
+  it('refreshes direct focusThread by default and allows batched suppression', async () => {
+    const state = { activeProjectId: 'project', activeThreadId: null as string | null };
+    const project = {
+      id: 'project',
+      lastActiveThreadId: null as string | null,
+      selectedWorktreePath: null as string | null,
+    };
+    const thread = {
+      id: 'thread-a',
+      kind: 'shell',
+      projectId: project.id,
+      worktreePath: '/repo',
+      status: 'running',
+      term: { focus: () => undefined },
+    };
+    let refreshes = 0;
+    const focusThread = compileFunction<(
+      id: string,
+      options?: { refreshStatus?: boolean },
+    ) => Promise<boolean>>(functionSource('focusThread'), {
+      findThread: (id: string) => (id === thread.id ? thread : null),
+      showTerminalView: async () => true,
+      markActiveSurface: () => undefined,
+      state,
+      findProject: () => project,
+      paneLayoutFor: () => null,
+      PsychePanes,
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      scheduleVisiblePaneFit: () => undefined,
+      syncBrowserBounds: () => undefined,
+      setProjectStatus: () => undefined,
+      statusLevel: () => 'ok',
+      refreshStatusController: () => { refreshes += 1; },
+    });
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    await expect(focusThread(thread.id, { refreshStatus: false })).resolves.toBe(true);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe(thread.id);
+    expect(project.selectedWorktreePath).toBe('/repo');
+    expect(refreshes).toBe(1);
+  });
+
+  it('refreshes direct setActiveProject once while honoring suppressed outer refresh', async () => {
+    const createSetActiveProject = (
+      state: {
+        activeProjectId: string;
+        activeThreadId: string | null;
+        threads: Array<Record<string, unknown>>;
+      },
+      project: {
+        id: string;
+        selectedWorktreePath: string;
+        lastActiveThreadId: string | null;
+      },
+      focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }>,
+      refreshes: { count: number },
+    ) => compileFunction<(
+      id: string,
+      callOptions?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('setActiveProject'), {
+      state,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+      focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
+        focusCalls.push({ id, options: focusOptions });
+        state.activeThreadId = id;
+        return true;
+      },
+      renderPaneWorkspace: () => undefined,
+      refreshSidebar: () => undefined,
+      refreshTabs: () => undefined,
+      syncProjectBrowser: () => undefined,
+      ensureProjectCoven: async () => null,
+      setStatus: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes.count += 1; },
+    });
+
+    const directProject = {
+      id: 'project',
+      selectedWorktreePath: '/repo',
+      lastActiveThreadId: 'thread-a',
+    };
+
+    const defaultState = {
+      activeProjectId: 'other',
+      activeThreadId: null as string | null,
+      threads: [{
+        id: 'thread-a',
+        projectId: directProject.id,
+        worktreePath: '/repo',
+        hidden: false,
+      }],
+    };
+    const defaultOptions = { ensureCoven: false };
+    const defaultFocusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    const defaultRefreshes = { count: 0 };
+    const setActiveProject = createSetActiveProject(
+      defaultState,
+      directProject,
+      defaultFocusCalls,
+      defaultRefreshes,
+    );
+
+    await expect(setActiveProject(directProject.id, defaultOptions)).resolves.toBe(true);
+    expect(defaultState.activeProjectId).toBe(directProject.id);
+    expect(defaultFocusCalls).toEqual([
+      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+    ]);
+    expect(defaultRefreshes.count).toBe(1);
+    expect(defaultOptions).toEqual({ ensureCoven: false });
+
+    const suppressedState = {
+      activeProjectId: 'other',
+      activeThreadId: null as string | null,
+      threads: [{
+        id: 'thread-a',
+        projectId: directProject.id,
+        worktreePath: '/repo',
+        hidden: false,
+      }],
+    };
+    const suppressedOptions = { refreshStatus: false };
+    const suppressedFocusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    const suppressedRefreshes = { count: 0 };
+    const suppressedSetActiveProject = createSetActiveProject(
+      suppressedState,
+      directProject,
+      suppressedFocusCalls,
+      suppressedRefreshes,
+    );
+
+    await expect(
+      suppressedSetActiveProject(directProject.id, suppressedOptions),
+    ).resolves.toBe(true);
+    expect(suppressedFocusCalls).toEqual([
+      { id: 'thread-a', options: { refreshStatus: false } },
+    ]);
+    expect(suppressedRefreshes.count).toBe(0);
+    expect(suppressedOptions).toEqual({ refreshStatus: false });
+  });
+
   it('accepts guarded /new-thread creation only after revealing the terminal', async () => {
     const terminalHost = { hidden: true };
     let spawned = 0;
