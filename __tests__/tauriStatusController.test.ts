@@ -734,7 +734,7 @@ describe('tauri status controller', () => {
     expect(meta[0]).toContain('Last refresh');
     expect(tasks).toContain('offline');
     expect(meta[1]).toContain('Reconnects 3');
-    expect(meta[1]).toContain('Last refresh');
+    expect(meta[1]).not.toContain('Last refresh');
   });
 
   it('does not invent a Coven refresh timestamp when discovery fails before any success', () => {
@@ -760,6 +760,67 @@ describe('tauri status controller', () => {
     expect(meta).toContain('Reconnects 0');
     expect(meta).not.toContain('Last refresh');
     expect(errors[0]).toBe('Discovery failed (coven_unavailable)');
+  });
+
+  it('does not invent a Coven refresh timestamp when render receives an initial error sample', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+
+    controller.render(buildSample({
+      covenHealth: {
+        phase: 'error',
+        reconnects: 0,
+        latencyMs: 24,
+        refreshedAt: 1_700_000_010_000,
+        error: 'Discovery failed',
+      },
+    }));
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta')[1] ?? '';
+    const errors = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(meta).toContain('Reconnects 0');
+    expect(meta).not.toContain('Last refresh');
+    expect(meta).not.toContain(new Date(1_700_000_010_000).toLocaleTimeString());
+    expect(errors[0]).toBe('Discovery failed');
+  });
+
+  it('preserves the last successful Coven refresh when render receives a later failure sample', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+
+    controller.render(buildSample({
+      nativeHealth: {
+        lastSuccessAt: 1_700_000_030_000,
+      },
+      covenHealth: {
+        phase: 'ready',
+        refreshedAt: 1_700_000_010_000,
+        latencyMs: 12,
+      },
+    }));
+    controller.render({
+      sampledAt: 1_700_000_020_000,
+      covenHealth: {
+        phase: 'error',
+        refreshedAt: 1_700_000_020_000,
+        error: 'Discovery timed out',
+      },
+    });
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta')[1] ?? '';
+    const errors = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(controller.render()?.labels.connection).toBe('Degraded');
+    expect(meta).toContain(`Last refresh ${new Date(1_700_000_010_000).toLocaleTimeString()}`);
+    expect(meta).not.toContain(new Date(1_700_000_020_000).toLocaleTimeString());
+    expect(errors[0]).toBe('Discovery timed out');
   });
 
   it('preserves the last successful Coven refresh when a later discovery attempt fails', () => {
@@ -1510,7 +1571,8 @@ describe('tauri status controller', () => {
       hidden: true,
       nowMs: 1_700_000_030_000,
     });
-    unavailable.controller.render(buildSample({
+    const nativeFailureHistorySample: StatusControllerSample = {
+      sampledAt: 1_700_000_030_000,
       nativeHealth: {
         reconnects: 0,
         latencyMs: 18,
@@ -1524,7 +1586,8 @@ describe('tauri status controller', () => {
         ],
         error: 'Native metrics timed out after 10s',
       },
-    }));
+    };
+    unavailable.controller.render(nativeFailureHistorySample);
     unavailable.controller.toggleMetric('connection');
 
     const unavailableMeta = classTexts(unavailable.elements.detailBody, 'status-row-meta')[0] ?? '';

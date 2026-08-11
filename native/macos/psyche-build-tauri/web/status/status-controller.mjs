@@ -849,7 +849,7 @@ function mergeCovenHealthState(previous, value) {
     refreshedAt: phase === 'ready'
       ? (parsedRefreshedAt ?? previous.refreshedAt)
       : failurePhase
-        ? (previous.refreshedAt ?? parsedRefreshedAt)
+        ? previous.refreshedAt
         : (parsedRefreshedAt ?? previous.refreshedAt),
     error: phase === 'ready'
       ? ''
