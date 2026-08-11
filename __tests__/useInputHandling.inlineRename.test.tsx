@@ -234,7 +234,7 @@ describe('useInputHandling inline rename', () => {
     );
 
     await pressUntil(
-      stdin, '\x1b[<0;2;3M',
+      stdin, '\x1b[<0;2;4M',
       () => setSelectedIndex.mock.calls.length > 0, 'row selection',
     );
 
@@ -268,10 +268,10 @@ describe('useInputHandling inline rename', () => {
     // inside SIDEBAR_DOUBLE_CLICK_INTERVAL_MS for the pair to read as a
     // double-click, so it is not retried and not waited on.
     await pressUntil(
-      stdin, '\x1b[<0;2;3M',
+      stdin, '\x1b[<0;2;4M',
       () => setSelectedIndex.mock.calls.length > 0, 'first press to land',
     );
-    stdin.write('\x1b[<0;2;3M');
+    stdin.write('\x1b[<0;2;4M');
     await waitFor(() => rename !== null, 'rename to open');
     stdin.write('-renamed');
     await waitFor(
