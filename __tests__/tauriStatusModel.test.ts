@@ -548,10 +548,11 @@ describe('tauri footer status model', () => {
     const text = formatLiveDiagnostics({
       sampledAt: 1_700_000_000_000,
       scope: 'workspace',
-      metrics: { cpuPercent: 18, memoryBytes: 640 * 1024 * 1024 },
-      peaks: { cpuPercent: 42, memoryBytes: 900 * 1024 * 1024 },
+      metrics: { cpuPercent: 18, memoryBytes: 640 * 1024 * 1024, errors: 3 },
+      peaks: { cpuPercent: 42, memoryBytes: 900 * 1024 * 1024, errors: 4 },
       trends: {
         cpuPercent: Array.from({ length: 2_000 }, (_, index) => index % 100),
+        errors: [0, 4, 3],
       },
       services: [
         { name: 'Native', status: 'ready', latencyMs: 4 },
@@ -561,8 +562,10 @@ describe('tauri footer status model', () => {
 
     expect(text).toContain('CPU: 18%');
     expect(text).toContain('Memory: 640 MB');
-    expect(text).toContain('Observed peaks: CPU 42%, Memory 900 MB');
+    expect(text).toContain('Errors: 3');
+    expect(text).toContain('Observed peaks: CPU 42%, Memory 900 MB, Errors 4');
     expect(text).toContain('cpuPercent trend: 0 → 99');
+    expect(text).toContain('errors trend: 0 → 3');
     expect(text).toContain('Native: ready (4 ms)');
     expect(text).toContain('Coven: unavailable');
     expect(text).toContain('Excludes prompts, terminal contents, file contents, diffs, and browser contents.');

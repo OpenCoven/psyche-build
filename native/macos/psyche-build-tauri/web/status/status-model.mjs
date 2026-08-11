@@ -685,12 +685,16 @@ export function formatLiveDiagnostics(input) {
   if (Number.isFinite(outputRate)) {
     bodyLines.push(`Output: ${Math.round(outputRate)} lines/s`);
   }
+  if (Number.isFinite(metrics.errors)) {
+    bodyLines.push(`Errors: ${Math.round(metrics.errors)}`);
+  }
 
   const peakParts = [
     formatMetricPeak('CPU', peaks.cpuPercent, formatPercent),
     formatMetricPeak('Memory', peaks.memoryBytes, formatMemory),
     formatMetricPeak('FPS', peaks.fps, (value) => `${Math.round(value)}`),
     formatMetricPeak('Output', peaks.outputLinesPerSecond ?? peaks.linesPerSecond, (value) => `${Math.round(value)} lines/s`),
+    formatMetricPeak('Errors', peaks.errors, (value) => `${Math.round(value)}`),
   ].filter(Boolean);
 
   if (peakParts.length) {

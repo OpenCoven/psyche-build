@@ -602,6 +602,17 @@ function classTexts(root: FakeElement, className: string) {
   return root.querySelectorAll(`.${className}`).map((node) => node.textContent);
 }
 
+function findCellByLabel(root: FakeElement, cellClassName: string, label: string) {
+  return root.querySelectorAll(`.${cellClassName}`)
+    .find((node) => node.querySelector('.status-cell-label')?.textContent === label) ?? null;
+}
+
+function sparklineData(cell: FakeElement | null) {
+  const sparkline = cell?.querySelector('.status-sparkline');
+  const path = sparkline instanceof FakeElement ? sparkline.childNodes[0] : null;
+  return path instanceof FakeElement ? path.attributes.get('d') ?? null : null;
+}
+
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
@@ -724,6 +735,102 @@ describe('tauri status controller', () => {
     expect(tasks).toContain('offline');
     expect(meta[1]).toContain('Reconnects 3');
     expect(meta[1]).toContain('Last refresh');
+  });
+
+  it('does not invent a Coven refresh timestamp when discovery fails before any success', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+
+    controller.render(buildSample());
+    controller.noteCovenSample({
+      phase: 'unavailable',
+      sampledAt: 1_700_000_010_000,
+      error: {
+        code: 'coven_unavailable',
+        message: 'Discovery failed',
+      },
+    });
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta')[1] ?? '';
+    const errors = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(meta).toContain('Reconnects 0');
+    expect(meta).not.toContain('Last refresh');
+    expect(errors[0]).toBe('Discovery failed (coven_unavailable)');
+  });
+
+  it('preserves the last successful Coven refresh when a later discovery attempt fails', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+
+    controller.render(buildSample({
+      nativeHealth: {
+        lastSuccessAt: 1_700_000_030_000,
+      },
+    }));
+    controller.noteCovenSample({
+      phase: 'ready',
+      refreshedAt: 1_700_000_010_000,
+      latencyMs: 12,
+    });
+    controller.noteCovenSample({
+      phase: 'error',
+      sampledAt: 1_700_000_020_000,
+      error: {
+        code: 'status_failed',
+        message: 'Discovery timed out',
+      },
+    });
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta')[1] ?? '';
+    const errors = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(controller.render()?.labels.connection).toBe('Degraded');
+    expect(meta).toContain(`Last refresh ${new Date(1_700_000_010_000).toLocaleTimeString()}`);
+    expect(meta).not.toContain(new Date(1_700_000_020_000).toLocaleTimeString());
+    expect(errors[0]).toBe('Discovery timed out (status_failed)');
+  });
+
+  it('clears Coven discovery errors, updates refresh time, and increments reconnects on recovery', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_040_000,
+    });
+
+    controller.render(buildSample({
+      nativeHealth: {
+        lastSuccessAt: 1_700_000_040_000,
+      },
+    }));
+    controller.noteCovenSample({
+      phase: 'ready',
+      refreshedAt: 1_700_000_010_000,
+    });
+    controller.noteCovenSample({
+      phase: 'error',
+      sampledAt: 1_700_000_020_000,
+      formattedError: 'Discovery timed out (status_failed)',
+    });
+    controller.noteCovenSample({
+      phase: 'ready',
+      refreshedAt: 1_700_000_030_000,
+      latencyMs: 8,
+    });
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta')[1] ?? '';
+    const errors = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(controller.render()?.labels.connection).toBe('Connected');
+    expect(meta).toContain('Reconnects 1');
+    expect(meta).toContain(`Last refresh ${new Date(1_700_000_030_000).toLocaleTimeString()}`);
+    expect(errors).toEqual([]);
   });
 
   it('clears stale copy alerts on success and preserves explicit copy failures', async () => {
@@ -1490,6 +1597,49 @@ describe('tauri status controller', () => {
       },
     }));
     expect(classTexts(elements.detailBody, 'status-cell-label')).not.toContain('Agent tools');
+  });
+
+  it('renders Errors activity with its own peak metadata, diagnostics, and sparkline trend', async () => {
+    const { controller, elements, clock } = createHarness({
+      hidden: true,
+      fetchMetrics: async () => buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+      }),
+    });
+
+    controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+      }),
+      nativeHealth: {
+        lastSuccessAt: clock.now(),
+      },
+    }));
+    controller.toggleMetric('activity');
+
+    controller.notePtyData('shell', `${'line\n'.repeat(5)}`, clock.now());
+    await controller.refresh();
+
+    await clock.advance(1_000);
+    controller.notePtyData('shell', `${'line\n'.repeat(12)}`, clock.now());
+    for (let count = 0; count < 4; count += 1) {
+      controller.noteOperation({ name: 'shell_exec', ok: false });
+    }
+    await controller.refresh();
+
+    await clock.advance(1_000);
+    controller.notePtyData('shell', `${'line\n'.repeat(18)}`, clock.now());
+    controller.noteOperation({ name: 'shell_exec', ok: false });
+    await controller.refresh();
+
+    const linesCell = findCellByLabel(elements.detailBody, 'status-activity-cell', 'Lines');
+    const errorsCell = findCellByLabel(elements.detailBody, 'status-activity-cell', 'Errors');
+    const diagnostics = controller.render()?.diagnostics;
+
+    expect(errorsCell?.querySelector('.status-cell-meta')?.textContent).toBe('Peak 4 failures / sample');
+    expect(sparklineData(errorsCell)).not.toBe(sparklineData(linesCell));
+    expect(diagnostics?.peaks).toMatchObject({ errors: 4 });
+    expect(diagnostics?.trends?.errors).toEqual([0, 4, 1]);
   });
 
   it('renders shell CPU, memory, and output fields independently without NaN placeholders', () => {

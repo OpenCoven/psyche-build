@@ -29,7 +29,7 @@ export type StatusControllerHealth = {
   lastSuccessAt?: number | string | null;
   staleAgeMs?: number | null;
   refreshedAt?: number | string | null;
-  failureAt?: Array<number | string | null>;
+  failureAt?: number | string | null;
   error?: string;
 };
 

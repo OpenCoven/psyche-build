@@ -190,6 +190,7 @@ export type DiagnosticsPeaks = {
   outputLinesPerSecond?: number | null;
   outputBytesPerSecond?: number | null;
   operationsPerSecond?: number | null;
+  errors?: number | null;
 };
 
 export type DiagnosticsService = {

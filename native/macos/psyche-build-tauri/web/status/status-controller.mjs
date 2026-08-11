@@ -115,8 +115,39 @@ function parseTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function firstMeaningfulString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
+}
+
 function formatError(error) {
   if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string') return error;
+
+  const input = asObject(error);
+  const nested = input.error != null && input.error !== error
+    ? formatError(input.error)
+    : '';
+  const message = firstMeaningfulString(
+    input.formattedError,
+    input.formatted,
+    input.message,
+    nested,
+  );
+  const code = firstMeaningfulString(
+    input.code,
+    input.name === 'Error' ? '' : input.name,
+  );
+
+  if (message && code && !message.includes(code)) {
+    return `${message} (${code})`;
+  }
+  if (message) return message;
+  if (code) return code;
   return String(error);
 }
 
@@ -577,6 +608,17 @@ function cloneTrendValues(trend) {
   return Array.isArray(trend?.values) ? [...trend.values] : [];
 }
 
+function normalizeFailureTimestamps(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => parseTimestamp(entry))
+      .filter((entry) => entry != null);
+  }
+
+  const parsed = parseTimestamp(value);
+  return parsed == null ? [] : [parsed];
+}
+
 function metricDisplayValue(valueText) {
   const text = valueText == null ? null : String(valueText);
   return {
@@ -727,9 +769,11 @@ function buildDiagnostics(sample, effectiveScope, trends) {
   peaks.outputLinesPerSecond = peakValue(trends.outputLinesPerSecond);
   peaks.outputBytesPerSecond = peakValue(trends.outputBytesPerSecond);
   peaks.operationsPerSecond = peakValue(trends.operationsPerSecond);
+  peaks.errors = peakValue(trends.errors);
   trendValues.outputLinesPerSecond = cloneTrendValues(trends.outputLinesPerSecond);
   trendValues.outputBytesPerSecond = cloneTrendValues(trends.outputBytesPerSecond);
   trendValues.operationsPerSecond = cloneTrendValues(trends.operationsPerSecond);
+  trendValues.errors = cloneTrendValues(trends.errors);
 
   return {
     sampledAt: sample.sampledAt,
@@ -771,11 +815,7 @@ function mergeNativeHealthState(previous, value) {
       ? (input.error ? formatError(input.error) : '')
       : previous.error,
     failureAt: hasOwn(input, 'failureAt')
-      ? (Array.isArray(input.failureAt)
-        ? input.failureAt
-          .map((entry) => parseTimestamp(entry))
-          .filter((entry) => entry != null)
-        : [])
+      ? normalizeFailureTimestamps(input.failureAt)
       : previous.failureAt,
   };
 }
@@ -787,26 +827,35 @@ function mergeCovenHealthState(previous, value) {
   const hasRefreshedAt = hasOwn(input, 'refreshedAt')
     || hasOwn(input, 'sampledAt')
     || hasOwn(input, 'updatedAt');
+  const parsedRefreshedAt = hasRefreshedAt
+    ? parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt)
+    : null;
+  const phase = hasPhase
+    ? (typeof input.phase === 'string' ? input.phase : previous.phase)
+    : hasStatus
+      ? (typeof input.status === 'string' ? input.status : previous.phase)
+      : previous.phase;
+  const failurePhase = phase === 'error' || phase === 'unavailable' || phase === 'incompatible';
 
   return {
     ...previous,
-    phase: hasPhase
-      ? (typeof input.phase === 'string' ? input.phase : previous.phase)
-      : hasStatus
-        ? (typeof input.status === 'string' ? input.status : previous.phase)
-        : previous.phase,
+    phase,
     reconnects: hasOwn(input, 'reconnects')
       ? (finiteNumber(input.reconnects) ?? previous.reconnects)
       : previous.reconnects,
     latencyMs: hasOwn(input, 'latencyMs')
       ? finiteNumber(input.latencyMs)
       : previous.latencyMs,
-    refreshedAt: hasRefreshedAt
-      ? parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt)
-      : previous.refreshedAt,
-    error: hasOwn(input, 'error')
-      ? (input.error ? formatError(input.error) : '')
-      : previous.error,
+    refreshedAt: phase === 'ready'
+      ? (parsedRefreshedAt ?? previous.refreshedAt)
+      : failurePhase
+        ? (previous.refreshedAt ?? parsedRefreshedAt)
+        : (parsedRefreshedAt ?? previous.refreshedAt),
+    error: phase === 'ready'
+      ? ''
+      : hasOwn(input, 'error')
+        ? (input.error ? formatError(input.error) : '')
+        : previous.error,
   };
 }
 
@@ -1059,8 +1108,8 @@ function renderActivity(body, doc, activity, trends, spikes, agentToolCalls) {
       doc,
       'Errors',
       String(Math.round(activity.workspace.errors ?? 0)),
-      'Native call failures',
-      trends.outputLinesPerSecond.values,
+      `Peak ${Math.round(peakValue(trends.errors) ?? activity.workspace.errors ?? 0)} failures / sample`,
+      trends.errors.values,
     ),
   );
 
@@ -1138,7 +1187,7 @@ function renderConnection(body, doc, nativeHealth, covenHealth) {
       latencyMs: covenHealth.latencyMs,
       reconnects: covenHealth.reconnects,
       refreshedAt: covenHealth.refreshedAt,
-      error: '',
+      error: covenHealth.error,
     }),
   );
 }
@@ -1337,6 +1386,7 @@ export function createStatusController(options = {}) {
     outputLinesPerSecond: { values: [], peak: Number.NEGATIVE_INFINITY },
     outputBytesPerSecond: { values: [], peak: Number.NEGATIVE_INFINITY },
     operationsPerSecond: { values: [], peak: Number.NEGATIVE_INFINITY },
+    errors: { values: [], peak: Number.NEGATIVE_INFINITY },
   };
   const resizeObserver = new ResizeObserverClass(() => {
     if (lastSampleContext) {
@@ -1739,6 +1789,7 @@ export function createStatusController(options = {}) {
     recordTrend('outputLinesPerSecond', rawSample.activity?.workspace?.linesPerSecond);
     recordTrend('outputBytesPerSecond', rawSample.activity?.workspace?.bytesPerSecond);
     recordTrend('operationsPerSecond', rawSample.activity?.workspace?.operationsPerSecond);
+    recordTrend('errors', rawSample.activity?.workspace?.errors);
 
     lastSampleContext = {
       ...rawSample,
@@ -2174,12 +2225,21 @@ export function createStatusController(options = {}) {
         ? input.status
         : 'idle';
     const recovered = covenHealth.phase !== 'ready' && covenHealth.phase !== 'idle' && phase === 'ready';
+    const nextRefreshedAt = parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt);
+    const hasError = hasOwn(input, 'formattedError') || hasOwn(input, 'error');
+    const failurePhase = phase === 'error' || phase === 'unavailable' || phase === 'incompatible';
     covenHealth = {
       phase,
       reconnects: covenHealth.reconnects + (recovered ? 1 : 0),
       latencyMs: finiteNumber(input.latencyMs),
-      refreshedAt: parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt) ?? now(),
-      error: input.error ? formatError(input.error) : '',
+      refreshedAt: phase === 'ready'
+        ? (nextRefreshedAt ?? now())
+        : covenHealth.refreshedAt,
+      error: phase === 'ready'
+        ? ''
+        : (failurePhase && hasError)
+          ? formatError(input.formattedError ?? input.error)
+          : covenHealth.error,
     };
 
     if (lastSampleContext) {
