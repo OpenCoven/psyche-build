@@ -717,6 +717,51 @@ describe('Tauri footer status bar shell', () => {
     expect(written).toEqual(['copied']);
   });
 
+  it('surfaces missing footer bundle initialization failures while preserving the boot guard', () => {
+    const warnings: string[] = [];
+    const alert = { id: 'status-alert', textContent: '' };
+    const buildStatusController = compileBuildStatusController<() => unknown>({
+      window: {},
+      document: {
+        getElementById(id: string) {
+          return id === 'status-alert' ? alert : null;
+        },
+        querySelector() {
+          throw new Error('bundle guard should return before querying the footer shell');
+        },
+        querySelectorAll() {
+          throw new Error('bundle guard should return before querying scope buttons');
+        },
+      },
+      console: {
+        warn(message: string) {
+          warnings.push(message);
+        },
+      },
+      localStorage: {
+        getItem() { return null; },
+        setItem() { return undefined; },
+      },
+      navigator: {},
+      invokeNative: async () => null,
+      state: { activeThreadId: null, threads: [] },
+      activeProject: () => null,
+      allCovenSessionsForProject: () => [],
+      Promise,
+    });
+
+    expect(buildStatusController()).toBeNull();
+    expect(alert.textContent).toBe('Workspace status unavailable: status bundle missing.');
+    expect(warnings).toEqual([
+      '[status controller] footer status bundle missing; window.PsycheStatus.createStatusController unavailable',
+    ]);
+
+    const source = functionSource(mainJs, 'buildStatusController');
+    expect(source).toMatch(/if \(!PsycheStatus \|\| typeof PsycheStatus\.createStatusController !== "function"\)/);
+    expect(source).toContain('statusAlert.textContent = "Workspace status unavailable: status bundle missing.";');
+    expect(source).toContain('[status controller] footer status bundle missing; window.PsycheStatus.createStatusController unavailable');
+  });
+
   it('feeds PTY, Coven, visibility, focus, project/worktree, and lifecycle events into the controller while keeping the rail live-only', () => {
     const refreshCoven = functionSource(mainJs, 'refreshCovenSessions');
 

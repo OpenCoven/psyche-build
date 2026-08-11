@@ -133,7 +133,7 @@ describe('Tauri workspace metrics native contract', () => {
       /function\s+handlePtyExit\s*\([\s\S]*thread\.finishedAt\s*=\s*Date\.now\(\)\s*;[\s\S]*thread\.exitCode\s*=\s*payload\.code == null \? null : payload\.code\s*;/,
     );
     expect(mainSource).toMatch(
-      /function\s+handlePtyExit\s*\([\s\S]*thread\.status\s*=\s*stoppedByUser \|\| payload\.code == null \|\| payload\.code === 0\s*\?\s*"exited"\s*:\s*"failed"\s*;/,
+      /function\s+handlePtyExit\s*\([\s\S]*thread\.status\s*=\s*"exited"\s*;[\s\S]*if\s*\(!stoppedByUser\s*&&\s*payload\.code != null\s*&&\s*payload\.code !== 0\)\s*\{[\s\S]*thread\.status\s*=\s*"failed"\s*;/,
     );
   });
 });

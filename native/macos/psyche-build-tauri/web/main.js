@@ -749,7 +749,16 @@
 
   function buildStatusController() {
     var PsycheStatus = window.PsycheStatus;
+    // Temporary incremental-development guard until the status bundle loads
+    // before main.js in Task 8.
     if (!PsycheStatus || typeof PsycheStatus.createStatusController !== "function") {
+      var statusAlert = document.getElementById("status-alert");
+      if (statusAlert) {
+        statusAlert.textContent = "Workspace status unavailable: status bundle missing.";
+      }
+      console.warn(
+        "[status controller] footer status bundle missing; window.PsycheStatus.createStatusController unavailable"
+      );
       return null;
     }
     var bar = document.getElementById("status-bar");
