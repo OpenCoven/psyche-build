@@ -1606,9 +1606,12 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .pane-footer-popover {
   position: fixed;
   z-index: 150;
+  box-sizing: border-box;
   min-width: 190px;
   max-width: min(320px, calc(100vw - 16px));
-  overflow: hidden;
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 7px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;

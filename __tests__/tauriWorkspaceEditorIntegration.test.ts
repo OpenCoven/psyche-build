@@ -791,6 +791,7 @@ describe('native CodeMirror workspace editor surface', () => {
       activateFileTabNow: () => undefined,
       fileViewEl: { hidden: false },
       terminalHost: { hidden: true },
+      syncPaneMetricsVisibility: () => true,
       requestAnimationFrame: () => undefined,
       scheduleVisiblePaneFit: () => undefined,
     });
@@ -850,6 +851,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       covenDiscovery: {},
       startCovenPolling: () => undefined,
+      syncPaneMetricsVisibility: () => true,
     });
 
     const removing = removeProject(project.id);
@@ -1073,6 +1075,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       fileViewEl,
       terminalHost,
+      syncPaneMetricsVisibility: () => true,
       activePaneLayout: () => layout,
       renderPaneMinimap: (value: unknown, file: { id: string }) => {
         minimapCalls.push({ layout: value, fileId: file.id });

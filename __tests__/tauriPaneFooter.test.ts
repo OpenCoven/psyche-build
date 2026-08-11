@@ -342,12 +342,21 @@ describe('pane metrics refresh contract', () => {
     layout: Record<string, any>,
     threads: Record<string, any>[],
     focusSets: Record<string, any>[] = [],
+    visibility: { documentHidden?: boolean; terminalHidden?: boolean; mounted?: boolean } = {},
   ) {
+    const terminalHost = {
+      hidden: Boolean(visibility.terminalHidden),
+      isConnected: true,
+      contains: (pane: unknown) => visibility.mounted !== false
+        && threads.some((thread) => thread.pane === pane),
+    };
     const factory = Function(
       'PsychePanes',
       'state',
       'activePaneLayout',
       'seedFocusSets',
+      'document',
+      'terminalHost',
       `"use strict";
        var focusSets = seedFocusSets;
        var SPAN_ORIENTATION = { column: "row", row: "column" };
@@ -364,6 +373,8 @@ describe('pane metrics refresh contract', () => {
       { threads },
       () => layout,
       focusSets,
+      { hidden: Boolean(visibility.documentHidden) },
+      terminalHost,
     ) as (thread: Record<string, any>) => boolean;
   }
 
@@ -436,6 +447,68 @@ describe('pane metrics refresh contract', () => {
     }]);
     expect(threadWantsMetrics(visible)).toBe(true);
     expect(threadWantsMetrics(excluded)).toBe(false);
+  });
+
+  it('requires the document and mounted terminal canvas to be actually visible', () => {
+    const visible = eligibleThread('visible');
+    const layout = { root: paneTreeModule.createLeaf('leaf-visible', visible.id) };
+
+    expect(metricsEligibility(layout, [visible], [], { documentHidden: true })(visible))
+      .toBe(false);
+    expect(metricsEligibility(layout, [visible], [], { terminalHidden: true })(visible))
+      .toBe(false);
+    expect(metricsEligibility(layout, [visible], [], { mounted: false })(visible))
+      .toBe(false);
+    expect(metricsEligibility(layout, [visible])(visible)).toBe(true);
+  });
+
+  it('cancels pending metrics refreshes while hidden and refreshes immediately on resume', () => {
+    const threads = [
+      { metricsGeneration: 2, metricsRefreshTimer: 17 },
+      { metricsGeneration: 5, metricsRefreshTimer: 0 },
+    ];
+    const documentState = { hidden: true };
+    const terminalHost = { hidden: false, isConnected: true };
+    const cleared: number[] = [];
+    const refreshVisiblePaneMetrics = vi.fn();
+    const syncPaneMetricsVisibility = compileFunction<() => boolean>(
+      functionSource(mainJs, 'syncPaneMetricsVisibility'),
+      {
+        document: documentState,
+        terminalHost,
+        state: { threads },
+        clearTimeout: (timer: number) => { cleared.push(timer); },
+        refreshVisiblePaneMetrics,
+      },
+    );
+
+    expect(syncPaneMetricsVisibility()).toBe(false);
+    expect(cleared).toEqual([17]);
+    expect(threads).toEqual([
+      { metricsGeneration: 3, metricsRefreshTimer: 0 },
+      { metricsGeneration: 6, metricsRefreshTimer: 0 },
+    ]);
+    expect(refreshVisiblePaneMetrics).not.toHaveBeenCalled();
+
+    documentState.hidden = false;
+    terminalHost.hidden = true;
+    threads[0].metricsRefreshTimer = 29;
+    expect(syncPaneMetricsVisibility()).toBe(false);
+    expect(cleared).toEqual([17, 29]);
+    expect(threads[0]).toEqual({ metricsGeneration: 4, metricsRefreshTimer: 0 });
+
+    terminalHost.hidden = false;
+    expect(syncPaneMetricsVisibility()).toBe(true);
+    expect(refreshVisiblePaneMetrics).toHaveBeenCalledTimes(1);
+
+    expect(functionSource(mainJs, 'handleVisibilityChange'))
+      .toMatch(/syncPaneMetricsVisibility\(\)/);
+    expect(functionSource(mainJs, 'enterFileFocus'))
+      .toMatch(/terminalHost\.hidden = true;[\s\S]*syncPaneMetricsVisibility\(\)/);
+    expect(functionSource(mainJs, 'showTerminalView'))
+      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
+    expect(functionSource(mainJs, 'closeFileTab'))
+      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
   });
 
   it('debounces refresh after PTY output and rechecks eligibility', () => {
@@ -573,7 +646,7 @@ describe('pane metrics refresh contract', () => {
   });
 
   it('shows exact values and truthful unreported fields in the usage popover', () => {
-    expect(mainJs).toMatch(/function openPaneUsagePopover\(thread\)/);
+    expect(mainJs).toMatch(/function openPaneUsagePopover\(thread,\s*trigger\)/);
     expect(mainJs).toContain('Not reported by Coven');
     expect(mainJs).toContain('Local estimate');
     expect(stylesCss).toContain('.pane-usage-popover');
@@ -587,7 +660,7 @@ describe('pane metrics refresh contract', () => {
       appendChild(child: unknown) { this.children.push(child); },
       focus: vi.fn(),
     };
-    const openPaneUsagePopover = compileFunction<(thread: any) => any>(
+    const openPaneUsagePopover = compileFunction<(thread: any, trigger: any) => any>(
       functionSource(mainJs, 'openPaneUsagePopover'),
       {
         closePaneFooterPopovers: vi.fn(),
@@ -609,7 +682,7 @@ describe('pane metrics refresh contract', () => {
           },
         }),
         document: {
-          activeElement: null,
+          activeElement: { tagName: 'BODY' },
           createElement: () => popover,
           addEventListener: vi.fn(),
           removeEventListener: vi.fn(),
@@ -628,7 +701,10 @@ describe('pane metrics refresh contract', () => {
       },
     );
 
-    openPaneUsagePopover({ name: 'Agent pane', paneFooter: {} });
+    openPaneUsagePopover(
+      { name: 'Agent pane', paneFooter: {} },
+      { isConnected: true },
+    );
     expect(rows).toEqual([
       { label: 'Provider', value: 'Coven' },
       { label: 'Model', value: 'Not reported by Coven' },
@@ -668,9 +744,10 @@ describe('pane usage popover lifecycle', () => {
       };
       return element;
     };
+    const body = createElement();
     const trigger = createElement();
     const document = {
-      activeElement: trigger,
+      activeElement: body,
       createElement,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
@@ -747,16 +824,19 @@ describe('pane usage popover lifecycle', () => {
       vi.fn(),
       vi.fn(),
     ) as {
-      openPaneUsagePopover: (thread: typeof threadA) => ReturnType<typeof createElement>;
+      openPaneUsagePopover: (
+        thread: typeof threadA,
+        trigger: ReturnType<typeof createElement>,
+      ) => ReturnType<typeof createElement>;
       syncPaneFooter: (thread: typeof threadA) => void;
       currentPopover: () => ReturnType<typeof createElement> | null;
     };
-    return { harness, threadA, threadB };
+    return { harness, body, trigger, threadA, threadB };
   }
 
   it('removes an owned usage dialog before rerendering its footer trigger', () => {
-    const { harness, threadA, threadB } = popoverHarness();
-    const popover = harness.openPaneUsagePopover(threadA);
+    const { harness, trigger, threadA, threadB } = popoverHarness();
+    const popover = harness.openPaneUsagePopover(threadA, trigger);
 
     harness.syncPaneFooter(threadB);
     expect(popover.removed).toBe(false);
@@ -765,6 +845,25 @@ describe('pane usage popover lifecycle', () => {
     harness.syncPaneFooter(threadA);
     expect(popover.removed).toBe(true);
     expect(harness.currentPopover()).toBeNull();
+  });
+
+  it('owns the dialog with the explicit trigger even when activeElement is body', () => {
+    const { harness, trigger, threadA } = popoverHarness();
+    const popover = harness.openPaneUsagePopover(threadA, trigger);
+    const otherFooter = {};
+    const close = vi.fn();
+    const handlePointerDown = compileFunction<(event: { target: unknown }) => void>(
+      functionSource(mainJs, 'handlePaneFooterPopoverPointerDown'),
+      {
+        paneFooterPopover: popover,
+        paneFooterPopoverTrigger: trigger,
+        closePaneFooterPopovers: close,
+      },
+    );
+
+    handlePointerDown({ target: otherFooter });
+    expect(close).toHaveBeenCalledWith(false);
+    expect(trigger.contains(otherFooter)).toBe(false);
   });
 
   it('closes on another footer action without swallowing that action', () => {
@@ -1231,20 +1330,23 @@ describe('pane footer interaction behavior', () => {
   });
 
   it('restores overflow-trigger focus only for overflow menu activations', () => {
-    const thread = { id: 'thread-a' };
+    const overflowTrigger = { id: 'overflow-trigger' };
+    const visibleTrigger = { id: 'visible-trigger' };
+    const menuItem = { id: 'menu-item' };
+    const thread = { id: 'thread-a', paneFooterOverflow: overflowTrigger };
     const calls: string[] = [];
     const handlePaneFooterItemClick = compileFunction<(
       threadValue: typeof thread,
       item: Record<string, unknown>,
-      event: { stopPropagation: () => void },
+      event: { currentTarget: unknown; stopPropagation: () => void },
       fromOverflowMenu?: boolean,
     ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
       closePaneFooterMenu: (_thread: typeof thread, restoreFocus: boolean) => {
         calls.push(`close-menu:${restoreFocus}`);
         if (restoreFocus) calls.push('focus-trigger');
       },
-      runPaneFooterAction: () => {
-        calls.push('run-action');
+      runPaneFooterAction: (_thread: unknown, _item: unknown, trigger: unknown) => {
+        calls.push(`run-action:${(trigger as { id: string }).id}`);
         return true;
       },
       focusPaneAfterFooterAction: () => {
@@ -1258,11 +1360,12 @@ describe('pane footer interaction behavior', () => {
       value: 'feat/footer',
       fullValue: 'feat/footer',
     }, {
+      currentTarget: visibleTrigger,
       stopPropagation: () => { calls.push('stop:visible'); },
     }, false);
     expect(calls).toEqual([
       'stop:visible',
-      'run-action',
+      'run-action:visible-trigger',
       'close-menu:false',
       'focus-pane',
     ]);
@@ -1274,11 +1377,12 @@ describe('pane footer interaction behavior', () => {
       value: '12345678',
       fullValue: 'session-123',
     }, {
+      currentTarget: menuItem,
       stopPropagation: () => { calls.push('stop:overflow'); },
     }, true);
     expect(calls).toEqual([
       'stop:overflow',
-      'run-action',
+      'run-action:overflow-trigger',
       'close-menu:true',
       'focus-trigger',
       'focus-pane',
@@ -1290,7 +1394,7 @@ describe('pane footer interaction behavior', () => {
     const handlePaneFooterItemClick = compileFunction<(
       threadValue: { id: string },
       item: Record<string, unknown>,
-      event: { stopPropagation: () => void },
+      event: { currentTarget: unknown; stopPropagation: () => void },
       fromOverflowMenu?: boolean,
     ) => unknown>(functionSource(mainJs, 'handlePaneFooterItemClick'), {
       closePaneFooterMenu: () => { calls.push('close-menu'); },
@@ -1304,7 +1408,10 @@ describe('pane footer interaction behavior', () => {
     expect(handlePaneFooterItemClick(
       { id: 'thread-a' },
       { action: 'usage', label: 'Context' },
-      { stopPropagation: () => { calls.push('stop'); } },
+      {
+        currentTarget: { id: 'menu-item' },
+        stopPropagation: () => { calls.push('stop'); },
+      },
       true,
     )).toBe(true);
     expect(calls).toEqual(['stop', 'open-usage']);
@@ -1312,6 +1419,49 @@ describe('pane footer interaction behavior', () => {
 });
 
 describe('pane footer integration contract', () => {
+  it('bounds popovers vertically and chooses reachable space around the trigger', () => {
+    function position(anchorRect: Record<string, number>, naturalHeight: number) {
+      const style: Record<string, string> = {};
+      const popover = {
+        style,
+        getBoundingClientRect: () => ({
+          width: 180,
+          height: Math.min(naturalHeight, Number.parseFloat(style.maxHeight) || naturalHeight),
+        }),
+      };
+      const positionPaneFooterPopover = compileFunction<
+        (popoverValue: typeof popover, anchor: {
+          getBoundingClientRect: () => Record<string, number>;
+        }) => void
+      >(functionSource(mainJs, 'positionPaneFooterPopover'), {
+        document: { body: { appendChild: vi.fn() } },
+        window: { innerWidth: 240, innerHeight: 120 },
+      });
+
+      positionPaneFooterPopover(popover, {
+        getBoundingClientRect: () => anchorRect,
+      });
+      return {
+        top: Number.parseFloat(style.top),
+        maxHeight: Number.parseFloat(style.maxHeight),
+      };
+    }
+
+    const above = position({ top: 100, bottom: 110, right: 220 }, 180);
+    expect(above.maxHeight).toBe(86);
+    expect(above.top).toBeGreaterThanOrEqual(8);
+    expect(above.top + above.maxHeight).toBeLessThanOrEqual(112);
+
+    const below = position({ top: 10, bottom: 20, right: 220 }, 180);
+    expect(below.maxHeight).toBe(86);
+    expect(below.top).toBeGreaterThanOrEqual(8);
+    expect(below.top + below.maxHeight).toBeLessThanOrEqual(112);
+
+    expect(stylesCss).toMatch(
+      /\.pane-footer-popover\s*\{[\s\S]*max-height:\s*calc\(100vh - 16px\)[\s\S]*overflow-y:\s*auto/,
+    );
+  });
+
   it('mounts one footer in every physical pane path, including Git', () => {
     expect(mainJs).toMatch(/function createPaneFooter\(thread\)/);
     expect(mainJs).toMatch(/function syncPaneFooter\(thread\)/);
@@ -1423,7 +1573,9 @@ describe('pane footer integration contract', () => {
       .toMatch(/typeof item\.fullValue === "string" \? item\.fullValue : ""/);
     expect(dispatcher).toMatch(/item\.action === "copy"[\s\S]*copyPaneFooterValue\(item\.label,\s*paneFooterActionValue\(item\)\)/);
     expect(dispatcher).toMatch(/item\.action === "reveal"[\s\S]*revealPaneWorktree\(paneFooterActionValue\(item\)\)/);
-    expect(dispatcher).toMatch(/item\.action === "usage"[\s\S]*openPaneUsagePopover\(thread\)/);
+    expect(dispatcher).toMatch(
+      /item\.action === "usage"[\s\S]*openPaneUsagePopover\(thread,\s*trigger\)/,
+    );
     expect(dispatcher).toMatch(/item\.action === "switch-model"[\s\S]*toast\(item\.label \+ " is not reported"\)/);
     expect(dispatcher).not.toMatch(/switchPaneFooterModel|showPaneUsage/);
   });
@@ -1437,7 +1589,10 @@ describe('pane footer integration contract', () => {
     expect(create).toMatch(/className = "terminal-pane-footer-overflow"/);
     expect(create).toMatch(/data-footer-key|dataset\.footerKey/);
     expect(create).toMatch(/paneFooterItemDescription\(item\)/);
-    expect(create).toMatch(/handlePaneFooterItemClick\(thread, item, event, role === "menuitem"\)/);
+    expect(create).toMatch(
+      /handlePaneFooterItemClick\(thread, item, event, role === "menuitem"\)/,
+    );
+    expect(create).toMatch(/syncPaneFooter\(thread,\s*true,\s*event\.currentTarget\)/);
     expect(create).toMatch(/handlePaneFooterPointerDown\(thread, event\)/);
     expect(create).toMatch(/new ResizeObserver[\s\S]*PsychePanes\.footerTier/);
     expect(create).toMatch(/observer\.observe\(thread\.pane \|\| footer\)/);
@@ -1463,6 +1618,8 @@ describe('pane footer integration contract', () => {
     expect(moveFocus).toMatch(/key === "End"/);
     expect(onMenuKeyDown).toMatch(/event\.key === "Escape"/);
     expect(onMenuKeyDown).toMatch(/closePaneFooterMenu\(thread,\s*true\)/);
+    expect(functionSource(mainJs, 'closePaneFooterMenu'))
+      .toMatch(/paneFooterMenuTrigger \|\| thread\.paneFooterOverflow[\s\S]*trigger\.focus\(\)/);
     expect(sync).toMatch(/document\.addEventListener\("pointerdown", onOutsidePointerDown, true\)/);
     expect(sync).toMatch(/document\.addEventListener\("keydown", onMenuKeyDown, true\)/);
     expect(sync).toMatch(/function onOutsidePointerDown[\s\S]*closePaneFooterMenu\(thread,\s*false\)/);

@@ -106,12 +106,13 @@
   var PANE_MINIMUMS = { width: 200, height: 137, separator: 6 };
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") {
+    if (document.hidden || document.visibilityState === "hidden") {
       saveWorkspaceNow();
       stopCovenPolling();
     } else {
       startCovenPolling();
     }
+    syncPaneMetricsVisibility();
   }
 
   /**
@@ -2948,6 +2949,7 @@
     thread.paneFooter = null;
     thread.paneFooterItems = null;
     thread.paneFooterOverflow = null;
+    thread.paneFooterMenuTrigger = null;
     thread.createPaneFooterButton = null;
     var key = paneLayoutKey(thread.projectId, thread.worktreePath);
     var layout = paneLayouts.get(key);
@@ -3408,13 +3410,18 @@
   }
 
   function threadWantsMetrics(thread) {
-    return isLiveThread(thread)
+    return !document.hidden
+      && terminalHost
+      && terminalHost.isConnected
+      && !terminalHost.hidden
+      && isLiveThread(thread)
       && !thread.hidden
       && thread.status !== "exited"
       && thread.launch
       && thread.launch.launchKind === "coven-chat"
       && thread.pane
       && thread.pane.isConnected
+      && terminalHost.contains(thread.pane)
       && effectiveCanvasThreadIds().indexOf(thread.id) !== -1
       && Boolean(thread.launch.covenSessionId);
   }
@@ -3536,6 +3543,22 @@
     state.threads.forEach(function (thread) {
       if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
     });
+  }
+
+  function syncPaneMetricsVisibility() {
+    if (document.hidden || !terminalHost ||
+        !terminalHost.isConnected || terminalHost.hidden) {
+      state.threads.forEach(function (thread) {
+        thread.metricsGeneration = (thread.metricsGeneration || 0) + 1;
+        if (thread.metricsRefreshTimer) {
+          clearTimeout(thread.metricsRefreshTimer);
+          thread.metricsRefreshTimer = 0;
+        }
+      });
+      return false;
+    }
+    refreshVisiblePaneMetrics();
+    return true;
   }
 
   /** Sidebar and menu glyph for a pane kind. */
@@ -3672,26 +3695,41 @@
 
   function positionPaneFooterPopover(popover, anchor) {
     document.body.appendChild(popover);
+    var margin = 8;
+    var gap = 6;
     var anchorRect = anchor.getBoundingClientRect();
     var maxWidth = Math.max(0, Math.min(320, window.innerWidth - 16));
     popover.style.maxWidth = maxWidth + "px";
+    var viewportMaxHeight = Math.max(0, window.innerHeight - margin * 2);
+    popover.style.maxHeight = viewportMaxHeight + "px";
     var popoverRect = popover.getBoundingClientRect();
-    popover.style.left = Math.max(8, Math.min(
-      window.innerWidth - popoverRect.width - 8,
+    var spaceAbove = Math.max(0, anchorRect.top - gap - margin);
+    var spaceBelow = Math.max(
+      0,
+      window.innerHeight - anchorRect.bottom - gap - margin
+    );
+    var placeAbove = popoverRect.height <= spaceAbove ||
+      spaceAbove >= spaceBelow;
+    var availableHeight = placeAbove ? spaceAbove : spaceBelow;
+    popover.style.maxHeight = Math.min(
+      viewportMaxHeight,
+      availableHeight
+    ) + "px";
+    popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(margin, Math.min(
+      window.innerWidth - popoverRect.width - margin,
       anchorRect.right - popoverRect.width
     )) + "px";
-    popover.style.top = Math.max(
-      8,
-      anchorRect.top - popoverRect.height - 6
-    ) + "px";
+    var preferredTop = placeAbove
+      ? anchorRect.top - popoverRect.height - gap
+      : anchorRect.bottom + gap;
+    popover.style.top = Math.max(margin, Math.min(
+      window.innerHeight - popoverRect.height - margin,
+      preferredTop
+    )) + "px";
   }
 
-  function openPaneUsagePopover(thread) {
-    var trigger = document.activeElement;
-    if (thread.paneFooterMenu && trigger &&
-        thread.paneFooterMenu.contains(trigger)) {
-      trigger = thread.paneFooterOverflow;
-    }
+  function openPaneUsagePopover(thread, trigger) {
     closePaneFooterPopovers(false);
     var metrics = paneFooterState(thread).metrics || {};
     var notReported = "Not reported by Coven";
@@ -3739,9 +3777,9 @@
     if (metrics.error) popover.appendChild(paneUsageRow("Error", metrics.error));
     paneFooterPopover = popover;
     paneFooterPopoverOwner = thread.paneFooter;
-    paneFooterPopoverTrigger = trigger || thread.paneFooter;
+    paneFooterPopoverTrigger = trigger || null;
     paneFooterPopoverThreadId = thread.id;
-    positionPaneFooterPopover(popover, thread.paneFooter);
+    positionPaneFooterPopover(popover, trigger || thread.paneFooter);
 
     function onUsageKeyDown(event) {
       if (event.key !== "Escape") return;
@@ -3767,7 +3805,7 @@
     return item.label + ": " + value;
   }
 
-  function runPaneFooterAction(thread, item) {
+  function runPaneFooterAction(thread, item, trigger) {
     if (!item) return false;
     if (item.action === "copy") {
       return copyPaneFooterValue(item.label, paneFooterActionValue(item));
@@ -3776,7 +3814,7 @@
       return revealPaneWorktree(paneFooterActionValue(item));
     }
     if (item.action === "usage") {
-      openPaneUsagePopover(thread);
+      openPaneUsagePopover(thread, trigger);
       return true;
     }
     if (item.action === "model-details") {
@@ -3810,7 +3848,10 @@
 
   function handlePaneFooterItemClick(thread, item, event, fromOverflowMenu) {
     event.stopPropagation();
-    var result = runPaneFooterAction(thread, item);
+    var trigger = fromOverflowMenu
+      ? (thread.paneFooterMenuTrigger || thread.paneFooterOverflow)
+      : event.currentTarget;
+    var result = runPaneFooterAction(thread, item, trigger);
     if (item && item.action === "usage") return result;
     closePaneFooterMenu(thread, Boolean(fromOverflowMenu));
     focusPaneAfterFooterAction(thread);
@@ -3819,6 +3860,7 @@
 
   function closePaneFooterMenu(thread, restoreFocus) {
     if (!thread) return;
+    var trigger = thread.paneFooterMenuTrigger || thread.paneFooterOverflow;
     if (thread.paneFooterMenuCleanup) {
       thread.paneFooterMenuCleanup();
       thread.paneFooterMenuCleanup = null;
@@ -3827,9 +3869,13 @@
       thread.paneFooterMenu.parentNode.removeChild(thread.paneFooterMenu);
     }
     thread.paneFooterMenu = null;
+    thread.paneFooterMenuTrigger = null;
     if (thread.paneFooterOverflow) {
       thread.paneFooterOverflow.setAttribute("aria-expanded", "false");
-      if (restoreFocus) thread.paneFooterOverflow.focus();
+    }
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
     }
   }
 
@@ -3929,7 +3975,7 @@
     });
     overflow.addEventListener("click", function (event) {
       event.stopPropagation();
-      syncPaneFooter(thread, true);
+      syncPaneFooter(thread, true, event.currentTarget);
     });
     footer.appendChild(itemsHost);
     footer.appendChild(overflow);
@@ -3956,6 +4002,7 @@
   function syncPaneFooter(thread) {
     if (!thread || !thread.paneFooter || !thread.paneFooterItems) return;
     var openOverflow = arguments[1];
+    var overflowTrigger = arguments[2] || thread.paneFooterOverflow;
     closePaneUsagePopoverForFooter(thread, false);
     var items = PsychePanes.footerItems(paneFooterState(thread));
     var currentTier = thread.paneFooter.dataset.tier ||
@@ -3986,11 +4033,12 @@
       menu.appendChild(button);
     });
     thread.paneFooterMenu = menu;
+    thread.paneFooterMenuTrigger = overflowTrigger;
     thread.paneFooterOverflow.setAttribute("aria-expanded", "true");
-    positionPaneFooterPopover(menu, thread.paneFooterOverflow);
+    positionPaneFooterPopover(menu, overflowTrigger);
 
     function onOutsidePointerDown(event) {
-      if (menu.contains(event.target) || thread.paneFooterOverflow.contains(event.target)) return;
+      if (menu.contains(event.target) || overflowTrigger.contains(event.target)) return;
       closePaneFooterMenu(thread, false);
     }
     function onMenuKeyDown(event) {
@@ -4731,10 +4779,12 @@
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
+    var restoredTerminalView = false;
     if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
       state.activeFileId = null;
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
+      restoredTerminalView = true;
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
@@ -4753,6 +4803,7 @@
       }
     }
     refreshTabs();
+    if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
     return true;
@@ -4894,6 +4945,7 @@
     terminalArea.classList.add("is-file-focused");
     fileViewEl.hidden = false;
     terminalHost.hidden = true;
+    syncPaneMetricsVisibility();
     renderPaneMinimap(activePaneLayout(), file);
     return true;
   }
@@ -5027,6 +5079,7 @@
     state.activeFileId = null;
     if (fileViewEl) fileViewEl.hidden = true;
     if (terminalHost) terminalHost.hidden = false;
+    syncPaneMetricsVisibility();
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;
@@ -5055,6 +5108,7 @@
       state.activeFileId = null;
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
+      syncPaneMetricsVisibility();
       refreshTabs();
       requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     }
