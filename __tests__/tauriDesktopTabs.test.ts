@@ -81,7 +81,9 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {
-    expect(tauriLib).toMatch(/status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\)/);
+    expect(tauriLib).toMatch(
+      /status\.ok\(\)\.map\(\|status\|\s*status\.exit_code\(\)\s+as\s+i32\)/
+    );
     expect(tauriLib).toMatch(
       /fn\s+app_environment\(\)\s*->\s*AppEnvironment[\s\S]*?let\s+\(default_shell,\s*default_shell_args\)\s*=\s*platform::default_shell\(\);/
     );
@@ -107,8 +109,13 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).not.toMatch(/static\s+STARTING_SESSIONS:/);
     expect(tauriLib).toMatch(/let\s+pending_start\s*=\s*PendingPtyStart::reserve\(&thread_id\)\?/);
     expect(tauriLib).toMatch(
-      /pending_start\.install\(\s*PtySession\s*\{[\s\S]*?terminator:[\s\S]*?\}\s*\)/
+      /let\s+session\s*=\s*match\s+startup\.take_session\(\)[\s\S]*?startup\.prepare_exit_activation\(session_token\.clone\(\)\)[\s\S]*?pending_start\.install\(session\)/
     );
+    expect(tauriLib).toContain('std::thread::Builder::new()');
+    expect(tauriLib).toMatch(/startup\.spawn_reader\(&thread_spawner/);
+    expect(tauriLib).toMatch(/startup\.spawn_exit_watcher\(&thread_spawner/);
+    expect(tauriLib).toMatch(/startup\.activate_exit_watcher\(\)/);
+    expect(tauriLib).not.toContain('PtySpawnTerminationGuard');
     expect(tauriLib).toMatch(
       /pump\.start_worker[\s\S]*?app_for_output[\s\S]*?\.emit\("pty:data-batch",\s*payload\)/
     );
@@ -117,14 +124,14 @@ describe('Tauri desktop tab shortcuts', () => {
       /let\s+\(reader_done_tx,\s*reader_done_rx\)\s*=\s*std::sync::mpsc::sync_channel\(1\);[\s\S]*?reader_done_tx\.send\(reader_result\)/
     );
     expect(tauriLib).toMatch(
-      /let\s+outcome\s*=\s*coordinate_exit_shutdown\(\s*&mut shutdown,\s*EXIT_DRAIN_TIMEOUT\s*\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
+      /let\s+outcome\s*=\s*coordinate_exit_shutdown\(\s*&mut shutdown,\s*EXIT_DRAIN_TIMEOUT\s*\);[\s\S]*?app\.emit\(\s*"pty:exit"/
     );
     expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
       /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?guard[\s\S]*?\.live\(&thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
     );
     expect(tauriLib).toMatch(
-      /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/
+      /app\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&token\)/
     );
     expect(tauriLib).toMatch(/fn\s+agent_skill_source_rank\(source:\s*&str\)\s*->\s*u8/);
     expect(tauriLib).toMatch(/"project"\s*=>\s*0,[\s\S]*?"user"\s*=>\s*1,[\s\S]*?"plugin"\s*=>\s*2/);
@@ -133,6 +140,23 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).toMatch(/out\.dedup_by\(\|a,\s*b\|\s*a\.name\s*==\s*b\.name\s*&&\s*a\.kind\s*==\s*b\.kind\)/);
     expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
+
+    const startBegin = tauriLib.indexOf('fn pty_start(');
+    const startEnd = tauriLib.indexOf('\n#[tauri::command]\nfn pty_write', startBegin);
+    const startSource = tauriLib.slice(startBegin, startEnd);
+    const readerSpawn = startSource.indexOf('startup.spawn_reader(');
+    const watcherSpawn = startSource.indexOf('startup.spawn_exit_watcher(');
+    const activationPrepare = startSource.indexOf(
+      'startup.prepare_exit_activation('
+    );
+    const registration = startSource.indexOf('pending_start.install(session)');
+    const activation = startSource.indexOf('startup.activate_exit_watcher()');
+    expect(readerSpawn).toBeGreaterThanOrEqual(0);
+    expect(watcherSpawn).toBeGreaterThan(readerSpawn);
+    expect(activationPrepare).toBeGreaterThan(watcherSpawn);
+    expect(registration).toBeGreaterThan(activationPrepare);
+    expect(activation).toBeGreaterThan(registration);
+    expect(startSource).not.toContain('std::thread::spawn');
   });
 
   it('queries and validates the current Unix PTY foreground group before bounded escalation', () => {
@@ -159,34 +183,30 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(
       /fn\s+wait_for_child<[^>]+>[\s\S]*?disable_pid_fallback_before_wait\(\);[\s\S]*?wait\(\)/
     );
-    const watcherStart = tauriLib.indexOf('let exit_terminator = terminator;');
-    const waitStart = tauriLib.indexOf('exit_terminator.wait_for_child(|| child.wait())', watcherStart);
+    const watcherStart = tauriLib.indexOf('fn run_pty_exit_watcher(');
+    const waitStart = tauriLib.indexOf(
+      'terminator.wait_for_child(|| child.wait())',
+      watcherStart
+    );
     const shutdownStart = tauriLib.indexOf('PtyExitShutdown::new(', waitStart);
     expect(watcherStart).toBeGreaterThanOrEqual(0);
     expect(waitStart).toBeGreaterThan(watcherStart);
     expect(shutdownStart).toBeGreaterThan(waitStart);
   });
 
-  it('owns a kill-on-close Windows Job Object and terminates it before ConPTY teardown', () => {
-    expect(tauriCargo).toMatch(
-      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys\s*=\s*\{[^}]*version\s*=\s*"=0\.59\.0"[^}]*Win32_Foundation[^}]*Win32_Security[^}]*Win32_System_JobObjects[^}]*Win32_System_Threading/
+  it('delegates Windows process-tree termination to the vendored PTY child killer', () => {
+    expect(tauriCargo).not.toMatch(
+      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys/
     );
-    expect(tauriLib).toContain('const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;');
-    expect(tauriLib).toContain('const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;');
-    expect(tauriLib).toMatch(/OpenProcess\(\s*WINDOWS_REQUIRED_PROCESS_RIGHTS/);
-    expect(tauriLib).toContain('CreateJobObjectW');
-    expect(tauriLib).toContain('JobObjectExtendedLimitInformation');
-    expect(tauriLib).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
-    expect(tauriLib).toContain('SetInformationJobObject');
-    expect(tauriLib).toContain('AssignProcessToJobObject');
-    expect(tauriLib).toContain('TerminateJobObject');
-    expect(tauriLib).toContain('TerminateProcess');
-    expect(tauriLib).toContain('CloseHandle');
-    expect(tauriLib).toContain('WindowsExternalJobRestriction');
-    expect(tauriLib).toMatch(/impl<[^>]*>\s+Drop\s+for\s+OwnedTerminationResource/);
-    expect(tauriLib).toMatch(/if\s+result\s*!=\s*0\s*\{\s*Ok\(\(\)\)/);
+    expect(tauriLib).not.toContain('AssignProcessToJobObject');
+    expect(tauriLib).not.toContain('CreateJobObjectW');
+    expect(tauriLib).not.toContain('TerminateJobObject');
+    expect(tauriLib).not.toContain('TerminateProcess');
     expect(tauriLib).toMatch(
-      /let\s+result\s*=\s*unsafe\s*\{\s*TerminateJobObject\(self\.raw_handle\(\),\s*1\)\s*\};\s*check_windows_bool\(result,\s*std::io::Error::last_os_error\)/
+      /struct\s+WindowsProcessTreeKiller\s*\{[\s\S]*?killer:\s*Mutex<Box<dyn ChildKiller \+ Send \+ Sync>>/
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+terminate_platform_process\(\s*process_tree:\s*&WindowsProcessTreeKiller[\s\S]*?process_tree\.terminate\(\)\?;[\s\S]*?PtyTerminationOutcome::ProcessTree/
     );
     const windowsStart = tauriLib.indexOf(
       '#[cfg(windows)]\nfn terminate_platform_process'
@@ -197,7 +217,7 @@ describe('Tauri desktop tab shortcuts', () => {
       windowsStart,
       windowsEnd === -1 ? undefined : windowsEnd
     );
-    expect(windowsTermination).toContain('process_tree.terminate()');
+    expect(windowsTermination).toContain('process_tree.terminate()?');
     expect(windowsTermination).not.toContain('killer.kill()');
     expect(windowsTermination).not.toContain('libc::');
 

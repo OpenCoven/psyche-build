@@ -14,24 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
-};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE},
-    System::{
-        JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        },
-        Threading::{OpenProcess, TerminateProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-    },
 };
 
 mod coven_sessions;
@@ -305,6 +293,30 @@ impl<T> PtyLifecycleRegistry<T> {
         should_remove
     }
 
+    fn abort_activation(&mut self, token: &PtySessionToken) -> Option<T> {
+        let should_remove = self.entries.get(&token.thread_id).is_some_and(|entry| {
+            entry.generation == token.generation
+                && matches!(
+                    entry.state,
+                    PtyLifecycleState::Running(_) | PtyLifecycleState::Stopping
+                )
+        });
+        if !should_remove {
+            return None;
+        }
+        let entry = self
+            .entries
+            .remove(&token.thread_id)
+            .expect("matching lifecycle entry was checked before removal");
+        match entry.state {
+            PtyLifecycleState::Running(session) => Some(session),
+            PtyLifecycleState::Stopping => None,
+            PtyLifecycleState::Starting { .. } | PtyLifecycleState::Exiting => {
+                unreachable!("activation abort only removes running or stopping entries")
+            }
+        }
+    }
+
     fn live(&self, thread_id: &str) -> Option<&T> {
         self.entries
             .get(thread_id)
@@ -334,303 +346,36 @@ static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
 static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
-#[cfg(any(test, windows))]
-const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;
-#[cfg(any(test, windows))]
-const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;
-#[cfg(any(test, windows))]
-const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
-
-#[cfg(any(test, windows))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WindowsJobAssignmentFailure {
-    ExternalJobRestriction,
-    Other,
-}
-
-#[cfg(any(test, windows))]
-fn classify_windows_job_assignment_error(error: &std::io::Error) -> WindowsJobAssignmentFailure {
-    if error.raw_os_error() == Some(WINDOWS_ERROR_ACCESS_DENIED) {
-        WindowsJobAssignmentFailure::ExternalJobRestriction
-    } else {
-        WindowsJobAssignmentFailure::Other
-    }
-}
-
 #[derive(Debug)]
 enum PtyProcessTerminatorSetupError {
     Message(String),
-    #[cfg(windows)]
-    WindowsExternalJobRestriction {
-        process_id: u32,
-        assignment_error: std::io::Error,
-        cleanup_error: Option<std::io::Error>,
-    },
-    #[cfg(windows)]
-    WindowsJobAssignmentFailed {
-        process_id: u32,
-        assignment_error: std::io::Error,
-        cleanup_error: Option<std::io::Error>,
-    },
 }
 
 impl std::fmt::Display for PtyProcessTerminatorSetupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(message) => formatter.write_str(message),
-            #[cfg(windows)]
-            Self::WindowsExternalJobRestriction {
-                process_id,
-                assignment_error,
-                cleanup_error,
-            } => {
-                write!(
-                    formatter,
-                    "WindowsExternalJobRestriction: failed to assign PTY process {process_id} \
-                     to its owned Job Object: {assignment_error}"
-                )?;
-                match cleanup_error {
-                    Some(error) => write!(
-                        formatter,
-                        "; direct-child fallback also failed: {error}; descendant termination \
-                         is not proven"
-                    ),
-                    None => formatter.write_str(
-                        "; the direct child was terminated, but descendant termination is not proven",
-                    ),
-                }
-            }
-            #[cfg(windows)]
-            Self::WindowsJobAssignmentFailed {
-                process_id,
-                assignment_error,
-                cleanup_error,
-            } => {
-                write!(
-                    formatter,
-                    "failed to assign Windows PTY process {process_id} to its owned Job Object: \
-                     {assignment_error}"
-                )?;
-                match cleanup_error {
-                    Some(error) => {
-                        write!(formatter, "; direct-child fallback also failed: {error}")
-                    }
-                    None => formatter.write_str("; the direct child was terminated"),
-                }
-            }
         }
     }
 }
 
-#[cfg(any(test, windows))]
-fn check_windows_bool<LastError>(result: i32, last_error: LastError) -> std::io::Result<()>
-where
-    LastError: FnOnce() -> std::io::Error,
-{
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(last_error())
-    }
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsProcessTreeKiller {
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
-#[cfg(any(test, windows))]
-struct OwnedTerminationResource<T, Close>
-where
-    Close: FnMut(T),
-{
-    resource: Option<T>,
-    close_resource: Close,
-}
-
-#[cfg(any(test, windows))]
-impl<T, Close> OwnedTerminationResource<T, Close>
-where
-    Close: FnMut(T),
-{
-    fn new(resource: T, close_resource: Close) -> Self {
+#[cfg(windows)]
+impl WindowsProcessTreeKiller {
+    fn new(killer: Box<dyn ChildKiller + Send + Sync>) -> Self {
         Self {
-            resource: Some(resource),
-            close_resource,
+            killer: Mutex::new(killer),
         }
-    }
-
-    #[cfg(windows)]
-    fn get(&self) -> Option<&T> {
-        self.resource.as_ref()
-    }
-
-    fn close(&mut self) {
-        if let Some(resource) = self.resource.take() {
-            (self.close_resource)(resource);
-        }
-    }
-}
-
-#[cfg(any(test, windows))]
-impl<T, Close: FnMut(T)> Drop for OwnedTerminationResource<T, Close> {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-#[cfg(windows)]
-fn close_windows_handle(handle: isize) {
-    let result = unsafe { CloseHandle(handle as HANDLE) };
-    if result == 0 {
-        log::warn!(
-            "failed to close retained PTY termination handle: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsProcessHandle {
-    handle: OwnedTerminationResource<isize, fn(isize)>,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsProcessHandle {
-    fn open(process_id: u32) -> std::io::Result<Self> {
-        debug_assert_eq!(
-            WINDOWS_REQUIRED_PROCESS_RIGHTS,
-            PROCESS_SET_QUOTA | PROCESS_TERMINATE
-        );
-        let handle = unsafe { OpenProcess(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0, process_id) };
-        if handle.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self {
-            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
-        })
-    }
-
-    fn raw_handle(&self) -> HANDLE {
-        *self
-            .handle
-            .get()
-            .expect("owned Windows process handle must remain open until drop") as HANDLE
     }
 
     fn terminate(&self) -> std::io::Result<()> {
-        let result = unsafe { TerminateProcess(self.raw_handle(), 1) };
-        check_windows_bool(result, std::io::Error::last_os_error)
+        self.killer.lock().kill()
     }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsJobObject {
-    handle: OwnedTerminationResource<isize, fn(isize)>,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsJobObject {
-    fn create() -> std::io::Result<Self> {
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self {
-            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
-        })
-    }
-
-    fn raw_handle(&self) -> HANDLE {
-        *self
-            .handle
-            .get()
-            .expect("owned Windows Job Object handle must remain open until drop") as HANDLE
-    }
-
-    fn configure_kill_on_close(&self) -> std::io::Result<()> {
-        debug_assert_eq!(
-            WINDOWS_JOB_KILL_ON_CLOSE_LIMIT,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        );
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let result = unsafe {
-            SetInformationJobObject(
-                self.raw_handle(),
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of_val(&limits) as u32,
-            )
-        };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-
-    fn assign_process(&self, process: &OwnedWindowsProcessHandle) -> std::io::Result<()> {
-        let result = unsafe { AssignProcessToJobObject(self.raw_handle(), process.raw_handle()) };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-
-    fn terminate(&self) -> std::io::Result<()> {
-        let result = unsafe { TerminateJobObject(self.raw_handle(), 1) };
-        check_windows_bool(result, std::io::Error::last_os_error)
-    }
-}
-
-#[cfg(windows)]
-struct OwnedWindowsProcessTree {
-    job: OwnedWindowsJobObject,
-    process: OwnedWindowsProcessHandle,
-}
-
-#[cfg(windows)]
-impl OwnedWindowsProcessTree {
-    fn terminate(&self) -> std::io::Result<()> {
-        match self.job.terminate() {
-            Ok(()) => Ok(()),
-            Err(job_error) => {
-                let fallback = self.process.terminate();
-                Err(std::io::Error::new(
-                    job_error.kind(),
-                    match fallback {
-                        Ok(()) => format!(
-                            "{job_error}; the direct-child fallback was terminated, but \
-                             descendant termination is not proven"
-                        ),
-                        Err(fallback_error) => format!(
-                            "{job_error}; direct-child fallback also failed: {fallback_error}"
-                        ),
-                    },
-                ))
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn terminate_borrowed_windows_child(child: &dyn Child) -> std::io::Result<()> {
-    let handle = child.as_raw_handle().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "spawned PTY child did not expose a Windows process handle",
-        )
-    })?;
-    let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
-    check_windows_bool(result, std::io::Error::last_os_error)
-}
-
-#[cfg(windows)]
-fn windows_setup_error(
-    operation: &str,
-    process_id: u32,
-    error: std::io::Error,
-    cleanup: std::io::Result<()>,
-) -> PtyProcessTerminatorSetupError {
-    PtyProcessTerminatorSetupError::Message(match cleanup {
-        Ok(()) => format!(
-            "failed to {operation} for Windows PTY process {process_id}: {error}; \
-             the direct child was terminated, but descendant termination is not proven"
-        ),
-        Err(cleanup_error) => format!(
-            "failed to {operation} for Windows PTY process {process_id}: {error}; \
-             direct-child fallback also failed: {cleanup_error}"
-        ),
-    })
 }
 
 #[cfg(unix)]
@@ -1026,7 +771,7 @@ struct PtyProcessTerminator {
     #[cfg(unix)]
     unix_platform: Option<Arc<dyn UnixTerminationPlatform>>,
     #[cfg(windows)]
-    process_tree: Arc<OwnedWindowsProcessTree>,
+    process_tree: Arc<WindowsProcessTreeKiller>,
     identity: PtyProcessIdentity,
 }
 
@@ -1038,68 +783,8 @@ impl PtyProcessTerminator {
         let child_pid = child.process_id();
         #[cfg(windows)]
         {
-            let process_id = child_pid.ok_or_else(|| {
-                PtyProcessTerminatorSetupError::Message(
-                    "spawned PTY child did not expose a Windows process id".to_string(),
-                )
-            })?;
-            let process = match OwnedWindowsProcessHandle::open(process_id) {
-                Ok(process) => process,
-                Err(open_error) => {
-                    let cleanup = terminate_borrowed_windows_child(child);
-                    return Err(PtyProcessTerminatorSetupError::Message(match cleanup {
-                        Ok(()) => format!(
-                            "failed to retain Windows PTY process handle for {process_id}: \
-                             {open_error}; the direct child was terminated, but descendant \
-                             termination is not proven"
-                        ),
-                        Err(cleanup_error) => format!(
-                            "failed to retain Windows PTY process handle for {process_id}: \
-                             {open_error}; direct spawned-child cleanup also failed: \
-                             {cleanup_error}"
-                        ),
-                    }));
-                }
-            };
-            let job = OwnedWindowsJobObject::create().map_err(|error| {
-                windows_setup_error(
-                    "create an owned Job Object",
-                    process_id,
-                    error,
-                    process.terminate(),
-                )
-            })?;
-            job.configure_kill_on_close().map_err(|error| {
-                windows_setup_error(
-                    "configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
-                    process_id,
-                    error,
-                    process.terminate(),
-                )
-            })?;
-            if let Err(assignment_error) = job.assign_process(&process) {
-                let cleanup_error = process.terminate().err();
-                return Err(
-                    match classify_windows_job_assignment_error(&assignment_error) {
-                        WindowsJobAssignmentFailure::ExternalJobRestriction => {
-                            PtyProcessTerminatorSetupError::WindowsExternalJobRestriction {
-                                process_id,
-                                assignment_error,
-                                cleanup_error,
-                            }
-                        }
-                        WindowsJobAssignmentFailure::Other => {
-                            PtyProcessTerminatorSetupError::WindowsJobAssignmentFailed {
-                                process_id,
-                                assignment_error,
-                                cleanup_error,
-                            }
-                        }
-                    },
-                );
-            }
             Ok(Self {
-                process_tree: Arc::new(OwnedWindowsProcessTree { job, process }),
+                process_tree: Arc::new(WindowsProcessTreeKiller::new(child.clone_killer())),
                 identity: PtyProcessIdentity { child_pid },
             })
         }
@@ -1257,28 +942,492 @@ fn unix_terminator_setup_error(
     }
 }
 
-struct PtySpawnTerminationGuard {
-    terminator: Option<PtyProcessTerminator>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PtyThreadRole {
+    Reader,
+    ExitWatcher,
 }
 
-impl PtySpawnTerminationGuard {
-    fn new(terminator: PtyProcessTerminator) -> Self {
+type PtyThreadTask = Box<dyn FnOnce() + Send + 'static>;
+
+trait PtyThreadSpawner {
+    fn spawn(
+        &self,
+        role: PtyThreadRole,
+        name: String,
+        task: PtyThreadTask,
+    ) -> std::io::Result<std::thread::JoinHandle<()>>;
+}
+
+struct SystemPtyThreadSpawner;
+
+impl PtyThreadSpawner for SystemPtyThreadSpawner {
+    fn spawn(
+        &self,
+        _role: PtyThreadRole,
+        name: String,
+        task: PtyThreadTask,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new().name(name).spawn(move || task())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupActivationError {
+    AlreadyPrepared,
+    NotPrepared,
+    AlreadyConsumed,
+    Cancelled,
+}
+
+impl std::fmt::Display for StartupActivationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyPrepared => formatter.write_str("startup activation already prepared"),
+            Self::NotPrepared => formatter.write_str("startup activation is not prepared"),
+            Self::AlreadyConsumed => formatter.write_str("startup activation already consumed"),
+            Self::Cancelled => formatter.write_str("startup activation was cancelled"),
+        }
+    }
+}
+
+enum StartupActivationState<T> {
+    Waiting,
+    Prepared(T),
+    Active(T),
+    Consumed,
+    Cancelled,
+}
+
+struct StartupActivation<T> {
+    state: Mutex<StartupActivationState<T>>,
+    wake: Condvar,
+}
+
+impl<T> StartupActivation<T> {
+    fn new() -> Self {
         Self {
-            terminator: Some(terminator),
+            state: Mutex::new(StartupActivationState::Waiting),
+            wake: Condvar::new(),
         }
     }
 
-    fn disarm(&mut self) {
-        self.terminator = None;
+    fn prepare(&self, payload: T) -> Result<(), (StartupActivationError, T)> {
+        let mut state = self.state.lock();
+        match &*state {
+            StartupActivationState::Waiting => {
+                *state = StartupActivationState::Prepared(payload);
+                Ok(())
+            }
+            StartupActivationState::Prepared(_) | StartupActivationState::Active(_) => {
+                Err((StartupActivationError::AlreadyPrepared, payload))
+            }
+            StartupActivationState::Consumed => {
+                Err((StartupActivationError::AlreadyConsumed, payload))
+            }
+            StartupActivationState::Cancelled => Err((StartupActivationError::Cancelled, payload)),
+        }
+    }
+
+    fn activate(&self) -> Result<(), StartupActivationError> {
+        let mut state = self.state.lock();
+        let current = std::mem::replace(&mut *state, StartupActivationState::Consumed);
+        match current {
+            StartupActivationState::Prepared(payload) => {
+                *state = StartupActivationState::Active(payload);
+                drop(state);
+                self.wake.notify_all();
+                Ok(())
+            }
+            StartupActivationState::Waiting => {
+                *state = StartupActivationState::Waiting;
+                Err(StartupActivationError::NotPrepared)
+            }
+            StartupActivationState::Active(payload) => {
+                *state = StartupActivationState::Active(payload);
+                Err(StartupActivationError::AlreadyPrepared)
+            }
+            StartupActivationState::Consumed => Err(StartupActivationError::AlreadyConsumed),
+            StartupActivationState::Cancelled => {
+                *state = StartupActivationState::Cancelled;
+                Err(StartupActivationError::Cancelled)
+            }
+        }
+    }
+
+    fn wait(&self) -> Option<T> {
+        let mut state = self.state.lock();
+        loop {
+            match &*state {
+                StartupActivationState::Active(_) => {
+                    let current = std::mem::replace(&mut *state, StartupActivationState::Consumed);
+                    let StartupActivationState::Active(payload) = current else {
+                        unreachable!("active startup payload was checked before replacement");
+                    };
+                    return Some(payload);
+                }
+                StartupActivationState::Cancelled | StartupActivationState::Consumed => {
+                    return None;
+                }
+                StartupActivationState::Waiting | StartupActivationState::Prepared(_) => {
+                    self.wake.wait(&mut state);
+                }
+            }
+        }
+    }
+
+    fn cancel(&self) -> Option<T> {
+        let mut state = self.state.lock();
+        let current = std::mem::replace(&mut *state, StartupActivationState::Cancelled);
+        let payload = match current {
+            StartupActivationState::Prepared(payload) | StartupActivationState::Active(payload) => {
+                Some(payload)
+            }
+            StartupActivationState::Waiting
+            | StartupActivationState::Consumed
+            | StartupActivationState::Cancelled => None,
+        };
+        drop(state);
+        self.wake.notify_all();
+        payload
     }
 }
 
-impl Drop for PtySpawnTerminationGuard {
-    fn drop(&mut self) {
-        if let Some(terminator) = self.terminator.take() {
-            if let Err(error) = terminator.terminate() {
-                log::warn!("failed to terminate PTY after start setup error: {error}");
+struct PtyExitWatcherActivation {
+    child: Box<dyn Child + Send + Sync>,
+    token: PtySessionToken,
+    pump: OutputPump,
+    terminator: PtyProcessTerminator,
+    reader_cancellation: PtyReaderCancellation,
+    reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    reader_thread: std::thread::JoinHandle<()>,
+}
+
+struct PtyStartupGuard {
+    child: Option<Box<dyn Child + Send + Sync>>,
+    terminator: PtyProcessTerminator,
+    master: Option<Box<dyn MasterPty + Send>>,
+    writer: Option<Box<dyn Write + Send>>,
+    pump: Option<OutputPump>,
+    reader_cancellation: Option<PtyReaderCancellation>,
+    reader_done_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
+    exit_handoff: Option<Arc<StartupActivation<PtyExitWatcherActivation>>>,
+    exit_thread: Option<std::thread::JoinHandle<()>>,
+    armed: bool,
+}
+
+impl PtyStartupGuard {
+    fn new(
+        child: Box<dyn Child + Send + Sync>,
+        terminator: PtyProcessTerminator,
+        master: Box<dyn MasterPty + Send>,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            terminator,
+            master: Some(master),
+            writer: None,
+            pump: None,
+            reader_cancellation: None,
+            reader_done_rx: None,
+            reader_thread: None,
+            exit_handoff: None,
+            exit_thread: None,
+            armed: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        child: Box<dyn Child + Send + Sync>,
+        terminator: PtyProcessTerminator,
+        pump: OutputPump,
+    ) -> Self {
+        let mut guard = Self {
+            child: Some(child),
+            terminator,
+            master: None,
+            writer: None,
+            pump: None,
+            reader_cancellation: None,
+            reader_done_rx: None,
+            reader_thread: None,
+            exit_handoff: None,
+            exit_thread: None,
+            armed: true,
+        };
+        guard.pump = Some(pump);
+        guard
+    }
+
+    fn master(&self) -> Result<&dyn MasterPty, String> {
+        self.master
+            .as_deref()
+            .map(|master| master as &dyn MasterPty)
+            .ok_or_else(|| "PTY startup master is unavailable".to_string())
+    }
+
+    fn prepare_reader(&mut self) -> Result<Box<dyn Read + Send>, String> {
+        let (reader, cancellation) = prepare_pty_reader(self.master()?)?;
+        self.reader_cancellation = Some(cancellation);
+        Ok(reader)
+    }
+
+    fn prepare_writer(&mut self) -> Result<(), String> {
+        let writer = self
+            .master()?
+            .take_writer()
+            .map_err(|error| error.to_string())?;
+        self.writer = Some(writer);
+        Ok(())
+    }
+
+    fn set_pump(&mut self, pump: OutputPump) {
+        self.pump = Some(pump);
+    }
+
+    fn pump(&self) -> Result<OutputPump, String> {
+        self.pump
+            .clone()
+            .ok_or_else(|| "PTY startup output pump is unavailable".to_string())
+    }
+
+    fn spawn_reader_task<S>(
+        &mut self,
+        spawner: &S,
+        _thread_id: &str,
+        task: PtyThreadTask,
+    ) -> std::io::Result<()>
+    where
+        S: PtyThreadSpawner,
+    {
+        if self.reader_thread.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "PTY reader thread already started",
+            ));
+        }
+        let handle = spawner.spawn(PtyThreadRole::Reader, "pty-reader".to_string(), task)?;
+        self.reader_thread = Some(handle);
+        Ok(())
+    }
+
+    fn spawn_reader<S>(
+        &mut self,
+        spawner: &S,
+        thread_id: &str,
+        mut reader: Box<dyn Read + Send>,
+    ) -> Result<(), String>
+    where
+        S: PtyThreadSpawner,
+    {
+        let reader_pump = self.pump()?;
+        let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
+        self.spawn_reader_task(
+            spawner,
+            thread_id,
+            Box::new(move || {
+                let reader_result = pump_pty_reader(&mut reader, reader_pump);
+                let _ = reader_done_tx.send(reader_result);
+            }),
+        )
+        .map_err(|error| format!("failed to spawn PTY reader thread: {error}"))?;
+        self.reader_done_rx = Some(reader_done_rx);
+        Ok(())
+    }
+
+    fn spawn_exit_watcher<S, Run>(
+        &mut self,
+        spawner: &S,
+        _thread_id: &str,
+        run: Run,
+    ) -> std::io::Result<()>
+    where
+        S: PtyThreadSpawner,
+        Run: FnOnce(PtyExitWatcherActivation) + Send + 'static,
+    {
+        if self.exit_thread.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "PTY exit watcher already started",
+            ));
+        }
+        let handoff = Arc::new(StartupActivation::new());
+        let watcher_handoff = Arc::clone(&handoff);
+        let handle = spawner.spawn(
+            PtyThreadRole::ExitWatcher,
+            "pty-exit-watcher".to_string(),
+            Box::new(move || {
+                if let Some(activation) = watcher_handoff.wait() {
+                    run(activation);
+                }
+            }),
+        )?;
+        self.exit_handoff = Some(handoff);
+        self.exit_thread = Some(handle);
+        Ok(())
+    }
+
+    fn take_session(&mut self) -> Result<PtySession, String> {
+        let master = self
+            .master
+            .take()
+            .ok_or_else(|| "PTY startup master is unavailable".to_string())?;
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| "PTY startup writer is unavailable".to_string())?;
+        let pump = self.pump()?;
+        let reader_cancellation = self
+            .reader_cancellation
+            .clone()
+            .ok_or_else(|| "PTY reader cancellation is unavailable".to_string())?;
+        Ok(PtySession {
+            master: Arc::new(Mutex::new(master)),
+            writer: Arc::new(Mutex::new(writer)),
+            pump,
+            terminator: self.terminator.clone(),
+            reader_cancellation,
+        })
+    }
+
+    fn prepare_exit_activation(&mut self, token: PtySessionToken) -> Result<(), String> {
+        let missing = [
+            (self.child.is_none(), "child"),
+            (self.pump.is_none(), "output pump"),
+            (self.reader_cancellation.is_none(), "reader cancellation"),
+            (self.reader_done_rx.is_none(), "reader completion"),
+            (self.reader_thread.is_none(), "reader thread"),
+            (self.exit_handoff.is_none(), "exit watcher handoff"),
+        ]
+        .into_iter()
+        .find_map(|(missing, name)| missing.then_some(name));
+        if let Some(name) = missing {
+            return Err(format!("PTY startup {name} is unavailable"));
+        }
+
+        let activation = PtyExitWatcherActivation {
+            child: self.child.take().expect("child availability checked above"),
+            token,
+            pump: self.pump.take().expect("pump availability checked above"),
+            terminator: self.terminator.clone(),
+            reader_cancellation: self
+                .reader_cancellation
+                .take()
+                .expect("reader cancellation availability checked above"),
+            reader_done_rx: self
+                .reader_done_rx
+                .take()
+                .expect("reader completion availability checked above"),
+            reader_thread: self
+                .reader_thread
+                .take()
+                .expect("reader thread availability checked above"),
+        };
+        let handoff = self
+            .exit_handoff
+            .as_ref()
+            .expect("exit handoff availability checked above");
+        match handoff.prepare(activation) {
+            Ok(()) => Ok(()),
+            Err((error, activation)) => {
+                self.restore_activation(activation);
+                Err(format!("failed to prepare PTY exit watcher: {error}"))
             }
+        }
+    }
+
+    fn activate_exit_watcher(&mut self) -> Result<(), String> {
+        let handoff = self
+            .exit_handoff
+            .as_ref()
+            .ok_or_else(|| "PTY exit watcher handoff is unavailable".to_string())?;
+        handoff
+            .activate()
+            .map_err(|error| format!("failed to activate PTY exit watcher: {error}"))?;
+        self.armed = false;
+        self.exit_handoff = None;
+        self.exit_thread = None;
+        Ok(())
+    }
+
+    fn restore_activation(&mut self, activation: PtyExitWatcherActivation) {
+        self.child = Some(activation.child);
+        self.pump = Some(activation.pump);
+        self.reader_cancellation = Some(activation.reader_cancellation);
+        self.reader_done_rx = Some(activation.reader_done_rx);
+        self.reader_thread = Some(activation.reader_thread);
+    }
+
+    fn cleanup(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Some(handoff) = self.exit_handoff.as_ref() {
+            if let Some(activation) = handoff.cancel() {
+                self.restore_activation(activation);
+            }
+        }
+        if let Some(watcher) = self.exit_thread.take() {
+            if watcher.join().is_err() {
+                errors.push("PTY exit watcher panicked during startup cleanup".to_string());
+            }
+        }
+        self.exit_handoff = None;
+
+        if let Err(error) = self.terminator.terminate() {
+            errors.push(error);
+        }
+        if let Some(cancellation) = self.reader_cancellation.as_ref() {
+            if let Err(error) = cancellation.cancel() {
+                errors.push(format!("failed to cancel PTY reader: {error}"));
+            }
+        }
+        if let Some(pump) = self.pump.as_ref() {
+            pump.cancel();
+        }
+        self.writer = None;
+        self.master = None;
+
+        if let Some(mut child) = self.child.take() {
+            if let Err(error) = self.terminator.wait_for_child(|| child.wait()) {
+                errors.push(format!("failed to wait/reap PTY child: {error}"));
+            }
+        }
+        if let Some(reader) = self.reader_thread.take() {
+            if reader.join().is_err() {
+                errors.push("PTY reader panicked during startup cleanup".to_string());
+            }
+        }
+        self.reader_done_rx = None;
+        if let Some(pump) = self.pump.take() {
+            if pump.cancel_and_join().is_err() {
+                errors.push("PTY output pump panicked during startup cleanup".to_string());
+            }
+        }
+        self.armed = false;
+        errors
+    }
+
+    fn fail(mut self, primary_error: String) -> String {
+        let cleanup_errors = self.cleanup();
+        if cleanup_errors.is_empty() {
+            primary_error
+        } else {
+            format!(
+                "{primary_error}; startup cleanup failed: {}",
+                cleanup_errors.join("; ")
+            )
+        }
+    }
+}
+
+impl Drop for PtyStartupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for error in self.cleanup() {
+            log::warn!("{error}");
         }
     }
 }
@@ -1374,7 +1523,7 @@ fn terminate_platform_process(
 
 #[cfg(windows)]
 fn terminate_platform_process(
-    process_tree: &OwnedWindowsProcessTree,
+    process_tree: &WindowsProcessTreeKiller,
     _identity: PtyProcessIdentity,
 ) -> std::io::Result<PtyTerminationOutcome> {
     process_tree.terminate()?;
@@ -1409,6 +1558,10 @@ impl PendingPtyStart {
             .map_err(|error| error.to_string())?;
         self.completed = true;
         Ok((self.token.clone(), outcome))
+    }
+
+    fn token(&self) -> PtySessionToken {
+        self.token.clone()
     }
 }
 
@@ -2194,6 +2347,71 @@ pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpS
         .cloned()
 }
 
+fn run_pty_exit_watcher(app: AppHandle, activation: PtyExitWatcherActivation) {
+    let PtyExitWatcherActivation {
+        mut child,
+        token,
+        pump,
+        terminator,
+        reader_cancellation,
+        reader_done_rx,
+        reader_thread,
+    } = activation;
+    let status = terminator.wait_for_child(|| child.wait());
+    let code = status.ok().map(|status| status.exit_code() as i32);
+    let mut shutdown = PtyExitShutdown::new(
+        token.clone(),
+        pump,
+        terminator,
+        reader_cancellation,
+        reader_done_rx,
+        reader_thread,
+    );
+    let outcome = coordinate_exit_shutdown(&mut shutdown, EXIT_DRAIN_TIMEOUT);
+    if outcome == ExitShutdownOutcome::TimedOut {
+        let snapshot = shutdown.pump.snapshot();
+        log::warn!(
+            "PTY output shutdown timed out for '{}' with {} pending bytes, \
+             prepared={}, {} in-flight batches, and {} blocked producers",
+            snapshot.thread_id,
+            snapshot.pending_bytes,
+            snapshot.prepared,
+            snapshot.in_flight_batches,
+            snapshot.blocked_producers,
+        );
+    }
+    RECENT_PTY_SNAPSHOTS.lock().insert(FinalOutputPumpSnapshot {
+        key: TransportSessionKey::new(token.thread_id.clone(), token.generation),
+        outcome,
+        transport: shutdown.pump.snapshot(),
+    });
+    if shutdown.exit_event_allowed {
+        let _ = app.emit(
+            "pty:exit",
+            PtyExitEvent {
+                thread_id: token.thread_id.clone(),
+                generation: token.generation,
+                code,
+            },
+        );
+        PTY_LIFECYCLES.lock().finish_exit(&token);
+    }
+}
+
+fn terminator_setup_failure(
+    error: PtyProcessTerminatorSetupError,
+    mut child: Box<dyn Child + Send + Sync>,
+    master: Box<dyn MasterPty + Send>,
+) -> String {
+    drop(master);
+    match child.wait() {
+        Ok(status) => format!("{error}; spawned PTY child was reaped with status {status}"),
+        Err(wait_error) => {
+            format!("{error}; failed to wait/reap spawned PTY child: {wait_error}")
+        }
+    }
+}
+
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
@@ -2251,92 +2469,83 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     }
 
     resolved_cwd.configure_command_cwd(&mut cmd)?;
-    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let portable_pty::PtyPair { slave, master } = pair;
+    let child = slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(slave);
     drop(resolved_cwd);
-    let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
-        .map_err(|error| error.to_string())?;
-    let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
-    let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
+    let terminator = match PtyProcessTerminator::from_spawned_child(child.as_ref(), master.as_ref())
+    {
+        Ok(terminator) => terminator,
+        Err(error) => return Err(terminator_setup_failure(error, child, master)),
+    };
+    let mut startup = PtyStartupGuard::new(child, terminator, master);
+    let reader = match startup.prepare_reader() {
+        Ok(reader) => reader,
+        Err(error) => return Err(startup.fail(format!("failed to prepare PTY reader: {error}"))),
+    };
+    if let Err(error) = startup.prepare_writer() {
+        return Err(startup.fail(format!("failed to prepare PTY writer: {error}")));
+    }
+    let pump = match OutputPump::new(thread_id.clone()) {
+        Ok(pump) => pump,
+        Err(error) => {
+            return Err(startup.fail(format!("failed to create PTY output pump: {error}")))
+        }
+    };
+    startup.set_pump(pump.clone());
     let app_for_output = app.clone();
-    pump.start_worker(move |payload| {
+    if let Err(error) = pump.start_worker(move |payload| {
         app_for_output
             .emit("pty:data-batch", payload)
             .map_err(|error| error.to_string())
-    })
-    .map_err(|e| e.to_string())?;
-
-    let (session_token, install_outcome) = pending_start.install(PtySession {
-        master: Arc::new(Mutex::new(pair.master)),
-        writer: Arc::new(Mutex::new(writer)),
-        pump: pump.clone(),
-        terminator: terminator.clone(),
-        reader_cancellation: reader_cancellation.clone(),
-    })?;
-    spawn_guard.disarm();
-
-    let reader_pump = pump.clone();
-    let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
-    let data_thread = std::thread::spawn(move || {
-        let reader_result = pump_pty_reader(&mut reader, reader_pump);
-        let _ = reader_done_tx.send(reader_result);
-    });
-
+    }) {
+        return Err(startup.fail(format!("failed to start PTY output pump: {error}")));
+    }
+    let thread_spawner = SystemPtyThreadSpawner;
+    if let Err(error) = startup.spawn_reader(&thread_spawner, &thread_id, reader) {
+        return Err(startup.fail(error));
+    }
     let app_for_exit = app.clone();
-    let exit_pump = pump;
-    let exit_token = session_token.clone();
-    let exit_terminator = terminator;
-    std::thread::spawn(move || {
-        let status = exit_terminator.wait_for_child(|| child.wait());
-        let code = status.ok().map(|s| s.exit_code() as i32);
-        let mut shutdown = PtyExitShutdown::new(
-            exit_token.clone(),
-            exit_pump,
-            exit_terminator,
-            reader_cancellation,
-            reader_done_rx,
-            data_thread,
-        );
-        let outcome = coordinate_exit_shutdown(&mut shutdown, EXIT_DRAIN_TIMEOUT);
-        if outcome == ExitShutdownOutcome::TimedOut {
-            let snapshot = shutdown.pump.snapshot();
-            log::warn!(
-                "PTY output shutdown timed out for '{}' with {} pending bytes, \
-                 prepared={}, {} in-flight batches, and {} blocked producers",
-                snapshot.thread_id,
-                snapshot.pending_bytes,
-                snapshot.prepared,
-                snapshot.in_flight_batches,
-                snapshot.blocked_producers,
-            );
-        }
-        RECENT_PTY_SNAPSHOTS.lock().insert(FinalOutputPumpSnapshot {
-            key: TransportSessionKey::new(exit_token.thread_id.clone(), exit_token.generation),
-            outcome,
-            transport: shutdown.pump.snapshot(),
-        });
-        if shutdown.exit_event_allowed {
-            let _ = app_for_exit.emit(
-                "pty:exit",
-                PtyExitEvent {
-                    thread_id: exit_token.thread_id.clone(),
-                    generation: exit_token.generation,
-                    code,
-                },
-            );
-            PTY_LIFECYCLES.lock().finish_exit(&exit_token);
-        }
-    });
+    if let Err(error) = startup.spawn_exit_watcher(&thread_spawner, &thread_id, move |activation| {
+        run_pty_exit_watcher(app_for_exit, activation);
+    }) {
+        return Err(startup.fail(format!("failed to spawn PTY exit watcher thread: {error}")));
+    }
 
-    if let InstallSessionOutcome::StopImmediately(session) = install_outcome {
+    let session_token = pending_start.token();
+    let session = match startup.take_session() {
+        Ok(session) => session,
+        Err(error) => return Err(startup.fail(error)),
+    };
+    if let Err(error) = startup.prepare_exit_activation(session_token.clone()) {
+        drop(session);
+        return Err(startup.fail(error));
+    }
+    let (session_token, install_outcome) = match pending_start.install(session) {
+        Ok(installed) => installed,
+        Err(error) => return Err(startup.fail(error)),
+    };
+
+    let stop_during_start = if let InstallSessionOutcome::StopImmediately(session) = install_outcome
+    {
         let termination = terminate_pty_session(session)
             .map(|outcome| format!("{outcome:?}"))
             .unwrap_or_else(|error| error);
-        return Err(format!(
+        Some(format!(
             "thread '{}' generation {} was stopped during start ({termination})",
             session_token.thread_id, session_token.generation
-        ));
+        ))
+    } else {
+        None
+    };
+
+    if let Err(error) = startup.activate_exit_watcher() {
+        let installed_session = PTY_LIFECYCLES.lock().abort_activation(&session_token);
+        drop(installed_session);
+        return Err(startup.fail(error));
+    }
+    if let Some(error) = stop_during_start {
+        return Err(error);
     }
 
     Ok(())
@@ -4018,6 +4227,116 @@ mod pty_runtime_tests {
         }
     }
 
+    #[cfg(not(windows))]
+    #[derive(Debug)]
+    struct RecordingWaitChild {
+        waits: Arc<AtomicUsize>,
+        kills: Arc<AtomicUsize>,
+    }
+
+    #[cfg(not(windows))]
+    impl ChildKiller for RecordingWaitChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&self.kills),
+            })
+        }
+    }
+
+    #[cfg(not(windows))]
+    impl Child for RecordingWaitChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            Ok(portable_pty::ExitStatus::with_exit_code(1))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(41)
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct FailingPtyThreadSpawner {
+        fail_role: PtyThreadRole,
+        reader_starts: Arc<AtomicUsize>,
+        watcher_starts: Arc<AtomicUsize>,
+        active_readers: Arc<AtomicUsize>,
+        active_watchers: Arc<AtomicUsize>,
+    }
+
+    #[cfg(not(windows))]
+    impl PtyThreadSpawner for FailingPtyThreadSpawner {
+        fn spawn(
+            &self,
+            role: PtyThreadRole,
+            name: String,
+            task: PtyThreadTask,
+        ) -> std::io::Result<std::thread::JoinHandle<()>> {
+            if role == self.fail_role {
+                return Err(std::io::Error::other(format!(
+                    "injected {role:?} spawn failure"
+                )));
+            }
+            let (starts, active) = match role {
+                PtyThreadRole::Reader => (&self.reader_starts, &self.active_readers),
+                PtyThreadRole::ExitWatcher => (&self.watcher_starts, &self.active_watchers),
+            };
+            starts.fetch_add(1, Ordering::SeqCst);
+            let active = Arc::clone(active);
+            std::thread::Builder::new().name(name).spawn(move || {
+                active.fetch_add(1, Ordering::SeqCst);
+                task();
+                active.fetch_sub(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn startup_failure_fixture(
+        thread_id: &str,
+    ) -> (
+        PendingPtyStart,
+        PtyStartupGuard,
+        OutputPump,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+    ) {
+        let pending = PendingPtyStart::reserve(thread_id).unwrap();
+        let kills = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let child: Box<dyn Child + Send + Sync> = Box::new(RecordingWaitChild {
+            waits: Arc::clone(&waits),
+            kills: Arc::clone(&kills),
+        });
+        let terminator = PtyProcessTerminator::from_parts(
+            child.clone_killer(),
+            PtyProcessIdentity::direct_child(child.process_id()),
+        );
+        let pump = OutputPump::new(thread_id.to_string()).unwrap();
+        let guard = PtyStartupGuard::for_test(child, terminator, pump.clone());
+        (pending, guard, pump, kills, waits)
+    }
+
+    #[cfg(not(windows))]
+    fn failing_thread_spawner(role: PtyThreadRole) -> FailingPtyThreadSpawner {
+        FailingPtyThreadSpawner {
+            fail_role: role,
+            reader_starts: Arc::new(AtomicUsize::new(0)),
+            watcher_starts: Arc::new(AtomicUsize::new(0)),
+            active_readers: Arc::new(AtomicUsize::new(0)),
+            active_watchers: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum UnixObservationStep {
@@ -4185,6 +4504,95 @@ mod pty_runtime_tests {
         );
     }
 
+    #[test]
+    fn exit_watcher_handoff_waits_until_session_activation() {
+        let handoff = Arc::new(StartupActivation::new());
+        let waiter_handoff = Arc::clone(&handoff);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            result_tx.send(waiter_handoff.wait()).unwrap();
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handoff.prepare(41usize).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        handoff.activate().unwrap();
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Some(41)
+        );
+        waiter.join().unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reader_thread_spawn_failure_terminates_reaps_and_aborts_start() {
+        let thread_id = "reader-spawn-failure";
+        let (pending, mut guard, pump, kills, waits) = startup_failure_fixture(thread_id);
+        let spawner = failing_thread_spawner(PtyThreadRole::Reader);
+
+        let spawn_error = guard
+            .spawn_reader_task(
+                &spawner,
+                thread_id,
+                Box::new(|| panic!("reader task must not run when spawning fails")),
+            )
+            .unwrap_err();
+        let error = guard.fail(format!("failed to spawn PTY reader: {spawn_error}"));
+        drop(pending);
+
+        assert!(error.contains("injected Reader spawn failure"));
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            pump.enqueue(vec![1]),
+            Err(EnqueueError::Cancelled { .. })
+        ));
+        assert_eq!(spawner.reader_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(spawner.watcher_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(spawner.active_watchers.load(Ordering::SeqCst), 0);
+        assert!(!PTY_LIFECYCLES.lock().entries.contains_key(thread_id));
+        drop(PendingPtyStart::reserve(thread_id).unwrap());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn exit_watcher_spawn_failure_terminates_reaps_and_joins_reader() {
+        let thread_id = "watcher-spawn-failure";
+        let (pending, mut guard, pump, kills, waits) = startup_failure_fixture(thread_id);
+        let spawner = failing_thread_spawner(PtyThreadRole::ExitWatcher);
+
+        guard
+            .spawn_reader_task(&spawner, thread_id, Box::new(|| {}))
+            .unwrap();
+        let spawn_error = guard
+            .spawn_exit_watcher(&spawner, thread_id, |_| {
+                panic!("exit watcher task must not run when spawning fails")
+            })
+            .unwrap_err();
+        let error = guard.fail(format!("failed to spawn PTY exit watcher: {spawn_error}"));
+        drop(pending);
+
+        assert!(error.contains("injected ExitWatcher spawn failure"));
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            pump.enqueue(vec![1]),
+            Err(EnqueueError::Cancelled { .. })
+        ));
+        assert_eq!(spawner.reader_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(spawner.watcher_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(spawner.active_readers.load(Ordering::SeqCst), 0);
+        assert_eq!(spawner.active_watchers.load(Ordering::SeqCst), 0);
+        assert!(!PTY_LIFECYCLES.lock().entries.contains_key(thread_id));
+        drop(PendingPtyStart::reserve(thread_id).unwrap());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_reader_cancellation_releases_a_blocked_pty_read() {
@@ -4317,56 +4725,6 @@ mod pty_runtime_tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("spawned PTY session"));
-    }
-
-    #[test]
-    fn windows_job_assignment_requests_only_required_process_access() {
-        assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0x0101);
-    }
-
-    #[test]
-    fn windows_job_uses_kill_on_close_limit() {
-        assert_eq!(WINDOWS_JOB_KILL_ON_CLOSE_LIMIT, 0x2000);
-    }
-
-    #[test]
-    fn windows_access_denied_job_assignment_is_typed_as_external_restriction() {
-        assert_eq!(
-            classify_windows_job_assignment_error(&std::io::Error::from_raw_os_error(5)),
-            WindowsJobAssignmentFailure::ExternalJobRestriction
-        );
-    }
-
-    #[test]
-    fn windows_bool_interpretation_accepts_nonzero_without_reading_last_error() {
-        let result = check_windows_bool(1, || {
-            panic!("successful Win32 BOOL results must not read last-error state")
-        });
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn windows_bool_interpretation_rejects_zero_with_the_explicit_os_error() {
-        let error = check_windows_bool(0, || std::io::Error::from_raw_os_error(5)).unwrap_err();
-
-        assert_eq!(error.raw_os_error(), Some(5));
-    }
-
-    #[test]
-    fn owned_termination_resource_closes_exactly_once() {
-        let closes = Arc::new(AtomicUsize::new(0));
-        {
-            let closes_for_drop = Arc::clone(&closes);
-            let mut resource = OwnedTerminationResource::new(41usize, move |handle| {
-                assert_eq!(handle, 41);
-                closes_for_drop.fetch_add(1, Ordering::SeqCst);
-            });
-            resource.close();
-            resource.close();
-        }
-
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -4662,32 +5020,6 @@ mod pty_runtime_tests {
         assert!(error.contains("Operation not permitted"));
         assert!(platform.signals().is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
-        let failed_calls = Arc::new(AtomicUsize::new(0));
-        let failed_terminator = PtyProcessTerminator::from_parts(
-            Box::new(RecordingChildKiller {
-                calls: Arc::clone(&failed_calls),
-            }),
-            PtyProcessIdentity::direct_child(Some(42)),
-        );
-        drop(PtySpawnTerminationGuard::new(failed_terminator));
-        assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
-
-        let installed_calls = Arc::new(AtomicUsize::new(0));
-        let installed_terminator = PtyProcessTerminator::from_parts(
-            Box::new(RecordingChildKiller {
-                calls: Arc::clone(&installed_calls),
-            }),
-            PtyProcessIdentity::direct_child(Some(43)),
-        );
-        let mut guard = PtySpawnTerminationGuard::new(installed_terminator);
-        guard.disarm();
-        drop(guard);
-        assert_eq!(installed_calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(unix)]
