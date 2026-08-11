@@ -1,5 +1,11 @@
+import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
-import { ServerMessage, encodeServerMessage } from "./wireProtocol.js";
+import {
+  ServerMessage,
+  encodeMobileBinaryFrame,
+  encodeServerMessage,
+  type SupportedProtocolVersion,
+} from "./wireProtocol.js";
 
 export type SessionState = "unauthenticated" | "authenticated";
 
@@ -10,12 +16,20 @@ export interface SessionContext {
 }
 
 export class Session {
+  readonly connectionId = randomUUID();
   state: SessionState = "unauthenticated";
   clientId: string | null = null;
   clientName: string | null = null;
+  protocolVersion: SupportedProtocolVersion | null = null;
   token: string | null = null;
   subscribedPaneIds = new Set<string>();
   subscriptionTeardowns = new Map<string, () => void>();
+  /**
+   * Terminal streams this connection attached, keyed by stream id. Scoped to
+   * the connection so one client cannot detach or type into another's stream,
+   * and torn down on close so a dropped socket leaves no live subscription.
+   */
+  controlStreams = new Map<string, { paneId: string; teardown: () => void }>();
 
   constructor(public readonly ctx: SessionContext) {}
 
@@ -27,6 +41,15 @@ export class Session {
       // The socket can fail between the readyState check and the write. A
       // send failure is never worth propagating — the 'close' handler tears
       // the session down either way.
+    }
+  }
+
+  sendBinary(streamId: string, sequence: number, payload: Uint8Array): void {
+    if (this.ctx.socket.readyState !== 1) return; // 1 = OPEN
+    try {
+      this.ctx.socket.send(encodeMobileBinaryFrame(streamId, sequence, payload));
+    } catch {
+      // The socket can fail between the readyState check and the write.
     }
   }
 

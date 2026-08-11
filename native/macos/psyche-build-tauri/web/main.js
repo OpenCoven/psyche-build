@@ -39,13 +39,41 @@
     return;
   }
 
-  var invoke = window.__TAURI__.core.invoke;
+  var statusController = null;
+  var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
-  var openUrl = (window.__TAURI__.opener && window.__TAURI__.opener.openUrl) || null;
+  var opener = window.__TAURI__.opener || null;
+  var clipboardManager = window.__TAURI__.clipboardManager || null;
+  var openUrl = (opener && opener.openUrl) || null;
   var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
     : null;
+
+  function invoke(command, args) {
+    var startedAt = performance.now();
+    try {
+      return Promise.resolve(invokeNative(command, args)).then(
+        function (value) {
+          if (statusController) {
+            statusController.noteOperation(command, performance.now() - startedAt, true);
+          }
+          return value;
+        },
+        function (error) {
+          if (statusController) {
+            statusController.noteOperation(command, performance.now() - startedAt, false);
+          }
+          throw error;
+        }
+      );
+    } catch (error) {
+      if (statusController) {
+        statusController.noteOperation(command, performance.now() - startedAt, false);
+      }
+      throw error;
+    }
+  }
 
   // ============================================================
   // 2. State
@@ -93,18 +121,27 @@
   var COVEN_POLL_MS = 5000;
   var paneCounter = 0;
   var visiblePaneFitFrame = 0;
+  var PANE_METRICS_POLL_MS = 15000;
+  var paneMetricsPollTimer = 0;
+  var paneFooterPopoverCleanup = null;
+  var paneFooterPopover = null;
+  var paneFooterPopoverOwner = null;
+  var paneFooterPopoverTrigger = null;
+  var paneFooterPopoverThreadId = null;
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
-  // overflowing. 200x110 is the density the redesign tiles at.
-  var PANE_MINIMUMS = { width: 200, height: 110, separator: 6 };
+  // overflowing. 200x137 includes the fixed 27px footer rail.
+  var PANE_MINIMUMS = { width: 200, height: 137, separator: 6 };
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "hidden") {
+    if (document.hidden || document.visibilityState === "hidden") {
       saveWorkspaceNow();
       stopCovenPolling();
     } else {
       startCovenPolling();
+      if (typeof refreshStatusController === "function") refreshStatusController();
     }
+    syncPaneMetricsVisibility();
   }
 
   /**
@@ -212,11 +249,13 @@
     if (thread) project.lastActiveThreadId = thread.id;
   }
   async function activateProjectWorktree(project, worktreePath, options) {
+    var refreshStatus = !options || options.refreshStatus !== false;
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
     project.selectedWorktreePath = worktreePath;
     if (project.id !== state.activeProjectId) {
-      if (!(await setActiveProject(project.id, options))) {
+      var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      if (!(await setActiveProject(project.id, projectOptions))) {
         project.selectedWorktreePath = previousWorktreePath;
         return false;
       }
@@ -229,6 +268,9 @@
     refreshSidebar();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (refreshStatus && typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
   function measuredTerminalHost() {
@@ -293,6 +335,16 @@
       return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
     }, []);
   }
+  function allCovenSessionsForProject(project) {
+    var roots = [project.root].concat(
+      (project.worktrees || []).map(function (worktree) { return worktree.path; })
+    ).filter(function (root, index, candidates) {
+      return root && candidates.indexOf(root) === index;
+    });
+    return roots.reduce(function (sessions, root) {
+      return sessions.concat(covenDiscovery.allSessionsByProject.get(root) || []);
+    }, []);
+  }
   async function refreshCovenSessions() {
     if (document.visibilityState === "hidden" || state.projects.length === 0) {
       return covenDiscovery;
@@ -317,6 +369,9 @@
     var flight = { key: requestKey, promise: null };
     covenDiscoveryFlight = flight;
     flight.promise = (async function () {
+      var requestStartedAt = performance.now();
+      var errorMessage = "";
+      var ownsDiscovery = false;
       try {
         var response = await invoke("coven_sessions", {
           projectRoots: roots,
@@ -327,16 +382,33 @@
           started.requestId,
           response
         );
-      } catch (_) {
+        ownsDiscovery = covenDiscovery.requestId === started.requestId;
+      } catch (error) {
+        errorMessage = error && error.message ? error.message : String(error || "");
+        if (!errorMessage) errorMessage = "Coven sessions could not be loaded";
         covenDiscovery = PsycheSessions.applyCovenResponse(
           covenDiscovery,
           started.requestId,
-          { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
+          { status: "error", sessions: [], message: errorMessage }
         );
+        ownsDiscovery = covenDiscovery.requestId === started.requestId;
       } finally {
         if (covenDiscoveryFlight === flight) covenDiscoveryFlight = null;
       }
+      if (ownsDiscovery && typeof noteStatusCovenSample === "function") {
+        noteStatusCovenSample({
+          phase: covenDiscovery.phase,
+          latencyMs: performance.now() - requestStartedAt,
+          refreshedAt: covenDiscovery.refreshedAt,
+          error: covenDiscovery.phase === "ready"
+            ? ""
+            : (covenDiscovery.message || errorMessage),
+        });
+      }
       renderSessionList();
+      if (ownsDiscovery && typeof refreshStatusController === "function") {
+        refreshStatusController();
+      }
       return covenDiscovery;
     })();
     return flight.promise;
@@ -359,6 +431,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return Promise.resolve(project.worktrees);
     }
@@ -368,6 +441,7 @@
       project.selectedWorktreePath = selected ? selected.path : project.root;
       refreshSidebar();
       saveWorkspaceSoon();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
@@ -376,6 +450,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return project.worktrees;
     });
@@ -394,6 +469,7 @@
     return Boolean(thread) && thread.status === "exited";
   }
   async function setActiveProject(id, options) {
+    var refreshStatus = !options || options.refreshStatus !== false;
     if (state.activeProjectId === id) return true;
     if (!(await showTerminalView())) return false;
     state.activeProjectId = id;
@@ -412,7 +488,8 @@
         ? project.lastActiveThreadId
         : (threads[0] ? threads[0].id : null);
     if (nextId) {
-      await focusThread(nextId);
+      var focusOptions = Object.assign({}, options || {}, { refreshStatus: false });
+      await focusThread(nextId, focusOptions);
     } else {
       state.activeThreadId = null;
       renderPaneWorkspace();
@@ -426,6 +503,9 @@
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (refreshStatus && typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
   var projectCounter = 0;
@@ -617,6 +697,10 @@
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
+  var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
+  var agentPickerListEl = document.getElementById("agent-picker-list");
+  var agentPickerIndex = 0;
+  var agentPickerPreviousFocus = null;
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
@@ -706,6 +790,163 @@
   }
   if (callMuteBtn) callMuteBtn.addEventListener("click", toggleCallMute);
   if (callEndBtn) callEndBtn.addEventListener("click", endCall);
+  function isProcessBackedThread(thread) {
+    return !!(thread && thread.launch);
+  }
+
+  function statusThreadSnapshot(thread) {
+    var launch = thread && thread.launch ? thread.launch : null;
+    return {
+      id: thread && thread.id ? thread.id : null,
+      name: thread && thread.name ? thread.name : (thread && thread.id) || "",
+      kind: thread && thread.kind ? thread.kind : "shell",
+      status: thread && typeof thread.status === "string" ? thread.status : "",
+      covenSessionId: thread && thread.covenSessionId != null
+        ? thread.covenSessionId
+        : (launch && launch.covenSessionId) || null,
+      processBacked: isProcessBackedThread(thread),
+      needsAttention: !!(thread && thread.needsAttention),
+      startedAt: thread && thread.startedAt != null ? thread.startedAt : null,
+      finishedAt: thread && thread.finishedAt != null ? thread.finishedAt : null,
+      exitCode: thread && thread.exitCode != null ? thread.exitCode : null,
+    };
+  }
+
+  function statusCovenSessionSnapshot(session) {
+    if (!session || !session.id) return null;
+    var record = { id: session.id };
+    if (session.projectRoot != null) record.projectRoot = session.projectRoot;
+    if (session.cwd != null) record.cwd = session.cwd;
+    if (session.title != null) record.title = session.title;
+    if (session.harness != null) record.harness = session.harness;
+    if (session.model != null) record.model = session.model;
+    if (session.currentTask != null) record.currentTask = session.currentTask;
+    if (session.inputTokens != null) record.inputTokens = session.inputTokens;
+    if (session.outputTokens != null) record.outputTokens = session.outputTokens;
+    if (session.status != null) record.status = session.status;
+    if (session.createdAt != null) record.createdAt = session.createdAt;
+    if (session.updatedAt != null) record.updatedAt = session.updatedAt;
+    if (session.archivedAt != null) record.archivedAt = session.archivedAt;
+    return record;
+  }
+
+  function readStructuredAgentToolCallCount() {
+    if (Number.isFinite(state.agentToolCalls)) return state.agentToolCalls;
+    var project = activeProject();
+    if (project && Number.isFinite(project.agentToolCalls)) return project.agentToolCalls;
+    return null;
+  }
+
+  function getStatusContext() {
+    var project = activeProject();
+    var context = {
+      activeThreadId: state.activeThreadId || null,
+      threads: state.threads.map(statusThreadSnapshot),
+      covenSessions: project
+        ? allCovenSessionsForProject(project).map(statusCovenSessionSnapshot).filter(Boolean)
+        : [],
+    };
+    var agentToolCalls = readStructuredAgentToolCallCount();
+    if (agentToolCalls != null) {
+      context.agentToolCalls = agentToolCalls;
+    }
+    return context;
+  }
+
+  function buildStatusController() {
+    var PsycheStatus = window.PsycheStatus;
+    // Temporary incremental-development guard until the status bundle loads
+    // before main.js in Task 8.
+    if (!PsycheStatus || typeof PsycheStatus.createStatusController !== "function") {
+      var statusAlert = document.getElementById("status-alert");
+      if (statusAlert) {
+        statusAlert.textContent = "Workspace status unavailable: status bundle missing.";
+      }
+      console.warn(
+        "[status controller] footer status bundle missing; window.PsycheStatus.createStatusController unavailable"
+      );
+      return null;
+    }
+    var bar = document.getElementById("status-bar");
+    var metrics = document.getElementById("status-metrics");
+    var detailPanel = document.getElementById("status-detail");
+    var detailTitle = document.getElementById("status-detail-title");
+    var detailBody = document.getElementById("status-detail-body");
+    var detailClose = document.getElementById("status-detail-close");
+    var detailPin = document.getElementById("status-detail-pin");
+    var detailCopy = document.getElementById("status-detail-copy");
+    var moreButton = document.getElementById("status-more-button");
+    var moreMenu = document.getElementById("status-more-menu");
+    var live = document.getElementById("status-live");
+    var alert = document.getElementById("status-alert");
+    var trailing = document.querySelector(".status-bar-trailing");
+    var scopeButtons = document.querySelectorAll(".status-scope-btn, .status-detail-scope-btn");
+    if (!bar || !metrics || !detailPanel || !detailTitle || !detailBody || !detailClose ||
+        !detailPin || !detailCopy || !moreButton || !moreMenu || !live || !alert ||
+        !trailing || !scopeButtons || !scopeButtons.length) {
+      return null;
+    }
+    return PsycheStatus.createStatusController({
+      elements: {
+        bar: bar,
+        metrics: metrics,
+        detail: detailPanel,
+        detailTitle: detailTitle,
+        detailBody: detailBody,
+        close: detailClose,
+        pin: detailPin,
+        copy: detailCopy,
+        scopeButtons: scopeButtons,
+        more: moreButton,
+        moreMenu: moreMenu,
+        live: live,
+        alert: alert,
+        trailing: trailing,
+      },
+      fetchMetrics: function (scope) {
+        return invokeNative("workspace_metrics", { scope: scope || null });
+      },
+      getContext: getStatusContext,
+      storage: localStorage,
+      copyText: function (text) {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+          return Promise.reject(new Error("Clipboard API unavailable"));
+        }
+        return navigator.clipboard.writeText(text);
+      },
+    });
+  }
+
+  statusController = buildStatusController();
+
+  function noteStatusActivity(at) {
+    if (!statusController || typeof statusController.noteActivity !== "function") return;
+    statusController.noteActivity(at);
+  }
+
+  function noteStatusPtyData(threadId, bytes, at) {
+    if (!statusController || typeof statusController.notePtyData !== "function") return;
+    statusController.notePtyData(threadId, bytes, at);
+  }
+
+  function noteStatusCovenSample(sample) {
+    if (!statusController || typeof statusController.noteCovenSample !== "function") return;
+    statusController.noteCovenSample(sample);
+  }
+
+  function refreshStatusController() {
+    if (!statusController || typeof statusController.refresh !== "function" ||
+        document.visibilityState === "hidden") {
+      return Promise.resolve(null);
+    }
+    return statusController.refresh().catch(function (error) {
+      console.warn("[status controller] refresh failed", error);
+      return null;
+    });
+  }
+
+  document.addEventListener("pointerdown", function () { noteStatusActivity(); }, true);
+  document.addEventListener("keydown", function () { noteStatusActivity(); }, true);
 
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
@@ -720,6 +961,43 @@
       toastEl.hidden = true;
       toastTimer = 0;
     }, 2600);
+  }
+
+  async function copyPaneFooterValue(label, value) {
+    if (!value) {
+      toast(label + " is not reported");
+      return false;
+    }
+    if (!clipboardManager || typeof clipboardManager.writeText !== "function") {
+      setStatus("Clipboard support is unavailable", "error");
+      return false;
+    }
+    try {
+      await clipboardManager.writeText(value);
+      toast(label + " copied");
+      return true;
+    } catch (error) {
+      setStatus("Copy failed: " + String(error), "error");
+      return false;
+    }
+  }
+
+  async function revealPaneWorktree(path) {
+    if (!path) {
+      setStatus("Worktree path is unavailable", "error");
+      return false;
+    }
+    if (!opener || typeof opener.revealItemInDir !== "function") {
+      setStatus("Finder reveal is unavailable", "error");
+      return false;
+    }
+    try {
+      await opener.revealItemInDir(path);
+      return true;
+    } catch (error) {
+      setStatus("Reveal failed: " + String(error), "error");
+      return false;
+    }
   }
 
   function markActiveSurface(surface) {
@@ -954,6 +1232,7 @@
     var bytes = new Uint8Array(payload.bytes);
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing) return;
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.thread_id, bytes);
     if (thread.term) {
       thread.term.write(bytes);
     } else {
@@ -961,19 +1240,26 @@
       arr.push(bytes);
       pendingDataBuffers.set(payload.thread_id, arr);
     }
+    schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
 
   function handlePtyExit(payload) {
     payload = payload || {};
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
+    var stoppedByUser = thread.stopRequested;
     thread.ptyStarted = false;
     if (thread.startInFlight) {
       thread.exitDuringStart = true;
     }
     thread.stopRequested = false;
     thread.spawning = false;
+    thread.finishedAt = Date.now();
+    thread.exitCode = payload.code == null ? null : payload.code;
     thread.status = "exited";
+    if (!stoppedByUser && payload.code != null && payload.code !== 0) {
+      thread.status = "failed";
+    }
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
@@ -986,6 +1272,7 @@
     if (state.activeThreadId === thread.id) {
       setProjectStatus(findProject(thread.projectId), "warn");
     }
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
 
@@ -1335,8 +1622,36 @@
     threadCounter += 1;
     return "t" + Date.now().toString(36) + "-" + threadCounter;
   }
+  function makeCovenSessionId() {
+    var cryptoApi = window.crypto;
+    if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+      try {
+        return cryptoApi.randomUUID();
+      } catch (_) {}
+    }
+    if (cryptoApi && typeof cryptoApi.getRandomValues === "function") {
+      try {
+        var bytes = new Uint8Array(16);
+        cryptoApi.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        var hex = "";
+        for (var i = 0; i < bytes.length; i++) {
+          hex += bytes[i].toString(16).padStart(2, "0");
+        }
+        return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+          hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+      } catch (_) {}
+    }
+    setStatus("Secure session ID generation is unavailable", "error");
+    return null;
+  }
   function isLiveThread(thread) {
     return !!thread && !thread.closing && state.threads.indexOf(thread) !== -1;
+  }
+
+  function threadCovenSessionId(thread) {
+    return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
   function createThread(opts) {
@@ -1350,6 +1665,7 @@
       cwd: opts.cwd || opts.worktreePath || opts.projectRoot,
       launchKind: opts.launchKind || null,
       covenSessionId: opts.covenSessionId || null,
+      metricsProvider: opts.metricsProvider || null,
     };
     var launch = {
       command: sourceLaunch.command,
@@ -1360,6 +1676,7 @@
         (project && activeWorkspaceRoot(project)) || null,
       launchKind: sourceLaunch.launchKind || null,
       covenSessionId: sourceLaunch.covenSessionId || null,
+      metricsProvider: sourceLaunch.metricsProvider || opts.metricsProvider || null,
     };
     var worktreePath = opts.worktreePath || launch.cwd || launch.projectRoot ||
       (project && activeWorkspaceRoot(project));
@@ -1388,9 +1705,18 @@
       exitDuringStart: false,
       stopRequested: false,
       ptyStarted: false,
+      metricsGeneration: 0,
+      metrics: launch.launchKind === "coven-chat" && launch.covenSessionId
+        ? loadingPaneMetrics(launch)
+        : null,
+      metricsRefreshTimer: 0,
+      startedAt: Date.now(),
+      finishedAt: null,
+      exitCode: null,
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     refreshSidebar();
     refreshTabs();
     mountTerminal(thread);
@@ -1443,6 +1769,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(pane);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
     await focusThread(id);
     refreshSidebar();
@@ -1475,6 +1802,9 @@
     thread.startInFlight = true;
     thread.status = "starting";
     thread.spawning = true;
+    thread.startedAt = Date.now();
+    thread.finishedAt = null;
+    thread.exitCode = null;
     syncThreadPaneMetadata(thread);
     refreshSidebar();
     refreshTabs();
@@ -1504,7 +1834,6 @@
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
         thread.ptyStarted = false;
-        thread.status = "exited";
         thread.spawning = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
@@ -1542,7 +1871,6 @@
       if (thread.exitDuringStart) {
         thread.exitDuringStart = false;
         thread.ptyStarted = false;
-        thread.status = "exited";
         thread.spawning = false;
         syncThreadPaneMetadata(thread);
         refreshSidebar();
@@ -1566,11 +1894,13 @@
       } else {
         thread.ptyStarted = false;
         thread.status = "failed";
+        thread.finishedAt = Date.now();
+        thread.exitCode = null;
         if (thread.term) {
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
         if (state.activeThreadId === thread.id) {
-          setStatus("start failed", "error");
+          setStatus(thread.name + " failed to start: " + msg, "error");
         }
       }
       syncThreadPaneMetadata(thread);
@@ -1597,6 +1927,7 @@
         return false;
       }
     }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     return spawnPty(thread);
   }
 
@@ -1815,6 +2146,7 @@
     pane.appendChild(header);
     pane.appendChild(body);
     thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     thread.host = body;
     thread.toolBody = body;
     thread.paneTitle = title;
@@ -1863,6 +2195,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountToolPane(thread);
     if (dropTarget && dropTarget.threadId && dropTarget.position) {
       movePaneTo(id, dropTarget.threadId, dropTarget.position);
@@ -1878,6 +2211,7 @@
     if (!thread || thread.closeStarted) return;
     thread.closeStarted = true;
     thread.closing = true;
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     // Move the surface home before the pane is torn down, or it would be
     // removed from the document along with its container.
     dockGitSurface();
@@ -2029,10 +2363,11 @@
     }, true);
     pane.appendChild(header);
     pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     pane.addEventListener("pointerdown", function (event) {
       handlePanePointerDown(thread, body, close, event);
     });
-    thread.pane = pane;
     thread.host = body;
     thread.browserBody = body;
     thread.paneTitle = title;
@@ -2149,10 +2484,11 @@
     body.appendChild(container);
     pane.appendChild(header);
     pane.appendChild(body);
+    thread.pane = pane;
+    pane.appendChild(createPaneFooter(thread));
     pane.addEventListener("pointerdown", function (event) {
       handlePanePointerDown(thread, body, close, event);
     });
-    thread.pane = pane;
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
@@ -3035,7 +3371,7 @@
     });
   }
 
-  async function focusThread(id) {
+  async function focusThread(id, options) {
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
@@ -3063,6 +3399,10 @@
     });
 
     setProjectStatus(project, statusLevel(thread.status));
+    if ((!options || options.refreshStatus !== false) &&
+        typeof refreshStatusController === "function") {
+      refreshStatusController();
+    }
     return true;
   }
 
@@ -3082,6 +3422,7 @@
     if (thread.paneStatus) {
       applyPaneStatus(thread.paneStatus, thread.status);
     }
+    if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
     var leaf = layout && layout.root
       ? PsychePanes.findLeafByThreadId(layout.root, thread.id)
@@ -3100,6 +3441,19 @@
 
   function detachThreadPane(thread) {
     if (!thread) return null;
+    if (typeof paneFooterPopoverThreadId !== "undefined" &&
+        paneFooterPopoverThreadId === thread.id &&
+        typeof closePaneFooterPopovers === "function") {
+      closePaneFooterPopovers(false);
+    }
+    if (typeof closePaneFooterMenu === "function") closePaneFooterMenu(thread, false);
+    if (thread.paneFooterObserver) thread.paneFooterObserver.disconnect();
+    thread.paneFooterObserver = null;
+    thread.paneFooter = null;
+    thread.paneFooterItems = null;
+    thread.paneFooterOverflow = null;
+    thread.paneFooterMenuTrigger = null;
+    thread.createPaneFooterButton = null;
     var key = paneLayoutKey(thread.projectId, thread.worktreePath);
     var layout = paneLayouts.get(key);
     if (!layout || !layout.root) return null;
@@ -3153,6 +3507,12 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     pendingDataBuffers.delete(id);
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
@@ -3188,6 +3548,12 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    thread.metricsGeneration += 1;
+    if (thread.metricsRefreshTimer) {
+      clearTimeout(thread.metricsRefreshTimer);
+      thread.metricsRefreshTimer = 0;
+    }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
     if (state.activeThreadId === id) {
@@ -3213,8 +3579,14 @@
       setStatus("Not enough space to reopen this terminal pane", "warn");
       return false;
     }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     thread.hidden = false;
     commitPanePlacement(placement);
+    if (thread.pane && !thread.paneFooter) {
+      var staleFooter = thread.pane.querySelector(".terminal-pane-footer");
+      if (staleFooter) staleFooter.remove();
+      thread.pane.appendChild(createPaneFooter(thread));
+    }
     project.lastActiveThreadId = thread.id;
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
@@ -3243,12 +3615,18 @@
 
   function duplicateThread(thread) {
     if (!thread || thread.status === "exited") return null;
+    var project = findProject(thread.projectId);
+    var launch = thread.launch;
+    if (launch && launch.launchKind === "coven-chat") {
+      launch = covenChatLaunch(project || { root: launch.projectRoot }, thread.worktreePath || launch.cwd);
+      if (!launch) return null;
+    }
     return createThread({
-      project: findProject(thread.projectId),
+      project: project,
       name: thread.name + " copy",
       kind: thread.kind,
       worktreePath: thread.worktreePath,
-      launch: thread.launch,
+      launch: launch,
     });
   }
 
@@ -3549,6 +3927,168 @@
     }).filter(Boolean);
   }
 
+  function effectiveCanvasThreadIds() {
+    var layout = activePaneLayout();
+    var root = effectivePaneRoot(layout);
+    if (!root) return [];
+    return PsychePanes.leafIds(root).map(function (leafId) {
+      var leaf = PsychePanes.findLeafById(root, leafId);
+      return leaf ? leaf.threadId : null;
+    }).filter(Boolean);
+  }
+
+  function threadWantsMetrics(thread) {
+    return !document.hidden
+      && terminalHost
+      && terminalHost.isConnected
+      && !terminalHost.hidden
+      && isLiveThread(thread)
+      && !thread.hidden
+      && thread.status !== "exited"
+      && thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && thread.pane
+      && thread.pane.isConnected
+      && terminalHost.contains(thread.pane)
+      && effectiveCanvasThreadIds().indexOf(thread.id) !== -1
+      && Boolean(thread.launch.covenSessionId);
+  }
+
+  function loadingPaneMetrics(launch) {
+    return {
+      phase: "loading",
+      provider: launch && launch.metricsProvider || "coven",
+      sessionId: launch && launch.covenSessionId || null,
+      model: null,
+      contextUsed: null,
+      contextLimit: null,
+      cumulativeInputTokens: null,
+      cumulativeOutputTokens: null,
+      cacheCreationTokens: null,
+      cacheReadTokens: null,
+      spendUsd: null,
+      costKind: "unknown",
+      updatedAt: null,
+      stale: false,
+      error: null,
+      canSwitchModel: false,
+    };
+  }
+
+  function metricsValue(previous, key) {
+    return previous && previous[key] !== undefined ? previous[key] : null;
+  }
+
+  function metricsErrorState(thread, error) {
+    var previous = thread.metrics;
+    return {
+      phase: "error",
+      provider: previous && previous.provider ||
+        thread.launch && thread.launch.metricsProvider || "coven",
+      sessionId: thread.launch && thread.launch.covenSessionId || null,
+      model: metricsValue(previous, "model"),
+      contextUsed: metricsValue(previous, "contextUsed"),
+      contextLimit: metricsValue(previous, "contextLimit"),
+      cumulativeInputTokens: metricsValue(previous, "cumulativeInputTokens"),
+      cumulativeOutputTokens: metricsValue(previous, "cumulativeOutputTokens"),
+      cacheCreationTokens: metricsValue(previous, "cacheCreationTokens"),
+      cacheReadTokens: metricsValue(previous, "cacheReadTokens"),
+      spendUsd: metricsValue(previous, "spendUsd"),
+      costKind: previous && previous.costKind || "unknown",
+      updatedAt: metricsValue(previous, "updatedAt"),
+      stale: Boolean(previous && (previous.phase === "ready" || previous.stale)),
+      error: String(error),
+      canSwitchModel: false,
+    };
+  }
+
+  async function refreshPaneMetrics(thread) {
+    if (!threadWantsMetrics(thread)) return false;
+    thread.metricsGeneration += 1;
+    var generation = thread.metricsGeneration;
+    var sessionId = thread.launch.covenSessionId;
+    if (!thread.metrics || thread.metrics.phase === "idle") {
+      thread.metrics = loadingPaneMetrics(thread.launch);
+      syncPaneFooter(thread);
+    }
+    try {
+      var metrics = await invoke("pane_session_metrics", {
+        projectRoot: thread.launch.projectRoot,
+        project_root: thread.launch.projectRoot,
+        cwd: thread.worktreePath,
+        sessionId: sessionId,
+        session_id: sessionId,
+      });
+      var response = {
+        threadId: thread.id,
+        generation: generation,
+        sessionId: metrics.sessionId,
+      };
+      if (!threadWantsMetrics(thread) ||
+          !PsychePanes.shouldApplyMetricsResponse(thread, response)) return false;
+      thread.metrics = {
+        phase: "ready",
+        provider: metrics.provider || "coven",
+        sessionId: metrics.sessionId,
+        model: metrics.model,
+        contextUsed: metrics.contextUsed,
+        contextLimit: metrics.contextLimit,
+        cumulativeInputTokens: metrics.cumulativeInputTokens,
+        cumulativeOutputTokens: metrics.cumulativeOutputTokens,
+        cacheCreationTokens: metrics.cacheCreationTokens,
+        cacheReadTokens: metrics.cacheReadTokens,
+        spendUsd: metrics.spendUsd,
+        costKind: metrics.costKind || "unknown",
+        updatedAt: metrics.updatedAt,
+        stale: false,
+        error: null,
+        canSwitchModel: false,
+      };
+      syncPaneFooter(thread);
+      return true;
+    } catch (error) {
+      if (thread.metricsGeneration !== generation ||
+          !threadWantsMetrics(thread) ||
+          thread.launch.covenSessionId !== sessionId) return false;
+      thread.metrics = metricsErrorState(thread, error);
+      syncPaneFooter(thread);
+      return false;
+    }
+  }
+
+  function schedulePaneMetricsRefresh(thread, delay) {
+    if (!thread) return;
+    if (thread.metricsRefreshTimer) clearTimeout(thread.metricsRefreshTimer);
+    thread.metricsRefreshTimer = 0;
+    if (!threadWantsMetrics(thread)) return;
+    thread.metricsRefreshTimer = setTimeout(function () {
+      thread.metricsRefreshTimer = 0;
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    }, delay);
+  }
+
+  function refreshVisiblePaneMetrics() {
+    state.threads.forEach(function (thread) {
+      if (threadWantsMetrics(thread)) refreshPaneMetrics(thread);
+    });
+  }
+
+  function syncPaneMetricsVisibility() {
+    if (document.hidden || !terminalHost ||
+        !terminalHost.isConnected || terminalHost.hidden) {
+      state.threads.forEach(function (thread) {
+        thread.metricsGeneration = (thread.metricsGeneration || 0) + 1;
+        if (thread.metricsRefreshTimer) {
+          clearTimeout(thread.metricsRefreshTimer);
+          thread.metricsRefreshTimer = 0;
+        }
+      });
+      return false;
+    }
+    refreshVisiblePaneMetrics();
+    return true;
+  }
+
   /** Sidebar and menu glyph for a pane kind. */
   function paneGlyphFor(kind) {
     if (kind === "shell") return "❯_";
@@ -3589,6 +4129,468 @@
     }
     return shortenRoot(path);
   }
+
+  function threadWorktree(thread) {
+    var project = thread && findProject(thread.projectId);
+    var worktrees = (project && project.worktrees) || [];
+    var exact = worktrees.find(function (worktree) {
+      return worktree.path === thread.worktreePath;
+    });
+    if (exact) return exact;
+    return {
+      path: thread.worktreePath || null,
+      branch: null,
+    };
+  }
+
+  function paneFooterState(thread) {
+    var worktree = threadWorktree(thread);
+    var isAgent = PsychePanes.isAgentPaneKind(thread.kind);
+    var metrics = thread.metrics || null;
+    var isEligibleCoven = thread.launch
+      && thread.launch.launchKind === "coven-chat"
+      && Boolean(thread.launch.covenSessionId);
+    if (isEligibleCoven && !metrics) {
+      metrics = loadingPaneMetrics(thread.launch);
+    } else if (isAgent && !metrics) {
+      metrics = {
+        phase: "ready",
+        provider: thread.launch && thread.launch.metricsProvider || "agent",
+        sessionId: thread.launch && thread.launch.covenSessionId || null,
+        model: null,
+        contextUsed: null,
+        contextLimit: null,
+        spendUsd: null,
+        tokens: null,
+        costKind: "unknown",
+        updatedAt: null,
+        stale: false,
+        error: "Session metrics are not reported by this harness",
+        canSwitchModel: false,
+      };
+    }
+    return {
+      kind: thread.kind || "shell",
+      branch: worktree.branch || null,
+      worktreeLabel: shortenRoot(worktree.path || thread.worktreePath || ""),
+      worktreePath: worktree.path || null,
+      paneId: thread.id,
+      metrics: metrics,
+    };
+  }
+
+  function closePaneFooterPopovers(restoreFocus) {
+    var trigger = paneFooterPopoverTrigger;
+    if (paneFooterPopoverCleanup) paneFooterPopoverCleanup();
+    paneFooterPopoverCleanup = null;
+    if (paneFooterPopover && paneFooterPopover.remove) paneFooterPopover.remove();
+    paneFooterPopover = null;
+    paneFooterPopoverOwner = null;
+    paneFooterPopoverTrigger = null;
+    paneFooterPopoverThreadId = null;
+    state.threads.forEach(function (thread) {
+      closePaneFooterMenu(thread, false);
+    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".pane-footer-popover"),
+      function (popover) { popover.remove(); }
+    );
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
+    }
+  }
+
+  function closePaneUsagePopoverForFooter(thread, restoreFocus) {
+    if (!thread ||
+        paneFooterPopoverThreadId !== thread.id ||
+        paneFooterPopoverOwner !== thread.paneFooter) return false;
+    closePaneFooterPopovers(restoreFocus);
+    return true;
+  }
+
+  function paneUsageRow(label, value) {
+    var row = document.createElement("div");
+    row.className = "pane-usage-row";
+    var key = document.createElement("span");
+    key.textContent = label;
+    var detail = document.createElement("strong");
+    detail.textContent = value;
+    row.appendChild(key);
+    row.appendChild(detail);
+    return row;
+  }
+
+  function positionPaneFooterPopover(popover, anchor) {
+    document.body.appendChild(popover);
+    var margin = 8;
+    var gap = 6;
+    var anchorRect = anchor.getBoundingClientRect();
+    var maxWidth = Math.max(0, Math.min(320, window.innerWidth - 16));
+    popover.style.maxWidth = maxWidth + "px";
+    var viewportMaxHeight = Math.max(0, window.innerHeight - margin * 2);
+    popover.style.maxHeight = viewportMaxHeight + "px";
+    var popoverRect = popover.getBoundingClientRect();
+    var spaceAbove = Math.max(0, anchorRect.top - gap - margin);
+    var spaceBelow = Math.max(
+      0,
+      window.innerHeight - anchorRect.bottom - gap - margin
+    );
+    var placeAbove = popoverRect.height <= spaceAbove ||
+      spaceAbove >= spaceBelow;
+    var availableHeight = placeAbove ? spaceAbove : spaceBelow;
+    popover.style.maxHeight = Math.min(
+      viewportMaxHeight,
+      availableHeight
+    ) + "px";
+    popoverRect = popover.getBoundingClientRect();
+    popover.style.left = Math.max(margin, Math.min(
+      window.innerWidth - popoverRect.width - margin,
+      anchorRect.right - popoverRect.width
+    )) + "px";
+    var preferredTop = placeAbove
+      ? anchorRect.top - popoverRect.height - gap
+      : anchorRect.bottom + gap;
+    popover.style.top = Math.max(margin, Math.min(
+      window.innerHeight - popoverRect.height - margin,
+      preferredTop
+    )) + "px";
+  }
+
+  function openPaneUsagePopover(thread, trigger) {
+    closePaneFooterPopovers(false);
+    var metrics = paneFooterState(thread).metrics || {};
+    var notReported = "Not reported by Coven";
+    var popover = document.createElement("div");
+    popover.className = "pane-footer-popover pane-usage-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", thread.name + " session usage");
+    popover.setAttribute("tabindex", "-1");
+    popover.appendChild(paneUsageRow("Provider", "Coven"));
+    popover.appendChild(paneUsageRow("Model", metrics.model || notReported));
+    popover.appendChild(paneUsageRow(
+      "Session",
+      metrics.sessionId || "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Context",
+      Number.isFinite(metrics.contextUsed) && Number.isFinite(metrics.contextLimit)
+        ? metrics.contextUsed + " / " + metrics.contextLimit + " tokens"
+        : notReported
+    ));
+    popover.appendChild(paneUsageRow(
+      "Input tokens",
+      Number.isFinite(metrics.cumulativeInputTokens)
+        ? String(metrics.cumulativeInputTokens)
+        : "Not available"
+    ));
+    popover.appendChild(paneUsageRow(
+      "Output tokens",
+      Number.isFinite(metrics.cumulativeOutputTokens)
+        ? String(metrics.cumulativeOutputTokens)
+        : "Not available"
+    ));
+    var spend = notReported;
+    if (Number.isFinite(metrics.spendUsd)) {
+      spend = "$" + metrics.spendUsd.toFixed(4);
+      if (metrics.costKind === "local-estimate") spend += " · Local estimate";
+    }
+    popover.appendChild(paneUsageRow("Spend", spend));
+    popover.appendChild(paneUsageRow(
+      "Updated",
+      metrics.updatedAt ||
+        (metrics.phase === "loading" ? "Loading…" : "Not available")
+    ));
+    if (metrics.stale) popover.appendChild(paneUsageRow("State", "Stale"));
+    if (metrics.error) popover.appendChild(paneUsageRow("Error", metrics.error));
+    paneFooterPopover = popover;
+    paneFooterPopoverOwner = thread.paneFooter;
+    paneFooterPopoverTrigger = trigger || null;
+    paneFooterPopoverThreadId = thread.id;
+    positionPaneFooterPopover(popover, trigger || thread.paneFooter);
+
+    function onUsageKeyDown(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterPopovers(true);
+    }
+    document.addEventListener("keydown", onUsageKeyDown, true);
+    paneFooterPopoverCleanup = function () {
+      document.removeEventListener("keydown", onUsageKeyDown, true);
+    };
+    popover.focus();
+    return popover;
+  }
+
+  function paneFooterActionValue(item) {
+    return item && typeof item.fullValue === "string" ? item.fullValue : "";
+  }
+
+  function paneFooterItemDescription(item) {
+    if (!item) return "";
+    var value = item.a11yValue || paneFooterActionValue(item) || item.value || "not reported";
+    return item.label + ": " + value;
+  }
+
+  function runPaneFooterAction(thread, item, trigger) {
+    if (!item) return false;
+    if (item.action === "copy") {
+      return copyPaneFooterValue(item.label, paneFooterActionValue(item));
+    }
+    if (item.action === "reveal") {
+      return revealPaneWorktree(paneFooterActionValue(item));
+    }
+    if (item.action === "usage") {
+      openPaneUsagePopover(thread, trigger);
+      return true;
+    }
+    if (item.action === "model-details") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    if (item.action === "switch-model") {
+      toast(item.label + " is not reported");
+      return false;
+    }
+    toast(item.label + " is not reported");
+    return false;
+  }
+
+  function handlePaneFooterPointerDown(thread, event) {
+    var target = event.target;
+    if (target && target.closest && target.closest("button")) {
+      event.stopPropagation();
+      return;
+    }
+    if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    event.stopPropagation();
+  }
+
+  function focusPaneAfterFooterAction(thread) {
+    if (!thread || state.activeThreadId === thread.id) return;
+    requestAnimationFrame(function () {
+      if (state.activeThreadId !== thread.id) focusThread(thread.id);
+    });
+  }
+
+  function handlePaneFooterItemClick(thread, item, event, fromOverflowMenu) {
+    event.stopPropagation();
+    var trigger = fromOverflowMenu
+      ? (thread.paneFooterMenuTrigger || thread.paneFooterOverflow)
+      : event.currentTarget;
+    var result = runPaneFooterAction(thread, item, trigger);
+    if (item && item.action === "usage") return result;
+    closePaneFooterMenu(thread, Boolean(fromOverflowMenu));
+    focusPaneAfterFooterAction(thread);
+    return result;
+  }
+
+  function closePaneFooterMenu(thread, restoreFocus) {
+    if (!thread) return;
+    var trigger = thread.paneFooterMenuTrigger || thread.paneFooterOverflow;
+    if (thread.paneFooterMenuCleanup) {
+      thread.paneFooterMenuCleanup();
+      thread.paneFooterMenuCleanup = null;
+    }
+    if (thread.paneFooterMenu && thread.paneFooterMenu.parentNode) {
+      thread.paneFooterMenu.parentNode.removeChild(thread.paneFooterMenu);
+    }
+    thread.paneFooterMenu = null;
+    thread.paneFooterMenuTrigger = null;
+    if (thread.paneFooterOverflow) {
+      thread.paneFooterOverflow.setAttribute("aria-expanded", "false");
+    }
+    if (restoreFocus && trigger && trigger.focus &&
+        (trigger.isConnected === undefined || trigger.isConnected)) {
+      trigger.focus();
+    }
+  }
+
+  function paneFooterMenuItems(menu) {
+    if (!menu || !menu.querySelectorAll) return [];
+    return Array.prototype.filter.call(
+      menu.querySelectorAll('[role="menuitem"]'),
+      function (button) {
+        return !button.disabled;
+      }
+    );
+  }
+
+  function movePaneFooterMenuFocus(menu, key) {
+    var buttons = paneFooterMenuItems(menu);
+    if (!buttons.length) return false;
+    var current = document.activeElement;
+    var currentIndex = buttons.indexOf(current);
+    var nextIndex = 0;
+    if (key === "Home") {
+      nextIndex = 0;
+    } else if (key === "End") {
+      nextIndex = buttons.length - 1;
+    } else if (key === "ArrowUp") {
+      nextIndex = currentIndex === -1
+        ? buttons.length - 1
+        : (currentIndex + buttons.length - 1) % buttons.length;
+    } else if (key === "ArrowDown") {
+      nextIndex = currentIndex === -1
+        ? 0
+        : (currentIndex + 1) % buttons.length;
+    } else {
+      return false;
+    }
+    buttons[nextIndex].focus();
+    return true;
+  }
+
+  function handlePaneFooterMenuKeyDown(thread, menu, event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePaneFooterMenu(thread, true);
+      return true;
+    }
+    if (!movePaneFooterMenuFocus(menu, event.key)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  function createPaneFooter(thread) {
+    var footer = document.createElement("footer");
+    footer.className = "terminal-pane-footer";
+    footer.setAttribute("aria-label", "Pane details");
+    footer.dataset.tier = PsychePanes.footerTier(0);
+
+    var itemsHost = document.createElement("div");
+    itemsHost.className = "terminal-pane-footer-items";
+    var overflow = document.createElement("button");
+    overflow.type = "button";
+    overflow.className = "terminal-pane-footer-overflow";
+    overflow.textContent = "\u2026";
+    overflow.title = "More pane details";
+    overflow.setAttribute("aria-label", "More pane details");
+    overflow.setAttribute("aria-haspopup", "menu");
+    overflow.setAttribute("aria-expanded", "false");
+    overflow.hidden = true;
+
+    thread.createPaneFooterButton = function (item, role) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = role === "menuitem"
+        ? "pane-footer-menu-item"
+        : "terminal-pane-footer-item";
+      button.dataset.footerKey = item.key;
+      var description = paneFooterItemDescription(item);
+      button.title = description;
+      button.setAttribute("aria-label", description);
+      if (role) button.setAttribute("role", role);
+      var label = document.createElement("span");
+      label.className = "pane-footer-item-label";
+      label.textContent = item.label;
+      var value = document.createElement("span");
+      value.className = "pane-footer-item-value";
+      value.textContent = item.value;
+      button.appendChild(label);
+      button.appendChild(value);
+      button.addEventListener("click", function (event) {
+        handlePaneFooterItemClick(thread, item, event, role === "menuitem");
+      });
+      return button;
+    };
+
+    footer.addEventListener("pointerdown", function (event) {
+      handlePaneFooterPointerDown(thread, event);
+    });
+    overflow.addEventListener("click", function (event) {
+      event.stopPropagation();
+      syncPaneFooter(thread, true, event.currentTarget);
+    });
+    footer.appendChild(itemsHost);
+    footer.appendChild(overflow);
+
+    thread.paneFooter = footer;
+    thread.paneFooterItems = itemsHost;
+    thread.paneFooterOverflow = overflow;
+    var observer = null;
+    if (typeof ResizeObserver === "function") {
+      observer = new ResizeObserver(function (entries) {
+        var width = entries[0] && entries[0].contentRect
+          ? entries[0].contentRect.width
+          : footer.getBoundingClientRect().width;
+        footer.dataset.tier = PsychePanes.footerTier(width);
+        syncPaneFooter(thread);
+      });
+      observer.observe(thread.pane || footer);
+    }
+    thread.paneFooterObserver = observer;
+    syncPaneFooter(thread);
+    return footer;
+  }
+
+  function syncPaneFooter(thread) {
+    if (!thread || !thread.paneFooter || !thread.paneFooterItems) return;
+    var openOverflow = arguments[1];
+    var overflowTrigger = arguments[2] || thread.paneFooterOverflow;
+    closePaneUsagePopoverForFooter(thread, false);
+    var items = PsychePanes.footerItems(paneFooterState(thread));
+    var currentTier = thread.paneFooter.dataset.tier ||
+      PsychePanes.footerTier(thread.paneFooter.getBoundingClientRect().width);
+    var isAgentPaneKind = PsychePanes.isAgentPaneKind(thread.kind);
+    var hiddenKeys = PsychePanes.hiddenFooterKeys(currentTier, isAgentPaneKind);
+    var hiddenItems = items.filter(function (item) {
+      return hiddenKeys.indexOf(item.key) !== -1;
+    });
+
+    thread.paneFooterItems.innerHTML = "";
+    items.forEach(function (item) {
+      thread.paneFooterItems.appendChild(thread.createPaneFooterButton(item));
+    });
+    thread.paneFooterOverflow.hidden = hiddenItems.length === 0;
+
+    closePaneFooterMenu(thread, false);
+    if (!openOverflow || hiddenItems.length === 0) return;
+
+    closePaneFooterPopovers(false);
+    var menu = document.createElement("div");
+    menu.className = "pane-footer-popover pane-footer-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Hidden pane details");
+    hiddenItems.forEach(function (item) {
+      var button = thread.createPaneFooterButton(item, "menuitem");
+      button.setAttribute("role", "menuitem");
+      menu.appendChild(button);
+    });
+    thread.paneFooterMenu = menu;
+    thread.paneFooterMenuTrigger = overflowTrigger;
+    thread.paneFooterOverflow.setAttribute("aria-expanded", "true");
+    positionPaneFooterPopover(menu, overflowTrigger);
+
+    function onOutsidePointerDown(event) {
+      if (menu.contains(event.target) || overflowTrigger.contains(event.target)) return;
+      closePaneFooterMenu(thread, false);
+    }
+    function onMenuKeyDown(event) {
+      handlePaneFooterMenuKeyDown(thread, menu, event);
+    }
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    document.addEventListener("keydown", onMenuKeyDown, true);
+    thread.paneFooterMenuCleanup = function () {
+      document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+      document.removeEventListener("keydown", onMenuKeyDown, true);
+    };
+    var first = paneFooterMenuItems(menu)[0];
+    if (first) first.focus();
+  }
+
+  function handlePaneFooterPopoverPointerDown(event) {
+    if (!paneFooterPopover) return;
+    var target = event.target;
+    if (target && paneFooterPopover.contains(target)) return;
+    if (target && paneFooterPopoverTrigger &&
+        paneFooterPopoverTrigger.contains(target)) return;
+    closePaneFooterPopovers(false);
+  }
+  document.addEventListener("pointerdown", handlePaneFooterPopoverPointerDown, true);
 
   /**
    * Focus-set membership swatches. Squares, in the set's colour, so they can't
@@ -3671,7 +4673,7 @@
     return state.threads.find(function (thread) {
       return (!threadId || thread.id === threadId)
         && thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     }) || null;
   }
@@ -3741,6 +4743,7 @@
         worktreePath: worktree.path,
         launchKind: "coven-attach",
         covenSessionId: session.id,
+        metricsProvider: session.harness || "coven",
       });
     }).finally(function () {
       covenAttachInFlight.delete(key);
@@ -3753,7 +4756,7 @@
     var presentation = PsycheSessions.statusPresentation(session.status);
     var attached = state.threads.some(function (thread) {
       return thread.projectId === project.id
-        && thread.covenSessionId === session.id
+        && threadCovenSessionId(thread) === session.id
         && !thread.closeStarted;
     });
     var row = document.createElement("button");
@@ -4262,19 +5265,19 @@
       "</div>" +
       '<div class="canvas-empty-actions">' +
         '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
-          '<span class="glyph mono">❯_</span>Shell<span class="key">/new-shell</span></button>' +
+          '<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
-          '<span class="glyph">✳</span>Agent<span class="key">⌘T</span></button>' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
-          '<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span></button>' +
+          '<span class="glyph">◍</span>Browser<span class="key">Web +</span></button>' +
       "</div>";
     empty.addEventListener("click", function (event) {
       var button = event.target.closest("[data-empty-action]");
       if (!button) return;
       if (!activeProject()) { openProjectPicker(); return; }
       var action = button.dataset.emptyAction;
-      if (action === "term") runNewShellCommand();
-      else if (action === "agent") runNewThreadCommand();
+      if (action === "term") createTerminalPane();
+      else if (action === "agent") openAgentPicker();
       else openBlankBrowserTab();
     });
     terminalHost.appendChild(empty);
@@ -4304,10 +5307,12 @@
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
+    var restoredTerminalView = false;
     if (dropped.some(function (f) { return f.id === state.activeFileId; })) {
       state.activeFileId = null;
       if (fileViewEl) fileViewEl.hidden = true;
       if (terminalHost) terminalHost.hidden = false;
+      restoredTerminalView = true;
     }
     // Remove the project from state.
     state.projects = state.projects.filter(function (p) { return p.id !== id; });
@@ -4326,8 +5331,10 @@
       }
     }
     refreshTabs();
+    if (restoredTerminalView) syncPaneMetricsVisibility();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
 
@@ -4506,6 +5513,7 @@
     terminalArea.classList.add("is-file-focused");
     fileViewEl.hidden = false;
     terminalHost.hidden = true;
+    syncPaneMetricsVisibility();
     renderPaneMinimap(activePaneLayout(), file);
     return true;
   }
@@ -4516,6 +5524,7 @@
     terminalArea.classList.remove("is-file-focused");
     fileViewEl.hidden = true;
     terminalHost.hidden = false;
+    syncPaneMetricsVisibility();
   }
 
   async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
@@ -5099,8 +6108,7 @@
   }
 
   async function runNewShellCommand() {
-    if (!(await prepareDefaultThreadCreation())) return null;
-    return spawnShellThread();
+    return createTerminalPane();
   }
 
   async function runNewPsycheCommand() {
@@ -5311,7 +6319,7 @@
     });
   }
 
-  /** `!line` runs in the nearest shell pane, whichever pane holds focus. */
+  /** `!line` runs in the focused shell pane, or the first open shell in the active project. */
   function runShellSigil(line) {
     if (!line) return;
     var focused = findThread(state.activeThreadId);
@@ -5735,6 +6743,7 @@
     return project.browsersByWorktree[root];
   }
   function makeBrowserTabId() { return "bt" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
+  var DICE_BROWSER_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1&pp=ygUJcmljayByb2xsoAcB0gcJCckLAYcqIYzv";
   function tabTitle(url) {
     if (!url || url === "about:blank") return "New tab";
     try { return new URL(url).hostname || url; } catch (_) { return url; }
@@ -5774,7 +6783,8 @@
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
   }
-  async function openBlankBrowserTab() {
+  async function openBlankBrowserTab(options) {
+    options = options || {};
     var project = activeProject();
     if (!project) return null;
     var worktreePath = activeWorkspaceRoot(project);
@@ -5784,18 +6794,26 @@
     markActiveSurface("browser");
     var browser = ensureBrowserModel(project, worktreePath);
     var tab = null;
-    if (existing || !browser.tabs.length) {
+    if (options.requireNew || existing || !browser.tabs.length) {
       tab = createBrowserTab(project, "about:blank", true);
     } else {
       renderBrowserTabs();
     }
     syncProjectBrowser();
     if (urlInput) urlInput.focus();
-    return tab || currentBrowserTab(project);
+    return tab || (options.requireNew ? null : currentBrowserTab(project));
+  }
+  async function openDiceBrowserTab() {
+    var tab = await openBlankBrowserTab({ requireNew: true });
+    if (!tab) return;
+    await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
   listen("browser:shortcut-new-tab", function () {
     markActiveSurface("browser");
     openBlankBrowserTab();
+  }).catch(function () {});
+  listen("browser:shortcut-terminal-pane", function () {
+    createTerminalPane();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
@@ -5879,9 +6897,13 @@
   });
   document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex > 0) { tab.historyIndex -= 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex < tab.history.length - 1) { tab.historyIndex += 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
+  document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
-  window.addEventListener("beforeunload", saveWorkspaceNow);
+  window.addEventListener("beforeunload", function () {
+    saveWorkspaceNow();
+    if (statusController) statusController.stop();
+  });
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   // -------- Resizable splitter between canvas and Git dock --------
@@ -5992,25 +7014,38 @@
     return showTerminalView();
   }
 
-  async function createContextualTab() {
-    if (activeSurface === "browser") {
-      await openBlankBrowserTab();
-      return true;
+  async function createTerminalPane() {
+    var project = activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting a terminal", "warn");
+      return null;
     }
-    return (await spawnCovenThread()) ? true : null;
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting a terminal", "warn");
+      return null;
+    }
+    if (!(await showTerminalView())) return null;
+    return spawnShellThread(project);
   }
 
   document.addEventListener("keydown", async function (e) {
+    if (routeAgentPickerModalKeydown(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
       await handleExplicitFileSave(e);
       return;
     }
-    // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
+    // ⌘T always opens a plain login shell in the terminal canvas.
     if (String(e.key).toLowerCase() === "t") {
-      await createContextualTab();
-      e.preventDefault(); return;
+      e.preventDefault();
+      await createTerminalPane();
+      return;
+    }
+    if (String(e.key).toLowerCase() === "p") {
+      if (openAgentPicker()) e.preventDefault();
+      return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
@@ -6121,7 +7156,7 @@
     if (trigger) trigger.setAttribute("aria-expanded", "false");
   }
   function toggleNewPaneMenu() {
-    if (!newPaneMenuEl) { createContextualTab(); return; }
+    if (!newPaneMenuEl) { createTerminalPane(); return; }
     var open = newPaneMenuEl.hidden;
     if (open) {
       var project = activeProject();
@@ -6142,12 +7177,11 @@
     el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
   }
   onMenuClick("new-pane-term", async function () {
-    await runNewShellCommand();
-    toast("Shell pane opened");
+    var thread = await createTerminalPane();
+    if (thread) toast("Terminal pane opened");
   });
-  onMenuClick("new-pane-agent", async function () {
-    await runNewThreadCommand();
-    toast("Agent pane opened — coven chat");
+  onMenuClick("new-pane-agent", function () {
+    openAgentPicker();
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -6155,6 +7189,90 @@
   });
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
+
+  function consumeAgentPickerKey(event) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  function focusAgentPickerList() {
+    if (
+      agentPickerListEl &&
+      typeof agentPickerListEl.focus === "function"
+    ) {
+      agentPickerListEl.focus();
+    }
+  }
+
+  function handleAgentPickerListKeydown(event) {
+    var count = agentLaunchOptions().length;
+    if (event.key === "Tab") {
+      focusAgentPickerList();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "ArrowDown") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, -1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Home") {
+      agentPickerIndex = 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "End") {
+      agentPickerIndex = count ? count - 1 : 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Enter") {
+      consumeAgentPickerKey(event);
+      launchSelectedAgent();
+      return true;
+    }
+    if (event.key === "Escape") {
+      consumeAgentPickerKey(event);
+      closeAgentPicker();
+      return true;
+    }
+    return false;
+  }
+
+  function routeAgentPickerModalKeydown(event) {
+    if (!agentPickerOpen()) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      String(event.key).toLowerCase() === "p"
+    ) {
+      consumeAgentPickerKey(event);
+      openAgentPicker();
+      return true;
+    }
+    if (handleAgentPickerListKeydown(event)) return true;
+    consumeAgentPickerKey(event);
+    return true;
+  }
+
+  if (agentPickerListEl) {
+    agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown);
+  }
+  if (agentPickerOverlayEl) {
+    agentPickerOverlayEl.addEventListener("pointerdown", function (event) {
+      if (event.target === agentPickerOverlayEl) closeAgentPicker();
+    });
+  }
 
   document.addEventListener("pointerdown", function (event) {
     if (newPaneMenuEl && !newPaneMenuEl.hidden &&
@@ -6171,9 +7289,9 @@
     ["Toggle the tools dock", "⌘⌥B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
-    ["New shell pane", "/new-shell"],
-    ["New agent pane (coven chat)", "⌘T"],
-    ["New browser tab", "focus Web, then ⌘T"],
+    ["New terminal pane", "⌘T"],
+    ["Choose an agent", "⌘P"],
+    ["New browser tab", "Web pane +"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
@@ -6210,8 +7328,10 @@
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → file return → focus mode.
+    // picker → help → menus → set picking → armed confirm → file return →
+    // focus mode.
     if (event.key === "Escape") {
+      if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
       closeNewPaneMenu();
@@ -6991,6 +8111,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }
 
@@ -7020,17 +8141,154 @@
     }
   }
 
+  function agentLaunchOptions() {
+    return [
+      { id: "coven-code", label: "Coven Code", command: null, args: ["chat"], kind: "coven-chat" },
+      { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
+      { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
+      { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
+      { id: "grok-build", label: "Grok Build", command: "grok", args: [], kind: "agent-grok-build" },
+    ];
+  }
+
+  function nextAgentPickerIndex(current, delta, count) {
+    if (!count) return 0;
+    return (((current + delta) % count) + count) % count;
+  }
+
+  function agentPickerOpen() {
+    return Boolean(agentPickerOverlayEl && !agentPickerOverlayEl.hidden);
+  }
+
+  function renderAgentPicker() {
+    if (!agentPickerListEl) return;
+    var entries = agentLaunchOptions();
+    agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 0, entries.length);
+    agentPickerListEl.innerHTML = "";
+    entries.forEach(function (entry, index) {
+      var selected = index === agentPickerIndex;
+      var option = document.createElement("button");
+      option.type = "button";
+      option.id = "agent-picker-option-" + entry.id;
+      option.className = "agent-picker-option" + (selected ? " is-selected" : "");
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+      option.tabIndex = -1;
+      option.innerHTML =
+        '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
+        '<span class="agent-picker-option-command">' +
+          escapeHtml(entry.id === "coven-code" ? "coven chat" : (entry.command || "")) +
+        "</span>";
+      option.addEventListener("pointermove", function () {
+        if (agentPickerIndex === index) return;
+        agentPickerIndex = index;
+        renderAgentPicker();
+      });
+      option.addEventListener("click", function () {
+        agentPickerIndex = index;
+        launchSelectedAgent();
+      });
+      agentPickerListEl.appendChild(option);
+    });
+    if (entries[agentPickerIndex]) {
+      agentPickerListEl.setAttribute(
+        "aria-activedescendant",
+        "agent-picker-option-" + entries[agentPickerIndex].id
+      );
+    } else {
+      agentPickerListEl.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function openAgentPicker() {
+    if (!agentPickerOverlayEl || !agentPickerListEl) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
+    if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
+    setHelpOpen(false);
+    closeNewPaneMenu();
+    closeScopeMenu();
+    closeSessionContextMenu();
+    agentPickerIndex = 0;
+    renderAgentPicker();
+    agentPickerOverlayEl.hidden = false;
+    focusAgentPickerList();
+    return true;
+  }
+
+  function closeAgentPicker() {
+    if (agentPickerOverlayEl) agentPickerOverlayEl.hidden = true;
+    var previousFocus = agentPickerPreviousFocus;
+    agentPickerPreviousFocus = null;
+    if (
+      previousFocus &&
+      typeof previousFocus.focus === "function" &&
+      (!document.contains || document.contains(previousFocus))
+    ) {
+      previousFocus.focus();
+    }
+  }
+
+  function launchSelectedAgent() {
+    var entry = agentLaunchOptions()[agentPickerIndex];
+    if (!entry) return null;
+    closeAgentPicker();
+    return spawnAgentThread(entry.id);
+  }
+
+  async function spawnAgentThread(agentId, project) {
+    project = project || activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting an agent", "warn");
+      return null;
+    }
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting an agent", "warn");
+      return null;
+    }
+    var entry = agentLaunchOptions().find(function (option) {
+      return option.id === agentId;
+    });
+    if (!entry) {
+      setStatus("Unknown agent: " + agentId, "error");
+      return null;
+    }
+    var command = entry.command;
+    if (entry.id === "coven-code") {
+      command = state.env && state.env.coven_path;
+      if (!command) {
+        setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+        return null;
+      }
+    }
+    if (!(await showTerminalView())) return null;
+    return createThread({
+      project: project,
+      worktreePath: worktree.path,
+      name: entry.label,
+      kind: entry.kind,
+      command: command,
+      args: entry.args.slice(),
+      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      projectRoot: project.root,
+      cwd: worktree.path,
+    });
+  }
+
   function covenChatLaunch(project, worktreePath) {
     var worktree = worktreePath ? { path: worktreePath } : selectedWorktree(project);
+    var sessionId = makeCovenSessionId();
+    if (!sessionId) return null;
     return {
       command: state.env.coven_path,
-      args: ["chat"],
+      args: ["code", "--session-id", sessionId],
       env: {},
       projectRoot: project.root,
       cwd: worktree.path,
       kind: "coven-chat",
       launchKind: "coven-chat",
-      covenSessionId: null,
+      covenSessionId: sessionId,
+      metricsProvider: "coven",
     };
   }
 
@@ -7053,6 +8311,7 @@
     if (!currentProject || currentProject.id !== intendedProjectId ||
         !currentWorktree || currentWorktree.path !== intendedWorktreePath) return null;
     var launch = covenChatLaunch({ root: intendedProjectRoot }, intendedWorktreePath);
+    if (!launch) return null;
     return createThread({
       project: currentProject,
       worktreePath: launch.cwd,
@@ -7163,6 +8422,7 @@
   async function boot(env) {
     state.env = env || {};
     await installTerminalImageDrop();
+    if (typeof statusController !== "undefined" && statusController) statusController.start();
     var saved = readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
@@ -7191,6 +8451,10 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    if (paneMetricsPollTimer) clearInterval(paneMetricsPollTimer);
+    paneMetricsPollTimer = setInterval(refreshVisiblePaneMetrics, 15000);
+    refreshVisiblePaneMetrics();
+    if (typeof refreshStatusController === "function") refreshStatusController();
   }
 
   invoke("app_environment")

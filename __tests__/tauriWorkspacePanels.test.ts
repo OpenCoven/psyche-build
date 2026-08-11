@@ -23,6 +23,10 @@ const inputBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/input.bundle.js'),
   'utf8'
 );
+const statusBundle = readFileSync(
+  join(repoRoot, 'native/macos/psyche-build-tauri/web/status.bundle.js'),
+  'utf8'
+);
 const stylesCss = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
   'utf8'
@@ -39,6 +43,16 @@ const tauriPackage = JSON.parse(
 };
 
 describe('Tauri workspace panels', () => {
+  it('registers a scoped pane-session metrics command', () => {
+    expect(tauriLib).toContain('mod pane_metrics;');
+    expect(tauriLib).toMatch(
+      /fn pane_session_metrics\([\s\S]*project_root:\s*String[\s\S]*cwd:\s*String[\s\S]*session_id:\s*String/,
+    );
+    expect(tauriLib).toMatch(/\n\s*pane_session_metrics,/);
+    expect(tauriLib).toMatch(/open_pty_cwd\(&project_root,\s*&cwd\)/);
+    expect(tauriLib).toMatch(/is_safe_session_id\(&session_id\)/);
+  });
+
   it('scopes filesystem reads to the active project root', () => {
     expect(mainJs).toMatch(
       /invoke\("fs_list_dir",\s*\{\s*root:\s*root,\s*path:\s*dirPath\s*\}\)/
@@ -108,7 +122,7 @@ describe('Tauri workspace panels', () => {
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
     expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js'
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js'
     );
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
@@ -121,6 +135,7 @@ describe('Tauri workspace panels', () => {
     const sessionsScript = '<script src="./sessions.bundle.js" defer></script>';
     const panesScript = '<script src="./panes.bundle.js" defer></script>';
     const inputScript = '<script src="./input.bundle.js" defer></script>';
+    const statusScript = '<script src="./status.bundle.js" defer></script>';
     const mainScript = '<script src="./main.js" defer></script>';
 
     expect(indexHtml).toContain(editorScript);
@@ -128,18 +143,24 @@ describe('Tauri workspace panels', () => {
     expect(indexHtml).toContain(sessionsScript);
     expect(indexHtml).toContain(panesScript);
     expect(indexHtml).toContain(inputScript);
+    expect(indexHtml).toContain(statusScript);
     expect(indexHtml).toContain(mainScript);
     expect(indexHtml.indexOf(editorScript)).toBeLessThan(indexHtml.indexOf(diffsScript));
     expect(indexHtml.indexOf(diffsScript)).toBeLessThan(indexHtml.indexOf(sessionsScript));
     expect(indexHtml.indexOf(sessionsScript)).toBeLessThan(indexHtml.indexOf(panesScript));
     expect(indexHtml.indexOf(panesScript)).toBeLessThan(indexHtml.indexOf(inputScript));
     expect(indexHtml.indexOf(inputScript)).toBeLessThan(indexHtml.indexOf(mainScript));
+    expect(indexHtml.indexOf(panesScript)).toBeLessThan(indexHtml.indexOf(statusScript));
+    expect(indexHtml.indexOf(statusScript)).toBeLessThan(indexHtml.indexOf(mainScript));
     expect(sessionsBundle.length).toBeGreaterThan(0);
     expect(sessionsBundle).toContain('PsycheSessions');
     expect(panesBundle.length).toBeGreaterThan(0);
     expect(panesBundle).toContain('PsychePanes');
     expect(inputBundle.length).toBeGreaterThan(0);
     expect(inputBundle).toContain('PsycheTerminalInput');
+    expect(statusBundle.length).toBeGreaterThan(0);
+    expect(statusBundle).toContain('PsycheStatus');
+    expect(statusBundle).toContain('createStatusController');
   });
 
   describe('Web canvas pane', () => {
@@ -165,7 +186,12 @@ describe('Tauri workspace panels', () => {
       )?.[0];
       expect(boundsFunction).toBeTruthy();
       expect(boundsFunction).toContain('preview.isConnected');
+      expect(boundsFunction).toContain('browserSurface.parentElement !== pane.browserBody');
+      expect(boundsFunction).toContain('preview.getBoundingClientRect()');
       expect(boundsFunction).not.toContain('state.activeThreadId');
+      expect(mainJs).toMatch(
+        /function mountBrowserPane\(thread\)[\s\S]*pane\.appendChild\(body\);[\s\S]*pane\.appendChild\(createPaneFooter\(thread\)\)/,
+      );
     });
 
     it('returns contextual shortcuts to terminal mode through every Web close path', () => {

@@ -89,6 +89,7 @@ function compileOpenCovenSession<T extends (...args: never[]) => unknown>(
     ...names,
     `"use strict";
      ${functionSource(mainJs, 'waitForTerminalLayout')}
+     ${functionSource(mainJs, 'threadCovenSessionId')}
      ${functionSource(mainJs, 'findCovenAttachment')}
      ${functionSource(mainJs, 'covenWorktreeForSession')}
      return (${functionSource(mainJs, 'openCovenSession')});`,
@@ -104,12 +105,42 @@ function compileOpenWithProjectActivation<T extends (...args: never[]) => unknow
     ...names,
     `"use strict";
      ${functionSource(mainJs, 'waitForTerminalLayout')}
+     ${functionSource(mainJs, 'threadCovenSessionId')}
      ${functionSource(mainJs, 'findCovenAttachment')}
      ${functionSource(mainJs, 'covenWorktreeForSession')}
      ${functionSource(mainJs, 'setActiveProject')}
      ${functionSource(mainJs, 'activateProjectWorktree')}
      return (${functionSource(mainJs, 'openCovenSession')});`,
   )(...values) as T;
+}
+
+function compileCreateCovenSessionRow<T extends (...args: never[]) => unknown>(
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict";
+     ${functionSource(mainJs, 'threadCovenSessionId')}
+     return (${functionSource(mainJs, 'createCovenSessionRow')});`,
+  )(...values) as T;
+}
+
+function attachedThread(overrides: Record<string, any> = {}) {
+  return {
+    id: 'attached',
+    projectId: 'alpha',
+    hidden: false,
+    closeStarted: false,
+    worktreePath: '/alpha',
+    launch: {
+      launchKind: 'coven-attach',
+      covenSessionId: 'remote',
+      ...(overrides.launch || {}),
+    },
+    ...overrides,
+  };
 }
 
 function discoveryHarness(
@@ -124,11 +155,18 @@ function discoveryHarness(
   const invoke = (command: string, args: unknown) => new Promise((resolve) => {
     requests.push({ command, args, resolve });
   });
+  const statusSamples: Array<Record<string, unknown>> = [];
+  let statusRefreshes = 0;
+  let now = 1000;
+  const performance = { now: () => { now += 25; return now; } };
   const create = new Function(
     'PsycheSessions',
     'invoke',
     'initialProjects',
     'initialVisibilityState',
+    'noteStatusCovenSample',
+    'refreshStatusController',
+    'performance',
     `
       var state = { projects: initialProjects };
       var document = { visibilityState: initialVisibilityState };
@@ -146,13 +184,23 @@ function discoveryHarness(
       };
     `,
   );
-  const harness = create(PsycheSessions, invoke, projects, visibilityState);
-  return { ...harness, requests } as {
+  const harness = create(
+    PsycheSessions,
+    invoke,
+    projects,
+    visibilityState,
+    (sample: Record<string, unknown>) => { statusSamples.push(sample); },
+    () => { statusRefreshes += 1; return Promise.resolve(null); },
+    performance,
+  );
+  return { ...harness, requests, statusSamples, statusRefreshes: () => statusRefreshes } as {
     refresh: () => Promise<unknown>;
     setProjects: (projects: Array<Record<string, unknown>>) => void;
     setVisibility: (value: string) => void;
     discovery: () => ReturnType<typeof PsycheSessions.createCovenDiscoveryState>;
     requests: typeof requests;
+    statusSamples: typeof statusSamples;
+    statusRefreshes: () => number;
   };
 }
 
@@ -272,10 +320,66 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(harness.discovery().sessionsByProject.get('/beta')?.[0].id).toBe('new');
   });
 
+  it('reports footer Coven health only for the request that still owns discovery state', async () => {
+    {
+      const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+      const first = harness.refresh();
+      harness.setProjects([{ root: '/beta', worktrees: [] }]);
+      const second = harness.refresh();
+
+      harness.requests[1].resolve({
+        status: 'error',
+        sessions: [],
+        message: 'new fail',
+      });
+      await second;
+      harness.requests[0].resolve({
+        status: 'ready',
+        sessions: [{ id: 'old', projectRoot: '/alpha', status: 'running' }],
+      });
+      await first;
+
+      expect(harness.statusSamples).toEqual([
+        expect.objectContaining({
+          phase: 'error',
+          error: 'new fail',
+          refreshedAt: expect.any(Number),
+          latencyMs: expect.any(Number),
+        }),
+      ]);
+      expect(harness.statusRefreshes()).toBe(1);
+    }
+
+    {
+      const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+      const first = harness.refresh();
+      harness.setProjects([{ root: '/beta', worktrees: [] }]);
+      const second = harness.refresh();
+
+      harness.requests[1].resolve({
+        status: 'ready',
+        sessions: [{ id: 'new', projectRoot: '/beta', status: 'running' }],
+      });
+      await second;
+      harness.requests[0].resolve(Promise.reject(new Error('stale fail')));
+      await first;
+
+      expect(harness.statusSamples).toEqual([
+        expect.objectContaining({
+          phase: 'ready',
+          error: '',
+          refreshedAt: expect.any(Number),
+          latencyMs: expect.any(Number),
+        }),
+      ]);
+      expect(harness.statusRefreshes()).toBe(1);
+    }
+  });
+
   it('retains stored local Coven identity when creating threads', () => {
-    expect(functionSource(mainJs, 'createThread')).toContain(
-      'covenSessionId: opts.covenSessionId || null'
-    );
+    const source = functionSource(mainJs, 'createThread');
+    expect(source).toContain('covenSessionId: opts.covenSessionId || null');
+    expect(source).toContain('metricsProvider: opts.metricsProvider || null');
   });
 
   it('keeps native Coven create and attach outside daemon/tmux mutation paths', () => {
@@ -285,7 +389,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(nativeCovenSource).not.toMatch(
       /coven\.session\.open|openProjectCovenSession|createTmuxPane|sendTmuxCommand|TMUX_TMPDIR/
     );
-    expect(nativeCovenSource).toContain('args: ["chat"]');
+    expect(nativeCovenSource).toContain('args: ["code", "--session-id", sessionId]');
     expect(nativeCovenSource).toContain('args: ["attach", session.id]');
   });
 
@@ -297,6 +401,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(source).toContain('args: ["attach", session.id]');
     expect(source).toContain('launchKind: "coven-attach"');
     expect(source).toContain('covenSessionId: session.id');
+    expect(source).toContain('metricsProvider: session.harness || "coven"');
     expect(source).toContain('.finally(function ()');
     expect(source).not.toMatch(/coven\.session\.open|openProjectCovenSession|tmux/i);
   });
@@ -394,6 +499,78 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(covenAttachInFlight.size).toBe(0);
   });
 
+  it('reuses an attached session after the reservation settles', async () => {
+    const project = {
+      id: 'alpha', root: '/alpha', selectedWorktreePath: '/alpha',
+      worktrees: [{ path: '/alpha' }],
+    };
+    const session = {
+      id: 'remote', projectRoot: '/alpha', cwd: '/alpha', title: 'Durable session',
+    };
+    const state = {
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha',
+      threads: [] as Array<Record<string, any>>,
+    };
+    const covenAttachInFlight = new Map<string, Promise<unknown>>();
+    const covenAttachKey = compileFunction<(p: typeof project, s: typeof session) => string>(
+      functionSource(mainJs, 'covenAttachKey'), {},
+    );
+    let nextThreadId = 0;
+    let createCalls = 0;
+    const createThread = compileFunction<(options: Record<string, any>) => Record<string, any>>(
+      functionSource(mainJs, 'createThread'),
+      {
+        makeThreadId: () => `thread-${nextThreadId += 1}`,
+        activeProject: () => project,
+        activeWorkspaceRoot: () => project.selectedWorktreePath,
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        commitPanePlacement: () => undefined,
+        state,
+        refreshSidebar: () => undefined,
+        refreshTabs: () => undefined,
+        mountTerminal: () => undefined,
+        focusThread: () => undefined,
+        requestAnimationFrame: () => undefined,
+        isLiveThread: () => true,
+        spawnPty: () => undefined,
+      },
+    );
+    const openCovenSession = compileOpenCovenSession<(
+      p: typeof project, s: typeof session,
+    ) => Promise<Record<string, any> | null>>({
+      PsycheSessions,
+      state,
+      setStatus: () => undefined,
+      activateProjectWorktree: async (_project: typeof project, path: string) => {
+        project.selectedWorktreePath = path;
+        return true;
+      },
+      requestAnimationFrame: (callback: () => void) => callback(),
+      reopenThread: () => true,
+      focusThread: async () => true,
+      covenAttachKey,
+      covenAttachInFlight,
+      selectedWorktree: () => project.worktrees[0],
+      createThread: (options: Record<string, any>) => {
+        createCalls += 1;
+        return createThread(options);
+      },
+    });
+
+    const first = await openCovenSession(project, session);
+    expect(first?.launch).toMatchObject({
+      launchKind: 'coven-attach',
+      covenSessionId: 'remote',
+    });
+    expect(covenAttachInFlight.size).toBe(0);
+
+    const second = await openCovenSession(project, session);
+    expect(second).toBe(first);
+    expect(createCalls).toBe(1);
+    expect(state.threads).toHaveLength(1);
+  });
+
   it('selects the most-specific owned worktree for an overlapping session cwd', async () => {
     const project = {
       id: 'alpha', root: '/repo', selectedWorktreePath: '/repo',
@@ -401,6 +578,7 @@ describe('macOS Coven session lifecycle boundary', () => {
     };
     const session = {
       id: 'remote', projectRoot: '/repo', cwd: '/repo/feature/packages/app',
+      harness: 'codex',
     };
     let createdOptions: Record<string, unknown> | null = null;
     const openCovenSession = compileOpenCovenSession<(
@@ -427,7 +605,51 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(createdOptions).toMatchObject({
       cwd: '/repo/feature/packages/app',
       worktreePath: '/repo/feature',
+      metricsProvider: 'codex',
     });
+  });
+
+  it('marks nested-launch attachments as focus targets in session rows', () => {
+    const project = { id: 'alpha' };
+    const session = {
+      id: 'remote',
+      status: 'running',
+      harness: 'coven',
+      title: 'Durable session',
+    };
+    const opened: string[] = [];
+    const document = {
+      createElement: (_tag: string) => {
+        const listeners = new Map<string, () => void>();
+        return {
+          type: '',
+          className: '',
+          dataset: {} as Record<string, string>,
+          title: '',
+          textContent: '',
+          appendChild: () => undefined,
+          addEventListener: (event: string, handler: () => void) => {
+            listeners.set(event, handler);
+          },
+          click: () => {
+            listeners.get('click')?.();
+          },
+        };
+      },
+    };
+    const createCovenSessionRow = compileCreateCovenSessionRow<(
+      p: typeof project, s: typeof session,
+    ) => { title: string; click: () => void }>({
+      PsycheSessions,
+      document,
+      state: { threads: [attachedThread()] },
+      openCovenSession: () => { opened.push('open'); },
+    });
+
+    const row = createCovenSessionRow(project, session);
+    expect(row.title).toBe('Focus attachment');
+    row.click();
+    expect(opened).toEqual(['open']);
   });
 
   it('activates the exact worktree before reopening and focusing an existing attachment', async () => {
@@ -436,10 +658,7 @@ describe('macOS Coven session lifecycle boundary', () => {
       worktrees: [{ path: '/alpha' }, { path: '/alpha-feature' }],
     };
     const session = { id: 'remote', projectRoot: '/alpha' };
-    const existing = {
-      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
-      closeStarted: false, worktreePath: '/alpha-feature',
-    };
+    const existing = attachedThread({ hidden: true, worktreePath: '/alpha-feature' });
     const state = {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
     };
@@ -473,10 +692,7 @@ describe('macOS Coven session lifecycle boundary', () => {
   it('abandons an existing attachment that closes during its worktree switch', async () => {
     const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha-feature' }] };
     const session = { id: 'remote', projectRoot: '/alpha' };
-    const existing = {
-      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
-      closeStarted: false, worktreePath: '/alpha-feature',
-    };
+    const existing = attachedThread({ hidden: true, worktreePath: '/alpha-feature' });
     const state = {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
     };
@@ -512,10 +728,7 @@ describe('macOS Coven session lifecycle boundary', () => {
   it('returns null when an existing attachment cannot be focused', async () => {
     const project = { id: 'alpha', root: '/alpha', worktrees: [{ path: '/alpha' }] };
     const session = { id: 'remote', projectRoot: '/alpha' };
-    const existing = {
-      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: false,
-      closeStarted: false, worktreePath: '/alpha',
-    };
+    const existing = attachedThread();
     const state = {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [existing],
     };
@@ -543,10 +756,7 @@ describe('macOS Coven session lifecycle boundary', () => {
       worktrees: [{ path: '/alpha' }, { path: '/alpha-feature' }],
     };
     const session = { id: 'remote', projectRoot: '/alpha' };
-    const existing = {
-      id: 'attached', projectId: 'alpha', covenSessionId: 'remote', hidden: true,
-      closeStarted: false, worktreePath: '/alpha-feature',
-    };
+    const existing = attachedThread({ hidden: true, worktreePath: '/alpha-feature' });
     const state = {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
       threads: [existing],
