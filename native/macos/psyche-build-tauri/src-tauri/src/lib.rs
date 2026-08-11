@@ -9,6 +9,7 @@ use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -16,14 +17,16 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 
 mod coven_sessions;
+mod metrics;
 mod pane_metrics;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use pane_metrics::PaneSessionMetrics;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -49,12 +52,19 @@ fn safe_browser_label(label: Option<String>) -> String {
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pid: Option<u32>,
+    spawn_time_unix_secs: u64,
 }
 
 static SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static STARTING_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static AUGMENTED_PATH: Lazy<String> = Lazy::new(compute_augmented_path);
+
+#[derive(Clone, Default)]
+struct MetricsState {
+    collector: Arc<Mutex<MetricsCollector>>,
+}
 
 #[derive(Debug)]
 struct PendingPtyStart {
@@ -515,7 +525,12 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     cmd.env_remove("NPM_CONFIG_PREFIX");
     cmd.env_remove("PREFIX");
 
+    let spawn_time_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let pid = child.process_id();
     drop(resolved_cwd);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -527,6 +542,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
             PtySession {
                 master: pair.master,
                 writer: Arc::new(Mutex::new(writer)),
+                pid,
+                spawn_time_unix_secs,
             },
         );
     }
@@ -615,6 +632,34 @@ fn pty_stop(thread_id: String) {
 fn pty_list() -> Vec<String> {
     let guard = SESSIONS.lock();
     guard.keys().cloned().collect()
+}
+
+#[tauri::command]
+async fn workspace_metrics(
+    state: State<'_, MetricsState>,
+    scope: Option<MetricsScope>,
+) -> Result<MetricsSnapshot, String> {
+    let tracked_sessions = {
+        let guard = SESSIONS.lock();
+        guard
+            .iter()
+            .filter_map(|(thread_id, session)| {
+                session.pid.map(|pid| {
+                    TrackedPty::new(thread_id.clone(), pid, session.spawn_time_unix_secs)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let collector = state.collector.clone();
+    let scope = scope.unwrap_or(MetricsScope { thread_id: None });
+
+    tauri::async_runtime::spawn_blocking(move || {
+        collector
+            .lock()
+            .snapshot(std::process::id(), &tracked_sessions, scope)
+    })
+    .await
+    .map_err(|error| format!("metrics collector task failed: {error}"))
 }
 
 // ----------------------------------------------------------------------------
@@ -2198,6 +2243,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(MetricsState::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
             pane_session_metrics,
@@ -2222,6 +2268,7 @@ pub fn run() {
             git_worktrees,
             git_diff,
             git_log,
+            workspace_metrics,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

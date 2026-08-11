@@ -11,6 +11,7 @@ export {
   beginCovenRequest,
   createCovenDiscoveryState,
   filterProjectSessions,
+  groupAllCovenSessions,
   groupCovenSessions,
   buildProjectRailModel,
   invalidateCovenRequests,

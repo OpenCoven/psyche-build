@@ -1,28 +1,51 @@
 /**
- * wireProtocol.ts — TypeScript mirror of PsycheCore v2 wire protocol.
+ * wireProtocol.ts — TypeScript mirror of PsycheCore wire protocol.
  *
- * Field names and JSON shape are byte-identical to the Swift encoders in:
- *   native/shared/PsycheCore/Sources/PsycheCore/Messages.swift
+ * Legacy v2 fields and message names remain byte-identical to the Swift
+ * encoders in native/ios/PsycheCore/Sources/PsycheCore/Protocol/BridgeMessages.swift.
+ * Protocol v3 adds top-level `control` and `workspaceChanged` envelopes around
+ * the canonical daemon control/workspace messages without removing the legacy
+ * bridge messages.
  *
  * Encoding rules (matching Swift's BridgeCoder):
  *   - dateEncodingStrategy = .iso8601  → Date fields are ISO-8601 strings on the wire.
  *   - outputFormatting = [.sortedKeys] → Object keys emitted in sorted (lexicographic) order.
  *   - Swift Data                       → base64-encoded string by default via JSONEncoder.
  *
- * `seq` (PaneOutput) is Swift UInt64. JS number is safe up to 2^53, which is
- * sufficient at any realistic pane-output rate, so we use `number` rather than
- * `bigint` here.
+ * `seq` values are Swift UInt64. JS number is safe up to 2^53, which is
+ * sufficient at any realistic pane-output rate, so the TS mirror uses `number`.
  */
+
+import type {
+  ClientRequest as DaemonClientRequest,
+  PaneLaunchRequest,
+  ServerResponse as DaemonServerResponse,
+  StreamId,
+} from '../../daemon/protocol.js';
+import type { ActionOption, ActionResult, PaneAction } from '../../actions/types.js';
+import type { BrowserSnapshot } from '../../utils/fileBrowser.js';
+import type {
+  ReadonlyWorkspaceSnapshot,
+} from '../../workspace/snapshot.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-export const PROTOCOL_VERSION = 2;
+export const LEGACY_PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+export const SUPPORTED_PROTOCOL_VERSIONS = [LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION] as const;
+export type SupportedProtocolVersion = typeof SUPPORTED_PROTOCOL_VERSIONS[number];
 export const BONJOUR_SERVICE_TYPE = "_psyche._tcp";
 
+export function isSupportedProtocolVersion(value: unknown): value is SupportedProtocolVersion {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && (SUPPORTED_PROTOCOL_VERSIONS as readonly number[]).includes(value);
+}
+
 // ---------------------------------------------------------------------------
-// Shared types
+// Shared legacy v2 types
 // ---------------------------------------------------------------------------
 
 export type PaneStatus = "working" | "idle" | "waiting" | "unknown";
@@ -61,13 +84,13 @@ export interface Ritual {
 }
 
 // ---------------------------------------------------------------------------
-// Client message payloads
+// Legacy v2 client message payloads
 // ---------------------------------------------------------------------------
 
 export interface HelloPayload {
   clientId: string;
   clientName: string;
-  protocolVersion: number;
+  protocolVersion: SupportedProtocolVersion;
   token: string | null;
 }
 
@@ -100,10 +123,10 @@ export interface PairRequestPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Client message union
+// Legacy v2 message unions
 // ---------------------------------------------------------------------------
 
-export type ClientMessage =
+export type LegacyClientMessage =
   | { type: "hello"; payload: HelloPayload }
   | { type: "listPanes"; payload: Record<string, never> }
   | { type: "sendInput"; payload: SendInputPayload }
@@ -116,16 +139,12 @@ export type ClientMessage =
   | { type: "launchRitual"; payload: LaunchRitualPayload }
   | { type: "pair"; payload: PairRequestPayload };
 
-// ---------------------------------------------------------------------------
-// Server message payloads
-// ---------------------------------------------------------------------------
-
 export interface WelcomePayload {
   serverId: string;
   serverName: string;
-  protocolVersion: number;
+  protocolVersion: SupportedProtocolVersion;
   projectName: string | null;
-  // NOTE: no `serverFingerprint` field — not in the Swift struct.
+  supportedVersions?: readonly SupportedProtocolVersion[];
 }
 
 export interface PaneOutputPayload {
@@ -152,11 +171,7 @@ export interface BridgeError {
   message: string;
 }
 
-// ---------------------------------------------------------------------------
-// Server message union
-// ---------------------------------------------------------------------------
-
-export type ServerMessage =
+export type LegacyServerMessage =
   | { type: "welcome"; payload: WelcomePayload }
   | { type: "paneList"; payload: PaneSnapshot[] }
   | { type: "paneListChanged"; payload: PaneSnapshot[] }
@@ -171,13 +186,236 @@ export type ServerMessage =
   | { type: "error"; payload: BridgeError };
 
 // ---------------------------------------------------------------------------
-// Runtime type lists
-//
-// The unions above are erased at runtime, so the contract test cannot iterate
-// them directly. These arrays make the set enumerable, and the assertions below
-// make them impossible to forget: adding a union member without adding it here
-// (or vice versa) is a compile error, not a silently under-covered test.
+// Protocol v3 mobile control envelopes
 // ---------------------------------------------------------------------------
+
+export type MobilePaneCreateKind = 'agent' | 'terminal' | 'coven-session';
+export type MobileTerminalReplayMode = 'append' | 'replace';
+
+type CanonicalMobileControlRequest = Extract<
+  DaemonClientRequest,
+  {
+    type:
+      | 'workspace.snapshot'
+      | 'panes.detach'
+      | 'panes.input'
+      | 'panes.resize'
+      | 'panes.kill'
+      | 'panes.meta';
+  }
+>;
+
+type CanonicalMobileControlResponse = Extract<
+  DaemonServerResponse,
+  { type: 'ack' | 'panes.spawn.result' | 'panes.stream.exit' | 'error' }
+>;
+
+export type MobilePaneSpawnRequest = {
+  type: 'panes.spawn';
+  requestId: string;
+  idempotencyKey: string;
+  kind: MobilePaneCreateKind;
+  projectId: string;
+} & PaneLaunchRequest;
+
+export type MobileRitualLaunchRequest = {
+  type: 'rituals.launch';
+  requestId: string;
+  projectId: string;
+  ritualId: string;
+  params?: Record<string, string>;
+};
+
+export type MobilePaneAttachRequest = {
+  type: 'panes.attach';
+  requestId: string;
+  id: string;
+  cols?: number;
+  rows?: number;
+  sinceSeq?: number;
+};
+
+export type MobileFilesListRequest = {
+  type: 'files.list';
+  requestId: string;
+  paneId: string;
+};
+
+export type MobileFilesReadRequest = {
+  type: 'files.read';
+  requestId: string;
+  paneId: string;
+  path: string;
+};
+
+export type MobileFilesDiffRequest = {
+  type: 'files.diff';
+  requestId: string;
+  paneId: string;
+  path: string;
+};
+
+export type MobileActionInteractionResponse =
+  | { type: 'confirm' }
+  | { type: 'choice'; optionId: string }
+  | { type: 'input'; value: string }
+  | { type: 'cancel' };
+
+export type MobileActionsStartRequest = {
+  type: 'actions.start';
+  requestId: string;
+  paneId: string;
+  action: PaneAction;
+};
+
+export type MobileActionsRespondRequest = {
+  type: 'actions.respond';
+  requestId: string;
+  paneId: string;
+  response: MobileActionInteractionResponse;
+};
+
+export interface MobileActionReviewData {
+  repoPath: string;
+  sourceBranch: string;
+  targetBranch: string;
+  files: string[];
+  aiFailed?: boolean;
+}
+
+export type MobileActionOption = Pick<ActionOption, 'id' | 'label' | 'description' | 'danger' | 'default'>;
+
+export interface SerializedMobileActionResult {
+  type: ActionResult['type'];
+  message: string;
+  title?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  options?: MobileActionOption[];
+  placeholder?: string;
+  defaultValue?: string;
+  inputMaxVisibleLines?: number;
+  progress?: number;
+  targetPaneId?: string;
+  reviewData?: MobileActionReviewData;
+  data?: string;
+  relatedFiles?: string[];
+  dismissable?: boolean;
+}
+
+export type MobileWorkspaceSnapshotResult = {
+  type: 'mobile.workspace.snapshot.result';
+  requestId: string;
+  sequence: number;
+  workspace: ReadonlyWorkspaceSnapshot;
+};
+
+export type MobilePaneAttachResult = {
+  type: 'mobile.panes.attach.result';
+  requestId: string;
+  streamId: StreamId;
+  id: string;
+  latestSeq: number;
+  hasReplay: boolean;
+  replayMode: MobileTerminalReplayMode;
+};
+
+export type MobileFilesListResult = {
+  type: 'files.list.result';
+  requestId: string;
+  paneId: string;
+  snapshot: BrowserSnapshot;
+};
+
+export type MobileFilesReadResult = {
+  type: 'files.read.result';
+  requestId: string;
+  paneId: string;
+  path: string;
+  content: string;
+};
+
+export type MobileFilesDiffResult = {
+  type: 'files.diff.result';
+  requestId: string;
+  paneId: string;
+  path: string;
+  diff: string;
+};
+
+export type MobileActionsResult = {
+  type: 'actions.result';
+  requestId: string;
+  sessionId?: string;
+  result: SerializedMobileActionResult;
+};
+
+export interface WorkspaceChangedPayload {
+  revision: number;
+  sequence: number;
+  workspace: ReadonlyWorkspaceSnapshot;
+}
+
+export type MobileControlRequest =
+  | CanonicalMobileControlRequest
+  | MobilePaneSpawnRequest
+  | MobilePaneAttachRequest
+  | MobileFilesListRequest
+  | MobileFilesReadRequest
+  | MobileFilesDiffRequest
+  | MobileActionsStartRequest
+  | MobileActionsRespondRequest
+  | MobileRitualLaunchRequest;
+
+export type MobileControlResponse =
+  | CanonicalMobileControlResponse
+  | MobileWorkspaceSnapshotResult
+  | MobilePaneAttachResult
+  | MobileFilesListResult
+  | MobileFilesReadResult
+  | MobileFilesDiffResult
+  | MobileActionsResult;
+
+export type ClientMessage = LegacyClientMessage | { type: 'control'; payload: MobileControlRequest };
+
+export type ServerMessage =
+  | LegacyServerMessage
+  | { type: 'control'; payload: MobileControlResponse }
+  | { type: 'workspaceChanged'; payload: WorkspaceChangedPayload };
+
+// ---------------------------------------------------------------------------
+// Runtime type lists
+// ---------------------------------------------------------------------------
+
+export const MOBILE_CONTROL_REQUEST_TYPES = [
+  'workspace.snapshot',
+  'panes.detach',
+  'panes.input',
+  'panes.resize',
+  'panes.kill',
+  'panes.meta',
+  'panes.spawn',
+  'panes.attach',
+  'files.list',
+  'files.read',
+  'files.diff',
+  'actions.start',
+  'actions.respond',
+  'rituals.launch',
+] as const;
+
+export const MOBILE_CONTROL_RESPONSE_TYPES = [
+  'ack',
+  'panes.spawn.result',
+  'panes.stream.exit',
+  'error',
+  'mobile.workspace.snapshot.result',
+  'mobile.panes.attach.result',
+  'files.list.result',
+  'files.read.result',
+  'files.diff.result',
+  'actions.result',
+] as const;
 
 export const CLIENT_MESSAGE_TYPES = [
   "hello",
@@ -191,6 +429,7 @@ export const CLIENT_MESSAGE_TYPES = [
   "listRituals",
   "launchRitual",
   "pair",
+  'control',
 ] as const;
 
 export const SERVER_MESSAGE_TYPES = [
@@ -206,6 +445,8 @@ export const SERVER_MESSAGE_TYPES = [
   "pairRejected",
   "pong",
   "error",
+  'control',
+  'workspaceChanged',
 ] as const;
 
 /** Compile error if the array and the union ever disagree, in either direction. */
@@ -220,14 +461,21 @@ const _serverTypesMatchUnion: MutuallyExhaustive<
   ServerMessage["type"],
   typeof SERVER_MESSAGE_TYPES[number]
 > = true;
+const _mobileControlRequestTypesMatchUnion: MutuallyExhaustive<
+  MobileControlRequest['type'],
+  typeof MOBILE_CONTROL_REQUEST_TYPES[number]
+> = true;
+const _mobileControlResponseTypesMatchUnion: MutuallyExhaustive<
+  MobileControlResponse['type'],
+  typeof MOBILE_CONTROL_RESPONSE_TYPES[number]
+> = true;
 void _clientTypesMatchUnion;
 void _serverTypesMatchUnion;
+void _mobileControlRequestTypesMatchUnion;
+void _mobileControlResponseTypesMatchUnion;
 
 // ---------------------------------------------------------------------------
 // stableStringify — mirrors Swift's .sortedKeys output formatting.
-//
-// JSON.stringify with a replacer that sorts object keys lexicographically.
-// Arrays are left in their original order (JSON.stringify handles them as-is).
 // ---------------------------------------------------------------------------
 
 function stableStringify(value: unknown): string {
@@ -290,7 +538,33 @@ export function decodeClientMessage(raw: string): ClientMessage {
     );
   }
 
-  // We trust the caller to send the right payload shape for each type.
-  // Structural validation beyond type+payload can be layered on top.
   return obj as ClientMessage;
+}
+
+/**
+ * Binary frames are
+ * `[1-byte streamId-length][streamId utf8][8-byte big-endian sequence][payload]`.
+ */
+export function encodeMobileBinaryFrame(
+  streamId: StreamId,
+  sequence: number,
+  payload: Uint8Array,
+): Buffer {
+  const idBytes = Buffer.from(streamId, 'utf8');
+  if (idBytes.length === 0) {
+    throw new Error('streamId must not be empty');
+  }
+  if (idBytes.length > 255) {
+    throw new Error('streamId too long');
+  }
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error('sequence must be a non-negative safe integer');
+  }
+
+  const out = Buffer.allocUnsafe(1 + idBytes.length + 8 + payload.length);
+  out.writeUInt8(idBytes.length, 0);
+  idBytes.copy(out, 1);
+  out.writeBigUInt64BE(BigInt(sequence), 1 + idBytes.length);
+  Buffer.from(payload).copy(out, 1 + idBytes.length + 8);
+  return out;
 }
