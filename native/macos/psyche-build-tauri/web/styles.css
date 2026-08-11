@@ -3614,6 +3614,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-picker-overlay { animation: none; }
+}
+
 /* -------- Diff viewer --------
    Split and stacked share one model, so they share one palette and one row
    metric; only the track layout differs. Added and removed text carry their
