@@ -22,7 +22,18 @@ function extractFunctionSource(source: string, name: string) {
   const syncStart = source.indexOf(`function ${name}(`);
   const start = asyncStart === -1 ? syncStart : asyncStart;
   if (start === -1) throw new Error(`missing function ${name}`);
-  const bodyStart = source.indexOf('{', start);
+  const paramsStart = source.indexOf('(', start);
+  let paramsDepth = 0;
+  let bodyStart = -1;
+  for (let index = paramsStart; index < source.length; index += 1) {
+    if (source[index] === '(') paramsDepth += 1;
+    if (source[index] === ')') paramsDepth -= 1;
+    if (paramsDepth === 0) {
+      bodyStart = source.indexOf('{', index);
+      break;
+    }
+  }
+  if (bodyStart === -1) throw new Error(`missing function body ${name}`);
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
     if (source[index] === '{') depth += 1;
@@ -64,7 +75,7 @@ describe('native CodeMirror workspace editor surface', () => {
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
     expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
+      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/diffs\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/input\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
     );
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
@@ -307,56 +318,26 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(editorEntry).toContain('head: main.head');
   });
 
-  it('provides one accessible virtualized read-only unified diff surface', async () => {
-    expect(indexHtml).toContain('id="diff-editor-host"');
+  it('renders diffs from the shared model rather than a CodeMirror document', async () => {
+    // The unified CodeMirror diff surface was retired: split and stacked are two
+    // renderings of one parsed model, which a read-only editor cannot express.
+    expect(indexHtml).toContain('id="diff-rows"');
     expect(indexHtml).toContain('id="diff-metadata"');
     expect(indexHtml).toContain('id="diff-truncation"');
-    expect(indexHtml).not.toContain('<pre class="diff-body" id="diff-body">');
+    expect(indexHtml).not.toContain('id="diff-editor-host"');
 
-    expect(editorEntry).toMatch(/export function createDiffViewer\s*\(/);
-    expect(editorEntry).toMatch(/export function createDiffViewerState\s*\(/);
-    expect(editorEntry).toContain('EditorView.editable.of(false)');
-    expect(editorEntry).toContain('EditorState.readOnly.of(true)');
-    expect(editorEntry).toMatch(
-      /EditorView\.contentAttributes\.of\(\{[\s\S]*'aria-label': 'Unified diff viewer',[\s\S]*'aria-readonly': 'true',[\s\S]*tabindex: '0'/
-    );
-    expect(editorEntry).toContain('ViewPlugin.fromClass');
-    expect(editorEntry).toContain('view.visibleRanges');
-    expect(editorEntry).toContain('update.viewportChanged');
-    expect(extractFunctionSource(editorEntry, 'createDiffViewerState')).not.toContain('basicSetup');
-
-    const editorModule = await import(
-      pathToFileURL(join(webRoot, 'editor/editor-entry.js')).href
-    );
-    const diffState = editorModule.createDiffViewerState({
-      text: '@@ -1 +1 @@\n-old\n+new',
-      cspNonce: 'test-nonce',
-    });
-    const stateModule = await import(
-      pathToFileURL(requireFromTauri.resolve('@codemirror/state')).href
-    );
-    const viewModule = await import(
-      pathToFileURL(requireFromTauri.resolve('@codemirror/view')).href
-    );
-
-    expect(diffState.facet(stateModule.EditorState.readOnly)).toBe(true);
-    expect(diffState.facet(viewModule.EditorView.editable)).toBe(false);
-    expect(diffState.facet(viewModule.EditorView.contentAttributes)).toContainEqual({
-      'aria-label': 'Unified diff viewer',
-      'aria-readonly': 'true',
-      tabindex: '0',
-    });
-    expect(editorModule.diffClass('@@ -1 +1 @@')).toBe('cm-diff-hunk');
-    expect(editorModule.diffClass('+++ b/file')).toBe('cm-diff-meta');
-    expect(editorModule.diffClass('--- a/file')).toBe('cm-diff-meta');
-    expect(editorModule.diffClass('+added')).toBe('cm-diff-add');
-    expect(editorModule.diffClass('-deleted')).toBe('cm-diff-delete');
+    // Its implementation is gone too, not merely unreferenced.
+    expect(editorEntry).not.toContain('createDiffViewer');
+    expect(editorEntry).not.toContain('diffClass');
+    expect(editorEntry).not.toContain('workspaceDiffTheme');
+    // The file editor it shared a module with is untouched.
+    expect(editorEntry).toMatch(/export function createFileEditor\s*\(/);
   });
 
   it('coordinates structured diff responses with exact cache and request identity', () => {
     expect(mainJs).toContain('window.PsycheCodeEditor.createLruCache(6)');
     expect(mainJs).toContain('window.PsycheCodeEditor.createRequestGate()');
-    expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged\)/);
+    expect(mainJs).toMatch(/function diffCacheKey\(projectId, workspaceRoot, path, staged, context\)/);
     expect(mainJs).toContain('projectId + "\\0" + workspaceRoot + "\\0" + path + "\\0" +');
     expect(mainJs).toContain('key.startsWith(projectId + "\\0")');
     expect(mainJs).toMatch(/diffCache\.get\(key\)[\s\S]*invoke\("git_diff"/);
@@ -442,14 +423,16 @@ describe('native CodeMirror workspace editor surface', () => {
     const renderCalls: unknown[] = [];
     let invokeCalls = 0;
     const common = {
-      diffEditorHostEl: {},
+      diffRowsEl: { replaceChildren: () => undefined },
       activeProject: () => project,
       currentPanel: () => 'diffs',
       currentLayout: () => 'split',
       panelIsVisible: () => true,
       activeWorkspaceRoot: (owner: typeof project) => owner.root,
       stagedDiffFor: () => false,
-      diffCacheKey: () => 'p1\0src/a.ts\0unstaged',
+      diffCacheKey: () => 'p1\0src/a.ts\0unstaged\0default',
+      diffContext: null,
+      shownDiffTarget: null,
       diffRequestGate: { next: () => 1 },
       selectedDiffPath: null,
       selectedDiffKey: null,
@@ -615,6 +598,12 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(mainJs).toMatch(/event\.key === "Escape"[\s\S]*event\.preventDefault\(\)/);
     expect(mainJs).toMatch(/event\.target === dirtyFileDialogEl/);
     expect(stylesCss).toMatch(/\.file-decision-dialog::backdrop\s*\{/);
+  });
+
+  it('stops dirty-dialog Escape before it reaches fullscreen file return', () => {
+    expect(extractFunctionSource(mainJs, 'showFileDecision')).toMatch(
+      /event\.key === "Escape"[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*settle\(fallback\)/
+    );
   });
 
   it('guards dirty files with save, discard, and cancel semantics', async () => {
@@ -817,10 +806,8 @@ describe('native CodeMirror workspace editor surface', () => {
       state,
       refreshTabs: () => undefined,
       activateFileTabNow: () => undefined,
-      fileViewEl: { hidden: false },
-      terminalHost: { hidden: true },
-      requestAnimationFrame: () => undefined,
-      scheduleVisiblePaneFit: () => undefined,
+      clearFileFocusPresentation: () => undefined,
+      renderPaneWorkspace: () => undefined,
     });
 
     const closing = closeFileTab(file.id);
@@ -1078,6 +1065,159 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(selections).toEqual([{ reload: true }]);
   });
 
+  it('enters file focus once and preserves the original return pane across file tabs', () => {
+    const state = {
+      activeFileId: null as string | null,
+      activeThreadId: 'thread-a',
+    };
+    const fileFocus = { returnThreadId: null as string | null };
+    const classes = new Set<string>();
+    const minimapCalls: Array<{ layout: unknown; fileId: string }> = [];
+    const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
+    const fileViewEl = { hidden: true };
+    const terminalHost = { hidden: false };
+    const enterFileFocus = compileFunction<
+      (file: { id: string }) => void
+    >(extractFunctionSource(mainJs, 'enterFileFocus'), {
+      state,
+      fileFocus,
+      terminalArea: {
+        classList: {
+          add: (name: string) => classes.add(name),
+        },
+      },
+      fileViewEl,
+      terminalHost,
+      activePaneLayout: () => layout,
+      renderPaneMinimap: (value: unknown, file: { id: string }) => {
+        minimapCalls.push({ layout: value, fileId: file.id });
+      },
+    });
+
+    enterFileFocus({ id: 'file-a' });
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(state.activeFileId).toBe('file-a');
+    expect(fileViewEl.hidden).toBe(false);
+    expect(terminalHost.hidden).toBe(true);
+    expect(classes).toContain('is-file-focused');
+
+    state.activeThreadId = 'thread-b';
+    enterFileFocus({ id: 'file-b' });
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(state.activeFileId).toBe('file-b');
+    expect(minimapCalls).toEqual([
+      { layout, fileId: 'file-a' },
+      { layout, fileId: 'file-b' },
+    ]);
+    expect(extractFunctionSource(mainJs, 'enterFileFocus')).not.toMatch(
+      /applyLayout|data\.layout|sidebar/
+    );
+  });
+
+  it('keeps file focus intact when dirty-file navigation is cancelled', async () => {
+    const state = { activeFileId: 'file-a' };
+    const fileFocus = { returnThreadId: 'thread-a' };
+    let clearCalls = 0;
+    const showTerminalView = compileFunction<() => Promise<boolean>>(
+      extractFunctionSource(mainJs, 'showTerminalView'),
+      {
+        state,
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        guardDirtyFile: async () => false,
+        findOpenFile: () => ({ id: 'file-a', dirty: true }),
+        clearFileFocusPresentation: () => { clearCalls += 1; },
+        refreshTabs: () => undefined,
+        requestAnimationFrame: () => undefined,
+        scheduleVisiblePaneFit: () => undefined,
+      },
+    );
+
+    await expect(showTerminalView()).resolves.toBe(false);
+    expect(state.activeFileId).toBe('file-a');
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(clearCalls).toBe(0);
+  });
+
+  it('refreshes the pane minimap immediately after leaving file focus', async () => {
+    const calls: string[] = [];
+    const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
+    const showTerminalView = compileFunction<() => Promise<boolean>>(
+      extractFunctionSource(mainJs, 'showTerminalView'),
+      {
+        state: { activeFileId: 'file-a' },
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        guardDirtyFile: async () => true,
+        findOpenFile: () => ({ id: 'file-a', dirty: false }),
+        clearFileFocusPresentation: () => { calls.push('clear'); },
+        activePaneLayout: () => layout,
+        renderPaneMinimap: (value: unknown, file: unknown) => {
+          expect(value).toBe(layout);
+          expect(file).toBeNull();
+          calls.push('minimap');
+        },
+        refreshTabs: () => { calls.push('tabs'); },
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => { calls.push('fit'); },
+      },
+    );
+
+    await expect(showTerminalView()).resolves.toBe(true);
+    expect(calls).toEqual(['clear', 'minimap', 'tabs', 'fit']);
+  });
+
+  it('routes Escape through guarded file return before pane maximize', () => {
+    expect(mainJs).toMatch(
+      /document\.addEventListener\("keydown", async function \(event\)[\s\S]*if \(state\.activeFileId\) \{[\s\S]*event\.preventDefault\(\);[\s\S]*await returnFromFileFocus\(\);[\s\S]*if \(!typing && exitPaneMaximize\(\)\)/
+    );
+    expect(extractFunctionSource(mainJs, 'renderPaneMinimap')).toMatch(
+      /await returnFromFileFocus\(item\.thread\.id, true\)/
+    );
+  });
+
+  it('documents Escape as the way to leave a fullscreen file', () => {
+    expect(mainJs).toContain('["Leave a fullscreen file", "esc"]');
+  });
+
+  it('restores the pane workspace after the last active file closes', async () => {
+    const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
+    const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
+    let cleared = 0;
+    let rendered = 0;
+    const closeFileTab = compileFunction<
+      (id: string) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'closeFileTab'), {
+      findOpenFile: () => file,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: null,
+      guardDirtyFile: async () => true,
+      projectFiles: () => state.openFiles,
+      state,
+      refreshTabs: () => undefined,
+      activateFileTabNow: () => undefined,
+      clearFileFocusPresentation: () => {
+        cleared += 1;
+        state.activeFileId = null;
+      },
+      renderPaneWorkspace: () => { rendered += 1; },
+    });
+
+    await expect(closeFileTab(file.id)).resolves.toBe(true);
+    expect(state.openFiles).toEqual([]);
+    expect(state.activeFileId).toBeNull();
+    expect({ cleared, rendered }).toEqual({ cleared: 1, rendered: 1 });
+  });
+
+  it('reserves the focus-mode minimap column for the fullscreen file editor', () => {
+    expect(stylesCss).toMatch(
+      /\.terminal-area\.is-file-focused \.file-view\s*\{[^}]*grid-column:\s*1;/
+    );
+    expect(stylesCss).toMatch(
+      /\.terminal-area\.is-file-focused \.pane-minimap\s*\{[^}]*grid-column:\s*2;/
+    );
+  });
+
   it('guards navigation, project removal, and native window close before mutation', () => {
     for (const name of ['activateFileTab', 'closeFileTab', 'removeProject', 'showTerminalView']) {
       expect(mainJs).toMatch(new RegExp(`async function ${name}\\(`));
@@ -1085,7 +1225,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const activateFileTabSource = extractFunctionSource(mainJs, 'activateFileTab');
     expect(activateFileTabSource).toMatch(/await guardDirtyFile\(/);
     expect(activateFileTabSource).toMatch(/if \(!canActivate\) return false;[\s\S]*activateFileTabNow\(id\)/);
-    expect(mainJs).toMatch(/function activateFileTabNow\(id\)[\s\S]*state\.activeFileId = id/);
+    expect(extractFunctionSource(mainJs, 'activateFileTabNow')).toMatch(/enterFileFocus\(file\)/);
     expect(extractFunctionSource(mainJs, 'closeFileTab')).toMatch(
       /await guardDirtyFile\(file\)[\s\S]*if \(!canClose\) return false;[\s\S]*state\.openFiles =/
     );
@@ -1093,7 +1233,7 @@ describe('native CodeMirror workspace editor surface', () => {
       /await guardDirtyFiles\([\s\S]*if \(!canRemove\) return false;[\s\S]*state\.projects =/
     );
     expect(extractFunctionSource(mainJs, 'showTerminalView')).toMatch(
-      /await guardDirtyFile\([\s\S]*if \(!canShowTerminal\) return false;[\s\S]*state\.activeFileId = null/
+      /await guardDirtyFile\([\s\S]*if \(!canShowTerminal\) return false;[\s\S]*clearFileFocusPresentation\(\)/
     );
     expect(mainJs).toContain('window.__TAURI__.window.getCurrentWindow()');
     expect(mainJs).toContain('onCloseRequested');

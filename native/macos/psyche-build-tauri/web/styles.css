@@ -524,6 +524,21 @@ kbd {
 }
 .session-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
+/* A row waiting on the user keeps its badge legible at every state the row can
+   be in, including active — being the pane you are looking at is not the same
+   as having answered it. The tint is deliberately faint: the `!` is the signal,
+   this only stops the row reading as ordinary while it scrolls past. */
+.session-row.needs-attention .session-title { color: var(--text); }
+.session-row.needs-attention::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(251, 191, 36, 0.06);
+  pointer-events: none;
+}
+.session-title-row > .session-attention-badge { flex: none; }
+
 .session-dot {
   width: 7px;
   height: 7px;
@@ -1250,12 +1265,39 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.22);
 }
 
-/* Six tracks: glyph · label · status · span · maximise · close. The label is
-   the only flexible one, so the buttons keep their footprint at any width
-   instead of being squeezed out of the row. */
+/* A pane waiting on the user is the only thing allowed to outrank the focus
+   ring: violet marks where you are, amber marks where you are needed. It holds
+   even on the focused pane, because the answer is still outstanding until the
+   user types -- opening the pane is not replying to it. */
+.terminal-pane.needs-attention,
+.terminal-pane.focused.needs-attention {
+  border-color: rgba(251, 191, 36, 0.6);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.28);
+}
+.terminal-pane.needs-attention .terminal-pane-header {
+  background: rgba(251, 191, 36, 0.09);
+}
+/* Worded chip, matching how every other pane state is spelled out rather than
+   left to colour alone. */
+.terminal-pane-attention {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Seven tracks: glyph · label · attention · status · span · maximise · close.
+   The label is the only flexible one, so the buttons keep their footprint at
+   any width instead of being squeezed out of the row. The attention chip is
+   hidden (display:none) unless the pane is waiting, so its track collapses to
+   nothing rather than reserving space for a state most panes never reach. */
 .terminal-pane-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
@@ -1545,6 +1587,31 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 /* Picking dims the canvas and rings the picks. The overlay is a real button so
    the click never reaches the terminal underneath. */
 .terminal-pane { position: relative; }
+.terminal-pane.image-drop-target {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--rgb-accent), 0.28),
+    0 0 0 1px rgba(var(--rgb-accent), 0.16);
+}
+.terminal-pane.image-drop-target::after {
+  content: "Drop images to insert paths";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--rgb-accent), 0.26);
+  border-radius: 999px;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .terminal-pane.is-picking { opacity: 0.55; }
 .terminal-pane.is-picked {
   opacity: 1;
@@ -1630,6 +1697,20 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .minimap-dot.running { background: var(--ok); }
 .minimap-dot.starting { background: var(--warn); }
 .minimap-dot.exited { background: var(--error); }
+.minimap-dot.file {
+  background: var(--accent);
+  box-shadow: 0 0 7px var(--accent-glow);
+}
+/* Focus mode draws one pane and hides the rest, so the minimap is the only
+   place a waiting pane can still be seen. It wins over the status colour and
+   grows a ring, because at 5px a hue swap alone is not a signal. */
+.minimap-dot.attention {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.28);
+}
+.minimap-pane:has(.minimap-dot.attention) {
+  border-color: rgba(251, 191, 36, 0.45);
+}
 /* A blank slab, not a live preview: it reads as "a pane is here" at 66px wide
    without paying to render a second terminal. */
 .minimap-body {
@@ -2134,6 +2215,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .terminal-host { grid-row: 3; grid-column: 1; }
 .file-view     { grid-row: 3; grid-column: 1 / -1; }
 .pane-minimap  { grid-row: 3; grid-column: 2; }
+.terminal-area.is-file-focused .file-view {
+  grid-column: 1;
+}
+.terminal-area.is-file-focused .pane-minimap {
+  grid-column: 2;
+}
 
 .file-view[hidden] { display: none; }
 .file-view {
@@ -3527,4 +3614,225 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-picker-overlay { animation: none; }
+/* -------- Diff viewer --------
+   Split and stacked share one model, so they share one palette and one row
+   metric; only the track layout differs. Added and removed text carry their
+   own foreground against a 9% wash, which stays AA on bg/1 -- colour alone
+   never marks a line, the +/- marker and the gutters do. */
+
+.diff-layout-toggle {
+  display: inline-flex;
+  flex: none;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.diff-layout-btn {
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.diff-layout-btn:hover { color: var(--text); }
+.diff-layout-btn.is-active { background: rgba(255, 255, 255, 0.10); color: var(--text); }
+.diff-layout-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.diff-rows {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+.diff-row { display: grid; }
+.diff-rows[data-layout="stacked"] .diff-row { grid-template-columns: 34px 34px 16px minmax(0, 1fr); }
+.diff-rows[data-layout="split"]   .diff-row { grid-template-columns: 30px minmax(0, 1fr) 30px minmax(0, 1fr); }
+
+.diff-gutter {
+  padding-right: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  user-select: none;
+}
+.diff-rows[data-layout="stacked"] .diff-gutter-new { border-right: 1px solid rgba(255, 255, 255, 0.05); }
+.diff-marker { color: var(--muted); text-align: center; user-select: none; }
+
+.diff-text {
+  min-width: 0;
+  padding: 0 8px 0 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-rows[data-layout="split"] .diff-text:first-of-type { border-right: 1px solid var(--border); }
+
+.diff-row.diff-add    .diff-text, .diff-text.diff-add    { background: rgba(52, 211, 153, 0.09); color: #8fe3b8; }
+.diff-row.diff-delete .diff-text, .diff-text.diff-delete { background: rgba(248, 113, 113, 0.09); color: #f0a3a3; }
+.diff-row.diff-add    .diff-marker { color: var(--ok); }
+.diff-row.diff-delete .diff-marker { color: var(--error); }
+.diff-gutter.diff-add    { background: rgba(52, 211, 153, 0.05); }
+.diff-gutter.diff-delete { background: rgba(248, 113, 113, 0.05); }
+/* The cell opposite a pure add or delete. Tinted rather than blank so the gap
+   reads as "nothing here", not as an unstyled row. */
+.diff-text.diff-empty { background: rgba(255, 255, 255, 0.015); }
+
+/* Word-level marks sit on top of the line wash, so the changed tokens read
+   without having to compare two lines character by character. */
+.diff-add .diff-word, .diff-text.diff-add .diff-word { background: rgba(52, 211, 153, 0.30); border-radius: 3px; }
+.diff-delete .diff-word, .diff-text.diff-delete .diff-word { background: rgba(248, 113, 113, 0.32); border-radius: 3px; }
+
+.diff-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+}
+.diff-sep-mark { letter-spacing: 2px; }
+.diff-sep-spacer { flex: 1 1 auto; }
+.diff-sep-expand {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: inherit;
+}
+.diff-sep-expand:hover { color: #c4b5fd; }
+.diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
+.diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }
+
+/* -------- Tools on the canvas --------
+   A tool pane is a pane like any other; only its body differs, holding the
+   surface that was in the dock rather than a terminal. */
+
+.terminal-pane.is-tool .terminal-pane-glyph { color: var(--accent); }
+.tool-pane-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.tool-pane-body > .panel-git-body { flex: 1 1 auto; min-height: 0; }
+
+/* While a tool is being dragged out of the dock the canvas is the target, so
+   panes recede the same way they do when one is being repositioned. */
+body.is-tool-dragging .terminal-pane { transition: opacity var(--transition-fast); opacity: 0.65; }
+
+.dock-popped-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.dock-popped-note[hidden] { display: none; }
+.dock-popped-note button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.dock-popped-note button:hover { background: var(--surface-2); color: var(--text); }
+.dock-popped-note button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* -------- Voice call bar --------
+   Green because a call is a live, benign state -- the same green the running
+   dot uses. It sits above the composer like the palette does, so the composer
+   never moves when a call starts. */
+
+.call-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: 10px;
+  background: rgba(14, 20, 18, 0.97);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  animation: menu-rise 150ms ease-out;
+}
+.call-bar[hidden] { display: none; }
+.call-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  animation: session-dot-pulse 1.4s ease-in-out infinite;
+}
+.call-title { flex: none; font-weight: 600; color: var(--text); }
+.call-target { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-soft); font-weight: 400; }
+.call-wave { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.call-wave i {
+  width: 2.5px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ok);
+  animation: call-wave 900ms ease-in-out infinite;
+}
+.call-wave i:nth-child(2) { animation-delay: 120ms; }
+.call-wave i:nth-child(3) { animation-delay: 240ms; }
+.call-wave i:nth-child(4) { animation-delay: 360ms; }
+.call-wave i:nth-child(5) { animation-delay: 480ms; }
+@keyframes call-wave { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+
+/* Muted stops the waveform: the one honest thing it can show. */
+.call-bar.is-muted .call-wave i { animation: none; transform: scaleY(0.3); opacity: 0.5; }
+.call-bar.is-muted .call-dot { animation: none; opacity: 0.5; }
+
+.call-note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.call-spacer { flex: 1 1 auto; }
+.call-timer { flex: none; color: var(--text-soft); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.call-btn {
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 3px 11px;
+}
+.call-btn:hover { background: rgba(255, 255, 255, 0.10); }
+.call-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.call-end {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.13);
+  color: #f4a6a6;
+  font-weight: 600;
+}
+.call-end:hover { background: rgba(248, 113, 113, 0.22); }
+.composer-call-btn[aria-pressed="true"] { color: var(--ok); border-color: rgba(52, 211, 153, 0.5); }
+
+@media (prefers-reduced-motion: reduce) {
+  .call-bar { animation: none; }
+  .call-dot, .call-wave i { animation: none; }
 }
