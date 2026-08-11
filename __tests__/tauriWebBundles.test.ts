@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 /**
- * The three web bundles are build output that is committed, so nothing but a
- * test stops them drifting from the sources they were built from. This rebuilds
- * each one with the *same* flags the build script uses -- parsed out of
+ * The committed web bundles are build output, so nothing but a test stops them
+ * drifting from the sources they were built from. This rebuilds each one with
+ * the *same* flags the build script uses -- parsed out of
  * package.json rather than restated here, so changing the build cannot leave
  * the check validating yesterday's command -- and compares the bytes.
  */
@@ -61,6 +61,7 @@ describe('committed web bundles', () => {
       'web/editor.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
+      'web/status.bundle.js',
     ]);
   });
 

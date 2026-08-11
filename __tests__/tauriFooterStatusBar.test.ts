@@ -9,6 +9,7 @@ const statusRoot = join(webRoot, 'status');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
+const statusBundle = readFileSync(join(webRoot, 'status.bundle.js'), 'utf8');
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -98,6 +99,19 @@ function compileBuildStatusController<T extends (...args: never[]) => unknown>(
      ${functionSource(mainJs, 'getStatusContext')}
      return (${functionSource(mainJs, 'buildStatusController')});`,
   )(...values) as T;
+}
+
+function loadBrowserBundle(
+  source: string,
+  globalName: string,
+): Record<string, unknown> {
+  const global = {} as Record<string, unknown>;
+  return Function(
+    'window',
+    'self',
+    'globalThis',
+    `"use strict"; ${source}; return typeof ${globalName} !== "undefined" ? ${globalName} : globalThis[${JSON.stringify(globalName)}];`,
+  )(global, global, global);
 }
 
 function footerSection(source: string) {
@@ -322,6 +336,31 @@ describe('Tauri footer status bar shell', () => {
       'sparklinePath',
       'summarizeWorkspace',
     ]);
+  });
+
+  it('ships the bundled footer status module before main boot and exposes public exports', () => {
+    const statusScript = '<script src="./status.bundle.js" defer></script>';
+    const mainScript = '<script src="./main.js" defer></script>';
+    const shipped = loadBrowserBundle(statusBundle, 'PsycheStatus');
+
+    expect(indexHtml).toContain(statusScript);
+    expect(indexHtml.indexOf(statusScript)).toBeLessThan(indexHtml.indexOf(mainScript));
+    expect(shipped).toMatchObject({
+      createStatusController: expect.any(Function),
+      DEFAULT_METRIC_ORDER: expect.any(Array),
+      METRICS: expect.any(Object),
+      chooseVisibleMetrics: expect.any(Function),
+      createActivityTracker: expect.any(Function),
+      createFrameSampler: expect.any(Function),
+      evaluateSeverity: expect.any(Function),
+      formatLiveDiagnostics: expect.any(Function),
+      median: expect.any(Function),
+      normalizePreferences: expect.any(Function),
+      pushTrend: expect.any(Function),
+      samplingDelay: expect.any(Function),
+      sparklinePath: expect.any(Function),
+      summarizeWorkspace: expect.any(Function),
+    });
   });
 
   it('ships controller source contracts for persistence, announcements, Escape, and focused scope fallback', () => {
