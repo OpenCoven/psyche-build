@@ -49,7 +49,10 @@ describe('Tauri Coven session native contract', () => {
     ]);
 
     expect(covenSessionsSource).toMatch(
-      /#\[tauri::command\]\s*pub\(crate\)\s+async\s+fn\s+coven_sessions\s*\(\s*project_roots\s*:\s*Vec\s*<\s*String\s*>\s*\)\s*->\s*CovenSessionsResponse/,
+      /#\[tauri::command\][\s\S]*?fn\s+coven_sessions\s*\([\s\S]*?project_roots\s*:\s*Vec<String>\s*,[\s\S]*?project_scopes\s*:\s*Option<Vec<CovenProjectScope>>\s*,?[\s\S]*?\)\s*->\s*CovenSessionsResponse/,
+    );
+    expect(covenSessionsSource).toMatch(
+      /#\[serde\(rename_all\s*=\s*"camelCase"\)\][\s\S]*struct\s+CovenProjectScope\s*\{[\s\S]*project_root\s*:\s*String[\s\S]*worktree_roots\s*:\s*Vec<String>/,
     );
 
     const command = functionBody(covenSessionsSource, 'coven_sessions');
@@ -62,13 +65,19 @@ describe('Tauri Coven session native contract', () => {
       expect(closure).toMatch(new RegExp(`std::env::var_os\\s*\\(\\s*"${key}"\\s*\\)`));
     }
     expect(closure).toMatch(/home_path\s*\(\s*std::env::var_os\s*\(\s*"HOME"\s*\)\s*\)/);
-    expect(closure).toMatch(/discover\s*\(\s*&env\s*,\s*&home\s*,\s*project_roots\s*\)/);
+    expect(closure).toMatch(
+      /discover\s*\(\s*&env\s*,\s*&home\s*,\s*project_roots\s*,\s*project_scopes\s*\)/,
+    );
 
     expect(libSource).toMatch(/use\s+coven_sessions::coven_sessions\s*;/);
     expect(libSource).toMatch(
       /tauri::generate_handler!\s*\[[\s\S]*?app_environment\s*,\s*coven_sessions\s*,/,
     );
     expect(libSource).not.toMatch(/load_coven_sessions\s*\(/);
+    expect(libSource).toMatch(/fn\s+validate_coven_launch\(/);
+    expect(libSource).toMatch(/fn\s+resolve_pty_cwd\(/);
+    expect(libSource).toMatch(/fn\s+linked_worktree_roots\(/);
+    expect(libSource).toMatch(/cmd\.env_remove\("TMUX"\)/);
   });
   test('shares one wall-clock deadline across health and session requests', async () => {
     const source = await readFile(covenSessionsSourcePath, 'utf8');

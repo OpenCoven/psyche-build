@@ -4,7 +4,7 @@
 
 **Goal:** Land the trustworthy host boundary for the Psyche soul orchestrator as pure, fully unit-tested `src/control/` modules with zero runtime behavior change.
 
-**Architecture:** Six leaf modules under `src/control/` — canonical contract (`types.ts`, `protocol.ts`), project identity + owner fencing (`projectIdentity.ts`, `ownerLock.ts`), durable journal (`journal.ts`), lane leases + scope (`leases.ts`, `scope.ts`), and no-replay prompt dispatch (`promptDispatch.ts`). Nothing is imported by the daemon, bridge, MCP, TUI, or cockpit yet; the modules are additive and proven independently.
+**Architecture:** Eight planned leaf modules under `src/control/` — canonical contract (`types.ts`, `protocol.ts`), project identity + owner fencing (`projectIdentity.ts`, `ownerLock.ts`), durable journal (`journal.ts`), lane leases + scope (`leases.ts`, `scope.ts`), and no-replay prompt dispatch (`promptDispatch.ts`). Nothing is imported by the daemon, bridge, MCP, TUI, or cockpit yet; the modules are additive and proven independently.
 
 **Tech Stack:** TypeScript (ESM, `.js` import specifiers), Node `fs/promises`/`crypto`, Vitest. Commands run via `pnpm exec vitest`, `pnpm typecheck`, `pnpm build`, `pnpm smoke`.
 
@@ -12,6 +12,17 @@
 **Parent plan:** `docs/superpowers/plans/2026-08-03-psyche-host-control-plane.md` (this is the foundation subset, Tasks 1–5, with the Task 5 `tmuxControl.ts` change deferred to the wiring PR).
 
 **Every commit uses the trailer:** `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+---
+
+## Current Status
+
+**Updated:** 2026-08-05
+
+- Tasks 1–4 are merged into `main`: canonical control protocol and fixtures; canonical project identity and owner fencing; byte-correct, subscriber-safe durable journal; and lane lease plus scope validation.
+- The implementation includes the hardening identified while executing those tasks: deterministic key ordering, envelope validation, owner-lock rollback on finalization failure, idempotent release, byte-accurate trailing-record truncation, and subscriber isolation after durable appends.
+- Task 5 (`promptDispatch.ts`) and Task 6 full-slice validation remain open.
+- The merged modules are deliberately behavior-neutral: no daemon, bridge, MCP, TUI, or cockpit code imports them. Runtime wiring, including the deferred exact `tmuxControl.ts` submission path, belongs to the subsequent wiring slice.
 
 ---
 
@@ -42,7 +53,7 @@
 - Create: `protocol-fixtures/control-v1/command-submit.json`
 - Create: `protocol-fixtures/control-v1/command-result.json`
 
-- [ ] **Step 1: Write the failing protocol test**
+- [x] **Step 1: Write the failing protocol test**
 
 Create `__tests__/controlProtocol.test.ts`:
 
@@ -91,12 +102,12 @@ describe('control protocol v1', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify the missing-module failure**
+- [x] **Step 2: Run the test and verify the missing-module failure**
 
 Run: `pnpm exec vitest --run __tests__/controlProtocol.test.ts`
 Expected: FAIL because `src/control/protocol.ts` does not exist.
 
-- [ ] **Step 3: Add the control types**
+- [x] **Step 3: Add the control types**
 
 Create `src/control/types.ts`:
 
@@ -235,7 +246,7 @@ export interface ControlSnapshot {
 }
 ```
 
-- [ ] **Step 4: Add the protocol codec**
+- [x] **Step 4: Add the protocol codec**
 
 Create `src/control/protocol.ts`:
 
@@ -356,7 +367,7 @@ export function decodeControlRequest(raw: string): ControlRequest {
 }
 ```
 
-- [ ] **Step 5: Add the golden fixtures**
+- [x] **Step 5: Add the golden fixtures**
 
 Create `protocol-fixtures/control-v1/command-submit.json`:
 
@@ -392,12 +403,12 @@ Create `protocol-fixtures/control-v1/command-result.json`:
 }
 ```
 
-- [ ] **Step 6: Run the protocol tests**
+- [x] **Step 6: Run the protocol tests**
 
 Run: `pnpm exec vitest --run __tests__/controlProtocol.test.ts`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/control/types.ts src/control/protocol.ts \
@@ -416,7 +427,7 @@ git commit -m "feat: define canonical control protocol" \
 - Test: `__tests__/controlProjectIdentity.test.ts`
 - Test: `__tests__/controlOwnerLock.test.ts`
 
-- [ ] **Step 1: Write the failing project-identity test**
+- [x] **Step 1: Write the failing project-identity test**
 
 Create `__tests__/controlProjectIdentity.test.ts`:
 
@@ -438,7 +449,7 @@ it('maps a symlink alias to one canonical project root', async () => {
 });
 ```
 
-- [ ] **Step 2: Write the failing owner-lock test**
+- [x] **Step 2: Write the failing owner-lock test**
 
 Create `__tests__/controlOwnerLock.test.ts`:
 
@@ -513,12 +524,12 @@ describe('project owner lock', () => {
 });
 ```
 
-- [ ] **Step 3: Run the tests and verify they fail**
+- [x] **Step 3: Run the tests and verify they fail**
 
 Run: `pnpm exec vitest --run __tests__/controlProjectIdentity.test.ts __tests__/controlOwnerLock.test.ts`
 Expected: FAIL because `src/control/projectIdentity.ts` and `src/control/ownerLock.ts` do not exist.
 
-- [ ] **Step 4: Implement canonical project identity**
+- [x] **Step 4: Implement canonical project identity**
 
 Create `src/control/projectIdentity.ts`:
 
@@ -534,7 +545,7 @@ export async function canonicalizeProjectRoot(projectRoot: string): Promise<stri
 }
 ```
 
-- [ ] **Step 5: Implement exclusive acquisition and epochs**
+- [x] **Step 5: Implement exclusive acquisition and epochs**
 
 Create `src/control/ownerLock.ts`:
 
@@ -671,12 +682,12 @@ function defaultIsProcessAlive(pid: number): boolean {
 }
 ```
 
-- [ ] **Step 6: Run the ownership tests**
+- [x] **Step 6: Run the ownership tests**
 
 Run: `pnpm exec vitest --run __tests__/controlProjectIdentity.test.ts __tests__/controlOwnerLock.test.ts`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/control/projectIdentity.ts src/control/ownerLock.ts \
@@ -693,7 +704,7 @@ git commit -m "feat: fence the Psyche host owner" \
 - Create: `src/control/journal.ts`
 - Test: `__tests__/controlJournal.test.ts`
 
-- [ ] **Step 1: Write the failing journal tests**
+- [x] **Step 1: Write the failing journal tests**
 
 Create `__tests__/controlJournal.test.ts`:
 
@@ -743,12 +754,12 @@ describe('ControlJournal', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run: `pnpm exec vitest --run __tests__/controlJournal.test.ts`
 Expected: FAIL because `src/control/journal.ts` does not exist.
 
-- [ ] **Step 3: Implement the journal**
+- [x] **Step 3: Implement the journal**
 
 Create `src/control/journal.ts`. It must expose exactly this public surface and satisfy the behaviors below:
 
@@ -964,12 +975,12 @@ export class ControlJournal {
 
 Note: `stat` is imported for symmetry with future snapshot sizing; if `pnpm typecheck` flags it as unused, remove it from the import line before committing.
 
-- [ ] **Step 4: Run the journal tests**
+- [x] **Step 4: Run the journal tests**
 
 Run: `pnpm exec vitest --run __tests__/controlJournal.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/control/journal.ts __tests__/controlJournal.test.ts
@@ -987,7 +998,7 @@ git commit -m "feat: add the control command journal" \
 - Test: `__tests__/controlLeases.test.ts`
 - Test: `__tests__/controlScope.test.ts`
 
-- [ ] **Step 1: Write the failing lease test**
+- [x] **Step 1: Write the failing lease test**
 
 Create `__tests__/controlLeases.test.ts`:
 
@@ -1014,7 +1025,7 @@ describe('LaneLeaseStore', () => {
 });
 ```
 
-- [ ] **Step 2: Write the failing scope test**
+- [x] **Step 2: Write the failing scope test**
 
 Create `__tests__/controlScope.test.ts`:
 
@@ -1042,12 +1053,12 @@ it('rejects cross-project and symlink-escape paths', async () => {
 });
 ```
 
-- [ ] **Step 3: Run the tests and verify they fail**
+- [x] **Step 3: Run the tests and verify they fail**
 
 Run: `pnpm exec vitest --run __tests__/controlLeases.test.ts __tests__/controlScope.test.ts`
 Expected: FAIL because `src/control/leases.ts` and `src/control/scope.ts` do not exist.
 
-- [ ] **Step 4: Implement the lease store**
+- [x] **Step 4: Implement the lease store**
 
 Create `src/control/leases.ts`:
 
@@ -1125,7 +1136,7 @@ export class LaneLeaseStore {
 }
 ```
 
-- [ ] **Step 5: Implement the scope gate**
+- [x] **Step 5: Implement the scope gate**
 
 Create `src/control/scope.ts`:
 
@@ -1205,12 +1216,12 @@ export class ControlScope {
 }
 ```
 
-- [ ] **Step 6: Run the lease and scope tests**
+- [x] **Step 6: Run the lease and scope tests**
 
 Run: `pnpm exec vitest --run __tests__/controlLeases.test.ts __tests__/controlScope.test.ts`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/control/leases.ts src/control/scope.ts \
@@ -1310,6 +1321,14 @@ export class PromptDispatcher {
   ) {}
 
   async dispatch(envelope: PromptEnvelope): Promise<PromptDispatchOutcome> {
+    if (typeof envelope?.utf8 !== 'string') {
+      return {
+        status: 'failed',
+        promptId: envelope?.promptId ?? 'unknown',
+        code: 'prompt_envelope_invalid',
+        message: 'prompt envelope is missing string utf8 content',
+      };
+    }
     const hash = createHash('sha256').update(envelope.utf8).digest('hex');
     if (hash !== envelope.contentHash) {
       return {
@@ -1325,7 +1344,9 @@ export class PromptDispatcher {
         ? { status: 'confirmed', promptId: envelope.promptId, receiptId: result.receiptId }
         : { status: 'dispatched', promptId: envelope.promptId };
     } catch (error) {
-      const ambiguous = (error as { ambiguous?: boolean }).ambiguous === true;
+      const ambiguous =
+        typeof error === 'object' && error !== null &&
+        (error as { ambiguous?: boolean }).ambiguous === true;
       return {
         status: ambiguous ? 'unknown' : 'failed',
         promptId: envelope.promptId,

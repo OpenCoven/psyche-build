@@ -103,15 +103,31 @@ describe('Tauri Coven session model', () => {
     expect(sessions).toEqual(original);
   });
 
-  test('groups only safe, project-scoped sessions into sorted copies', () => {
+  test('treats only attached harness statuses as live', () => {
+    for (const status of ['starting', 'running', 'waiting']) {
+      expect(model.isLiveCovenSession({ status })).toBe(true);
+    }
+    // `idle` is written when a run exits with a resumable conversation, so the
+    // harness is already gone; it belongs with the other terminal statuses.
+    for (const status of ['idle', 'completed', 'archived', 'failed', 'killed', 'orphaned', '']) {
+      expect(model.isLiveCovenSession({ status })).toBe(false);
+    }
+    expect(model.isLiveCovenSession({})).toBe(false);
+    expect(model.isLiveCovenSession()).toBe(false);
+  });
+
+  test('groups only safe, project-scoped, live sessions into sorted copies', () => {
     const sessions = [
-      { id: 'later', projectRoot: '/alpha', status: 'completed', updatedAt: '2026-01-01T00:00:00Z' },
+      { id: 'later', projectRoot: '/alpha', status: 'waiting', updatedAt: '2025-01-01T00:00:00Z' },
       { id: 'live', projectRoot: '/alpha', status: 'running', updatedAt: '2026-01-01T00:00:00Z' },
       { id: 'beta', projectRoot: '/beta', status: 'waiting' },
       { id: 'unsafe id', projectRoot: '/alpha', status: 'running' },
       { id: 'missing-root', status: 'running' },
       { projectRoot: '/alpha', status: 'running' },
       { id: 'empty-root', projectRoot: '', status: 'running' },
+      { id: 'finished', projectRoot: '/alpha', status: 'completed' },
+      { id: 'resumable', projectRoot: '/alpha', status: 'idle' },
+      { id: 'beta-orphan', projectRoot: '/beta', status: 'orphaned' },
     ];
 
     const grouped = model.groupCovenSessions(sessions);
@@ -119,7 +135,16 @@ describe('Tauri Coven session model', () => {
     expect([...grouped.keys()]).toEqual(['/alpha', '/beta']);
     expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'later']);
     expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['beta']);
-    expect(sessions).toHaveLength(7);
+    expect(sessions).toHaveLength(10);
+  });
+
+  test('drops a project whose sessions have all finished', () => {
+    const grouped = model.groupCovenSessions([
+      { id: 'done', projectRoot: '/alpha', status: 'completed' },
+      { id: 'gone', projectRoot: '/alpha', status: 'orphaned' },
+    ]);
+
+    expect([...grouped.keys()]).toEqual([]);
   });
 
   test('filters both local and remote sessions without mutating their inputs', () => {
@@ -204,10 +229,13 @@ describe('Tauri Coven session model', () => {
 
   test('creates an idle discovery state and only shows first-request loading', () => {
     const initial = model.createCovenDiscoveryState();
+    const stale: boolean = initial.stale;
 
     expect(initial).toEqual({
       phase: 'idle', sessionsByProject: new Map(), message: null, requestId: 0, refreshedAt: null,
+      stale: false,
     });
+    expect(stale).toBe(false);
     const first = model.beginCovenRequest(initial);
     expect(first).toEqual({
       requestId: 1,
@@ -217,37 +245,45 @@ describe('Tauri Coven session model', () => {
 
     const refreshed = model.beginCovenRequest({
       phase: 'ready', sessionsByProject: new Map([['/alpha', [{ id: 'live' }]]]),
-      message: 'still here', requestId: 3, refreshedAt: 10,
+      message: 'still here', requestId: 3, refreshedAt: 10, stale: false,
     });
     expect(refreshed.requestId).toBe(4);
     expect(refreshed.state).toEqual({
       phase: 'ready', sessionsByProject: new Map([['/alpha', [{ id: 'live' }]]]),
-      message: 'still here', requestId: 4, refreshedAt: 10,
+      message: 'still here', requestId: 4, refreshedAt: 10, stale: false,
     });
   });
 
-  test('applies ready groups, clears non-ready results, and can recover', () => {
+  test('preserves confirmed rows as stale through failures and replaces them on recovery', () => {
     const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
     const ready = model.applyCovenResponse(requested.state, requested.requestId, {
-      status: 'ready', message: ' updated ', sessions: [
-        { id: 'done', projectRoot: '/alpha', status: 'completed' },
-        { id: 'live', projectRoot: '/alpha', status: 'running' },
-      ],
+      status: 'ready',
+      sessions: [{ id: 'live', projectRoot: '/alpha', status: 'running' }],
     }, 100);
-    expect(ready).toMatchObject({ phase: 'ready', message: 'updated', refreshedAt: 100 });
-    expect(ready.sessionsByProject.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'done']);
 
     for (const status of ['unavailable', 'incompatible', 'error']) {
       const next = model.beginCovenRequest(ready);
-      const failed = model.applyCovenResponse(next.state, next.requestId, { status, message: ' nope ' }, 101);
+      const failed = model.applyCovenResponse(
+        next.state,
+        next.requestId,
+        { status, message: ' nope ' },
+        101,
+      );
       expect(failed).toEqual({
-        phase: status, sessionsByProject: new Map(), message: 'nope', requestId: next.requestId, refreshedAt: 101,
+        phase: status,
+        sessionsByProject: ready.sessionsByProject,
+        message: 'nope',
+        requestId: next.requestId,
+        refreshedAt: 101,
+        stale: true,
       });
+
       const recovery = model.beginCovenRequest(failed);
       const recovered = model.applyCovenResponse(recovery.state, recovery.requestId, {
         status: 'ready', sessions: [{ id: 'recovered', projectRoot: '/beta', status: 'running' }],
       }, 102);
-      expect(recovered.phase).toBe('ready');
+      expect(recovered).toMatchObject({ phase: 'ready', stale: false });
+      expect(recovered.sessionsByProject.has('/alpha')).toBe(false);
       expect(recovered.sessionsByProject.get('/beta')?.[0].id).toBe('recovered');
     }
   });
@@ -267,6 +303,7 @@ describe('Tauri Coven session model', () => {
       message: null,
       requestId: requested.requestId,
       refreshedAt: 103,
+      stale: false,
     });
   });
   test('turns malformed responses into errors and suppresses stale results by identity', () => {
@@ -278,11 +315,13 @@ describe('Tauri Coven session model', () => {
     const invalid = model.applyCovenResponse(second.state, second.requestId, { status: 'wat' }, 11);
     expect(invalid).toEqual({
       phase: 'error', sessionsByProject: new Map(), message: null, requestId: second.requestId, refreshedAt: 11,
+      stale: false,
     });
 
     const invalidated = model.invalidateCovenRequests(invalid);
     expect(invalidated).toEqual({
       phase: 'idle', sessionsByProject: new Map(), message: null, requestId: second.requestId + 1, refreshedAt: null,
+      stale: false,
     });
     expect(model.applyCovenResponse(invalidated, second.requestId, { status: 'ready', sessions: [] }))
       .toBe(invalidated);

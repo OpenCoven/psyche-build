@@ -4,22 +4,29 @@
   color-scheme: dark;
 
   /* Brand — themes below override --rgb-accent plus the two hex stops. The
-     soft/line/glow derivations stay put so a theme only states its colour. */
-  --rgb-accent: 184, 157, 255;
-  --accent: #b89dff;
-  --accent-strong: #9d80f0;
+     soft/line/glow derivations stay put so a theme only states its colour.
+
+     Violet has exactly one job: it marks where keyboard input goes. Focus
+     rings, the focused pane's header tint, the composer caret. It is never a
+     selection fill and never a status — those are neutral and semantic
+     respectively, so the three never get confused for one another. */
+  --rgb-accent: 167, 139, 250;
+  --accent: #a78bfa;
+  --accent-strong: #8f6ff0;
   --accent-soft: rgba(var(--rgb-accent), 0.14);
   --accent-line: rgba(var(--rgb-accent), 0.28);
   --accent-glow: rgba(var(--rgb-accent), 0.55);
+  --focus-ring: 0 0 0 3px rgba(var(--rgb-accent), 0.15);
 
   /* Surface ramp, darkest to lightest. Every translucent chrome background in
      the file resolves to one of these five, so a theme restyles the whole
-     window by restating them. */
-  --rgb-deep: 13, 11, 22;   /* titlebar, rails, panel bars */
-  --rgb-s1:   20, 18, 30;   /* tab strip, command bar, panes */
-  --rgb-s2:   28, 25, 42;   /* hover fills */
-  --rgb-s3:   38, 33, 56;   /* raised fills */
-  --rgb-term: 13, 12, 20;   /* terminal + file view */
+     window by restating them. The default ramp is neutral by design: colour
+     in the chrome competes with the colour that carries meaning. */
+  --rgb-deep: 11, 11, 13;   /* bg/0 — titlebar, rails, panel bars */
+  --rgb-s1:   16, 16, 20;   /* bg/1 — tab strip, command bar, panes */
+  --rgb-s2:   23, 23, 27;   /* bg/2 — inputs, hover fills */
+  --rgb-s3:   30, 30, 36;   /* bg/3 — raised fills, selection */
+  --rgb-term:  8,  8, 10;   /* terminal + file view */
 
   /* Surfaces — translucent over the macOS HudWindow vibrancy material */
   /* Master background-opacity multiplier. 1 reproduces the original design;
@@ -37,27 +44,51 @@
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.14);
 
-  /* Text */
-  --text: #f5f2fb;
-  --text-soft: #c8c2d8;
-  --muted: #8a8499;
+  /* Text — contrast measured on bg/1. --faint is decorative only; nothing a
+     user has to read is allowed to land on it. */
+  --text: #ededf0;        /* ~15.2:1 — titles, values */
+  --text-soft: #b6b6bf;   /*  ~8.7:1 — body, transcript */
+  --muted: #8b8b96;       /*  ~5.2:1 — meta, >= 10.5px */
+  --faint: #6e6e79;       /*  ~3.4:1 — decorative hints */
 
-  /* Semantic */
-  --ok: #7be3b3;
+  /* Semantic — operational truth. Always paired with a word, count or shape,
+     never colour alone. */
+  --ok: #34d399;
   --warn: #fbbf24;
   --error: #f87171;
 
+  /* Focus-set membership. Squares, never dots, so a set swatch can't be
+     mistaken for a round status light. */
+  --set-1: #5eead4;
+  --set-2: #f0abfc;
+  --set-3: #93c5fd;
+  --set-4: #bef264;
+
   /* Geometry */
-  --titlebar-h: 38px;
+  --titlebar-h: 40px;
   --titlebar-pad-l: 78px;   /* leaves room for traffic lights */
   --rail-w: 44px;
-  --sidebar-w: 268px;
-  --tab-h: 34px;
+  --sidebar-w: 276px;
+  --sidebar-min: 220px;
+  --sidebar-max: 420px;
+  --mini-rail-w: 46px;
+  --tab-h: 30px;
   --command-h: 46px;
-  --browser-bar-h: 38px;
+  --composer-h: 54px;
+  --session-row-h: 44px;
+  --pane-head-h: 32px;
+  --pane-foot-h: 27px;
+  --pane-gap: 2px;
+  --pane-min-w: 200px;
+  --pane-min-h: 137px;
+  --browser-bar-h: 30px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
   --splitter-grip-h: 42px;
+
+  /* Pane canvas split fractions, driven by the canvas splitters. */
+  --pane-col-frac: 0.5;
+  --pane-row-frac: 0.52;
 
   /* Type */
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
@@ -93,24 +124,37 @@ kbd {
 
 /* -------- App grid -------- */
 
+/* Three stacked bands: titlebar, workbench, composer. The workbench splits
+   into sidebar | canvas | dock. The titlebar and composer span the full
+   window so the shell reads as one frame rather than three columns. */
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr var(--rail-w);
-  grid-template-rows: var(--titlebar-h) 1fr;
-  grid-template-areas:
-    "rail-l title  rail-r"
-    "rail-l detail rail-r";
+  grid-template-columns: 1fr;
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) var(--composer-h);
   height: 100vh;
   background: transparent;
 }
 
-/* -------- Side rails --------
-   Full-height chrome columns flanking the titlebar + detail. Content is pushed
-   below --titlebar-h so the left rail never sits under the macOS traffic
-   lights (Overlay titleBarStyle floats them over the top-left of the window).
-   The rails live outside .detail on purpose: the browser preview is a native
-   child webview positioned from preview.getBoundingClientRect(), so keeping
-   the rails out of that subtree lets the existing bounds sync stay correct. */
+.workbench {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0px;
+  min-height: 0;
+  overflow: hidden;
+}
+.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) 0px; }
+.app[data-dock="collapsed"] .workbench { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w); }
+.app[data-sidebar="collapsed"][data-dock="collapsed"] .workbench {
+  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w);
+}
+.app[data-sidebar="collapsed"] .sidebar { display: none; }
+.app[data-sidebar="open"] .sidebar-mini { display: none; }
+
+/* -------- Sessions sidebar --------
+   The sidebar lives outside .detail on purpose: the browser preview is a
+   native child webview positioned from preview.getBoundingClientRect(), so
+   keeping chrome out of that subtree lets the existing bounds sync stay
+   correct. */
 
 .rail {
   position: relative;
@@ -118,31 +162,63 @@ kbd {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: calc(var(--titlebar-h) + 8px) 0 10px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.45));
+  padding: 0 0 6px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-app-region: drag;
+  user-select: none;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+.sidebar { align-items: stretch; min-height: 0; }
+
+/* Collapsed rails — one click anywhere brings the surface back. */
+.mini-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
   user-select: none;
   overflow: hidden;
 }
-.rail > * { -webkit-app-region: no-drag; }
-.sidebar    { grid-area: rail-l; align-items: stretch; padding: calc(var(--titlebar-h) + 6px) 0 6px; }
-.rail-right { grid-area: rail-r; }
-
-/* Divider is a pseudo-element rather than a border so it can start below the
-   titlebar. A full-height border would draw a vertical line straight through
-   the macOS traffic lights, which float over the window's top-left corner. */
-.rail::after {
-  content: "";
-  position: absolute;
-  top: var(--titlebar-h);
-  bottom: 0;
-  width: 1px;
-  background: var(--border);
+.mini-rail[hidden] { display: none; }
+.sidebar-mini { border-right: 1px solid var(--border); justify-content: flex-end; }
+.dock-mini { border-left: 1px solid var(--border); }
+.mini-rail-btn {
+  position: relative;
+  width: 32px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
-.sidebar::after    { right: 0; }
-.rail-right::after { left: 0; }
+.mini-rail-btn:hover { background: var(--surface-3); color: var(--text); }
+.mini-rail-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+/* Drag handle sits just past the sidebar's own edge so it never eats a click
+   meant for a session row. */
+.sidebar-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -5px;
+  width: 10px;
+  z-index: 30;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resize:hover,
+.sidebar-resize.dragging { background: rgba(var(--rgb-accent), 0.12); }
 
 /* -------- Sessions sidebar --------
    Rows are threads (state.threads) grouped under their project. Rendered by
@@ -174,6 +250,78 @@ kbd {
 .session-search::-webkit-search-cancel-button { -webkit-appearance: none; }
 .sidebar-head .rail-btn { width: 26px; height: 26px; border-radius: 7px; }
 
+/* -------- Sidebar sections: Sessions | Files --------
+   The file tree used to be a right-dock panel. It now shares the left rail
+   with the session list, one at a time, so the explorer sits where an
+   explorer belongs and the dock keeps Git and Web. */
+
+/* Segmented control: a recessed track holding two pills, where the selected
+   one lifts out of it with an accent edge. The track is darker than the rail
+   so the inactive half reads as a groove rather than a button. */
+.sidebar-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: none;
+  box-sizing: border-box;
+  width: calc(100% - 12px);
+  margin: 0 6px 8px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.92));
+}
+.sidebar-tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.sidebar-tab svg { flex: none; opacity: 0.85; }
+.sidebar-tab:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
+.sidebar-tab.is-active {
+  background: rgba(var(--rgb-accent), 0.15);
+  border-color: rgba(var(--rgb-accent), 0.55);
+  color: #f8f5ff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.sidebar-tab.is-active svg { color: var(--accent); opacity: 1; }
+.sidebar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.sidebar-files {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+.sidebar-files[hidden] { display: none; }
+.sidebar-subbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 24px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar-subbar .panel-crumb { flex: 1 1 auto; min-width: 0; }
+.sidebar-files .file-tree { flex: 1 1 auto; }
+
+.session-list[hidden] { display: none; }
 .session-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -284,14 +432,49 @@ kbd {
   letter-spacing: 0.09em;
   color: var(--muted);
 }
-
-.session-row {
+.session-coven-row {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+.session-coven-row:hover,
+.session-coven-row:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.session-coven-row:focus-visible { outline: none; border-color: var(--accent-line); }
+.session-coven-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-coven-meta { flex: 0 0 auto; }
+.session-inline-state {
+  padding: 4px 10px 6px 28px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.coven-tone-ok { color: var(--ok); }
+.coven-tone-warn { color: var(--warn); }
+.coven-tone-danger { color: var(--error); }
+.coven-tone-neutral,
+.coven-tone-muted { color: var(--muted); }
+
+.session-row,
+.session-coven-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   width: 100%;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-soft);
@@ -299,6 +482,9 @@ kbd {
   position: relative;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
+/* Border-box 44px: the row is a fixed rhythm the eye can scan down, and the
+   two-line text column is what sets it. */
+.session-row { min-height: var(--session-row-h); }
 .session-row:hover { background: var(--surface-2); color: var(--text); }
 .session-row-wrap {
   position: relative;
@@ -315,9 +501,14 @@ kbd {
   transform: translateY(-50%);
 }
 .session-row-wrap:hover .session-row:not(.active) { background: var(--surface-2); color: var(--text); }
+
+/* Selection is deliberately colourless — a neutral raised fill (bg/3). The
+   violet is a separate signal layered on top: the 2px bar means "this row is
+   the pane the keyboard is talking to", which is why it can coexist with the
+   fill instead of replacing it. */
 .session-row.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-line);
+  background: var(--surface-3);
+  border-color: transparent;
   color: var(--text);
 }
 .session-row.active::before {
@@ -327,45 +518,64 @@ kbd {
   top: 50%;
   transform: translateY(-50%);
   width: 2px;
-  height: 18px;
+  height: 22px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  background: var(--accent);
   box-shadow: 0 0 6px var(--accent-glow);
 }
-.session-row:focus-visible { outline: none; border-color: var(--accent-line); }
+.session-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* A row waiting on the user keeps its badge legible at every state the row can
+   be in, including active — being the pane you are looking at is not the same
+   as having answered it. The tint is deliberately faint: the `!` is the signal,
+   this only stops the row reading as ordinary while it scrolls past. */
+.session-row.needs-attention .session-title { color: var(--text); }
+.session-row.needs-attention::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(251, 191, 36, 0.06);
+  pointer-events: none;
+}
+.session-title-row > .session-attention-badge { flex: none; }
 
 .session-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
   border-radius: 999px;
   background: var(--muted);
   transition: background var(--transition-fast), box-shadow var(--transition-fast);
 }
 .session-row.running .dot,
-.session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
+.session-row.running .session-dot { background: var(--ok); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
 .session-row.exited  .session-dot { background: var(--error); }
 .session-row.starting .session-dot { background: var(--warn); animation: session-dot-pulse 1.1s ease-in-out infinite; }
 @keyframes session-dot-pulse { 50% { opacity: 0.35; } }
 
+/* No gap: the two line-heights plus the row's padding come to just under 44px,
+   so min-height lands the row on exactly the designed 44 instead of 45. */
 .session-text {
   min-width: 0;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
 }
 .session-title {
   display: block;
-  font-size: 13.5px;
-  line-height: 1.35;
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .session-sub {
   display: block;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
   line-height: 1.3;
   color: var(--muted);
   white-space: nowrap;
@@ -402,6 +612,105 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .session-row.starting .session-dot { animation: none; }
 }
+/* -------- Sidebar design pass, second round --------
+   Additive again; the row treatment stays as designed. */
+
+/* Group heads are buttons, so they should answer the pointer. The wash is an
+   inset shadow rather than a background, because the background is doing the
+   sticky header's opaque backdrop and must not be replaced. */
+.session-group-head {
+  border-radius: 6px;
+  transition: box-shadow var(--transition-fast), color var(--transition-fast);
+}
+.session-group-head:hover {
+  box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.05);
+  color: var(--text-soft);
+}
+.session-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Appearance settles into a recessed card, the same language as the
+   Sessions | Files track, so the rail ends on a deliberate edge rather than
+   trailing off into loose controls. */
+.sidebar-settings {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 8px 4px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.85));
+}
+.sidebar-settings > summary { padding: 5px 0; }
+
+/* "There is more below" - driven by whether the list can still scroll down,
+   not merely by whether it overflows, so it stops promising content once you
+   reach the bottom. */
+.session-list.has-more {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+}
+
+/* -------- Sidebar design pass --------
+   Additive only: the row's colourless-selection-plus-violet-bar language is
+   deliberate and left alone. */
+
+/* A long list scrolls *under* its project header rather than past it, so you
+   never lose track of which project the rows below belong to. */
+.session-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.94));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Search reads as a search field before it is focused. background-color rather
+   than the background shorthand, so the icon survives the focus state. */
+.session-search {
+  padding-left: 28px;
+  background-color: var(--surface-2);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%239a9aa3' stroke-width='1.5'%3E%3Ccircle cx='7' cy='7' r='4.25'/%3E%3Cpath d='M10.2 10.2 13.5 13.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 9px center;
+  background-size: 13px 13px;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast),
+              box-shadow var(--transition-fast);
+}
+.session-search:focus {
+  background-color: var(--surface-3);
+  box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.14);
+}
+
+/* AGENTS / COVEN carry a trailing hairline, so sections separate without
+   spending vertical space on gaps. */
+.session-subsection-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-subsection-label::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+  opacity: 0.55;
+}
+
+/* The selected worktree gets the same violet edge the active row uses, so
+   "where am I" reads at a glance instead of only from a 6% wash. */
+.session-worktree-group { position: relative; }
+.session-worktree-group.selected::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(var(--rgb-accent), 0.5);
+}
+
 .session-empty {
   padding: 10px 10px;
   font-size: 12.5px;
@@ -443,36 +752,58 @@ kbd {
 }
 .rail-btn[aria-pressed="true"] .panel-fill { opacity: 0.85; }
 
+/* The titlebar now spans the whole window, so it owns the traffic-light
+   gutter again — .traffic-gutter reserves it without drawing anything. */
 .titlebar {
-  grid-area: title;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.45));
+  gap: 10px;
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-bottom: 1px solid var(--border);
-  /* The sidebar column (--sidebar-w) already clears the traffic lights, so the
-     titlebar no longer needs its own --titlebar-pad-l gutter. */
-  padding: 0 14px;
+  padding: 0 10px 0 12px;
   -webkit-app-region: drag;
   user-select: none;
 }
 .titlebar > * { -webkit-app-region: no-drag; }
-.titlebar-left { display: flex; align-items: baseline; gap: 8px; }
-.titlebar-center { display: flex; gap: 4px; justify-content: center; }
-.titlebar-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+.traffic-gutter { flex: none; width: calc(var(--titlebar-pad-l) - 24px); height: 1px; -webkit-app-region: drag; }
+.titlebar-spacer { flex: 1 1 auto; -webkit-app-region: drag; }
+.titlebar-sep { flex: none; width: 1px; height: 16px; background: var(--border-strong); }
 
 .brand {
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13.5px;
   letter-spacing: -0.01em;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.brand-sub { color: var(--muted); font-size: 11px; }
+
+/* Local runtime indicator. The dot mirrors the focused pane's real PTY
+   state — it is not a remote-connection light. */
+.daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+.daemon-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--muted);
+}
+.daemon-status[data-state="running"] .daemon-dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
+.daemon-status[data-state="starting"] .daemon-dot { background: var(--warn); box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); animation: session-dot-pulse 1.4s ease-in-out infinite; }
+.daemon-status[data-state="exited"] .daemon-dot { background: var(--error); box-shadow: 0 0 6px rgba(248, 113, 113, 0.5); }
+.daemon-status[data-state="idle"] .daemon-dot { background: transparent; border: 1.5px solid var(--muted); }
+.help-btn { font-size: 12px; font-weight: 600; }
 
 /* Modern collapse trigger — single button replaces the old 3-button group */
 .chrome-btn {
@@ -500,9 +831,6 @@ kbd {
 /* Icon orientation tracks browser side so the visual cue matches reality.
    Uses :has() (WebKit 15.4+ — Tauri's WebView is fine). */
 [data-browser-toggle] svg { transition: transform var(--transition-med); }
-.app:has(.detail[data-browser-side="left"])   [data-browser-toggle] svg { transform: scaleX(-1); }
-.app:has(.detail[data-browser-side="bottom"]) [data-browser-toggle] svg { transform: rotate(90deg); }
-.app:has(.detail[data-browser-side="top"])    [data-browser-toggle] svg { transform: rotate(-90deg); }
 
 .status-pill {
   font-size: 11px;
@@ -543,18 +871,15 @@ kbd {
 /* -------- Detail -------- */
 
 .detail {
-  grid-area: detail;
   display: grid;
-  height: calc(100vh - var(--titlebar-h));
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
-  /* Pane mins are relaxed from the old 360/320 so a narrow window can't push
-     the terminal under the painted child webview (which is z-ordered above
-     the DOM via macOS APIs). The splitter clamp picks the right pair based
-     on browser side. */
+  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
+     the Git dock. Browser surfaces now tile inside the canvas itself. */
   --terminal-min:   220px;
   --browser-min:    72px;
-  --terminal-min-y: 160px;
-  --browser-min-y:  54px;
   --split-frac: 0.6;
   --terminal-col: calc(var(--split-frac, 0.6) * 100%);
   transition: grid-template-columns var(--transition-layout),
@@ -562,7 +887,6 @@ kbd {
   will-change: grid-template-columns, grid-template-rows;
 }
 .detail.resizing { transition: none; }
-
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
@@ -570,64 +894,24 @@ kbd {
   white-space: pre-wrap;
 }
 
-/* terminal-only & browser-only: hide unused side */
+/* The canvas is always present; the Git dock is the only optional side. */
 .detail[data-layout="terminal"] {
   grid-template-columns: 1fr;
   grid-template-rows: 1fr;
 }
-.detail[data-layout="terminal"] .browser-pane,
+.detail[data-layout="terminal"] .git-dock,
 .detail[data-layout="terminal"] .splitter { display: none; }
 
-.detail[data-layout="browser"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="browser"] .terminal-area,
-.detail[data-layout="browser"] .splitter { display: none; }
-
-/* split — terminal on left, browser on right (default) */
-.detail[data-layout="split"][data-browser-side="right"] {
+/* split — canvas, resize seam, Git dock */
+.detail[data-layout="split"] {
   grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
                          var(--splitter-w)
                          minmax(var(--browser-min), 1fr);
   grid-template-rows: 1fr;
 }
-.detail[data-layout="split"][data-browser-side="right"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="right"] .browser-pane  { grid-column: 3; grid-row: 1; }
-
-/* split — browser on left, terminal on right */
-.detail[data-layout="split"][data-browser-side="left"] {
-  grid-template-columns: minmax(var(--browser-min), 1fr)
-                         var(--splitter-w)
-                         minmax(var(--terminal-min), var(--terminal-col));
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="split"][data-browser-side="left"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .splitter      { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="left"] .terminal-area { grid-column: 3; grid-row: 1; }
-
-/* split — browser on bottom */
-.detail[data-layout="split"][data-browser-side="bottom"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--terminal-min-y), var(--terminal-col))
-                      var(--splitter-w)
-                      minmax(var(--browser-min-y), 1fr);
-}
-.detail[data-layout="split"][data-browser-side="bottom"] .terminal-area { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="bottom"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="bottom"] .browser-pane  { grid-column: 1; grid-row: 3; }
-
-/* split — browser on top */
-.detail[data-layout="split"][data-browser-side="top"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: minmax(var(--browser-min-y), 1fr)
-                      var(--splitter-w)
-                      minmax(var(--terminal-min-y), var(--terminal-col));
-}
-.detail[data-layout="split"][data-browser-side="top"] .browser-pane  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"][data-browser-side="top"] .splitter      { grid-column: 1; grid-row: 2; }
-.detail[data-layout="split"][data-browser-side="top"] .terminal-area { grid-column: 1; grid-row: 3; }
+.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 1; }
+.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 1; }
+.detail[data-layout="split"] .git-dock       { grid-column: 3; grid-row: 1; }
 
 .splitter {
   background: transparent;
@@ -637,10 +921,7 @@ kbd {
   outline: none;
   transition: background var(--transition-fast);
 }
-.detail[data-browser-side="right"] .splitter,
-.detail[data-browser-side="left"]  .splitter { cursor: col-resize; }
-.detail[data-browser-side="bottom"] .splitter,
-.detail[data-browser-side="top"]    .splitter { cursor: row-resize; }
+.splitter { cursor: col-resize; }
 
 .splitter::before {
   content: '';
@@ -652,22 +933,14 @@ kbd {
               opacity var(--transition-fast), box-shadow var(--transition-fast);
 }
 /* Hairline orientation tracks browser side */
-.detail[data-browser-side="right"] .splitter::before,
-.detail[data-browser-side="left"]  .splitter::before {
+.splitter::before {
   inset: 10px auto 10px 50%;
   width: 1px;
   transform: translateX(-50%);
 }
-.detail[data-browser-side="bottom"] .splitter::before,
-.detail[data-browser-side="top"]    .splitter::before {
-  inset: 50% 10px auto 10px;
-  height: 1px;
-  transform: translateY(-50%);
-}
 
 /* Animated grip — only on col-resize where the design fits */
-.detail[data-browser-side="right"] .splitter::after,
-.detail[data-browser-side="left"]  .splitter::after {
+.splitter::after {
   content: '';
   position: absolute;
   top: 50%;
@@ -701,18 +974,9 @@ kbd {
   opacity: 0.9;
 }
 /* hover/drag thickening — by axis */
-.detail[data-browser-side="right"] .splitter:hover::before,
-.detail[data-browser-side="right"] .splitter:focus-visible::before,
-.detail[data-browser-side="right"] .splitter.dragging::before,
-.detail[data-browser-side="left"]  .splitter:hover::before,
-.detail[data-browser-side="left"]  .splitter:focus-visible::before,
-.detail[data-browser-side="left"]  .splitter.dragging::before { width: 2px; }
-.detail[data-browser-side="bottom"] .splitter:hover::before,
-.detail[data-browser-side="bottom"] .splitter:focus-visible::before,
-.detail[data-browser-side="bottom"] .splitter.dragging::before,
-.detail[data-browser-side="top"]    .splitter:hover::before,
-.detail[data-browser-side="top"]    .splitter:focus-visible::before,
-.detail[data-browser-side="top"]    .splitter.dragging::before { height: 2px; }
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter.dragging::before { width: 2px; }
 
 .splitter:hover::after,
 .splitter:focus-visible::after,
@@ -739,13 +1003,17 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 .terminal-area {
   display: grid;
-  grid-template-rows: var(--tab-h) 1fr var(--command-h);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
-  background: var(--surface-solid);
+  background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.55));
   position: relative;
   border-radius: 0;
 }
+/* The file-tab strip only earns its row once a file is open. Explicit
+   grid-row assignments live with the file view, further down. */
+.tab-strip:empty { display: none; }
 
 .tab-strip {
   display: flex;
@@ -756,7 +1024,18 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border-bottom: 1px solid var(--border);
   padding: 0 6px;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: thin;
+  scroll-behavior: smooth;
+}
+/* Applied only when the strip really does scroll, so a half-tab reads as
+   "there is more" instead of looking clipped. */
+.tab-strip.is-overflowing {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-strip { scroll-behavior: auto; }
 }
 .tab {
   display: flex;
@@ -777,6 +1056,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   color: #f8f5ff;
   background: rgba(255, 255, 255, 0.10);
 }
+.tab.active { border-right-color: transparent; }
+.tab:has(+ .tab.active) { border-right-color: transparent; }
+.tab:last-child { border-right: 0; }
 .tab.active::after {
   content: '';
   position: absolute;
@@ -785,19 +1067,30 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   background: linear-gradient(90deg, var(--accent), var(--accent-strong));
   box-shadow: 0 0 6px var(--accent-glow);
 }
+/* Dot and close occupy the same slot: the dirty state is what you need at
+   rest, the close is what you need under the cursor, and swapping them in
+   place keeps the strip from reflowing on hover. */
+.tab-end {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .tab .dot {
+  position: absolute;
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--muted);
-  flex: 0 0 6px;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  background: var(--text-soft);
+  transition: opacity var(--transition-fast), background var(--transition-fast);
 }
-.tab.running .dot { background: var(--ok); box-shadow: 0 0 6px rgba(123, 227, 179, 0.5); }
-.tab.exited  .dot { background: var(--error); }
+.tab.active .dot { background: var(--accent); }
 .tab .close {
-  width: 16px;
-  height: 16px;
+  position: absolute;
+  inset: 0;
   border-radius: 4px;
   display: inline-flex;
   align-items: center;
@@ -807,10 +1100,13 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border: 0;
   font-size: 14px;
   line-height: 1;
-  opacity: 0.6;
+  opacity: 0;
   transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
 }
+/* Hover reveals the close and retires the dot. The active tab keeps its dot,
+   because that is exactly the file whose unsaved state matters most. */
 .tab:hover .close { opacity: 1; }
+.tab:hover .dot { opacity: 0; }
 .tab .close:hover { background: var(--surface-3); color: var(--text); }
 .tab-add {
   display: inline-flex;
@@ -825,16 +1121,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   transition: background var(--transition-fast), color var(--transition-fast);
 }
 .tab-add:hover { background: var(--surface-2); color: var(--text); }
-.tab-empty {
-  display: flex;
-  align-items: center;
-  height: var(--tab-h);
-  padding: 0 14px;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.02em;
-}
-
 .inline-edit {
   background: var(--surface-3);
   border: 1px solid var(--accent);
@@ -849,49 +1135,895 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.18);
 }
 
+/* -------- Pane canvas --------
+   Every live PTY owns a framed pane; the canvas tiles the panes that are on
+   the canvas right now (up to four) and hides the rest. Grid placement is
+   written from JS (layoutPanes) because span/maximise change both the track
+   list and the per-pane placement together. */
+
 .terminal-host {
-  position: relative;
   /* Transparent on purpose: .terminal-area paints the tint. Painting here too
      stacked two translucent layers and squared the opacity. */
+  position: relative;
   background: transparent;
+  display: grid;
+  gap: var(--pane-gap);
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 8px 12px 4px;
 }
-.term-instance {
-  position: absolute;
-  inset: 8px 12px 4px;
-  visibility: hidden;
+.terminal-pane-split,
+.terminal-pane-branch {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
-.term-instance.active { visibility: visible; }
-
-.command-bar {
+.terminal-pane-branch {
+  flex-basis: 0;
+  overflow: hidden;
+}
+.terminal-pane {
+  display: grid;
+  grid-template-rows: 24px minmax(0, 1fr) var(--pane-foot-h);
+  min-width: var(--pane-min-w);
+  min-height: var(--pane-min-h);
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.45));
+}
+.terminal-pane.focused {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.18);
+}
+.terminal-pane-header {
   display: flex;
   align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 6px 0 9px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+}
+.terminal-pane-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-pane-status {
+  flex: none;
+  text-transform: lowercase;
+}
+.terminal-pane-close {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.terminal-pane-close:hover {
+  color: var(--text);
+}
+.terminal-pane-body,
+.term-instance {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.terminal-pane-body {
+  overflow: hidden;
+  padding: 4px 6px;
+}
+.terminal-pane.is-web .terminal-pane-body {
+  padding: 0;
+}
+.terminal-pane-glyph.is-web {
+  color: var(--accent);
+}
+.term-instance {
+  position: relative;
+}
+.terminal-pane-divider {
+  flex: 0 0 6px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: row-resize;
+}
+.terminal-pane-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* -------- Pane frame, design pass --------
+   The canvas geometry belongs to the pane tree (PsychePanes); these rules only
+   restyle the frames it lays out to match the workspace redesign. */
+
+.terminal-pane {
+  grid-template-rows: var(--pane-head-h) minmax(0, 1fr) var(--pane-foot-h);
+  border-radius: 4px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.86));
+  /* Panes degrade on their own width, not the window's: a pane can be narrow
+     in a wide window and wide in a narrow one, and it is the pane's width that
+     decides whether its meta line still fits. */
+  container-type: inline-size;
+  container-name: pane;
+}
+
+/* The focused pane is the one place violet fills anything. Ring plus header
+   tint, matched by the 2px bar on its sidebar row. */
+.terminal-pane.focused {
+  border-color: rgba(var(--rgb-accent), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--rgb-accent), 0.22);
+}
+
+/* A pane waiting on the user is the only thing allowed to outrank the focus
+   ring: violet marks where you are, amber marks where you are needed. It holds
+   even on the focused pane, because the answer is still outstanding until the
+   user types -- opening the pane is not replying to it. */
+.terminal-pane.needs-attention,
+.terminal-pane.focused.needs-attention {
+  border-color: rgba(251, 191, 36, 0.6);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.28);
+}
+.terminal-pane.needs-attention .terminal-pane-header {
+  background: rgba(251, 191, 36, 0.09);
+}
+/* Worded chip, matching how every other pane state is spelled out rather than
+   left to colour alone. */
+.terminal-pane-attention {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Seven tracks: glyph · label · attention · status · span · maximise · close.
+   The label is the only flexible one, so the buttons keep their footprint at
+   any width instead of being squeezed out of the row. The attention chip is
+   hidden (display:none) unless the pane is waiting, so its track collapses to
+   nothing rather than reserving space for a state most panes never reach. */
+.terminal-pane-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
+  align-items: center;
   gap: 8px;
-  padding: 0 14px;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.82));
+  padding: 0 6px 0 8px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 12.5px;
+  user-select: none;
+}
+.terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
+
+/* Title and meta share one track and ellipsize independently: the title gives
+   up space last (flex 0 1) and the meta first (flex 0 4). */
+.terminal-pane-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+.terminal-pane-glyph {
+  flex: none;
+  width: 19px;
+  height: 19px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.terminal-pane-glyph.is-agent { color: var(--accent); }
+.terminal-pane-glyph.is-term { font-size: 8px; }
+.terminal-pane-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.terminal-pane-meta {
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* Status is a worded chip, never a bare colour. Running is the exception and
+   only because it is the steady state of nearly every pane: a static green dot
+   carries it, and the word stays in the aria-label. */
+.terminal-pane-status {
+  justify-self: end;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.terminal-pane-status:empty { display: none; }
+.terminal-pane-status.starting {
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--warn);
+}
+.terminal-pane-status.failed {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--error);
+}
+.terminal-pane-status.exited {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+}
+.terminal-pane-status.running {
+  display: block;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
+  align-self: center;
+}
+
+/* Header controls: span cycle, maximise, close. Identical footprint so the
+   three read as one group and the row never reflows as states change. */
+.terminal-pane-span,
+.terminal-pane-max,
+.terminal-pane-close {
+  flex: none;
+  width: 22px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.terminal-pane-close { font-size: 13px; }
+.terminal-pane-span:hover,
+.terminal-pane-max:hover,
+.terminal-pane-close:hover { background: var(--surface-3); color: var(--text); }
+
+/* -------- Pane chrome design pass (additive) --------
+
+   Three buttons at 22px each is a third of a 200px pane's header spent on
+   controls you are not using. They now rest at zero opacity and appear on
+   hover, on keyboard focus inside the pane, and permanently on the focused
+   pane - the one you are actually driving. Opacity rather than display keeps
+   the grid tracks reserved, so nothing reflows as they appear. */
+.terminal-pane-span,
+.terminal-pane-max,
+.terminal-pane-close {
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast),
+              color var(--transition-fast);
+}
+.terminal-pane:hover .terminal-pane-span,
+.terminal-pane:hover .terminal-pane-max,
+.terminal-pane:hover .terminal-pane-close,
+.terminal-pane:focus-within .terminal-pane-span,
+.terminal-pane:focus-within .terminal-pane-max,
+.terminal-pane:focus-within .terminal-pane-close,
+.terminal-pane.focused .terminal-pane-span,
+.terminal-pane.focused .terminal-pane-max,
+.terminal-pane.focused .terminal-pane-close { opacity: 1; }
+/* Never let a keyboard user tab to something they cannot see. */
+.terminal-pane-span:focus-visible,
+.terminal-pane-max:focus-visible,
+.terminal-pane-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Unfocused panes recede so the focused one reads instantly in a grid of
+   them. The title stays legible - this dims chrome, not content. */
+.terminal-pane:not(.focused) .terminal-pane-title { color: var(--text-soft); }
+.terminal-pane:not(.focused) .terminal-pane-glyph { opacity: 0.7; }
+
+/* A hairline under the header so terminal content scrolls beneath an edge
+   rather than butting straight into it. */
+.terminal-pane-header {
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+  position: relative;
+  z-index: 1;
+}
+.terminal-pane-span:focus-visible,
+.terminal-pane-max:focus-visible,
+.terminal-pane-close:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* An engaged span or maximise is a mode you are currently in, and violet is
+   how this app says "here". */
+.terminal-pane-span[aria-pressed="true"],
+.terminal-pane-max[aria-pressed="true"] { color: var(--accent); }
+
+/* Pane tiers. Information drops in reverse order of usefulness: the meta line
+   is repeated in the sidebar, the status word is not. */
+@container pane (max-width: 460px) {
+  .terminal-pane-meta { display: none; }
+}
+@container pane (max-width: 300px) {
+  .terminal-pane-status:not(.running) { display: none; }
+  .terminal-pane-header { gap: 4px; padding: 0 4px 0 6px; }
+}
+.terminal-pane-divider {
+  background: transparent;
+  border-color: transparent;
+  transition: background var(--transition-fast);
+}
+.terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
+
+.terminal-pane-footer {
+  display: flex;
+  min-width: 0;
+  height: var(--pane-foot-h);
+  overflow: hidden;
+  flex-wrap: nowrap;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.018);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.terminal-pane-footer-items {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+.terminal-pane-footer-item,
+.terminal-pane-footer-overflow,
+.pane-footer-menu-item {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.terminal-pane-footer-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  overflow: hidden;
+}
+.terminal-pane-footer-item[data-footer-key="branch"],
+.terminal-pane-footer-item[data-footer-key="worktree"] {
+  flex: 1 1 120px;
+}
+.terminal-pane-footer-item[data-footer-key="pane"],
+.terminal-pane-footer-item[data-footer-key="model"],
+.terminal-pane-footer-item[data-footer-key="session"],
+.terminal-pane-footer-item[data-footer-key="context"],
+.terminal-pane-footer-item[data-footer-key="spend"] {
+  flex: 0 1 auto;
+  max-width: 132px;
+}
+.pane-footer-item-label {
+  flex: none;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pane-footer-item-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+}
+.terminal-pane-footer-item:hover,
+.terminal-pane-footer-overflow:hover,
+.pane-footer-menu-item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.terminal-pane-footer-item:active,
+.terminal-pane-footer-overflow:active,
+.pane-footer-menu-item:active {
+  background: var(--accent-soft);
+}
+.terminal-pane-footer-item:focus-visible,
+.terminal-pane-footer-overflow:focus-visible,
+.pane-footer-menu-item:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.terminal-pane-footer-overflow {
+  display: inline-flex;
+  flex: 0 0 27px;
+  align-items: center;
+  justify-content: center;
+  border-right: 0;
+  border-left: 1px solid var(--border);
+  font-size: 13px;
+}
+.terminal-pane-footer[data-tier="full"] .terminal-pane-footer-overflow,
+.terminal-pane-footer-overflow[hidden] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-session"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="session"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="spend"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="context"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="core"] [data-footer-key="model"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="model"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="pane"] {
+  display: none;
+}
+.pane-footer-popover {
+  position: fixed;
+  z-index: 150;
+  box-sizing: border-box;
+  min-width: 190px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), 0.98);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  color: var(--text-soft);
+}
+.pane-usage-popover {
+  display: grid;
+  gap: 2px;
+}
+.pane-usage-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 5px;
+  font-size: 11px;
+}
+.pane-usage-row span {
+  color: var(--muted);
+}
+.pane-usage-row strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.pane-footer-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.pane-footer-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 28px;
+  padding: 0 8px;
+  border-right: 0;
+  border-radius: 4px;
+  text-align: left;
+}
+
+/* -------- 2D tiling: row splits and drag-to-reposition --------
+   The pane tree lays out both axes; these rules turn a split's orientation into
+   the right flex direction, resize cursor, and drop affordance. */
+
+.terminal-pane-split.is-row { flex-direction: row; }
+
+/* The divider's flex-basis works on either axis; only the affordances flip. */
+.terminal-pane-divider.is-row {
+  cursor: col-resize;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+}
+
+/* The pane being carried recedes so the drop highlight is what reads. */
+.terminal-pane-header { cursor: grab; }
+body.is-pane-dragging { cursor: grabbing; user-select: none; }
+body.is-pane-dragging .terminal-pane-header { cursor: grabbing; }
+body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast); }
+.terminal-pane.is-dragging { opacity: 0.45; }
+
+/* Fixed to the viewport: the client rects are already viewport-space, so the
+   highlight needs no positioned ancestor and no pane's overflow can clip it.
+   It animates between targets rather than teleporting, which is what makes the
+   gesture feel continuous. */
+.pane-drop-indicator {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  border-radius: 6px;
+  border: 1.5px solid rgba(var(--rgb-accent), 0.9);
+  background: rgba(var(--rgb-accent), 0.16);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.18),
+    0 12px 32px -12px rgba(var(--rgb-accent), 0.55);
+  transition:
+    left var(--transition-fast),
+    top var(--transition-fast),
+    width var(--transition-fast),
+    height var(--transition-fast);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-drop-indicator { transition: none; }
+}
+
+/* -------- Focus sets --------
+   A set is a colour-coded subset of the panes on one canvas. Membership shows
+   as a square swatch on the row; the only chrome a set ever gets is the pick
+   bar, and that exists only while you are picking. */
+
+.set-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 4px;
+  animation: menu-rise 140ms ease-out;
+}
+.set-pick-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 650;
+  color: #d6c8ff;
+}
+.set-pick-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: session-dot-pulse 1.4s ease-in-out infinite;
+}
+.set-pick-create {
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: #d6c8ff;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 3px 11px;
+  transition: background var(--transition-fast);
+}
+.set-pick-create:hover:not(:disabled) { background: rgba(var(--rgb-accent), 0.26); }
+/* Disabled rather than hidden: the count is the feedback that picking works. */
+.set-pick-create:disabled { opacity: 0.35; }
+.set-pick-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.set-pick-cancel:hover { color: var(--text); }
+.set-pick-create:focus-visible,
+.set-pick-cancel:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* Picking dims the canvas and rings the picks. The overlay is a real button so
+   the click never reaches the terminal underneath. */
+.terminal-pane { position: relative; }
+.terminal-pane.image-drop-target {
+  border-color: rgba(var(--rgb-accent), 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--rgb-accent), 0.28),
+    0 0 0 1px rgba(var(--rgb-accent), 0.16);
+}
+.terminal-pane.image-drop-target::after {
+  content: "Drop images to insert paths";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  padding: 8px 12px;
+  border: 1px solid rgba(var(--rgb-accent), 0.26);
+  border-radius: 999px;
+  pointer-events: none;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.terminal-pane.is-picking { opacity: 0.55; }
+.terminal-pane.is-picked {
+  opacity: 1;
+  border-color: rgba(var(--rgb-accent), 0.7);
+}
+.pane-pick-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.terminal-pane.is-picked .pane-pick-overlay { background: rgba(var(--rgb-accent), 0.10); }
+.pane-pick-overlay:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+
+.session-row.is-picking { opacity: 0.7; }
+.session-row.is-picked {
+  opacity: 1;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-pick-bar { animation: none; }
+  .set-pick-dot { animation: none; }
+}
+
+/* -------- Pane minimap --------
+   Focus mode draws one pane, so the minimap is how the rest stay reachable. */
+
+.pane-minimap {
+  width: 78px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  padding: 8px 6px 4px 0;
+  scrollbar-width: none;
+}
+.pane-minimap::-webkit-scrollbar { display: none; }
+.minimap-pane {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.8));
+  opacity: 0.75;
+  transition: opacity var(--transition-fast), border-color var(--transition-fast);
+}
+.minimap-pane:hover { opacity: 1; border-color: var(--accent-line); }
+.minimap-pane.is-current {
+  opacity: 1;
+  border-color: rgba(var(--rgb-accent), 0.55);
+  background: rgba(var(--rgb-accent), 0.08);
+}
+.minimap-pane:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.minimap-head { display: flex; align-items: center; gap: 4px; width: 100%; }
+.minimap-glyph {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  color: var(--muted);
+}
+.minimap-dot {
+  margin-left: auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.minimap-dot.running { background: var(--ok); }
+.minimap-dot.starting { background: var(--warn); }
+.minimap-dot.exited { background: var(--error); }
+.minimap-dot.file {
+  background: var(--accent);
+  box-shadow: 0 0 7px var(--accent-glow);
+}
+/* Focus mode draws one pane and hides the rest, so the minimap is the only
+   place a waiting pane can still be seen. It wins over the status colour and
+   grows a ring, because at 5px a hue swap alone is not a signal. */
+.minimap-dot.attention {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.28);
+}
+.minimap-pane:has(.minimap-dot.attention) {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+/* A blank slab, not a live preview: it reads as "a pane is here" at 66px wide
+   without paying to render a second terminal. */
+.minimap-body {
+  height: 26px;
+  border-radius: 3px;
+  background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.9));
+}
+.minimap-name {
+  width: 100%;
+  font-size: 9px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+/* -------- Empty canvas -------- */
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+  padding: 24px;
+}
+.canvas-empty-mark {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+  letter-spacing: 0.35em;
+}
+.canvas-empty-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.canvas-empty-sub { font-size: 12px; color: var(--muted); max-width: 340px; line-height: 1.55; }
+.canvas-empty-actions { display: flex; gap: 10px; margin-top: 4px; }
+.canvas-empty-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 120px;
+  padding: 14px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12.5px;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.canvas-empty-action:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.canvas-empty-action .glyph { color: var(--accent); font-size: 16px; }
+.canvas-empty-action .key { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+/* -------- Command composer --------
+   Window-wide footer: a scope chip that says where text lands, the input
+   itself, and the voice/send affordances. The palette and scope menu open
+   upward from here. */
+
+.composer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.9));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--border);
-  height: var(--command-h);
+  height: var(--composer-h);
+}
+.scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex: none;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.scope-btn:hover { border-color: var(--accent-line); color: var(--text); }
+.scope-kicker {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.scope-label { font-weight: 600; color: var(--text); }
+.scope-caret { color: var(--muted); font-size: 9px; }
+.scope-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--accent);
+}
+.scope-dot-project { background: var(--ok); }
+.scope-dot-agents { background: var(--warn); }
+.scope-btn[data-scope="project"] .scope-dot { background: var(--ok); }
+.scope-btn[data-scope="agents"] .scope-dot { background: var(--warn); }
+
+.composer-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 .command-prompt {
+  position: absolute;
+  left: 12px;
   color: var(--accent);
   font-family: var(--font-mono);
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: 13px;
+  pointer-events: none;
 }
 #command-input {
-  flex: 1;
+  width: 100%;
+  height: 34px;
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 96px 0 30px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 12.5px;
   outline: none;
   transition: border-color var(--transition-fast), background var(--transition-fast),
               box-shadow var(--transition-fast);
@@ -902,12 +2034,121 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   box-shadow: 0 0 0 3px rgba(var(--rgb-accent), 0.16);
 }
 #command-input::placeholder { color: var(--muted); }
+.composer-send-hint {
+  position: absolute;
+  right: 10px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  max-width: 45%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.composer-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.composer-btn svg { display: block; }
+.composer-btn:hover { color: var(--text); border-color: var(--accent-line); }
+.composer-btn.listening {
+  width: auto;
+  gap: 7px;
+  padding: 0 12px;
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.1);
+  color: #f4a6a6;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.composer-send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.composer-send[hidden] { display: none; }
+.composer-send:hover { background: rgba(var(--rgb-accent), 0.24); }
+.composer-send-key { font-size: 10px; opacity: 0.8; }
+.mono { font-family: var(--font-mono); }
+
+/* -------- Menus that open upward from the composer -------- */
+
+.scope-menu {
+  position: absolute;
+  left: 12px;
+  bottom: calc(var(--composer-h) - 4px);
+  z-index: 60;
+  min-width: 262px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(28px) saturate(1.2);
+  -webkit-backdrop-filter: blur(28px) saturate(1.2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  animation: menu-rise 140ms ease-out;
+}
+.scope-menu[hidden] { display: none; }
+.scope-menu-head,
+.new-pane-menu-head {
+  padding: 6px 9px 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.scope-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+.scope-item:hover { background: var(--accent-soft); }
+.scope-item[aria-checked="true"] { background: var(--accent-soft); }
+.scope-item-text { flex: 1; min-width: 0; }
+.scope-item-desc { display: block; font-size: 10.5px; color: var(--muted); }
+.scope-item-key { font-size: 10px; color: var(--muted); }
+@keyframes menu-rise {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scope-menu, .new-pane-menu, .toast, .help-overlay { animation: none; }
+}
 
 .palette {
   position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: calc(var(--command-h) + 6px);
+  left: 12px;
+  width: calc(100% - 24px);
+  max-width: 780px;
+  bottom: calc(var(--composer-h) - 4px);
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.92));
   backdrop-filter: blur(28px) saturate(1.2);
   -webkit-backdrop-filter: blur(28px) saturate(1.2);
@@ -967,19 +2208,29 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Browser pane -------- */
 
-/* The right pane hosts four stacked panels (browser / files / diffs / git);
-   the rail picks which one is visible via .detail[data-panel]. They share one
-   grid cell so switching never reflows the pane. */
-.browser-pane {
+/* Git is the only fixed tools dock. */
+.git-dock {
   display: grid;
-  grid-template-rows: 1fr;
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 1fr;
   min-width: 0;
   min-height: 0;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.50));
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid var(--border);
 }
+/* Density pass: chrome rows keep their hit targets and lose their inset. The
+   canvas already speaks in 2px seams, and every extra pixel of panel padding
+   read as a gap the layout did not intend. */
+.panel-bar .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
+.dock-tab-count {
+  font-size: 8.5px;
+  font-weight: 700;
+  color: var(--warn);
+  transform: translateY(-3px);
+}
+.dock-tab-count[hidden] { display: none; }
 .panel {
   grid-area: 1 / 1;
   display: none;
@@ -987,20 +2238,53 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   min-height: 0;
   overflow: hidden;
 }
-.panel-browser { grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) 1fr; }
 .panel-files,
 .panel-diffs,
 .panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
-.detail[data-panel="browser"] .panel-browser,
-.detail[data-panel="files"]   .panel-files,
-.detail[data-panel="diffs"]   .panel-diffs,
-.detail[data-panel="git"]     .panel-git { display: grid; }
+.detail[data-panel="git"] .panel-git { display: grid; }
+.browser-surface {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
+  grid-template-areas: "bar" "tabs" "preview";
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
 
+/* Git owns diffs now: repository state on top, then a subheading, then the
+   changed-file list and its detail. Only the last row flexes, so the git view
+   keeps its natural height and scrolls on its own once it outgrows the cap. */
+/* Tabs then one section. The git view no longer has to share the column with
+   the diff list, so it drops the 38% cap that used to keep them both fed. */
+.panel-git-body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.panel-subbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 3px 0 6px;
+  min-height: 22px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));
+}
+.panel-subtitle {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pane-header.panel-bar,
 .panel-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 10px;
+  gap: 4px;
+  padding: 0 3px 0 6px;
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.86));
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -1025,6 +2309,37 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   text-overflow: ellipsis;
 }
 .panel-body { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+/* The git panel's two sections use the same segmented switch as the sidebar,
+   so both rails teach one control instead of two. */
+.dock-tabs-segmented {
+  width: calc(100% - 6px);
+  margin: 3px 3px 4px;
+  padding: 2px;
+  border-radius: 9px;
+}
+.dock-tabs-segmented .sidebar-tab { height: 24px; border-radius: 7px; font-size: 11.5px; gap: 6px; }
+.sidebar-tab-count {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+.sidebar-tab-count[hidden] { display: none; }
+.git-tab-panel {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.git-tab-panel[hidden] { display: none; }
 .panel-split { display: grid; grid-template-rows: minmax(0, 1fr); }
 .panel-split.has-detail { grid-template-rows: minmax(0, 1fr) minmax(0, 1.2fr); }
 
@@ -1067,15 +2382,26 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
    terminal's grid row. An author `display` beats the hidden attribute's UA
    rule, so [hidden] has to be restored explicitly. */
 
-.tab-strip     { grid-row: 1; }
-.terminal-host { grid-row: 2; }
-.file-view     { grid-row: 2; }
-.command-bar   { grid-row: 3; }
+/* Row 2 and column 2 are the transient ones: the focus-set pick bar and the
+   focus-mode minimap. Both tracks are `auto`, so an absent element costs
+   nothing rather than reserving a gap. */
+.tab-strip     { grid-row: 1; grid-column: 1 / -1; }
+.set-pick-bar  { grid-row: 2; grid-column: 1 / -1; }
+.terminal-host { grid-row: 3; grid-column: 1; }
+.file-view     { grid-row: 3; grid-column: 1 / -1; }
+.pane-minimap  { grid-row: 3; grid-column: 2; }
+.terminal-area.is-file-focused .file-view {
+  grid-column: 1;
+}
+.terminal-area.is-file-focused .pane-minimap {
+  grid-column: 2;
+}
 
 .file-view[hidden] { display: none; }
 .file-view {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* tab strip · toolbar · path · editor · status */
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: var(--surface-solid);
@@ -1305,7 +2631,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Diffs panel -------- */
 
-.diff-files { overflow: auto; min-height: 0; padding: 4px 0; scrollbar-width: thin; }
+.diff-files { overflow: auto; min-height: 0; padding: 2px 0; scrollbar-width: thin; }
 .diff-row {
   display: flex;
   align-items: center;
@@ -1398,7 +2724,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Git panel -------- */
 
-.git-view { overflow: auto; min-height: 0; padding: 10px 12px; scrollbar-width: thin; }
+.git-view { overflow: auto; min-height: 0; padding: 6px 6px 8px; scrollbar-width: thin; }
 .git-branch-line {
   display: flex;
   align-items: baseline;
@@ -1501,7 +2827,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   display: flex;
   align-items: center;
   height: var(--browser-bar-h);
-  padding: 0 10px;
+  padding: 0 4px 0 8px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.80));
   border-bottom: 1px solid var(--border);
   font-size: 11px;
@@ -1601,17 +2927,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .side-trigger { color: var(--accent); }
 .ghost-btn { color: var(--muted); }
 
-.terminal-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  font-size: 12px;
-  pointer-events: none;
-  background: radial-gradient(circle at 50% 42%, rgba(184,157,255,0.08), transparent 34%);
-}
 .palette-section {
   padding: 8px 10px 4px;
   color: var(--muted);
@@ -1637,11 +2952,8 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Native/window + hierarchy polish -------- */
 .titlebar,
-.titlebar-left,
-.titlebar-center,
-.titlebar-right,
 .brand,
-.brand-sub,
+.daemon-status,
 .status-pill {
   -webkit-app-region: drag;
 }
@@ -1651,14 +2963,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   -webkit-app-region: no-drag;
 }
 .titlebar {
-  min-height: 40px;
-  padding-left: 80px;
-  padding-right: 12px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.54));
+  min-height: var(--titlebar-h);
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));
 }
-.titlebar-left,
-.titlebar-right { height: 100%; align-items: center; }
-.brand-sub { transform: translateY(0.5px); }
 .status-pill.ok {
   color: rgba(245, 242, 251, 0.72);
   border-color: rgba(255,255,255,0.07);
@@ -1714,7 +3021,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   from { opacity: 0.35; transform: scale(0.985); }
   to { opacity: 1; transform: scale(1); }
 }
-.command-bar {
+.composer {
   background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.88));
   border-top-color: rgba(255,255,255,0.08);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
@@ -1731,8 +3038,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border-color: rgba(255,255,255,0.10);
   box-shadow: 0 -1px 0 rgba(255,255,255,0.06) inset;
 }
-.detail[data-layout="split"] .browser-pane,
-.detail[data-layout="browser"] .browser-pane {
+.detail[data-layout="split"] .git-dock {
   animation: browser-pane-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes browser-pane-in {
@@ -1759,11 +3065,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .preview-placeholder.loading .preview-empty {
   opacity: 0;
 }
-.titlebar > .titlebar-left,
-.titlebar > .titlebar-center,
-.titlebar > .titlebar-right,
 .titlebar .brand,
-.titlebar .brand-sub,
+.titlebar .titlebar-spacer,
+.titlebar .traffic-gutter,
 .titlebar .status-pill {
   -webkit-app-region: drag !important;
 }
@@ -1778,28 +3082,14 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   --titlebar-h: 42px;
 }
 .titlebar {
-  grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr);
   align-items: center;
-  padding-left: 74px;
-  padding-right: 12px;
   min-height: var(--titlebar-h);
-}
-.titlebar-left {
-  align-items: center;
-  gap: 7px;
-  height: var(--titlebar-h);
 }
 .brand {
   line-height: var(--titlebar-h);
 }
-.brand-sub {
-  line-height: var(--titlebar-h);
-  transform: none;
-}
-.titlebar-right {
-  height: var(--titlebar-h);
-  align-items: center;
-}
+/* The runtime dot in the titlebar already reports session health; the pill is
+   kept in the DOM for its status text but stays out of the chrome. */
 .titlebar .status-pill {
   display: none !important;
 }
@@ -1809,20 +3099,10 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   border-radius: 8px;
 }
 
-/* The pane is a single cell that all four panels share; the bar/tabs/preview
-   areas belong to the browser panel, which is the only one that has them. */
-.browser-pane {
+.git-dock {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.56));
-}
-.panel-browser {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--browser-bar-h) var(--browser-tab-h) minmax(0, 1fr);
-  grid-template-areas:
-    "bar"
-    "tabs"
-    "preview";
+  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
 }
 .panel-files,
 .panel-diffs,
@@ -1944,9 +3224,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   padding: 0 8px;
   color: rgba(245,242,251,0.34);
   letter-spacing: 0.04em;
-}
-.detail[data-layout="browser"] .browser-pane {
-  grid-template-columns: minmax(0, 1fr);
 }
 .browser-tab { position: relative; }
 .browser-tab:hover .browser-tab-title,
@@ -2116,9 +3393,10 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 :root[data-surface="solid"] body { background: rgb(var(--rgb-term)); }
 :root[data-surface="solid"] .titlebar,
 :root[data-surface="solid"] .rail,
+:root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
-:root[data-surface="solid"] .command-bar,
-:root[data-surface="solid"] .browser-pane,
+:root[data-surface="solid"] .composer,
+:root[data-surface="solid"] .git-dock,
 :root[data-surface="solid"] .browser-bar,
 :root[data-surface="solid"] .panel-bar,
 :root[data-surface="solid"] .palette {
@@ -2160,3 +3438,578 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   user-select: none;
 }
 .solid-toggle input { accent-color: var(--accent); margin: 0; }
+
+/* ============================================================
+   Redesign: sidebar chrome, dock rails, overlays
+   ============================================================ */
+
+.sidebar-head { padding: 10px 10px 8px; gap: 6px; }
+.sidebar-head .rail-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+.session-search { height: 28px; font-size: 12px; }
+
+/* The keyboard hints lived here permanently to teach three shortcuts; the
+   help overlay (?) already documents every one of them, so the footer is now
+   a single collapsed row that costs 22px instead of a block that costs 60. */
+.sidebar-foot {
+  flex: none;
+  padding: 2px 4px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-settings > summary {
+  list-style: none;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.sidebar-settings > summary::-webkit-details-marker { display: none; }
+.sidebar-settings > summary:hover { background: var(--surface-2); color: var(--text-soft); }
+.sidebar-settings[open] > summary { color: var(--text-soft); }
+/* The swatch is the collapsed row's entire preview: it carries the accent, so
+   the row still says which theme is on without spelling it out. */
+.appearance-swatch {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.appearance-label { flex: 1 1 auto; min-width: 0; }
+.appearance-caret { flex: none; font-size: 9px; color: var(--faint); transition: transform var(--transition-fast); }
+.sidebar-settings[open] .appearance-caret { transform: rotate(180deg); }
+.theme-row { display: flex; align-items: center; gap: 4px; padding: 4px 5px 2px; }
+.bg-opacity-row { display: flex; align-items: center; gap: 6px; padding: 0 5px 4px; }
+.bg-opacity-label { flex: none; color: var(--muted); font-size: 11px; }
+.bg-opacity-slider { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
+.bg-opacity-value {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* New-pane menu — anchored under the sidebar's + button. */
+.new-pane-menu {
+  position: absolute;
+  top: 44px;
+  left: 8px;
+  right: 8px;
+  z-index: 60;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(28px) saturate(1.2);
+  -webkit-backdrop-filter: blur(28px) saturate(1.2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  animation: menu-rise 140ms ease-out;
+}
+.new-pane-menu[hidden] { display: none; }
+.new-pane-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 12.5px;
+}
+.new-pane-item:hover { background: var(--accent-soft); }
+.new-pane-glyph { flex: none; color: var(--accent); }
+.new-pane-key {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.new-pane-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
+/* Session row anatomy, left to right: git-state glyph · name (+ on-canvas mark,
+   + set swatches) over meta · status dot + worded chip · slide-out close. */
+
+/* The leading glyph reports the worktree's git state, not the pane's kind —
+   the kind is already in the meta line, and "does this lane have work in it"
+   is the question you actually scan the sidebar for. */
+.session-glyph {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.session-glyph.git-dirty  { color: var(--warn); }
+.session-glyph.git-staged { color: var(--ok); }
+.session-glyph.git-clean  { color: var(--muted); }
+.session-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-oncanvas { flex: none; color: var(--accent); display: inline-flex; }
+
+/* Set membership is a square in the set's colour. Square vs. round is the
+   whole distinction from a status dot, so it must never be rounded past 2px. */
+.session-sets { flex: none; display: inline-flex; align-items: center; gap: 3px; }
+.session-set-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--set-1);
+}
+.session-set-swatch[data-set="2"] { background: var(--set-2); }
+.session-set-swatch[data-set="3"] { background: var(--set-3); }
+.session-set-swatch[data-set="4"] { background: var(--set-4); }
+
+.session-state {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.session-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.14);
+  color: var(--warn);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.session-chip.muted { background: rgba(255, 255, 255, 0.07); color: var(--muted); }
+
+/* Closing a pane kills a process, so one click can't do it. The × swaps for a
+   countdown pill that cancels itself — the fast path stays one gesture, but
+   the destructive half needs a second, deliberate one. */
+.session-close-confirm {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  border-radius: 6px;
+  background: rgba(40, 18, 20, 0.98);
+  color: #f4a6a6;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  animation: close-confirm-slide 170ms ease-out;
+}
+.session-close-confirm:hover { background: rgba(248, 113, 113, 0.2); color: #ffd7d7; }
+.session-close-confirm:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+@keyframes close-confirm-slide {
+  from { opacity: 0; transform: translateY(-50%) translateX(12px); }
+  to   { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-close-confirm { animation: none; }
+}
+
+/* -------- Toast -------- */
+
+.toast {
+  position: absolute;
+  right: 16px;
+  bottom: calc(var(--composer-h) + 12px);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--text);
+  animation: menu-rise 160ms ease-out;
+  max-width: 60vw;
+}
+.toast[hidden] { display: none; }
+
+/* -------- Keyboard overlay -------- */
+
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 5, 8, 0.6);
+  animation: menu-rise 140ms ease-out;
+}
+.help-overlay[hidden] { display: none; }
+.help-card {
+  width: 620px;
+  max-width: calc(100% - 60px);
+  max-height: 80%;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  padding: 22px 24px;
+}
+.help-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+.help-title { font-size: 15px; font-weight: 700; }
+.help-sub { font-size: 11px; color: var(--muted); }
+.help-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  font-size: 12px;
+}
+.help-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.help-row-what { flex: 1; color: var(--text-soft); }
+.help-row-key {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.agent-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+  background: rgba(5, 5, 8, 0.62);
+  animation: menu-rise 140ms ease-out;
+}
+.agent-picker-overlay[hidden] { display: none; }
+.agent-picker {
+  width: min(440px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+}
+.agent-picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 6px 12px;
+}
+.agent-picker-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.agent-picker-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.agent-picker-list {
+  display: grid;
+  gap: 4px;
+  outline: none;
+}
+.agent-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-align: left;
+}
+.agent-picker-option:hover,
+.agent-picker-option.is-selected {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+.agent-picker-option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.agent-picker-label {
+  min-width: 0;
+}
+.agent-picker-option-command {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-picker-overlay { animation: none; }
+}
+
+/* -------- Diff viewer --------
+   Split and stacked share one model, so they share one palette and one row
+   metric; only the track layout differs. Added and removed text carry their
+   own foreground against a 9% wash, which stays AA on bg/1 -- colour alone
+   never marks a line, the +/- marker and the gutters do. */
+
+.diff-layout-toggle {
+  display: inline-flex;
+  flex: none;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.diff-layout-btn {
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.diff-layout-btn:hover { color: var(--text); }
+.diff-layout-btn.is-active { background: rgba(255, 255, 255, 0.10); color: var(--text); }
+.diff-layout-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.diff-rows {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+.diff-row { display: grid; }
+.diff-rows[data-layout="stacked"] .diff-row { grid-template-columns: 34px 34px 16px minmax(0, 1fr); }
+.diff-rows[data-layout="split"]   .diff-row { grid-template-columns: 30px minmax(0, 1fr) 30px minmax(0, 1fr); }
+
+.diff-gutter {
+  padding-right: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  user-select: none;
+}
+.diff-rows[data-layout="stacked"] .diff-gutter-new { border-right: 1px solid rgba(255, 255, 255, 0.05); }
+.diff-marker { color: var(--muted); text-align: center; user-select: none; }
+
+.diff-text {
+  min-width: 0;
+  padding: 0 8px 0 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-rows[data-layout="split"] .diff-text:first-of-type { border-right: 1px solid var(--border); }
+
+.diff-row.diff-add    .diff-text, .diff-text.diff-add    { background: rgba(52, 211, 153, 0.09); color: #8fe3b8; }
+.diff-row.diff-delete .diff-text, .diff-text.diff-delete { background: rgba(248, 113, 113, 0.09); color: #f0a3a3; }
+.diff-row.diff-add    .diff-marker { color: var(--ok); }
+.diff-row.diff-delete .diff-marker { color: var(--error); }
+.diff-gutter.diff-add    { background: rgba(52, 211, 153, 0.05); }
+.diff-gutter.diff-delete { background: rgba(248, 113, 113, 0.05); }
+/* The cell opposite a pure add or delete. Tinted rather than blank so the gap
+   reads as "nothing here", not as an unstyled row. */
+.diff-text.diff-empty { background: rgba(255, 255, 255, 0.015); }
+
+/* Word-level marks sit on top of the line wash, so the changed tokens read
+   without having to compare two lines character by character. */
+.diff-add .diff-word, .diff-text.diff-add .diff-word { background: rgba(52, 211, 153, 0.30); border-radius: 3px; }
+.diff-delete .diff-word, .diff-text.diff-delete .diff-word { background: rgba(248, 113, 113, 0.32); border-radius: 3px; }
+
+.diff-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+}
+.diff-sep-mark { letter-spacing: 2px; }
+.diff-sep-spacer { flex: 1 1 auto; }
+.diff-sep-expand {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-family: inherit;
+}
+.diff-sep-expand:hover { color: #c4b5fd; }
+.diff-sep-expand:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
+.diff-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }
+
+/* -------- Tools on the canvas --------
+   A tool pane is a pane like any other; only its body differs, holding the
+   surface that was in the dock rather than a terminal. */
+
+.terminal-pane.is-tool .terminal-pane-glyph { color: var(--accent); }
+.tool-pane-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+.tool-pane-body > .panel-git-body { flex: 1 1 auto; min-height: 0; }
+
+/* While a tool is being dragged out of the dock the canvas is the target, so
+   panes recede the same way they do when one is being repositioned. */
+body.is-tool-dragging .terminal-pane { transition: opacity var(--transition-fast); opacity: 0.65; }
+
+.dock-popped-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.dock-popped-note[hidden] { display: none; }
+.dock-popped-note button {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.dock-popped-note button:hover { background: var(--surface-2); color: var(--text); }
+.dock-popped-note button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* -------- Voice call bar --------
+   Green because a call is a live, benign state -- the same green the running
+   dot uses. It sits above the composer like the palette does, so the composer
+   never moves when a call starts. */
+
+.call-bar {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% - 4px);
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  border-radius: 10px;
+  background: rgba(14, 20, 18, 0.97);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  animation: menu-rise 150ms ease-out;
+}
+.call-bar[hidden] { display: none; }
+.call-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  animation: session-dot-pulse 1.4s ease-in-out infinite;
+}
+.call-title { flex: none; font-weight: 600; color: var(--text); }
+.call-target { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-soft); font-weight: 400; }
+.call-wave { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.call-wave i {
+  width: 2.5px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ok);
+  animation: call-wave 900ms ease-in-out infinite;
+}
+.call-wave i:nth-child(2) { animation-delay: 120ms; }
+.call-wave i:nth-child(3) { animation-delay: 240ms; }
+.call-wave i:nth-child(4) { animation-delay: 360ms; }
+.call-wave i:nth-child(5) { animation-delay: 480ms; }
+@keyframes call-wave { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+
+/* Muted stops the waveform: the one honest thing it can show. */
+.call-bar.is-muted .call-wave i { animation: none; transform: scaleY(0.3); opacity: 0.5; }
+.call-bar.is-muted .call-dot { animation: none; opacity: 0.5; }
+
+.call-note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.call-spacer { flex: 1 1 auto; }
+.call-timer { flex: none; color: var(--text-soft); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.call-btn {
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 3px 11px;
+}
+.call-btn:hover { background: rgba(255, 255, 255, 0.10); }
+.call-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.call-end {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.13);
+  color: #f4a6a6;
+  font-weight: 600;
+}
+.call-end:hover { background: rgba(248, 113, 113, 0.22); }
+.composer-call-btn[aria-pressed="true"] { color: var(--ok); border-color: rgba(52, 211, 153, 0.5); }
+
+@media (prefers-reduced-motion: reduce) {
+  .call-bar { animation: none; }
+  .call-dot, .call-wave i { animation: none; }
+}

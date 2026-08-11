@@ -56,4 +56,83 @@ describe('control protocol v1', () => {
       '{"commandId":"cmd-1","outcome":{"status":"succeeded"},"requestId":"req-1","type":"command.result","version":1}',
     );
   });
+
+  it('decodes a valid hello request', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'hello',
+      requestId: 'hello',
+      token: 'token-1',
+      clientName: 'client-1',
+      projectRoot: '/repo',
+    }))).toMatchObject({
+      type: 'hello',
+      token: 'token-1',
+      clientName: 'client-1',
+      projectRoot: '/repo',
+    });
+  });
+
+  it('rejects a malformed hello request', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'hello',
+      requestId: 'hello',
+      clientName: 'client-1',
+      projectRoot: '/repo',
+    }))).toThrow('invalid hello request');
+  });
+
+  it('rejects command.submit requests missing required command fields', () => {
+    const command = {
+      id: 'cmd-1',
+      idempotencyKey: 'idem-1',
+      kind: 'pane.takeover',
+      projectRoot: '/repo',
+      createdAt: '2026-08-03T20:00:00.000Z',
+      payload: { paneId: '%3' },
+    };
+
+    for (const field of ['idempotencyKey', 'projectRoot', 'createdAt', 'payload'] as const) {
+      const malformedCommand = { ...command };
+      delete malformedCommand[field];
+      expect(() => decodeControlRequest(JSON.stringify({
+        version: CONTROL_PROTOCOL_VERSION,
+        type: 'command.submit',
+        requestId: 'req-1',
+        command: malformedCommand,
+      }))).toThrow('invalid command.submit payload');
+    }
+  });
+
+  it('rejects events.read requests with a non-number afterSequence', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'events.read',
+      requestId: 'req-1',
+      afterSequence: '0',
+    }))).toThrow('invalid events.read request');
+  });
+
+  it('decodes a valid events.read request', () => {
+    expect(decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'events.read',
+      requestId: 'req-1',
+      afterSequence: 0,
+      limit: 100,
+    }))).toMatchObject({
+      type: 'events.read',
+      afterSequence: 0,
+      limit: 100,
+    });
+  });
+
+  it('rejects an unknown request type', () => {
+    expect(() => decodeControlRequest(JSON.stringify({
+      version: CONTROL_PROTOCOL_VERSION,
+      type: 'unknown',
+      requestId: 'req-1',
+    }))).toThrow('unsupported control request type');
+  });
 });

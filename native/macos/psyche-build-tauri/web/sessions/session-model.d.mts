@@ -26,6 +26,7 @@ export type CovenDiscoveryState = {
   message: string | null;
   requestId: number;
   refreshedAt: number | null;
+  stale: boolean;
 };
 
 export function isSafeCovenSessionId(id: unknown): id is string;
@@ -34,6 +35,7 @@ export function statusPresentation(status?: unknown): {
   label: string;
   live: boolean;
 };
+export function isLiveCovenSession(session?: Partial<CovenSession>): boolean;
 export function sortCovenSessions<T extends CovenSession>(sessions: T[]): T[];
 export function groupCovenSessions<T extends Partial<CovenSession>>(
   sessions: T[],
