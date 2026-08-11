@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -19,7 +20,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -35,11 +36,15 @@ use windows_sys::Win32::{
 };
 
 mod coven_sessions;
+mod metrics;
+mod pane_metrics;
 mod platform;
 pub mod pty_transport;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
+use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
     coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
     ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
@@ -72,6 +77,8 @@ struct PtySession {
     pump: OutputPump,
     terminator: PtyProcessTerminator,
     reader_cancellation: PtyReaderCancellation,
+    pid: Option<u32>,
+    spawn_time_unix_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -317,6 +324,16 @@ impl<T> PtyLifecycleRegistry<T> {
     #[cfg(test)]
     fn is_live(&self, thread_id: &str) -> bool {
         self.live(thread_id).is_some()
+    }
+
+    fn live_sessions(&self) -> Vec<(&String, &T)> {
+        self.entries
+            .iter()
+            .filter_map(|(thread_id, entry)| match &entry.state {
+                PtyLifecycleState::Running(session) => Some((thread_id, session)),
+                _ => None,
+            })
+            .collect()
     }
 
     fn live_thread_ids(&self) -> Vec<String> {
@@ -1381,6 +1398,11 @@ fn terminate_platform_process(
     Ok(PtyTerminationOutcome::ProcessTree)
 }
 
+#[derive(Clone, Default)]
+struct MetricsState {
+    collector: Arc<Mutex<MetricsCollector>>,
+}
+
 #[derive(Debug)]
 struct PendingPtyStart {
     token: PtySessionToken,
@@ -1735,12 +1757,23 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-chat" => {
-            if options.coven_session_id.is_some() {
-                return Err("coven-chat does not accept a session id".to_string());
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-chat requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-chat session id is unsafe".to_string());
             }
             match options.args.as_deref() {
-                Some([verb]) if verb == "chat" => Ok(()),
-                _ => Err("coven-chat requires exactly one 'chat' argument".to_string()),
+                Some([verb, flag, argument])
+                    if verb == "code" && flag == "--session-id" && argument == session_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(
+                    "coven-chat requires exactly 'code --session-id' and the validated session id"
+                        .to_string(),
+                ),
             }
         }
         "coven-attach" => {
@@ -1771,6 +1804,35 @@ fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
 #[tauri::command]
 fn canonical_project_path(root: String) -> Result<String, String> {
     canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn pane_session_metrics(
+    project_root: String,
+    cwd: String,
+    session_id: String,
+) -> Result<PaneSessionMetrics, String> {
+    if !is_safe_session_id(&session_id) {
+        return Err("session id is unsafe".to_string());
+    }
+    let resolved_cwd = open_pty_cwd(&project_root, &cwd)?;
+    let coven = which_on_path("coven").ok_or_else(|| "Coven executable not found".to_string())?;
+    let canonical_cwd = resolved_cwd.canonical_path;
+    let path = platform::augmented_path().to_string_lossy().to_string();
+
+    match tauri::async_runtime::spawn_blocking(move || {
+        pane_metrics::load_coven_metrics(
+            &coven,
+            &canonical_cwd,
+            &session_id,
+            std::ffi::OsStr::new(&path),
+        )
+    })
+    .await
+    {
+        Ok(metrics) => metrics,
+        Err(error) => Err(format!("failed to join Coven metrics task: {error}")),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2250,8 +2312,13 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         cmd.env(key, value);
     }
 
+    let spawn_time_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let pid = child.process_id();
     drop(resolved_cwd);
     let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
         .map_err(|error| error.to_string())?;
@@ -2273,6 +2340,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         pump: pump.clone(),
         terminator: terminator.clone(),
         reader_cancellation: reader_cancellation.clone(),
+        pid,
+        spawn_time_unix_secs,
     })?;
     spawn_guard.disarm();
 
@@ -2423,6 +2492,35 @@ fn pty_list() -> Vec<String> {
     PTY_LIFECYCLES.lock().live_thread_ids()
 }
 
+#[tauri::command]
+async fn workspace_metrics(
+    state: State<'_, MetricsState>,
+    scope: Option<MetricsScope>,
+) -> Result<MetricsSnapshot, String> {
+    let tracked_sessions = {
+        let guard = PTY_LIFECYCLES.lock();
+        guard
+            .live_sessions()
+            .into_iter()
+            .filter_map(|(thread_id, session)| {
+                session.pid.map(|pid| {
+                    TrackedPty::new(thread_id.clone(), pid, session.spawn_time_unix_secs)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let collector = state.collector.clone();
+    let scope = scope.unwrap_or(MetricsScope { thread_id: None });
+
+    tauri::async_runtime::spawn_blocking(move || {
+        collector
+            .lock()
+            .snapshot(std::process::id(), &tracked_sessions, scope)
+    })
+    .await
+    .map_err(|error| format!("metrics collector task failed: {error}"))
+}
+
 // ----------------------------------------------------------------------------
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
@@ -2480,7 +2578,7 @@ fn ensure_browser(
                               if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-new-tab", {{ label: browserLabel, url: location.href }});
+                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);
@@ -3951,8 +4049,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(MetricsState::default())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            pane_session_metrics,
             canonical_project_path,
             pty_write,
             pty_resize,
@@ -3974,6 +4075,7 @@ pub fn run() {
             git_worktrees,
             git_diff,
             git_log,
+            workspace_metrics,
         ])
         .setup(|app| {
             if let Err(error) = platform::configure_window(app) {
@@ -4936,12 +5038,18 @@ mod workspace_panel_tests {
     #[test]
     fn accepts_exact_native_coven_chat_and_attach_launches() {
         let coven = "/canonical/bin/coven";
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some(session_id),
+            Some(coven),
+            Some(&["code", "--session-id", session_id]),
+        );
         let attach = launch_options(
             Some("coven-attach"),
-            Some("release:fix_01.a-b"),
+            Some(session_id),
             Some(coven),
-            Some(&["attach", "release:fix_01.a-b"]),
+            Some(&["attach", session_id]),
         );
 
         assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
@@ -4963,19 +5071,54 @@ mod workspace_panel_tests {
                 Some("coven-chat"),
                 None,
                 Some(coven),
-                Some(&["chat", "extra"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                Some("unexpected"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some(coven),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                ]),
             ),
             launch_options(
                 Some("coven-chat"),
-                None,
+                Some("../unsafe"),
+                Some(coven),
+                Some(&["code", "--session-id", "../unsafe"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
                 Some("/wrong/coven"),
-                Some(&["chat"]),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                ]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&["code", "12345678-1234-4abc-8def-1234567890ab"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("12345678-1234-4abc-8def-1234567890ab"),
+                Some(coven),
+                Some(&[
+                    "code",
+                    "--session-id",
+                    "12345678-1234-4abc-8def-1234567890ab",
+                    "extra",
+                ]),
             ),
             launch_options(
                 Some("coven-attach"),
@@ -5007,7 +5150,16 @@ mod workspace_panel_tests {
         for options in invalid {
             assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
         }
-        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let chat = launch_options(
+            Some("coven-chat"),
+            Some("12345678-1234-4abc-8def-1234567890ab"),
+            Some(coven),
+            Some(&[
+                "code",
+                "--session-id",
+                "12345678-1234-4abc-8def-1234567890ab",
+            ]),
+        );
         assert!(validate_coven_launch_with(&chat, None).is_err());
     }
 

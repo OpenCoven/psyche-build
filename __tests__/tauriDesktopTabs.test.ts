@@ -22,15 +22,21 @@ const indexHtml = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri
 const tauriConfig = JSON.parse(
   readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
+const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
+const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
 
 describe('Tauri desktop tab shortcuts', () => {
-  it('routes Command+T based on the last focused desktop surface', () => {
-    expect(mainJs).toMatch(/var\s+activeSurface\s*=\s*"terminal";/);
-    expect(mainJs).toMatch(/function\s+createContextualTab\(\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"terminal"\s*\)/);
-    expect(mainJs).toMatch(/markActiveSurface\(\s*"browser"\s*\)/);
+  it('routes Command+T to terminal panes globally', () => {
+    expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
     expect(mainJs).toMatch(
-      /if\s*\(\s*activeSurface\s*===\s*"browser"\s*\)[\s\S]*openBlankBrowserTab\(\);[\s\S]*return\s*\(await spawnCovenThread\(\)\)\s*\?\s*true\s*:\s*null;/
+      /async function createTerminalPane\(\)\s*\{[\s\S]*var project = activeProject\(\);[\s\S]*if \(!project \|\| !project\.root\)\s*\{[\s\S]*setStatus\("Open a project before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*var worktree = selectedWorktree\(project\);[\s\S]*if \(!worktree \|\| !worktree\.path\)\s*\{[\s\S]*setStatus\("Select an available worktree before starting a terminal", "warn"\);[\s\S]*return null;[\s\S]*\}[\s\S]*await showTerminalView\(\)[\s\S]*return spawnShellThread\(project\);[\s\S]*\}/
+    );
+    expect(mainJs).toMatch(
+      /String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"[\s\S]*e\.preventDefault\(\);[\s\S]*await createTerminalPane\(\);/
+    );
+    expect(mainJs).not.toMatch(forbiddenContextualTabFn);
+    expect(mainJs).not.toMatch(
+      /if\s*\(\s*String\(e\.key\)\.toLowerCase\(\)\s*===\s*"t"\s*\)\s*\{[^}]*openBlankBrowserTab\(\)/
     );
   });
 
@@ -64,12 +70,15 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews request a new browser tab with Command+T', () => {
-    expect(tauriLib).toMatch(/browser:shortcut-new-tab/);
+  it('lets embedded browser webviews request a terminal pane with Command+T', () => {
+    expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
+    expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
     expect(tauriLib).toMatch(/function\(browserLabel\)/);
     expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
-    expect(mainJs).toMatch(/listen\(\s*"browser:shortcut-new-tab"/);
+    expect(mainJs).toMatch(
+      /listen\(\s*"browser:shortcut-terminal-pane",\s*function\s*\(\)\s*\{[\s\S]*createTerminalPane\(\);[\s\S]*\}\s*\)\.catch/
+    );
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {

@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 /**
- * The three web bundles are build output that is committed, so nothing but a
+ * The committed web bundles are generated build output, so nothing but a
  * test stops them drifting from the sources they were built from. This rebuilds
  * each one with the *same* flags the build script uses -- parsed out of
  * package.json rather than restated here, so changing the build cannot leave
@@ -85,7 +85,9 @@ function parseBuildScript(script: string): BundleStep[] {
 }
 
 const steps = parseBuildScript(buildScript);
-const scratch = mkdtempSync(join(tmpdir(), 'psyche-bundles-'));
+const scratch = join(process.cwd(), '.test-artifacts', 'tauri-web-bundles');
+rmSync(scratch, { recursive: true, force: true });
+mkdirSync(scratch, { recursive: true });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 describe('committed web bundles', () => {
@@ -111,8 +113,10 @@ describe('committed web bundles', () => {
     expect(steps.map((step) => step.outfile).sort()).toEqual([
       'web/diffs.bundle.js',
       'web/editor.bundle.js',
+      'web/input.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
+      'web/status.bundle.js',
     ]);
   });
 

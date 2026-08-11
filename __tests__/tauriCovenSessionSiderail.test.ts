@@ -320,7 +320,10 @@ type LocalThread = {
   status?: string;
   spawning?: boolean;
   hidden?: boolean;
-  covenSessionId?: string | null;
+  launch?: {
+    covenSessionId?: string | null;
+    launchKind?: string | null;
+  };
   worktreePath?: string;
   kind?: string;
 };
@@ -422,6 +425,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'sessionSetSwatches'),
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
+    extractFunctionSource(mainJs, 'threadCovenSessionId'),
     extractFunctionSource(mainJs, 'createCovenSessionRow'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
@@ -530,7 +534,7 @@ describe('Tauri Coven session project rail', () => {
         name: 'Attached locally',
         status: 'running',
         kind: 'coven-attach',
-        covenSessionId: 'remote',
+        launch: { launchKind: 'coven-attach', covenSessionId: 'remote' },
         worktreePath: '/alpha',
       }],
       sessions: [{
@@ -664,7 +668,8 @@ describe('Tauri Coven session project rail', () => {
         { id: 'local', projectId: 'alpha', name: 'Local plan', status: 'running' },
         {
           id: 'attached', projectId: 'alpha', name: 'Existing attachment', status: 'running',
-          kind: 'coven-attach', covenSessionId: 'alpha-daemon',
+          kind: 'coven-attach',
+          launch: { launchKind: 'coven-attach', covenSessionId: 'alpha-daemon' },
         },
       ],
     });
