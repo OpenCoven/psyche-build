@@ -51,7 +51,12 @@
             </div>
 
             <div class="sidebar-head">
-              <label class="session-search-wrap" for="session-search">
+              <label
+                class="session-search-wrap has-tooltip"
+                for="session-search"
+                data-tooltip="Press / to search sessions"
+                title="Press / to search sessions"
+              >
                 <svg class="session-search-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                   <circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.35"/>
                   <path d="M10.4 10.4 13.25 13.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
@@ -64,6 +69,7 @@
                   autocomplete="off"
                   placeholder="Search projects, branches, sessions…"
                   aria-label="Search projects, branches, agents, shells, and session metadata"
+                  aria-keyshortcuts="/"
                 />
                 <kbd class="session-search-key">/</kbd>
               </label>

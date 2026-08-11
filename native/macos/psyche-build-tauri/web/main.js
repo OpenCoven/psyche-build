@@ -3005,11 +3005,11 @@
   if (sessionListEl) {
     sessionListEl.addEventListener("scroll", function () { syncSessionListScroll(); });
   }
-  var sidebarTab = "sessions";
+  var sidebarTab = settings.sidebarTab;
 
   // The file tree renders lazily: switching to it is the only thing that has to
   // ask the filesystem, and the sessions rail should not pay for that.
-  function setSidebarTab(name) {
+  function setSidebarTab(name, options) {
     sidebarTab = name === "files" ? "files" : "sessions";
     if (sessionListEl) sessionListEl.hidden = sidebarTab !== "sessions";
     if (sidebarFilesEl) sidebarFilesEl.hidden = sidebarTab !== "files";
@@ -3022,6 +3022,8 @@
       }
     );
     if (sidebarTab === "files") renderFilesPanel();
+    settings.sidebarTab = sidebarTab;
+    if (!options || options.persist !== false) saveSettings();
     return sidebarTab;
   }
 
@@ -3064,6 +3066,23 @@
   var sessionSearchEl = document.getElementById("session-search");
   var sessionFilter = "";
   var sessionTypeFilter = settings.sessionFilter;
+  var sessionTreeFocusKey = "";
+  var sessionSearchRestoreKey = "";
+
+  function setSessionTypeFilter(value, options) {
+    sessionTypeFilter = PsycheSessions.normalizeSidebarFilter(value);
+    settings.sessionFilter = sessionTypeFilter;
+    if (!options || options.persist !== false) saveSettings();
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-session-filter]"),
+      function (button) {
+        var active = button.dataset.sessionFilter === sessionTypeFilter;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    );
+    renderSessionList();
+  }
 
   // ~/Documents/GitHub/OpenCoven/coven-cave → ~/…/OpenCoven/coven-cave
   function shortenRoot(root) {
@@ -3302,7 +3321,7 @@
     return disclosure;
   }
 
-  function createStatusIndicator(status) {
+  function createStatusIndicator(status, matches) {
     var indicator = document.createElement("span");
     indicator.className = "session-status session-state status-" + status.key;
     indicator.setAttribute("aria-label", status.tooltip);
@@ -3313,6 +3332,10 @@
     var label = document.createElement("span");
     label.className = "session-status-label";
     label.textContent = status.label;
+    if (matches && matches.length) {
+      label.textContent = "";
+      appendHighlightedText(label, status.label, matches);
+    }
     indicator.appendChild(icon);
     indicator.appendChild(label);
     attachTooltip(indicator, status.tooltip);
@@ -3411,7 +3434,11 @@
         String(rowModel.meta || "").toLowerCase().indexOf("coven") === -1) {
       var source = document.createElement("span");
       source.className = "session-source";
-      source.textContent = "Coven · ";
+      appendHighlightedText(
+        source,
+        "Coven · ",
+        PsycheSessions.matchTextRanges("Coven · ", options.query)
+      );
       meta.appendChild(source);
     }
     appendHighlightedText(meta, rowModel.meta, rowModel.metaMatches);
@@ -3420,7 +3447,7 @@
 
     row.appendChild(icon);
     row.appendChild(text);
-    row.appendChild(createStatusIndicator(rowModel.status));
+    row.appendChild(createStatusIndicator(rowModel.status, rowModel.statusMatches));
     wrapper.appendChild(row);
     return { wrapper: wrapper, row: row, title: title };
   }
@@ -3603,6 +3630,140 @@
     return { message: message, className: covenToneClass(discovery.phase) };
   }
 
+  function visibleSessionTreeItems() {
+    if (!sessionListEl) return [];
+    return Array.prototype.filter.call(
+      sessionListEl.querySelectorAll("[data-tree-item]"),
+      function (item) { return item.offsetParent !== null; }
+    );
+  }
+
+  function focusSessionTreeItem(item) {
+    if (!item) return false;
+    visibleSessionTreeItems().forEach(function (candidate) {
+      candidate.setAttribute("tabindex", candidate === item ? "0" : "-1");
+    });
+    sessionTreeFocusKey = item.dataset.treeKey || "";
+    item.focus();
+    return true;
+  }
+
+  function parentSessionTreeItem(item) {
+    var parent = item && item.parentElement;
+    while (parent && parent !== sessionListEl) {
+      if (parent.matches(".session-branch")) return parent;
+      if (parent.matches(".session-project")) return parent;
+      parent = parent.parentElement;
+    }
+    return null;
+  }
+
+  function firstChildSessionTreeItem(item) {
+    if (!item) return null;
+    if (item.dataset.treeItem === "project") {
+      return item.querySelector(".session-branch");
+    }
+    if (item.dataset.treeItem === "branch") {
+      return item.querySelector(".session-row");
+    }
+    return null;
+  }
+
+  function toggleSessionTreeDisclosure(item) {
+    var disclosure = item && item.querySelector(".session-disclosure");
+    if (!disclosure || disclosure.disabled) return false;
+    disclosure.click();
+    return true;
+  }
+
+  function activateSessionTreeItem(item) {
+    if (!item) return false;
+    if (item.dataset.treeItem === "session") {
+      item.click();
+      return true;
+    }
+    var head = item.querySelector(
+      item.dataset.treeItem === "project"
+        ? ".session-project-head"
+        : ".session-branch-head"
+    );
+    if (!head) return false;
+    head.click();
+    return true;
+  }
+
+  function handleSessionTreeKeydown(event) {
+    var item = event.target && event.target.matches &&
+      event.target.matches("[data-tree-item]") ? event.target : null;
+    if (!item || document.activeElement !== item) return;
+    var items = visibleSessionTreeItems();
+    var index = items.indexOf(item);
+    if (index === -1) return;
+    sessionTreeFocusKey = item.dataset.treeKey || "";
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+        event.key === "Home" || event.key === "End") {
+      var next = index;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = items.length - 1;
+      else if (event.key === "ArrowDown") next = Math.min(items.length - 1, index + 1);
+      else next = Math.max(0, index - 1);
+      event.preventDefault();
+      focusSessionTreeItem(items[next]);
+      return;
+    }
+
+    if (event.key === "ArrowLeft") {
+      if ((item.dataset.treeItem === "project" || item.dataset.treeItem === "branch") &&
+          item.getAttribute("aria-expanded") === "true") {
+        event.preventDefault();
+        toggleSessionTreeDisclosure(item);
+        return;
+      }
+      var parent = parentSessionTreeItem(item);
+      if (parent) {
+        event.preventDefault();
+        focusSessionTreeItem(parent);
+      }
+      return;
+    }
+
+    if (event.key === "ArrowRight") {
+      if ((item.dataset.treeItem === "project" || item.dataset.treeItem === "branch") &&
+          item.getAttribute("aria-expanded") === "false") {
+        event.preventDefault();
+        toggleSessionTreeDisclosure(item);
+        return;
+      }
+      var child = firstChildSessionTreeItem(item);
+      if (child) {
+        event.preventDefault();
+        focusSessionTreeItem(child);
+      }
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      activateSessionTreeItem(item);
+      return;
+    }
+    if (event.key === " " && item.dataset.treeItem !== "session") {
+      event.preventDefault();
+      toggleSessionTreeDisclosure(item);
+    }
+  }
+
+  function restoreSessionTreeFocus(key) {
+    var items = visibleSessionTreeItems();
+    var target = items.find(function (item) {
+      return key && item.dataset.treeKey === key;
+    }) || items.find(function (item) {
+      return item.getAttribute("tabindex") === "0";
+    }) || items[0];
+    return focusSessionTreeItem(target);
+  }
+
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -3617,12 +3778,12 @@
       }
       return false;
     }
-    function ownTreeItemKeydown(event, treeItem) {
-      return event.target === treeItem && document.activeElement === treeItem;
-    }
-    var focusedKey = document.activeElement && document.activeElement.dataset
+    var activeTreeKey = document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
       : "";
+    var shouldRestoreTreeFocus = Boolean(activeTreeKey);
+    if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
+    var focusedKey = sessionTreeFocusKey;
     sessionListEl.setAttribute("role", "tree");
     sessionListEl.setAttribute(
       "aria-label",
@@ -3639,12 +3800,39 @@
     // Walked once per render: every row tests membership against this list.
     var onCanvasIds = canvasThreadIds();
 
+    var persistedSelectionExists = !settings.selectedSessionKey ||
+      state.projects.some(function (project) {
+        var localMatch = state.threads.some(function (thread) {
+          return thread.projectId === project.id && !thread.hidden &&
+            !isDormantThread(thread) &&
+            PsycheSessions.localSidebarSelectionKey(project, thread) ===
+              settings.selectedSessionKey;
+        });
+        if (localMatch) return true;
+        return covenSessionsForProject(project).some(function (session) {
+          return PsycheSessions.sidebarSelectionKey({
+            source: "coven",
+            id: session.id,
+          }) === settings.selectedSessionKey;
+        });
+      });
+    var canValidatePersistedSelection = state.projects.length > 0 &&
+      !isRestoringWorkspace &&
+      (settings.selectedSessionKey.indexOf("coven:") !== 0 ||
+        covenDiscovery.phase === "ready");
+    if (settings.selectedSessionKey && canValidatePersistedSelection &&
+        !persistedSelectionExists) {
+      settings.selectedSessionKey = "";
+      saveSettings();
+    }
+
     var selectedThread = findThread(state.activeThreadId);
     var selectedThreadProject = selectedThread && findProject(selectedThread.projectId);
     var selectedKey = selectedThread && selectedThreadProject
       ? PsycheSessions.localSidebarSelectionKey(selectedThreadProject, selectedThread)
       : settings.selectedSessionKey;
 
+    var projectModels = [];
     state.projects.forEach(function (project) {
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden && !isDormantThread(t);
@@ -3661,7 +3849,43 @@
       });
       if (projectModel.visibleCount === 0) return;
       matched += projectModel.visibleCount;
+      projectModels.push({ project: project, model: projectModel });
+    });
 
+    if (needle || sessionTypeFilter !== "all") {
+      var summary = document.createElement("div");
+      summary.className = "session-result-summary";
+      summary.setAttribute("role", "status");
+      summary.setAttribute("aria-live", "polite");
+      var summaryText = document.createElement("span");
+      summaryText.textContent = matched + (matched === 1 ? " session" : " sessions");
+      var reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "session-result-reset";
+      if (needle) {
+        reset.textContent = "Clear search";
+        reset.addEventListener("click", function () {
+          sessionSearchEl.value = "";
+          sessionFilter = "";
+          renderSessionList();
+          sessionSearchEl.focus();
+        });
+      } else {
+        reset.textContent = "Reset filter";
+        reset.addEventListener("click", function () {
+          setSessionTypeFilter("all");
+          var allFilter = document.querySelector('[data-session-filter="all"]');
+          if (allFilter) allFilter.focus();
+        });
+      }
+      summary.appendChild(summaryText);
+      summary.appendChild(reset);
+      sessionListEl.appendChild(summary);
+    }
+
+    projectModels.forEach(function (entry) {
+      var project = entry.project;
+      var projectModel = entry.model;
       var projectParts = createProjectGroup(projectModel, {
         current: project.id === state.activeProjectId,
         tabindex: "-1",
@@ -3684,24 +3908,6 @@
         clearFocusSet();
         setActiveProject(project.id);
       });
-      projectParts.group.addEventListener("keydown", function (event) {
-        if (!ownTreeItemKeydown(event, projectParts.group)) return;
-        if (event.key === "Enter") {
-          event.preventDefault();
-          clearFocusSet();
-          setActiveProject(project.id);
-          return;
-        }
-        if (event.key === " " || event.key === "Spacebar") {
-          event.preventDefault();
-          setProjectExpanded(!projectModel.expanded);
-          return;
-        }
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        event.preventDefault();
-        setProjectExpanded(event.key === "ArrowRight");
-      });
-
       if (projectModel.expanded) {
         projectModel.branches.forEach(function (branchModel) {
         var worktree = branchModel.worktree;
@@ -3735,24 +3941,6 @@
           event.preventDefault();
           setBranchExpanded(!branchModel.expanded);
         });
-        branchParts.group.addEventListener("keydown", async function (event) {
-          if (worktree.virtual || worktree.missing ||
-              !ownTreeItemKeydown(event, branchParts.group)) return;
-          if (event.key === "Enter") {
-            event.preventDefault();
-            await activateProjectWorktree(project, worktree.path);
-            return;
-          }
-          if (event.key === " " || event.key === "Spacebar") {
-            event.preventDefault();
-            setBranchExpanded(!branchModel.expanded);
-            return;
-          }
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          setBranchExpanded(event.key === "ArrowRight");
-        });
-
         var hiddenThreads = state.threads.filter(function (thread) {
           return thread.projectId === project.id && thread.worktreePath === worktree.path &&
             thread.hidden;
@@ -3793,6 +3981,7 @@
                 tabindex: "-1",
                 tooltip: rowModel.title + " — " + rowModel.meta +
                   " — " + rowModel.status.tooltip,
+                query: currentSearchQuery,
                 onCanvas: rowModel.source === "psyche" &&
                   onCanvasIds.indexOf(rowModel.id) !== -1,
                 sets: rowModel.source === "psyche" ? setsForThread(rowModel.value) : [],
@@ -3813,11 +4002,6 @@
                   openCovenSession(project, rowModel.value);
                 }
                 row.addEventListener("click", activateCovenRow);
-                row.addEventListener("keydown", function (event) {
-                  if (!ownTreeItemKeydown(event, row) || event.key !== "Enter") return;
-                  event.preventDefault();
-                  activateCovenRow();
-                });
                 categoryGroup.appendChild(wrapper);
                 return;
               }
@@ -3845,12 +4029,7 @@
               }
               row.addEventListener("click", activateLocalRow);
               row.addEventListener("keydown", function (event) {
-                if (!ownTreeItemKeydown(event, row)) return;
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  activateLocalRow();
-                  return;
-                }
+                if (event.target !== row || document.activeElement !== row) return;
                 if (event.key !== "Delete") return;
                 event.preventDefault();
                 dismissLocalRow();
@@ -3961,17 +4140,18 @@
       inline.className = "session-inline-state " + inlineState.className;
       inline.textContent = inlineState.message;
       sessionListEl.appendChild(inline);
-      matched += 1;
     }
 
-    if (matched === 0) {
+    if (matched === 0 && !inlineState) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
       empty.textContent = needle
         ? "No sessions match “" + sessionFilter.trim() + "”"
-        : state.projects.length
-          ? "No matching projects, worktrees, or panes."
-          : "No project open — ⌘O to add one.";
+        : sessionTypeFilter !== "all"
+          ? "No sessions match the " + sessionTypeFilter + " filter."
+          : state.projects.length
+            ? "No sessions yet."
+            : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
 
@@ -3989,27 +4169,9 @@
     renderedItems.forEach(function (item) {
       item.setAttribute("tabindex", item === preferred ? "0" : "-1");
     });
-    if (focusedKey && preferred) preferred.focus();
-
-    var persistedSelectionExists = !settings.selectedSessionKey ||
-      state.projects.some(function (project) {
-        var localMatch = state.threads.some(function (thread) {
-          return thread.projectId === project.id && !thread.hidden &&
-            !isDormantThread(thread) &&
-            PsycheSessions.localSidebarSelectionKey(project, thread) ===
-              settings.selectedSessionKey;
-        });
-        if (localMatch) return true;
-        return covenSessionsForProject(project).some(function (session) {
-          return PsycheSessions.sidebarSelectionKey({
-            source: "coven",
-            id: session.id,
-          }) === settings.selectedSessionKey;
-        });
-      });
-    if (settings.selectedSessionKey && !selectedThread && !persistedSelectionExists) {
-      settings.selectedSessionKey = "";
-      saveSettings();
+    if (preferred) {
+      sessionTreeFocusKey = preferred.dataset.treeKey || "";
+      if (shouldRestoreTreeFocus) preferred.focus();
     }
   }
 
@@ -4036,6 +4198,9 @@
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
   if (sessionSearchEl) {
+    sessionSearchEl.addEventListener("focus", function () {
+      sessionSearchRestoreKey = sessionTreeFocusKey;
+    });
     sessionSearchEl.addEventListener("input", function () {
       sessionFilter = sessionSearchEl.value || "";
       renderSessionList();
@@ -4043,33 +4208,47 @@
     // Escape clears the filter rather than bubbling to the terminal.
     sessionSearchEl.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
         sessionSearchEl.value = "";
         sessionFilter = "";
         renderSessionList();
-        sessionSearchEl.blur();
-        e.stopPropagation();
+        restoreSessionTreeFocus(sessionSearchRestoreKey);
       }
     });
   }
   if (sessionListEl) {
-    sessionListEl.addEventListener("keydown", function (event) {
-      if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) === -1) return;
-      var items = Array.prototype.filter.call(
-        sessionListEl.querySelectorAll("[data-tree-item]"),
-        function (item) { return item.offsetParent !== null; }
-      );
-      if (!items.length) return;
-      var current = items.indexOf(document.activeElement);
-      if (current === -1) return;
-      var next = current;
-      if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = items.length - 1;
-      else if (event.key === "ArrowDown") next = Math.min(items.length - 1, current + 1);
-      else next = current <= 0 ? 0 : current - 1;
-      event.preventDefault();
-      items[next].focus();
+    sessionListEl.addEventListener("focusin", function (event) {
+      if (event.target && event.target.matches &&
+          event.target.matches("[data-tree-item]")) {
+        sessionTreeFocusKey = event.target.dataset.treeKey || "";
+      }
     });
+    sessionListEl.addEventListener("keydown", handleSessionTreeKeydown);
   }
+  Array.prototype.forEach.call(
+    document.querySelectorAll("[data-session-filter]"),
+    function (button) {
+      button.addEventListener("click", function () {
+        setSessionTypeFilter(button.dataset.sessionFilter);
+      });
+    }
+  );
+  document.addEventListener("keydown", function (event) {
+    var target = event.target;
+    var editing = target && (
+      target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT" || target.isContentEditable
+    );
+    if (event.key === "/" && !editing && sidebarTab === "sessions") {
+      event.preventDefault();
+      sessionSearchRestoreKey = sessionTreeFocusKey;
+      sessionSearchEl.focus();
+      sessionSearchEl.select();
+    }
+  });
+  setSidebarTab(settings.sidebarTab, { persist: false });
+  setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
   /**
    * The canvas' zero state. It is also the fastest route back into work, so

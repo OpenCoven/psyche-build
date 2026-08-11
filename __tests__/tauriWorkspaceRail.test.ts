@@ -30,7 +30,7 @@ function functionSource(source: string, name: string) {
 describe('Tauri project/worktree/pane rail', () => {
   it('ships pinned sidebar controls and honest navigation semantics contracts', () => {
     expect(indexHtml).toContain('class="sidebar-controls"');
-    expect(indexHtml).toContain('class="session-search-wrap"');
+    expect(indexHtml).toContain('class="session-search-wrap has-tooltip"');
     expect(indexHtml).toContain('<kbd class="session-search-key">/</kbd>');
     expect(indexHtml).not.toContain('session-filter-btn');
 
@@ -158,25 +158,55 @@ describe('Tauri project/worktree/pane rail', () => {
   });
 
   it('supports keyboard traversal, collapse controls, and attention badges', () => {
-    expect(mainJs).toMatch(/sessionListEl\.addEventListener\("keydown"/);
-    expect(mainJs).toMatch(/"ArrowDown",\s*"ArrowUp",\s*"Home",\s*"End"/);
-    expect(mainJs).toContain('event.target === treeItem && document.activeElement === treeItem');
-    expect(mainJs).toContain('if (event.key === "Enter")');
-    expect(mainJs).toContain('if (event.key === " " || event.key === "Spacebar")');
-    expect(mainJs).toContain('setActiveProject(project.id)');
-    expect(mainJs).toContain('await activateProjectWorktree(project, worktree.path)');
-    expect(mainJs).toContain('setProjectExpanded(!projectModel.expanded)');
-    expect(mainJs).toContain('setBranchExpanded(!branchModel.expanded)');
-    expect(mainJs).toMatch(/event\.key\s*!==\s*"ArrowLeft"[\s\S]*event\.key\s*!==\s*"ArrowRight"/);
+    for (const helper of [
+      'visibleSessionTreeItems',
+      'focusSessionTreeItem',
+      'parentSessionTreeItem',
+      'firstChildSessionTreeItem',
+      'toggleSessionTreeDisclosure',
+      'activateSessionTreeItem',
+      'handleSessionTreeKeydown',
+    ]) {
+      expect(mainJs).toContain(`function ${helper}(`);
+    }
+    expect(mainJs).toContain('sessionListEl.addEventListener("keydown", handleSessionTreeKeydown)');
+    expect(mainJs).toContain('event.key === "ArrowDown"');
+    expect(mainJs).toContain('event.key === "ArrowUp"');
+    expect(mainJs).toContain('event.key === "Home"');
+    expect(mainJs).toContain('event.key === "End"');
+    expect(mainJs).toContain('event.key === "ArrowLeft"');
+    expect(mainJs).toContain('event.key === "ArrowRight"');
+    expect(mainJs).toContain('event.key === "Enter"');
+    expect(mainJs).toContain('event.key === " "');
+    expect(mainJs).toContain('event.key === "/"');
+    expect(mainJs).toContain('event.key === "Escape"');
     expect(mainJs).toContain('"[data-tree-item]"');
     expect(mainJs).not.toContain('"[data-tree-item], .session-close"');
     expect(mainJs).toContain('row.setAttribute("aria-keyshortcuts", "Delete")');
     expect(mainJs).toContain('close.setAttribute("tabindex", "-1")');
     expect(mainJs).toContain('if (event.key !== "Delete") return;');
     expect(mainJs).toContain('dismissLocalRow();');
-    expect(mainJs).toContain('if (current === -1) return;');
+    expect(mainJs).toContain('if (index === -1) return;');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
+  });
+
+  it('wires visit-local search, persisted filters, summaries, and shortcut guidance', () => {
+    expect(indexHtml).toMatch(/id="session-search"[^>]*aria-keyshortcuts="\/"/);
+    expect(indexHtml).toContain('data-tooltip="Press / to search sessions"');
+    expect(mainJs).toContain('var sidebarTab = settings.sidebarTab;');
+    expect(mainJs).toContain('var sessionTypeFilter = settings.sessionFilter;');
+    expect(mainJs).toContain('function setSessionTypeFilter(value, options)');
+    expect(mainJs).toContain('settings.sessionFilter = sessionTypeFilter;');
+    expect(mainJs).toContain('setSidebarTab(settings.sidebarTab, { persist: false });');
+    expect(mainJs).toContain('setSessionTypeFilter(settings.sessionFilter, { persist: false });');
+    expect(mainJs).toContain('PsycheSessions.matchTextRanges');
+    expect(mainJs).toContain('session-result-summary');
+    expect(mainJs).toContain('Clear search');
+    expect(mainJs).toContain('Reset filter');
+    expect(mainJs).not.toContain('settings.sessionSearch');
+    expect(styles).toMatch(/\.session-filter\.is-active\s*\{/);
+    expect(styles).toMatch(/\.session-search-key\s*\{/);
   });
 
   it('validates sidebar settings and persists collapsed project state', () => {

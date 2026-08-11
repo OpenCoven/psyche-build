@@ -56,30 +56,6 @@ function extractFunctionSource(source: string, name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
-function extractInlineFunctionSource(source: string, anchor: string) {
-  const anchorIndex = source.indexOf(anchor);
-  if (anchorIndex === -1) throw new Error(`missing anchor ${anchor}`);
-  const functionStart = source.indexOf('function (event)', anchorIndex);
-  if (functionStart === -1) throw new Error(`missing inline function for ${anchor}`);
-  const bodyStart = source.indexOf('{', functionStart);
-  let depth = 0;
-  for (let index = bodyStart; index < source.length; index += 1) {
-    if (source[index] === '{') depth += 1;
-    if (source[index] === '}') depth -= 1;
-    if (depth === 0) return source.slice(functionStart, index + 1);
-  }
-  throw new Error(`unterminated inline function for ${anchor}`);
-}
-
-function compileFunction<T extends (...args: never[]) => unknown>(
-  source: string,
-  dependencies: Record<string, unknown>,
-) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
-  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
-}
-
 function decodeHtml(value: string) {
   return value
     .replaceAll('&lt;', '<')
@@ -293,6 +269,29 @@ class FakeElement {
     this.selected = true;
   }
 
+  click() {
+    const event = new FakeEvent(this);
+    for (let element: FakeElement | null = this; element; element = element.parentElement) {
+      for (const listener of element.listeners.get('click') ?? []) {
+        void listener(event);
+      }
+      if (event.propagationStopped) break;
+    }
+  }
+
+  matches(selector: string) {
+    if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
+    if (selector === '[data-tree-item]') return Boolean(this.dataset.treeItem);
+    return false;
+  }
+
+  closest(selector: string): FakeElement | null {
+    for (let element: FakeElement | null = this; element; element = element.parentElement) {
+      if (element.matches(selector)) return element;
+    }
+    return null;
+  }
+
   addEventListener(name: string, listener: Listener) {
     const listeners = this.listeners.get(name) ?? [];
     listeners.push(listener);
@@ -396,9 +395,12 @@ function createRenderer(options: {
   scopingSet?: { id: string; name: string; threadIds: string[] } | null;
   setPicking?: { key: string; picked: string[] } | null;
   selectedSessionKey?: string;
+  typeFilter?: string;
 } = {}) {
   const document = new FakeDocument();
   const sessionListEl = new FakeElement('div', document);
+  const sessionSearchEl = new FakeElement('input', document);
+  sessionSearchEl.value = options.filter ?? '';
   const state = {
     env: { home: '/Users/val' },
     projects: options.projects ?? [{ id: 'alpha', name: 'Alpha', root: '/alpha' }],
@@ -456,11 +458,12 @@ function createRenderer(options: {
   const clearFocusSet = vi.fn();
   const settings = {
     selectedSessionKey: options.selectedSessionKey ?? '',
-    sessionFilter: 'all',
+    sessionFilter: options.typeFilter ?? 'all',
     sidebarTab: 'sessions',
   };
   const saveSettings = vi.fn();
   const saveWorkspaceSoon = vi.fn();
+  const setSessionTypeFilter = vi.fn();
   const paneGlyphFor = (kind: string) =>
     kind === 'shell' ? '❯_' : kind === 'web' ? '◍' : '✳';
 
@@ -469,6 +472,8 @@ function createRenderer(options: {
     'var armedSessionClose = null;',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
+    'var sessionTreeFocusKey = "";',
+    'var isRestoringWorkspace = false;',
     extractFunctionSource(mainJs, 'paneLayoutKey'),
     extractFunctionSource(mainJs, 'findFocusSet'),
     extractFunctionSource(mainJs, 'setsForThread'),
@@ -491,10 +496,17 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'createSessionRow'),
     extractFunctionSource(mainJs, 'createBranchGroup'),
     extractFunctionSource(mainJs, 'createProjectGroup'),
+    extractFunctionSource(mainJs, 'visibleSessionTreeItems'),
+    extractFunctionSource(mainJs, 'focusSessionTreeItem'),
+    extractFunctionSource(mainJs, 'parentSessionTreeItem'),
+    extractFunctionSource(mainJs, 'firstChildSessionTreeItem'),
+    extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure'),
+    extractFunctionSource(mainJs, 'activateSessionTreeItem'),
+    extractFunctionSource(mainJs, 'handleSessionTreeKeydown'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(
-    'document', 'sessionListEl', 'editingContext', 'sessionFilter', 'state',
+    'document', 'sessionListEl', 'sessionSearchEl', 'editingContext', 'sessionFilter', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
     'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
     'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
@@ -502,19 +514,21 @@ function createRenderer(options: {
     'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
-    'saveWorkspaceSoon', 'activateProjectWorktree',
+    'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
       disarmSessionClose: disarmSessionClose,
+      handleTreeKeydown: handleSessionTreeKeydown,
       toggleSetPick: toggleSetPick,
       picked: function () { return setPicking ? setPicking.picked.slice() : null; }
     };`,
   )(
     document,
     sessionListEl,
+    sessionSearchEl,
     null,
     options.filter ?? '',
     state,
@@ -559,6 +573,7 @@ function createRenderer(options: {
     findProject,
     saveWorkspaceSoon,
     activateProjectWorktree,
+    setSessionTypeFilter,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -567,6 +582,7 @@ function createRenderer(options: {
       wrapper: FakeElement, close: FakeElement, thread: { id: string; name: string },
     ) => void;
     disarmSessionClose: () => void;
+    handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
     settings: typeof settings;
@@ -578,6 +594,7 @@ function createRenderer(options: {
     ...harness,
     document,
     sessionListEl,
+    sessionSearchEl,
     state,
     discovery,
     focusSets,
@@ -588,6 +605,7 @@ function createRenderer(options: {
     settings,
     saveSettings,
     saveWorkspaceSoon,
+    setSessionTypeFilter,
     setActiveProject,
     activateProjectWorktree,
     focusThread,
@@ -888,9 +906,13 @@ describe('Tauri Coven session project rail', () => {
     expect(project).not.toBeNull();
 
     project?.focus();
-    const enter = await project?.emit('keydown', { key: 'Enter' });
-    project?.focus();
-    const space = await project?.emit('keydown', { key: ' ' });
+    const enter = new FakeEvent(project!, 'Enter');
+    renderer.handleTreeKeydown(enter);
+    await Promise.resolve();
+    const currentProject = renderer.sessionListEl.querySelector('.session-project');
+    currentProject?.focus();
+    const space = new FakeEvent(currentProject!, ' ');
+    renderer.handleTreeKeydown(space);
 
     expect(enter?.defaultPrevented).toBe(true);
     expect(space?.defaultPrevented).toBe(true);
@@ -933,14 +955,17 @@ describe('Tauri Coven session project rail', () => {
     expect(branch).not.toBeNull();
 
     branch?.focus();
-    const enter = await branch?.emit('keydown', { key: 'Enter' });
+    const enter = new FakeEvent(branch!, 'Enter');
+    renderer.handleTreeKeydown(enter);
+    await Promise.resolve();
     expect(enter?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
     expect(renderer.setActiveProject).toHaveBeenCalledWith('psyche');
     expect(renderer.saveWorkspaceSoon).not.toHaveBeenCalled();
 
     branch?.focus();
-    const space = await branch?.emit('keydown', { key: ' ' });
+    const space = new FakeEvent(branch!, ' ');
+    renderer.handleTreeKeydown(space);
     expect(space?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(true);
     expect(renderer.sessionListEl.querySelector('.session-branch')?.getAttribute('aria-expanded'))
@@ -1022,25 +1047,29 @@ describe('Tauri Coven session project rail', () => {
     renderer.render();
     const branch = renderer.sessionListEl.querySelector('.session-branch');
     branch?.focus();
-    const branchLeft = await branch?.emit('keydown', { key: 'ArrowLeft' });
+    const branchLeft = new FakeEvent(branch!, 'ArrowLeft');
+    renderer.handleTreeKeydown(branchLeft);
     expect(branchLeft?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(true);
 
     renderer.sessionListEl.querySelector('.session-branch')?.focus();
     const rerenderedBranch = renderer.sessionListEl.querySelector('.session-branch');
-    const branchRight = await rerenderedBranch?.emit('keydown', { key: 'ArrowRight' });
+    const branchRight = new FakeEvent(rerenderedBranch!, 'ArrowRight');
+    renderer.handleTreeKeydown(branchRight);
     expect(branchRight?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
 
     const project = renderer.sessionListEl.querySelector('.session-project');
     project?.focus();
-    const projectLeft = await project?.emit('keydown', { key: 'ArrowLeft' });
+    const projectLeft = new FakeEvent(project!, 'ArrowLeft');
+    renderer.handleTreeKeydown(projectLeft);
     expect(projectLeft?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].collapsed).toBe(true);
 
     const rerenderedProject = renderer.sessionListEl.querySelector('.session-project');
     rerenderedProject?.focus();
-    const projectRight = await rerenderedProject?.emit('keydown', { key: 'ArrowRight' });
+    const projectRight = new FakeEvent(rerenderedProject!, 'ArrowRight');
+    renderer.handleTreeKeydown(projectRight);
     expect(projectRight?.defaultPrevented).toBe(true);
     expect(renderer.state.projects[0].collapsed).toBe(false);
     expect(renderer.saveWorkspaceSoon).toHaveBeenCalledTimes(4);
@@ -1525,6 +1554,124 @@ describe('Tauri Coven session project rail', () => {
     expect(renderer.sessionListEl.querySelector('.session-row')?.dataset.threadId).toBe('local');
   });
 
+  it('highlights every visible matching field, including Coven source and status', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build', branch: 'feat/agent-search',
+          is_main: true, dirty: false, missing: false,
+        }],
+      }],
+      sessions: [{
+        id: 'daemon', projectRoot: '/repo/psyche-build', cwd: '/repo/psyche-build',
+        title: 'Release agent', harness: 'codex', status: 'waiting',
+      }],
+      filter: 'reply',
+    });
+
+    renderer.render();
+
+    const status = renderer.sessionListEl.querySelector('.session-status-label');
+    expect(status?.textContent).toBe('REPLY');
+    expect(descendants(status!).filter((element) => element.tagName === 'MARK')
+      .map((element) => element.textContent)).toEqual(['REPLY']);
+
+    renderer.setFilter('coven');
+    renderer.render();
+    const meta = renderer.sessionListEl.querySelector('.session-meta');
+    expect(meta?.textContent).toContain('Coven');
+    expect(descendants(meta!).filter((element) => element.tagName === 'MARK')
+      .map((element) => element.textContent)).toContain('Coven');
+  });
+
+  it('renders accurate result summaries and clear-search or reset-filter actions', () => {
+    const renderer = createRenderer({
+      projects: [
+        {
+          id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build',
+          worktrees: [{
+            path: '/repo/psyche-build', branch: 'main',
+            is_main: true, dirty: false, missing: false,
+          }],
+        },
+        {
+          id: 'coven', name: 'COVEN-CAVE', root: '/repo/coven-cave',
+          worktrees: [{
+            path: '/repo/coven-cave', branch: 'main',
+            is_main: true, dirty: false, missing: false,
+          }],
+        },
+        {
+          id: 'chat', name: 'CHAT', root: '/repo/chat',
+          worktrees: [{
+            path: '/repo/chat', branch: 'main',
+            is_main: true, dirty: false, missing: false,
+          }],
+        },
+      ],
+      threads: [
+        { id: 'psyche-shell', projectId: 'psyche', worktreePath: '/repo/psyche-build',
+          name: 'Search worker', kind: 'shell', status: 'running' },
+        { id: 'chat-agent', projectId: 'chat', worktreePath: '/repo/chat',
+          name: 'Search agent', kind: 'agent', status: 'running' },
+      ],
+      sessions: [{
+        id: 'coven-search', projectRoot: '/repo/coven-cave', cwd: '/repo/coven-cave',
+        title: 'Search durable', harness: 'Coven', status: 'running',
+      }],
+      filter: 'search',
+    });
+
+    renderer.render();
+    expect(renderer.sessionListEl.querySelector('.session-result-summary')?.textContent)
+      .toContain('3 sessions');
+    expect(renderer.sessionListEl.querySelector('.session-result-reset')?.textContent)
+      .toBe('Clear search');
+
+    const filtered = createRenderer({
+      projects: renderer.state.projects,
+      threads: renderer.state.threads,
+      sessions: [{
+        id: 'coven-search', projectRoot: '/repo/coven-cave', cwd: '/repo/coven-cave',
+        title: 'Search durable', harness: 'Coven', status: 'running',
+      }],
+      typeFilter: 'agents',
+    });
+    filtered.render();
+    expect(filtered.sessionListEl.querySelector('.session-result-summary')?.textContent)
+      .toContain('2 sessions');
+    expect(filtered.sessionListEl.querySelector('.session-result-reset')?.textContent)
+      .toBe('Reset filter');
+  });
+
+  it('keeps search focus while results rerender and restores tree focus by stable key', () => {
+    const renderer = createRenderer({
+      projects: [{
+        id: 'psyche', name: 'PSYCHE-BUILD', root: '/repo/psyche-build',
+        worktrees: [{
+          path: '/repo/psyche-build', branch: 'main',
+          is_main: true, dirty: false, missing: false,
+        }],
+      }],
+      threads: [{
+        id: 'shell', projectId: 'psyche', worktreePath: '/repo/psyche-build',
+        name: 'Search worker', kind: 'shell', status: 'running',
+      }],
+    });
+
+    renderer.render();
+    const branch = renderer.sessionListEl.querySelector('.session-branch');
+    branch?.focus();
+    renderer.render();
+    expect(renderer.document.activeElement?.dataset.treeKey).toBe(branch?.dataset.treeKey);
+
+    renderer.sessionSearchEl.focus();
+    renderer.setFilter('search');
+    renderer.render();
+    expect(renderer.document.activeElement).toBe(renderer.sessionSearchEl);
+  });
+
   it('does not clear a valid persisted selection merely because search hides it', () => {
     const renderer = createRenderer({
       selectedSessionKey: 'coven:daemon',
@@ -1547,6 +1694,31 @@ describe('Tauri Coven session project rail', () => {
 
     expect(renderer.settings.selectedSessionKey).toBe('');
     expect(renderer.saveSettings).toHaveBeenCalledOnce();
+  });
+
+  it('clears an invalid persisted selection even when another local thread is active', () => {
+    const renderer = createRenderer({
+      selectedSessionKey: 'coven:missing',
+      activeThreadId: 'local',
+      threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+    });
+
+    renderer.render();
+
+    expect(renderer.settings.selectedSessionKey).toBe('');
+    expect(renderer.saveSettings).toHaveBeenCalledOnce();
+  });
+
+  it('defers Coven selection validation until discovery has completed', () => {
+    const renderer = createRenderer({
+      selectedSessionKey: 'coven:not-loaded-yet',
+      phase: 'loading',
+    });
+
+    renderer.render();
+
+    expect(renderer.settings.selectedSessionKey).toBe('coven:not-loaded-yet');
+    expect(renderer.saveSettings).not.toHaveBeenCalled();
   });
 
   it('does not reveal an empty worktree when its branch matches the search', () => {
@@ -1602,10 +1774,13 @@ describe('Tauri Coven session project rail', () => {
     renderer.setActiveProject.mockClear();
     renderer.focusThread.mockClear();
     localRow.focus();
-    const enterEvent = await localRow.emit('keydown', { key: 'Enter' });
+    const enterEvent = new FakeEvent(localRow, 'Enter');
+    renderer.handleTreeKeydown(enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
     expect(renderer.setActiveProject).toHaveBeenCalledWith('alpha');
-    expect(renderer.focusThread).toHaveBeenCalledWith('local');
+    await vi.waitFor(() => {
+      expect(renderer.focusThread).toHaveBeenCalledWith('local');
+    });
 
     renderer.setActiveProject.mockClear();
     renderer.focusThread.mockClear();
@@ -1653,7 +1828,7 @@ describe('Tauri Coven session project rail', () => {
     empty.render();
     expect(empty.sessionListEl.querySelector('.session-worktree-group')).toBeNull();
     expect(empty.sessionListEl.querySelector('.session-empty')?.textContent)
-      .toBe('No matching projects, worktrees, or panes.');
+      .toBe('No sessions yet.');
   });
 
   it('activates focused Coven session treeitems only on Enter', async () => {
@@ -1670,62 +1845,107 @@ describe('Tauri Coven session project rail', () => {
     const row = renderer.sessionListEl.querySelector('.session-row');
     row?.focus();
 
-    const space = await row?.emit('keydown', { key: ' ' });
+    const space = new FakeEvent(row!, ' ');
+    renderer.handleTreeKeydown(space);
     expect(space?.defaultPrevented).toBe(false);
     expect(renderer.openCovenSession).not.toHaveBeenCalled();
 
-    const enter = await row?.emit('keydown', { key: 'Enter' });
+    const enter = new FakeEvent(row!, 'Enter');
+    renderer.handleTreeKeydown(enter);
+    await Promise.resolve();
     expect(enter?.defaultPrevented).toBe(true);
     expect(renderer.openCovenSession).toHaveBeenCalledOnce();
   });
 
-  it('keeps tree arrow traversal on treeitems and out of close buttons', () => {
+  it('implements complete roving tree navigation without traversing embedded controls', async () => {
     const renderer = createRenderer({
+      projects: [{
+        id: 'alpha',
+        name: 'Alpha',
+        root: '/alpha',
+        selectedWorktreePath: '/alpha',
+        worktrees: [{
+          path: '/alpha',
+          branch: 'main',
+          is_main: true,
+          dirty: false,
+          missing: false,
+          collapsed: false,
+        }],
+      }],
       activeProjectId: 'alpha',
       activeThreadId: 'first',
       threads: [
-        { id: 'first', projectId: 'alpha', name: 'First', status: 'running' },
-        { id: 'second', projectId: 'alpha', name: 'Second', status: 'running' },
+        {
+          id: 'first', projectId: 'alpha', worktreePath: '/alpha',
+          name: 'First', status: 'running',
+        },
+        {
+          id: 'second', projectId: 'alpha', worktreePath: '/alpha',
+          name: 'Second', status: 'running',
+        },
       ],
     });
     renderer.render();
-
-    const handleSessionListKeydown = compileFunction<
-      (event: { key: string; preventDefault: () => void }) => void
-    >(
-      extractInlineFunctionSource(mainJs, 'sessionListEl.addEventListener("keydown"'),
-      {
-        document: renderer.document,
-        sessionListEl: renderer.sessionListEl,
-      },
-    );
 
     const rows = renderer.sessionListEl.querySelectorAll('.session-row');
     const first = rows.find((row) => row.dataset.threadId === 'first');
     const second = rows.find((row) => row.dataset.threadId === 'second');
     const firstClose = first?.parentNode?.querySelector('.session-close');
+    const project = renderer.sessionListEl.querySelector('.session-project');
+    const branch = renderer.sessionListEl.querySelector('.session-branch');
     expect(first).toBeDefined();
     expect(second).toBeDefined();
     expect(firstClose).toBeDefined();
 
-    first?.focus();
-    let prevented = 0;
-    handleSessionListKeydown({
-      key: 'ArrowDown',
-      preventDefault: () => { prevented += 1; },
-    });
+    project?.focus();
+    renderer.handleTreeKeydown(new FakeEvent(project!, 'End'));
     expect(renderer.document.activeElement).toBe(second);
-    expect(renderer.document.activeElement).not.toBe(firstClose);
-    expect(prevented).toBe(1);
+    renderer.handleTreeKeydown(new FakeEvent(second!, 'Home'));
+    expect(renderer.document.activeElement).toBe(project);
+    renderer.handleTreeKeydown(new FakeEvent(project!, 'ArrowDown'));
+    expect(renderer.document.activeElement).toBe(branch);
+    renderer.handleTreeKeydown(new FakeEvent(branch!, 'ArrowDown'));
+    expect(renderer.document.activeElement).toBe(first);
+    renderer.handleTreeKeydown(new FakeEvent(first!, 'ArrowUp'));
+    expect(renderer.document.activeElement).toBe(branch);
+
+    renderer.handleTreeKeydown(new FakeEvent(branch!, 'ArrowRight'));
+    expect(renderer.document.activeElement).toBe(first);
+    renderer.handleTreeKeydown(new FakeEvent(first!, 'ArrowLeft'));
+    expect(renderer.document.activeElement).toBe(branch);
+    renderer.handleTreeKeydown(new FakeEvent(branch!, 'ArrowLeft'));
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(true);
+    const collapsedBranch = renderer.sessionListEl.querySelector('.session-branch');
+    renderer.handleTreeKeydown(new FakeEvent(collapsedBranch!, 'ArrowRight'));
+    expect(renderer.state.projects[0].worktrees?.[0].collapsed).toBe(false);
 
     firstClose?.focus();
-    prevented = 0;
-    handleSessionListKeydown({
-      key: 'ArrowDown',
-      preventDefault: () => { prevented += 1; },
-    });
+    const closeEvent = new FakeEvent(firstClose!, 'ArrowDown');
+    renderer.handleTreeKeydown(closeEvent);
     expect(renderer.document.activeElement).toBe(firstClose);
-    expect(prevented).toBe(0);
+    expect(closeEvent.defaultPrevented).toBe(false);
+
+    const currentProject = renderer.sessionListEl.querySelector('.session-project');
+    const currentBranch = renderer.sessionListEl.querySelector('.session-branch');
+    currentProject?.focus();
+    const space = new FakeEvent(currentProject!, ' ');
+    renderer.handleTreeKeydown(space);
+    expect(space.defaultPrevented).toBe(true);
+    expect(renderer.state.projects[0].collapsed).toBe(true);
+    renderer.handleTreeKeydown(new FakeEvent(
+      renderer.sessionListEl.querySelector('.session-project')!,
+      ' ',
+    ));
+    expect(renderer.state.projects[0].collapsed).toBe(false);
+
+    const expandedBranch = renderer.sessionListEl.querySelector('.session-branch');
+    expandedBranch?.focus();
+    const enter = new FakeEvent(expandedBranch!, 'Enter');
+    renderer.handleTreeKeydown(enter);
+    await Promise.resolve();
+    expect(enter.defaultPrevented).toBe(true);
+    expect(renderer.activateProjectWorktree).toHaveBeenCalled();
   });
 
   it('marks rows that hold a pane-tree leaf and detaches them without killing the process', async () => {
