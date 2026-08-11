@@ -345,7 +345,7 @@ function requireHttpsUrl(value: unknown, onError: ErrorFactory): string {
   } catch {
     return onError();
   }
-  if (url.protocol !== 'https:' || url.hostname.trim().length === 0) {
+  if (url.protocol !== 'https:' || url.hostname.trim().length === 0 || url.username || url.password) {
     return onError();
   }
   return parsed;
