@@ -27,6 +27,7 @@ const FAILURE_DEGRADED_COUNT = 2;
 const FAILURE_DISCONNECTED_WINDOW_MS = 30_000;
 const FAILURE_DISCONNECTED_COUNT = 5;
 const DEFAULT_NATIVE_POLL_TIMEOUT_MS = 10_000;
+const MAX_SCOPED_NATIVE_SNAPSHOT_CACHE_KEYS = 4;
 const STOP_POLL_SENTINEL = Symbol('status-controller-stop-poll');
 const METRIC_WIDTH_FALLBACKS = Object.freeze({
   connection: 116,
@@ -927,20 +928,22 @@ function nativeRequestScope(scopeState) {
     : null;
   if (scopeState?.scopeName === 'focused' && threadId) {
     return {
-      key: threadId,
+      key: scopeKey(scopeState),
+      scopeState,
       scope: { threadId },
     };
   }
 
   return {
     key: 'workspace',
+    scopeState,
     scope: undefined,
   };
 }
 
-function shouldDiscardFocusedSnapshot(requestScopeKey, currentScopeState) {
-  return requestScopeKey !== 'workspace'
-    && nativeRequestScope(currentScopeState).key !== requestScopeKey;
+function shouldDiscardFocusedSnapshot(requestScopeState, currentScopeState) {
+  return requestScopeState?.scopeName === 'focused'
+    && scopeKey(requestScopeState) !== scopeKey(currentScopeState);
 }
 
 function isStoppedNativeRequest(result) {
@@ -1514,7 +1517,7 @@ export function createStatusController(options = {}) {
   let nativeRequestCancels = new Set();
   let lifecycleToken = 0;
   let lastFrameFlushAt = now();
-  let lastSuccessfulSnapshot = null;
+  const nativeSnapshotsByScope = new Map();
   let lastActivityAt = now();
   let lastActivitySample = createEmptyActivitySample();
   let lastFrameSample = createEmptyFrameSample();
@@ -1569,6 +1572,53 @@ export function createStatusController(options = {}) {
       nativeHealth: nativeHealthView(nativeHealth, at),
       covenHealth: covenHealthView(covenHealth),
     };
+  }
+
+  function pruneNativeSnapshotCache(preferredKey = 'workspace') {
+    const focusedKeys = [...nativeSnapshotsByScope.keys()].filter((key) => key !== 'workspace');
+    const keepFocused = new Set(focusedKeys.slice(-MAX_SCOPED_NATIVE_SNAPSHOT_CACHE_KEYS));
+    if (preferredKey !== 'workspace' && nativeSnapshotsByScope.has(preferredKey)) {
+      keepFocused.add(preferredKey);
+    }
+
+    for (const key of [...nativeSnapshotsByScope.keys()]) {
+      if (key === 'workspace') continue;
+      if (!keepFocused.has(key)) {
+        nativeSnapshotsByScope.delete(key);
+      }
+    }
+  }
+
+  function cacheNativeSnapshot(scopeState, snapshot, preferredScopeState = scopeState) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return null;
+    }
+
+    const key = scopeKey(scopeState);
+    nativeSnapshotsByScope.delete(key);
+    nativeSnapshotsByScope.set(key, snapshot);
+    pruneNativeSnapshotCache(scopeKey(preferredScopeState));
+    return snapshot;
+  }
+
+  function cachedNativeSnapshot(scopeState) {
+    const key = scopeKey(scopeState);
+    if (!nativeSnapshotsByScope.has(key)) {
+      return null;
+    }
+
+    const snapshot = nativeSnapshotsByScope.get(key) ?? null;
+    nativeSnapshotsByScope.delete(key);
+    nativeSnapshotsByScope.set(key, snapshot);
+    pruneNativeSnapshotCache(key);
+    return snapshot;
+  }
+
+  function scopedNativeSnapshot(scopeState, snapshot) {
+    if (snapshot && typeof snapshot === 'object') {
+      return cacheNativeSnapshot(scopeState, snapshot, scopeState);
+    }
+    return cachedNativeSnapshot(scopeState);
   }
 
   function requestNativeMetrics(requestedScope) {
@@ -1786,7 +1836,7 @@ export function createStatusController(options = {}) {
     }
   }
 
-  function updateNativeHealthFromSuccess(snapshot, latencyMs, sampledAt, { commitSnapshot = true } = {}) {
+  function updateNativeHealthFromSuccess(snapshot, latencyMs, sampledAt) {
     const previousStatus = resolveNativeHealthStatus(nativeHealth, sampledAt);
     const recovered = previousStatus === 'degraded' || previousStatus === 'disconnected';
     nativeHealth = {
@@ -1797,9 +1847,6 @@ export function createStatusController(options = {}) {
       error: '',
       failureAt: [],
     };
-    if (commitSnapshot) {
-      lastSuccessfulSnapshot = snapshot;
-    }
     scheduleNativeHealthTransition(sampledAt);
   }
 
@@ -1832,6 +1879,7 @@ export function createStatusController(options = {}) {
 
   function processSample(rawSample) {
     const scopeState = rawSample.scopeState ?? effectiveScopeForContext(rawSample.context ?? {});
+    const nativeSnapshot = scopedNativeSnapshot(scopeState, rawSample.nativeSnapshot);
     syncTrendScope(scopeState);
     const summary = summarizeForScope(
       rawSample.sampledAt,
@@ -1844,8 +1892,8 @@ export function createStatusController(options = {}) {
     const lineHistory = trends.outputLinesPerSecond.values.slice(-30);
     const outputBaseline = median(lineHistory);
     const thresholds = evaluateSeverity({
-      cpuPercent: rawSample.nativeSnapshot?.workspace?.cpuPercent ?? null,
-      memoryPressurePercent: rawSample.nativeSnapshot?.memoryPressurePercent ?? null,
+      cpuPercent: nativeSnapshot?.workspace?.cpuPercent ?? null,
+      memoryPressurePercent: nativeSnapshot?.memoryPressurePercent ?? null,
       fps: rawSample.frame?.fps ?? null,
       renderLatencyMs: rawSample.frame?.renderLatencyMs ?? null,
       outputLinesPerSecond: activitySample?.workspace?.linesPerSecond ?? null,
@@ -1873,9 +1921,9 @@ export function createStatusController(options = {}) {
     currentMetricSeverity = metricSeverity;
     recordSpikes(metricSeverity, rawSample.sampledAt);
 
-    recordTrend('cpuPercent', rawSample.nativeSnapshot?.workspace?.cpuPercent);
-    recordTrend('memoryBytes', rawSample.nativeSnapshot?.workspace?.memoryBytes);
-    recordTrend('memoryPressurePercent', rawSample.nativeSnapshot?.memoryPressurePercent);
+    recordTrend('cpuPercent', nativeSnapshot?.workspace?.cpuPercent);
+    recordTrend('memoryBytes', nativeSnapshot?.workspace?.memoryBytes);
+    recordTrend('memoryPressurePercent', nativeSnapshot?.memoryPressurePercent);
     recordTrend('fps', rawSample.frame?.fps);
     recordTrend('renderLatencyMs', rawSample.frame?.renderLatencyMs);
     recordTrend('droppedFrames', rawSample.frame?.droppedFrames);
@@ -1893,6 +1941,7 @@ export function createStatusController(options = {}) {
       summary,
       activity: rawSample.activity ?? createEmptyActivitySample(),
       agentToolCalls,
+      nativeSnapshot,
     };
 
     renderView();
@@ -1915,9 +1964,11 @@ export function createStatusController(options = {}) {
     );
     const activitySample = scopeActivitySample(liveSample.activity, scopeState);
     const agentToolCalls = scopedAgentToolCalls(liveSample.context ?? {}, scopeState);
+    const nativeSnapshot = cachedNativeSnapshot(scopeState);
     liveSample.scopeState = scopeState;
     liveSample.summary = summary;
     liveSample.activity = activitySample;
+    liveSample.nativeSnapshot = nativeSnapshot;
     const focusToken = captureFocusToken(doc, elements);
     const metricDisplays = buildMetricDisplays(liveSample);
     const labels = Object.fromEntries(
@@ -2116,15 +2167,17 @@ export function createStatusController(options = {}) {
       const sampledAt = now();
       const currentContext = getContext();
       const currentScopeState = effectiveScopeForContext(currentContext);
-      const discardFocusedResult = shouldDiscardFocusedSnapshot(requestScope.key, currentScopeState);
+      const scopeChanged = requestScope.key !== scopeKey(currentScopeState);
+      const discardFocusedResult = shouldDiscardFocusedSnapshot(requestScope.scopeState, currentScopeState);
       if (result.ok) {
-        updateNativeHealthFromSuccess(result.snapshot, latencyMs, sampledAt, {
-          commitSnapshot: !discardFocusedResult,
-        });
+        updateNativeHealthFromSuccess(result.snapshot, latencyMs, sampledAt);
+        if (!discardFocusedResult) {
+          cacheNativeSnapshot(requestScope.scopeState, result.snapshot, currentScopeState);
+        }
       } else {
         updateNativeHealthFromFailure(result.error, latencyMs, sampledAt);
       }
-      if (discardFocusedResult) {
+      if (scopeChanged) {
         // Snapshot applicability is scope-bound, but native bridge health is global.
         refreshQueued = true;
         return lastView;
@@ -2162,7 +2215,7 @@ export function createStatusController(options = {}) {
         covenSessions: context?.covenSessions ?? [],
       }),
       scopeState,
-      nativeSnapshot: lastSuccessfulSnapshot,
+      nativeSnapshot: cachedNativeSnapshot(scopeState),
       nativeHealth: nativeHealthView(nativeHealth, sampledAt),
       activity: activitySample,
       frame: frameSample,
@@ -2383,9 +2436,9 @@ export function createStatusController(options = {}) {
       const context = sample.context ?? getContext();
       const scopeState = sample.scopeState ?? effectiveScopeForContext(context);
       pruneActivityTracker(activity, context?.threads ?? []);
-      if (Object.prototype.hasOwnProperty.call(sample, 'nativeSnapshot')) {
-        lastSuccessfulSnapshot = sample.nativeSnapshot;
-      }
+      const nativeSnapshot = Object.prototype.hasOwnProperty.call(sample, 'nativeSnapshot')
+        ? scopedNativeSnapshot(scopeState, sample.nativeSnapshot)
+        : cachedNativeSnapshot(scopeState);
       if (sample.nativeHealth) {
         nativeHealth = mergeNativeHealthState(nativeHealth, sample.nativeHealth);
       }
@@ -2403,7 +2456,7 @@ export function createStatusController(options = {}) {
           sample.scopeState ?? scopeState,
         ),
         scopeState,
-        nativeSnapshot: sample.nativeSnapshot ?? lastSuccessfulSnapshot,
+        nativeSnapshot,
         nativeHealth: nativeHealthView(nativeHealth, sampledAt),
         activity: sample.activity ?? lastActivitySample,
         frame: sample.frame ?? lastFrameSample,
@@ -2419,7 +2472,7 @@ export function createStatusController(options = {}) {
         context,
         summary: summarizeForScope(sampledAt, context, scopeState),
         scopeState,
-        nativeSnapshot: lastSuccessfulSnapshot,
+        nativeSnapshot: cachedNativeSnapshot(scopeState),
         nativeHealth: nativeHealthView(nativeHealth, sampledAt),
         activity: lastActivitySample,
         frame: lastFrameSample,

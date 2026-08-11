@@ -1271,6 +1271,68 @@ describe('tauri status controller', () => {
     controller.stop();
   });
 
+  it('omits workspace native metrics after switching to focused until focused metrics arrive', async () => {
+    const focused = createDeferred<unknown>();
+    const currentContext = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const workspaceSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 82,
+        memoryBytes: 700 * 1024 * 1024,
+      },
+    });
+    const focusedSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 17,
+        memoryBytes: 64 * 1024 * 1024,
+      },
+    });
+    const fetchScopes: Array<{ threadId?: string } | undefined> = [];
+    const { controller } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: (scope?: { threadId?: string }) => {
+        fetchScopes.push(scope ? { ...scope } : undefined);
+        return focused.promise;
+      },
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      nativeSnapshot: workspaceSnapshot,
+    }));
+    expect(controller.render()?.labels.performance).toBe('82% 700M');
+
+    const pendingFocused = controller.setScope('focused');
+    await flushMicrotasks();
+
+    const pendingView = controller.render();
+    expect(fetchScopes).toEqual([{ threadId: 'thread-a' }]);
+    expect(pendingView?.effectiveScope).toBe('focused');
+    expect(pendingView?.labels.performance).toBeNull();
+    expect(pendingView?.visibleMetrics).not.toContain('performance');
+    expect(pendingView?.diagnostics.metrics).not.toHaveProperty('cpuPercent');
+    expect(pendingView?.diagnostics.metrics).not.toHaveProperty('memoryBytes');
+    expect(pendingView?.diagnostics.metrics).not.toHaveProperty('memoryPressurePercent');
+
+    focused.resolve(focusedSnapshot);
+    const focusedView = await pendingFocused;
+    expect(focusedView?.labels.performance).toBe('17% 64M');
+    expect(controller.render()?.diagnostics.metrics.cpuPercent).toBe(17);
+  });
+
   it('discards focused results after a mid-poll scope switch and immediately refreshes the new scope', async () => {
     const first = createDeferred<unknown>();
     const second = createDeferred<unknown>();
@@ -1335,6 +1397,8 @@ describe('tauri status controller', () => {
     };
     const queuedWorkspace = controller.setScope('workspace');
     expect(queuedWorkspace).toBe(pendingFocused);
+    expect(controller.render()?.effectiveScope).toBe('workspace');
+    expect(controller.render()?.labels.performance).toBeNull();
 
     first.resolve(buildNativeSnapshot({
       workspace: {
@@ -1346,9 +1410,9 @@ describe('tauri status controller', () => {
     const discardedView = await pendingFocused;
     await flushMicrotasks();
 
-    expect(discardedView?.labels.performance).toBe('12% 256M');
+    expect(discardedView?.labels.performance).toBeNull();
     expect(fetchScopes).toEqual([{ threadId: 'thread-a' }, undefined]);
-    expect(controller.render()?.labels.performance).toBe('12% 256M');
+    expect(controller.render()?.labels.performance).toBeNull();
 
     second.resolve(buildNativeSnapshot({
       workspace: {
@@ -1416,7 +1480,7 @@ describe('tauri status controller', () => {
 
     const queuedWorkspace = controller.setScope('workspace');
     expect(queuedWorkspace).toBe(pendingFocused);
-    expect(controller.render()?.labels.performance).toBe('12% 256M');
+    expect(controller.render()?.labels.performance).toBeNull();
 
     await clock.advance(9_999);
     expect(controller.render()?.labels.connection).toBe('Connected');
@@ -1424,9 +1488,9 @@ describe('tauri status controller', () => {
     await clock.advance(1);
     const timedOutView = await pendingFocused;
 
-    expect(timedOutView?.labels.performance).toBe('12% 256M');
+    expect(timedOutView?.labels.performance).toBeNull();
     expect(fetchScopes).toEqual([{ threadId: 'thread-a' }, undefined]);
-    expect(controller.render()?.labels.performance).toBe('12% 256M');
+    expect(controller.render()?.labels.performance).toBeNull();
     expect(controller.render()?.labels.connection).toBe('Degraded');
 
     controller.toggleMetric('connection');
@@ -1448,6 +1512,202 @@ describe('tauri status controller', () => {
     expect(classTexts(elements.detailBody, 'status-row-task')).toEqual([]);
 
     controller.stop();
+  });
+
+  it('never reuses focused A native metrics under focused B and keeps B unavailable until B succeeds', async () => {
+    let currentContext = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'thread-b',
+          name: 'Thread B',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const focusedASnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 12,
+        memoryBytes: 256 * 1024 * 1024,
+      },
+      processes: [
+        {
+          threadId: 'thread-a',
+          cpuPercent: 12,
+          memoryBytes: 256 * 1024 * 1024,
+          processName: 'zsh-a',
+          pid: 11,
+        },
+      ],
+    });
+    const focusedBSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 34,
+        memoryBytes: 128 * 1024 * 1024,
+      },
+      processes: [
+        {
+          threadId: 'thread-b',
+          cpuPercent: 34,
+          memoryBytes: 128 * 1024 * 1024,
+          processName: 'zsh-b',
+          pid: 22,
+        },
+      ],
+    });
+    let fetchCount = 0;
+    const { controller, elements } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: (scope?: { threadId?: string }) => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          expect(scope).toEqual({ threadId: 'thread-a' });
+          return Promise.resolve(focusedASnapshot);
+        }
+        if (fetchCount === 2) {
+          expect(scope).toEqual({ threadId: 'thread-b' });
+          return Promise.reject(new Error('Native metrics unavailable for Thread B'));
+        }
+        expect(scope).toEqual({ threadId: 'thread-b' });
+        return Promise.resolve(focusedBSnapshot);
+      },
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      scopeState: {
+        focusedAvailable: true,
+        scopeName: 'focused',
+        activeThreadId: 'thread-a',
+      },
+      nativeSnapshot: focusedASnapshot,
+    }));
+    await controller.setScope('focused');
+    expect(controller.render()?.labels.performance).toBe('12% 256M');
+
+    controller.toggleMetric('shells');
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['12% CPU']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['256 MB']);
+
+    currentContext = {
+      ...currentContext,
+      activeThreadId: 'thread-b',
+    };
+    const switchedView = controller.render(buildSample({
+      context: currentContext,
+      scopeState: {
+        focusedAvailable: true,
+        scopeName: 'focused',
+        activeThreadId: 'thread-b',
+      },
+      nativeSnapshot: null,
+    }));
+    expect(switchedView?.effectiveScope).toBe('focused');
+    expect(switchedView?.labels.performance).toBeNull();
+    expect(switchedView?.diagnostics.metrics).not.toHaveProperty('cpuPercent');
+    expect(classTexts(elements.detailBody, 'status-row-name')).toEqual(['Thread B']);
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['CPU --']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['MEM --']);
+    expect(elements.detailBody.textContent).not.toContain('zsh-a');
+    expect(elements.detailBody.textContent).not.toContain('PID 11');
+
+    await controller.refresh();
+    expect(controller.render()?.labels.performance).toBeNull();
+    expect(controller.render()?.diagnostics.metrics).not.toHaveProperty('cpuPercent');
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['CPU --']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['MEM --']);
+
+    const recoveredView = await controller.refresh();
+    expect(recoveredView?.labels.performance).toBe('34% 128M');
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['34% CPU']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['128 MB']);
+    expect(elements.detailBody.textContent).toContain('zsh-b');
+    expect(elements.detailBody.textContent).toContain('PID 22');
+  });
+
+  it('reuses only the workspace native cache when switching back from focused', async () => {
+    const currentContext = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const workspaceSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 82,
+        memoryBytes: 700 * 1024 * 1024,
+      },
+    });
+    const focusedSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 17,
+        memoryBytes: 64 * 1024 * 1024,
+      },
+    });
+    const refreshedWorkspaceSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 90,
+        memoryBytes: 900 * 1024 * 1024,
+      },
+    });
+    const pendingWorkspace = createDeferred<unknown>();
+    let fetchCount = 0;
+    const { controller } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: (scope?: { threadId?: string }) => {
+        fetchCount += 1;
+        if (fetchCount === 1) {
+          expect(scope).toEqual({ threadId: 'thread-a' });
+          return Promise.resolve(focusedSnapshot);
+        }
+        expect(scope).toBeUndefined();
+        return pendingWorkspace.promise;
+      },
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      nativeSnapshot: workspaceSnapshot,
+    }));
+    expect(controller.render()?.labels.performance).toBe('82% 700M');
+
+    await controller.setScope('focused');
+    expect(controller.render()?.effectiveScope).toBe('focused');
+    expect(controller.render()?.labels.performance).toBe('17% 64M');
+
+    const pendingWorkspaceRefresh = controller.setScope('workspace');
+    const workspaceView = controller.render();
+    expect(workspaceView?.effectiveScope).toBe('workspace');
+    expect(workspaceView?.labels.performance).toBe('82% 700M');
+    expect(workspaceView?.diagnostics.metrics.cpuPercent).toBe(82);
+    expect(workspaceView?.labels.performance).not.toBe('17% 64M');
+
+    pendingWorkspace.resolve(refreshedWorkspaceSnapshot);
+    const refreshedView = await pendingWorkspaceRefresh;
+    expect(refreshedView?.labels.performance).toBe('90% 900M');
+    expect(controller.render()?.labels.performance).toBe('90% 900M');
   });
 
   it('degrades at 10s stale age and disconnects at 30s even while a native poll stays hung', async () => {
