@@ -6,6 +6,10 @@ const repoRoot = process.cwd();
 const mainJs = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'), 'utf8');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauriCargo = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
+  'utf8'
+);
 const platformMod = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/platform/mod.rs'),
   'utf8'
@@ -131,14 +135,30 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
   });
 
-  it('retains a portable PTY killer and uses only verified target process termination', () => {
+  it('queries and validates the current Unix PTY foreground group before bounded escalation', () => {
     expect(tauriLib).toMatch(/portable_pty::\{[^}]*ChildKiller/);
     expect(tauriLib).toMatch(/child\.clone_killer\(\)/);
     expect(tauriLib).toMatch(/child\.process_id\(\)/);
     expect(tauriLib).toMatch(/master\.process_group_leader\(\)/);
-    expect(tauriLib).toMatch(
-      /#\[cfg\(unix\)\][\s\S]*?fn\s+terminate_platform_process[\s\S]*?libc::kill\(\s*-leader,[\s\S]*?libc::SIGKILL/
+    expect(tauriLib).toContain('master.as_raw_fd()');
+    expect(tauriLib).toContain('libc::tcgetpgrp');
+    expect(tauriLib).toContain('libc::tcgetsid');
+    expect(tauriLib).toContain('libc::getsid');
+    expect(tauriLib).toContain('libc::getpgid');
+    expect(tauriLib).toMatch(/libc::SIGHUP[\s\S]*libc::SIGCONT[\s\S]*libc::SIGKILL/);
+    expect(tauriLib).toMatch(/reader_cancellation\.cancel\(\)/);
+  });
+
+  it('uses a directly owned Windows process handle with correct BOOL semantics', () => {
+    expect(tauriCargo).toMatch(
+      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys\s*=\s*\{[^}]*version\s*=\s*"=0\.59\.0"[^}]*Win32_Foundation[^}]*Win32_System_Threading/
     );
+    expect(tauriLib).toContain('const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0001;');
+    expect(tauriLib).toMatch(/OpenProcess\(\s*WINDOWS_REQUIRED_PROCESS_RIGHTS/);
+    expect(tauriLib).toContain('TerminateProcess');
+    expect(tauriLib).toContain('CloseHandle');
+    expect(tauriLib).toMatch(/impl<[^>]*>\s+Drop\s+for\s+OwnedTerminationResource/);
+    expect(tauriLib).toMatch(/if\s+result\s*!=\s*0\s*\{\s*Ok\(\(\)\)/);
     const windowsStart = tauriLib.indexOf(
       '#[cfg(windows)]\nfn terminate_platform_process'
     );
@@ -148,9 +168,9 @@ describe('Tauri desktop tab shortcuts', () => {
       windowsStart,
       windowsEnd === -1 ? undefined : windowsEnd
     );
-    expect(windowsTermination).toContain('killer.kill()');
+    expect(windowsTermination).toContain('process.terminate()');
+    expect(windowsTermination).not.toContain('killer.kill()');
     expect(windowsTermination).not.toContain('libc::');
-    expect(windowsTermination).toMatch(/descendant|process tree/i);
   });
 
   it('keeps the Tauri app CSP free of broad unsafe allowances', () => {

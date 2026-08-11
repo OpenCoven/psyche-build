@@ -4,10 +4,12 @@ use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -18,6 +20,11 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl,
+};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
 };
 
 mod coven_sessions;
@@ -57,6 +64,7 @@ struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
+    reader_cancellation: PtyReaderCancellation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,11 +327,309 @@ static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
 static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
+#[cfg(any(test, windows))]
+const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0001;
+
+#[cfg(any(test, windows))]
+fn check_windows_bool<LastError>(result: i32, last_error: LastError) -> std::io::Result<()>
+where
+    LastError: FnOnce() -> std::io::Error,
+{
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(last_error())
+    }
+}
+
+#[cfg(any(test, windows))]
+struct OwnedTerminationResource<T, Close>
+where
+    Close: FnMut(T),
+{
+    resource: Option<T>,
+    close_resource: Close,
+}
+
+#[cfg(any(test, windows))]
+impl<T, Close> OwnedTerminationResource<T, Close>
+where
+    Close: FnMut(T),
+{
+    fn new(resource: T, close_resource: Close) -> Self {
+        Self {
+            resource: Some(resource),
+            close_resource,
+        }
+    }
+
+    #[cfg(windows)]
+    fn get(&self) -> Option<&T> {
+        self.resource.as_ref()
+    }
+
+    fn close(&mut self) {
+        if let Some(resource) = self.resource.take() {
+            (self.close_resource)(resource);
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
+impl<T, Close: FnMut(T)> Drop for OwnedTerminationResource<T, Close> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(windows)]
+fn close_windows_handle(handle: isize) {
+    let result = unsafe { CloseHandle(handle as HANDLE) };
+    if result == 0 {
+        log::warn!(
+            "failed to close retained PTY process handle: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(windows)]
+struct OwnedWindowsProcessHandle {
+    handle: OwnedTerminationResource<isize, fn(isize)>,
+}
+
+#[cfg(windows)]
+impl OwnedWindowsProcessHandle {
+    fn open(process_id: u32) -> std::io::Result<Self> {
+        debug_assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, PROCESS_TERMINATE);
+        let handle = unsafe { OpenProcess(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0, process_id) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
+        })
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        let handle = *self
+            .handle
+            .get()
+            .expect("owned Windows process handle must remain open until drop");
+        let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
+        check_windows_bool(result, std::io::Error::last_os_error)
+    }
+}
+
+#[cfg(windows)]
+fn terminate_borrowed_windows_child(child: &dyn Child) -> std::io::Result<()> {
+    let handle = child.as_raw_handle().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "spawned PTY child did not expose a Windows process handle",
+        )
+    })?;
+    let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
+    check_windows_bool(result, std::io::Error::last_os_error)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnixPtyIdentity {
+    session_id: libc::pid_t,
+    original_process_group: libc::pid_t,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct UnixPtyControl {
+    descriptor: OwnedFd,
+}
+
+#[cfg(unix)]
+impl UnixPtyControl {
+    fn retain(master: &dyn MasterPty) -> std::io::Result<Self> {
+        let descriptor = master.as_raw_fd().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unix PTY master did not expose its control descriptor",
+            )
+        })?;
+        Ok(Self {
+            descriptor: duplicate_cloexec_fd(descriptor)?,
+        })
+    }
+
+    fn descriptor(&self) -> RawFd {
+        self.descriptor.as_raw_fd()
+    }
+
+    fn observe_termination(&self) -> std::io::Result<UnixTerminationObservation> {
+        let current_pid = unsafe { libc::getpid() };
+        let current_process_group = unsafe { libc::getpgrp() };
+        let current_session = checked_unix_pid("getsid(0)", unsafe { libc::getsid(0) })?;
+        let tty_session =
+            checked_unix_pid("tcgetsid", unsafe { libc::tcgetsid(self.descriptor()) })?;
+        let foreground_process_group =
+            checked_unix_pid("tcgetpgrp", unsafe { libc::tcgetpgrp(self.descriptor()) })?;
+        let foreground_session =
+            optional_unix_pid(unsafe { libc::getsid(foreground_process_group) });
+        let foreground_group =
+            optional_unix_pid(unsafe { libc::getpgid(foreground_process_group) });
+        Ok(UnixTerminationObservation {
+            current_pid,
+            current_process_group,
+            current_session,
+            tty_session,
+            foreground_process_group,
+            foreground_session,
+            foreground_group,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn checked_unix_pid(operation: &str, result: libc::pid_t) -> std::io::Result<libc::pid_t> {
+    if result > 0 {
+        Ok(result)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{operation} failed: {}", std::io::Error::last_os_error()),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn optional_unix_pid(result: libc::pid_t) -> Option<libc::pid_t> {
+    (result > 0).then_some(result)
+}
+
+#[cfg(unix)]
+impl UnixPtyIdentity {
+    fn from_spawned_child(
+        child_pid: Option<u32>,
+        master: &dyn MasterPty,
+        control: &UnixPtyControl,
+    ) -> std::io::Result<Self> {
+        let child_pid = child_pid
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "spawned PTY child did not expose a valid Unix process id",
+                )
+            })?;
+        let current_pid = unsafe { libc::getpid() };
+        let current_process_group = unsafe { libc::getpgrp() };
+        let current_session = checked_unix_pid("getsid(0)", unsafe { libc::getsid(0) })?;
+        let tty_session =
+            checked_unix_pid("tcgetsid", unsafe { libc::tcgetsid(control.descriptor()) })?;
+        let child_session = checked_unix_pid("getsid(child)", unsafe { libc::getsid(child_pid) })?;
+        let child_process_group =
+            checked_unix_pid("getpgid(child)", unsafe { libc::getpgid(child_pid) })?;
+        let initial_foreground = master.process_group_leader().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Unix PTY master did not expose its foreground process group",
+            )
+        })?;
+        let initial_foreground_session = checked_unix_pid("getsid(initial foreground)", unsafe {
+            libc::getsid(initial_foreground)
+        })?;
+        let initial_foreground_group = checked_unix_pid("getpgid(initial foreground)", unsafe {
+            libc::getpgid(initial_foreground)
+        })?;
+
+        if child_pid == current_pid
+            || child_process_group == current_process_group
+            || child_session == current_session
+            || child_session != child_pid
+            || child_process_group != child_pid
+            || tty_session != child_pid
+            || initial_foreground <= 1
+            || initial_foreground_session != child_pid
+            || initial_foreground_group != initial_foreground
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spawned PTY process/session ownership could not be verified",
+            ));
+        }
+
+        Ok(Self {
+            session_id: child_session,
+            original_process_group: child_process_group,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnixTerminationObservation {
+    current_pid: libc::pid_t,
+    current_process_group: libc::pid_t,
+    current_session: libc::pid_t,
+    tty_session: libc::pid_t,
+    foreground_process_group: libc::pid_t,
+    foreground_session: Option<libc::pid_t>,
+    foreground_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+fn verified_unix_process_groups(
+    identity: UnixPtyIdentity,
+    observation: UnixTerminationObservation,
+) -> std::io::Result<Vec<libc::pid_t>> {
+    if observation.current_pid <= 1
+        || observation.current_process_group <= 1
+        || observation.current_session <= 1
+        || identity.session_id <= 1
+        || identity.original_process_group != identity.session_id
+        || observation.tty_session != identity.session_id
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PTY control descriptor no longer belongs to the spawned PTY session",
+        ));
+    }
+
+    let foreground = observation.foreground_process_group;
+    for group in [foreground, identity.original_process_group] {
+        if group <= 1
+            || group == observation.current_pid
+            || group == observation.current_process_group
+            || group == observation.current_session
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to signal Psyche's own process or an invalid process group",
+            ));
+        }
+    }
+    if identity.session_id == observation.current_session
+        || observation.foreground_session != Some(identity.session_id)
+        || observation.foreground_group != Some(foreground)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "foreground process group does not belong to the spawned PTY session",
+        ));
+    }
+
+    let mut groups = vec![foreground];
+    if identity.original_process_group != foreground {
+        groups.push(identity.original_process_group);
+    }
+    Ok(groups)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PtyProcessIdentity {
     child_pid: Option<u32>,
     #[cfg(unix)]
-    confirmed_process_group: Option<libc::pid_t>,
+    unix: Option<UnixPtyIdentity>,
 }
 
 impl PtyProcessIdentity {
@@ -332,27 +638,14 @@ impl PtyProcessIdentity {
         Self {
             child_pid,
             #[cfg(unix)]
-            confirmed_process_group: None,
-        }
-    }
-
-    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Self {
-        let child_pid = child.process_id();
-        #[cfg(unix)]
-        let confirmed_process_group = child_pid
-            .and_then(|pid| libc::pid_t::try_from(pid).ok())
-            .filter(|pid| master.process_group_leader() == Some(*pid));
-        Self {
-            child_pid,
-            #[cfg(unix)]
-            confirmed_process_group,
+            unix: None,
         }
     }
 
     #[cfg(unix)]
     #[cfg(test)]
     fn confirmed_unix_process_group(&self) -> Option<libc::pid_t> {
-        self.confirmed_process_group
+        self.unix.map(|identity| identity.original_process_group)
     }
 }
 
@@ -360,31 +653,107 @@ impl PtyProcessIdentity {
 enum PtyTerminationOutcome {
     DirectChild,
     #[cfg(unix)]
-    ConfirmedProcessGroup {
-        leader: libc::pid_t,
+    ConfirmedProcessGroups {
+        foreground_process_group: libc::pid_t,
+        original_process_group: libc::pid_t,
+        group_count: usize,
     },
 }
 
 #[derive(Clone)]
 struct PtyProcessTerminator {
+    #[cfg(not(windows))]
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    #[cfg(unix)]
+    unix_control: Option<Arc<UnixPtyControl>>,
+    #[cfg(windows)]
+    process: Arc<OwnedWindowsProcessHandle>,
     identity: PtyProcessIdentity,
 }
 
 impl PtyProcessTerminator {
-    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Self {
-        Self::from_parts(
-            child.clone_killer(),
-            PtyProcessIdentity::from_spawned_child(child, master),
-        )
+    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Result<Self, String> {
+        let child_pid = child.process_id();
+        #[cfg(windows)]
+        {
+            let process_id = child_pid.ok_or_else(|| {
+                "spawned PTY child did not expose a Windows process id".to_string()
+            })?;
+            let process = match OwnedWindowsProcessHandle::open(process_id) {
+                Ok(process) => process,
+                Err(open_error) => {
+                    let cleanup = terminate_borrowed_windows_child(child);
+                    return Err(match cleanup {
+                        Ok(()) => format!(
+                            "failed to retain Windows PTY process handle for {process_id}: \
+                             {open_error}; spawned child was terminated"
+                        ),
+                        Err(cleanup_error) => format!(
+                            "failed to retain Windows PTY process handle for {process_id}: \
+                             {open_error}; direct spawned-child cleanup also failed: \
+                             {cleanup_error}"
+                        ),
+                    });
+                }
+            };
+            Ok(Self {
+                process: Arc::new(process),
+                identity: PtyProcessIdentity { child_pid },
+            })
+        }
+        #[cfg(unix)]
+        {
+            let mut killer = child.clone_killer();
+            let control = match UnixPtyControl::retain(master) {
+                Ok(control) => control,
+                Err(error) => {
+                    let cleanup = terminate_unretained_unix_child(child_pid, killer.as_mut());
+                    return Err(unix_terminator_setup_error(
+                        "retain PTY control descriptor",
+                        error,
+                        cleanup,
+                    ));
+                }
+            };
+            let unix_identity =
+                match UnixPtyIdentity::from_spawned_child(child_pid, master, &control) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let cleanup = terminate_unretained_unix_child(child_pid, killer.as_mut());
+                        return Err(unix_terminator_setup_error(
+                            "verify PTY process/session ownership",
+                            error,
+                            cleanup,
+                        ));
+                    }
+                };
+            Ok(Self {
+                killer: Arc::new(Mutex::new(killer)),
+                unix_control: Some(Arc::new(control)),
+                identity: PtyProcessIdentity {
+                    child_pid,
+                    unix: Some(unix_identity),
+                },
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(Self::from_parts(
+                child.clone_killer(),
+                PtyProcessIdentity { child_pid },
+            ))
+        }
     }
 
+    #[cfg(all(not(windows), any(test, not(unix))))]
     fn from_parts(
         killer: Box<dyn ChildKiller + Send + Sync>,
         identity: PtyProcessIdentity,
     ) -> Self {
         Self {
             killer: Arc::new(Mutex::new(killer)),
+            #[cfg(unix)]
+            unix_control: None,
             identity,
         }
     }
@@ -395,13 +764,65 @@ impl PtyProcessTerminator {
     }
 
     fn terminate(&self) -> Result<PtyTerminationOutcome, String> {
-        let mut killer = self.killer.lock();
-        terminate_platform_process(killer.as_mut(), self.identity).map_err(|error| {
+        #[cfg(windows)]
+        let result = terminate_platform_process(self.process.as_ref(), self.identity);
+        #[cfg(unix)]
+        let result = {
+            let mut killer = self.killer.lock();
+            terminate_platform_process(killer.as_mut(), self.identity, self.unix_control.as_deref())
+        };
+        #[cfg(not(any(unix, windows)))]
+        let result = {
+            let mut killer = self.killer.lock();
+            killer.kill().map(|()| PtyTerminationOutcome::DirectChild)
+        };
+        result.map_err(|error| {
             format!(
                 "failed to terminate PTY child {:?}: {error}",
                 self.identity.child_pid
             )
         })
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unretained_unix_child(
+    child_pid: Option<u32>,
+    killer: &mut dyn ChildKiller,
+) -> std::io::Result<()> {
+    let Some(pid) = child_pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) else {
+        return killer.kill();
+    };
+    if pid <= 1 || pid == unsafe { libc::getpid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing unsafe spawned-child cleanup",
+        ));
+    }
+    let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_terminator_setup_error(
+    operation: &str,
+    error: std::io::Error,
+    cleanup: std::io::Result<()>,
+) -> String {
+    match cleanup {
+        Ok(()) => format!("failed to {operation}: {error}; spawned PTY child was terminated"),
+        Err(cleanup_error) => format!(
+            "failed to {operation}: {error}; spawned-child cleanup also failed: {cleanup_error}"
+        ),
     }
 }
 
@@ -432,46 +853,96 @@ impl Drop for PtySpawnTerminationGuard {
 }
 
 #[cfg(unix)]
+const UNIX_PTY_TERMINATION_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+#[cfg(unix)]
+fn signal_unix_process_group(
+    process_group: libc::pid_t,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(-process_group, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn unix_validation_error_with_fallback(
+    error: std::io::Error,
+    killer: &mut dyn ChildKiller,
+) -> std::io::Error {
+    let fallback = killer.kill();
+    std::io::Error::new(
+        error.kind(),
+        match fallback {
+            Ok(()) => format!(
+                "{error}; direct-child SIGHUP fallback was requested, but group termination \
+                 was not reported as successful"
+            ),
+            Err(fallback_error) => {
+                format!("{error}; direct-child SIGHUP fallback also failed: {fallback_error}")
+            }
+        },
+    )
+}
+
+#[cfg(unix)]
 fn terminate_platform_process(
     killer: &mut dyn ChildKiller,
     identity: PtyProcessIdentity,
+    control: Option<&UnixPtyControl>,
 ) -> std::io::Result<PtyTerminationOutcome> {
-    let killer_result = killer.kill();
-    let Some(leader) = identity.confirmed_process_group else {
-        killer_result?;
+    let (Some(unix_identity), Some(control)) = (identity.unix, control) else {
+        killer.kill()?;
         return Ok(PtyTerminationOutcome::DirectChild);
     };
-    // portable-pty 0.8 calls setsid before exec on Unix. We additionally
-    // require the PTY foreground process group to equal the spawned child PID
-    // before signaling the group. Descendants that deliberately create a new
-    // session can still escape because portable-pty exposes no owned process
-    // tree handle on Unix.
-    if leader <= 0 || leader == unsafe { libc::getpgrp() } {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to signal an unverified PTY process group",
-        ));
-    }
+    let observation = control
+        .observe_termination()
+        .map_err(|error| unix_validation_error_with_fallback(error, killer))?;
+    let process_groups = verified_unix_process_groups(unix_identity, observation)
+        .map_err(|error| unix_validation_error_with_fallback(error, killer))?;
 
-    let result = unsafe { libc::kill(-leader, libc::SIGKILL) };
-    if result != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
+    let mut first_error = None;
+    for signal in [libc::SIGHUP, libc::SIGCONT] {
+        for process_group in process_groups.iter().copied() {
+            if let Err(error) = signal_unix_process_group(process_group, signal) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
     }
-    Ok(PtyTerminationOutcome::ConfirmedProcessGroup { leader })
+    std::thread::sleep(UNIX_PTY_TERMINATION_GRACE);
+    for process_group in process_groups.iter().copied() {
+        if let Err(error) = signal_unix_process_group(process_group, libc::SIGKILL) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(unix_validation_error_with_fallback(error, killer));
+    }
+
+    Ok(PtyTerminationOutcome::ConfirmedProcessGroups {
+        foreground_process_group: observation.foreground_process_group,
+        original_process_group: unix_identity.original_process_group,
+        group_count: process_groups.len(),
+    })
 }
 
 #[cfg(windows)]
 fn terminate_platform_process(
-    killer: &mut dyn ChildKiller,
+    process: &OwnedWindowsProcessHandle,
     _identity: PtyProcessIdentity,
 ) -> std::io::Result<PtyTerminationOutcome> {
-    // portable-pty terminates its owned process handle. It does not expose a
-    // Windows Job Object, so descendants outside ConPTY's process tree may
-    // survive; owned PTY handles are still closed by the lifecycle cleanup.
-    killer.kill()?;
+    process.terminate()?;
     Ok(PtyTerminationOutcome::DirectChild)
 }
 
@@ -896,10 +1367,190 @@ fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), Strin
     }
 }
 
+#[cfg(unix)]
+fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn duplicate_cloexec_fd(fd: RawFd) -> std::io::Result<OwnedFd> {
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+#[cfg(unix)]
+fn create_cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+    set_cloexec(read.as_raw_fd())?;
+    set_cloexec(write.as_raw_fd())?;
+    Ok((read, write))
+}
+
+#[cfg(unix)]
+struct UnixPtyReader {
+    pty: OwnedFd,
+    cancellation: OwnedFd,
+}
+
+#[cfg(unix)]
+impl Read for UnixPtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: self.cancellation.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.pty.as_raw_fd(),
+                    events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                    revents: 0,
+                },
+            ];
+            let poll_result =
+                unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+            if poll_result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if descriptors[0].revents != 0 {
+                return Ok(0);
+            }
+            if descriptors[1].revents & libc::POLLNVAL != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "PTY reader descriptor became invalid",
+                ));
+            }
+            if descriptors[1].revents != 0 {
+                let read_result = unsafe {
+                    libc::read(
+                        self.pty.as_raw_fd(),
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                    )
+                };
+                if read_result >= 0 {
+                    return Ok(read_result as usize);
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct UnixPtyReaderCancellation {
+    write: OwnedFd,
+    cancelled: AtomicBool,
+}
+
+#[derive(Clone)]
+struct PtyReaderCancellation {
+    #[cfg(unix)]
+    inner: Arc<UnixPtyReaderCancellation>,
+}
+
+impl PtyReaderCancellation {
+    fn cancel(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            let byte = [1u8];
+            loop {
+                let result = unsafe {
+                    libc::write(
+                        self.inner.write.as_raw_fd(),
+                        byte.as_ptr().cast(),
+                        byte.len(),
+                    )
+                };
+                if result >= 0 {
+                    return Ok(());
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn prepare_pty_reader(
+    master: &dyn MasterPty,
+) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
+    let master_fd = master
+        .as_raw_fd()
+        .ok_or_else(|| "Unix PTY master did not expose its reader descriptor".to_string())?;
+    let pty = duplicate_cloexec_fd(master_fd).map_err(|error| error.to_string())?;
+    let (cancellation_read, cancellation_write) =
+        create_cloexec_pipe().map_err(|error| error.to_string())?;
+    Ok((
+        Box::new(UnixPtyReader {
+            pty,
+            cancellation: cancellation_read,
+        }),
+        PtyReaderCancellation {
+            inner: Arc::new(UnixPtyReaderCancellation {
+                write: cancellation_write,
+                cancelled: AtomicBool::new(false),
+            }),
+        },
+    ))
+}
+
+#[cfg(not(unix))]
+fn prepare_pty_reader(
+    master: &dyn MasterPty,
+) -> Result<(Box<dyn Read + Send>, PtyReaderCancellation), String> {
+    Ok((
+        master
+            .try_clone_reader()
+            .map_err(|error| error.to_string())?,
+        PtyReaderCancellation {},
+    ))
+}
+
 struct PtyExitShutdown {
     token: PtySessionToken,
     pump: OutputPump,
     terminator: PtyProcessTerminator,
+    reader_cancellation: PtyReaderCancellation,
     reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
     reader_thread: Option<std::thread::JoinHandle<()>>,
     reader_result: Option<Result<(), String>>,
@@ -912,6 +1563,7 @@ impl PtyExitShutdown {
         token: PtySessionToken,
         pump: OutputPump,
         terminator: PtyProcessTerminator,
+        reader_cancellation: PtyReaderCancellation,
         reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
         reader_thread: std::thread::JoinHandle<()>,
     ) -> Self {
@@ -919,6 +1571,7 @@ impl PtyExitShutdown {
             token,
             pump,
             terminator,
+            reader_cancellation,
             reader_done_rx,
             reader_thread: Some(reader_thread),
             reader_result: None,
@@ -1006,8 +1659,7 @@ impl PtyExitShutdown {
         }
         if !self.reader_completion_known {
             log::warn!(
-                "PTY reader did not finish after terminating '{}'; descendants may \
-                 remain on platforms without process-tree ownership",
+                "PTY reader did not finish after terminating and cancelling '{}'",
                 self.token.thread_id
             );
         }
@@ -1058,6 +1710,9 @@ impl ExitShutdownHooks for PtyExitShutdown {
         if let Err(error) = self.terminator.terminate() {
             log::warn!("PTY termination cleanup failed: {error}");
         }
+        if let Err(error) = self.reader_cancellation.cancel() {
+            log::warn!("PTY reader cancellation failed: {error}");
+        }
     }
 
     fn remove_session(&mut self) {
@@ -1070,10 +1725,21 @@ impl ExitShutdownHooks for PtyExitShutdown {
 }
 
 fn terminate_pty_session(session: PtySession) -> Result<PtyTerminationOutcome, String> {
-    let result = session.terminator.terminate();
+    let termination = session.terminator.terminate();
+    let reader_cancellation = session
+        .reader_cancellation
+        .cancel()
+        .map_err(|error| format!("failed to cancel PTY reader: {error}"));
     session.pump.cancel();
     drop(session);
-    result
+    match (termination, reader_cancellation) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(termination_error), Ok(())) => Err(termination_error),
+        (Ok(_), Err(cancellation_error)) => Err(cancellation_error),
+        (Err(termination_error), Err(cancellation_error)) => {
+            Err(format!("{termination_error}; {cancellation_error}"))
+        }
+    }
 }
 
 pub fn recent_pty_transport_snapshot(
@@ -1152,9 +1818,10 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(resolved_cwd);
-    let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref());
+    let terminator =
+        PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())?;
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
     let app_for_output = app.clone();
@@ -1170,6 +1837,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         writer: Arc::new(Mutex::new(writer)),
         pump: pump.clone(),
         terminator: terminator.clone(),
+        reader_cancellation: reader_cancellation.clone(),
     })?;
     spawn_guard.disarm();
 
@@ -1191,6 +1859,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
             exit_token.clone(),
             exit_pump,
             exit_terminator,
+            reader_cancellation,
             reader_done_rx,
             data_thread,
         );
@@ -2889,13 +3558,16 @@ mod pty_runtime_tests {
     use std::time::Duration;
 
     use super::*;
+    #[cfg(not(windows))]
     use portable_pty::ChildKiller;
 
+    #[cfg(not(windows))]
     #[derive(Debug)]
     struct RecordingChildKiller {
         calls: Arc<AtomicUsize>,
     }
 
+    #[cfg(not(windows))]
     impl ChildKiller for RecordingChildKiller {
         fn kill(&mut self) -> std::io::Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -2906,6 +3578,55 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(unix)]
+    struct ExactUnixFixtureCleanup {
+        pids: Vec<libc::pid_t>,
+        process_groups: Vec<libc::pid_t>,
+    }
+
+    #[cfg(unix)]
+    impl ExactUnixFixtureCleanup {
+        fn new() -> Self {
+            Self {
+                pids: Vec::new(),
+                process_groups: Vec::new(),
+            }
+        }
+
+        fn track_pid(&mut self, pid: libc::pid_t) {
+            self.pids.push(pid);
+        }
+
+        fn track_process_group(&mut self, process_group: libc::pid_t) {
+            self.process_groups.push(process_group);
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ExactUnixFixtureCleanup {
+        fn drop(&mut self) {
+            let own_process_group = unsafe { libc::getpgrp() };
+            self.process_groups.sort_unstable();
+            self.process_groups.dedup();
+            for process_group in self.process_groups.iter().copied() {
+                if process_group > 1 && process_group != own_process_group {
+                    unsafe {
+                        libc::kill(-process_group, libc::SIGKILL);
+                    }
+                }
+            }
+            self.pids.sort_unstable();
+            self.pids.dedup();
+            for pid in self.pids.iter().copied() {
+                if pid > 1 && pid != unsafe { libc::getpid() } {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
         }
     }
 
@@ -2926,6 +3647,169 @@ mod pty_runtime_tests {
             emitted,
             Some(("reader-test".to_string(), 1, b"ordered pty bytes".to_vec()))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_reader_cancellation_releases_a_blocked_pty_read() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref()).unwrap();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader_tx.send(reader.read_to_end(&mut bytes));
+        });
+
+        assert!(matches!(
+            reader_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        reader_cancellation.cancel().unwrap();
+        reader_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader cancellation must release the blocked PTY read")
+            .expect("cancelled PTY reader must exit cleanly");
+
+        drop(pair.slave);
+        drop(pair.master);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_selects_distinct_foreground_and_original_groups() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_200,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_200),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_200, 4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_deduplicates_matching_foreground_and_original_groups() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_100,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_rejects_psyches_own_process_group() {
+        let error = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 99,
+                current_process_group: 100,
+                current_session: 90,
+                tty_session: 4_100,
+                foreground_process_group: 100,
+                foreground_session: Some(4_100),
+                foreground_group: Some(100),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("Psyche"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_rejects_foreground_groups_from_an_unrelated_session() {
+        let error = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_100,
+                foreground_process_group: 4_200,
+                foreground_session: Some(9_900),
+                foreground_group: Some(4_200),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("spawned PTY session"));
+    }
+
+    #[test]
+    fn windows_termination_requests_only_process_terminate_access() {
+        assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0x0001);
+    }
+
+    #[test]
+    fn windows_bool_interpretation_accepts_nonzero_without_reading_last_error() {
+        let result = check_windows_bool(1, || {
+            panic!("successful Win32 BOOL results must not read last-error state")
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn windows_bool_interpretation_rejects_zero_with_the_explicit_os_error() {
+        let error = check_windows_bool(0, || std::io::Error::from_raw_os_error(5)).unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(5));
+    }
+
+    #[test]
+    fn owned_termination_resource_closes_exactly_once() {
+        let closes = Arc::new(AtomicUsize::new(0));
+        {
+            let closes_for_drop = Arc::clone(&closes);
+            let mut resource = OwnedTerminationResource::new(41usize, move |handle| {
+                assert_eq!(handle, 41);
+                closes_for_drop.fetch_add(1, Ordering::SeqCst);
+            });
+            resource.close();
+            resource.close();
+        }
+
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2986,6 +3870,7 @@ mod pty_runtime_tests {
         assert!(registry.is_live("same-id"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn retained_child_killer_is_invoked_by_process_termination() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -3003,6 +3888,7 @@ mod pty_runtime_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
         let failed_calls = Arc::new(AtomicUsize::new(0));
@@ -3030,7 +3916,7 @@ mod pty_runtime_tests {
 
     #[cfg(unix)]
     #[test]
-    fn confirmed_spawned_pty_group_termination_finishes_child_and_reader() {
+    fn interactive_foreground_process_group_termination_finishes_child_and_reader() {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 10,
@@ -3042,16 +3928,37 @@ mod pty_runtime_tests {
         let mut command = CommandBuilder::new("/bin/sh");
         command.args([
             "-c",
-            "trap '' HUP TERM; (trap '' HUP TERM; exec sleep 30) & wait",
+            "set -m; trap '' HUP TERM; sh -c 'trap \"\" HUP TERM; exec sleep 30' & fg",
         ]);
         let mut child = pair.slave.spawn_command(command).unwrap();
         let child_pid = child.process_id().unwrap() as libc::pid_t;
+        let mut cleanup = ExactUnixFixtureCleanup::new();
+        cleanup.track_pid(child_pid);
+        cleanup.track_process_group(child_pid);
         let terminator =
-            PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref());
+            PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref()).unwrap();
         assert_eq!(
             terminator.identity().confirmed_unix_process_group(),
             Some(child_pid)
         );
+        let control_fd = pair
+            .master
+            .as_raw_fd()
+            .expect("Unix PTY master must expose its control descriptor");
+        let foreground_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let foreground_process_group = loop {
+            let foreground = unsafe { libc::tcgetpgrp(control_fd) };
+            if foreground > 1 && foreground != child_pid {
+                break foreground;
+            }
+            assert!(
+                std::time::Instant::now() < foreground_deadline,
+                "interactive fixture never installed a distinct foreground process group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        cleanup.track_pid(foreground_process_group);
+        cleanup.track_process_group(foreground_process_group);
 
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -3069,7 +3976,11 @@ mod pty_runtime_tests {
 
         assert_eq!(
             terminator.terminate().unwrap(),
-            PtyTerminationOutcome::ConfirmedProcessGroup { leader: child_pid }
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group,
+                original_process_group: child_pid,
+                group_count: 2,
+            }
         );
         drop(writer);
         drop(pair.master);
@@ -3082,6 +3993,11 @@ mod pty_runtime_tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("terminated PTY reader must finish")
             .expect("terminated PTY reader must exit cleanly");
+        assert_eq!(unsafe { libc::kill(-foreground_process_group, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
         assert_eq!(unsafe { libc::kill(-child_pid, 0) }, -1);
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
