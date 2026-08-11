@@ -505,10 +505,12 @@ describe('pane metrics refresh contract', () => {
       .toMatch(/syncPaneMetricsVisibility\(\)/);
     expect(functionSource(mainJs, 'enterFileFocus'))
       .toMatch(/terminalHost\.hidden = true;[\s\S]*syncPaneMetricsVisibility\(\)/);
+    expect(functionSource(mainJs, 'clearFileFocusPresentation'))
+      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
     expect(functionSource(mainJs, 'showTerminalView'))
-      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
+      .toMatch(/clearFileFocusPresentation\(\)/);
     expect(functionSource(mainJs, 'closeFileTab'))
-      .toMatch(/terminalHost\.hidden = false;[\s\S]*syncPaneMetricsVisibility\(\)/);
+      .toMatch(/clearFileFocusPresentation\(\)/);
   });
 
   it('debounces refresh after PTY output and rechecks eligibility', () => {
