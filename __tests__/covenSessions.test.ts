@@ -1,7 +1,6 @@
-import { chmod, mkdtemp, realpath, rename, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import { afterAll, describe, expect, it } from 'vitest';
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
 import {
   filterCovenSessionsForProjectRoots,
   listCovenSessionsFromCli,
@@ -10,9 +9,16 @@ import {
   parseCovenSessionsJson,
 } from '../src/utils/covenSessions.js';
 
+const testArtifactRoot = path.resolve('.psyche-test-coven-sessions');
+
 async function tempDir(prefix: string): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), prefix));
+  await mkdir(testArtifactRoot, { recursive: true });
+  return mkdtemp(path.join(testArtifactRoot, prefix));
 }
+
+afterAll(async () => {
+  await rm(testArtifactRoot, { recursive: true, force: true });
+});
 
 // These tests spawn a real shell script, so they inherit the production
 // default timeout of 1.5s. Under full-suite parallelism that is close enough
@@ -131,10 +137,106 @@ describe('coven session adapter', () => {
       { id: 'nested', projectRoot: nested, title: 'Nested' },
       { id: 'outside', projectRoot: outside, title: 'Outside' },
       { id: 'missing', projectRoot: path.join(root, 'nope'), title: 'Missing' },
-    ], [root]);
+    ], [root], {
+      loadWorktrees: async () => [],
+    });
 
     expect(realRoot).toBe(await realpath(root));
     expect(visible.map((session) => session.id)).toEqual(['inside', 'nested']);
+  });
+
+  it('includes sessions from external Git worktrees without exposing unrelated sessions', async () => {
+    const root = await tempDir('psyche-coven-root-');
+    const externalWorktree = await tempDir('psyche-coven-external-worktree-');
+    const externalChild = path.join(externalWorktree, 'packages', 'app');
+    const unrelated = await tempDir('psyche-coven-unrelated-');
+    await mkdir(externalChild, { recursive: true });
+
+    const visible = await filterCovenSessionsForProjectRoots([
+      {
+        id: 'external',
+        projectRoot: externalWorktree,
+        cwd: externalChild,
+        title: 'External worktree',
+      },
+      {
+        id: 'unrelated',
+        projectRoot: unrelated,
+        title: 'Unrelated',
+      },
+    ], [root], {
+      loadWorktrees: async (projectRoot) => [
+        {
+          path: projectRoot,
+          head: 'main',
+          isMain: true,
+          detached: false,
+          bare: false,
+          locked: false,
+          prunable: false,
+          dirty: false,
+          missing: false,
+        },
+        {
+          path: externalWorktree,
+          head: 'external',
+          isMain: false,
+          detached: false,
+          bare: false,
+          locked: false,
+          prunable: false,
+          dirty: false,
+          missing: false,
+        },
+      ],
+    });
+
+    expect(visible).toEqual([
+      expect.objectContaining({
+        id: 'external',
+        projectRoot: await realpath(externalWorktree),
+        cwd: await realpath(externalChild),
+      }),
+    ]);
+  });
+
+  it('keeps the main project visible when worktree discovery fails', async () => {
+    const root = await tempDir('psyche-coven-root-');
+    const unrelated = await tempDir('psyche-coven-unrelated-');
+
+    const visible = await filterCovenSessionsForProjectRoots([
+      { id: 'main', projectRoot: root, title: 'Main project' },
+      { id: 'unrelated', projectRoot: unrelated, title: 'Unrelated' },
+    ], [root], {
+      loadWorktrees: async () => {
+        throw new Error('git unavailable');
+      },
+    });
+
+    expect(visible.map((session) => session.id)).toEqual(['main']);
+  });
+
+  it('bounds asynchronous worktree discovery across published projects', async () => {
+    const roots = await Promise.all(
+      Array.from({ length: 5 }, (_, index) => tempDir(`psyche-coven-root-${index}-`)),
+    );
+    let active = 0;
+    let maxActive = 0;
+
+    await filterCovenSessionsForProjectRoots([], roots, {
+      maxConcurrentProjects: 2,
+      loadWorktrees: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
+        active -= 1;
+        return [];
+      },
+    });
+
+    expect(maxActive).toBe(2);
   });
 
   it('chooses the latest scoped Coven session for the open action', () => {
@@ -226,7 +328,7 @@ exit 2
   it('returns an unavailable load state when the Coven CLI is missing', async () => {
     const state = await listCovenSessionsFromCli({
       timeoutMs: EXEC_TIMEOUT_MS,
-      command: path.join(os.tmpdir(), 'missing-coven-command'),
+      command: path.join(testArtifactRoot, 'missing-coven-command'),
     });
 
     expect(state).toMatchObject({

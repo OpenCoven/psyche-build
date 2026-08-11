@@ -48,6 +48,11 @@ export class PaneStreamHub {
     this.tmux.sendKeysHex(paneId, data);
   }
 
+  /** Resize a tmux pane to the client's viewport. */
+  resizePane(paneId: string, cols: number, rows: number): void {
+    this.tmux.resizePane(paneId, cols, rows);
+  }
+
   forgetPane(paneId: string): void {
     this.buffers.delete(paneId);
   }

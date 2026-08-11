@@ -2,6 +2,10 @@ import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { createCovenClient, type CovenClient } from '../daemon/bridge.js';
+import {
+  readProjectWorktreesAsync,
+  type GitWorktreeSnapshotInput,
+} from '../workspace/snapshot.js';
 
 export type CovenSessionVisibilityStatus =
   | 'created'
@@ -61,6 +65,13 @@ export interface ListCovenSessionsOptions {
 
 export interface ListCovenDaemonSessionsOptions {
   client?: Pick<CovenClient, 'listSessions'>;
+}
+
+export interface FilterCovenSessionsForProjectRootsOptions {
+  loadWorktrees?: (
+    projectRoot: string,
+  ) => Promise<readonly Pick<GitWorktreeSnapshotInput, 'path'>[]>;
+  maxConcurrentProjects?: number;
 }
 
 export async function listCovenSessionsFromDaemon(
@@ -154,21 +165,46 @@ async function listCovenSessionsJson(
 export async function filterCovenSessionsForProjectRoots(
   sessions: CovenSessionVisibility[],
   projectRoots: string[],
+  options: FilterCovenSessionsForProjectRootsOptions = {},
 ): Promise<CovenSessionVisibility[]> {
-  const scopedRoots = await realpathExisting(projectRoots);
-  if (scopedRoots.length === 0) return [];
+  const mainRoots = await realpathExisting(projectRoots);
+  if (mainRoots.length === 0) return [];
+
+  const loadWorktrees = options.loadWorktrees ?? readProjectWorktreesAsync;
+  const discoveredWorktreeRoots = await mapWithConcurrency(
+    mainRoots,
+    normalizeConcurrency(options.maxConcurrentProjects),
+    async (projectRoot) => {
+      try {
+        const worktrees = await loadWorktrees(projectRoot);
+        return realpathExisting(worktrees.map((worktree) => worktree.path));
+      } catch {
+        return [];
+      }
+    },
+  );
+  const scopedRoots = Array.from(new Set([
+    ...mainRoots,
+    ...discoveredWorktreeRoots.flat(),
+  ]));
 
   const visible: CovenSessionVisibility[] = [];
   for (const session of sessions) {
-    const candidateRoot = session.projectRoot || session.cwd;
-    if (!candidateRoot) continue;
+    const [realProjectRoot, realCwd] = await Promise.all([
+      realpathExistingOne(session.projectRoot),
+      session.cwd ? realpathExistingOne(session.cwd) : Promise.resolve(null),
+    ]);
+    const sessionRoots = [realCwd, realProjectRoot]
+      .filter((value): value is string => !!value);
+    if (!sessionRoots.some((sessionRoot) => (
+      scopedRoots.some((root) => isPathInsideOrEqual(root, sessionRoot))
+    ))) continue;
 
-    const realSessionRoot = await realpathExistingOne(candidateRoot);
-    if (!realSessionRoot) continue;
-
-    if (scopedRoots.some((root) => isPathInsideOrEqual(root, realSessionRoot))) {
-      visible.push({ ...session, projectRoot: realSessionRoot });
-    }
+    visible.push({
+      ...session,
+      projectRoot: realProjectRoot ?? session.projectRoot,
+      cwd: session.cwd ? realCwd ?? session.cwd : undefined,
+    });
   }
 
   return visible;
@@ -284,6 +320,35 @@ async function realpathExistingOne(value: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function normalizeConcurrency(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 4;
+  return Math.max(1, Math.floor(value ?? 4));
+}
+
+async function mapWithConcurrency<Input, Output>(
+  inputs: readonly Input[],
+  concurrency: number,
+  mapper: (input: Input) => Promise<Output>,
+): Promise<Output[]> {
+  const outputs = new Array<Output>(inputs.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, inputs.length) },
+      async () => {
+        while (nextIndex < inputs.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          outputs[index] = await mapper(inputs[index]!);
+        }
+      },
+    ),
+  );
+
+  return outputs;
 }
 
 function describeCovenUnavailable(error: unknown): string {

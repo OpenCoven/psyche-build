@@ -33,11 +33,18 @@ public struct HostEndpoint: Codable, Sendable, Equatable, Hashable {
     public let host: String
     public let port: Int
     public let route: ConnectionRoute
+    public let certificateFingerprint: String
 
-    public init(host: String, port: Int, route: ConnectionRoute = .localNetwork) {
+    public init(
+        host: String,
+        port: Int,
+        route: ConnectionRoute = .localNetwork,
+        certificateFingerprint: String
+    ) {
         self.host = host
         self.port = port
         self.route = route
+        self.certificateFingerprint = certificateFingerprint
     }
 }
 
@@ -140,6 +147,7 @@ public struct WorkspacePaneSnapshot: Codable, Sendable, Equatable, Identifiable 
     public let agent: String?
     public let status: String
     public let needsAttention: Bool?
+    public let lastActivity: String?
     public let recoverability: String
 }
 
@@ -382,16 +390,24 @@ public struct WelcomePayload: Codable, Sendable, Equatable {
     public let serverName: String
     public let protocolVersion: Int
     public let projectName: String?
+    public let supportedVersions: [Int]?
 
-    public init(serverID: String, serverName: String, protocolVersion: Int, projectName: String?) {
+    public init(
+        serverID: String,
+        serverName: String,
+        protocolVersion: Int,
+        projectName: String?,
+        supportedVersions: [Int]? = nil
+    ) {
         self.serverID = serverID
         self.serverName = serverName
         self.protocolVersion = protocolVersion
         self.projectName = projectName
+        self.supportedVersions = supportedVersions
     }
 
     enum CodingKeys: String, CodingKey {
-        case serverID = "serverId", serverName, protocolVersion, projectName
+        case serverID = "serverId", serverName, protocolVersion, projectName, supportedVersions
     }
 }
 

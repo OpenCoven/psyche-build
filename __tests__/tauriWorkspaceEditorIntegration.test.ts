@@ -74,9 +74,30 @@ describe('native CodeMirror workspace editor surface', () => {
     }
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
-    expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/diffs\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/input\.bundle\.js" defer><\/script>\s*<script src="\.\/workspace\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
-    );
+    const requiredScripts = [
+      './editor.bundle.js',
+      './diffs.bundle.js',
+      './sessions.bundle.js',
+      './panes.bundle.js',
+      './input.bundle.js',
+      './status.bundle.js',
+      './workspace.bundle.js',
+      './main.js',
+    ];
+    const scriptPositions = requiredScripts.map((script) => {
+      const marker = `<script src="${script}" defer></script>`;
+      return { script, index: indexHtml.indexOf(marker) };
+    });
+
+    for (const { script, index } of scriptPositions) {
+      expect(index, `${script} should be present in native index order`).toBeGreaterThanOrEqual(0);
+    }
+    for (let position = 1; position < scriptPositions.length; position += 1) {
+      expect(
+        scriptPositions[position - 1].index,
+        `${scriptPositions[position - 1].script} should load before ${scriptPositions[position].script}`
+      ).toBeLessThan(scriptPositions[position].index);
+    }
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
   });

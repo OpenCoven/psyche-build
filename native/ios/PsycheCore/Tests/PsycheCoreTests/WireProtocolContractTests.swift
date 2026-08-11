@@ -47,6 +47,12 @@ final class WireProtocolContractTests: XCTestCase {
         return (object?["type"] as? String) ?? ""
     }
 
+    private func nestedControlType(of data: Data) throws -> String {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let payload = try XCTUnwrap(object["payload"] as? [String: Any])
+        return try XCTUnwrap(payload["type"] as? String)
+    }
+
 
     /// Swift's JSONEncoder omits nil optionals; TypeScript's JSON.stringify
     /// writes an explicit null. Both sides DECODE either form, and the host
@@ -108,6 +114,28 @@ final class WireProtocolContractTests: XCTestCase {
         }
     }
 
+    func testMobileControlFixturesCoverEverySupportedRequestType() throws {
+        let covered = Set(
+            try loadFixtures("mobile-control.json")
+                .values
+                .filter { try wireType(of: $0) == "control" }
+                .compactMap { try? nestedControlType(of: $0) }
+        )
+        let missing = MobileControlRequest.supportedTypeNames.filter { !covered.contains($0) }
+        XCTAssertEqual(missing, [], "Supported request types with no fixture")
+    }
+
+    func testMobileControlFixturesCoverEverySupportedResponseType() throws {
+        let covered = Set(
+            try loadFixtures("mobile-control.json")
+                .values
+                .filter { try wireType(of: $0) == "control" }
+                .compactMap { try? nestedControlType(of: $0) }
+        )
+        let missing = MobileControlResponse.supportedTypeNames.filter { !covered.contains($0) }
+        XCTAssertEqual(missing, [], "Supported response types with no fixture")
+    }
+
     // MARK: - Decoding
 
     func testEveryClientFixtureDecodes() throws {
@@ -163,6 +191,60 @@ final class WireProtocolContractTests: XCTestCase {
         }
     }
 
+
+    func testMobileControlFixturesDecodeAndRoundTrip() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        for (name, data) in try loadFixtures("mobile-control.json") {
+            if let decodedClient = try? JSONDecoder().decode(MobileClientMessage.self, from: data) {
+                XCTAssertEqual(
+                    try comparableJSON(encoder.encode(decodedClient)),
+                    try comparableJSON(data),
+                    "Mobile client fixture \(name) did not survive a round-trip"
+                )
+                continue
+            }
+
+            if let decodedServer = try? JSONDecoder().decode(MobileServerMessage.self, from: data) {
+                XCTAssertEqual(
+                    try comparableJSON(encoder.encode(decodedServer)),
+                    try comparableJSON(data),
+                    "Mobile server fixture \(name) did not survive a round-trip"
+                )
+                continue
+            }
+
+            XCTFail("Mobile control fixture \(name) did not decode as either client or server")
+        }
+    }
+
+    func testSupportedMobileControlRequestFixturesDecodeToTypedCases() throws {
+        for (name, data) in try loadFixtures("mobile-control.json") {
+            guard try wireType(of: data) == "control" else { continue }
+            guard MobileControlRequest.supportedTypeNames.contains(try nestedControlType(of: data)) else { continue }
+            guard case let .control(request) = try JSONDecoder().decode(MobileClientMessage.self, from: data) else {
+                return XCTFail("Expected control client fixture \(name)")
+            }
+            if case .unknown = request {
+                XCTFail("Supported request fixture \(name) decoded as .unknown")
+            }
+        }
+    }
+
+    func testSupportedMobileControlResponseFixturesDecodeToTypedCases() throws {
+        for (name, data) in try loadFixtures("mobile-control.json") {
+            guard try wireType(of: data) == "control" else { continue }
+            guard MobileControlResponse.supportedTypeNames.contains(try nestedControlType(of: data)) else { continue }
+            guard case let .control(response) = try JSONDecoder().decode(MobileServerMessage.self, from: data) else {
+                return XCTFail("Expected control server fixture \(name)")
+            }
+            if case .unknown = response {
+                XCTFail("Supported response fixture \(name) decoded as .unknown")
+            }
+        }
+    }
+
     func testWorkspaceSnapshotFixtureDecodesAndRoundTrips() throws {
         let data = try Data(
             contentsOf: Self.fixtureDirectory.appendingPathComponent("workspace-snapshot.json")
@@ -172,6 +254,10 @@ final class WireProtocolContractTests: XCTestCase {
         XCTAssertEqual(snapshot.type, "workspace.snapshot.result")
         XCTAssertEqual(snapshot.workspace.revision, 42)
         XCTAssertEqual(snapshot.workspace.projects.first?.worktrees.count, 2)
+        XCTAssertEqual(
+            snapshot.workspace.projects.first?.worktrees.first?.panes.first?.lastActivity,
+            "2026-08-03T02:12:00.000Z"
+        )
         XCTAssertEqual(
             snapshot.workspace.projects.first?.projectPanes.first?.recoverability,
             "missing-worktree"
