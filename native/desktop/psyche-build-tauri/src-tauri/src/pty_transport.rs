@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
@@ -75,7 +76,13 @@ pub enum CapacityBudget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PushError {
+    OversizedFragment {
+        fragment: Vec<u8>,
+        incoming_bytes: usize,
+        max_pending_bytes: usize,
+    },
     WouldBlock {
+        fragment: Vec<u8>,
         budget: CapacityBudget,
         pending_bytes: usize,
         pending_fragments: usize,
@@ -86,11 +93,21 @@ pub enum PushError {
 impl fmt::Display for PushError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OversizedFragment {
+                incoming_bytes,
+                max_pending_bytes,
+                ..
+            } => write!(
+                formatter,
+                "PTY fragment contains {incoming_bytes} bytes and can never fit the \
+                 {max_pending_bytes}-byte pending budget"
+            ),
             Self::WouldBlock {
                 budget,
                 pending_bytes,
                 pending_fragments,
                 incoming_bytes,
+                ..
             } => write!(
                 formatter,
                 "PTY queue would exceed {budget:?} budget \
@@ -118,18 +135,24 @@ pub enum BatchReadiness {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedBatch {
+    pub sequence: u64,
+    pub data: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PtyBatch {
     pub sequence: u64,
-    pub data: Vec<u8>,
+    pub data: Arc<[u8]>,
     pub emitted_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EmitError {
+pub enum PrepareError {
     SequenceExhausted,
 }
 
-impl fmt::Display for EmitError {
+impl fmt::Display for PrepareError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SequenceExhausted => formatter.write_str("PTY batch sequence space exhausted"),
@@ -137,7 +160,29 @@ impl fmt::Display for EmitError {
     }
 }
 
-impl Error for EmitError {}
+impl Error for PrepareError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitError {
+    NoPreparedBatch,
+    SequenceMismatch { expected: u64, received: u64 },
+    InFlightFull,
+}
+
+impl fmt::Display for CommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPreparedBatch => formatter.write_str("no PTY batch is prepared"),
+            Self::SequenceMismatch { expected, received } => write!(
+                formatter,
+                "prepared PTY batch sequence is {expected}, not {received}"
+            ),
+            Self::InFlightFull => formatter.write_str("PTY in-flight batch window is full"),
+        }
+    }
+}
+
+impl Error for CommitError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AckOutcome {
@@ -191,7 +236,6 @@ impl Error for AckError {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PumpMetrics {
-    pub bytes_read: u64,
     pub bytes_accepted: u64,
     pub fragments_accepted: u64,
     pub bytes_emitted: u64,
@@ -199,8 +243,8 @@ pub struct PumpMetrics {
     pub bytes_acknowledged: u64,
     pub batches_acknowledged: u64,
     pub push_would_block_count: u64,
-    pub queued_bytes_high_water: usize,
-    pub queued_fragments_high_water: usize,
+    pub pending_bytes_high_water: usize,
+    pub pending_fragments_high_water: usize,
     pub in_flight_batches_high_water: usize,
     pub in_flight_bytes_high_water: usize,
     pub total_ack_latency: Duration,
@@ -231,11 +275,54 @@ impl PumpMetrics {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingFragmentProgress {
+    pub consumed_bytes: usize,
+    pub remaining_bytes: usize,
+    pub total_bytes: usize,
+}
+
+#[derive(Debug)]
+struct PendingFragment {
+    data: Vec<u8>,
+    consumed_bytes: usize,
+}
+
+impl PendingFragment {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            consumed_bytes: 0,
+        }
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.data[self.consumed_bytes..]
+    }
+
+    fn progress(&self) -> PendingFragmentProgress {
+        PendingFragmentProgress {
+            consumed_bytes: self.consumed_bytes,
+            remaining_bytes: self.data.len() - self.consumed_bytes,
+            total_bytes: self.data.len(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedEmission {
+    batch: PreparedBatch,
+    completed_fragments: usize,
+}
+
 #[derive(Debug)]
 pub struct PumpState {
     limits: PumpLimits,
-    pending: VecDeque<Vec<u8>>,
+    pending: VecDeque<PendingFragment>,
+    queued_bytes: usize,
     pending_bytes: usize,
+    pending_fragments: usize,
+    prepared: Option<PreparedEmission>,
     in_flight: VecDeque<PtyBatch>,
     in_flight_bytes: usize,
     last_emitted_at: Option<Instant>,
@@ -268,7 +355,10 @@ impl PumpState {
         Ok(Self {
             limits,
             pending: VecDeque::new(),
+            queued_bytes: 0,
             pending_bytes: 0,
+            pending_fragments: 0,
+            prepared: None,
             in_flight: VecDeque::new(),
             in_flight_bytes: 0,
             last_emitted_at: None,
@@ -291,7 +381,11 @@ impl PumpState {
     }
 
     pub fn pending_fragments(&self) -> usize {
-        self.pending.len()
+        self.pending_fragments
+    }
+
+    pub fn oldest_queued_fragment_progress(&self) -> Option<PendingFragmentProgress> {
+        self.pending.front().map(PendingFragment::progress)
     }
 
     pub fn in_flight_len(&self) -> usize {
@@ -306,21 +400,29 @@ impl PumpState {
         self.last_acked_sequence
     }
 
-    pub fn push(&mut self, fragment: &[u8]) -> Result<(), PushError> {
+    pub fn last_emitted_at(&self) -> Option<Instant> {
+        self.last_emitted_at
+    }
+
+    pub fn push(&mut self, fragment: Vec<u8>) -> Result<(), PushError> {
         if fragment.is_empty() {
             return Ok(());
         }
 
-        self.metrics.bytes_read = self
-            .metrics
-            .bytes_read
-            .saturating_add(fragment.len() as u64);
+        let incoming_bytes = fragment.len();
+        if incoming_bytes > self.limits.max_pending_bytes {
+            return Err(PushError::OversizedFragment {
+                fragment,
+                incoming_bytes,
+                max_pending_bytes: self.limits.max_pending_bytes,
+            });
+        }
 
         let next_bytes = self.pending_bytes.checked_add(fragment.len());
         let exceeds_bytes = next_bytes
             .map(|bytes| bytes > self.limits.max_pending_bytes)
             .unwrap_or(true);
-        let exceeds_fragments = self.pending.len() >= self.limits.max_pending_fragments;
+        let exceeds_fragments = self.pending_fragments >= self.limits.max_pending_fragments;
 
         if exceeds_bytes || exceeds_fragments {
             self.metrics.push_would_block_count =
@@ -332,32 +434,41 @@ impl PumpState {
                 (false, false) => unreachable!("a budget must be exceeded"),
             };
             return Err(PushError::WouldBlock {
+                fragment,
                 budget,
                 pending_bytes: self.pending_bytes,
-                pending_fragments: self.pending.len(),
-                incoming_bytes: fragment.len(),
+                pending_fragments: self.pending_fragments,
+                incoming_bytes,
             });
         }
 
-        self.pending.push_back(fragment.to_vec());
+        let fragment_bytes = fragment.len();
+        self.pending.push_back(PendingFragment::new(fragment));
+        self.queued_bytes += fragment_bytes;
         self.pending_bytes = next_bytes.expect("checked above");
+        self.pending_fragments += 1;
         self.metrics.bytes_accepted = self
             .metrics
             .bytes_accepted
-            .saturating_add(fragment.len() as u64);
+            .saturating_add(fragment_bytes as u64);
         self.metrics.fragments_accepted = self.metrics.fragments_accepted.saturating_add(1);
-        self.metrics.queued_bytes_high_water =
-            self.metrics.queued_bytes_high_water.max(self.pending_bytes);
-        self.metrics.queued_fragments_high_water = self
+        self.metrics.pending_bytes_high_water = self
             .metrics
-            .queued_fragments_high_water
-            .max(self.pending.len());
+            .pending_bytes_high_water
+            .max(self.pending_bytes);
+        self.metrics.pending_fragments_high_water = self
+            .metrics
+            .pending_fragments_high_water
+            .max(self.pending_fragments);
 
         Ok(())
     }
 
     pub fn readiness(&self, now: Instant, visibility: PaneVisibility) -> BatchReadiness {
-        if self.pending_bytes == 0 {
+        if self.prepared.is_some() {
+            return BatchReadiness::Ready;
+        }
+        if self.queued_bytes == 0 {
             return BatchReadiness::Empty;
         }
         if self.in_flight.len() >= self.limits.max_in_flight {
@@ -383,11 +494,18 @@ impl PumpState {
         BatchReadiness::Ready
     }
 
-    pub fn next_batch(
+    /// Repeated calls return the same prepared batch until it is committed.
+    ///
+    /// Preparation advances fragment cursors but does not advance cadence,
+    /// sequence state, in-flight occupancy, or emission metrics.
+    pub fn prepare_batch(
         &mut self,
         now: Instant,
         visibility: PaneVisibility,
-    ) -> Result<Option<PtyBatch>, EmitError> {
+    ) -> Result<Option<PreparedBatch>, PrepareError> {
+        if let Some(prepared) = &self.prepared {
+            return Ok(Some(prepared.batch.clone()));
+        }
         if self.readiness(now, visibility) != BatchReadiness::Ready {
             return Ok(None);
         }
@@ -395,36 +513,75 @@ impl PumpState {
         let sequence = self
             .last_emitted_sequence
             .checked_add(1)
-            .ok_or(EmitError::SequenceExhausted)?;
-        let batch_bytes = self.pending_bytes.min(self.limits.max_batch_bytes);
+            .ok_or(PrepareError::SequenceExhausted)?;
+        let batch_bytes = self.queued_bytes.min(self.limits.max_batch_bytes);
         let mut data = Vec::with_capacity(batch_bytes);
+        let mut completed_fragments = 0;
 
         while data.len() < batch_bytes {
-            let mut fragment = self
-                .pending
-                .pop_front()
-                .expect("pending byte accounting guarantees a fragment");
-            let remaining = batch_bytes - data.len();
-            if fragment.len() <= remaining {
-                data.extend_from_slice(&fragment);
-            } else {
-                let remainder = fragment.split_off(remaining);
-                data.extend_from_slice(&fragment);
-                self.pending.push_front(remainder);
+            let fragment_completed = {
+                let fragment = self
+                    .pending
+                    .front_mut()
+                    .expect("pending byte accounting guarantees a fragment");
+                let remaining = batch_bytes - data.len();
+                let copied_bytes = fragment.remaining().len().min(remaining);
+                data.extend_from_slice(&fragment.remaining()[..copied_bytes]);
+                fragment.consumed_bytes += copied_bytes;
+                self.queued_bytes -= copied_bytes;
+                fragment.remaining().is_empty()
+            };
+            if fragment_completed {
+                self.pending.pop_front();
+                completed_fragments += 1;
             }
         }
 
-        self.pending_bytes -= data.len();
-        let batch = PtyBatch {
+        let prepared = PreparedBatch {
             sequence,
-            data,
-            emitted_at: now,
+            data: data.into(),
+        };
+        self.prepared = Some(PreparedEmission {
+            batch: prepared.clone(),
+            completed_fragments,
+        });
+
+        Ok(Some(prepared))
+    }
+
+    /// Records a successfully delivered prepared batch as emitted and in flight.
+    pub fn commit_prepared(
+        &mut self,
+        sequence: u64,
+        emitted_at: Instant,
+    ) -> Result<PtyBatch, CommitError> {
+        let prepared = self.prepared.as_ref().ok_or(CommitError::NoPreparedBatch)?;
+        if sequence != prepared.batch.sequence {
+            return Err(CommitError::SequenceMismatch {
+                expected: prepared.batch.sequence,
+                received: sequence,
+            });
+        }
+        if self.in_flight.len() >= self.limits.max_in_flight {
+            return Err(CommitError::InFlightFull);
+        }
+
+        let prepared = self
+            .prepared
+            .take()
+            .expect("prepared batch was validated above");
+        let batch = PtyBatch {
+            sequence: prepared.batch.sequence,
+            data: prepared.batch.data,
+            emitted_at,
         };
 
+        self.pending_bytes -= batch.data.len();
+        self.pending_fragments -= prepared.completed_fragments;
         self.in_flight_bytes += batch.data.len();
         self.in_flight.push_back(batch.clone());
-        self.last_emitted_at = Some(now);
-        self.last_emitted_sequence = sequence;
+        self.last_emitted_at = Some(emitted_at);
+        self.last_emitted_sequence = batch.sequence;
         self.metrics.bytes_emitted = self
             .metrics
             .bytes_emitted
@@ -439,7 +596,7 @@ impl PumpState {
             .in_flight_bytes_high_water
             .max(self.in_flight_bytes);
 
-        Ok(Some(batch))
+        Ok(batch)
     }
 
     pub fn acknowledge(
@@ -530,6 +687,7 @@ fn validate_limit(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -540,6 +698,21 @@ mod tests {
             ..PumpLimits::default()
         })
         .expect("test limits should be valid")
+    }
+
+    fn commit_next(
+        state: &mut PumpState,
+        now: Instant,
+        visibility: PaneVisibility,
+    ) -> Option<PtyBatch> {
+        let prepared = state
+            .prepare_batch(now, visibility)
+            .expect("sequence should be available")?;
+        Some(
+            state
+                .commit_prepared(prepared.sequence, now)
+                .expect("prepared batch should commit"),
+        )
     }
 
     #[test]
@@ -587,14 +760,12 @@ mod tests {
         let now = Instant::now();
 
         state
-            .push(&vec![1; MAX_BATCH_BYTES - 1])
+            .push(vec![1; MAX_BATCH_BYTES - 1])
             .expect("first fragment should fit");
-        state.push(&[2, 2]).expect("second fragment should fit");
+        state.push(vec![2, 2]).expect("second fragment should fit");
 
-        let first = state
-            .next_batch(now, PaneVisibility::Visible)
-            .expect("sequence should be available")
-            .expect("batch should be ready");
+        let first =
+            commit_next(&mut state, now, PaneVisibility::Visible).expect("batch should be ready");
         assert_eq!(first.sequence, 1);
         assert_eq!(first.data.len(), MAX_BATCH_BYTES);
         assert!(first.data[..MAX_BATCH_BYTES - 1]
@@ -613,12 +784,10 @@ mod tests {
             }
         ));
 
-        let second = state
-            .next_batch(now + VISIBLE_CADENCE, PaneVisibility::Visible)
-            .expect("sequence should be available")
+        let second = commit_next(&mut state, now + VISIBLE_CADENCE, PaneVisibility::Visible)
             .expect("remaining byte should be ready");
         assert_eq!(second.sequence, 2);
-        assert_eq!(second.data, vec![2]);
+        assert_eq!(second.data.as_ref(), &[2]);
     }
 
     #[test]
@@ -626,17 +795,12 @@ mod tests {
         let mut state = PumpState::default();
         let now = Instant::now();
         state
-            .push(&vec![7; MAX_BATCH_BYTES * 3])
+            .push(vec![7; MAX_BATCH_BYTES * 3])
             .expect("input should fit pending budget");
 
-        let first = state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
-        let second = state
-            .next_batch(now + VISIBLE_CADENCE, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        let first = commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
+        let second =
+            commit_next(&mut state, now + VISIBLE_CADENCE, PaneVisibility::Visible).unwrap();
 
         assert_eq!((first.sequence, second.sequence), (1, 2));
         assert_eq!(state.in_flight_len(), MAX_IN_FLIGHT);
@@ -644,18 +808,22 @@ mod tests {
             state.readiness(now + VISIBLE_CADENCE * 2, PaneVisibility::Visible),
             BatchReadiness::InFlightFull
         );
-        assert!(state
-            .next_batch(now + VISIBLE_CADENCE * 2, PaneVisibility::Visible)
-            .unwrap()
-            .is_none());
+        assert!(commit_next(
+            &mut state,
+            now + VISIBLE_CADENCE * 2,
+            PaneVisibility::Visible,
+        )
+        .is_none());
 
         state
             .acknowledge(1, now + VISIBLE_CADENCE * 2)
             .expect("oldest batch acknowledgement should advance");
-        let third = state
-            .next_batch(now + VISIBLE_CADENCE * 2, PaneVisibility::Visible)
-            .unwrap()
-            .expect("capacity should reopen after acknowledgement");
+        let third = commit_next(
+            &mut state,
+            now + VISIBLE_CADENCE * 2,
+            PaneVisibility::Visible,
+        )
+        .expect("capacity should reopen after acknowledgement");
         assert_eq!(third.sequence, 3);
         assert_eq!(state.in_flight_len(), MAX_IN_FLIGHT);
     }
@@ -664,11 +832,11 @@ mod tests {
     fn byte_and_fragment_budgets_block_before_they_are_exceeded() {
         let mut byte_limited = PumpState::default();
         byte_limited
-            .push(&vec![3; MAX_PENDING_BYTES])
+            .push(vec![3; MAX_PENDING_BYTES])
             .expect("exact byte budget should be accepted");
 
         assert!(matches!(
-            byte_limited.push(&[4]),
+            byte_limited.push(vec![4]),
             Err(PushError::WouldBlock {
                 budget: CapacityBudget::Bytes,
                 ..
@@ -677,28 +845,24 @@ mod tests {
         assert_eq!(byte_limited.pending_bytes(), MAX_PENDING_BYTES);
         assert_eq!(byte_limited.pending_fragments(), 1);
         assert_eq!(
-            byte_limited.metrics().bytes_read,
-            MAX_PENDING_BYTES as u64 + 1
-        );
-        assert_eq!(
             byte_limited.metrics().bytes_accepted,
             MAX_PENDING_BYTES as u64
         );
         assert_eq!(byte_limited.metrics().push_would_block_count, 1);
         assert_eq!(
-            byte_limited.metrics().queued_bytes_high_water,
+            byte_limited.metrics().pending_bytes_high_water,
             MAX_PENDING_BYTES
         );
 
         let mut fragment_limited = PumpState::default();
         for value in 0..MAX_PENDING_FRAGMENTS {
             fragment_limited
-                .push(&[(value % 256) as u8])
+                .push(vec![(value % 256) as u8])
                 .expect("fragment within exact budget should be accepted");
         }
 
         assert!(matches!(
-            fragment_limited.push(&[9]),
+            fragment_limited.push(vec![9]),
             Err(PushError::WouldBlock {
                 budget: CapacityBudget::Fragments,
                 ..
@@ -707,7 +871,7 @@ mod tests {
         assert_eq!(fragment_limited.pending_fragments(), MAX_PENDING_FRAGMENTS);
         assert_eq!(fragment_limited.pending_bytes(), MAX_PENDING_FRAGMENTS);
         assert_eq!(
-            fragment_limited.metrics().queued_fragments_high_water,
+            fragment_limited.metrics().pending_fragments_high_water,
             MAX_PENDING_FRAGMENTS
         );
     }
@@ -716,15 +880,9 @@ mod tests {
     fn acknowledgements_are_exact_idempotent_and_ordered() {
         let mut state = state_with_batch_bytes(2);
         let now = Instant::now();
-        state.push(&[1, 2, 3, 4]).unwrap();
-        state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
-        state
-            .next_batch(now + VISIBLE_CADENCE, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        state.push(vec![1, 2, 3, 4]).unwrap();
+        commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
+        commit_next(&mut state, now + VISIBLE_CADENCE, PaneVisibility::Visible).unwrap();
 
         assert_eq!(
             state.acknowledge(0, now + Duration::from_millis(20)),
@@ -781,11 +939,8 @@ mod tests {
     fn acknowledgement_time_before_emission_does_not_advance() {
         let mut state = PumpState::default();
         let emitted_at = Instant::now();
-        state.push(&[1]).unwrap();
-        state
-            .next_batch(emitted_at, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        state.push(vec![1]).unwrap();
+        commit_next(&mut state, emitted_at, PaneVisibility::Visible).unwrap();
 
         assert_eq!(
             state.acknowledge(1, emitted_at - Duration::from_millis(1)),
@@ -800,42 +955,35 @@ mod tests {
     fn zero_length_fragments_are_accepted_as_no_ops() {
         let mut state = PumpState::default();
 
-        state.push(&[]).expect("empty input should be a no-op");
+        state
+            .push(Vec::new())
+            .expect("empty input should be a no-op");
 
         assert_eq!(state.pending_bytes(), 0);
         assert_eq!(state.pending_fragments(), 0);
-        assert_eq!(state.metrics().bytes_read, 0);
         assert_eq!(state.metrics().bytes_accepted, 0);
-        assert!(state
-            .next_batch(Instant::now(), PaneVisibility::Visible)
-            .unwrap()
-            .is_none());
+        assert!(commit_next(&mut state, Instant::now(), PaneVisibility::Visible).is_none());
     }
 
     #[test]
     fn one_batch_drains_multiple_fragments_and_preserves_remainders() {
         let mut state = state_with_batch_bytes(4);
         let now = Instant::now();
-        state.push(b"ab").unwrap();
-        state.push(b"cde").unwrap();
-        state.push(b"f").unwrap();
+        state.push(b"ab".to_vec()).unwrap();
+        state.push(b"cde".to_vec()).unwrap();
+        state.push(b"f".to_vec()).unwrap();
 
-        let first = state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.data, b"abcd");
+        let first = commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
+        assert_eq!(first.data.as_ref(), b"abcd");
         assert_eq!(state.pending_bytes(), 2);
         assert_eq!(state.pending_fragments(), 2);
 
         state
             .acknowledge(1, now + Duration::from_millis(1))
             .unwrap();
-        let second = state
-            .next_batch(now + VISIBLE_CADENCE, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
-        assert_eq!(second.data, b"ef");
+        let second =
+            commit_next(&mut state, now + VISIBLE_CADENCE, PaneVisibility::Visible).unwrap();
+        assert_eq!(second.data.as_ref(), b"ef");
         assert_eq!(state.pending_bytes(), 0);
         assert_eq!(state.pending_fragments(), 0);
     }
@@ -844,17 +992,14 @@ mod tests {
     fn queue_and_in_flight_accounting_changes_only_on_emit_and_ack() {
         let mut state = state_with_batch_bytes(4);
         let now = Instant::now();
-        state.push(&[1, 2, 3]).unwrap();
-        state.push(&[4, 5]).unwrap();
+        state.push(vec![1, 2, 3]).unwrap();
+        state.push(vec![4, 5]).unwrap();
 
         assert_eq!(state.pending_bytes(), 5);
         assert_eq!(state.pending_fragments(), 2);
         assert_eq!(state.in_flight_bytes(), 0);
 
-        state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
         assert_eq!(state.pending_bytes(), 1);
         assert_eq!(state.pending_fragments(), 1);
         assert_eq!(state.in_flight_bytes(), 4);
@@ -874,11 +1019,8 @@ mod tests {
         let now = Instant::now();
 
         let mut visible = state_with_batch_bytes(1);
-        visible.push(&[1, 2]).unwrap();
-        visible
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        visible.push(vec![1, 2]).unwrap();
+        commit_next(&mut visible, now, PaneVisibility::Visible).unwrap();
         visible
             .acknowledge(1, now + Duration::from_millis(1))
             .unwrap();
@@ -894,11 +1036,8 @@ mod tests {
         );
 
         let mut hidden = state_with_batch_bytes(1);
-        hidden.push(&[1, 2]).unwrap();
-        hidden
-            .next_batch(now, PaneVisibility::Hidden)
-            .unwrap()
-            .unwrap();
+        hidden.push(vec![1, 2]).unwrap();
+        commit_next(&mut hidden, now, PaneVisibility::Hidden).unwrap();
         hidden
             .acknowledge(1, now + Duration::from_millis(1))
             .unwrap();
@@ -928,20 +1067,14 @@ mod tests {
         .unwrap();
         let now = Instant::now();
 
-        state.push(b"abc").unwrap();
-        state.push(b"de").unwrap();
-        state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
-        state.push(b"fghi").unwrap();
-        state
-            .next_batch(now, PaneVisibility::Visible)
-            .unwrap()
-            .unwrap();
+        state.push(b"abc".to_vec()).unwrap();
+        state.push(b"de".to_vec()).unwrap();
+        commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
+        state.push(b"fghi".to_vec()).unwrap();
+        commit_next(&mut state, now, PaneVisibility::Visible).unwrap();
 
-        assert_eq!(state.metrics().queued_bytes_high_water, 5);
-        assert_eq!(state.metrics().queued_fragments_high_water, 2);
+        assert_eq!(state.metrics().pending_bytes_high_water, 5);
+        assert_eq!(state.metrics().pending_fragments_high_water, 2);
         assert_eq!(state.metrics().in_flight_batches_high_water, 2);
         assert_eq!(state.metrics().in_flight_bytes_high_water, 8);
         assert_eq!(state.metrics().average_batch_bytes(), Some(4.0));
@@ -958,10 +1091,246 @@ mod tests {
             Some(Duration::from_micros(7_500))
         );
         assert_eq!(state.metrics().max_ack_latency, Duration::from_millis(10));
-        assert_eq!(state.metrics().bytes_read, 9);
         assert_eq!(state.metrics().bytes_accepted, 9);
         assert_eq!(state.metrics().bytes_emitted, 8);
         assert_eq!(state.metrics().batches_emitted, 2);
         assert_eq!(state.metrics().batches_acknowledged, 2);
+    }
+
+    #[test]
+    fn failed_delivery_reuses_prepared_sequence_and_bytes_without_committing_emission() {
+        let mut state = PumpState::default();
+        let now = Instant::now();
+        state.push(b"retry exactly".to_vec()).unwrap();
+
+        let first_attempt = state
+            .prepare_batch(now, PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+        let retry = state
+            .prepare_batch(now + Duration::from_millis(1), PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first_attempt.sequence, 1);
+        assert_eq!(retry.sequence, first_attempt.sequence);
+        assert_eq!(retry.data.as_ref(), first_attempt.data.as_ref());
+        assert!(Arc::ptr_eq(&retry.data, &first_attempt.data));
+        assert_eq!(state.in_flight_len(), 0);
+        assert_eq!(state.last_emitted_at(), None);
+        assert_eq!(state.metrics().bytes_emitted, 0);
+        assert_eq!(state.metrics().batches_emitted, 0);
+        assert_eq!(
+            state.readiness(now, PaneVisibility::Visible),
+            BatchReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn commit_after_failed_delivery_records_exactly_one_emission() {
+        let mut state = PumpState::default();
+        let now = Instant::now();
+        state.push(b"commit once".to_vec()).unwrap();
+
+        let first_attempt = state
+            .prepare_batch(now, PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+        let retry = state
+            .prepare_batch(now + Duration::from_millis(1), PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+        let committed = state
+            .commit_prepared(retry.sequence, now + Duration::from_millis(2))
+            .unwrap();
+
+        assert_eq!(committed.sequence, first_attempt.sequence);
+        assert!(Arc::ptr_eq(&committed.data, &first_attempt.data));
+        assert_eq!(state.in_flight_len(), 1);
+        assert_eq!(
+            state.metrics().bytes_emitted,
+            first_attempt.data.len() as u64
+        );
+        assert_eq!(state.metrics().batches_emitted, 1);
+        assert_eq!(
+            state.commit_prepared(retry.sequence, now + Duration::from_millis(3)),
+            Err(CommitError::NoPreparedBatch)
+        );
+        assert_eq!(state.in_flight_len(), 1);
+        assert_eq!(state.metrics().batches_emitted, 1);
+    }
+
+    #[test]
+    fn repeated_failed_deliveries_never_fill_the_in_flight_window() {
+        let mut state = PumpState::new(PumpLimits {
+            max_in_flight: 1,
+            ..PumpLimits::default()
+        })
+        .unwrap();
+        let now = Instant::now();
+        state.push(b"still pending".to_vec()).unwrap();
+
+        for attempt in 0..2 {
+            let prepared = state
+                .prepare_batch(
+                    now + Duration::from_millis(attempt),
+                    PaneVisibility::Visible,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(prepared.sequence, 1);
+            assert_eq!(state.in_flight_len(), 0);
+            assert_ne!(
+                state.readiness(now, PaneVisibility::Visible),
+                BatchReadiness::InFlightFull
+            );
+        }
+    }
+
+    #[test]
+    fn one_large_owned_fragment_advances_a_cursor_across_many_batches() {
+        let mut state = PumpState::new(PumpLimits {
+            max_pending_bytes: 10,
+            max_pending_fragments: 1,
+            max_batch_bytes: 3,
+            max_in_flight: 1,
+            visible_cadence: Duration::ZERO,
+            hidden_cadence: Duration::ZERO,
+            exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+        })
+        .unwrap();
+        let now = Instant::now();
+        state.push((0_u8..10).collect::<Vec<_>>()).unwrap();
+        let mut emitted = Vec::new();
+
+        for (batch_index, expected_consumed) in [3, 6, 9, 10].into_iter().enumerate() {
+            let prepared = state
+                .prepare_batch(now, PaneVisibility::Visible)
+                .unwrap()
+                .unwrap();
+            emitted.extend_from_slice(&prepared.data);
+
+            if expected_consumed < 10 {
+                assert_eq!(
+                    state.oldest_queued_fragment_progress(),
+                    Some(PendingFragmentProgress {
+                        consumed_bytes: expected_consumed,
+                        remaining_bytes: 10 - expected_consumed,
+                        total_bytes: 10,
+                    })
+                );
+                assert_eq!(state.pending_fragments(), 1);
+            } else {
+                assert_eq!(state.oldest_queued_fragment_progress(), None);
+                assert_eq!(state.pending_fragments(), 1);
+            }
+
+            let sequence = prepared.sequence;
+            state.commit_prepared(sequence, now).unwrap();
+            state.acknowledge(sequence, now).unwrap();
+            assert_eq!(sequence, batch_index as u64 + 1);
+            if expected_consumed == 10 {
+                assert_eq!(state.pending_fragments(), 0);
+            }
+        }
+
+        assert_eq!(emitted, (0_u8..10).collect::<Vec<_>>());
+        assert_eq!(state.pending_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_fragment_is_a_permanent_error_without_state_or_metric_changes() {
+        let mut state = PumpState::new(PumpLimits {
+            max_pending_bytes: 4,
+            ..PumpLimits::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            state.push(vec![1, 2, 3, 4, 5]),
+            Err(PushError::OversizedFragment {
+                fragment: vec![1, 2, 3, 4, 5],
+                incoming_bytes: 5,
+                max_pending_bytes: 4,
+            })
+        );
+        assert_eq!(state.pending_bytes(), 0);
+        assert_eq!(state.pending_fragments(), 0);
+        assert_eq!(state.metrics(), &PumpMetrics::default());
+    }
+
+    #[test]
+    fn transient_would_block_counts_bytes_only_after_retry_is_accepted() {
+        let mut state = PumpState::new(PumpLimits {
+            max_pending_bytes: 4,
+            max_pending_fragments: 2,
+            max_batch_bytes: 4,
+            max_in_flight: 1,
+            visible_cadence: Duration::ZERO,
+            hidden_cadence: Duration::ZERO,
+            exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+        })
+        .unwrap();
+        let now = Instant::now();
+        state.push(vec![1, 2, 3, 4]).unwrap();
+
+        let retry = match state.push(vec![5]) {
+            Err(PushError::WouldBlock {
+                fragment,
+                budget: CapacityBudget::Bytes,
+                ..
+            }) => fragment,
+            other => panic!("expected transient byte backpressure, got {other:?}"),
+        };
+        assert_eq!(state.metrics().bytes_accepted, 4);
+        assert_eq!(state.metrics().fragments_accepted, 1);
+
+        let prepared = state
+            .prepare_batch(now, PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+        state.commit_prepared(prepared.sequence, now).unwrap();
+        state.acknowledge(prepared.sequence, now).unwrap();
+        state.push(retry).unwrap();
+
+        assert_eq!(state.metrics().bytes_accepted, 5);
+        assert_eq!(state.metrics().fragments_accepted, 2);
+        assert_eq!(state.metrics().push_would_block_count, 1);
+    }
+
+    #[test]
+    fn prepared_retention_stays_inside_pending_byte_and_fragment_budgets() {
+        let mut state = PumpState::new(PumpLimits {
+            max_pending_bytes: 1,
+            max_pending_fragments: 1,
+            max_batch_bytes: 1,
+            max_in_flight: 1,
+            visible_cadence: Duration::ZERO,
+            hidden_cadence: Duration::ZERO,
+            exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+        })
+        .unwrap();
+        let now = Instant::now();
+        state.push(vec![1]).unwrap();
+        let prepared = state
+            .prepare_batch(now, PaneVisibility::Visible)
+            .unwrap()
+            .unwrap();
+
+        let retry = match state.push(vec![2]) {
+            Err(PushError::WouldBlock {
+                fragment,
+                budget: CapacityBudget::BytesAndFragments,
+                ..
+            }) => fragment,
+            other => panic!("prepared bytes and fragment should retain both budgets: {other:?}"),
+        };
+        assert_eq!(state.pending_bytes(), 1);
+        assert_eq!(state.pending_fragments(), 1);
+
+        state.commit_prepared(prepared.sequence, now).unwrap();
+        state.push(retry).unwrap();
+        assert_eq!(state.pending_bytes(), 1);
+        assert_eq!(state.pending_fragments(), 1);
     }
 }
