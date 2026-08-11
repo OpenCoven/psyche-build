@@ -498,7 +498,7 @@ describe('desktop shell wiring', () => {
     );
     expect(
       mainJs.match(
-        /\{ label: "Interrupt", run: function \(\) \{ sendToThread\(thread, "\\x03"\); \} \}/g
+        /label: "Interrupt", run: function \(\) \{\s*sendToThread\(thread, "\\x03"\);\s*\} \}/g
       )
     ).toHaveLength(2);
   });
