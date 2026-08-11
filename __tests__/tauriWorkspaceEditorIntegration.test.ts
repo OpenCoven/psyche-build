@@ -74,7 +74,6 @@ describe('native CodeMirror workspace editor surface', () => {
     }
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
-<<<<<<< HEAD
     const requiredScripts = [
       './editor.bundle.js',
       './diffs.bundle.js',
@@ -98,11 +97,6 @@ describe('native CodeMirror workspace editor surface', () => {
         `${scriptPositions[position - 1].script} should load before ${scriptPositions[position].script}`
       ).toBeLessThan(scriptPositions[position].index);
     }
-=======
-    expect(indexHtml).toMatch(
-      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/diffs\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/input\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
-    );
->>>>>>> origin/main
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
   });

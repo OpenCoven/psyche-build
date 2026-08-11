@@ -21,6 +21,8 @@ const panesBundle = readFileSync(
 );
 const inputBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/input.bundle.js'),
+  'utf8'
+);
 const statusBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/status.bundle.js'),
   'utf8'
