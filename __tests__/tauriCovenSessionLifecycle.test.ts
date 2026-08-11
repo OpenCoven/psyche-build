@@ -114,17 +114,12 @@ function compileOpenWithProjectActivation<T extends (...args: never[]) => unknow
   )(...values) as T;
 }
 
-function compileCreateCovenSessionRow<T extends (...args: never[]) => unknown>(
-  dependencies: Record<string, unknown>,
-) {
-  const names = Object.keys(dependencies);
-  const values = Object.values(dependencies);
+function compileCovenRowAttached<T extends (...args: never[]) => unknown>() {
   return Function(
-    ...names,
     `"use strict";
      ${functionSource(mainJs, 'threadCovenSessionId')}
-     return (${functionSource(mainJs, 'createCovenSessionRow')});`,
-  )(...values) as T;
+     return (${functionSource(mainJs, 'covenRowAttached')});`,
+  )() as T;
 }
 
 function attachedThread(overrides: Record<string, any> = {}) {
@@ -537,46 +532,19 @@ describe('macOS Coven session lifecycle boundary', () => {
   });
 
   it('marks nested-launch attachments as focus targets in session rows', () => {
-    const project = { id: 'alpha' };
-    const session = {
-      id: 'remote',
-      status: 'running',
-      harness: 'coven',
-      title: 'Durable session',
-    };
-    const opened: string[] = [];
-    const document = {
-      createElement: (_tag: string) => {
-        const listeners = new Map<string, () => void>();
-        return {
-          type: '',
-          className: '',
-          dataset: {} as Record<string, string>,
-          title: '',
-          textContent: '',
-          appendChild: () => undefined,
-          addEventListener: (event: string, handler: () => void) => {
-            listeners.set(event, handler);
-          },
-          click: () => {
-            listeners.get('click')?.();
-          },
-        };
-      },
-    };
-    const createCovenSessionRow = compileCreateCovenSessionRow<(
-      p: typeof project, s: typeof session,
-    ) => { title: string; click: () => void }>({
-      PsycheSessions,
-      document,
-      state: { threads: [attachedThread()] },
-      openCovenSession: () => { opened.push('open'); },
-    });
+    const covenRowAttached = compileCovenRowAttached<(
+      state: { threads: unknown[] }, projectId: string, sessionId: string,
+    ) => boolean>();
 
-    const row = createCovenSessionRow(project, session);
-    expect(row.title).toBe('Focus attachment');
-    row.click();
-    expect(opened).toEqual(['open']);
+    expect(covenRowAttached({ threads: [attachedThread()] }, 'alpha', 'remote')).toBe(true);
+    expect(covenRowAttached({ threads: [attachedThread({ closeStarted: true })] }, 'alpha', 'remote'))
+      .toBe(false);
+    expect(covenRowAttached({ threads: [attachedThread()] }, 'beta', 'remote')).toBe(false);
+  });
+
+  it('renders coven session rows through the sidebar tree, not a bespoke row builder', () => {
+    expect(mainJs).not.toContain('function createCovenSessionRow(');
+    expect(mainJs).toContain('covenRowAttached(state, project.id, rowModel.id)');
   });
 
   it('activates the exact worktree before reopening and focusing an existing attachment', async () => {

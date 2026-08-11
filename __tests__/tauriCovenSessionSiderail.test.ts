@@ -364,10 +364,11 @@ type LocalThread = {
   launch?: {
     covenSessionId?: string | null;
     launchKind?: string | null;
+    command?: string;
+    args?: string[];
   };
   worktreePath?: string;
   kind?: string;
-  launch?: { command?: string; args?: string[] };
   lastOutputAt?: number;
   isWorking?: boolean;
 };
@@ -491,6 +492,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
     extractFunctionSource(mainJs, 'threadCovenSessionId'),
+    extractFunctionSource(mainJs, 'covenRowAttached'),
     'var sessionTypeFilter = seedSessionTypeFilter;',
     extractFunctionSource(mainJs, 'attachTooltip'),
     extractFunctionSource(mainJs, 'appendHighlightedText'),

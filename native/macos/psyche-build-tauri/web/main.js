@@ -1469,6 +1469,14 @@
     return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
+  function covenRowAttached(state, projectId, sessionId) {
+    return state.threads.some(function (thread) {
+      return thread.projectId === projectId
+        && threadCovenSessionId(thread) === sessionId
+        && !thread.closeStarted;
+    });
+  }
+
   function createThread(opts) {
     var id = makeThreadId();
     var project = opts.project || activeProject();
@@ -5281,11 +5289,7 @@
               var row = rowParts.row;
               var wrapper = rowParts.wrapper;
               if (rowModel.source === "coven") {
-                var attached = state.threads.some(function (thread) {
-                  return thread.projectId === project.id
-                    && thread.covenSessionId === rowModel.id
-                    && !thread.closeStarted;
-                });
+                var attached = covenRowAttached(state, project.id, rowModel.id);
                 row.dataset.sessionId = rowModel.id;
                 row.title = (attached ? "Focus attachment — " : "Attach — ") + row.title;
                 function activateCovenRow() {
