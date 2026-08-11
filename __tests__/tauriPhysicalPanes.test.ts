@@ -825,6 +825,7 @@ describe('Tauri physical terminal panes', () => {
     const thread = { id: 'thread-a' };
     const state = { activeProjectId: project.id, activeThreadId: null as string | null };
     let renders = 0;
+    let refreshes = 0;
     const renderPaneWorkspace = () => { renders += 1; };
     const activatePaneLayoutFocus = compileFunction<(
       value: typeof project, path: string,
@@ -837,6 +838,7 @@ describe('Tauri physical terminal panes', () => {
       findThread: () => thread,
       state,
       renderPaneWorkspace,
+      refreshStatusController: () => { refreshes += 1; },
     });
     const activateProjectWorktree = compileFunction<(
       value: typeof project, path: string,
@@ -852,12 +854,14 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes += 1; },
     });
 
     await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
     expect(project.selectedWorktreePath).toBe('/target');
     expect(state.activeThreadId).toBe(thread.id);
     expect(renders).toBe(1);
+    expect(refreshes).toBe(1);
   });
 
   it('accepts guarded /new-thread creation only after revealing the terminal', async () => {

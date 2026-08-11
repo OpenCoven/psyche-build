@@ -235,7 +235,6 @@
     var thread = leaf && findThread(leaf.threadId);
     state.activeThreadId = thread ? thread.id : null;
     if (thread) project.lastActiveThreadId = thread.id;
-    if (typeof refreshStatusController === "function") refreshStatusController();
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     if (!project || !(await showTerminalView())) return false;
@@ -356,6 +355,7 @@
     flight.promise = (async function () {
       var requestStartedAt = performance.now();
       var errorMessage = "";
+      var ownsDiscovery = false;
       try {
         var response = await invoke("coven_sessions", {
           projectRoots: roots,
@@ -366,6 +366,7 @@
           started.requestId,
           response
         );
+        ownsDiscovery = covenDiscovery.requestId === started.requestId;
       } catch (error) {
         errorMessage = error && error.message ? error.message : String(error || "");
         if (!errorMessage) errorMessage = "Coven sessions could not be loaded";
@@ -374,10 +375,11 @@
           started.requestId,
           { status: "error", sessions: [], message: errorMessage }
         );
+        ownsDiscovery = covenDiscovery.requestId === started.requestId;
       } finally {
         if (covenDiscoveryFlight === flight) covenDiscoveryFlight = null;
       }
-      if (typeof noteStatusCovenSample === "function") {
+      if (ownsDiscovery && typeof noteStatusCovenSample === "function") {
         noteStatusCovenSample({
           phase: covenDiscovery.phase,
           latencyMs: performance.now() - requestStartedAt,
@@ -388,7 +390,9 @@
         });
       }
       renderSessionList();
-      if (typeof refreshStatusController === "function") refreshStatusController();
+      if (ownsDiscovery && typeof refreshStatusController === "function") {
+        refreshStatusController();
+      }
       return covenDiscovery;
     })();
     return flight.promise;

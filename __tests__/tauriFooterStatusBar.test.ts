@@ -777,7 +777,7 @@ describe('Tauri footer status bar shell', () => {
     );
     expect(functionSource(mainJs, 'focusThread')).toContain('refreshStatusController();');
     expect(functionSource(mainJs, 'handlePtyExit')).toContain('refreshStatusController();');
-    expect(functionSource(mainJs, 'activatePaneLayoutFocus')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'activatePaneLayoutFocus')).not.toContain('refreshStatusController();');
     expect(functionSource(mainJs, 'activateProjectWorktree')).toContain('refreshStatusController();');
     expect(functionSource(mainJs, 'refreshProjectWorktrees')).toContain('refreshStatusController();');
     expect(functionSource(mainJs, 'removeProject')).toContain('refreshStatusController();');
