@@ -542,10 +542,25 @@
   function persistableProject(project) {
     return { id: project.id, name: project.name, root: project.root, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
   }
+  function workspaceModel() {
+    return window.PsycheWorkspace || null;
+  }
+  function workspaceSnapshotV2() {
+    return { version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) };
+  }
   function saveWorkspaceNow() {
     if (isRestoringWorkspace) return;
+    var snapshot = workspaceSnapshotV2();
     try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
+      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(snapshot));
+    } catch (_) {}
+    // The native store is authoritative on load; localStorage above stays as a
+    // fallback for webviews where the command is unavailable.
+    var model = workspaceModel();
+    if (!model) return;
+    try {
+      var promise = invoke("workspace_save", { workspace: model.importWorkspaceV2(snapshot) });
+      if (promise && typeof promise.catch === "function") promise.catch(function () {});
     } catch (_) {}
   }
   function saveWorkspaceSoon() {
@@ -555,6 +570,18 @@
   }
   function readSavedWorkspace() {
     try { var saved = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null"); return saved && Array.isArray(saved.projects) ? saved : null; } catch (_) { return null; }
+  }
+  async function loadSavedWorkspace() {
+    var model = workspaceModel();
+    if (model) {
+      try {
+        var native = model.sanitizeWorkspaceV3(await invoke("workspace_load"));
+        if (native && native.projects.length) {
+          return { version: 2, activeProjectId: native.activeProjectId, projects: native.projects };
+        }
+      } catch (_) {}
+    }
+    return readSavedWorkspace();
   }
   function sanitizeSavedProject(saved) {
     if (!saved || !saved.root) return null;
@@ -8250,7 +8277,7 @@
   async function boot(env) {
     state.env = env || {};
     await installTerminalImageDrop();
-    var saved = readSavedWorkspace();
+    var saved = await loadSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
     if (saved && saved.projects.length) {
