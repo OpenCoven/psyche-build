@@ -1960,6 +1960,7 @@ export function createStatusController(options = {}) {
         updateNativeHealthFromFailure(result.error, latencyMs, sampledAt);
       }
       if (discardFocusedResult) {
+        // Snapshot applicability is scope-bound, but native bridge health is global.
         refreshQueued = true;
         return lastView;
       }

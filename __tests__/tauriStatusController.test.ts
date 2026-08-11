@@ -1196,6 +1196,92 @@ describe('tauri status controller', () => {
     controller.stop();
   });
 
+  it('keeps timed-out superseded focused polls from rendering stale snapshots while global health recovers on workspace success', async () => {
+    const focused = createDeferred<unknown>();
+    const workspace = createDeferred<unknown>();
+    const context = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const fetchScopes: Array<{ threadId?: string } | undefined> = [];
+    let fetchCount = 0;
+    const fetchMetrics = (scope?: { threadId?: string }) => {
+      fetchScopes.push(scope ? { ...scope } : undefined);
+      fetchCount += 1;
+      return fetchCount === 1 ? focused.promise : workspace.promise;
+    };
+    const { controller, clock, elements } = createHarness({
+      hidden: true,
+      fetchMetrics,
+      getContext: () => context,
+    });
+
+    controller.render(buildSample({
+      context,
+      scopeState: {
+        focusedAvailable: true,
+        scopeName: 'focused',
+        activeThreadId: 'thread-a',
+      },
+      nativeSnapshot: buildNativeSnapshot({
+        workspace: {
+          cpuPercent: 12,
+          memoryBytes: 256 * 1024 * 1024,
+        },
+      }),
+    }));
+    controller.start();
+
+    const pendingFocused = controller.setScope('focused');
+    await flushMicrotasks();
+    expect(fetchScopes).toEqual([{ threadId: 'thread-a' }]);
+
+    const queuedWorkspace = controller.setScope('workspace');
+    expect(queuedWorkspace).toBe(pendingFocused);
+    expect(controller.render()?.labels.performance).toBe('12% 256M');
+
+    await clock.advance(9_999);
+    expect(controller.render()?.labels.connection).toBe('Connected');
+
+    await clock.advance(1);
+    const timedOutView = await pendingFocused;
+
+    expect(timedOutView?.labels.performance).toBe('12% 256M');
+    expect(fetchScopes).toEqual([{ threadId: 'thread-a' }, undefined]);
+    expect(controller.render()?.labels.performance).toBe('12% 256M');
+    expect(controller.render()?.labels.connection).toBe('Degraded');
+
+    controller.toggleMetric('connection');
+    expect(classTexts(elements.detailBody, 'status-row-state')[0]).toBe('degraded');
+    expect(classTexts(elements.detailBody, 'status-row-task')[0]).toBe('Native metrics timed out after 10s');
+
+    workspace.resolve(buildNativeSnapshot({
+      sampledAtMs: clock.now(),
+      workspace: {
+        cpuPercent: 88,
+        memoryBytes: 900 * 1024 * 1024,
+      },
+    }));
+    await flushMicrotasks();
+
+    expect(controller.render()?.labels.connection).toBe('Connected');
+    expect(controller.render()?.labels.performance).toBe('88% 900M');
+    expect(classTexts(elements.detailBody, 'status-row-state')[0]).toBe('ready');
+    expect(classTexts(elements.detailBody, 'status-row-task')).toEqual([]);
+
+    controller.stop();
+  });
+
   it('degrades at 10s stale age and disconnects at 30s even while a native poll stays hung', async () => {
     const hanging = createDeferred<unknown>();
     let fetchCount = 0;
