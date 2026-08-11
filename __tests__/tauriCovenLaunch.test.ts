@@ -705,6 +705,7 @@ describe('native Coven launch routing', () => {
     );
     const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
       functionSource('handlePtyExit'), {
+        clearThreadAttention: () => undefined,
         findThread: () => thread,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
@@ -890,8 +891,10 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers: new Map(),
       stopThreadPty,
       state,
@@ -921,8 +924,10 @@ describe('native Coven launch routing', () => {
     const state = { threads: [thread], activeThreadId: thread.id };
     let stopCalls = 0;
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => thread,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers: new Map(),
       stopThreadPty: () => { stopCalls += 1; return Promise.resolve(true); },
       state,
@@ -995,8 +1000,10 @@ describe('native Coven launch routing', () => {
       },
     );
     const closeThread = compileFunction<(id: string) => boolean>(functionSource('closeThread'), {
+      forgetThreadInSets: () => undefined,
       findThread: () => state.threads.find((value) => value.id === thread.id) || null,
       detachThreadPane: () => null,
+      retainFileFocusAfterThreadRemoval: () => false,
       pendingDataBuffers: new Map(),
       stopThreadPty,
       state,
@@ -1009,6 +1016,7 @@ describe('native Coven launch routing', () => {
     });
     const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
       functionSource('handlePtyExit'), {
+        clearThreadAttention: () => undefined,
         findThread: () => state.threads.find((value) => value.id === thread.id) || null,
         syncThreadPaneMetadata: () => undefined,
         refreshSidebar: () => undefined,
@@ -1075,6 +1083,7 @@ describe('native Coven launch routing', () => {
       );
       const handlePtyExit = compileFunction<(payload: { thread_id: string }) => boolean>(
         functionSource('handlePtyExit'), {
+          clearThreadAttention: () => undefined,
           findThread: () => thread,
           syncThreadPaneMetadata: () => undefined,
           refreshSidebar: () => undefined,

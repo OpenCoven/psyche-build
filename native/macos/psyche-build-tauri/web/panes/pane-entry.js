@@ -10,5 +10,7 @@ export {
   moveLeaf,
   removeLeaf,
   resizeSplit,
+  retainThreads,
+  spanLayout,
   splitOrientation,
 } from "./pane-tree.mjs";
