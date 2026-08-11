@@ -347,14 +347,17 @@ export default function usePanes(
 
       const projectRoot = config.projectRoot || fallbackProjectRoot;
       const projectName = config.projectName || path.basename(projectRoot);
+      const basePanes = Array.isArray(config.panes)
+        ? config.panes
+        : panesRef.current;
       const normalizedProjects = normalizeSidebarProjects(
         newSidebarProjects,
-        config.panes || [],
+        basePanes,
         projectRoot,
         projectName
       );
       const syncedPanes = syncPaneColorThemes(
-        config.panes || [],
+        basePanes,
         normalizedProjects,
         projectRoot
       );

@@ -122,7 +122,6 @@ export async function createConflictResolutionPane(
 
   // Don't apply global layouts - just enforce sidebar width
   try {
-    const controlPaneId = tmuxService.getCurrentPaneIdSync();
     await enforceControlPaneSize(controlPaneId, sidebarWidth);
   } catch {}
 
