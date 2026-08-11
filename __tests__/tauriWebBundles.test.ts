@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 /**
- * The three web bundles are build output that is committed, so nothing but a
+ * The committed web bundles are generated build output, so nothing but a
  * test stops them drifting from the sources they were built from. This rebuilds
  * each one with the *same* flags the build script uses -- parsed out of
  * package.json rather than restated here, so changing the build cannot leave
@@ -60,6 +60,7 @@ describe('committed web bundles', () => {
     expect(steps.map((step) => step.outfile).sort()).toEqual([
       'web/diffs.bundle.js',
       'web/editor.bundle.js',
+      'web/input.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
     ]);

@@ -85,6 +85,8 @@
     returnThreadId: null,
   };
   var paneLayouts = new Map();
+  var imageDropScaleFactor = 1;
+  var imageDropTarget = null;
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
@@ -636,6 +638,88 @@
   var composerMicEl = document.getElementById("composer-mic");
   var dockGitCountEl = document.getElementById("dock-git-count");
 
+  // -------- Voice call bar --------
+  // Board 4's call bar. The bar, its timer and its mute state are real UI; what
+  // does not exist yet is a voice transport. There is no getUserMedia, no
+  // speech recogniser and no audio path to an agent anywhere in this app, so a
+  // call is a local session that shows the designed chrome and says plainly
+  // that it is not carrying audio. When a transport lands, `startCall` is where
+  // it attaches -- nothing below fakes a connection or a peer.
+
+  var callBarEl = document.getElementById("call-bar");
+  var callTargetEl = document.getElementById("call-target");
+  var callTimerEl = document.getElementById("call-timer");
+  var callNoteEl = document.getElementById("call-note");
+  var callMuteBtn = document.getElementById("call-mute");
+  var callEndBtn = document.getElementById("call-end");
+  var composerCallEl = document.getElementById("composer-call");
+
+  var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+
+  function formatCallTime(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var minutes = Math.floor(total / 60);
+    var seconds = total % 60;
+    return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+  }
+
+  function paintCallBar() {
+    if (!callBarEl) return;
+    callBarEl.hidden = !callState.active;
+    callBarEl.classList.toggle("is-muted", callState.muted);
+    if (composerCallEl) composerCallEl.setAttribute("aria-pressed", callState.active ? "true" : "false");
+    // Painted whether or not the bar is showing: leaving the control reading
+    // "Unmute" after a call ends would have the next call open mislabelled.
+    if (callMuteBtn) {
+      callMuteBtn.textContent = callState.muted ? "Unmute" : "Mute";
+      callMuteBtn.setAttribute("aria-pressed", callState.muted ? "true" : "false");
+    }
+    if (!callState.active) return;
+    if (callTimerEl) callTimerEl.textContent = formatCallTime(Date.now() - callState.startedAt);
+  }
+
+  function startCall() {
+    if (callState.active) return false;
+    var thread = findThread(state.activeThreadId);
+    callState.active = true;
+    callState.muted = false;
+    callState.startedAt = Date.now();
+    if (callTargetEl) callTargetEl.textContent = thread ? thread.name : "no pane focused";
+    // Say what is actually true rather than "the agent hears your terminal":
+    // nothing is listening, and a bar that implied otherwise would be a lie
+    // told in the UI.
+    if (callNoteEl) callNoteEl.textContent = "no voice transport yet — chrome only";
+    paintCallBar();
+    callState.timer = setInterval(paintCallBar, 1000);
+    return true;
+  }
+
+  function endCall() {
+    if (!callState.active) return false;
+    clearInterval(callState.timer);
+    callState.timer = 0;
+    callState.active = false;
+    callState.muted = false;
+    paintCallBar();
+    return true;
+  }
+
+  function toggleCallMute() {
+    if (!callState.active) return false;
+    callState.muted = !callState.muted;
+    paintCallBar();
+    return callState.muted;
+  }
+
+  if (composerCallEl) {
+    composerCallEl.addEventListener("click", function () {
+      if (callState.active) endCall();
+      else startCall();
+    });
+  }
+  if (callMuteBtn) callMuteBtn.addEventListener("click", toggleCallMute);
+  if (callEndBtn) callEndBtn.addEventListener("click", endCall);
+
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
   // (a pane spawned behind a maximised pane, a dock panel switched, …).
@@ -967,6 +1051,141 @@
     return null;
   }
 
+  function acceptsImageDrop(thread) {
+    return !!thread
+      && thread.kind !== "web"
+      && !thread.closing
+      && !thread.closeStarted
+      && thread.status === "running"
+      && thread.ptyStarted === true;
+  }
+
+  function resolveImageDropTarget(position, scaleFactor) {
+    var cssPosition = PsycheTerminalInput.physicalToCssPosition(position, scaleFactor);
+    if (!cssPosition) return null;
+    var element = document.elementFromPoint(cssPosition.x, cssPosition.y);
+    var pane = element && typeof element.closest === "function"
+      ? element.closest(".terminal-pane[data-thread-id]")
+      : null;
+    if (!pane) return null;
+    var thread = findThread(pane.dataset.threadId);
+    return acceptsImageDrop(thread) ? thread : null;
+  }
+
+  function clearImageDropTarget() {
+    if (imageDropTarget && imageDropTarget.pane) {
+      imageDropTarget.pane.classList.remove("image-drop-target");
+    }
+    imageDropTarget = null;
+  }
+
+  function setImageDropTarget(thread) {
+    if (thread === imageDropTarget) return;
+    clearImageDropTarget();
+    if (!acceptsImageDrop(thread) || !thread.pane) return;
+    imageDropTarget = thread;
+    thread.pane.classList.add("image-drop-target");
+  }
+
+  async function insertDroppedImages(thread, paths) {
+    var insertion = PsycheTerminalInput.buildImageDropInsertion(paths);
+    if (!insertion.accepted.length) {
+      toast("No supported images in this drop");
+      return false;
+    }
+
+    try {
+      if (!(await focusThread(thread.id))) {
+        setStatus("image drop focus failed", "warn");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop focus failed", "warn");
+      return false;
+    }
+
+    thread = findThread(thread.id);
+    if (!acceptsImageDrop(thread)) {
+      setStatus("image drop target is no longer available", "warn");
+      return false;
+    }
+
+    try {
+      if (!(await sendToThread(thread, insertion.text))) {
+        setStatus("image drop write failed", "error");
+        return false;
+      }
+    } catch (_error) {
+      setStatus("image drop write failed", "error");
+      return false;
+    }
+
+    if (insertion.skipped.length) {
+      toast(
+        "Inserted " + insertion.accepted.length + " image" +
+        (insertion.accepted.length === 1 ? "" : "s") +
+        "; skipped " + insertion.skipped.length + " unsupported file" +
+        (insertion.skipped.length === 1 ? "" : "s")
+      );
+    }
+    return true;
+  }
+
+  async function handleTerminalImageDropEvent(event) {
+    var payload = event && event.payload ? event.payload : {};
+    if (payload.type === "leave") {
+      clearImageDropTarget();
+      return false;
+    }
+    if (payload.type !== "enter" && payload.type !== "over" && payload.type !== "drop") {
+      return false;
+    }
+
+    var thread = resolveImageDropTarget(payload.position, imageDropScaleFactor);
+    setImageDropTarget(thread);
+    if (payload.type !== "drop") return !!thread;
+
+    clearImageDropTarget();
+    if (!thread) {
+      toast("Drop images onto a running terminal pane");
+      return false;
+    }
+    return insertDroppedImages(thread, Array.isArray(payload.paths) ? payload.paths : []);
+  }
+
+  async function installTerminalImageDrop() {
+    if (!currentWindow ||
+        typeof currentWindow.scaleFactor !== "function" ||
+        typeof currentWindow.onDragDropEvent !== "function") {
+      setStatus("image drop unavailable: Tauri window API missing", "warn");
+      return false;
+    }
+
+    try {
+      var scaleFactor = await currentWindow.scaleFactor();
+      if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+        throw new Error("invalid window scale factor");
+      }
+      imageDropScaleFactor = scaleFactor;
+      if (typeof currentWindow.onScaleChanged === "function") {
+        await currentWindow.onScaleChanged(function (event) {
+          var nextScaleFactor = event && event.payload && event.payload.scaleFactor;
+          if (Number.isFinite(nextScaleFactor) && nextScaleFactor > 0) {
+            imageDropScaleFactor = nextScaleFactor;
+          }
+          clearImageDropTarget();
+        });
+      }
+      await currentWindow.onDragDropEvent(handleTerminalImageDropEvent);
+      window.addEventListener("blur", clearImageDropTarget);
+      return true;
+    } catch (error) {
+      clearImageDropTarget();
+      setStatus("image drop unavailable: " + String(error), "warn");
+      return false;
+    }
+  }
+
   function findBrowserPane(projectId, worktreePath) {
     return state.threads.find(function (thread) {
       return thread.kind === "web" && thread.projectId === projectId &&
@@ -1125,9 +1344,12 @@
     if (minimapDot) minimapDot.classList.toggle("attention", !!thread.needsAttention);
   }
 
-  function noteThreadUserInput(thread) {
-    if (!thread) return;
-    applyThreadAttention(thread, attentionTracker.userInput(thread.id));
+  function noteThreadInput(thread, text) {
+    if (!thread || !threadWantsAttentionTracking(thread)) return;
+    var next = text === "\x03"
+      ? attentionTracker.interrupt(thread.id)
+      : attentionTracker.userInput(thread.id);
+    applyThreadAttention(thread, next);
   }
 
   function clearThreadAttention(thread) {
@@ -2072,18 +2294,7 @@
       }
     } catch (_) { /* canvas fallback is fine */ }
 
-    term.onData(function (data) {
-      // Typing *is* the answer, so the badge clears on the keystroke rather
-      // than on focus: opening a pane to look at the question should not make
-      // the app forget it was asked.
-      noteThreadUserInput(thread);
-      var bytes = Array.from(new TextEncoder().encode(data));
-      invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-        function (err) {
-          term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
-        }
-      );
-    });
+    term.onData(function (data) { sendToThread(thread, data); });
     // Agents ring the bell for exactly one reason -- they want the user back --
     // so it is trusted immediately instead of waiting for the tail to settle.
     if (typeof term.onBell === "function") {
@@ -2692,6 +2903,7 @@
     var layout = activePaneLayout();
     if (!layout || !layout.root) {
       renderTerminalEmptyState();
+      renderPaneMinimap(layout, findOpenFile(state.activeFileId));
       return;
     }
     var root = effectivePaneRoot(layout);
@@ -2716,7 +2928,7 @@
       syncThreadPaneMetadata(thread);
     });
     renderSetPickBar();
-    renderPaneMinimap(layout);
+    renderPaneMinimap(layout, findOpenFile(state.activeFileId));
     scheduleVisiblePaneFit();
     requestAnimationFrame(syncBrowserBounds);
   }
@@ -2810,10 +3022,43 @@
    * Focus mode hides every pane but one, so the minimap is how the others stay
    * reachable — a carousel of the panes the canvas is no longer drawing.
    */
-  function renderPaneMinimap(layout) {
+  function paneMinimapItems(layout, activeFile) {
+    var items = [];
+    if (activeFile) {
+      items.push({
+        kind: "file",
+        id: activeFile.id,
+        label: activeFile.name,
+        detail: activeFile.rel,
+        current: true,
+        thread: null,
+      });
+    }
+    if (!layout || !layout.root) return items;
+
+    PsychePanes.leafIds(scopedPaneRoot(layout)).forEach(function (leafId) {
+      var leaf = PsychePanes.findLeafById(layout.root, leafId);
+      var thread = leaf && findThread(leaf.threadId);
+      if (!thread) return;
+      items.push({
+        kind: "pane",
+        id: thread.id,
+        label: thread.name,
+        detail: (thread.status || "") +
+          (thread.needsAttention
+            ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
+            : ""),
+        current: !activeFile && layout.maximizedLeafId === leafId,
+        thread: thread,
+      });
+    });
+    return items;
+  }
+
+  function renderPaneMinimap(layout, activeFile) {
     if (!terminalArea) return;
     var rail = terminalArea.querySelector(".pane-minimap");
-    if (!layout || !layout.maximizedLeafId) {
+    if (!activeFile && (!layout || !layout.maximizedLeafId)) {
       if (rail) rail.remove();
       return;
     }
@@ -2824,33 +3069,28 @@
       terminalArea.appendChild(rail);
     }
     rail.replaceChildren();
-    var scopedIds = PsychePanes.leafIds(scopedPaneRoot(layout));
-    scopedIds.forEach(function (leafId) {
-      var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread) return;
+    paneMinimapItems(layout, activeFile).forEach(function (item) {
       var entry = document.createElement("button");
       entry.type = "button";
-      entry.dataset.threadId = thread.id;
       entry.className = "minimap-pane" +
-        (layout.maximizedLeafId === leafId ? " is-current" : "");
-      // Focus mode is exactly when a waiting pane is easiest to lose, so the
-      // minimap says it in the label too, not just in the dot's colour.
-      entry.title = thread.name + " — " + (thread.status || "") +
-        (thread.needsAttention
-          ? " · " + PsycheSessions.attentionLabel(thread.attentionReason)
-          : "") +
-        " · click to focus this pane";
+        (item.kind === "file" ? " is-file" : "") +
+        (item.current ? " is-current" : "");
+      if (item.kind === "pane") entry.dataset.threadId = item.thread.id;
+      entry.title = item.kind === "file"
+        ? item.detail + " · current file"
+        : item.label + " — " + item.detail + " · click to focus this pane";
       entry.setAttribute("aria-label", entry.title);
 
       var head = document.createElement("span");
       head.className = "minimap-head";
       var glyph = document.createElement("span");
       glyph.className = "minimap-glyph";
-      glyph.textContent = paneGlyphFor(thread.kind);
+      glyph.textContent = item.kind === "file" ? "F" : paneGlyphFor(item.thread.kind);
       var dot = document.createElement("span");
-      dot.className = "minimap-dot " + sessionStatusClass(thread) +
-        (thread.needsAttention ? " attention" : "");
+      dot.className = item.kind === "file"
+        ? "minimap-dot file"
+        : "minimap-dot " + sessionStatusClass(item.thread) +
+          (item.thread.needsAttention ? " attention" : "");
       head.appendChild(glyph);
       head.appendChild(dot);
 
@@ -2858,16 +3098,28 @@
       body.className = "minimap-body";
       var name = document.createElement("span");
       name.className = "minimap-name";
-      name.textContent = thread.name;
+      name.textContent = item.label;
 
       entry.appendChild(head);
       entry.appendChild(body);
       entry.appendChild(name);
-      entry.addEventListener("click", function () {
-        layout.maximizedLeafId = leafId;
-        layout.focusedLeafId = leafId;
-        focusThread(thread.id);
-      });
+      if (item.kind === "file") {
+        entry.addEventListener("click", function () {
+          restoreFileEditorFocus();
+        });
+      } else {
+        entry.addEventListener("click", async function () {
+          var leaf = PsychePanes.findLeafByThreadId(layout.root, item.thread.id);
+          if (!leaf) return;
+          if (state.activeFileId) {
+            await returnFromFileFocus(item.thread.id, true);
+            return;
+          }
+          layout.maximizedLeafId = leaf.id;
+          layout.focusedLeafId = leaf.id;
+          focusThread(item.thread.id);
+        });
+      }
       rail.appendChild(entry);
     });
   }
@@ -2979,6 +3231,23 @@
     return closed;
   }
 
+  function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId, projectId) {
+    if (!state.activeFileId) return false;
+    state.activeThreadId = nextThreadId || null;
+    if (fileFocus.returnThreadId === removedThreadId) {
+      fileFocus.returnThreadId = nextThreadId || null;
+    }
+    var project = findProject(projectId);
+    if (project) {
+      project.lastActiveThreadId = nextThreadId || null;
+      if (nextThreadId) {
+        var nextThread = findThread(nextThreadId);
+        if (nextThread) project.selectedWorktreePath = nextThread.worktreePath;
+      }
+    }
+    return true;
+  }
+
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
@@ -3007,7 +3276,10 @@
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
-      if (nextThreadId && (!options || options.focus !== false)) {
+      if (retainFileFocusAfterThreadRemoval(id, nextThreadId, closingProjectId)) {
+        renderPaneWorkspace();
+        if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
+      } else if (nextThreadId && (!options || options.focus !== false)) {
         focusThread(nextThreadId);
       } else {
         renderPaneWorkspace();
@@ -3033,7 +3305,9 @@
     thread.hidden = true;
     if (state.activeThreadId === id) {
       state.activeThreadId = null;
-      if (nextThreadId) focusThread(nextThreadId);
+      if (!retainFileFocusAfterThreadRemoval(id, nextThreadId, thread.projectId) && nextThreadId) {
+        focusThread(nextThreadId);
+      }
     }
     renderPaneWorkspace();
     refreshSidebar();
@@ -4914,6 +5188,7 @@
       bind(dirtyFileDialogEl, "keydown", function (event) {
         if (event.key === "Escape") {
           event.preventDefault();
+          event.stopPropagation();
           settle(fallback);
         }
       });
@@ -4936,6 +5211,44 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
+  function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot) {
+    return !!thread &&
+      !thread.hidden &&
+      thread.projectId === project.id &&
+      thread.worktreePath === workspaceRoot &&
+      !!PsychePanes.findLeafByThreadId(root, thread.id);
+  }
+
+  function resolveFileFocusThreadId(preferredId) {
+    var project = activeProject();
+    var layout = activePaneLayout();
+    if (!project || !layout || !layout.root) return null;
+    var root = scopedPaneRoot(layout);
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var preferred = preferredId ? findThread(preferredId) : null;
+    if (fileFocusThreadIsAvailable(preferred, root, project, workspaceRoot)) {
+      return preferred.id;
+    }
+
+    var focused = layout.focusedLeafId
+      ? PsychePanes.findLeafById(root, layout.focusedLeafId)
+      : null;
+    var focusedThread = focused ? findThread(focused.threadId) : null;
+    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot)) {
+      return focusedThread.id;
+    }
+
+    var leafIds = PsychePanes.leafIds(root);
+    for (var i = 0; i < leafIds.length; i++) {
+      var leaf = PsychePanes.findLeafById(root, leafIds[i]);
+      var thread = leaf ? findThread(leaf.threadId) : null;
+      if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot)) {
+        return thread.id;
+      }
+    }
+    return null;
+  }
+
   function enterFileFocus(file) {
     if (!file) return false;
     if (!state.activeFileId) {
@@ -4947,6 +5260,46 @@
     terminalHost.hidden = true;
     syncPaneMetricsVisibility();
     renderPaneMinimap(activePaneLayout(), file);
+    return true;
+  }
+
+  function clearFileFocusPresentation() {
+    state.activeFileId = null;
+    fileFocus.returnThreadId = null;
+    terminalArea.classList.remove("is-file-focused");
+    fileViewEl.hidden = true;
+    terminalHost.hidden = false;
+    syncPaneMetricsVisibility();
+  }
+
+  async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
+    if (!state.activeFileId) return false;
+    var activeFile = findOpenFile(state.activeFileId);
+    var destinationId = resolveFileFocusThreadId(
+      explicitThreadId || fileFocus.returnThreadId
+    );
+    if (destinationId) {
+      var layout = activePaneLayout();
+      var leaf = layout && layout.root
+        ? PsychePanes.findLeafByThreadId(layout.root, destinationId)
+        : null;
+      var previousMaximizedLeafId = layout ? layout.maximizedLeafId : null;
+      var previousFocusedLeafId = layout ? layout.focusedLeafId : null;
+      if (maximizeDestination && layout && leaf) {
+        layout.maximizedLeafId = leaf.id;
+        layout.focusedLeafId = leaf.id;
+      }
+      var focused = await focusThread(destinationId);
+      if (!focused && maximizeDestination && layout) {
+        layout.maximizedLeafId = previousMaximizedLeafId;
+        layout.focusedLeafId = previousFocusedLeafId;
+        renderPaneMinimap(layout, activeFile);
+      }
+      return focused;
+    }
+    if (!(await showTerminalView())) return false;
+    renderPaneWorkspace();
+    refreshSidebar();
     return true;
   }
 
@@ -5076,10 +5429,8 @@
       fileNavigationInFlight = false;
     }
     if (!canShowTerminal) return false;
-    state.activeFileId = null;
-    if (fileViewEl) fileViewEl.hidden = true;
-    if (terminalHost) terminalHost.hidden = false;
-    syncPaneMetricsVisibility();
+    clearFileFocusPresentation();
+    renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
     return true;
@@ -5105,12 +5456,9 @@
     var next = remaining[Math.min(idx, remaining.length - 1)];
     if (next) activateFileTabNow(next.id);
     else {
-      state.activeFileId = null;
-      if (fileViewEl) fileViewEl.hidden = true;
-      if (terminalHost) terminalHost.hidden = false;
-      syncPaneMetricsVisibility();
+      clearFileFocusPresentation();
       refreshTabs();
-      requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
+      renderPaneWorkspace();
     }
     return true;
   }
@@ -5902,10 +6250,21 @@
     });
   }
   function sendToThread(thread, text) {
+    if (!thread || thread.kind === "web") return Promise.resolve(false);
+    noteThreadInput(thread, text);
     var bytes = Array.from(new TextEncoder().encode(text));
-    invoke("pty_write", { threadId: thread.id, thread_id: thread.id, bytes: bytes }).catch(
-      function () {}
-    );
+    return invoke("pty_write", {
+      threadId: thread.id,
+      thread_id: thread.id,
+      bytes: bytes,
+    }).then(function () {
+      return true;
+    }).catch(function (err) {
+      if (thread.term) {
+        thread.term.write("\r\n\x1b[31m[pty_write]\x1b[0m " + err + "\r\n");
+      }
+      return false;
+    });
   }
   function writeToActive(text) {
     var thread = findThread(state.activeThreadId);
@@ -6645,6 +7004,7 @@
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
     ["Save the open file", "⌘S"],
+    ["Leave a fullscreen file", "esc"],
     ["This overlay", "?"],
   ];
   function renderHelpRows() {
@@ -6670,13 +7030,13 @@
   }
 
   // `?` is only a shortcut when nothing text-like has focus.
-  document.addEventListener("keydown", function (event) {
+  document.addEventListener("keydown", async function (event) {
     var tag = (event.target && event.target.tagName ? event.target.tagName : "").toLowerCase();
     var typing = tag === "input" || tag === "textarea" || tag === "select" ||
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → focus mode.
+    // help → menus → set picking → armed confirm → file return → focus mode.
     if (event.key === "Escape") {
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
@@ -6686,6 +7046,14 @@
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
+      // A call is the most transient thing on screen after a menu, and ending
+      // it is always safe: nothing is transmitting.
+      if (endCall()) return;
+      if (state.activeFileId) {
+        event.preventDefault();
+        await returnFromFileFocus();
+        return;
+      }
       if (!typing && exitPaneMaximize()) return;
       return;
     }
@@ -7626,6 +7994,7 @@
 
   async function boot(env) {
     state.env = env || {};
+    await installTerminalImageDrop();
     var saved = readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
