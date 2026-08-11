@@ -114,11 +114,8 @@ export type WorkspaceSummary = {
 };
 
 export type ActivityThreadState = {
-  decoder: TextDecoder;
-  carry: string;
   bytes: number;
   lines: number;
-  at: number;
 };
 
 export type ActivityThreadSample = {
@@ -130,8 +127,8 @@ export type ActivityThreadSample = {
 export type ActivityWorkspaceSample = {
   bytesPerSecond: number;
   linesPerSecond: number;
-  operationsPerSecond: number;
-  errors: number;
+  operationsPerSecond?: number | null;
+  errors?: number | null;
 };
 
 export type ActivityTracker = {
@@ -214,6 +211,7 @@ export const METRICS: Readonly<Record<MetricId, MetricDefinition>>;
 export function normalizePreferences(value: unknown): StatusPreferences;
 export function summarizeWorkspace(input: {
   now?: number;
+  scope?: ScopePreference;
   activeThreadId?: string | null;
   threads: StatusThread[];
   covenSessions: StatusCovenSession[];
@@ -227,6 +225,10 @@ export function notePtyChunk(
   at: number,
 ): void;
 export function noteOperation(tracker: ActivityTracker, ok: boolean): void;
+export function pruneActivityTracker(
+  tracker: ActivityTracker,
+  threads: StatusThread[],
+): void;
 export function flushActivity(
   tracker: ActivityTracker,
   at: number,

@@ -1642,6 +1642,393 @@ describe('tauri status controller', () => {
     expect(classTexts(elements.detailBody, 'status-cell-value')).toContain('0');
   });
 
+  it('scopes focused compact metrics, panels, and diagnostics to the active pane while workspace still aggregates', async () => {
+    const focusedThreadId = 'focus-shell';
+    const focusedProcess = {
+      threadId: focusedThreadId,
+      cpuPercent: 17,
+      memoryBytes: 64 * 1024 * 1024,
+      processName: 'zsh',
+      pid: 11,
+    };
+    const backgroundShellProcess = {
+      threadId: 'background-shell',
+      cpuPercent: 41,
+      memoryBytes: 96 * 1024 * 1024,
+      processName: 'bash',
+      pid: 12,
+    };
+    const workspaceSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 82,
+        memoryBytes: 700 * 1024 * 1024,
+      },
+      processes: [
+        focusedProcess,
+        backgroundShellProcess,
+      ],
+    });
+    const focusedSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 17,
+        memoryBytes: 64 * 1024 * 1024,
+      },
+      processes: [focusedProcess],
+    });
+    let currentContext = {
+      activeThreadId: focusedThreadId,
+      threads: [
+        {
+          id: focusedThreadId,
+          name: 'Focused Shell',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'background-shell',
+          name: 'Background Shell',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'background-task',
+          name: 'Background Task',
+          kind: 'exec',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'background-agent',
+          name: 'Background Agent',
+          kind: 'coven-attach',
+          status: 'running',
+          processBacked: true,
+          covenSessionId: 'attached-session',
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [
+        {
+          id: 'attached-session',
+          title: 'Attached session',
+          status: 'waiting',
+          currentTask: 'Remote attached task',
+          createdAt: 0,
+        },
+        {
+          id: 'workspace-remote',
+          title: 'Workspace Remote',
+          status: 'running',
+          currentTask: 'Workspace only',
+          createdAt: 0,
+        },
+      ],
+      agentToolCalls: 7,
+    };
+    const { controller, elements, clock } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: async (scope?: { threadId?: string }) => (
+        scope?.threadId === focusedThreadId ? focusedSnapshot : workspaceSnapshot
+      ),
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      nativeSnapshot: workspaceSnapshot,
+      nativeHealth: {
+        lastSuccessAt: clock.now(),
+      },
+    }));
+
+    await clock.advance(1_000);
+    controller.notePtyData(focusedThreadId, 'focus\n'.repeat(4), clock.now());
+    controller.notePtyData('background-shell', 'bg\n'.repeat(11), clock.now());
+    for (let count = 0; count < 7; count += 1) {
+      controller.noteOperation({ name: 'shell_exec', ok: false });
+    }
+    await controller.setScope('focused');
+
+    const focusedView = controller.render();
+    expect(focusedView?.effectiveScope).toBe('focused');
+    expect(focusedView?.labels.agents).toBe('0');
+    expect(focusedView?.labels.shells).toBe('1');
+    expect(focusedView?.labels.tasks).toBe('1 Run  0 Wait');
+    expect(focusedView?.labels.activity).toBe('4 l/s');
+
+    controller.toggleMetric('agents');
+    expect(elements.detailBody.textContent).toContain('No active agents.');
+
+    controller.toggleMetric('shells');
+    expect(classTexts(elements.detailBody, 'status-row-name')).toEqual(['Focused Shell']);
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['17% CPU']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['64 MB']);
+    expect(elements.detailBody.textContent).not.toContain('Background Shell');
+
+    controller.toggleMetric('tasks');
+    expect(classTexts(elements.detailBody, 'status-row-name')).toEqual(['Focused Shell']);
+    expect(elements.detailBody.textContent).not.toContain('Background Task');
+    expect(elements.detailBody.textContent).not.toContain('Workspace Remote');
+
+    controller.toggleMetric('activity');
+    expect(classTexts(elements.detailBody, 'status-cell-label')).toEqual(['Lines', 'Bytes']);
+    expect(elements.detailBody.textContent).not.toContain('Ops');
+    expect(elements.detailBody.textContent).not.toContain('Errors');
+    expect(elements.detailBody.textContent).not.toContain('Agent tools');
+
+    const focusedDiagnostics = controller.render()?.diagnostics;
+    expect(focusedDiagnostics?.scope).toBe('focused');
+    expect(focusedDiagnostics?.metrics).toMatchObject({
+      outputLinesPerSecond: 4,
+      outputBytesPerSecond: 24,
+    });
+    expect('operationsPerSecond' in (focusedDiagnostics?.metrics ?? {})).toBe(false);
+    expect('errors' in (focusedDiagnostics?.metrics ?? {})).toBe(false);
+    expect(focusedDiagnostics?.trends?.operationsPerSecond).toBeUndefined();
+    expect(focusedDiagnostics?.trends?.errors).toBeUndefined();
+
+    await clock.advance(1_000);
+    controller.notePtyData(focusedThreadId, 'focus\n'.repeat(4), clock.now());
+    controller.notePtyData('background-shell', 'bg\n'.repeat(11), clock.now());
+    for (let count = 0; count < 7; count += 1) {
+      controller.noteOperation({ name: 'shell_exec', ok: false });
+    }
+    await controller.setScope('workspace');
+
+    const workspaceView = controller.render();
+    expect(workspaceView?.effectiveScope).toBe('workspace');
+    expect(workspaceView?.labels.agents).toBe('2');
+    expect(workspaceView?.labels.shells).toBe('2');
+    expect(workspaceView?.labels.tasks).toBe('5 Run  0 Wait');
+    expect(workspaceView?.labels.activity).toBe('15 l/s');
+
+    controller.toggleMetric('agents');
+    expect(classTexts(elements.detailBody, 'status-row-name')).toEqual([
+      'Background Agent',
+      'Workspace Remote',
+    ]);
+
+    controller.toggleMetric('activity');
+    expect(classTexts(elements.detailBody, 'status-cell-label')).toEqual([
+      'Lines',
+      'Bytes',
+      'Ops',
+      'Errors',
+      'Agent tools',
+    ]);
+
+    const workspaceDiagnostics = controller.render()?.diagnostics;
+    expect(workspaceDiagnostics?.metrics).toMatchObject({
+      outputLinesPerSecond: 15,
+      outputBytesPerSecond: 57,
+      operationsPerSecond: 7,
+      errors: 7,
+    });
+    expect(workspaceDiagnostics?.trends?.operationsPerSecond).toEqual([7]);
+    expect(workspaceDiagnostics?.trends?.errors).toEqual([7]);
+  });
+
+  it('resets activity trends, severity, and spikes across scope and focused-thread changes', async () => {
+    let currentContext = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'thread-b',
+          name: 'Thread B',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const { controller, elements, clock } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: async (scope?: { threadId?: string }) => buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+        workspace: {
+          cpuPercent: scope?.threadId === 'thread-b' ? 22 : 18,
+          memoryBytes: 64 * 1024 * 1024,
+        },
+      }),
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      nativeSnapshot: buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+      }),
+      nativeHealth: {
+        lastSuccessAt: clock.now(),
+      },
+    }));
+
+    for (let count = 0; count < 5; count += 1) {
+      await clock.advance(1_000);
+      controller.notePtyData('thread-a', 'low\n'.repeat(10), clock.now());
+      await controller.refresh();
+    }
+    for (let count = 0; count < 3; count += 1) {
+      await clock.advance(1_000);
+      controller.notePtyData('thread-a', 'high\n'.repeat(1_500), clock.now());
+      await controller.refresh();
+    }
+
+    const workspaceView = controller.render();
+    expect(workspaceView?.metricSeverity.activity).toBe('warn');
+    expect(workspaceView?.diagnostics.trends?.outputLinesPerSecond).toEqual([
+      10,
+      10,
+      10,
+      10,
+      10,
+      1_500,
+      1_500,
+      1_500,
+    ]);
+
+    controller.toggleMetric('activity');
+    expect(elements.detailBody.textContent).not.toContain('No recent activity spikes.');
+
+    await clock.advance(1_000);
+    controller.notePtyData('thread-a', 'focus\n'.repeat(5), clock.now());
+    await controller.setScope('focused');
+
+    let focusedView = controller.render();
+    expect(focusedView?.effectiveScope).toBe('focused');
+    expect(focusedView?.metricSeverity.activity).toBe('neutral');
+    expect(focusedView?.diagnostics.trends?.outputLinesPerSecond).toEqual([5]);
+    expect(elements.detailBody.textContent).toContain('No recent activity spikes.');
+
+    currentContext = {
+      ...currentContext,
+      activeThreadId: 'thread-b',
+    };
+    await clock.advance(1_000);
+    controller.notePtyData('thread-b', 'next\n'.repeat(9), clock.now());
+    await controller.refresh();
+
+    focusedView = controller.render();
+    expect(focusedView?.diagnostics.trends?.outputLinesPerSecond).toEqual([9]);
+    expect(focusedView?.metricSeverity.activity).toBe('neutral');
+  });
+
+  it('prunes exited and removed pane activity after fresh context updates', async () => {
+    const shellId = 'shell-1';
+    const process = {
+      threadId: shellId,
+      cpuPercent: 21,
+      memoryBytes: 64 * 1024 * 1024,
+      processName: 'zsh',
+      pid: 21,
+    };
+    let currentContext: {
+      activeThreadId: string | null;
+      threads: Array<{
+        id: string;
+        name: string;
+        kind: string;
+        status: string;
+        processBacked: boolean;
+        startedAt: number;
+        finishedAt?: number;
+        exitCode?: number | null;
+      }>;
+      covenSessions: unknown[];
+    } = {
+      activeThreadId: shellId,
+      threads: [{
+        id: shellId,
+        name: 'Shell 1',
+        kind: 'shell',
+        status: 'running',
+        processBacked: true,
+        startedAt: 0,
+      }],
+      covenSessions: [],
+    };
+    const { controller, elements, clock } = createHarness({
+      hidden: true,
+      getContext: () => currentContext,
+      fetchMetrics: async () => buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+        workspace: {
+          cpuPercent: 21,
+          memoryBytes: 64 * 1024 * 1024,
+        },
+        processes: currentContext.threads.some((thread) => thread.id === shellId && thread.status === 'running')
+          ? [process]
+          : [],
+      }),
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      nativeSnapshot: buildNativeSnapshot({
+        sampledAtMs: clock.now(),
+        processes: [process],
+      }),
+      nativeHealth: {
+        lastSuccessAt: clock.now(),
+      },
+    }));
+
+    await clock.advance(1_000);
+    controller.notePtyData(shellId, 'line\n'.repeat(8), clock.now());
+    await controller.refresh();
+
+    expect(controller.render()?.labels.shells).toBe('1');
+    expect(controller.render()?.labels.activity).toBe('8 l/s');
+
+    currentContext = {
+      activeThreadId: null,
+      threads: [{
+        id: shellId,
+        name: 'Shell 1',
+        kind: 'shell',
+        status: 'exited',
+        processBacked: true,
+        startedAt: 0,
+        finishedAt: clock.now(),
+        exitCode: 0,
+      }],
+      covenSessions: [],
+    };
+    await clock.advance(1_000);
+    await controller.refresh();
+
+    expect(controller.render()?.labels.shells).toBe('0');
+    expect(controller.render()?.labels.activity).toBe('idle');
+    controller.toggleMetric('shells');
+    expect(elements.detailBody.textContent).toContain('No active shells.');
+
+    currentContext = {
+      activeThreadId: null,
+      threads: [],
+      covenSessions: [],
+    };
+    await clock.advance(1_000);
+    await controller.refresh();
+
+    expect(controller.render()?.labels.shells).toBe('0');
+    expect(controller.render()?.diagnostics.metrics.outputLinesPerSecond).toBe(0);
+  });
+
   it('renders Agent tools only for finite structured counts', () => {
     const { controller, elements } = createHarness({ hidden: true });
 

@@ -13,6 +13,7 @@ import {
   normalizePreferences,
   noteOperation,
   notePtyChunk,
+  pruneActivityTracker,
   pushTrend,
   samplingDelay,
   sparklinePath,
@@ -345,12 +346,212 @@ describe('tauri footer status model', () => {
     expect(summary.counts.shells).toBe(1);
   });
 
+  test('scopes focused shell and task summaries to the selected process-backed pane only', () => {
+    const summary = summarizeWorkspace({
+      now: 20_000,
+      scope: 'focused',
+      activeThreadId: 'shell-b',
+      threads: [
+        {
+          id: 'shell-a',
+          name: 'Shell A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 1_000,
+        },
+        {
+          id: 'shell-b',
+          name: 'Shell B',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 2_000,
+        },
+        {
+          id: 'build-a',
+          name: 'Build A',
+          kind: 'exec',
+          status: 'running',
+          processBacked: true,
+          startedAt: 3_000,
+        },
+      ],
+      covenSessions: [{
+        id: 'remote-background',
+        title: 'Background session',
+        status: 'running',
+        createdAt: 4_000,
+      }],
+    });
+
+    expect(summary).toEqual({
+      agents: [],
+      shells: [{
+        id: 'shell-b',
+        name: 'Shell B',
+        status: 'running',
+        runtimeMs: 18_000,
+        threadId: 'shell-b',
+      }],
+      tasks: [{
+        id: 'local:shell-b',
+        name: 'Shell B',
+        status: 'running',
+        runtimeMs: 18_000,
+        threadId: 'shell-b',
+      }],
+      counts: {
+        agents: 0,
+        shells: 1,
+        running: 1,
+        waiting: 0,
+        failed: 0,
+      },
+    });
+  });
+
+  test('scopes focused agent summaries to the selected pane and its attached remote session only', () => {
+    const summary = summarizeWorkspace({
+      now: 20_000,
+      scope: 'focused',
+      activeThreadId: 'agent-b',
+      threads: [
+        {
+          id: 'agent-a',
+          name: 'Agent A',
+          kind: 'coven-attach',
+          status: 'running',
+          covenSessionId: 'session-a',
+          currentTask: 'Local A',
+          processBacked: true,
+          startedAt: 1_000,
+        },
+        {
+          id: 'agent-b',
+          name: 'Agent B',
+          kind: 'coven-attach',
+          status: 'running',
+          covenSessionId: 'session-b',
+          currentTask: 'Local B',
+          processBacked: true,
+          startedAt: 2_000,
+        },
+      ],
+      covenSessions: [
+        {
+          id: 'session-a',
+          title: 'Remote A',
+          status: 'waiting',
+          currentTask: 'Remote A',
+          model: 'model-a',
+          createdAt: 5_000,
+        },
+        {
+          id: 'session-b',
+          title: 'Remote B',
+          status: 'waiting',
+          currentTask: 'Remote B',
+          model: 'model-b',
+          inputTokens: 10,
+          outputTokens: 4,
+          createdAt: 6_000,
+        },
+        {
+          id: 'session-unattached',
+          title: 'Unattached',
+          status: 'running',
+          currentTask: 'Should not leak',
+          createdAt: 7_000,
+        },
+      ],
+    });
+
+    expect(summary).toEqual({
+      agents: [{
+        id: 'local:agent-b',
+        name: 'Agent B',
+        harness: null,
+        model: 'model-b',
+        currentTask: 'Remote B',
+        tokens: { input: 10, output: 4 },
+        status: 'running',
+        runtimeMs: 18_000,
+        threadId: 'agent-b',
+      }],
+      shells: [],
+      tasks: [{
+        id: 'local:agent-b',
+        name: 'Agent B',
+        status: 'running',
+        runtimeMs: 18_000,
+        threadId: 'agent-b',
+      }],
+      counts: {
+        agents: 1,
+        shells: 0,
+        running: 1,
+        waiting: 0,
+        failed: 0,
+      },
+    });
+  });
+
+  test('returns an empty focused summary when the active pane is missing or not process backed', () => {
+    expect(summarizeWorkspace({
+      now: 20_000,
+      scope: 'focused',
+      activeThreadId: 'missing',
+      threads: [],
+      covenSessions: [{
+        id: 'remote-only',
+        title: 'Remote only',
+        status: 'running',
+      }],
+    })).toEqual({
+      agents: [],
+      shells: [],
+      tasks: [],
+      counts: {
+        agents: 0,
+        shells: 0,
+        running: 0,
+        waiting: 0,
+        failed: 0,
+      },
+    });
+
+    expect(summarizeWorkspace({
+      now: 20_000,
+      scope: 'focused',
+      activeThreadId: 'web-pane',
+      threads: [{
+        id: 'web-pane',
+        name: 'Web',
+        kind: 'web',
+        status: 'running',
+        processBacked: false,
+      }],
+      covenSessions: [],
+    }).counts).toEqual({
+      agents: 0,
+      shells: 0,
+      running: 0,
+      waiting: 0,
+      failed: 0,
+    });
+  });
+
   test('tracks split UTF-8 chunks, bytes, lines, operations, and per-thread rates', () => {
     const tracker = createActivityTracker();
     const encoder = new TextEncoder();
 
     notePtyChunk(tracker, 'a', encoder.encode('one\npar'), 0);
     notePtyChunk(tracker, 'a', encoder.encode('tial\ntwo\n'), 500);
+    expect(tracker.threads.get('a')).toEqual({
+      bytes: 16,
+      lines: 3,
+    });
     noteOperation(tracker, true);
     noteOperation(tracker, false);
 
@@ -403,6 +604,75 @@ describe('tauri footer status model', () => {
         linesPerSecond: 2,
       }],
     });
+  });
+
+  test('counts megabyte chunks without retaining decoded terminal contents or tails', () => {
+    const tracker = createActivityTracker();
+    const bytes = new Uint8Array(1024 * 1024).fill(0x61);
+
+    notePtyChunk(tracker, 'heavy', bytes, 0);
+    notePtyChunk(tracker, 'heavy', bytes, 500);
+
+    const row = tracker.threads.get('heavy');
+    expect(row).toEqual({
+      bytes: 2 * 1024 * 1024,
+      lines: 0,
+    });
+    expect(row && 'carry' in row).toBe(false);
+    expect(row && 'decoder' in row).toBe(false);
+
+    expect(flushActivity(tracker, 1_000)).toEqual({
+      workspace: {
+        bytesPerSecond: 2 * 1024 * 1024,
+        linesPerSecond: 0,
+        operationsPerSecond: 0,
+        errors: 0,
+      },
+      threads: [{
+        threadId: 'heavy',
+        bytesPerSecond: 2 * 1024 * 1024,
+        linesPerSecond: 0,
+      }],
+    });
+    expect(tracker.threads.get('heavy')).toEqual({
+      bytes: 0,
+      lines: 0,
+    });
+  });
+
+  test('prunes removed and terminal process-backed threads from the activity tracker', () => {
+    const tracker = createActivityTracker();
+    const encoder = new TextEncoder();
+
+    notePtyChunk(tracker, 'running-shell', encoder.encode('one\n'), 0);
+    notePtyChunk(tracker, 'failed-shell', encoder.encode('two\n'), 0);
+    notePtyChunk(tracker, 'missing-shell', encoder.encode('three\n'), 0);
+
+    pruneActivityTracker(tracker, [
+      {
+        id: 'running-shell',
+        name: 'Running shell',
+        kind: 'shell',
+        status: 'running',
+        processBacked: true,
+      },
+      {
+        id: 'failed-shell',
+        name: 'Failed shell',
+        kind: 'shell',
+        status: 'failed',
+        processBacked: true,
+      },
+      {
+        id: 'web-pane',
+        name: 'Web',
+        kind: 'web',
+        status: 'running',
+        processBacked: false,
+      },
+    ]);
+
+    expect([...tracker.threads.keys()]).toEqual(['running-shell']);
   });
 
   test('requires sustained thresholds and hysteresis before clearing', () => {

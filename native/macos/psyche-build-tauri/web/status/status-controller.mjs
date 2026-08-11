@@ -11,6 +11,7 @@ import {
   normalizePreferences,
   noteOperation as noteOperationMetric,
   notePtyChunk,
+  pruneActivityTracker,
   pushTrend,
   samplingDelay,
   sparklinePath,
@@ -361,6 +362,59 @@ function diagnosticsShell(scope) {
     metrics: {},
     services: [],
   };
+}
+
+function scopeKey(scopeState) {
+  if (scopeState?.scopeName === 'focused' && typeof scopeState?.activeThreadId === 'string' && scopeState.activeThreadId) {
+    return `focused:${scopeState.activeThreadId}`;
+  }
+  return 'workspace';
+}
+
+function summarizeForScope(sampledAt, context, scopeState, fallbackSummary, fallbackScopeState = scopeState) {
+  if (fallbackSummary && scopeKey(scopeState) === scopeKey(fallbackScopeState)) {
+    return fallbackSummary;
+  }
+
+  return summarizeWorkspace({
+    now: sampledAt,
+    scope: scopeState?.scopeName === 'focused' ? 'focused' : 'workspace',
+    activeThreadId: scopeState?.activeThreadId ?? context?.activeThreadId ?? null,
+    threads: context?.threads ?? [],
+    covenSessions: context?.covenSessions ?? [],
+  });
+}
+
+function scopeActivitySample(sample, scopeState) {
+  const source = sample ?? createEmptyActivitySample();
+  if (scopeState?.scopeName !== 'focused' || !scopeState?.activeThreadId) {
+    return source;
+  }
+
+  const row = Array.isArray(source.threads)
+    ? source.threads.find((candidate) => candidate?.threadId === scopeState.activeThreadId)
+    : null;
+
+  return {
+    workspace: {
+      bytesPerSecond: finiteNumber(row?.bytesPerSecond) ?? 0,
+      linesPerSecond: finiteNumber(row?.linesPerSecond) ?? 0,
+    },
+    threads: row
+      ? [{
+          threadId: row.threadId,
+          bytesPerSecond: finiteNumber(row.bytesPerSecond) ?? 0,
+          linesPerSecond: finiteNumber(row.linesPerSecond) ?? 0,
+        }]
+      : [],
+  };
+}
+
+function scopedAgentToolCalls(context, scopeState) {
+  if (scopeState?.scopeName === 'focused') {
+    return null;
+  }
+  return finiteNumber(context?.agentToolCalls);
 }
 
 function readPreferences(storage) {
@@ -764,16 +818,24 @@ function buildDiagnostics(sample, effectiveScope, trends) {
 
   metrics.outputLinesPerSecond = finiteNumber(sample.activity?.workspace?.linesPerSecond);
   metrics.outputBytesPerSecond = finiteNumber(sample.activity?.workspace?.bytesPerSecond);
-  metrics.operationsPerSecond = finiteNumber(sample.activity?.workspace?.operationsPerSecond);
-  metrics.errors = finiteNumber(sample.activity?.workspace?.errors);
   peaks.outputLinesPerSecond = peakValue(trends.outputLinesPerSecond);
   peaks.outputBytesPerSecond = peakValue(trends.outputBytesPerSecond);
-  peaks.operationsPerSecond = peakValue(trends.operationsPerSecond);
-  peaks.errors = peakValue(trends.errors);
   trendValues.outputLinesPerSecond = cloneTrendValues(trends.outputLinesPerSecond);
   trendValues.outputBytesPerSecond = cloneTrendValues(trends.outputBytesPerSecond);
-  trendValues.operationsPerSecond = cloneTrendValues(trends.operationsPerSecond);
-  trendValues.errors = cloneTrendValues(trends.errors);
+
+  const operationsPerSecond = finiteNumber(sample.activity?.workspace?.operationsPerSecond);
+  if (operationsPerSecond != null) {
+    metrics.operationsPerSecond = operationsPerSecond;
+    peaks.operationsPerSecond = peakValue(trends.operationsPerSecond);
+    trendValues.operationsPerSecond = cloneTrendValues(trends.operationsPerSecond);
+  }
+
+  const errors = finiteNumber(sample.activity?.workspace?.errors);
+  if (errors != null) {
+    metrics.errors = errors;
+    peaks.errors = peakValue(trends.errors);
+    trendValues.errors = cloneTrendValues(trends.errors);
+  }
 
   return {
     sampledAt: sample.sampledAt,
@@ -1082,7 +1144,7 @@ function renderActivity(body, doc, activity, trends, spikes, agentToolCalls) {
   const grid = doc.createElement('div');
   grid.className = 'status-activity-grid';
 
-  grid.append(
+  const cells = [
     activityCell(
       doc,
       'Lines',
@@ -1097,23 +1159,33 @@ function renderActivity(body, doc, activity, trends, spikes, agentToolCalls) {
       `Peak ${formatRate(peakValue(trends.outputBytesPerSecond) ?? activity.workspace.bytesPerSecond, 'bytes/s')}`,
       trends.outputBytesPerSecond.values,
     ),
-    activityCell(
+  ];
+
+  const operationsPerSecond = finiteNumber(activity.workspace.operationsPerSecond);
+  if (operationsPerSecond != null) {
+    cells.push(activityCell(
       doc,
       'Ops',
-      formatRate(activity.workspace.operationsPerSecond, 'Ops/s'),
-      `Peak ${formatRate(peakValue(trends.operationsPerSecond) ?? activity.workspace.operationsPerSecond, 'Ops/s')}`,
+      formatRate(operationsPerSecond, 'Ops/s'),
+      `Peak ${formatRate(peakValue(trends.operationsPerSecond) ?? operationsPerSecond, 'Ops/s')}`,
       trends.operationsPerSecond.values,
-    ),
-    activityCell(
+    ));
+  }
+
+  const errors = finiteNumber(activity.workspace.errors);
+  if (errors != null) {
+    cells.push(activityCell(
       doc,
       'Errors',
-      String(Math.round(activity.workspace.errors ?? 0)),
-      `Peak ${Math.round(peakValue(trends.errors) ?? activity.workspace.errors ?? 0)} failures / sample`,
+      String(Math.round(errors)),
+      `Peak ${Math.round(peakValue(trends.errors) ?? errors)} failures / sample`,
       trends.errors.values,
-    ),
-  );
+    ));
+  }
 
-  if (Number.isFinite(agentToolCalls)) {
+  grid.append(...cells);
+
+  if (agentToolCalls != null) {
     grid.appendChild(activityCell(
       doc,
       'Agent tools',
@@ -1388,6 +1460,17 @@ export function createStatusController(options = {}) {
     operationsPerSecond: { values: [], peak: Number.NEGATIVE_INFINITY },
     errors: { values: [], peak: Number.NEGATIVE_INFINITY },
   };
+  function resetTrendState() {
+    for (const name of Object.keys(trends)) {
+      trends[name] = { values: [], peak: Number.NEGATIVE_INFINITY };
+    }
+    thresholdState = {};
+    currentMetricSeverity = {};
+    previousMetricSeverity = {};
+    spikes = [];
+  }
+
+  let lastTrendScopeKey = 'workspace';
   const resizeObserver = new ResizeObserverClass(() => {
     if (lastSampleContext) {
       renderView();
@@ -1549,6 +1632,14 @@ export function createStatusController(options = {}) {
   function writePreferences(next) {
     preferencesState.value = savePreferences(storage, next);
     return preferencesState.value;
+  }
+
+  function syncTrendScope(scopeState) {
+    const nextKey = scopeKey(scopeState);
+    if (nextKey === lastTrendScopeKey) return nextKey;
+    lastTrendScopeKey = nextKey;
+    resetTrendState();
+    return nextKey;
   }
 
   function effectiveScopeForContext(context) {
@@ -1740,14 +1831,16 @@ export function createStatusController(options = {}) {
   }
 
   function processSample(rawSample) {
-    const summary = rawSample.summary ?? summarizeWorkspace({
-      now: rawSample.sampledAt,
-      activeThreadId: rawSample.context?.activeThreadId ?? null,
-      threads: rawSample.context?.threads ?? [],
-      covenSessions: rawSample.context?.covenSessions ?? [],
-    });
-    rawSample.summary = summary;
-
+    const scopeState = rawSample.scopeState ?? effectiveScopeForContext(rawSample.context ?? {});
+    syncTrendScope(scopeState);
+    const summary = summarizeForScope(
+      rawSample.sampledAt,
+      rawSample.context ?? {},
+      scopeState,
+      scopeState.scopeName === 'focused' ? null : rawSample.summary,
+    );
+    const activitySample = scopeActivitySample(rawSample.activity, scopeState);
+    const agentToolCalls = scopedAgentToolCalls(rawSample.context ?? {}, scopeState);
     const lineHistory = trends.outputLinesPerSecond.values.slice(-30);
     const outputBaseline = median(lineHistory);
     const thresholds = evaluateSeverity({
@@ -1755,7 +1848,7 @@ export function createStatusController(options = {}) {
       memoryPressurePercent: rawSample.nativeSnapshot?.memoryPressurePercent ?? null,
       fps: rawSample.frame?.fps ?? null,
       renderLatencyMs: rawSample.frame?.renderLatencyMs ?? null,
-      outputLinesPerSecond: rawSample.activity?.workspace?.linesPerSecond ?? null,
+      outputLinesPerSecond: activitySample?.workspace?.linesPerSecond ?? null,
       outputBaseline,
     }, thresholdState);
     thresholdState = thresholds.state;
@@ -1786,15 +1879,20 @@ export function createStatusController(options = {}) {
     recordTrend('fps', rawSample.frame?.fps);
     recordTrend('renderLatencyMs', rawSample.frame?.renderLatencyMs);
     recordTrend('droppedFrames', rawSample.frame?.droppedFrames);
-    recordTrend('outputLinesPerSecond', rawSample.activity?.workspace?.linesPerSecond);
-    recordTrend('outputBytesPerSecond', rawSample.activity?.workspace?.bytesPerSecond);
-    recordTrend('operationsPerSecond', rawSample.activity?.workspace?.operationsPerSecond);
-    recordTrend('errors', rawSample.activity?.workspace?.errors);
+    recordTrend('outputLinesPerSecond', activitySample?.workspace?.linesPerSecond);
+    recordTrend('outputBytesPerSecond', activitySample?.workspace?.bytesPerSecond);
+    if (scopeState.scopeName === 'workspace') {
+      recordTrend('operationsPerSecond', activitySample?.workspace?.operationsPerSecond);
+      recordTrend('errors', activitySample?.workspace?.errors);
+    }
 
     lastSampleContext = {
       ...rawSample,
       outputBaseline,
+      scopeState,
       summary,
+      activity: rawSample.activity ?? createEmptyActivitySample(),
+      agentToolCalls,
     };
 
     renderView();
@@ -1805,16 +1903,31 @@ export function createStatusController(options = {}) {
 
     const renderedAt = now();
     const liveSample = liveHealthSample(sample, renderedAt);
+    const previousScopeState = liveSample.scopeState ?? null;
+    const scopeState = effectiveScopeForContext(liveSample.context ?? {});
+    syncTrendScope(scopeState);
+    const summary = summarizeForScope(
+      liveSample.sampledAt,
+      liveSample.context ?? {},
+      scopeState,
+      scopeState.scopeName === 'focused' ? null : liveSample.summary,
+      previousScopeState,
+    );
+    const activitySample = scopeActivitySample(liveSample.activity, scopeState);
+    const agentToolCalls = scopedAgentToolCalls(liveSample.context ?? {}, scopeState);
+    liveSample.scopeState = scopeState;
+    liveSample.summary = summary;
+    liveSample.activity = activitySample;
     const focusToken = captureFocusToken(doc, elements);
     const metricDisplays = buildMetricDisplays(liveSample);
     const labels = Object.fromEntries(
       Object.entries(metricDisplays).map(([id, display]) => [id, display?.available ? display.valueText : null]),
     );
-    const { focusedAvailable, scopeName } = liveSample.scopeState ?? effectiveScopeForContext(liveSample.context ?? {});
+    const { focusedAvailable, scopeName, activeThreadId } = scopeState;
     liveSample.scopeState = {
       focusedAvailable,
       scopeName,
-      activeThreadId: liveSample.context?.activeThreadId ?? null,
+      activeThreadId: activeThreadId ?? null,
     };
 
     const availableMetrics = new Set(['connection', 'agents', 'shells', 'tasks', 'activity']);
@@ -1910,7 +2023,7 @@ export function createStatusController(options = {}) {
         liveSample.activity,
         trends,
         spikes,
-        Number.isFinite(liveSample.context?.agentToolCalls) ? liveSample.context.agentToolCalls : null,
+        agentToolCalls,
       );
     } else if (panelId === 'connection') {
       renderConnection(elements.detailBody, doc, liveSample.nativeHealth, liveSample.covenHealth);
@@ -1986,6 +2099,7 @@ export function createStatusController(options = {}) {
 
   async function runPoll(token) {
     let context = getContext();
+    pruneActivityTracker(activity, context?.threads ?? []);
     let scopeState = effectiveScopeForContext(context);
     const requestScope = nativeRequestScope(scopeState);
     const startedAt = performanceApi.now();
@@ -2017,6 +2131,7 @@ export function createStatusController(options = {}) {
       }
       context = currentContext;
       scopeState = currentScopeState;
+      pruneActivityTracker(activity, context?.threads ?? []);
     } catch (error) {
       const latencyMs = performanceApi.now() - startedAt;
       if (token !== lifecycleToken) {
@@ -2041,7 +2156,8 @@ export function createStatusController(options = {}) {
       context,
       summary: summarizeWorkspace({
         now: sampledAt,
-        activeThreadId: context?.activeThreadId ?? null,
+        scope: scopeState.scopeName,
+        activeThreadId: scopeState.activeThreadId ?? context?.activeThreadId ?? null,
         threads: context?.threads ?? [],
         covenSessions: context?.covenSessions ?? [],
       }),
@@ -2266,6 +2382,7 @@ export function createStatusController(options = {}) {
       const sampledAt = finiteNumber(sample.sampledAt) ?? now();
       const context = sample.context ?? getContext();
       const scopeState = sample.scopeState ?? effectiveScopeForContext(context);
+      pruneActivityTracker(activity, context?.threads ?? []);
       if (Object.prototype.hasOwnProperty.call(sample, 'nativeSnapshot')) {
         lastSuccessfulSnapshot = sample.nativeSnapshot;
       }
@@ -2278,12 +2395,13 @@ export function createStatusController(options = {}) {
       lastSampleContext = {
         sampledAt,
         context,
-        summary: sample.summary ?? summarizeWorkspace({
-          now: sampledAt,
-          activeThreadId: context?.activeThreadId ?? null,
-          threads: context?.threads ?? [],
-          covenSessions: context?.covenSessions ?? [],
-        }),
+        summary: summarizeForScope(
+          sampledAt,
+          context,
+          scopeState,
+          scopeState.scopeName === 'focused' ? null : sample.summary,
+          sample.scopeState ?? scopeState,
+        ),
         scopeState,
         nativeSnapshot: sample.nativeSnapshot ?? lastSuccessfulSnapshot,
         nativeHealth: nativeHealthView(nativeHealth, sampledAt),
@@ -2294,16 +2412,13 @@ export function createStatusController(options = {}) {
     } else if (!lastSampleContext) {
       const sampledAt = now();
       const context = getContext();
+      const scopeState = effectiveScopeForContext(context);
+      pruneActivityTracker(activity, context?.threads ?? []);
       lastSampleContext = {
         sampledAt,
         context,
-        summary: summarizeWorkspace({
-          now: sampledAt,
-          activeThreadId: context?.activeThreadId ?? null,
-          threads: context?.threads ?? [],
-          covenSessions: context?.covenSessions ?? [],
-        }),
-        scopeState: effectiveScopeForContext(context),
+        summary: summarizeForScope(sampledAt, context, scopeState),
+        scopeState,
         nativeSnapshot: lastSuccessfulSnapshot,
         nativeHealth: nativeHealthView(nativeHealth, sampledAt),
         activity: lastActivitySample,

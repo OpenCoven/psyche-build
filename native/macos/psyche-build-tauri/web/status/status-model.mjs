@@ -11,6 +11,7 @@ export const DEFAULT_METRIC_ORDER = Object.freeze([
 const METRIC_IDS = new Set(DEFAULT_METRIC_ORDER);
 const LOCAL_AGENT_KINDS = new Set(['coven-chat', 'coven-attach']);
 const ACTIVE_AGENT_STATUSES = new Set(['running', 'waiting', 'blocked']);
+const ACTIVE_ACTIVITY_THREAD_STATUSES = new Set(['starting', 'running', 'waiting', 'blocked']);
 const IDEAL_FRAME_MS = 1000 / 60;
 const MAX_TREND_SAMPLES = 60;
 const DIAGNOSTIC_LIMIT = 16_384;
@@ -165,6 +166,31 @@ function isActiveAgentStatus(status) {
   return ACTIVE_AGENT_STATUSES.has(status);
 }
 
+function activeThreadIdForScope(source, threads) {
+  if (source.scope !== 'focused') return null;
+  const activeThreadId = typeof source.activeThreadId === 'string' && source.activeThreadId
+    ? source.activeThreadId
+    : null;
+  if (!activeThreadId) return null;
+  const thread = threads.find((candidate) => candidate?.id === activeThreadId);
+  return thread?.processBacked === true ? activeThreadId : null;
+}
+
+function emptyWorkspaceSummary() {
+  return {
+    agents: [],
+    shells: [],
+    tasks: [],
+    counts: {
+      agents: 0,
+      shells: 0,
+      running: 0,
+      waiting: 0,
+      failed: 0,
+    },
+  };
+}
+
 export function normalizePreferences(value) {
   const input = asObject(value);
   const visible = Array.isArray(input.visible)
@@ -194,8 +220,25 @@ export function normalizePreferences(value) {
 export function summarizeWorkspace(input) {
   const source = asObject(input);
   const now = finiteNumber(source.now) ?? Date.now();
-  const threads = Array.isArray(source.threads) ? source.threads : [];
-  const covenSessions = Array.isArray(source.covenSessions) ? source.covenSessions : [];
+  const allThreads = Array.isArray(source.threads) ? source.threads : [];
+  const allCovenSessions = Array.isArray(source.covenSessions) ? source.covenSessions : [];
+  const focusedThreadId = activeThreadIdForScope(source, allThreads);
+
+  if (source.scope === 'focused' && !focusedThreadId) {
+    return emptyWorkspaceSummary();
+  }
+
+  const threads = focusedThreadId
+    ? allThreads.filter((thread) => thread?.id === focusedThreadId)
+    : allThreads;
+  const focusedSessionId = focusedThreadId
+    ? threads.find((thread) => thread?.id === focusedThreadId)?.covenSessionId ?? null
+    : null;
+  const covenSessions = focusedSessionId
+    ? allCovenSessions.filter((session) => session?.id === focusedSessionId)
+    : focusedThreadId
+      ? []
+      : allCovenSessions;
   const covenById = new Map(
     covenSessions
       .filter((session) => typeof session?.id === 'string' && session.id)
@@ -323,21 +366,38 @@ export function notePtyChunk(tracker, threadId, bytes, at) {
   let row = tracker.threads.get(threadId);
   if (!row) {
     row = {
-      decoder: new TextDecoder(),
-      carry: '',
       bytes: 0,
       lines: 0,
-      at: finiteNumber(at) ?? 0,
     };
     tracker.threads.set(threadId, row);
   }
 
-  const decoded = row.decoder.decode(bytes, { stream: true });
-  const parts = `${row.carry}${decoded}`.split('\n');
-  row.carry = parts.pop() ?? '';
-  row.lines += parts.length;
   row.bytes += bytes.byteLength;
-  row.at = finiteNumber(at) ?? row.at;
+  for (const value of bytes) {
+    if (value === 0x0A) {
+      row.lines += 1;
+    }
+  }
+}
+
+export function pruneActivityTracker(tracker, threads) {
+  if (!tracker?.threads) return;
+
+  const activeThreadIds = new Set(
+    (Array.isArray(threads) ? threads : [])
+      .filter((thread) => thread?.processBacked === true)
+      .filter((thread) => ACTIVE_ACTIVITY_THREAD_STATUSES.has(
+        typeof thread?.status === 'string' ? thread.status.trim().toLowerCase() : '',
+      ))
+      .map((thread) => (typeof thread?.id === 'string' && thread.id) ? thread.id : null)
+      .filter(Boolean),
+  );
+
+  for (const threadId of tracker.threads.keys()) {
+    if (!activeThreadIds.has(threadId)) {
+      tracker.threads.delete(threadId);
+    }
+  }
 }
 
 export function noteOperation(tracker, ok) {
