@@ -62,6 +62,7 @@ describe('committed web bundles', () => {
       'web/input.bundle.js',
       'web/panes.bundle.js',
       'web/sessions.bundle.js',
+      'web/workspace.bundle.js',
     ]);
   });
 

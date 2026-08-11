@@ -104,14 +104,6 @@ describe('Tauri workspace panels', () => {
     for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-rows']) {
       expect(gitPanel).toContain(`id="${id}"`);
     }
-    // Diffs is no longer a tab of its own...
-    expect(indexHtml).not.toContain('data-panel-btn="diffs"');
-    // ...but its markup still exists, inside the git panel, with the element
-    // ids the diff renderer writes into.
-    const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
-    for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-editor-host']) {
-      expect(gitPanel).toContain(`id="${id}"`);
-    }
   });
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
