@@ -214,10 +214,13 @@ export function sanitizePaneTree(
 }
 
 export function reconcileSessions(descriptors, liveIds) {
-  const live = new Set(Array.isArray(liveIds) ? liveIds.filter((id) => typeof id === 'string') : []);
+  const live = new Set(
+    Array.isArray(liveIds)
+      ? liveIds.map(safeId).filter(Boolean)
+      : []
+  );
   const sessions = [];
   const unknownLiveIds = new Set();
-
   for (const descriptor of Array.isArray(descriptors) ? descriptors : []) {
     const session = sanitizeSessionDescriptor(descriptor);
     if (!session) continue;
