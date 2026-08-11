@@ -834,6 +834,84 @@ pub enum DrainOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompletionOutcome {
+    Completed,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExitShutdownOutcome {
+    Drained,
+    TimedOut,
+    Cancelled,
+}
+
+pub(crate) trait ExitShutdownHooks {
+    fn now(&self) -> Instant;
+    fn request_drain(&mut self);
+    fn wait_for_reader(&mut self, timeout: Duration) -> CompletionOutcome;
+    fn join_reader(&mut self);
+    fn wait_for_drain(&mut self, timeout: Duration) -> DrainOutcome;
+    fn cancel_pump(&mut self);
+    fn wait_for_worker(&mut self, timeout: Duration) -> CompletionOutcome;
+    fn join_worker(&mut self);
+    fn record_drain_timeout(&mut self);
+    fn remove_session(&mut self);
+    fn finish_nonblocking_cleanup(&mut self);
+}
+
+pub(crate) fn coordinate_exit_shutdown<H: ExitShutdownHooks>(
+    hooks: &mut H,
+    timeout: Duration,
+) -> ExitShutdownOutcome {
+    let started_at = hooks.now();
+    let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
+    hooks.request_drain();
+
+    if hooks.wait_for_reader(remaining_until(hooks.now(), deadline)) == CompletionOutcome::TimedOut
+    {
+        return timeout_exit_shutdown(hooks);
+    }
+    hooks.join_reader();
+
+    match hooks.wait_for_drain(remaining_until(hooks.now(), deadline)) {
+        DrainOutcome::Drained => {}
+        DrainOutcome::TimedOut => return timeout_exit_shutdown(hooks),
+        DrainOutcome::Cancelled => return cancel_exit_shutdown(hooks),
+    }
+
+    hooks.cancel_pump();
+    if hooks.wait_for_worker(remaining_until(hooks.now(), deadline)) == CompletionOutcome::TimedOut
+    {
+        return timeout_exit_shutdown(hooks);
+    }
+    hooks.join_worker();
+    hooks.remove_session();
+    ExitShutdownOutcome::Drained
+}
+
+fn remaining_until(now: Instant, deadline: Instant) -> Duration {
+    deadline
+        .checked_duration_since(now)
+        .unwrap_or(Duration::ZERO)
+}
+
+fn timeout_exit_shutdown<H: ExitShutdownHooks>(hooks: &mut H) -> ExitShutdownOutcome {
+    hooks.record_drain_timeout();
+    hooks.cancel_pump();
+    hooks.remove_session();
+    hooks.finish_nonblocking_cleanup();
+    ExitShutdownOutcome::TimedOut
+}
+
+fn cancel_exit_shutdown<H: ExitShutdownHooks>(hooks: &mut H) -> ExitShutdownOutcome {
+    hooks.cancel_pump();
+    hooks.remove_session();
+    hooks.finish_nonblocking_cleanup();
+    ExitShutdownOutcome::Cancelled
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimePumpMetrics {
     blocked_reader_count: u64,
@@ -1123,6 +1201,14 @@ impl OutputPump {
     }
 
     pub fn wait_for_drain_timeout(&self, timeout: Duration) -> DrainOutcome {
+        let outcome = self.wait_for_drain_timeout_unrecorded(timeout);
+        if outcome == DrainOutcome::TimedOut {
+            self.record_drain_timeout();
+        }
+        outcome
+    }
+
+    pub(crate) fn wait_for_drain_timeout_unrecorded(&self, timeout: Duration) -> DrainOutcome {
         let started_at = Instant::now();
         let mut guard = lock_unpoisoned(&self.shared.state);
 
@@ -1136,12 +1222,15 @@ impl OutputPump {
 
             let elapsed = started_at.elapsed();
             if elapsed >= timeout {
-                guard.metrics.drain_timeout_count =
-                    guard.metrics.drain_timeout_count.saturating_add(1);
                 return DrainOutcome::TimedOut;
             }
             guard = wait_timeout_unpoisoned(&self.shared.wake, guard, timeout - elapsed);
         }
+    }
+
+    pub(crate) fn record_drain_timeout(&self) {
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        guard.metrics.drain_timeout_count = guard.metrics.drain_timeout_count.saturating_add(1);
     }
 
     pub fn cancel(&self) -> bool {
@@ -1169,6 +1258,37 @@ impl OutputPump {
             }
         }
         result
+    }
+
+    pub(crate) fn wait_for_worker_timeout(&self, timeout: Duration) -> CompletionOutcome {
+        let started_at = Instant::now();
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        loop {
+            if !guard.worker_running {
+                return CompletionOutcome::Completed;
+            }
+            let elapsed = started_at.elapsed();
+            if elapsed >= timeout {
+                return CompletionOutcome::TimedOut;
+            }
+            guard = wait_timeout_unpoisoned(&self.shared.wake, guard, timeout - elapsed);
+        }
+    }
+
+    pub(crate) fn join_worker_after_completion(&self) -> thread::Result<()> {
+        let worker = lock_unpoisoned(&self.shared.worker).take();
+        match worker {
+            Some(worker) => worker.join(),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn join_worker_if_finished(&self) -> Option<thread::Result<()>> {
+        let mut worker = lock_unpoisoned(&self.shared.worker);
+        if worker.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            return None;
+        }
+        worker.take().map(JoinHandle::join)
     }
 
     pub fn snapshot(&self) -> OutputPumpSnapshot {
@@ -1495,6 +1615,174 @@ mod tests {
             hidden_cadence: Duration::ZERO,
             ..PumpLimits::default()
         }
+    }
+
+    struct FakeExitHooks {
+        clock: Arc<TestClock>,
+        request_drain_elapsed: Duration,
+        reader_outcome: CompletionOutcome,
+        reader_elapsed: Duration,
+        drain_outcome: DrainOutcome,
+        drain_elapsed: Duration,
+        worker_outcome: CompletionOutcome,
+        worker_elapsed: Duration,
+        reader_wait_budget: Option<Duration>,
+        drain_wait_budget: Option<Duration>,
+        worker_wait_budget: Option<Duration>,
+        events: Vec<&'static str>,
+        session_present: bool,
+        timeout_count: u64,
+    }
+
+    impl FakeExitHooks {
+        fn successful(clock: Arc<TestClock>) -> Self {
+            Self {
+                clock,
+                request_drain_elapsed: Duration::ZERO,
+                reader_outcome: CompletionOutcome::Completed,
+                reader_elapsed: Duration::ZERO,
+                drain_outcome: DrainOutcome::Drained,
+                drain_elapsed: Duration::ZERO,
+                worker_outcome: CompletionOutcome::Completed,
+                worker_elapsed: Duration::ZERO,
+                reader_wait_budget: None,
+                drain_wait_budget: None,
+                worker_wait_budget: None,
+                events: Vec::new(),
+                session_present: true,
+                timeout_count: 0,
+            }
+        }
+
+        fn advance_wait(&self, budget: Duration, elapsed: Duration, outcome: CompletionOutcome) {
+            let elapsed = match outcome {
+                CompletionOutcome::Completed => elapsed.min(budget),
+                CompletionOutcome::TimedOut => budget,
+            };
+            self.clock.advance(elapsed);
+        }
+    }
+
+    impl ExitShutdownHooks for FakeExitHooks {
+        fn now(&self) -> Instant {
+            self.clock.sample().instant
+        }
+
+        fn request_drain(&mut self) {
+            assert!(self.session_present);
+            self.events.push("request_drain");
+            self.clock.advance(self.request_drain_elapsed);
+        }
+
+        fn wait_for_reader(&mut self, timeout: Duration) -> CompletionOutcome {
+            assert!(self.session_present);
+            self.events.push("wait_reader");
+            self.reader_wait_budget = Some(timeout);
+            self.advance_wait(timeout, self.reader_elapsed, self.reader_outcome);
+            self.reader_outcome
+        }
+
+        fn join_reader(&mut self) {
+            assert!(self.session_present);
+            self.events.push("join_reader");
+        }
+
+        fn wait_for_drain(&mut self, timeout: Duration) -> DrainOutcome {
+            assert!(self.session_present);
+            self.events.push("wait_drain");
+            self.drain_wait_budget = Some(timeout);
+            let elapsed = match self.drain_outcome {
+                DrainOutcome::Drained | DrainOutcome::Cancelled => self.drain_elapsed.min(timeout),
+                DrainOutcome::TimedOut => timeout,
+            };
+            self.clock.advance(elapsed);
+            self.drain_outcome
+        }
+
+        fn cancel_pump(&mut self) {
+            self.events.push("cancel_pump");
+        }
+
+        fn wait_for_worker(&mut self, timeout: Duration) -> CompletionOutcome {
+            self.events.push("wait_worker");
+            self.worker_wait_budget = Some(timeout);
+            self.advance_wait(timeout, self.worker_elapsed, self.worker_outcome);
+            self.worker_outcome
+        }
+
+        fn join_worker(&mut self) {
+            self.events.push("join_worker");
+        }
+
+        fn record_drain_timeout(&mut self) {
+            self.events.push("record_timeout");
+            self.timeout_count += 1;
+        }
+
+        fn remove_session(&mut self) {
+            assert!(self.session_present);
+            self.events.push("remove_session");
+            self.session_present = false;
+        }
+
+        fn finish_nonblocking_cleanup(&mut self) {
+            assert!(!self.session_present);
+            self.events.push("nonblocking_cleanup");
+        }
+    }
+
+    struct BlockingProducerTimeoutHooks {
+        clock: Arc<TestClock>,
+        pump: OutputPump,
+        session_present: bool,
+    }
+
+    impl ExitShutdownHooks for BlockingProducerTimeoutHooks {
+        fn now(&self) -> Instant {
+            self.clock.sample().instant
+        }
+
+        fn request_drain(&mut self) {
+            assert!(self.session_present);
+            self.pump.request_drain();
+        }
+
+        fn wait_for_reader(&mut self, timeout: Duration) -> CompletionOutcome {
+            assert!(self.session_present);
+            self.clock.advance(timeout);
+            CompletionOutcome::TimedOut
+        }
+
+        fn join_reader(&mut self) {
+            panic!("a timed-out reader must not be joined");
+        }
+
+        fn wait_for_drain(&mut self, _timeout: Duration) -> DrainOutcome {
+            panic!("reader timeout must skip the drain wait");
+        }
+
+        fn cancel_pump(&mut self) {
+            self.pump.cancel();
+        }
+
+        fn wait_for_worker(&mut self, _timeout: Duration) -> CompletionOutcome {
+            panic!("reader timeout must skip the worker wait");
+        }
+
+        fn join_worker(&mut self) {
+            panic!("reader timeout must not block joining the worker");
+        }
+
+        fn record_drain_timeout(&mut self) {
+            self.pump.record_drain_timeout();
+        }
+
+        fn remove_session(&mut self) {
+            assert!(self.session_present);
+            self.session_present = false;
+        }
+
+        fn finish_nonblocking_cleanup(&mut self) {}
     }
 
     fn state_with_batch_bytes(max_batch_bytes: usize) -> PumpState {
@@ -2385,6 +2673,130 @@ mod tests {
         assert!(drained.draining);
         assert!(drained.is_empty());
         assert_eq!(drained.metrics.drain_timeout_count, 3);
+    }
+
+    #[test]
+    fn exit_deadline_starts_before_waiting_for_a_blocked_reader() {
+        let clock = TestClock::new();
+        let mut hooks = FakeExitHooks::successful(Arc::clone(&clock));
+        hooks.request_drain_elapsed = Duration::from_millis(250);
+        hooks.reader_outcome = CompletionOutcome::TimedOut;
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::TimedOut
+        );
+        assert_eq!(hooks.reader_wait_budget, Some(Duration::from_millis(1_750)));
+        assert_eq!(
+            clock.sample().instant.duration_since(clock.origin),
+            EXIT_DRAIN_TIMEOUT
+        );
+        assert_eq!(
+            hooks.events,
+            vec![
+                "request_drain",
+                "wait_reader",
+                "record_timeout",
+                "cancel_pump",
+                "remove_session",
+                "nonblocking_cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn session_remains_routable_until_reader_and_acknowledgement_drain_complete() {
+        let clock = TestClock::new();
+        let mut hooks = FakeExitHooks::successful(clock);
+        hooks.reader_elapsed = Duration::from_millis(300);
+        hooks.drain_elapsed = Duration::from_millis(400);
+        hooks.worker_elapsed = Duration::from_millis(50);
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::Drained
+        );
+        assert!(!hooks.session_present);
+        assert_eq!(
+            hooks.events,
+            vec![
+                "request_drain",
+                "wait_reader",
+                "join_reader",
+                "wait_drain",
+                "cancel_pump",
+                "wait_worker",
+                "join_worker",
+                "remove_session",
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_reader_and_acknowledged_drain_finish_without_timeout() {
+        let clock = TestClock::new();
+        let mut hooks = FakeExitHooks::successful(clock);
+        hooks.reader_elapsed = Duration::from_millis(500);
+        hooks.drain_elapsed = Duration::from_millis(1_200);
+        hooks.worker_elapsed = Duration::from_millis(100);
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::Drained
+        );
+        assert_eq!(hooks.reader_wait_budget, Some(EXIT_DRAIN_TIMEOUT));
+        assert_eq!(hooks.drain_wait_budget, Some(Duration::from_millis(1_500)));
+        assert_eq!(hooks.worker_wait_budget, Some(Duration::from_millis(300)));
+        assert_eq!(hooks.timeout_count, 0);
+    }
+
+    #[test]
+    fn timeout_cancels_pump_wakes_blocked_producer_and_records_once() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "timeout",
+            PumpLimits {
+                max_pending_bytes: 1,
+                max_pending_fragments: 1,
+                max_batch_bytes: 1,
+                max_in_flight: 1,
+                visible_cadence: Duration::ZERO,
+                hidden_cadence: Duration::ZERO,
+                exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+            },
+            Arc::clone(&clock),
+        );
+        pump.enqueue(vec![1]).unwrap();
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        pump.enqueue(vec![2]).unwrap();
+        let producer_pump = pump.clone();
+        let producer = thread::spawn(move || producer_pump.enqueue(vec![3]));
+        wait_for_blocked_producers(&pump, 1);
+        let mut hooks = BlockingProducerTimeoutHooks {
+            clock: Arc::clone(&clock),
+            pump: pump.clone(),
+            session_present: true,
+        };
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::TimedOut
+        );
+        assert_eq!(
+            producer.join().unwrap(),
+            Err(EnqueueError::Cancelled { fragment: vec![3] })
+        );
+        let snapshot = pump.snapshot();
+        assert!(snapshot.cancelled);
+        assert_eq!(snapshot.blocked_producers, 0);
+        assert_eq!(snapshot.metrics.drain_timeout_count, 1);
+        assert_eq!(
+            clock.sample().instant.duration_since(clock.origin),
+            EXIT_DRAIN_TIMEOUT
+        );
     }
 
     #[test]

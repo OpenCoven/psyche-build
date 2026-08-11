@@ -26,7 +26,10 @@ pub mod pty_transport;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
-use pty_transport::{DrainOutcome, EnqueueError, OutputPump};
+use pty_transport::{
+    coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
+    ExitShutdownOutcome, OutputPump, EXIT_DRAIN_TIMEOUT,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -465,6 +468,153 @@ fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), Strin
     }
 }
 
+struct PtyExitShutdown {
+    thread_id: String,
+    pump: OutputPump,
+    reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
+    reader_result: Option<Result<(), String>>,
+    reader_completion_known: bool,
+}
+
+impl PtyExitShutdown {
+    fn new(
+        thread_id: String,
+        pump: OutputPump,
+        reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+        reader_thread: std::thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            thread_id,
+            pump,
+            reader_done_rx,
+            reader_thread: Some(reader_thread),
+            reader_result: None,
+            reader_completion_known: false,
+        }
+    }
+
+    fn store_reader_completion(
+        &mut self,
+        completion: Result<Result<(), String>, std::sync::mpsc::RecvTimeoutError>,
+    ) -> CompletionOutcome {
+        match completion {
+            Ok(result) => {
+                self.reader_result = Some(result);
+                self.reader_completion_known = true;
+                CompletionOutcome::Completed
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.reader_completion_known = true;
+                CompletionOutcome::Completed
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => CompletionOutcome::TimedOut,
+        }
+    }
+
+    fn log_reader_result(&mut self) {
+        if let Some(Err(error)) = self.reader_result.take() {
+            log::warn!("PTY reader stopped after output pump error: {error}");
+        }
+    }
+
+    fn join_reader_after_completion(&mut self) {
+        if !self.reader_completion_known {
+            return;
+        }
+        if let Some(reader_thread) = self.reader_thread.take() {
+            if reader_thread.join().is_err() {
+                log::warn!("PTY reader thread panicked for '{}'", self.thread_id);
+            }
+        }
+        self.log_reader_result();
+    }
+
+    fn remove_matching_session(&self) {
+        let removed_session = {
+            let mut guard = SESSIONS.lock();
+            let matches_exiting_pump = guard
+                .get(&self.thread_id)
+                .is_some_and(|session| session.pump.ptr_eq(&self.pump));
+            matches_exiting_pump
+                .then(|| guard.remove(&self.thread_id))
+                .flatten()
+        };
+        drop(removed_session);
+    }
+}
+
+impl ExitShutdownHooks for PtyExitShutdown {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn request_drain(&mut self) {
+        self.pump.request_drain();
+    }
+
+    fn wait_for_reader(&mut self, timeout: std::time::Duration) -> CompletionOutcome {
+        let completion = self.reader_done_rx.recv_timeout(timeout);
+        self.store_reader_completion(completion)
+    }
+
+    fn join_reader(&mut self) {
+        self.join_reader_after_completion();
+    }
+
+    fn wait_for_drain(&mut self, timeout: std::time::Duration) -> DrainOutcome {
+        self.pump.wait_for_drain_timeout_unrecorded(timeout)
+    }
+
+    fn cancel_pump(&mut self) {
+        self.pump.cancel();
+    }
+
+    fn wait_for_worker(&mut self, timeout: std::time::Duration) -> CompletionOutcome {
+        self.pump.wait_for_worker_timeout(timeout)
+    }
+
+    fn join_worker(&mut self) {
+        if self.pump.join_worker_after_completion().is_err() {
+            log::warn!("PTY output worker panicked for '{}'", self.thread_id);
+        }
+    }
+
+    fn record_drain_timeout(&mut self) {
+        self.pump.record_drain_timeout();
+    }
+
+    fn remove_session(&mut self) {
+        self.remove_matching_session();
+    }
+
+    fn finish_nonblocking_cleanup(&mut self) {
+        if !self.reader_completion_known {
+            match self.reader_done_rx.try_recv() {
+                Ok(result) => {
+                    self.reader_result = Some(result);
+                    self.reader_completion_known = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.reader_completion_known = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        self.join_reader_after_completion();
+        if self
+            .pump
+            .join_worker_if_finished()
+            .is_some_and(|result| result.is_err())
+        {
+            log::warn!("PTY output worker panicked for '{}'", self.thread_id);
+        }
+        // portable-pty does not expose safe cross-platform read cancellation.
+        // Dropping the session closes owned PTY handles; an unfinished cloned
+        // reader is detached rather than extending the explicit exit deadline.
+    }
+}
+
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
@@ -549,10 +699,10 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     drop(pending_start);
 
     let reader_pump = pump.clone();
+    let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
     let data_thread = std::thread::spawn(move || {
-        if let Err(error) = pump_pty_reader(&mut reader, reader_pump) {
-            log::warn!("PTY reader stopped after output pump error: {error}");
-        }
+        let reader_result = pump_pty_reader(&mut reader, reader_pump);
+        let _ = reader_done_tx.send(reader_result);
     });
 
     let exit_thread_id = thread_id.clone();
@@ -560,31 +710,26 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let exit_pump = pump;
     std::thread::spawn(move || {
         let status = child.wait();
-        let removed_session = {
-            let mut guard = SESSIONS.lock();
-            let matches_exiting_pump = guard
-                .get(&exit_thread_id)
-                .is_some_and(|session| session.pump.ptr_eq(&exit_pump));
-            matches_exiting_pump
-                .then(|| guard.remove(&exit_thread_id))
-                .flatten()
-        };
-        drop(removed_session);
         let code = status.ok().map(|s| s.exit_code() as i32);
-        let _ = data_thread.join();
-        exit_pump.request_drain();
-        if exit_pump.wait_for_drain() == DrainOutcome::TimedOut {
-            let snapshot = exit_pump.snapshot();
+        let mut shutdown = PtyExitShutdown::new(
+            exit_thread_id.clone(),
+            exit_pump,
+            reader_done_rx,
+            data_thread,
+        );
+        let outcome = coordinate_exit_shutdown(&mut shutdown, EXIT_DRAIN_TIMEOUT);
+        if outcome == ExitShutdownOutcome::TimedOut {
+            let snapshot = shutdown.pump.snapshot();
             log::warn!(
-                "PTY output drain timed out for '{}' with {} pending bytes, \
-                 prepared={}, and {} in-flight batches",
+                "PTY output shutdown timed out for '{}' with {} pending bytes, \
+                 prepared={}, {} in-flight batches, and {} blocked producers",
                 snapshot.thread_id,
                 snapshot.pending_bytes,
                 snapshot.prepared,
-                snapshot.in_flight_batches
+                snapshot.in_flight_batches,
+                snapshot.blocked_producers,
             );
         }
-        let _ = exit_pump.cancel_and_join();
         let _ = app_for_exit.emit(
             "pty:exit",
             PtyExitEvent {

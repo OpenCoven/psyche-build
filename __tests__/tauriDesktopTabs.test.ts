@@ -103,11 +103,16 @@ describe('Tauri desktop tab shortcuts', () => {
       /guard\.insert\(\s*thread_id\.clone\(\),[\s\S]*?\);\s*\}\s*drop\(pending_start\);/
     );
     expect(tauriLib).toMatch(
-      /let\s+data_thread\s*=\s*std::thread::spawn[\s\S]*?app_for_data\.emit\("pty:data",\s*payload\)/
+      /pump\.start_worker[\s\S]*?app_for_output[\s\S]*?\.emit\("pty:data-batch",\s*payload\)/
+    );
+    expect(tauriLib).not.toMatch(/\.emit\(\s*"pty:data"/);
+    expect(tauriLib).toMatch(
+      /let\s+\(reader_done_tx,\s*reader_done_rx\)\s*=\s*std::sync::mpsc::sync_channel\(1\);[\s\S]*?reader_done_tx\.send\(reader_result\)/
     );
     expect(tauriLib).toMatch(
-      /let\s+code\s*=\s*status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\);[\s\S]*?let\s+_\s*=\s*data_thread\.join\(\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
+      /let\s+outcome\s*=\s*coordinate_exit_shutdown\(\s*&mut shutdown,\s*EXIT_DRAIN_TIMEOUT\s*\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
     );
+    expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
       /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*SESSIONS\.lock\(\);[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
     );
