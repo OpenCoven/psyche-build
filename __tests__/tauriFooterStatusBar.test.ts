@@ -8,6 +8,97 @@ const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
 const statusRoot = join(webRoot, 'status');
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
+const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function functionSource(source: string, name: string) {
+  const match = new RegExp(
+    `(?:async\\s+)?function\\s+${escapeRegExp(name)}\\s*\\(`
+  ).exec(source);
+  if (!match || match.index === undefined) throw new Error(`missing function ${name}`);
+
+  const bodyStart = source.indexOf('{', match.index + match[0].length);
+  if (bodyStart === -1) throw new Error(`missing body for ${name}`);
+
+  let depth = 0;
+  let quote: '"' | "'" | '`' | null = null;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (lineComment) {
+      if (character === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character === '\\') {
+        index += 1;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '{') depth += 1;
+    if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(match.index, index + 1);
+    }
+  }
+
+  throw new Error(`unterminated function ${name}`);
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(...names, `"use strict"; return (${source});`)(...values) as T;
+}
+
+function compileBuildStatusController<T extends (...args: never[]) => unknown>(
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict";
+     ${functionSource(mainJs, 'isProcessBackedThread')}
+     ${functionSource(mainJs, 'statusThreadSnapshot')}
+     ${functionSource(mainJs, 'statusCovenSessionSnapshot')}
+     ${functionSource(mainJs, 'readStructuredAgentToolCallCount')}
+     ${functionSource(mainJs, 'getStatusContext')}
+     return (${functionSource(mainJs, 'buildStatusController')});`,
+  )(...values) as T;
+}
 
 function footerSection(source: string) {
   const marker = '/* -------- Footer status -------- */';
@@ -274,5 +365,406 @@ describe('Tauri footer status bar shell', () => {
     ]) {
       expect(section).toContain(selector);
     }
+  });
+
+  it('renames invokeNative and preserves invoke success/failure instrumentation without swallowing rejections', async () => {
+    expect(mainJs).toContain('var invokeNative = window.__TAURI__.core.invoke;');
+    expect(mainJs).not.toMatch(/var invoke = window\.__TAURI__\.core\.invoke;/);
+
+    const operationCalls: Array<[string, number, boolean]> = [];
+    const performance = {
+      values: [12, 29, 40, 58],
+      now() {
+        return this.values.shift() ?? 0;
+      },
+    };
+    const successInvoke = compileFunction<
+      (command: string, args?: Record<string, unknown>) => Promise<unknown>
+    >(functionSource(mainJs, 'invoke'), {
+      invokeNative: async (_command: string, args?: Record<string, unknown>) => args?.ok,
+      statusController: {
+        noteOperation(command: string, duration: number, ok: boolean) {
+          operationCalls.push([command, duration, ok]);
+        },
+      },
+      performance,
+      Promise,
+    });
+
+    await expect(successInvoke('git_worktrees', { ok: 'done' })).resolves.toBe('done');
+    expect(operationCalls).toEqual([['git_worktrees', 17, true]]);
+
+    const rejection = new Error('boom');
+    const failureInvoke = compileFunction<
+      (command: string, args?: Record<string, unknown>) => Promise<unknown>
+    >(functionSource(mainJs, 'invoke'), {
+      invokeNative: async () => {
+        throw rejection;
+      },
+      statusController: {
+        noteOperation(command: string, duration: number, ok: boolean) {
+          operationCalls.push([command, duration, ok]);
+        },
+      },
+      performance,
+      Promise,
+    });
+
+    await expect(failureInvoke('pty_start')).rejects.toBe(rejection);
+    expect(operationCalls[1]).toEqual(['pty_start', 18, false]);
+  });
+
+  it('creates the footer controller with exact hosts, raw workspace metrics polling, live context mapping, and explicit clipboard fallback', async () => {
+    const idRequests: string[] = [];
+    const selectorRequests: string[] = [];
+    const nodes = new Map<string, { id?: string; selector?: string }>([
+      ['status-bar', { id: 'status-bar' }],
+      ['status-metrics', { id: 'status-metrics' }],
+      ['status-detail', { id: 'status-detail' }],
+      ['status-detail-title', { id: 'status-detail-title' }],
+      ['status-detail-body', { id: 'status-detail-body' }],
+      ['status-detail-close', { id: 'status-detail-close' }],
+      ['status-detail-pin', { id: 'status-detail-pin' }],
+      ['status-detail-copy', { id: 'status-detail-copy' }],
+      ['status-more-button', { id: 'status-more-button' }],
+      ['status-more-menu', { id: 'status-more-menu' }],
+      ['status-live', { id: 'status-live' }],
+      ['status-alert', { id: 'status-alert' }],
+      ['.status-bar-trailing', { selector: '.status-bar-trailing' }],
+    ]);
+    const scopeButtons = [
+      { id: 'status-scope-workspace' },
+      { id: 'status-scope-focused' },
+      { id: 'status-detail-scope-workspace' },
+      { id: 'status-detail-scope-focused' },
+    ];
+    const controller = { kind: 'status-controller' };
+    const createCalls: Array<Record<string, unknown>> = [];
+    const invokeNativeCalls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const project = { id: 'project-1', root: '/repo', worktrees: [{ path: '/repo' }] };
+    const sessions = [
+      {
+        id: 'live',
+        title: 'Live',
+        harness: 'claude',
+        model: 'claude-sonnet',
+        currentTask: 'Review',
+        inputTokens: 12,
+        outputTokens: 7,
+        status: 'running',
+        createdAt: '2026-08-10T00:00:00Z',
+      },
+      {
+        id: 'done',
+        title: 'Done',
+        status: 'completed',
+        archivedAt: '2026-08-10T01:00:00Z',
+      },
+    ];
+    const state = {
+      activeThreadId: 'agent',
+      agentToolCalls: 9,
+      threads: [
+        {
+          id: 'agent',
+          name: 'Agent',
+          kind: 'coven-chat',
+          status: 'running',
+          launch: { covenSessionId: 'live' },
+          needsAttention: true,
+          startedAt: 10,
+          finishedAt: null,
+          exitCode: null,
+        },
+        {
+          id: 'shell',
+          name: 'Shell',
+          kind: 'shell',
+          status: 'exited',
+          launch: {},
+          needsAttention: false,
+          startedAt: 5,
+          finishedAt: 15,
+          exitCode: 0,
+        },
+        {
+          id: 'web',
+          name: 'Web',
+          kind: 'web',
+          status: 'running',
+          needsAttention: false,
+          startedAt: 1,
+          finishedAt: null,
+          exitCode: null,
+        },
+        {
+          id: 'git',
+          name: 'Git',
+          kind: 'git',
+          status: '',
+          needsAttention: false,
+          startedAt: null,
+          finishedAt: null,
+          exitCode: null,
+        },
+      ],
+    };
+    const buildStatusController = compileBuildStatusController<() => unknown>({
+      window: {
+        PsycheStatus: {
+          createStatusController(options: Record<string, unknown>) {
+            createCalls.push(options);
+            return controller;
+          },
+        },
+      },
+      document: {
+        getElementById(id: string) {
+          idRequests.push(id);
+          return nodes.get(id) ?? null;
+        },
+        querySelector(selector: string) {
+          selectorRequests.push(selector);
+          return nodes.get(selector) ?? null;
+        },
+        querySelectorAll(selector: string) {
+          selectorRequests.push(selector);
+          return scopeButtons;
+        },
+      },
+      localStorage: {
+        getItem() { return null; },
+        setItem() { return undefined; },
+      },
+      navigator: {},
+      invokeNative: async (command: string, args: Record<string, unknown>) => {
+        invokeNativeCalls.push({ command, args });
+        return { ok: true, command, args };
+      },
+      state,
+      activeProject: () => project,
+      allCovenSessionsForProject: (inputProject: unknown) => {
+        expect(inputProject).toBe(project);
+        return sessions;
+      },
+      covenSessionsForProject: () => {
+        throw new Error('live-only helper must not power controller context');
+      },
+      Promise,
+    });
+
+    expect(buildStatusController()).toBe(controller);
+    expect(createCalls).toHaveLength(1);
+    expect(((mainJs.match(/PsycheStatus\.createStatusController\(/g)) ?? []).length).toBe(1);
+    expect(idRequests).toEqual([
+      'status-bar',
+      'status-metrics',
+      'status-detail',
+      'status-detail-title',
+      'status-detail-body',
+      'status-detail-close',
+      'status-detail-pin',
+      'status-detail-copy',
+      'status-more-button',
+      'status-more-menu',
+      'status-live',
+      'status-alert',
+    ]);
+    expect(selectorRequests).toEqual([
+      '.status-bar-trailing',
+      '.status-scope-btn, .status-detail-scope-btn',
+    ]);
+
+    const options = createCalls[0];
+    expect((options.elements as Record<string, unknown>).bar).toEqual({ id: 'status-bar' });
+    expect((options.elements as Record<string, unknown>).metrics).toEqual({ id: 'status-metrics' });
+    expect((options.elements as Record<string, unknown>).detail).toEqual({ id: 'status-detail' });
+    expect((options.elements as Record<string, unknown>).detailTitle).toEqual({ id: 'status-detail-title' });
+    expect((options.elements as Record<string, unknown>).detailBody).toEqual({ id: 'status-detail-body' });
+    expect((options.elements as Record<string, unknown>).close).toEqual({ id: 'status-detail-close' });
+    expect((options.elements as Record<string, unknown>).pin).toEqual({ id: 'status-detail-pin' });
+    expect((options.elements as Record<string, unknown>).copy).toEqual({ id: 'status-detail-copy' });
+    expect((options.elements as Record<string, unknown>).scopeButtons).toBe(scopeButtons);
+    expect((options.elements as Record<string, unknown>).more).toEqual({ id: 'status-more-button' });
+    expect((options.elements as Record<string, unknown>).moreMenu).toEqual({ id: 'status-more-menu' });
+    expect((options.elements as Record<string, unknown>).live).toEqual({ id: 'status-live' });
+    expect((options.elements as Record<string, unknown>).alert).toEqual({ id: 'status-alert' });
+    expect((options.elements as Record<string, unknown>).trailing).toEqual({
+      selector: '.status-bar-trailing',
+    });
+
+    const fetchMetrics = options.fetchMetrics as (scope?: { threadId?: string }) => Promise<unknown>;
+    await expect(fetchMetrics()).resolves.toMatchObject({
+      ok: true,
+      command: 'workspace_metrics',
+      args: { scope: null },
+    });
+    await expect(fetchMetrics({ threadId: 'agent' })).resolves.toMatchObject({
+      ok: true,
+      command: 'workspace_metrics',
+      args: { scope: { threadId: 'agent' } },
+    });
+    expect(invokeNativeCalls).toEqual([
+      { command: 'workspace_metrics', args: { scope: null } },
+      { command: 'workspace_metrics', args: { scope: { threadId: 'agent' } } },
+    ]);
+    expect(mainJs).not.toMatch(/invoke\s*\(\s*["']workspace_metrics["']/);
+
+    const getContext = options.getContext as () => Record<string, unknown>;
+    expect(functionSource(mainJs, 'isProcessBackedThread')).toContain('thread.launch');
+    expect(getContext()).toEqual({
+      activeThreadId: 'agent',
+      threads: [
+        {
+          id: 'agent',
+          name: 'Agent',
+          kind: 'coven-chat',
+          status: 'running',
+          covenSessionId: 'live',
+          processBacked: true,
+          needsAttention: true,
+          startedAt: 10,
+          finishedAt: null,
+          exitCode: null,
+        },
+        {
+          id: 'shell',
+          name: 'Shell',
+          kind: 'shell',
+          status: 'exited',
+          covenSessionId: null,
+          processBacked: true,
+          needsAttention: false,
+          startedAt: 5,
+          finishedAt: 15,
+          exitCode: 0,
+        },
+        {
+          id: 'web',
+          name: 'Web',
+          kind: 'web',
+          status: 'running',
+          covenSessionId: null,
+          processBacked: false,
+          needsAttention: false,
+          startedAt: 1,
+          finishedAt: null,
+          exitCode: null,
+        },
+        {
+          id: 'git',
+          name: 'Git',
+          kind: 'git',
+          status: '',
+          covenSessionId: null,
+          processBacked: false,
+          needsAttention: false,
+          startedAt: null,
+          finishedAt: null,
+          exitCode: null,
+        },
+      ],
+      covenSessions: sessions,
+      agentToolCalls: 9,
+    });
+
+    state.agentToolCalls = Number.NaN;
+    expect(getContext()).not.toHaveProperty('agentToolCalls');
+
+    const copyText = options.copyText as (text: string) => Promise<void>;
+    await expect(copyText('diagnostics')).rejects.toThrow('Clipboard API unavailable');
+
+    const written: string[] = [];
+    const withClipboard = compileBuildStatusController<() => unknown>({
+      window: {
+        PsycheStatus: {
+          createStatusController(options: Record<string, unknown>) {
+            return options;
+          },
+        },
+      },
+      document: {
+        getElementById(id: string) {
+          return nodes.get(id) ?? null;
+        },
+        querySelector(selector: string) {
+          return nodes.get(selector) ?? null;
+        },
+        querySelectorAll() {
+          return scopeButtons;
+        },
+      },
+      localStorage: {
+        getItem() { return null; },
+        setItem() { return undefined; },
+      },
+      navigator: {
+        clipboard: {
+          writeText(text: string) {
+            written.push(text);
+            return Promise.resolve();
+          },
+        },
+      },
+      invokeNative: async () => null,
+      state,
+      activeProject: () => project,
+      allCovenSessionsForProject: () => sessions,
+      Promise,
+    });
+    const clipboardOptions = withClipboard() as Record<string, unknown>;
+    await expect((clipboardOptions.copyText as (text: string) => Promise<void>)('copied')).resolves.toBeUndefined();
+    expect(written).toEqual(['copied']);
+  });
+
+  it('feeds PTY, Coven, visibility, focus, project/worktree, and lifecycle events into the controller while keeping the rail live-only', () => {
+    const refreshCoven = functionSource(mainJs, 'refreshCovenSessions');
+
+    expect(mainJs).toMatch(
+      /listen\("pty:data"[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!thread \|\| thread\.closing\) return;[\s\S]*noteStatusPtyData\(payload\.thread_id,\s*bytes\);/s
+    );
+    expect(refreshCoven).toMatch(/performance\.now\(\)/);
+    expect(refreshCoven).toMatch(
+      /noteStatusCovenSample\(\{[\s\S]*phase:\s*covenDiscovery\.phase[\s\S]*latencyMs:[\s\S]*refreshedAt:\s*covenDiscovery\.refreshedAt[\s\S]*error:/s
+    );
+    expect(functionSource(mainJs, 'handleVisibilityChange')).toMatch(
+      /else[\s\S]*startCovenPolling\(\)[\s\S]*refreshStatusController\(\)/s
+    );
+    expect(functionSource(mainJs, 'focusThread')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'handlePtyExit')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'activatePaneLayoutFocus')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'activateProjectWorktree')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'refreshProjectWorktrees')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'removeProject')).toContain('refreshStatusController();');
+    expect(functionSource(mainJs, 'addProject')).toContain('refreshStatusController();');
+    expect(mainJs).toMatch(
+      /document\.addEventListener\("pointerdown", function \(\) \s*\{\s*noteStatusActivity\(\);\s*\}, true\);/
+    );
+    expect(mainJs).toMatch(
+      /document\.addEventListener\("keydown", function \(\) \s*\{\s*noteStatusActivity\(\);\s*\}, true\);/
+    );
+
+    for (const name of [
+      'createThread',
+      'createBrowserPane',
+      'popOutGitPane',
+      'closeToolPane',
+      'closeThread',
+      'hideThread',
+      'reopenThread',
+      'retryThread',
+    ]) {
+      expect(functionSource(mainJs, name)).toContain('noteStatusActivity();');
+    }
+
+    expect(functionSource(mainJs, 'boot')).toMatch(
+      /state\.env = env \|\| \{\};[\s\S]*statusController[\s\S]*statusController\.start\(\);/s
+    );
+    expect(mainJs).toMatch(
+      /window\.addEventListener\("beforeunload", function \(\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*if \(statusController\) statusController\.stop\(\);[\s\S]*\}\);/s
+    );
+    expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('sessionsByProject.get(root) || []');
+    expect(functionSource(mainJs, 'covenSessionsForProject')).not.toContain('allSessionsByProject');
+    expect(functionSource(mainJs, 'allCovenSessionsForProject')).toContain('allSessionsByProject.get(root) || []');
   });
 });

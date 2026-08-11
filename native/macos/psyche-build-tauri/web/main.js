@@ -39,13 +39,39 @@
     return;
   }
 
-  var invoke = window.__TAURI__.core.invoke;
+  var statusController = null;
+  var invokeNative = window.__TAURI__.core.invoke;
   var listen = window.__TAURI__.event.listen;
   var openUrl = (window.__TAURI__.opener && window.__TAURI__.opener.openUrl) || null;
   var dialogOpen = (window.__TAURI__.dialog && window.__TAURI__.dialog.open) || null;
   var currentWindow = window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow
     ? window.__TAURI__.window.getCurrentWindow()
     : null;
+
+  function invoke(command, args) {
+    var startedAt = performance.now();
+    try {
+      return Promise.resolve(invokeNative(command, args)).then(
+        function (value) {
+          if (statusController) {
+            statusController.noteOperation(command, performance.now() - startedAt, true);
+          }
+          return value;
+        },
+        function (error) {
+          if (statusController) {
+            statusController.noteOperation(command, performance.now() - startedAt, false);
+          }
+          throw error;
+        }
+      );
+    } catch (error) {
+      if (statusController) {
+        statusController.noteOperation(command, performance.now() - startedAt, false);
+      }
+      throw error;
+    }
+  }
 
   // ============================================================
   // 2. State
@@ -102,6 +128,7 @@
       stopCovenPolling();
     } else {
       startCovenPolling();
+      if (typeof refreshStatusController === "function") refreshStatusController();
     }
   }
 
@@ -208,6 +235,7 @@
     var thread = leaf && findThread(leaf.threadId);
     state.activeThreadId = thread ? thread.id : null;
     if (thread) project.lastActiveThreadId = thread.id;
+    if (typeof refreshStatusController === "function") refreshStatusController();
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     if (!project || !(await showTerminalView())) return false;
@@ -227,6 +255,7 @@
     refreshSidebar();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
   function measuredTerminalHost() {
@@ -325,6 +354,8 @@
     var flight = { key: requestKey, promise: null };
     covenDiscoveryFlight = flight;
     flight.promise = (async function () {
+      var requestStartedAt = performance.now();
+      var errorMessage = "";
       try {
         var response = await invoke("coven_sessions", {
           projectRoots: roots,
@@ -335,16 +366,29 @@
           started.requestId,
           response
         );
-      } catch (_) {
+      } catch (error) {
+        errorMessage = error && error.message ? error.message : String(error || "");
+        if (!errorMessage) errorMessage = "Coven sessions could not be loaded";
         covenDiscovery = PsycheSessions.applyCovenResponse(
           covenDiscovery,
           started.requestId,
-          { status: "error", sessions: [], message: "Coven sessions could not be loaded" }
+          { status: "error", sessions: [], message: errorMessage }
         );
       } finally {
         if (covenDiscoveryFlight === flight) covenDiscoveryFlight = null;
       }
+      if (typeof noteStatusCovenSample === "function") {
+        noteStatusCovenSample({
+          phase: covenDiscovery.phase,
+          latencyMs: performance.now() - requestStartedAt,
+          refreshedAt: covenDiscovery.refreshedAt,
+          error: covenDiscovery.phase === "ready"
+            ? ""
+            : (covenDiscovery.message || errorMessage),
+        });
+      }
       renderSessionList();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       return covenDiscovery;
     })();
     return flight.promise;
@@ -367,6 +411,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return Promise.resolve(project.worktrees);
     }
@@ -376,6 +421,7 @@
       project.selectedWorktreePath = selected ? selected.path : project.root;
       refreshSidebar();
       saveWorkspaceSoon();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return project.worktrees;
     }).catch(function () {
@@ -384,6 +430,7 @@
       }]);
       project.selectedWorktreePath = project.root;
       refreshSidebar();
+      if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
       return project.worktrees;
     });
@@ -434,6 +481,7 @@
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
   var projectCounter = 0;
@@ -635,6 +683,155 @@
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
   var dockGitCountEl = document.getElementById("dock-git-count");
+
+  function isProcessBackedThread(thread) {
+    return !!(thread && thread.launch);
+  }
+
+  function statusThreadSnapshot(thread) {
+    var launch = thread && thread.launch ? thread.launch : null;
+    return {
+      id: thread && thread.id ? thread.id : null,
+      name: thread && thread.name ? thread.name : (thread && thread.id) || "",
+      kind: thread && thread.kind ? thread.kind : "shell",
+      status: thread && typeof thread.status === "string" ? thread.status : "",
+      covenSessionId: thread && thread.covenSessionId != null
+        ? thread.covenSessionId
+        : (launch && launch.covenSessionId) || null,
+      processBacked: isProcessBackedThread(thread),
+      needsAttention: !!(thread && thread.needsAttention),
+      startedAt: thread && thread.startedAt != null ? thread.startedAt : null,
+      finishedAt: thread && thread.finishedAt != null ? thread.finishedAt : null,
+      exitCode: thread && thread.exitCode != null ? thread.exitCode : null,
+    };
+  }
+
+  function statusCovenSessionSnapshot(session) {
+    if (!session || !session.id) return null;
+    var record = { id: session.id };
+    if (session.projectRoot != null) record.projectRoot = session.projectRoot;
+    if (session.cwd != null) record.cwd = session.cwd;
+    if (session.title != null) record.title = session.title;
+    if (session.harness != null) record.harness = session.harness;
+    if (session.model != null) record.model = session.model;
+    if (session.currentTask != null) record.currentTask = session.currentTask;
+    if (session.inputTokens != null) record.inputTokens = session.inputTokens;
+    if (session.outputTokens != null) record.outputTokens = session.outputTokens;
+    if (session.status != null) record.status = session.status;
+    if (session.createdAt != null) record.createdAt = session.createdAt;
+    if (session.updatedAt != null) record.updatedAt = session.updatedAt;
+    if (session.archivedAt != null) record.archivedAt = session.archivedAt;
+    return record;
+  }
+
+  function readStructuredAgentToolCallCount() {
+    if (Number.isFinite(state.agentToolCalls)) return state.agentToolCalls;
+    var project = activeProject();
+    if (project && Number.isFinite(project.agentToolCalls)) return project.agentToolCalls;
+    return null;
+  }
+
+  function getStatusContext() {
+    var project = activeProject();
+    var context = {
+      activeThreadId: state.activeThreadId || null,
+      threads: state.threads.map(statusThreadSnapshot),
+      covenSessions: project
+        ? allCovenSessionsForProject(project).map(statusCovenSessionSnapshot).filter(Boolean)
+        : [],
+    };
+    var agentToolCalls = readStructuredAgentToolCallCount();
+    if (agentToolCalls != null) {
+      context.agentToolCalls = agentToolCalls;
+    }
+    return context;
+  }
+
+  function buildStatusController() {
+    var PsycheStatus = window.PsycheStatus;
+    if (!PsycheStatus || typeof PsycheStatus.createStatusController !== "function") {
+      return null;
+    }
+    var bar = document.getElementById("status-bar");
+    var metrics = document.getElementById("status-metrics");
+    var detailPanel = document.getElementById("status-detail");
+    var detailTitle = document.getElementById("status-detail-title");
+    var detailBody = document.getElementById("status-detail-body");
+    var detailClose = document.getElementById("status-detail-close");
+    var detailPin = document.getElementById("status-detail-pin");
+    var detailCopy = document.getElementById("status-detail-copy");
+    var moreButton = document.getElementById("status-more-button");
+    var moreMenu = document.getElementById("status-more-menu");
+    var live = document.getElementById("status-live");
+    var alert = document.getElementById("status-alert");
+    var trailing = document.querySelector(".status-bar-trailing");
+    var scopeButtons = document.querySelectorAll(".status-scope-btn, .status-detail-scope-btn");
+    if (!bar || !metrics || !detailPanel || !detailTitle || !detailBody || !detailClose ||
+        !detailPin || !detailCopy || !moreButton || !moreMenu || !live || !alert ||
+        !trailing || !scopeButtons || !scopeButtons.length) {
+      return null;
+    }
+    return PsycheStatus.createStatusController({
+      elements: {
+        bar: bar,
+        metrics: metrics,
+        detail: detailPanel,
+        detailTitle: detailTitle,
+        detailBody: detailBody,
+        close: detailClose,
+        pin: detailPin,
+        copy: detailCopy,
+        scopeButtons: scopeButtons,
+        more: moreButton,
+        moreMenu: moreMenu,
+        live: live,
+        alert: alert,
+        trailing: trailing,
+      },
+      fetchMetrics: function (scope) {
+        return invokeNative("workspace_metrics", { scope: scope || null });
+      },
+      getContext: getStatusContext,
+      storage: localStorage,
+      copyText: function (text) {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+          return Promise.reject(new Error("Clipboard API unavailable"));
+        }
+        return navigator.clipboard.writeText(text);
+      },
+    });
+  }
+
+  statusController = buildStatusController();
+
+  function noteStatusActivity(at) {
+    if (!statusController || typeof statusController.noteActivity !== "function") return;
+    statusController.noteActivity(at);
+  }
+
+  function noteStatusPtyData(threadId, bytes, at) {
+    if (!statusController || typeof statusController.notePtyData !== "function") return;
+    statusController.notePtyData(threadId, bytes, at);
+  }
+
+  function noteStatusCovenSample(sample) {
+    if (!statusController || typeof statusController.noteCovenSample !== "function") return;
+    statusController.noteCovenSample(sample);
+  }
+
+  function refreshStatusController() {
+    if (!statusController || typeof statusController.refresh !== "function" ||
+        document.visibilityState === "hidden") {
+      return Promise.resolve(null);
+    }
+    return statusController.refresh().catch(function (error) {
+      console.warn("[status controller] refresh failed", error);
+      return null;
+    });
+  }
+
+  document.addEventListener("pointerdown", function () { noteStatusActivity(); }, true);
+  document.addEventListener("keydown", function () { noteStatusActivity(); }, true);
 
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
@@ -883,6 +1080,7 @@
     var bytes = new Uint8Array(payload.bytes);
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing) return;
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.thread_id, bytes);
     if (thread.term) {
       thread.term.write(bytes);
     } else {
@@ -905,9 +1103,10 @@
     thread.spawning = false;
     thread.finishedAt = Date.now();
     thread.exitCode = payload.code == null ? null : payload.code;
-    thread.status = stoppedByUser || payload.code == null || payload.code === 0
-      ? "exited"
-      : "failed";
+    thread.status = "exited";
+    if (!stoppedByUser && payload.code != null && payload.code !== 0) {
+      thread.status = "failed";
+    }
     // An exited pane is not waiting on an answer, it is over. Leaving the badge
     // would send the user to a pane with nothing to say.
     clearThreadAttention(thread);
@@ -920,6 +1119,7 @@
     if (state.activeThreadId === thread.id) {
       setProjectStatus(findProject(thread.projectId), "warn");
     }
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
 
@@ -1190,6 +1390,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     refreshSidebar();
     refreshTabs();
     mountTerminal(thread);
@@ -1242,6 +1443,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(pane);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
     await focusThread(id);
     refreshSidebar();
@@ -1399,6 +1601,7 @@
         return false;
       }
     }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     return spawnPty(thread);
   }
 
@@ -1665,6 +1868,7 @@
     };
     commitPanePlacement(placement);
     state.threads.push(thread);
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountToolPane(thread);
     if (dropTarget && dropTarget.threadId && dropTarget.position) {
       movePaneTo(id, dropTarget.threadId, dropTarget.position);
@@ -1680,6 +1884,7 @@
     if (!thread || thread.closeStarted) return;
     thread.closeStarted = true;
     thread.closing = true;
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     // Move the surface home before the pane is torn down, or it would be
     // removed from the document along with its container.
     dockGitSurface();
@@ -2835,6 +3040,7 @@
     });
 
     setProjectStatus(project, statusLevel(thread.status));
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
 
@@ -2908,6 +3114,7 @@
     }
     thread.closeStarted = true;
     thread.closing = true;
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     pendingDataBuffers.delete(id);
     // A set must never point at a thread that no longer exists, or scoping the
     // canvas to it would silently show fewer panes than it claims.
@@ -2940,6 +3147,7 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
     if (state.activeThreadId === id) {
@@ -2963,6 +3171,7 @@
       setStatus("Not enough space to reopen this terminal pane", "warn");
       return false;
     }
+    if (typeof noteStatusActivity === "function") noteStatusActivity();
     thread.hidden = false;
     commitPanePlacement(placement);
     project.lastActiveThreadId = thread.id;
@@ -4078,6 +4287,7 @@
     refreshTabs();
     syncProjectBrowser();
     saveWorkspaceSoon();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return true;
   }
 
@@ -5611,7 +5821,10 @@
   document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex < tab.history.length - 1) { tab.historyIndex += 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }
-  window.addEventListener("beforeunload", saveWorkspaceNow);
+  window.addEventListener("beforeunload", function () {
+    saveWorkspaceNow();
+    if (statusController) statusController.stop();
+  });
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   // -------- Resizable splitter between canvas and Git dock --------
@@ -6720,6 +6933,7 @@
     syncProjectBrowser();
     saveWorkspaceSoon();
     startCovenPolling();
+    if (typeof refreshStatusController === "function") refreshStatusController();
     return project;
   }
 
@@ -6891,6 +7105,7 @@
 
   async function boot(env) {
     state.env = env || {};
+    if (typeof statusController !== "undefined" && statusController) statusController.start();
     var saved = readSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
@@ -6919,6 +7134,7 @@
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();
+    if (typeof refreshStatusController === "function") refreshStatusController();
   }
 
   invoke("app_environment")
