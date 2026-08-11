@@ -56,6 +56,13 @@ describe('tauri footer status model', () => {
       pinned: [],
       scope: 'workspace',
     });
+    expect(normalizePreferences({
+      visible: ['connection'],
+      pinned: ['fps'],
+    })).toMatchObject({
+      visible: ['connection', 'fps'],
+      pinned: ['fps'],
+    });
   });
 
   test('normalizes process-backed tasks, de-duplicates remote attachments, and merges metadata', () => {

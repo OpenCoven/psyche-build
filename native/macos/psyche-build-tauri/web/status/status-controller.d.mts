@@ -1,6 +1,7 @@
 import type {
   ActivityThreadSample,
   ActivityWorkspaceSample,
+  DiagnosticsInput,
   FrameSample,
   MetricId,
   ScopePreference,
@@ -119,7 +120,7 @@ export type StatusControllerView = {
   overflowed: MetricId[];
   labels: Partial<Record<MetricId, string | null>>;
   metricSeverity: Record<string, string>;
-  diagnostics: unknown;
+  diagnostics: DiagnosticsInput;
 };
 
 export function createStatusController(options?: StatusControllerOptions): StatusController;

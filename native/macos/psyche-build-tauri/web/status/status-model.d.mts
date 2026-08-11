@@ -168,21 +168,28 @@ export type FrameSampler = {
 export type DiagnosticsMetrics = {
   cpuPercent?: number | null;
   memoryBytes?: number | null;
+  memoryPressurePercent?: number | null;
   fps?: number | null;
   renderLatencyMs?: number | null;
   droppedFrames?: number | null;
   linesPerSecond?: number | null;
   outputLinesPerSecond?: number | null;
+  outputBytesPerSecond?: number | null;
+  operationsPerSecond?: number | null;
+  errors?: number | null;
 };
 
 export type DiagnosticsPeaks = {
   cpuPercent?: number | null;
   memoryBytes?: number | null;
+  memoryPressurePercent?: number | null;
   fps?: number | null;
   renderLatencyMs?: number | null;
   droppedFrames?: number | null;
   linesPerSecond?: number | null;
   outputLinesPerSecond?: number | null;
+  outputBytesPerSecond?: number | null;
+  operationsPerSecond?: number | null;
 };
 
 export type DiagnosticsService = {

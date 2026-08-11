@@ -573,6 +573,7 @@ function createHarness(options: {
     elements: {
       alert,
       bar,
+      close,
       copy,
       detail,
       detailBody,
@@ -583,6 +584,10 @@ function createHarness(options: {
       pin,
     },
     frames,
+    readStoredPreferences() {
+      const raw = storageState.get('psyche.tauri.status.v1');
+      return raw ? JSON.parse(raw) : null;
+    },
     timers,
     clock: {
       advance: advanceClock,
@@ -652,6 +657,8 @@ describe('tauri status controller', () => {
     });
     expect(prevented).toBe(1);
     expect(elements.detail.hidden).toBe(true);
+
+    controller.stop();
   });
 
   it('announces pin and unpin in the polite live region and clears stale alerts', () => {
@@ -670,6 +677,53 @@ describe('tauri status controller', () => {
     elements.pin.dispatch('click');
     expect(elements.live.textContent).toBe('Unpinned Agents');
     expect(elements.alert.textContent).toBe('');
+
+    controller.stop();
+  });
+
+  it('preserves prior health fields when render receives partial health updates', () => {
+    const { controller, elements } = createHarness({
+      hidden: true,
+      nowMs: 1_700_000_030_000,
+    });
+
+    controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot(),
+      nativeHealth: {
+        status: 'ready',
+        reconnects: 2,
+        latencyMs: 18,
+        lastSuccessAt: 1_700_000_020_000,
+        error: 'offline',
+      },
+      covenHealth: {
+        phase: 'error',
+        reconnects: 3,
+        latencyMs: 24,
+        refreshedAt: 1_700_000_025_000,
+        error: 'timeout',
+      },
+    }));
+
+    controller.render({
+      sampledAt: 1_700_000_030_000,
+      nativeHealth: {
+        status: 'degraded',
+      },
+      covenHealth: {
+        phase: 'ready',
+      },
+    } as StatusControllerSample);
+    controller.toggleMetric('connection');
+
+    const meta = classTexts(elements.detailBody, 'status-row-meta');
+    const tasks = classTexts(elements.detailBody, 'status-row-task');
+
+    expect(meta[0]).toContain('Reconnects 2');
+    expect(meta[0]).toContain('Last refresh');
+    expect(tasks).toContain('offline');
+    expect(meta[1]).toContain('Reconnects 3');
+    expect(meta[1]).toContain('Last refresh');
   });
 
   it('clears stale copy alerts on success and preserves explicit copy failures', async () => {
@@ -684,6 +738,7 @@ describe('tauri status controller', () => {
     await flushMicrotasks();
     expect(success.elements.live.textContent).toBe('Diagnostics copied');
     expect(success.elements.alert.textContent).toBe('');
+    success.controller.stop();
 
     const failure = createHarness({
       hidden: true,
@@ -698,6 +753,7 @@ describe('tauri status controller', () => {
     expect(failure.elements.alert.textContent).toBe(
       'Unable to copy diagnostics: Clipboard unavailable',
     );
+    failure.controller.stop();
   });
 
   it('uses approved compact Tasks wording and excludes blocked counts from the collapsed metric', () => {
@@ -804,6 +860,105 @@ describe('tauri status controller', () => {
     expect(unavailablePerfOpen?.parentElement?.querySelector('.status-more-meta')?.textContent).toContain('unavailable');
   });
 
+  it('moves focus into the detail panel from More and restores it to More for overflowed metrics', () => {
+    const { controller, doc, elements } = createHarness({
+      hidden: true,
+      barWidth: 300,
+    });
+
+    controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot({
+        workspace: {
+          cpuPercent: 55,
+          memoryBytes: 512 * 1024 * 1024,
+        },
+      }),
+      frame: {
+        fps: 48,
+        renderLatencyMs: 21,
+        droppedFrames: 0,
+      },
+      summary: {
+        counts: {
+          agents: 1,
+          shells: 0,
+          running: 2,
+          waiting: 1,
+          failed: 1,
+        },
+      },
+    }));
+    controller.start();
+
+    expect(controller.render()?.overflowed).toContain('tasks');
+    expect(elements.metrics.querySelector('[data-metric="tasks"]')).toBeNull();
+
+    elements.more.dispatch('click');
+    const tasksOpen = elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]');
+    expect(tasksOpen).not.toBeNull();
+    tasksOpen?.focus();
+    tasksOpen?.dispatch('click');
+
+    const rebuiltTasksOpen = elements.moreMenu.querySelector('[data-focus-key="more-open:tasks"]');
+    expect(elements.moreMenu.hidden).toBe(true);
+    expect(doc.activeElement).toBe(elements.close);
+    expect(doc.activeElement).not.toBe(rebuiltTasksOpen);
+
+    elements.close.dispatch('click');
+    expect(doc.activeElement).toBe(elements.more);
+
+    controller.stop();
+  });
+
+  it('keeps pinning and visibility preferences in sync from the More menu', () => {
+    const { controller, elements, readStoredPreferences } = createHarness({ hidden: true });
+
+    controller.render(buildSample({
+      nativeSnapshot: buildNativeSnapshot(),
+    }));
+    controller.start();
+
+    elements.more.dispatch('click');
+    let checkbox = elements.moreMenu.querySelector('[data-focus-key="more-show:performance"]');
+    expect(checkbox?.checked).toBe(true);
+    if (!checkbox) throw new Error('missing More visibility checkbox');
+    checkbox.checked = false;
+    checkbox.dispatch('change');
+
+    let stored = readStoredPreferences();
+    expect(stored?.visible).not.toContain('performance');
+    expect(stored?.pinned).not.toContain('performance');
+
+    const performanceOpen = elements.moreMenu.querySelector('[data-focus-key="more-open:performance"]');
+    expect(performanceOpen).not.toBeNull();
+    performanceOpen?.focus();
+    performanceOpen?.dispatch('click');
+    elements.pin.dispatch('click');
+
+    stored = readStoredPreferences();
+    expect(stored?.visible).toContain('performance');
+    expect(stored?.pinned).toContain('performance');
+
+    elements.more.dispatch('click');
+    checkbox = elements.moreMenu.querySelector('[data-focus-key="more-show:performance"]');
+    expect(checkbox?.checked).toBe(true);
+    if (!checkbox) throw new Error('missing refreshed More visibility checkbox');
+    checkbox.checked = false;
+    checkbox.dispatch('change');
+
+    stored = readStoredPreferences();
+    expect(stored?.visible).not.toContain('performance');
+    expect(stored?.pinned).not.toContain('performance');
+    expect(elements.pin.textContent).toBe('Pin metric');
+
+    const refreshedCheckbox = elements.moreMenu.querySelector('[data-focus-key="more-show:performance"]');
+    const meta = refreshedCheckbox?.parentElement?.parentElement
+      ?.querySelector('.status-more-meta')?.textContent ?? '';
+    expect(meta).not.toContain('pinned');
+
+    controller.stop();
+  });
+
   it('times out hung native polls, keeps one controller poll active, and ignores late completions', async () => {
     const firstSnapshot = buildNativeSnapshot({
       sampledAtMs: 1_700_000_000_000,
@@ -866,6 +1021,179 @@ describe('tauri status controller', () => {
     hanging.resolve(lateSnapshot);
     await flushMicrotasks();
     expect(controller.render()?.labels.performance).toBe('77% 768M');
+
+    controller.stop();
+  });
+
+  it('settles a stopped in-flight poll without mutating health state and ignores late completion after restart', async () => {
+    const baselineSnapshot = buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 12,
+        memoryBytes: 256 * 1024 * 1024,
+      },
+    });
+    const hanging = createDeferred<unknown>();
+    const recoveredSnapshot = buildNativeSnapshot({
+      sampledAtMs: 1_700_000_010_000,
+      workspace: {
+        cpuPercent: 66,
+        memoryBytes: 768 * 1024 * 1024,
+      },
+    });
+    const lateSnapshot = buildNativeSnapshot({
+      sampledAtMs: 1_700_000_020_000,
+      workspace: {
+        cpuPercent: 3,
+        memoryBytes: 64 * 1024 * 1024,
+      },
+    });
+    let fetchCount = 0;
+    const fetchMetrics = () => {
+      fetchCount += 1;
+      if (fetchCount === 1) return hanging.promise;
+      return Promise.resolve(recoveredSnapshot);
+    };
+    const { controller, timers } = createHarness({
+      hidden: true,
+      fetchMetrics,
+    });
+
+    controller.render(buildSample({
+      nativeSnapshot: baselineSnapshot,
+      nativeHealth: {
+        status: 'ready',
+        reconnects: 1,
+        latencyMs: 5,
+        lastSuccessAt: 1_700_000_000_000,
+        error: '',
+      },
+    }));
+    controller.start();
+
+    const pending = controller.refresh();
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+
+    await flushMicrotasks();
+    expect(fetchCount).toBe(1);
+
+    controller.stop();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(settled).toBe(true);
+    expect(timers.size).toBe(0);
+
+    const stoppedView = await pending;
+    expect(stoppedView?.labels.connection).toBe('Connected');
+    expect(stoppedView?.labels.performance).toBe('12% 256M');
+    expect(controller.render()?.labels.performance).toBe('12% 256M');
+
+    controller.start();
+    const restarted = controller.refresh();
+    hanging.resolve(lateSnapshot);
+    await flushMicrotasks();
+
+    const restartedView = await restarted;
+    expect(restartedView?.labels.performance).toBe('66% 768M');
+    expect(controller.render()?.labels.performance).toBe('66% 768M');
+
+    controller.stop();
+  });
+
+  it('discards focused results after a mid-poll scope switch and immediately refreshes the new scope', async () => {
+    const first = createDeferred<unknown>();
+    const second = createDeferred<unknown>();
+    let currentContext = {
+      activeThreadId: 'thread-a',
+      threads: [
+        {
+          id: 'thread-a',
+          name: 'Thread A',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+        {
+          id: 'thread-b',
+          name: 'Thread B',
+          kind: 'shell',
+          status: 'running',
+          processBacked: true,
+          startedAt: 0,
+        },
+      ],
+      covenSessions: [],
+    };
+    const fetchScopes: Array<{ threadId?: string } | undefined> = [];
+    let fetchCount = 0;
+    const fetchMetrics = (scope?: { threadId?: string }) => {
+      fetchScopes.push(scope ? { ...scope } : undefined);
+      fetchCount += 1;
+      return fetchCount === 1 ? first.promise : second.promise;
+    };
+    const { controller } = createHarness({
+      hidden: true,
+      fetchMetrics,
+      getContext: () => currentContext,
+    });
+
+    controller.render(buildSample({
+      context: currentContext,
+      scopeState: {
+        focusedAvailable: true,
+        scopeName: 'focused',
+        activeThreadId: 'thread-a',
+      },
+      nativeSnapshot: buildNativeSnapshot({
+        workspace: {
+          cpuPercent: 12,
+          memoryBytes: 256 * 1024 * 1024,
+        },
+      }),
+    }));
+    controller.start();
+
+    const pendingFocused = controller.setScope('focused');
+    await flushMicrotasks();
+    expect(fetchScopes).toEqual([{ threadId: 'thread-a' }]);
+
+    currentContext = {
+      ...currentContext,
+      activeThreadId: 'thread-b',
+    };
+    const queuedWorkspace = controller.setScope('workspace');
+    expect(queuedWorkspace).toBe(pendingFocused);
+
+    first.resolve(buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 5,
+        memoryBytes: 128 * 1024 * 1024,
+      },
+    }));
+
+    const discardedView = await pendingFocused;
+    await flushMicrotasks();
+
+    expect(discardedView?.labels.performance).toBe('12% 256M');
+    expect(fetchScopes).toEqual([{ threadId: 'thread-a' }, undefined]);
+    expect(controller.render()?.labels.performance).toBe('12% 256M');
+
+    second.resolve(buildNativeSnapshot({
+      workspace: {
+        cpuPercent: 88,
+        memoryBytes: 900 * 1024 * 1024,
+      },
+    }));
+    await flushMicrotasks();
+
+    expect(controller.render()?.effectiveScope).toBe('workspace');
+    expect(controller.render()?.labels.performance).toBe('88% 900M');
+
+    controller.stop();
   });
 
   it('degrades at 10s stale age and disconnects at 30s even while a native poll stays hung', async () => {
@@ -898,6 +1226,8 @@ describe('tauri status controller', () => {
 
     await clock.advance(20_000);
     expect(controller.render()?.labels.connection).toBe('Disconnected');
+
+    controller.stop();
   });
 
   it('renders connection state copy and indicator affordances without making healthy text semantic-colored', () => {
@@ -1074,5 +1404,85 @@ describe('tauri status controller', () => {
       },
     }));
     expect(classTexts(elements.detailBody, 'status-cell-label')).not.toContain('Agent tools');
+  });
+
+  it('renders shell CPU, memory, and output fields independently without NaN placeholders', () => {
+    const { controller, elements } = createHarness({ hidden: true });
+    const shellSummary = {
+      shells: [{
+        id: 'shell-1',
+        name: 'Shell 1',
+        status: 'running' as const,
+        runtimeMs: 4_000,
+        threadId: 'shell-1',
+      }],
+      counts: {
+        agents: 0,
+        shells: 1,
+        running: 1,
+        waiting: 0,
+        failed: 0,
+      },
+    };
+
+    controller.render(buildSample({
+      summary: shellSummary,
+      nativeSnapshot: buildNativeSnapshot({
+        processes: [{
+          threadId: 'shell-1',
+          memoryBytes: 128 * 1024 * 1024,
+          processName: 'zsh',
+          pid: 42,
+        }],
+      }),
+      activity: {
+        workspace: {
+          bytesPerSecond: 0,
+          linesPerSecond: 0,
+          operationsPerSecond: 0,
+          errors: 0,
+        },
+        threads: [{
+          threadId: 'shell-1',
+          bytesPerSecond: 512,
+          linesPerSecond: Number.NaN,
+        }],
+      },
+    }));
+    controller.toggleMetric('shells');
+
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['CPU --']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['128 MB']);
+    expect(classTexts(elements.detailBody, 'status-row-task')).not.toContain('0 lines/s');
+    expect(elements.detailBody.textContent).not.toContain('NaN% CPU');
+
+    controller.render(buildSample({
+      summary: shellSummary,
+      nativeSnapshot: buildNativeSnapshot({
+        processes: [{
+          threadId: 'shell-1',
+          cpuPercent: 34.2,
+          processName: 'zsh',
+          pid: 42,
+        }],
+      }),
+      activity: {
+        workspace: {
+          bytesPerSecond: 0,
+          linesPerSecond: 0,
+          operationsPerSecond: 0,
+          errors: 0,
+        },
+        threads: [{
+          threadId: 'shell-1',
+          bytesPerSecond: 512,
+          linesPerSecond: 7,
+        }],
+      },
+    }));
+
+    expect(classTexts(elements.detailBody, 'status-row-state')).toEqual(['34% CPU']);
+    expect(classTexts(elements.detailBody, 'status-row-runtime')).toEqual(['MEM --']);
+    expect(classTexts(elements.detailBody, 'status-row-task')).toContain('7 lines/s');
   });
 });

@@ -176,6 +176,11 @@ export function normalizePreferences(value) {
   if (!visible.includes('connection')) {
     visible.push('connection');
   }
+  for (const id of pinned) {
+    if (!visible.includes(id)) {
+      visible.push(id);
+    }
+  }
 
   return {
     version: 1,

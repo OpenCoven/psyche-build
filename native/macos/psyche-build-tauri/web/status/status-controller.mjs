@@ -26,6 +26,7 @@ const FAILURE_DEGRADED_COUNT = 2;
 const FAILURE_DISCONNECTED_WINDOW_MS = 30_000;
 const FAILURE_DISCONNECTED_COUNT = 5;
 const DEFAULT_NATIVE_POLL_TIMEOUT_MS = 10_000;
+const STOP_POLL_SENTINEL = Symbol('status-controller-stop-poll');
 const METRIC_WIDTH_FALLBACKS = Object.freeze({
   connection: 116,
   agents: 62,
@@ -49,8 +50,45 @@ function asObject(value) {
   return value && typeof value === 'object' ? value : {};
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function parentNodeOf(node) {
   return node?.parentNode ?? node?.parentElement ?? null;
+}
+
+function nodeAttachedToDocument(doc, node) {
+  let current = node && typeof node === 'object' ? node : null;
+
+  while (current) {
+    if (current === doc) return true;
+    current = parentNodeOf(current);
+  }
+
+  return false;
+}
+
+function nodeHiddenFromView(doc, node) {
+  let current = node && typeof node === 'object' ? node : null;
+
+  while (current) {
+    if (current === doc) return false;
+    if (current.hidden === true) return true;
+    current = parentNodeOf(current);
+  }
+
+  return true;
+}
+
+function canFocusNode(doc, node) {
+  return Boolean(
+    node
+    && typeof node.focus === 'function'
+    && node.disabled !== true
+    && nodeAttachedToDocument(doc, node)
+    && !nodeHiddenFromView(doc, node),
+  );
 }
 
 function findMatchingNode(start, boundary, predicate) {
@@ -416,9 +454,25 @@ function restoreFocusToken(doc, elements, token) {
     target = elements.more;
   }
 
-  if (target && typeof target.focus === 'function') {
+  if (canFocusNode(doc, target)) {
     target.focus();
+    return;
   }
+
+  if (token.type === 'focus-key' && token.value.startsWith('more-') && canFocusNode(doc, elements.more)) {
+    elements.more.focus();
+  }
+}
+
+function focusPrimaryDetailControl(doc, elements) {
+  for (const control of [elements.close, elements.copy, elements.pin]) {
+    if (canFocusNode(doc, control)) {
+      control.focus();
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function resetNode(node) {
@@ -698,6 +752,90 @@ function buildDiagnostics(sample, effectiveScope, trends) {
   };
 }
 
+function mergeNativeHealthState(previous, value) {
+  const input = asObject(value);
+
+  return {
+    ...previous,
+    status: typeof input.status === 'string' ? input.status : previous.status,
+    reconnects: hasOwn(input, 'reconnects')
+      ? (finiteNumber(input.reconnects) ?? previous.reconnects)
+      : previous.reconnects,
+    latencyMs: hasOwn(input, 'latencyMs')
+      ? finiteNumber(input.latencyMs)
+      : previous.latencyMs,
+    lastSuccessAt: hasOwn(input, 'lastSuccessAt')
+      ? parseTimestamp(input.lastSuccessAt)
+      : previous.lastSuccessAt,
+    error: hasOwn(input, 'error')
+      ? (input.error ? formatError(input.error) : '')
+      : previous.error,
+    failureAt: hasOwn(input, 'failureAt')
+      ? (Array.isArray(input.failureAt)
+        ? input.failureAt
+          .map((entry) => parseTimestamp(entry))
+          .filter((entry) => entry != null)
+        : [])
+      : previous.failureAt,
+  };
+}
+
+function mergeCovenHealthState(previous, value) {
+  const input = asObject(value);
+  const hasPhase = hasOwn(input, 'phase');
+  const hasStatus = hasOwn(input, 'status');
+  const hasRefreshedAt = hasOwn(input, 'refreshedAt')
+    || hasOwn(input, 'sampledAt')
+    || hasOwn(input, 'updatedAt');
+
+  return {
+    ...previous,
+    phase: hasPhase
+      ? (typeof input.phase === 'string' ? input.phase : previous.phase)
+      : hasStatus
+        ? (typeof input.status === 'string' ? input.status : previous.phase)
+        : previous.phase,
+    reconnects: hasOwn(input, 'reconnects')
+      ? (finiteNumber(input.reconnects) ?? previous.reconnects)
+      : previous.reconnects,
+    latencyMs: hasOwn(input, 'latencyMs')
+      ? finiteNumber(input.latencyMs)
+      : previous.latencyMs,
+    refreshedAt: hasRefreshedAt
+      ? parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt)
+      : previous.refreshedAt,
+    error: hasOwn(input, 'error')
+      ? (input.error ? formatError(input.error) : '')
+      : previous.error,
+  };
+}
+
+function nativeRequestScope(scopeState) {
+  const threadId = typeof scopeState?.activeThreadId === 'string' && scopeState.activeThreadId
+    ? scopeState.activeThreadId
+    : null;
+  if (scopeState?.scopeName === 'focused' && threadId) {
+    return {
+      key: threadId,
+      scope: { threadId },
+    };
+  }
+
+  return {
+    key: 'workspace',
+    scope: undefined,
+  };
+}
+
+function shouldDiscardFocusedSnapshot(requestScopeKey, currentScopeState) {
+  return requestScopeKey !== 'workspace'
+    && nativeRequestScope(currentScopeState).key !== requestScopeKey;
+}
+
+function isStoppedNativeRequest(result) {
+  return result?.cancelled === true && result.error === STOP_POLL_SENTINEL;
+}
+
 function renderAgents(body, doc, summary) {
   resetNode(body);
   if (!summary.agents.length) {
@@ -733,20 +871,31 @@ function renderShells(body, doc, summary, nativeSnapshot, activity) {
   for (const shell of summary.shells) {
     const process = processByThreadId.get(shell.threadId) ?? null;
     const rate = activityByThreadId.get(shell.threadId) ?? null;
+    const cpuPercent = finiteNumber(process?.cpuPercent);
+    const memoryBytes = finiteNumber(process?.memoryBytes);
+    const linesPerSecond = finiteNumber(rate?.linesPerSecond);
     const row = doc.createElement('div');
     row.className = 'status-shell-row';
     row.append(
       appendTextCell(doc, 'status-row-name', shell.name),
-      appendTextCell(doc, 'status-row-state', process ? `${Math.round(process.cpuPercent)}% CPU` : 'CPU --'),
-      appendTextCell(doc, 'status-row-runtime', process ? formatMemory(process.memoryBytes) : 'MEM --'),
+      appendTextCell(
+        doc,
+        'status-row-state',
+        cpuPercent != null ? `${Math.round(cpuPercent)}% CPU` : 'CPU --',
+      ),
+      appendTextCell(
+        doc,
+        'status-row-runtime',
+        memoryBytes != null ? formatMemory(memoryBytes) : 'MEM --',
+      ),
     );
 
     const metaParts = [];
     if (process?.processName) metaParts.push(process.processName);
     if (Number.isFinite(process?.pid)) metaParts.push(`PID ${process.pid}`);
     appendOptionalRowText(doc, row, 'status-row-meta', metaParts.join(' · '));
-    if (rate) {
-      appendOptionalRowText(doc, row, 'status-row-task', formatRate(rate.linesPerSecond, 'lines/s'));
+    if (linesPerSecond != null) {
+      appendOptionalRowText(doc, row, 'status-row-task', formatRate(linesPerSecond, 'lines/s'));
     }
     body.appendChild(row);
   }
@@ -1052,7 +1201,9 @@ function renderMoreMenuState({
     toggle.className = 'status-more-toggle';
     const checkbox = doc.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.checked = id === 'connection' || preferences.visible.includes(id);
+    checkbox.checked = id === 'connection'
+      || preferences.visible.includes(id)
+      || preferences.pinned.includes(id);
     checkbox.disabled = id === 'connection';
     checkbox.dataset.focusKey = `more-show:${id}`;
     checkbox.dataset.metric = id;
@@ -1227,7 +1378,7 @@ export function createStatusController(options = {}) {
   let pollInFlight = null;
   let refreshQueued = false;
   let nativePollGeneration = 0;
-  let nativeRequestTimeoutIds = new Set();
+  let nativeRequestCancels = new Set();
   let lifecycleToken = 0;
   let lastFrameFlushAt = now();
   let lastSuccessfulSnapshot = null;
@@ -1294,16 +1445,29 @@ export function createStatusController(options = {}) {
     return new Promise((resolve) => {
       let settled = false;
       let timeoutId = null;
+      let cancelRequest = null;
       const settle = (result) => {
         if (settled) return;
         settled = true;
         if (timeoutId != null) {
           clearTimer(timeoutId);
-          nativeRequestTimeoutIds.delete(timeoutId);
           timeoutId = null;
+        }
+        if (cancelRequest) {
+          nativeRequestCancels.delete(cancelRequest);
+          cancelRequest = null;
         }
         resolve({ generation, ...result });
       };
+
+      cancelRequest = () => {
+        settle({
+          ok: false,
+          cancelled: true,
+          error: STOP_POLL_SENTINEL,
+        });
+      };
+      nativeRequestCancels.add(cancelRequest);
 
       // Tauri invoke is not cancellable, so a timed-out generation may still
       // settle later. Only the first settlement for this generation is allowed
@@ -1316,17 +1480,12 @@ export function createStatusController(options = {}) {
         );
 
       timeoutId = setTimer(() => {
-        if (timeoutId != null) {
-          nativeRequestTimeoutIds.delete(timeoutId);
-          timeoutId = null;
-        }
         settle({
           ok: false,
           error: createNativePollTimeoutError(nativePollTimeoutMs),
           timedOut: true,
         });
       }, nativePollTimeoutMs);
-      nativeRequestTimeoutIds.add(timeoutId);
     });
   }
 
@@ -1361,7 +1520,7 @@ export function createStatusController(options = {}) {
     if (elements.moreMenu.hidden) return;
     elements.moreMenu.hidden = true;
     elements.more.setAttribute('aria-expanded', 'false');
-    if (restoreFocus && typeof elements.more.focus === 'function') {
+    if (restoreFocus && canFocusNode(doc, elements.more)) {
       elements.more.focus();
     }
   }
@@ -1386,6 +1545,9 @@ export function createStatusController(options = {}) {
       closeMoreMenu();
     }
     renderView();
+    if (fromMoreMenu) {
+      focusPrimaryDetailControl(doc, elements);
+    }
   }
 
   function toggleMetric(id) {
@@ -1430,8 +1592,9 @@ export function createStatusController(options = {}) {
 
   function toggleVisibleMetric(id, visible) {
     let nextVisible = sanitizeMetricList(preferencesState.value.visible);
+    let nextPinned = sanitizeMetricList(preferencesState.value.pinned);
     if (id === 'connection') {
-      writePreferences({ ...preferencesState.value, visible: nextVisible });
+      writePreferences({ ...preferencesState.value, visible: nextVisible, pinned: nextPinned });
       renderView();
       return;
     }
@@ -1440,9 +1603,10 @@ export function createStatusController(options = {}) {
       nextVisible = [...new Set([...nextVisible, id])];
     } else {
       nextVisible = nextVisible.filter((metricId) => metricId !== id);
+      nextPinned = nextPinned.filter((metricId) => metricId !== id);
     }
 
-    writePreferences({ ...preferencesState.value, visible: nextVisible });
+    writePreferences({ ...preferencesState.value, visible: nextVisible, pinned: nextPinned });
     renderView();
   }
 
@@ -1450,15 +1614,19 @@ export function createStatusController(options = {}) {
     if (!id || !METRICS[id]) return;
 
     const pinned = new Set(preferencesState.value.pinned);
+    const visible = sanitizeMetricList(preferencesState.value.visible);
     let announcement = '';
     if (pinned.has(id)) {
       pinned.delete(id);
       announcement = `Unpinned ${metricAnnouncementLabel(id)}`;
     } else {
       pinned.add(id);
+      if (!visible.includes(id)) {
+        visible.push(id);
+      }
       announcement = `Pinned ${metricAnnouncementLabel(id)}`;
     }
-    writePreferences({ ...preferencesState.value, pinned: [...pinned] });
+    writePreferences({ ...preferencesState.value, visible, pinned: [...pinned] });
     renderView();
     elements.live.textContent = announcement;
     elements.alert.textContent = '';
@@ -1477,7 +1645,7 @@ export function createStatusController(options = {}) {
     }
   }
 
-  function updateNativeHealthFromSuccess(snapshot, latencyMs, sampledAt) {
+  function updateNativeHealthFromSuccess(snapshot, latencyMs, sampledAt, { commitSnapshot = true } = {}) {
     const previousStatus = resolveNativeHealthStatus(nativeHealth, sampledAt);
     const recovered = previousStatus === 'degraded' || previousStatus === 'disconnected';
     nativeHealth = {
@@ -1488,7 +1656,9 @@ export function createStatusController(options = {}) {
       error: '',
       failureAt: [],
     };
-    lastSuccessfulSnapshot = snapshot;
+    if (commitSnapshot) {
+      lastSuccessfulSnapshot = snapshot;
+    }
     scheduleNativeHealthTransition(sampledAt);
   }
 
@@ -1764,24 +1934,37 @@ export function createStatusController(options = {}) {
   }
 
   async function runPoll(token) {
-    const context = getContext();
-    const scopeState = effectiveScopeForContext(context);
+    let context = getContext();
+    let scopeState = effectiveScopeForContext(context);
+    const requestScope = nativeRequestScope(scopeState);
     const startedAt = performanceApi.now();
 
     try {
-      const requestedScope = scopeState.scopeName === 'focused'
-        ? { threadId: scopeState.activeThreadId }
-        : undefined;
-      const result = await requestNativeMetrics(requestedScope);
+      const result = await requestNativeMetrics(requestScope.scope);
       const latencyMs = performanceApi.now() - startedAt;
-      if (token !== lifecycleToken) {
+      if (isStoppedNativeRequest(result)) {
         return lastView;
       }
-      if (result.ok) {
-        updateNativeHealthFromSuccess(result.snapshot, latencyMs, now());
-      } else {
-        updateNativeHealthFromFailure(result.error, latencyMs, now());
+      if (token !== lifecycleToken || result.generation !== nativePollGeneration) {
+        return lastView;
       }
+      const sampledAt = now();
+      const currentContext = getContext();
+      const currentScopeState = effectiveScopeForContext(currentContext);
+      const discardFocusedResult = shouldDiscardFocusedSnapshot(requestScope.key, currentScopeState);
+      if (result.ok) {
+        updateNativeHealthFromSuccess(result.snapshot, latencyMs, sampledAt, {
+          commitSnapshot: !discardFocusedResult,
+        });
+      } else {
+        updateNativeHealthFromFailure(result.error, latencyMs, sampledAt);
+      }
+      if (discardFocusedResult) {
+        refreshQueued = true;
+        return lastView;
+      }
+      context = currentContext;
+      scopeState = currentScopeState;
     } catch (error) {
       const latencyMs = performanceApi.now() - startedAt;
       if (token !== lifecycleToken) {
@@ -2026,34 +2209,10 @@ export function createStatusController(options = {}) {
         lastSuccessfulSnapshot = sample.nativeSnapshot;
       }
       if (sample.nativeHealth) {
-        const input = asObject(sample.nativeHealth);
-        nativeHealth = {
-          ...nativeHealth,
-          status: typeof input.status === 'string' ? input.status : nativeHealth.status,
-          reconnects: finiteNumber(input.reconnects) ?? nativeHealth.reconnects,
-          latencyMs: finiteNumber(input.latencyMs),
-          lastSuccessAt: parseTimestamp(input.lastSuccessAt),
-          error: input.error ? formatError(input.error) : '',
-          failureAt: Array.isArray(input.failureAt)
-            ? input.failureAt
-              .map((value) => parseTimestamp(value))
-              .filter((value) => value != null)
-            : [],
-        };
+        nativeHealth = mergeNativeHealthState(nativeHealth, sample.nativeHealth);
       }
       if (sample.covenHealth) {
-        const input = asObject(sample.covenHealth);
-        covenHealth = {
-          phase: typeof input.phase === 'string'
-            ? input.phase
-            : typeof input.status === 'string'
-              ? input.status
-              : covenHealth.phase,
-          reconnects: finiteNumber(input.reconnects) ?? covenHealth.reconnects,
-          latencyMs: finiteNumber(input.latencyMs),
-          refreshedAt: parseTimestamp(input.refreshedAt ?? input.sampledAt ?? input.updatedAt),
-          error: input.error ? formatError(input.error) : '',
-        };
+        covenHealth = mergeCovenHealthState(covenHealth, sample.covenHealth);
       }
       lastSampleContext = {
         sampledAt,
@@ -2066,10 +2225,10 @@ export function createStatusController(options = {}) {
         }),
         scopeState,
         nativeSnapshot: sample.nativeSnapshot ?? lastSuccessfulSnapshot,
-        nativeHealth: sample.nativeHealth ?? nativeHealthView(nativeHealth, sampledAt),
+        nativeHealth: nativeHealthView(nativeHealth, sampledAt),
         activity: sample.activity ?? lastActivitySample,
         frame: sample.frame ?? lastFrameSample,
-        covenHealth: sample.covenHealth ?? covenHealthView(covenHealth),
+        covenHealth: covenHealthView(covenHealth),
       };
     } else if (!lastSampleContext) {
       const sampledAt = now();
@@ -2126,7 +2285,7 @@ export function createStatusController(options = {}) {
       && !cleanupCallbacks.length
       && timerId == null
       && nativeHealthTimerId == null
-      && nativeRequestTimeoutIds.size === 0
+      && nativeRequestCancels.size === 0
       && frameId == null) {
       return controller;
     }
@@ -2135,10 +2294,10 @@ export function createStatusController(options = {}) {
     refreshQueued = false;
     pollInFlight = null;
     clearNativeHealthTimer();
-    for (const timeoutId of nativeRequestTimeoutIds) {
-      clearTimer(timeoutId);
+    for (const cancelRequest of [...nativeRequestCancels]) {
+      cancelRequest();
     }
-    nativeRequestTimeoutIds = new Set();
+    nativeRequestCancels = new Set();
     if (timerId != null) {
       clearTimer(timerId);
       timerId = null;
