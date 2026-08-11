@@ -170,7 +170,7 @@ export function sanitizeSessionDescriptor(saved) {
     id,
     projectId,
     worktreePath,
-    hidden: Boolean(saved.hidden),
+    hidden: saved.hidden === true,
     launchKind,
     kind: normalizeKind(saved.kind) || launchKind,
   };
