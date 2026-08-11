@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use serde::Serialize;
 
 pub const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PENDING_FRAGMENTS: usize = 128;
@@ -138,6 +141,9 @@ pub enum BatchReadiness {
 pub struct PreparedBatch {
     pub sequence: u64,
     pub data: Arc<[u8]>,
+    pub enqueued_at_micros: u64,
+    pub queued_bytes: usize,
+    pub queue_depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,13 +292,15 @@ pub struct PendingFragmentProgress {
 struct PendingFragment {
     data: Vec<u8>,
     consumed_bytes: usize,
+    enqueued_at_micros: u64,
 }
 
 impl PendingFragment {
-    fn new(data: Vec<u8>) -> Self {
+    fn new(data: Vec<u8>, enqueued_at_micros: u64) -> Self {
         Self {
             data,
             consumed_bytes: 0,
+            enqueued_at_micros,
         }
     }
 
@@ -384,6 +392,22 @@ impl PumpState {
         self.pending_fragments
     }
 
+    pub fn queued_bytes(&self) -> usize {
+        self.queued_bytes
+    }
+
+    pub fn queue_depth(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn has_prepared(&self) -> bool {
+        self.prepared.is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending_bytes == 0 && self.prepared.is_none() && self.in_flight.is_empty()
+    }
+
     pub fn oldest_queued_fragment_progress(&self) -> Option<PendingFragmentProgress> {
         self.pending.front().map(PendingFragment::progress)
     }
@@ -405,6 +429,10 @@ impl PumpState {
     }
 
     pub fn push(&mut self, fragment: Vec<u8>) -> Result<(), PushError> {
+        self.push_at(fragment, 0)
+    }
+
+    fn push_at(&mut self, fragment: Vec<u8>, enqueued_at_micros: u64) -> Result<(), PushError> {
         if fragment.is_empty() {
             return Ok(());
         }
@@ -443,7 +471,8 @@ impl PumpState {
         }
 
         let fragment_bytes = fragment.len();
-        self.pending.push_back(PendingFragment::new(fragment));
+        self.pending
+            .push_back(PendingFragment::new(fragment, enqueued_at_micros));
         self.queued_bytes += fragment_bytes;
         self.pending_bytes = next_bytes.expect("checked above");
         self.pending_fragments += 1;
@@ -514,6 +543,11 @@ impl PumpState {
             .last_emitted_sequence
             .checked_add(1)
             .ok_or(PrepareError::SequenceExhausted)?;
+        let enqueued_at_micros = self
+            .pending
+            .front()
+            .expect("queued byte accounting guarantees a fragment")
+            .enqueued_at_micros;
         let batch_bytes = self.queued_bytes.min(self.limits.max_batch_bytes);
         let mut data = Vec::with_capacity(batch_bytes);
         let mut completed_fragments = 0;
@@ -540,6 +574,9 @@ impl PumpState {
         let prepared = PreparedBatch {
             sequence,
             data: data.into(),
+            enqueued_at_micros,
+            queued_bytes: self.queued_bytes,
+            queue_depth: self.pending.len(),
         };
         self.prepared = Some(PreparedEmission {
             batch: prepared.clone(),
@@ -667,6 +704,719 @@ impl PumpState {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyDataBatchEvent {
+    pub thread_id: String,
+    pub sequence: u64,
+    pub bytes: Vec<u8>,
+    pub byte_count: usize,
+    pub enqueued_at_micros: u64,
+    pub emitted_at_micros: u64,
+    pub queued_bytes: usize,
+    pub queue_depth: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClockSample {
+    pub instant: Instant,
+    pub micros: u64,
+}
+
+pub(crate) trait PumpClock: Send + Sync {
+    fn sample(&self) -> ClockSample;
+}
+
+#[derive(Debug)]
+struct SystemPumpClock {
+    origin: Instant,
+}
+
+impl SystemPumpClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl PumpClock for SystemPumpClock {
+    fn sample(&self) -> ClockSample {
+        let instant = Instant::now();
+        ClockSample {
+            instant,
+            micros: duration_micros(
+                instant
+                    .checked_duration_since(self.origin)
+                    .unwrap_or(Duration::ZERO),
+            ),
+        }
+    }
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnqueueError {
+    OversizedFragment {
+        fragment: Vec<u8>,
+        incoming_bytes: usize,
+        max_pending_bytes: usize,
+    },
+    Cancelled {
+        fragment: Vec<u8>,
+    },
+}
+
+impl fmt::Display for EnqueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OversizedFragment {
+                incoming_bytes,
+                max_pending_bytes,
+                ..
+            } => write!(
+                formatter,
+                "PTY fragment contains {incoming_bytes} bytes and can never fit the \
+                 {max_pending_bytes}-byte pending budget"
+            ),
+            Self::Cancelled { .. } => formatter.write_str("PTY output pump is cancelled"),
+        }
+    }
+}
+
+impl Error for EnqueueError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputPumpError {
+    Prepare(PrepareError),
+    Commit(CommitError),
+}
+
+impl fmt::Display for OutputPumpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepare(error) => error.fmt(formatter),
+            Self::Commit(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for OutputPumpError {}
+
+impl From<PrepareError> for OutputPumpError {
+    fn from(error: PrepareError) -> Self {
+        Self::Prepare(error)
+    }
+}
+
+impl From<CommitError> for OutputPumpError {
+    fn from(error: CommitError) -> Self {
+        Self::Commit(error)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmitOutcome {
+    Emitted { sequence: u64 },
+    Failed { sequence: u64, error: String },
+    NotReady(BatchReadiness),
+    Busy,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainOutcome {
+    Drained,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimePumpMetrics {
+    blocked_reader_count: u64,
+    total_blocked_reader_duration: Duration,
+    max_blocked_reader_duration: Duration,
+    emit_failure_count: u64,
+    emit_retry_count: u64,
+    visibility_transition_count: u64,
+    drain_timeout_count: u64,
+    worker_error_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputPumpMetrics {
+    pub state: PumpMetrics,
+    pub blocked_reader_count: u64,
+    pub total_blocked_reader_duration: Duration,
+    pub max_blocked_reader_duration: Duration,
+    pub emit_failure_count: u64,
+    pub emit_retry_count: u64,
+    pub visibility_transition_count: u64,
+    pub drain_timeout_count: u64,
+    pub worker_error_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputPumpSnapshot {
+    pub thread_id: String,
+    pub pending_bytes: usize,
+    pub pending_fragments: usize,
+    pub queued_bytes: usize,
+    pub queue_depth: usize,
+    pub prepared: bool,
+    pub in_flight_batches: usize,
+    pub in_flight_bytes: usize,
+    pub last_acked_sequence: u64,
+    pub blocked_producers: usize,
+    pub visibility: PaneVisibility,
+    pub effective_cadence: Duration,
+    pub draining: bool,
+    pub cancelled: bool,
+    pub worker_running: bool,
+    pub metrics: OutputPumpMetrics,
+}
+
+impl OutputPumpSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.pending_bytes == 0 && !self.prepared && self.in_flight_batches == 0
+    }
+}
+
+#[derive(Debug)]
+struct CachedPreparedEvent {
+    event: Arc<PtyDataBatchEvent>,
+    failed_attempts: u64,
+    last_attempt_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct SynchronizedPumpState {
+    state: PumpState,
+    prepared_event: Option<CachedPreparedEvent>,
+    visibility: PaneVisibility,
+    blocked_producers: usize,
+    draining: bool,
+    cancelled: bool,
+    worker_running: bool,
+    emit_in_progress: bool,
+    metrics: RuntimePumpMetrics,
+}
+
+struct OutputPumpShared {
+    thread_id: String,
+    clock: Arc<dyn PumpClock>,
+    state: Mutex<SynchronizedPumpState>,
+    wake: Condvar,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct WorkerRunningGuard {
+    shared: Weak<OutputPumpShared>,
+}
+
+impl Drop for WorkerRunningGuard {
+    fn drop(&mut self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        lock_unpoisoned(&shared.state).worker_running = false;
+        shared.wake.notify_all();
+    }
+}
+
+#[derive(Clone)]
+pub struct OutputPump {
+    shared: Arc<OutputPumpShared>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerStartError {
+    AlreadyStarted,
+    Cancelled,
+    Spawn(String),
+}
+
+impl fmt::Display for WorkerStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyStarted => formatter.write_str("PTY output pump worker already started"),
+            Self::Cancelled => formatter.write_str("PTY output pump is cancelled"),
+            Self::Spawn(error) => write!(formatter, "failed to start PTY output pump: {error}"),
+        }
+    }
+}
+
+impl Error for WorkerStartError {}
+
+impl OutputPump {
+    pub fn new(thread_id: String) -> Result<Self, PumpLimitsError> {
+        Self::new_with_clock(
+            thread_id,
+            PumpLimits::default(),
+            Arc::new(SystemPumpClock::new()),
+        )
+    }
+
+    pub(crate) fn new_with_clock(
+        thread_id: String,
+        limits: PumpLimits,
+        clock: Arc<dyn PumpClock>,
+    ) -> Result<Self, PumpLimitsError> {
+        Ok(Self {
+            shared: Arc::new(OutputPumpShared {
+                thread_id,
+                clock,
+                state: Mutex::new(SynchronizedPumpState {
+                    state: PumpState::new(limits)?,
+                    prepared_event: None,
+                    visibility: PaneVisibility::Visible,
+                    blocked_producers: 0,
+                    draining: false,
+                    cancelled: false,
+                    worker_running: false,
+                    emit_in_progress: false,
+                    metrics: RuntimePumpMetrics::default(),
+                }),
+                wake: Condvar::new(),
+                worker: Mutex::new(None),
+            }),
+        })
+    }
+
+    pub fn enqueue(&self, fragment: Vec<u8>) -> Result<(), EnqueueError> {
+        let enqueued_at = self.shared.clock.sample();
+        let mut fragment = fragment;
+        let mut blocked_at = None;
+        let mut guard = lock_unpoisoned(&self.shared.state);
+
+        loop {
+            if guard.cancelled {
+                finish_blocked_enqueue(&mut guard, blocked_at, self.shared.clock.sample().instant);
+                return Err(EnqueueError::Cancelled { fragment });
+            }
+
+            match guard.state.push_at(fragment, enqueued_at.micros) {
+                Ok(()) => {
+                    finish_blocked_enqueue(
+                        &mut guard,
+                        blocked_at,
+                        self.shared.clock.sample().instant,
+                    );
+                    drop(guard);
+                    self.shared.wake.notify_all();
+                    return Ok(());
+                }
+                Err(PushError::OversizedFragment {
+                    fragment,
+                    incoming_bytes,
+                    max_pending_bytes,
+                }) => {
+                    finish_blocked_enqueue(
+                        &mut guard,
+                        blocked_at,
+                        self.shared.clock.sample().instant,
+                    );
+                    return Err(EnqueueError::OversizedFragment {
+                        fragment,
+                        incoming_bytes,
+                        max_pending_bytes,
+                    });
+                }
+                Err(PushError::WouldBlock {
+                    fragment: returned, ..
+                }) => {
+                    fragment = returned;
+                    if blocked_at.is_none() {
+                        blocked_at = Some(self.shared.clock.sample().instant);
+                        guard.blocked_producers = guard.blocked_producers.saturating_add(1);
+                    }
+                    guard = wait_unpoisoned(&self.shared.wake, guard);
+                }
+            }
+        }
+    }
+
+    pub fn emit_ready<E>(&self, mut emitter: E) -> Result<EmitOutcome, OutputPumpError>
+    where
+        E: FnMut(&PtyDataBatchEvent) -> Result<(), String>,
+    {
+        emit_ready_shared(&self.shared, &mut emitter)
+    }
+
+    pub fn start_worker<E>(&self, emitter: E) -> Result<(), WorkerStartError>
+    where
+        E: FnMut(&PtyDataBatchEvent) -> Result<(), String> + Send + 'static,
+    {
+        let mut worker = lock_unpoisoned(&self.shared.worker);
+        if worker.is_some() {
+            return Err(WorkerStartError::AlreadyStarted);
+        }
+        {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            if state.cancelled {
+                return Err(WorkerStartError::Cancelled);
+            }
+            if state.worker_running {
+                return Err(WorkerStartError::AlreadyStarted);
+            }
+            state.worker_running = true;
+        }
+
+        let weak = Arc::downgrade(&self.shared);
+        match thread::Builder::new()
+            .name("pty-output-pump".to_string())
+            .spawn(move || output_worker(weak, emitter))
+        {
+            Ok(handle) => {
+                *worker = Some(handle);
+                Ok(())
+            }
+            Err(error) => {
+                lock_unpoisoned(&self.shared.state).worker_running = false;
+                self.shared.wake.notify_all();
+                Err(WorkerStartError::Spawn(error.to_string()))
+            }
+        }
+    }
+
+    pub fn acknowledge(&self, sequence: u64) -> Result<AckOutcome, AckError> {
+        let acknowledged_at = self.shared.clock.sample().instant;
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        let outcome = guard.state.acknowledge(sequence, acknowledged_at)?;
+        let advanced = matches!(outcome, AckOutcome::Advanced { .. });
+        drop(guard);
+        if advanced {
+            self.shared.wake.notify_all();
+        }
+        Ok(outcome)
+    }
+
+    pub fn set_visibility(&self, visibility: PaneVisibility) -> bool {
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        if guard.visibility == visibility {
+            return false;
+        }
+        guard.visibility = visibility;
+        guard.metrics.visibility_transition_count =
+            guard.metrics.visibility_transition_count.saturating_add(1);
+        drop(guard);
+        self.shared.wake.notify_all();
+        true
+    }
+
+    pub fn request_drain(&self) {
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        guard.draining = true;
+        drop(guard);
+        self.shared.wake.notify_all();
+    }
+
+    pub fn wait_for_drain(&self) -> DrainOutcome {
+        let timeout = lock_unpoisoned(&self.shared.state)
+            .state
+            .limits()
+            .exit_drain_timeout;
+        self.wait_for_drain_timeout(timeout)
+    }
+
+    pub fn wait_for_drain_timeout(&self, timeout: Duration) -> DrainOutcome {
+        let started_at = Instant::now();
+        let mut guard = lock_unpoisoned(&self.shared.state);
+
+        loop {
+            if guard.cancelled {
+                return DrainOutcome::Cancelled;
+            }
+            if guard.state.is_empty() {
+                return DrainOutcome::Drained;
+            }
+
+            let elapsed = started_at.elapsed();
+            if elapsed >= timeout {
+                guard.metrics.drain_timeout_count =
+                    guard.metrics.drain_timeout_count.saturating_add(1);
+                return DrainOutcome::TimedOut;
+            }
+            guard = wait_timeout_unpoisoned(&self.shared.wake, guard, timeout - elapsed);
+        }
+    }
+
+    pub fn cancel(&self) -> bool {
+        let mut guard = lock_unpoisoned(&self.shared.state);
+        if guard.cancelled {
+            return false;
+        }
+        guard.cancelled = true;
+        drop(guard);
+        self.shared.wake.notify_all();
+        true
+    }
+
+    pub fn cancel_and_join(&self) -> thread::Result<()> {
+        self.cancel();
+        let worker = lock_unpoisoned(&self.shared.worker).take();
+        let result = match worker {
+            Some(worker) => worker.join(),
+            None => Ok(()),
+        };
+        if result.is_ok() {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            while state.worker_running {
+                state = wait_unpoisoned(&self.shared.wake, state);
+            }
+        }
+        result
+    }
+
+    pub fn snapshot(&self) -> OutputPumpSnapshot {
+        let guard = lock_unpoisoned(&self.shared.state);
+        let runtime_metrics = &guard.metrics;
+        OutputPumpSnapshot {
+            thread_id: self.shared.thread_id.clone(),
+            pending_bytes: guard.state.pending_bytes(),
+            pending_fragments: guard.state.pending_fragments(),
+            queued_bytes: guard.state.queued_bytes(),
+            queue_depth: guard.state.queue_depth(),
+            prepared: guard.state.has_prepared(),
+            in_flight_batches: guard.state.in_flight_len(),
+            in_flight_bytes: guard.state.in_flight_bytes(),
+            last_acked_sequence: guard.state.last_acked_sequence(),
+            blocked_producers: guard.blocked_producers,
+            visibility: guard.visibility,
+            effective_cadence: effective_cadence(&guard),
+            draining: guard.draining,
+            cancelled: guard.cancelled,
+            worker_running: guard.worker_running,
+            metrics: OutputPumpMetrics {
+                state: guard.state.metrics().clone(),
+                blocked_reader_count: runtime_metrics.blocked_reader_count,
+                total_blocked_reader_duration: runtime_metrics.total_blocked_reader_duration,
+                max_blocked_reader_duration: runtime_metrics.max_blocked_reader_duration,
+                emit_failure_count: runtime_metrics.emit_failure_count,
+                emit_retry_count: runtime_metrics.emit_retry_count,
+                visibility_transition_count: runtime_metrics.visibility_transition_count,
+                drain_timeout_count: runtime_metrics.drain_timeout_count,
+                worker_error_count: runtime_metrics.worker_error_count,
+            },
+        }
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
+impl Drop for OutputPump {
+    fn drop(&mut self) {
+        let strong_count = Arc::strong_count(&self.shared);
+        let worker_running = lock_unpoisoned(&self.shared.state).worker_running;
+        let last_external_handle = if worker_running {
+            strong_count <= 2
+        } else {
+            strong_count == 1
+        };
+        if last_external_handle {
+            self.cancel();
+        }
+    }
+}
+
+fn finish_blocked_enqueue(
+    state: &mut SynchronizedPumpState,
+    blocked_at: Option<Instant>,
+    finished_at: Instant,
+) {
+    let Some(blocked_at) = blocked_at else {
+        return;
+    };
+    state.blocked_producers = state.blocked_producers.saturating_sub(1);
+    let duration = finished_at
+        .checked_duration_since(blocked_at)
+        .unwrap_or(Duration::ZERO);
+    state.metrics.blocked_reader_count = state.metrics.blocked_reader_count.saturating_add(1);
+    state.metrics.total_blocked_reader_duration = state
+        .metrics
+        .total_blocked_reader_duration
+        .checked_add(duration)
+        .unwrap_or(Duration::MAX);
+    state.metrics.max_blocked_reader_duration =
+        state.metrics.max_blocked_reader_duration.max(duration);
+}
+
+fn effective_cadence(state: &SynchronizedPumpState) -> Duration {
+    match state.visibility {
+        PaneVisibility::Visible => state.state.limits().visible_cadence,
+        PaneVisibility::Hidden => state.state.limits().hidden_cadence,
+    }
+}
+
+fn synchronized_readiness(state: &SynchronizedPumpState, now: Instant) -> BatchReadiness {
+    if let Some(prepared) = &state.prepared_event {
+        if prepared.failed_attempts != 0 {
+            if let Some(last_attempt_at) = prepared.last_attempt_at {
+                let cadence = effective_cadence(state);
+                let elapsed = now
+                    .checked_duration_since(last_attempt_at)
+                    .unwrap_or(Duration::ZERO);
+                if elapsed < cadence {
+                    return BatchReadiness::WaitingForCadence {
+                        remaining: cadence - elapsed,
+                    };
+                }
+            }
+        }
+    }
+    state.state.readiness(now, state.visibility)
+}
+
+fn emit_ready_shared<E>(
+    shared: &Arc<OutputPumpShared>,
+    emitter: &mut E,
+) -> Result<EmitOutcome, OutputPumpError>
+where
+    E: FnMut(&PtyDataBatchEvent) -> Result<(), String>,
+{
+    let sample = shared.clock.sample();
+    let (event, sequence) = {
+        let mut guard = lock_unpoisoned(&shared.state);
+        if guard.cancelled {
+            return Ok(EmitOutcome::Cancelled);
+        }
+        if guard.emit_in_progress {
+            return Ok(EmitOutcome::Busy);
+        }
+        let readiness = synchronized_readiness(&guard, sample.instant);
+        if readiness != BatchReadiness::Ready {
+            return Ok(EmitOutcome::NotReady(readiness));
+        }
+
+        let visibility = guard.visibility;
+        let prepared = guard
+            .state
+            .prepare_batch(sample.instant, visibility)?
+            .expect("ready PTY pump must prepare a batch");
+        if guard.prepared_event.is_none() {
+            let event = PtyDataBatchEvent {
+                thread_id: shared.thread_id.clone(),
+                sequence: prepared.sequence,
+                bytes: prepared.data.as_ref().to_vec(),
+                byte_count: prepared.data.len(),
+                enqueued_at_micros: prepared.enqueued_at_micros,
+                emitted_at_micros: sample.micros,
+                queued_bytes: prepared.queued_bytes,
+                queue_depth: prepared.queue_depth,
+            };
+            guard.prepared_event = Some(CachedPreparedEvent {
+                event: Arc::new(event),
+                failed_attempts: 0,
+                last_attempt_at: None,
+            });
+        }
+
+        let is_retry = guard
+            .prepared_event
+            .as_ref()
+            .is_some_and(|prepared| prepared.failed_attempts != 0);
+        if is_retry {
+            guard.metrics.emit_retry_count = guard.metrics.emit_retry_count.saturating_add(1);
+        }
+        let prepared_event = guard
+            .prepared_event
+            .as_mut()
+            .expect("prepared state must have a cached event");
+        prepared_event.last_attempt_at = Some(sample.instant);
+        let event = Arc::clone(&prepared_event.event);
+        let sequence = event.sequence;
+        guard.emit_in_progress = true;
+        (event, sequence)
+    };
+
+    let result = emitter(&event);
+    let committed_at = shared.clock.sample().instant;
+    let mut guard = lock_unpoisoned(&shared.state);
+    guard.emit_in_progress = false;
+    match result {
+        Ok(()) => {
+            guard.state.commit_prepared(sequence, committed_at)?;
+            guard.prepared_event = None;
+            drop(guard);
+            shared.wake.notify_all();
+            Ok(EmitOutcome::Emitted { sequence })
+        }
+        Err(error) => {
+            guard.metrics.emit_failure_count = guard.metrics.emit_failure_count.saturating_add(1);
+            if let Some(prepared) = guard.prepared_event.as_mut() {
+                prepared.failed_attempts = prepared.failed_attempts.saturating_add(1);
+            }
+            drop(guard);
+            shared.wake.notify_all();
+            Ok(EmitOutcome::Failed { sequence, error })
+        }
+    }
+}
+
+fn output_worker<E>(shared: Weak<OutputPumpShared>, mut emitter: E)
+where
+    E: FnMut(&PtyDataBatchEvent) -> Result<(), String>,
+{
+    let _running = WorkerRunningGuard {
+        shared: shared.clone(),
+    };
+    while let Some(shared) = shared.upgrade() {
+        let guard = lock_unpoisoned(&shared.state);
+        if guard.cancelled {
+            return;
+        }
+
+        match synchronized_readiness(&guard, shared.clock.sample().instant) {
+            BatchReadiness::Ready => {
+                drop(guard);
+                if emit_ready_shared(&shared, &mut emitter).is_err() {
+                    let mut guard = lock_unpoisoned(&shared.state);
+                    guard.metrics.worker_error_count =
+                        guard.metrics.worker_error_count.saturating_add(1);
+                    guard.cancelled = true;
+                    drop(guard);
+                    shared.wake.notify_all();
+                    return;
+                }
+            }
+            BatchReadiness::WaitingForCadence { remaining } => {
+                drop(wait_timeout_unpoisoned(&shared.wake, guard, remaining));
+            }
+            BatchReadiness::Empty | BatchReadiness::InFlightFull => {
+                drop(wait_unpoisoned(&shared.wake, guard));
+            }
+        }
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_unpoisoned<'a, T>(condition: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    condition
+        .wait(guard)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_timeout_unpoisoned<'a, T>(
+    condition: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> MutexGuard<'a, T> {
+    match condition.wait_timeout(guard, timeout) {
+        Ok((guard, _)) => guard,
+        Err(poisoned) => poisoned.into_inner().0,
+    }
+}
+
 fn validate_limit(
     field: &'static str,
     value: usize,
@@ -687,10 +1437,65 @@ fn validate_limit(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[derive(Debug)]
+    struct TestClock {
+        origin: Instant,
+        elapsed: Mutex<Duration>,
+    }
+
+    impl TestClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                origin: Instant::now(),
+                elapsed: Mutex::new(Duration::ZERO),
+            })
+        }
+
+        fn advance(&self, duration: Duration) {
+            let mut elapsed = self.elapsed.lock().unwrap();
+            *elapsed += duration;
+        }
+    }
+
+    impl PumpClock for TestClock {
+        fn sample(&self) -> ClockSample {
+            let elapsed = *self.elapsed.lock().unwrap();
+            ClockSample {
+                instant: self.origin + elapsed,
+                micros: duration_micros(elapsed),
+            }
+        }
+    }
+
+    fn test_pump(thread_id: &str, limits: PumpLimits, clock: Arc<TestClock>) -> OutputPump {
+        OutputPump::new_with_clock(thread_id.to_string(), limits, clock)
+            .expect("test pump limits should be valid")
+    }
+
+    fn wait_for_blocked_producers(pump: &OutputPump, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while pump.snapshot().blocked_producers != expected {
+            assert!(
+                Instant::now() < deadline,
+                "producer did not reach the expected blocked state"
+            );
+            thread::yield_now();
+        }
+    }
+
+    fn zero_cadence_limits() -> PumpLimits {
+        PumpLimits {
+            visible_cadence: Duration::ZERO,
+            hidden_cadence: Duration::ZERO,
+            ..PumpLimits::default()
+        }
+    }
 
     fn state_with_batch_bytes(max_batch_bytes: usize) -> PumpState {
         PumpState::new(PumpLimits {
@@ -1332,5 +2137,468 @@ mod tests {
         state.push(retry).unwrap();
         assert_eq!(state.pending_bytes(), 1);
         assert_eq!(state.pending_fragments(), 1);
+    }
+
+    #[test]
+    fn producer_blocks_at_byte_or_fragment_budget_until_capacity_is_released() {
+        let cases = [
+            (
+                PumpLimits {
+                    max_pending_bytes: 2,
+                    max_pending_fragments: 2,
+                    max_batch_bytes: 2,
+                    max_in_flight: 1,
+                    visible_cadence: Duration::ZERO,
+                    hidden_cadence: Duration::ZERO,
+                    exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+                },
+                vec![1, 2],
+                vec![3],
+            ),
+            (
+                PumpLimits {
+                    max_pending_bytes: 2,
+                    max_pending_fragments: 1,
+                    max_batch_bytes: 1,
+                    max_in_flight: 1,
+                    visible_cadence: Duration::ZERO,
+                    hidden_cadence: Duration::ZERO,
+                    exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+                },
+                vec![1],
+                vec![2],
+            ),
+        ];
+
+        for (index, (limits, initial, blocked)) in cases.into_iter().enumerate() {
+            let clock = TestClock::new();
+            let pump = test_pump(&format!("budget-{index}"), limits, Arc::clone(&clock));
+            pump.enqueue(initial).unwrap();
+
+            let producer_pump = pump.clone();
+            let producer = thread::spawn(move || producer_pump.enqueue(blocked));
+            wait_for_blocked_producers(&pump, 1);
+            assert!(!producer.is_finished());
+
+            clock.advance(Duration::from_millis(7));
+            assert_eq!(
+                pump.emit_ready(|_| Ok(())),
+                Ok(EmitOutcome::Emitted { sequence: 1 })
+            );
+            producer.join().unwrap().unwrap();
+
+            let snapshot = pump.snapshot();
+            assert_eq!(snapshot.blocked_producers, 0);
+            assert_eq!(snapshot.metrics.blocked_reader_count, 1);
+            assert_eq!(
+                snapshot.metrics.total_blocked_reader_duration,
+                Duration::from_millis(7)
+            );
+            assert_eq!(
+                snapshot.metrics.max_blocked_reader_duration,
+                Duration::from_millis(7)
+            );
+        }
+    }
+
+    #[test]
+    fn slow_pane_does_not_consume_another_panes_queue_or_in_flight_window() {
+        let clock = TestClock::new();
+        let limits = PumpLimits {
+            max_pending_bytes: 2,
+            max_pending_fragments: 2,
+            max_batch_bytes: 1,
+            max_in_flight: 1,
+            visible_cadence: Duration::ZERO,
+            hidden_cadence: Duration::ZERO,
+            exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+        };
+        let slow = test_pump("slow", limits.clone(), Arc::clone(&clock));
+        let ready = test_pump("ready", limits, Arc::clone(&clock));
+
+        slow.enqueue(vec![1, 2]).unwrap();
+        assert_eq!(
+            slow.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        assert_eq!(slow.snapshot().in_flight_batches, 1);
+        assert_eq!(slow.snapshot().queued_bytes, 1);
+
+        let mut ready_event = None;
+        ready.enqueue(b"ok".to_vec()).unwrap();
+        assert_eq!(
+            ready.emit_ready(|event| {
+                ready_event = Some((event.thread_id.clone(), event.sequence, event.bytes.clone()));
+                Ok(())
+            }),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+
+        assert_eq!(ready_event, Some(("ready".to_string(), 1, vec![b'o'])));
+        assert_eq!(ready.snapshot().in_flight_batches, 1);
+        assert_eq!(ready.snapshot().queued_bytes, 1);
+        assert_eq!(slow.snapshot().in_flight_batches, 1);
+        assert_eq!(slow.snapshot().queued_bytes, 1);
+    }
+
+    #[test]
+    fn visibility_changes_cadence_and_wakes_only_on_actual_transitions() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "visibility",
+            PumpLimits {
+                max_batch_bytes: 1,
+                ..PumpLimits::default()
+            },
+            Arc::clone(&clock),
+        );
+
+        assert_eq!(pump.snapshot().effective_cadence, VISIBLE_CADENCE);
+        assert!(!pump.set_visibility(PaneVisibility::Visible));
+        assert_eq!(pump.snapshot().metrics.visibility_transition_count, 0);
+
+        pump.enqueue(vec![1, 2]).unwrap();
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        pump.acknowledge(1).unwrap();
+        clock.advance(VISIBLE_CADENCE);
+
+        assert!(pump.set_visibility(PaneVisibility::Hidden));
+        let hidden = pump.snapshot();
+        assert_eq!(hidden.effective_cadence, HIDDEN_CADENCE);
+        assert_eq!(hidden.metrics.visibility_transition_count, 1);
+        assert!(!pump.set_visibility(PaneVisibility::Hidden));
+        assert_eq!(pump.snapshot().metrics.visibility_transition_count, 1);
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::NotReady(BatchReadiness::WaitingForCadence {
+                remaining: HIDDEN_CADENCE - VISIBLE_CADENCE,
+            }))
+        );
+
+        clock.advance(HIDDEN_CADENCE - VISIBLE_CADENCE);
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 2 })
+        );
+    }
+
+    #[test]
+    fn failed_emit_retries_the_same_cached_event_and_commits_once() {
+        let clock = TestClock::new();
+        let pump = test_pump("retry", PumpLimits::default(), Arc::clone(&clock));
+        pump.enqueue(b"retry exactly".to_vec()).unwrap();
+
+        let mut first = None;
+        assert!(matches!(
+            pump.emit_ready(|event| {
+                first = Some((
+                    event as *const PtyDataBatchEvent as usize,
+                    event.sequence,
+                    event.bytes.clone(),
+                    event.emitted_at_micros,
+                ));
+                Err("transient".to_string())
+            }),
+            Ok(EmitOutcome::Failed {
+                sequence: 1,
+                error
+            }) if error == "transient"
+        ));
+        let failed = pump.snapshot();
+        assert!(failed.prepared);
+        assert_eq!(failed.in_flight_batches, 0);
+        assert_eq!(failed.metrics.state.bytes_emitted, 0);
+        assert_eq!(failed.metrics.state.batches_emitted, 0);
+        assert_eq!(failed.metrics.emit_failure_count, 1);
+        assert_eq!(failed.metrics.emit_retry_count, 0);
+
+        clock.advance(VISIBLE_CADENCE);
+        let mut retry = None;
+        assert_eq!(
+            pump.emit_ready(|event| {
+                retry = Some((
+                    event as *const PtyDataBatchEvent as usize,
+                    event.sequence,
+                    event.bytes.clone(),
+                    event.emitted_at_micros,
+                ));
+                Ok(())
+            }),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+
+        assert_eq!(retry, first);
+        let committed = pump.snapshot();
+        assert!(!committed.prepared);
+        assert_eq!(committed.in_flight_batches, 1);
+        assert_eq!(
+            committed.metrics.state.bytes_emitted,
+            b"retry exactly".len() as u64
+        );
+        assert_eq!(committed.metrics.state.batches_emitted, 1);
+        assert_eq!(committed.metrics.emit_failure_count, 1);
+        assert_eq!(committed.metrics.emit_retry_count, 1);
+    }
+
+    #[test]
+    fn exit_drain_waits_for_queued_prepared_and_in_flight_data_and_records_timeouts() {
+        let clock = TestClock::new();
+        let pump = test_pump("drain", zero_cadence_limits(), Arc::clone(&clock));
+        pump.enqueue(b"queued".to_vec()).unwrap();
+        pump.request_drain();
+
+        assert_eq!(
+            pump.wait_for_drain_timeout(Duration::ZERO),
+            DrainOutcome::TimedOut
+        );
+        assert_eq!(pump.snapshot().metrics.drain_timeout_count, 1);
+
+        assert!(matches!(
+            pump.emit_ready(|_| Err("not yet".to_string())),
+            Ok(EmitOutcome::Failed { sequence: 1, .. })
+        ));
+        assert!(pump.snapshot().prepared);
+        assert_eq!(
+            pump.wait_for_drain_timeout(Duration::ZERO),
+            DrainOutcome::TimedOut
+        );
+
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        assert_eq!(pump.snapshot().in_flight_batches, 1);
+        assert_eq!(
+            pump.wait_for_drain_timeout(Duration::ZERO),
+            DrainOutcome::TimedOut
+        );
+
+        pump.acknowledge(1).unwrap();
+        assert_eq!(
+            pump.wait_for_drain_timeout(Duration::ZERO),
+            DrainOutcome::Drained
+        );
+        let drained = pump.snapshot();
+        assert!(drained.draining);
+        assert!(drained.is_empty());
+        assert_eq!(drained.metrics.drain_timeout_count, 3);
+    }
+
+    #[test]
+    fn acknowledgement_wakes_backpressured_producer_and_records_latency() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "ack",
+            PumpLimits {
+                max_pending_bytes: 1,
+                max_pending_fragments: 1,
+                max_batch_bytes: 1,
+                max_in_flight: 1,
+                visible_cadence: Duration::ZERO,
+                hidden_cadence: Duration::ZERO,
+                exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+            },
+            Arc::clone(&clock),
+        );
+        let (events_tx, events_rx) = mpsc::channel();
+        pump.start_worker(move |event| {
+            events_tx.send(event.clone()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        pump.enqueue(vec![1]).unwrap();
+        let first = events_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(first.sequence, 1);
+
+        pump.enqueue(vec![2]).unwrap();
+        let producer_pump = pump.clone();
+        let producer = thread::spawn(move || producer_pump.enqueue(vec![3]));
+        wait_for_blocked_producers(&pump, 1);
+
+        clock.advance(Duration::from_millis(9));
+        assert!(matches!(
+            pump.acknowledge(1).unwrap(),
+            AckOutcome::Advanced {
+                sequence: 1,
+                latency,
+                ..
+            } if latency == Duration::from_millis(9)
+        ));
+
+        let second = events_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!((second.sequence, second.bytes), (2, vec![2]));
+        producer.join().unwrap().unwrap();
+        let snapshot = pump.snapshot();
+        assert_eq!(snapshot.metrics.state.batches_acknowledged, 1);
+        assert_eq!(
+            snapshot.metrics.state.total_ack_latency,
+            Duration::from_millis(9)
+        );
+        assert_eq!(
+            snapshot.metrics.state.max_ack_latency,
+            Duration::from_millis(9)
+        );
+
+        pump.cancel_and_join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_wakes_blocked_producers_and_worker_without_leaking_threads() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "cancel",
+            PumpLimits {
+                max_pending_bytes: 1,
+                max_pending_fragments: 1,
+                max_batch_bytes: 1,
+                max_in_flight: 1,
+                visible_cadence: Duration::ZERO,
+                hidden_cadence: Duration::ZERO,
+                exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+            },
+            clock,
+        );
+
+        pump.enqueue(vec![1]).unwrap();
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        pump.enqueue(vec![2]).unwrap();
+        let producer_pump = pump.clone();
+        let producer = thread::spawn(move || producer_pump.enqueue(vec![3]));
+        wait_for_blocked_producers(&pump, 1);
+
+        pump.start_worker(|_| Ok(())).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !pump.snapshot().worker_running {
+            assert!(Instant::now() < deadline, "pump worker did not start");
+            thread::yield_now();
+        }
+
+        pump.cancel_and_join().unwrap();
+        assert_eq!(
+            producer.join().unwrap(),
+            Err(EnqueueError::Cancelled { fragment: vec![3] })
+        );
+        let cancelled = pump.snapshot();
+        assert!(cancelled.cancelled);
+        assert!(!cancelled.worker_running);
+        assert_eq!(cancelled.blocked_producers, 0);
+    }
+
+    #[test]
+    fn randomized_fragment_order_is_exact_through_enqueue_emit_and_ack() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "ordering",
+            PumpLimits {
+                max_pending_bytes: 1024,
+                max_pending_fragments: 128,
+                max_batch_bytes: 17,
+                max_in_flight: 2,
+                visible_cadence: Duration::ZERO,
+                hidden_cadence: Duration::ZERO,
+                exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+            },
+            clock,
+        );
+        let mut seed = 0x7a5b_319d_u64;
+        let mut expected = Vec::new();
+        for fragment_index in 0..73_u8 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let length = (seed as usize % 13) + 1;
+            let fragment = (0..length)
+                .map(|byte_index| fragment_index.wrapping_add(byte_index as u8))
+                .collect::<Vec<_>>();
+            expected.extend_from_slice(&fragment);
+            pump.enqueue(fragment).unwrap();
+        }
+
+        let mut emitted = Vec::new();
+        let mut next_sequence = 1;
+        while !pump.snapshot().is_empty() {
+            assert_eq!(
+                pump.emit_ready(|event| {
+                    emitted.extend_from_slice(&event.bytes);
+                    Ok(())
+                }),
+                Ok(EmitOutcome::Emitted {
+                    sequence: next_sequence
+                })
+            );
+            pump.acknowledge(next_sequence).unwrap();
+            next_sequence += 1;
+        }
+
+        assert_eq!(emitted, expected);
+        assert_eq!(
+            pump.snapshot().metrics.state.bytes_acknowledged,
+            expected.len() as u64
+        );
+    }
+
+    #[test]
+    fn batch_event_metadata_is_exact_and_sequences_are_monotonic() {
+        let clock = TestClock::new();
+        let pump = test_pump(
+            "metadata-thread",
+            PumpLimits {
+                max_pending_bytes: 16,
+                max_pending_fragments: 4,
+                max_batch_bytes: 4,
+                max_in_flight: 1,
+                visible_cadence: Duration::ZERO,
+                hidden_cadence: Duration::ZERO,
+                exit_drain_timeout: EXIT_DRAIN_TIMEOUT,
+            },
+            Arc::clone(&clock),
+        );
+
+        clock.advance(Duration::from_micros(11));
+        pump.enqueue(b"ab".to_vec()).unwrap();
+        clock.advance(Duration::from_micros(2));
+        pump.enqueue(b"cdef".to_vec()).unwrap();
+        clock.advance(Duration::from_micros(16));
+
+        let mut first = None;
+        assert_eq!(
+            pump.emit_ready(|event| {
+                first = Some(event.clone());
+                Ok(())
+            }),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        let first = first.unwrap();
+        assert_eq!(first.thread_id, "metadata-thread");
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.bytes, b"abcd");
+        assert_eq!(first.byte_count, 4);
+        assert_eq!(first.enqueued_at_micros, 11);
+        assert_eq!(first.emitted_at_micros, 29);
+        assert_eq!(first.queued_bytes, 2);
+        assert_eq!(first.queue_depth, 1);
+
+        pump.acknowledge(1).unwrap();
+        let mut second = None;
+        assert_eq!(
+            pump.emit_ready(|event| {
+                second = Some(event.clone());
+                Ok(())
+            }),
+            Ok(EmitOutcome::Emitted { sequence: 2 })
+        );
+        let second = second.unwrap();
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.bytes, b"ef");
+        assert_eq!(second.byte_count, 2);
+        assert_eq!(second.enqueued_at_micros, 13);
+        assert_eq!(second.emitted_at_micros, 29);
+        assert_eq!(second.queued_bytes, 0);
+        assert_eq!(second.queue_depth, 0);
     }
 }

@@ -26,6 +26,7 @@ pub mod pty_transport;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
+use pty_transport::{DrainOutcome, EnqueueError, OutputPump};
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -48,8 +49,9 @@ fn safe_browser_label(label: Option<String>) -> String {
 // ----------------------------------------------------------------------------
 
 struct PtySession {
-    master: Box<dyn MasterPty + Send>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pump: OutputPump,
 }
 
 static SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> =
@@ -436,12 +438,6 @@ fn canonical_project_path(root: String) -> Result<String, String> {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PtyDataEvent {
-    pub thread_id: String,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PtyExitEvent {
     pub thread_id: String,
     pub code: Option<i32>,
@@ -452,6 +448,21 @@ pub struct BrowserPageLoadEvent {
     pub label: String,
     pub url: String,
     pub phase: String,
+}
+
+fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), String> {
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(bytes_read) => match pump.enqueue(buffer[..bytes_read].to_vec()) {
+                Ok(()) => {}
+                Err(EnqueueError::Cancelled { .. }) => return Ok(()),
+                Err(error) => return Err(error.to_string()),
+            },
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 #[tauri::command]
@@ -515,48 +526,65 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     drop(resolved_cwd);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
+    let app_for_output = app.clone();
+    pump.start_worker(move |payload| {
+        app_for_output
+            .emit("pty:data-batch", payload)
+            .map_err(|error| error.to_string())
+    })
+    .map_err(|e| e.to_string())?;
 
     {
         let mut guard = SESSIONS.lock();
         guard.insert(
             thread_id.clone(),
             PtySession {
-                master: pair.master,
+                master: Arc::new(Mutex::new(pair.master)),
                 writer: Arc::new(Mutex::new(writer)),
+                pump: pump.clone(),
             },
         );
     }
     drop(pending_start);
 
-    let data_thread_id = thread_id.clone();
-    let app_for_data = app.clone();
+    let reader_pump = pump.clone();
     let data_thread = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let payload = PtyDataEvent {
-                        thread_id: data_thread_id.clone(),
-                        bytes: buf[..n].to_vec(),
-                    };
-                    let _ = app_for_data.emit("pty:data", payload);
-                }
-                Err(_) => break,
-            }
+        if let Err(error) = pump_pty_reader(&mut reader, reader_pump) {
+            log::warn!("PTY reader stopped after output pump error: {error}");
         }
     });
 
     let exit_thread_id = thread_id.clone();
     let app_for_exit = app.clone();
+    let exit_pump = pump;
     std::thread::spawn(move || {
         let status = child.wait();
-        {
+        let removed_session = {
             let mut guard = SESSIONS.lock();
-            guard.remove(&exit_thread_id);
-        }
+            let matches_exiting_pump = guard
+                .get(&exit_thread_id)
+                .is_some_and(|session| session.pump.ptr_eq(&exit_pump));
+            matches_exiting_pump
+                .then(|| guard.remove(&exit_thread_id))
+                .flatten()
+        };
+        drop(removed_session);
         let code = status.ok().map(|s| s.exit_code() as i32);
         let _ = data_thread.join();
+        exit_pump.request_drain();
+        if exit_pump.wait_for_drain() == DrainOutcome::TimedOut {
+            let snapshot = exit_pump.snapshot();
+            log::warn!(
+                "PTY output drain timed out for '{}' with {} pending bytes, \
+                 prepared={}, and {} in-flight batches",
+                snapshot.thread_id,
+                snapshot.pending_bytes,
+                snapshot.prepared,
+                snapshot.in_flight_batches
+            );
+        }
+        let _ = exit_pump.cancel_and_join();
         let _ = app_for_exit.emit(
             "pty:exit",
             PtyExitEvent {
@@ -586,10 +614,15 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 
 #[tauri::command]
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let guard = SESSIONS.lock();
-    if let Some(session) = guard.get(&thread_id) {
-        session
-            .master
+    let master = {
+        let guard = SESSIONS.lock();
+        guard
+            .get(&thread_id)
+            .map(|session| Arc::clone(&session.master))
+    };
+    if let Some(master) = master {
+        master
+            .lock()
             .resize(PtySize {
                 rows,
                 cols,
@@ -603,8 +636,16 @@ fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
 
 #[tauri::command]
 fn pty_stop(thread_id: String) {
-    let mut guard = SESSIONS.lock();
-    guard.remove(&thread_id);
+    let session = {
+        let mut guard = SESSIONS.lock();
+        guard.remove(&thread_id)
+    };
+    if let Some(session) = session {
+        let pump = session.pump.clone();
+        pump.cancel();
+        drop(session);
+        let _ = pump.cancel_and_join();
+    }
 }
 
 #[tauri::command]
@@ -2173,6 +2214,32 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod pty_runtime_tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn pty_reader_enqueues_raw_bytes_for_the_batch_worker() {
+        let pump = pty_transport::OutputPump::new("reader-test".to_string()).unwrap();
+        pump_pty_reader(Cursor::new(b"ordered pty bytes".to_vec()), pump.clone()).unwrap();
+
+        let mut emitted = None;
+        assert_eq!(
+            pump.emit_ready(|event| {
+                emitted = Some((event.thread_id.clone(), event.sequence, event.bytes.clone()));
+                Ok(())
+            }),
+            Ok(pty_transport::EmitOutcome::Emitted { sequence: 1 })
+        );
+        assert_eq!(
+            emitted,
+            Some(("reader-test".to_string(), 1, b"ordered pty bytes".to_vec()))
+        );
+    }
 }
 
 #[cfg(test)]
