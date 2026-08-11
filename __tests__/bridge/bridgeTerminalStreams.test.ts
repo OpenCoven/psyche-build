@@ -72,7 +72,9 @@ async function control(daemon: BridgeDaemon, session: any, request: unknown) {
   return sent[sent.length - 1]?.payload;
 }
 
-function framesFor(session: any) {
+type CapturedFrame = { streamId: string; sequence: number; text: string };
+
+function framesFor(session: any): CapturedFrame[] {
   return session.sendBinary.mock.calls.map(([streamId, sequence, payload]: any[]) => ({
     streamId,
     sequence,
