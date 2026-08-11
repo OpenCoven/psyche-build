@@ -22,7 +22,18 @@ function extractFunctionSource(source: string, name: string) {
   const syncStart = source.indexOf(`function ${name}(`);
   const start = asyncStart === -1 ? syncStart : asyncStart;
   if (start === -1) throw new Error(`missing function ${name}`);
-  const bodyStart = source.indexOf('{', start);
+  const paramsStart = source.indexOf('(', start);
+  let paramsDepth = 0;
+  let bodyStart = -1;
+  for (let index = paramsStart; index < source.length; index += 1) {
+    if (source[index] === '(') paramsDepth += 1;
+    if (source[index] === ')') paramsDepth -= 1;
+    if (paramsDepth === 0) {
+      bodyStart = source.indexOf('{', index);
+      break;
+    }
+  }
+  if (bodyStart === -1) throw new Error(`missing function body ${name}`);
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
     if (source[index] === '{') depth += 1;
@@ -63,11 +74,13 @@ describe('native CodeMirror workspace editor surface', () => {
     }
 
     expect(indexHtml).not.toContain('<pre class="file-view-body" id="file-view-body">');
+<<<<<<< HEAD
     const requiredScripts = [
       './editor.bundle.js',
       './diffs.bundle.js',
       './sessions.bundle.js',
       './panes.bundle.js',
+      './input.bundle.js',
       './status.bundle.js',
       './main.js',
     ];
@@ -85,6 +98,11 @@ describe('native CodeMirror workspace editor surface', () => {
         `${scriptPositions[position - 1].script} should load before ${scriptPositions[position].script}`
       ).toBeLessThan(scriptPositions[position].index);
     }
+=======
+    expect(indexHtml).toMatch(
+      /<script src="\.\/editor\.bundle\.js" defer><\/script>\s*<script src="\.\/diffs\.bundle\.js" defer><\/script>\s*<script src="\.\/sessions\.bundle\.js" defer><\/script>\s*<script src="\.\/panes\.bundle\.js" defer><\/script>\s*<script src="\.\/input\.bundle\.js" defer><\/script>\s*<script src="\.\/main\.js" defer><\/script>/
+    );
+>>>>>>> origin/main
     expect(indexHtml).toMatch(/id="file-save"[^>]*type="button"[^>]*disabled/);
     expect(indexHtml).toMatch(/id="file-read-only-message"[^>]*role="status"[^>]*hidden/);
   });
@@ -608,6 +626,12 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(stylesCss).toMatch(/\.file-decision-dialog::backdrop\s*\{/);
   });
 
+  it('stops dirty-dialog Escape before it reaches fullscreen file return', () => {
+    expect(extractFunctionSource(mainJs, 'showFileDecision')).toMatch(
+      /event\.key === "Escape"[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*settle\(fallback\)/
+    );
+  });
+
   it('guards dirty files with save, discard, and cancel semantics', async () => {
     const source = extractFunctionSource(mainJs, 'guardDirtyFile');
     const decisions = ['cancel', 'discard', 'save'];
@@ -808,10 +832,8 @@ describe('native CodeMirror workspace editor surface', () => {
       state,
       refreshTabs: () => undefined,
       activateFileTabNow: () => undefined,
-      fileViewEl: { hidden: false },
-      terminalHost: { hidden: true },
-      requestAnimationFrame: () => undefined,
-      scheduleVisiblePaneFit: () => undefined,
+      clearFileFocusPresentation: () => undefined,
+      renderPaneWorkspace: () => undefined,
     });
 
     const closing = closeFileTab(file.id);
@@ -869,6 +891,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       covenDiscovery: {},
       startCovenPolling: () => undefined,
+      syncPaneMetricsVisibility: () => true,
     });
 
     const removing = removeProject(project.id);
@@ -1092,6 +1115,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       fileViewEl,
       terminalHost,
+      syncPaneMetricsVisibility: () => true,
       activePaneLayout: () => layout,
       renderPaneMinimap: (value: unknown, file: { id: string }) => {
         minimapCalls.push({ layout: value, fileId: file.id });
@@ -1118,6 +1142,101 @@ describe('native CodeMirror workspace editor surface', () => {
     );
   });
 
+  it('keeps file focus intact when dirty-file navigation is cancelled', async () => {
+    const state = { activeFileId: 'file-a' };
+    const fileFocus = { returnThreadId: 'thread-a' };
+    let clearCalls = 0;
+    const showTerminalView = compileFunction<() => Promise<boolean>>(
+      extractFunctionSource(mainJs, 'showTerminalView'),
+      {
+        state,
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        guardDirtyFile: async () => false,
+        findOpenFile: () => ({ id: 'file-a', dirty: true }),
+        clearFileFocusPresentation: () => { clearCalls += 1; },
+        refreshTabs: () => undefined,
+        requestAnimationFrame: () => undefined,
+        scheduleVisiblePaneFit: () => undefined,
+      },
+    );
+
+    await expect(showTerminalView()).resolves.toBe(false);
+    expect(state.activeFileId).toBe('file-a');
+    expect(fileFocus.returnThreadId).toBe('thread-a');
+    expect(clearCalls).toBe(0);
+  });
+
+  it('refreshes the pane minimap immediately after leaving file focus', async () => {
+    const calls: string[] = [];
+    const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
+    const showTerminalView = compileFunction<() => Promise<boolean>>(
+      extractFunctionSource(mainJs, 'showTerminalView'),
+      {
+        state: { activeFileId: 'file-a' },
+        fileNavigationInFlight: false,
+        fileDecisionInFlight: null,
+        guardDirtyFile: async () => true,
+        findOpenFile: () => ({ id: 'file-a', dirty: false }),
+        clearFileFocusPresentation: () => { calls.push('clear'); },
+        activePaneLayout: () => layout,
+        renderPaneMinimap: (value: unknown, file: unknown) => {
+          expect(value).toBe(layout);
+          expect(file).toBeNull();
+          calls.push('minimap');
+        },
+        refreshTabs: () => { calls.push('tabs'); },
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => { calls.push('fit'); },
+      },
+    );
+
+    await expect(showTerminalView()).resolves.toBe(true);
+    expect(calls).toEqual(['clear', 'minimap', 'tabs', 'fit']);
+  });
+
+  it('routes Escape through guarded file return before pane maximize', () => {
+    expect(mainJs).toMatch(
+      /document\.addEventListener\("keydown", async function \(event\)[\s\S]*if \(state\.activeFileId\) \{[\s\S]*event\.preventDefault\(\);[\s\S]*await returnFromFileFocus\(\);[\s\S]*if \(!typing && exitPaneMaximize\(\)\)/
+    );
+    expect(extractFunctionSource(mainJs, 'renderPaneMinimap')).toMatch(
+      /await returnFromFileFocus\(item\.thread\.id, true\)/
+    );
+  });
+
+  it('documents Escape as the way to leave a fullscreen file', () => {
+    expect(mainJs).toContain('["Leave a fullscreen file", "esc"]');
+  });
+
+  it('restores the pane workspace after the last active file closes', async () => {
+    const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
+    const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
+    let cleared = 0;
+    let rendered = 0;
+    const closeFileTab = compileFunction<
+      (id: string) => Promise<boolean>
+    >(extractFunctionSource(mainJs, 'closeFileTab'), {
+      findOpenFile: () => file,
+      fileNavigationInFlight: false,
+      fileDecisionInFlight: null,
+      guardDirtyFile: async () => true,
+      projectFiles: () => state.openFiles,
+      state,
+      refreshTabs: () => undefined,
+      activateFileTabNow: () => undefined,
+      clearFileFocusPresentation: () => {
+        cleared += 1;
+        state.activeFileId = null;
+      },
+      renderPaneWorkspace: () => { rendered += 1; },
+    });
+
+    await expect(closeFileTab(file.id)).resolves.toBe(true);
+    expect(state.openFiles).toEqual([]);
+    expect(state.activeFileId).toBeNull();
+    expect({ cleared, rendered }).toEqual({ cleared: 1, rendered: 1 });
+  });
+
   it('reserves the focus-mode minimap column for the fullscreen file editor', () => {
     expect(stylesCss).toMatch(
       /\.terminal-area\.is-file-focused \.file-view\s*\{[^}]*grid-column:\s*1;/
@@ -1142,7 +1261,7 @@ describe('native CodeMirror workspace editor surface', () => {
       /await guardDirtyFiles\([\s\S]*if \(!canRemove\) return false;[\s\S]*state\.projects =/
     );
     expect(extractFunctionSource(mainJs, 'showTerminalView')).toMatch(
-      /await guardDirtyFile\([\s\S]*if \(!canShowTerminal\) return false;[\s\S]*state\.activeFileId = null/
+      /await guardDirtyFile\([\s\S]*if \(!canShowTerminal\) return false;[\s\S]*clearFileFocusPresentation\(\)/
     );
     expect(mainJs).toContain('window.__TAURI__.window.getCurrentWindow()');
     expect(mainJs).toContain('onCloseRequested');

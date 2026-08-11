@@ -19,6 +19,8 @@ const panesBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/panes.bundle.js'),
   'utf8'
 );
+const inputBundle = readFileSync(
+  join(repoRoot, 'native/macos/psyche-build-tauri/web/input.bundle.js'),
 const statusBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/status.bundle.js'),
   'utf8'
@@ -39,6 +41,16 @@ const tauriPackage = JSON.parse(
 };
 
 describe('Tauri workspace panels', () => {
+  it('registers a scoped pane-session metrics command', () => {
+    expect(tauriLib).toContain('mod pane_metrics;');
+    expect(tauriLib).toMatch(
+      /fn pane_session_metrics\([\s\S]*project_root:\s*String[\s\S]*cwd:\s*String[\s\S]*session_id:\s*String/,
+    );
+    expect(tauriLib).toMatch(/\n\s*pane_session_metrics,/);
+    expect(tauriLib).toMatch(/open_pty_cwd\(&project_root,\s*&cwd\)/);
+    expect(tauriLib).toMatch(/is_safe_session_id\(&session_id\)/);
+  });
+
   it('scopes filesystem reads to the active project root', () => {
     expect(mainJs).toMatch(
       /invoke\("fs_list_dir",\s*\{\s*root:\s*root,\s*path:\s*dirPath\s*\}\)/
@@ -108,18 +120,19 @@ describe('Tauri workspace panels', () => {
 
   it('pins a repository-local Tauri 2 CLI for native builds', () => {
     expect(tauriPackage.scripts['build:web']).toBe(
-      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js'
+      'esbuild web/editor/editor-entry.js --bundle --minify --format=iife --global-name=PsycheCodeEditor --outfile=web/editor.bundle.js && esbuild web/sessions/session-entry.js --bundle --minify --format=iife --global-name=PsycheSessions --outfile=web/sessions.bundle.js && esbuild web/panes/pane-entry.js --bundle --minify --format=iife --global-name=PsychePanes --outfile=web/panes.bundle.js && esbuild web/input/input-entry.js --bundle --minify --format=iife --global-name=PsycheTerminalInput --outfile=web/input.bundle.js && esbuild web/diffs/diff-entry.js --bundle --minify --format=iife --global-name=PsycheDiffs --outfile=web/diffs.bundle.js && esbuild web/status/status-entry.js --bundle --minify --format=iife --global-name=PsycheStatus --outfile=web/status.bundle.js'
     );
     expect(tauriPackage.scripts.build).toBe('pnpm build:web && tauri build');
     expect(tauriPackage.scripts.dev).toBe('pnpm build:web && tauri dev');
     expect(tauriPackage.devDependencies['@tauri-apps/cli']).toMatch(/^2\./);
   });
 
-  it('loads the footer status bundle before application initialization', () => {
+  it('loads the committed web bundles before the application shell', () => {
     const editorScript = '<script src="./editor.bundle.js" defer></script>';
     const diffsScript = '<script src="./diffs.bundle.js" defer></script>';
     const sessionsScript = '<script src="./sessions.bundle.js" defer></script>';
     const panesScript = '<script src="./panes.bundle.js" defer></script>';
+    const inputScript = '<script src="./input.bundle.js" defer></script>';
     const statusScript = '<script src="./status.bundle.js" defer></script>';
     const mainScript = '<script src="./main.js" defer></script>';
 
@@ -127,17 +140,22 @@ describe('Tauri workspace panels', () => {
     expect(indexHtml).toContain(diffsScript);
     expect(indexHtml).toContain(sessionsScript);
     expect(indexHtml).toContain(panesScript);
+    expect(indexHtml).toContain(inputScript);
     expect(indexHtml).toContain(statusScript);
     expect(indexHtml).toContain(mainScript);
     expect(indexHtml.indexOf(editorScript)).toBeLessThan(indexHtml.indexOf(diffsScript));
     expect(indexHtml.indexOf(diffsScript)).toBeLessThan(indexHtml.indexOf(sessionsScript));
     expect(indexHtml.indexOf(sessionsScript)).toBeLessThan(indexHtml.indexOf(panesScript));
+    expect(indexHtml.indexOf(panesScript)).toBeLessThan(indexHtml.indexOf(inputScript));
+    expect(indexHtml.indexOf(inputScript)).toBeLessThan(indexHtml.indexOf(mainScript));
     expect(indexHtml.indexOf(panesScript)).toBeLessThan(indexHtml.indexOf(statusScript));
     expect(indexHtml.indexOf(statusScript)).toBeLessThan(indexHtml.indexOf(mainScript));
     expect(sessionsBundle.length).toBeGreaterThan(0);
     expect(sessionsBundle).toContain('PsycheSessions');
     expect(panesBundle.length).toBeGreaterThan(0);
     expect(panesBundle).toContain('PsychePanes');
+    expect(inputBundle.length).toBeGreaterThan(0);
+    expect(inputBundle).toContain('PsycheTerminalInput');
     expect(statusBundle.length).toBeGreaterThan(0);
     expect(statusBundle).toContain('PsycheStatus');
     expect(statusBundle).toContain('createStatusController');
@@ -166,7 +184,12 @@ describe('Tauri workspace panels', () => {
       )?.[0];
       expect(boundsFunction).toBeTruthy();
       expect(boundsFunction).toContain('preview.isConnected');
+      expect(boundsFunction).toContain('browserSurface.parentElement !== pane.browserBody');
+      expect(boundsFunction).toContain('preview.getBoundingClientRect()');
       expect(boundsFunction).not.toContain('state.activeThreadId');
+      expect(mainJs).toMatch(
+        /function mountBrowserPane\(thread\)[\s\S]*pane\.appendChild\(body\);[\s\S]*pane\.appendChild\(createPaneFooter\(thread\)\)/,
+      );
     });
 
     it('returns contextual shortcuts to terminal mode through every Web close path', () => {
@@ -286,6 +309,117 @@ describe('Tauri workspace panels', () => {
     it('files a tool pane as a tool, not an agent', () => {
       expect(mainJs).toMatch(/var TOOL_KINDS = \["git", "web"\];/);
       expect(mainJs).toMatch(/\["Tools", function \(t\) \{ return TOOL_KINDS\.indexOf/);
+    });
+  });
+
+  describe('voice call bar', () => {
+    function compile(deps: Record<string, unknown> = {}) {
+      const bar = { hidden: true, classList: { toggle: () => undefined } };
+      const els: Record<string, any> = {
+        'call-bar': bar,
+        'call-target': { textContent: '' },
+        'call-timer': { textContent: '' },
+        'call-note': { textContent: '' },
+        'call-mute': { textContent: '', setAttribute: () => undefined, addEventListener: () => undefined },
+        'call-end': { addEventListener: () => undefined },
+        'composer-call': { setAttribute: () => undefined, addEventListener: () => undefined },
+      };
+      const source = [
+        'formatCallTime', 'paintCallBar', 'startCall', 'endCall', 'toggleCallMute',
+      ].map((name) => functionSourceOf(name)).join('\n');
+      const factory = Function(
+        'document', 'findThread', 'state', 'setInterval', 'clearInterval', 'Date',
+        `"use strict";
+         var callBarEl = document.getElementById('call-bar');
+         var callTargetEl = document.getElementById('call-target');
+         var callTimerEl = document.getElementById('call-timer');
+         var callNoteEl = document.getElementById('call-note');
+         var callMuteBtn = document.getElementById('call-mute');
+         var callEndBtn = document.getElementById('call-end');
+         var composerCallEl = document.getElementById('composer-call');
+         var callState = { active: false, startedAt: 0, muted: false, timer: 0 };
+         ${source}
+         return { formatCallTime, startCall, endCall, toggleCallMute, callState, els: {
+           bar: callBarEl, target: callTargetEl, note: callNoteEl, mute: callMuteBtn } };`,
+      );
+      return factory(
+        { getElementById: (id: string) => els[id] ?? null },
+        () => ({ name: 'codex-review' }),
+        { activeThreadId: 't1' },
+        () => 1,
+        () => undefined,
+        Date,
+        ...Object.values(deps),
+      ) as any;
+    }
+
+    function functionSourceOf(name: string) {
+      const start = mainJs.indexOf(`function ${name}(`);
+      if (start === -1) throw new Error(`missing ${name}`);
+      const bodyStart = mainJs.indexOf('{', start);
+      let depth = 0;
+      for (let i = bodyStart; i < mainJs.length; i += 1) {
+        if (mainJs[i] === '{') depth += 1;
+        if (mainJs[i] === '}') depth -= 1;
+        if (depth === 0) return mainJs.slice(start, i + 1);
+      }
+      throw new Error(`unterminated ${name}`);
+    }
+
+    it('formats elapsed time as m:ss', () => {
+      const api = compile();
+      expect(api.formatCallTime(0)).toBe('0:00');
+      expect(api.formatCallTime(9_000)).toBe('0:09');
+      expect(api.formatCallTime(61_000)).toBe('1:01');
+      expect(api.formatCallTime(600_000)).toBe('10:00');
+      // A clock that ran backwards would print a negative time.
+      expect(api.formatCallTime(-5_000)).toBe('0:00');
+    });
+
+    it('names the focused pane and says plainly that nothing is transmitting', () => {
+      const api = compile();
+      api.startCall();
+      expect(api.els.target.textContent).toBe('codex-review');
+      // There is no getUserMedia, recogniser or audio path in this app; the bar
+      // must not imply an agent is listening.
+      expect(api.els.note.textContent).toMatch(/no voice transport/i);
+      // Assert on the API entry points, not the words: the comment above
+      // startCall names them precisely to say they are absent.
+      expect(mainJs).not.toMatch(/navigator\.mediaDevices/);
+      expect(mainJs).not.toMatch(/new\s+(?:webkit)?SpeechRecognition\s*\(/);
+      expect(mainJs).not.toMatch(/\.getUserMedia\s*\(/);
+    });
+
+    it('starts unmuted, toggles, and resets the control when the call ends', () => {
+      const api = compile();
+      api.startCall();
+      expect(api.els.mute.textContent).toBe('Mute');
+      expect(api.toggleCallMute()).toBe(true);
+      expect(api.els.mute.textContent).toBe('Unmute');
+      api.endCall();
+      // Painted while hidden, or the next call opens reading "Unmute".
+      expect(api.els.mute.textContent).toBe('Mute');
+    });
+
+    it('is idempotent at both ends', () => {
+      const api = compile();
+      expect(api.startCall()).toBe(true);
+      expect(api.startCall()).toBe(false);
+      expect(api.endCall()).toBe(true);
+      expect(api.endCall()).toBe(false);
+      // Muting a call that is not running is a no-op, not a state change.
+      expect(api.toggleCallMute()).toBe(false);
+    });
+
+    it('ends on esc, after the more transient layers', () => {
+      expect(mainJs).toMatch(/if \(armedSessionClose\) \{ disarmSessionClose\(\); return; \}[\s\S]*if \(endCall\(\)\) return;/);
+    });
+
+    it('sits above the composer so the composer never moves', () => {
+      expect(indexHtml).toContain('id="call-bar"');
+      expect(stylesCss).toMatch(/\.call-bar\s*\{[^}]*bottom: calc\(100% - 4px\);/s);
+      // Muting stops the waveform -- the one honest thing it can show.
+      expect(stylesCss).toMatch(/\.call-bar\.is-muted \.call-wave i\s*\{[^}]*animation: none;/s);
     });
   });
 });
