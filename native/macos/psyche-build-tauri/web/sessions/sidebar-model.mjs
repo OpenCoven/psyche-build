@@ -150,7 +150,7 @@ function rowMatchesQuery(row, normalizedQuery) {
 function matchesFilter(row, filter) {
   switch (filter) {
     case 'agents':
-      return row.type === 'agents';
+      return row.type === 'agents' && !isToolRow(row);
     case 'shells':
       return row.type === 'shells';
     case 'active':

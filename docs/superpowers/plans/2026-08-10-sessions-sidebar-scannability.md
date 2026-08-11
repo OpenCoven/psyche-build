@@ -23,8 +23,8 @@
   - Unit coverage for all pure model behavior.
 - Modify `native/macos/psyche-build-tauri/web/index.html`
   - Add compact pinned tabs/search/actions/filters markup and the shared status
-    legend tooltip. Keep honest navigation semantics here; Task 4 promotes the
-    container to an ARIA tree once treeitem/group rendering lands.
+    legend tooltip. Promote `#session-list` to `role="tree"` with
+    `treeitem`/`group` semantics; keyboard navigation is already wired.
 - Modify `native/macos/psyche-build-tauri/web/main.js`
   - Persist sidebar tab/filter/project expansion/selection key, track recent PTY
     output and working state, build the tree through reusable functions, attach
