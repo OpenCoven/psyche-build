@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID as createRandomUUID } from 'node:crypto';
 import {
   lstat,
@@ -16,7 +16,6 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 
 const TAURI_CWD = 'native/macos/psyche-build-tauri';
 const CARGO_MANIFEST_PATH = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
@@ -82,8 +81,8 @@ const DEV_SOURCE_PATHSPECS = [
   ':(top,glob)**',
   ':(top,glob,exclude)**/target/**',
   ':(top,glob,exclude)**/node_modules/**',
+  ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
 ];
-const executeFile = promisify(execFile);
 
 export function parseBuildArguments(argv) {
   const tokens = argv.filter((value) => value !== '--');
@@ -137,64 +136,104 @@ export async function runCommand(command, args, options = {}) {
     throw new TypeError('runCommand requires an array of string arguments');
   }
 
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  let child;
+
   try {
-    const result = await executeFile(command, args, {
+    child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      signal: options.signal,
-      encoding: 'utf8',
-      maxBuffer: COMMAND_MAX_BUFFER,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return {
-      stdout: String(result.stdout),
-      stderr: String(result.stderr),
-    };
   } catch (cause) {
-    const stage =
-      typeof options.stage === 'string' && options.stage.trim() !== ''
-        ? options.stage.trim()
-        : 'run command';
-    const cwd = path.resolve(options.cwd ?? process.cwd());
-    const stdout = typeof cause?.stdout === 'string' ? cause.stdout : '';
-    const stderr = typeof cause?.stderr === 'string' ? cause.stderr : '';
-    const exitCode = typeof cause?.code === 'number' ? cause.code : undefined;
-    const code = typeof cause?.code === 'string' ? cause.code : undefined;
-    const signal = typeof cause?.signal === 'string' ? cause.signal : undefined;
-    const sections = [
-      `Stage: ${stage}`,
-      `cwd: ${cwd}`,
-      `Command: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
-    ];
-
-    if (exitCode !== undefined) {
-      sections.push(`exit code ${exitCode}`);
-    } else if (code !== undefined) {
-      sections.push(`spawn code ${code}`);
-    }
-    if (signal !== undefined) {
-      sections.push(`signal ${signal}`);
-    }
-    if (options.signal?.aborted) {
-      sections.push(`abort reason: ${describeError(options.signal.reason)}`);
-    }
-    sections.push(
-      `stdout:\n${stdout}`,
-      `stderr:\n${stderr}`,
-      `cause: ${describeError(cause)}`,
-    );
-
-    const error = new Error(sections.join('\n'), { cause });
-    error.command = command;
-    error.args = [...args];
-    error.cwd = cwd;
-    error.stage = stage;
-    error.exitCode = exitCode;
-    error.code = code;
-    error.signal = signal;
-    error.stdout = stdout;
-    error.stderr = stderr;
-    throw error;
+    throw createCommandFailure(command, args, options, cause, '', '', cwd);
   }
+
+  return await new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let processError;
+    let abortKillTimer;
+
+    const killChild = () => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+      }
+    };
+
+    const cancelAbortKillTimer = () => {
+      if (abortKillTimer) {
+        clearTimeout(abortKillTimer);
+        abortKillTimer = undefined;
+      }
+    };
+
+    const handleAbort = () => {
+      processError = createAbortCause(options.signal);
+      if (stdout !== '' || stderr !== '') {
+        killChild();
+        return;
+      }
+      abortKillTimer = setTimeout(killChild, 50);
+    };
+
+    const appendOutput = (streamName, chunk) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      if (streamName === 'stdout') {
+        stdout += text;
+      } else {
+        stderr += text;
+      }
+
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > COMMAND_MAX_BUFFER) {
+        processError = Object.assign(
+          new Error(`Command output exceeded ${COMMAND_MAX_BUFFER} bytes`),
+          { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+        );
+        child.kill('SIGTERM');
+      }
+      if (abortKillTimer) {
+        cancelAbortKillTimer();
+        killChild();
+      }
+    };
+
+    if (options.signal?.aborted) {
+      handleAbort();
+    } else {
+      options.signal?.addEventListener('abort', handleAbort, { once: true });
+    }
+    child.stdout?.on('data', (chunk) => appendOutput('stdout', chunk));
+    child.stderr?.on('data', (chunk) => appendOutput('stderr', chunk));
+    child.once('error', (error) => {
+      processError = error;
+    });
+    child.once('close', (exitCode, signal) => {
+      cancelAbortKillTimer();
+      options.signal?.removeEventListener('abort', handleAbort);
+      if (!processError && exitCode === 0 && signal === null) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const cause =
+        processError ??
+        createProcessExitCause(exitCode, signal);
+      reject(
+        createCommandFailure(
+          command,
+          args,
+          options,
+          cause,
+          stdout,
+          stderr,
+          cwd,
+          exitCode,
+          signal,
+        ),
+      );
+    });
+  });
 }
 
 export async function resolveCommit(root, ref, execute = runCommand) {
@@ -1411,6 +1450,93 @@ function describeExit(exit) {
 
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createProcessExitCause(exitCode, signal) {
+  if (typeof exitCode === 'number') {
+    return Object.assign(new Error(`Command exited with code ${exitCode}`), {
+      code: exitCode,
+    });
+  }
+  if (typeof signal === 'string') {
+    return Object.assign(new Error(`Command terminated by signal ${signal}`), {
+      signal,
+    });
+  }
+  return new Error('Command exited without a status code or signal');
+}
+
+function createAbortCause(signal) {
+  return Object.assign(new Error('The operation was aborted'), {
+    name: 'AbortError',
+    code: 'ABORT_ERR',
+    cause: signal?.reason,
+  });
+}
+
+function createCommandFailure(
+  command,
+  args,
+  options,
+  cause,
+  stdout,
+  stderr,
+  cwd = path.resolve(options.cwd ?? process.cwd()),
+  closeExitCode,
+  closeSignal,
+) {
+  const stage =
+    typeof options.stage === 'string' && options.stage.trim() !== ''
+      ? options.stage.trim()
+      : 'run command';
+  const exitCode =
+    typeof cause?.code === 'number'
+      ? cause.code
+      : typeof closeExitCode === 'number'
+        && typeof cause?.code !== 'string'
+        ? closeExitCode
+        : undefined;
+  const code = typeof cause?.code === 'string' ? cause.code : undefined;
+  const signal =
+    typeof cause?.signal === 'string'
+      ? cause.signal
+      : typeof closeSignal === 'string'
+        ? closeSignal
+        : undefined;
+  const sections = [
+    `Stage: ${stage}`,
+    `cwd: ${cwd}`,
+    `Command: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
+  ];
+
+  if (exitCode !== undefined) {
+    sections.push(`exit code ${exitCode}`);
+  } else if (code !== undefined) {
+    sections.push(`spawn code ${code}`);
+  }
+  if (signal !== undefined) {
+    sections.push(`signal ${signal}`);
+  }
+  if (options.signal?.aborted) {
+    sections.push(`abort reason: ${describeError(options.signal.reason)}`);
+  }
+  sections.push(
+    `stdout:\n${stdout}`,
+    `stderr:\n${stderr}`,
+    `cause: ${describeError(cause)}`,
+  );
+
+  const error = new Error(sections.join('\n'), { cause });
+  error.command = command;
+  error.args = [...args];
+  error.cwd = cwd;
+  error.stage = stage;
+  error.exitCode = exitCode;
+  error.code = code;
+  error.signal = signal;
+  error.stdout = stdout;
+  error.stderr = stderr;
+  return error;
 }
 
 function combineErrors(primaryError, secondaryError, secondaryContext) {

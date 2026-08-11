@@ -46,6 +46,7 @@ import type {
   CommandResult,
   InstallOverrides,
   Runner,
+  RunCliDependencies,
   RunMacosBuildDependencies,
   SmokeLaunchOverrides,
 } from '../scripts/build-macos-app.mjs';
@@ -60,6 +61,12 @@ const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
 const manifestPath = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
 const devConfigPath = resolve(repositoryRoot, 'native/macos/psyche-build-tauri/dev.tauri.generated.json');
 const scratchRoot = join(repositoryRoot, '.agent-test-artifacts', 'macos-build-channels');
+const devSourcePathspecs = [
+  ':(top,glob)**',
+  ':(top,glob,exclude)**/target/**',
+  ':(top,glob,exclude)**/node_modules/**',
+  ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
+];
 
 const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
   scripts: Record<string, string>;
@@ -117,6 +124,101 @@ function createScratchDirectory(label: string): string {
   scratchDirs.push(dir);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function devSourceFingerprintCalls(cwd: string) {
+  return [
+    [
+      'git',
+      [
+        '-c',
+        'core.warnAmbiguousRefs=true',
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        'HEAD^{commit}',
+      ],
+      { cwd, stage: 'resolve current commit' },
+    ],
+    [
+      'git',
+      [
+        'status',
+        '--porcelain=v2',
+        '-z',
+        '--untracked-files=all',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'capture dev source status' },
+    ],
+    [
+      'git',
+      [
+        'diff',
+        '--cached',
+        '--binary',
+        '--full-index',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-renames',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'capture staged dev source content' },
+    ],
+    [
+      'git',
+      [
+        'diff',
+        '--binary',
+        '--full-index',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-renames',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'capture worktree dev source content' },
+    ],
+    [
+      'git',
+      [
+        'diff',
+        '--cached',
+        '--name-only',
+        '-z',
+        '--no-renames',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'list staged dev source paths' },
+    ],
+    [
+      'git',
+      [
+        'diff',
+        '--name-only',
+        '-z',
+        '--no-renames',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'list worktree dev source paths' },
+    ],
+    [
+      'git',
+      [
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+        '-z',
+        '--',
+        ...devSourcePathspecs,
+      ],
+      { cwd, stage: 'list untracked dev source paths' },
+    ],
+  ];
 }
 
 function createAppBundle(root: string, relativePath: string, marker: string): string {
@@ -3010,7 +3112,7 @@ fi
       mutateDuringBuild: (sourceRoot: string) => void,
     ): Promise<{
       completion: Promise<unknown>;
-      publish: ReturnType<typeof vi.fn>;
+      publish: ReturnType<typeof vi.fn<[], Promise<string>>>;
       tempRoot: string;
     }> {
       const sourceRoot = createCommittedSource(label);
@@ -3293,23 +3395,8 @@ fi
         tempRoot,
       );
       expect(execute.mock.calls).toEqual([
-        [
-          'git',
-          [
-            '-c',
-            'core.warnAmbiguousRefs=true',
-            'rev-parse',
-            '--verify',
-            '--end-of-options',
-            'HEAD^{commit}',
-          ],
-          { cwd: virtualRepository, stage: 'resolve current commit' },
-        ],
-        [
-          'git',
-          ['status', '--porcelain'],
-          { cwd: virtualRepository, stage: 'inspect source status' },
-        ],
+        ...devSourceFingerprintCalls(virtualRepository),
+        ...devSourceFingerprintCalls(virtualRepository),
       ]);
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('worktree');
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('test');
@@ -3368,6 +3455,9 @@ fi
             return { stdout: `${devSha}\n`, stderr: '' };
           }
           if (command === 'git' && args[0] === 'status') {
+            return { stdout: '', stderr: '' };
+          }
+          if (command === 'git' && (args[0] === 'diff' || args[0] === 'ls-files')) {
             return { stdout: '', stderr: '' };
           }
           if (command === '/usr/bin/lockf') {
@@ -3725,6 +3815,7 @@ fi
         channel: 'stable',
         ref: 'release/v1.2.3',
         repositoryRoot,
+        signal: expect.any(AbortSignal),
       });
       expect(stdout).toEqual([
         'Installed Psyche Build at /Users/test/Applications/Psyche Build.app',
@@ -3792,6 +3883,11 @@ fi
         const signalTarget = new EventEmitter();
         const tempRoot = `/workspace/.build-temp/stable-${signalName.toLowerCase()}`;
         const sourceRoot = join(tempRoot, 'source');
+        const expectedCandidate = join(
+          sourceRoot,
+          'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
+          'Psyche Build.app',
+        );
         const stdout: string[] = [];
         const stderr: string[] = [];
         const events: string[] = [];
@@ -3878,8 +3974,9 @@ fi
         expect(events.indexOf('stable-child-aborted')).toBeLessThan(
           events.indexOf(`worktree-remove:worktree remove --force ${sourceRoot}`),
         );
-        expect(removePath).toHaveBeenCalledOnce();
-        expect(removePath).toHaveBeenCalledWith(tempRoot);
+        expect(removePath).toHaveBeenCalledTimes(2);
+        expect(removePath).toHaveBeenNthCalledWith(1, expectedCandidate);
+        expect(removePath).toHaveBeenNthCalledWith(2, tempRoot);
         expect(publish).not.toHaveBeenCalled();
         expect(stdout).toEqual([]);
         expect(stderr.join('\n')).toContain('long stable child');
