@@ -14,6 +14,8 @@ pub const MAX_IN_FLIGHT: usize = 2;
 pub const VISIBLE_CADENCE: Duration = Duration::from_millis(16);
 pub const HIDDEN_CADENCE: Duration = Duration::from_millis(100);
 pub const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+pub const EXIT_TERMINATION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_RECENT_OUTPUT_SNAPSHOTS: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PumpLimits {
@@ -841,7 +843,7 @@ pub(crate) enum CompletionOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExitShutdownOutcome {
+pub enum ExitShutdownOutcome {
     Drained,
     TimedOut,
     Cancelled,
@@ -857,8 +859,9 @@ pub(crate) trait ExitShutdownHooks {
     fn wait_for_worker(&mut self, timeout: Duration) -> CompletionOutcome;
     fn join_worker(&mut self);
     fn record_drain_timeout(&mut self);
+    fn terminate_process(&mut self);
     fn remove_session(&mut self);
-    fn finish_nonblocking_cleanup(&mut self);
+    fn finish_terminated_cleanup(&mut self, timeout: Duration);
 }
 
 pub(crate) fn coordinate_exit_shutdown<H: ExitShutdownHooks>(
@@ -878,7 +881,7 @@ pub(crate) fn coordinate_exit_shutdown<H: ExitShutdownHooks>(
     match hooks.wait_for_drain(remaining_until(hooks.now(), deadline)) {
         DrainOutcome::Drained => {}
         DrainOutcome::TimedOut => return timeout_exit_shutdown(hooks),
-        DrainOutcome::Cancelled => return cancel_exit_shutdown(hooks),
+        DrainOutcome::Cancelled => return cancel_exit_shutdown(hooks, deadline),
     }
 
     hooks.cancel_pump();
@@ -899,16 +902,24 @@ fn remaining_until(now: Instant, deadline: Instant) -> Duration {
 
 fn timeout_exit_shutdown<H: ExitShutdownHooks>(hooks: &mut H) -> ExitShutdownOutcome {
     hooks.record_drain_timeout();
+    hooks.terminate_process();
     hooks.cancel_pump();
     hooks.remove_session();
-    hooks.finish_nonblocking_cleanup();
+    hooks.finish_terminated_cleanup(EXIT_TERMINATION_CLEANUP_TIMEOUT);
     ExitShutdownOutcome::TimedOut
 }
 
-fn cancel_exit_shutdown<H: ExitShutdownHooks>(hooks: &mut H) -> ExitShutdownOutcome {
+fn cancel_exit_shutdown<H: ExitShutdownHooks>(
+    hooks: &mut H,
+    deadline: Instant,
+) -> ExitShutdownOutcome {
     hooks.cancel_pump();
+    if hooks.wait_for_worker(remaining_until(hooks.now(), deadline)) == CompletionOutcome::TimedOut
+    {
+        return timeout_exit_shutdown(hooks);
+    }
+    hooks.join_worker();
     hooks.remove_session();
-    hooks.finish_nonblocking_cleanup();
     ExitShutdownOutcome::Cancelled
 }
 
@@ -963,9 +974,115 @@ impl OutputPumpSnapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TransportSessionKey {
+    pub thread_id: String,
+    pub generation: u64,
+}
+
+impl TransportSessionKey {
+    pub fn new(thread_id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalOutputPumpSnapshot {
+    pub key: TransportSessionKey,
+    pub outcome: ExitShutdownOutcome,
+    pub transport: OutputPumpSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecentSnapshotStoreError {
+    ZeroCapacity,
+    CapacityExceedsMaximum { requested: usize, maximum: usize },
+}
+
+impl fmt::Display for RecentSnapshotStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroCapacity => formatter.write_str("recent snapshot capacity must be non-zero"),
+            Self::CapacityExceedsMaximum { requested, maximum } => write!(
+                formatter,
+                "recent snapshot capacity {requested} exceeds maximum {maximum}"
+            ),
+        }
+    }
+}
+
+impl Error for RecentSnapshotStoreError {}
+
+#[derive(Debug)]
+pub struct RecentOutputSnapshots {
+    capacity: usize,
+    entries: VecDeque<FinalOutputPumpSnapshot>,
+}
+
+impl Default for RecentOutputSnapshots {
+    fn default() -> Self {
+        Self::new(MAX_RECENT_OUTPUT_SNAPSHOTS)
+            .expect("default recent PTY snapshot capacity must be valid")
+    }
+}
+
+impl RecentOutputSnapshots {
+    pub fn new(capacity: usize) -> Result<Self, RecentSnapshotStoreError> {
+        if capacity == 0 {
+            return Err(RecentSnapshotStoreError::ZeroCapacity);
+        }
+        if capacity > MAX_RECENT_OUTPUT_SNAPSHOTS {
+            return Err(RecentSnapshotStoreError::CapacityExceedsMaximum {
+                requested: capacity,
+                maximum: MAX_RECENT_OUTPUT_SNAPSHOTS,
+            });
+        }
+        Ok(Self {
+            capacity,
+            entries: VecDeque::with_capacity(capacity),
+        })
+    }
+
+    pub fn insert(&mut self, snapshot: FinalOutputPumpSnapshot) {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|existing| existing.key == snapshot.key)
+        {
+            self.entries.remove(position);
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(snapshot);
+    }
+
+    pub fn get(&self, key: &TransportSessionKey) -> Option<&FinalOutputPumpSnapshot> {
+        self.entries.iter().find(|snapshot| &snapshot.key == key)
+    }
+
+    pub fn latest_for_thread(&self, thread_id: &str) -> Option<&FinalOutputPumpSnapshot> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|snapshot| snapshot.key.thread_id == thread_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 #[derive(Debug)]
 struct CachedPreparedEvent {
-    event: Arc<PtyDataBatchEvent>,
+    prepared: PreparedBatch,
     failed_attempts: u64,
     last_attempt_at: Option<Instant>,
 }
@@ -1283,14 +1400,6 @@ impl OutputPump {
         }
     }
 
-    pub(crate) fn join_worker_if_finished(&self) -> Option<thread::Result<()>> {
-        let mut worker = lock_unpoisoned(&self.shared.worker);
-        if worker.as_ref().is_some_and(|handle| !handle.is_finished()) {
-            return None;
-        }
-        worker.take().map(JoinHandle::join)
-    }
-
     pub fn snapshot(&self) -> OutputPumpSnapshot {
         let guard = lock_unpoisoned(&self.shared.state);
         let runtime_metrics = &guard.metrics;
@@ -1419,18 +1528,8 @@ where
             .prepare_batch(sample.instant, visibility)?
             .expect("ready PTY pump must prepare a batch");
         if guard.prepared_event.is_none() {
-            let event = PtyDataBatchEvent {
-                thread_id: shared.thread_id.clone(),
-                sequence: prepared.sequence,
-                bytes: prepared.data.as_ref().to_vec(),
-                byte_count: prepared.data.len(),
-                enqueued_at_micros: prepared.enqueued_at_micros,
-                emitted_at_micros: sample.micros,
-                queued_bytes: prepared.queued_bytes,
-                queue_depth: prepared.queue_depth,
-            };
             guard.prepared_event = Some(CachedPreparedEvent {
-                event: Arc::new(event),
+                prepared,
                 failed_attempts: 0,
                 last_attempt_at: None,
             });
@@ -1448,19 +1547,30 @@ where
             .as_mut()
             .expect("prepared state must have a cached event");
         prepared_event.last_attempt_at = Some(sample.instant);
-        let event = Arc::clone(&prepared_event.event);
-        let sequence = event.sequence;
+        let prepared = prepared_event.prepared.clone();
+        let sequence = prepared.sequence;
         guard.emit_in_progress = true;
-        (event, sequence)
+        (
+            PtyDataBatchEvent {
+                thread_id: shared.thread_id.clone(),
+                sequence,
+                bytes: prepared.data.as_ref().to_vec(),
+                byte_count: prepared.data.len(),
+                enqueued_at_micros: prepared.enqueued_at_micros,
+                emitted_at_micros: sample.micros,
+                queued_bytes: prepared.queued_bytes,
+                queue_depth: prepared.queue_depth,
+            },
+            sequence,
+        )
     };
 
     let result = emitter(&event);
-    let committed_at = shared.clock.sample().instant;
     let mut guard = lock_unpoisoned(&shared.state);
     guard.emit_in_progress = false;
     match result {
         Ok(()) => {
-            guard.state.commit_prepared(sequence, committed_at)?;
+            guard.state.commit_prepared(sequence, sample.instant)?;
             guard.prepared_event = None;
             drop(guard);
             shared.wake.notify_all();
@@ -1629,6 +1739,7 @@ mod tests {
         reader_wait_budget: Option<Duration>,
         drain_wait_budget: Option<Duration>,
         worker_wait_budget: Option<Duration>,
+        terminated_cleanup_budget: Option<Duration>,
         events: Vec<&'static str>,
         session_present: bool,
         timeout_count: u64,
@@ -1648,6 +1759,7 @@ mod tests {
                 reader_wait_budget: None,
                 drain_wait_budget: None,
                 worker_wait_budget: None,
+                terminated_cleanup_budget: None,
                 events: Vec::new(),
                 session_present: true,
                 timeout_count: 0,
@@ -1719,15 +1831,20 @@ mod tests {
             self.timeout_count += 1;
         }
 
+        fn terminate_process(&mut self) {
+            self.events.push("terminate_process");
+        }
+
         fn remove_session(&mut self) {
             assert!(self.session_present);
             self.events.push("remove_session");
             self.session_present = false;
         }
 
-        fn finish_nonblocking_cleanup(&mut self) {
+        fn finish_terminated_cleanup(&mut self, timeout: Duration) {
             assert!(!self.session_present);
-            self.events.push("nonblocking_cleanup");
+            self.events.push("finish_terminated_cleanup");
+            self.terminated_cleanup_budget = Some(timeout);
         }
     }
 
@@ -1777,12 +1894,14 @@ mod tests {
             self.pump.record_drain_timeout();
         }
 
+        fn terminate_process(&mut self) {}
+
         fn remove_session(&mut self) {
             assert!(self.session_present);
             self.session_present = false;
         }
 
-        fn finish_nonblocking_cleanup(&mut self) {}
+        fn finish_terminated_cleanup(&mut self, _timeout: Duration) {}
     }
 
     fn state_with_batch_bytes(max_batch_bytes: usize) -> PumpState {
@@ -2574,7 +2693,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_emit_retries_the_same_cached_event_and_commits_once() {
+    fn failed_emit_reuses_sequence_and_bytes_with_a_fresh_attempt_timestamp() {
         let clock = TestClock::new();
         let pump = test_pump("retry", PumpLimits::default(), Arc::clone(&clock));
         pump.enqueue(b"retry exactly".to_vec()).unwrap();
@@ -2583,7 +2702,6 @@ mod tests {
         assert!(matches!(
             pump.emit_ready(|event| {
                 first = Some((
-                    event as *const PtyDataBatchEvent as usize,
                     event.sequence,
                     event.bytes.clone(),
                     event.emitted_at_micros,
@@ -2607,28 +2725,133 @@ mod tests {
         let mut retry = None;
         assert_eq!(
             pump.emit_ready(|event| {
-                retry = Some((
-                    event as *const PtyDataBatchEvent as usize,
-                    event.sequence,
-                    event.bytes.clone(),
-                    event.emitted_at_micros,
-                ));
+                retry = Some((event.sequence, event.bytes.clone(), event.emitted_at_micros));
+                clock.advance(Duration::from_millis(5));
                 Ok(())
             }),
             Ok(EmitOutcome::Emitted { sequence: 1 })
         );
 
-        assert_eq!(retry, first);
+        let first = first.unwrap();
+        let retry = retry.unwrap();
+        assert_eq!(retry.0, first.0);
+        assert_eq!(retry.1, first.1);
+        assert_eq!(first.2, 0);
+        assert_eq!(retry.2, duration_micros(VISIBLE_CADENCE));
+        assert_eq!(
+            pump.acknowledge(1),
+            Ok(AckOutcome::Advanced {
+                sequence: 1,
+                bytes: b"retry exactly".len(),
+                emitted_at: clock.origin + VISIBLE_CADENCE,
+                acknowledged_at: clock.origin + VISIBLE_CADENCE + Duration::from_millis(5),
+                latency: Duration::from_millis(5),
+            })
+        );
         let committed = pump.snapshot();
         assert!(!committed.prepared);
-        assert_eq!(committed.in_flight_batches, 1);
+        assert_eq!(committed.in_flight_batches, 0);
         assert_eq!(
             committed.metrics.state.bytes_emitted,
             b"retry exactly".len() as u64
         );
         assert_eq!(committed.metrics.state.batches_emitted, 1);
+        assert_eq!(committed.metrics.state.batches_acknowledged, 1);
+        assert_eq!(
+            committed.metrics.state.total_ack_latency,
+            Duration::from_millis(5)
+        );
         assert_eq!(committed.metrics.emit_failure_count, 1);
         assert_eq!(committed.metrics.emit_retry_count, 1);
+    }
+
+    #[test]
+    fn final_snapshots_survive_session_removal_with_transport_outcomes() {
+        let clock = TestClock::new();
+        let pump = test_pump("snapshot", zero_cadence_limits(), Arc::clone(&clock));
+        pump.enqueue(vec![1]).unwrap();
+        assert!(matches!(
+            pump.emit_ready(|_| Err("transient".to_string())),
+            Ok(EmitOutcome::Failed { sequence: 1, .. })
+        ));
+        assert_eq!(
+            pump.emit_ready(|_| Ok(())),
+            Ok(EmitOutcome::Emitted { sequence: 1 })
+        );
+        clock.advance(Duration::from_millis(3));
+        pump.acknowledge(1).unwrap();
+        pump.record_drain_timeout();
+
+        let mut transport = pump.snapshot();
+        transport.metrics.blocked_reader_count = 2;
+        transport.metrics.total_blocked_reader_duration = Duration::from_millis(9);
+        transport.metrics.max_blocked_reader_duration = Duration::from_millis(6);
+        let final_snapshot = FinalOutputPumpSnapshot {
+            key: TransportSessionKey::new("snapshot", 7),
+            outcome: ExitShutdownOutcome::TimedOut,
+            transport,
+        };
+        let mut recent = RecentOutputSnapshots::new(2).unwrap();
+        recent.insert(final_snapshot.clone());
+        drop(pump);
+
+        let retained = recent
+            .get(&TransportSessionKey::new("snapshot", 7))
+            .expect("removed session snapshot must remain retrievable");
+        assert_eq!(retained, &final_snapshot);
+        assert_eq!(retained.transport.metrics.emit_failure_count, 1);
+        assert_eq!(retained.transport.metrics.emit_retry_count, 1);
+        assert_eq!(retained.transport.metrics.blocked_reader_count, 2);
+        assert_eq!(
+            retained.transport.metrics.total_blocked_reader_duration,
+            Duration::from_millis(9)
+        );
+        assert_eq!(retained.transport.metrics.state.batches_acknowledged, 1);
+        assert_eq!(
+            retained.transport.metrics.state.total_ack_latency,
+            Duration::from_millis(3)
+        );
+        assert_eq!(retained.transport.metrics.drain_timeout_count, 1);
+    }
+
+    #[test]
+    fn recent_snapshot_retention_is_bounded_and_generation_safe() {
+        let pump = test_pump("same-id", zero_cadence_limits(), TestClock::new());
+        let transport = pump.snapshot();
+        let mut recent = RecentOutputSnapshots::new(2).unwrap();
+
+        for generation in 1..=3 {
+            recent.insert(FinalOutputPumpSnapshot {
+                key: TransportSessionKey::new("same-id", generation),
+                outcome: ExitShutdownOutcome::Drained,
+                transport: transport.clone(),
+            });
+        }
+
+        assert_eq!(recent.len(), 2);
+        assert!(recent
+            .get(&TransportSessionKey::new("same-id", 1))
+            .is_none());
+        assert_eq!(
+            recent
+                .get(&TransportSessionKey::new("same-id", 2))
+                .unwrap()
+                .key
+                .generation,
+            2
+        );
+        assert_eq!(
+            recent.latest_for_thread("same-id").unwrap().key.generation,
+            3
+        );
+        let error = RecentOutputSnapshots::new(MAX_RECENT_OUTPUT_SNAPSHOTS + 1).unwrap_err();
+        assert_eq!(
+            error,
+            RecentSnapshotStoreError::CapacityExceedsMaximum {
+                requested: MAX_RECENT_OUTPUT_SNAPSHOTS + 1,
+                maximum: MAX_RECENT_OUTPUT_SNAPSHOTS,
+            }
+        );
     }
 
     #[test]
@@ -2697,10 +2920,15 @@ mod tests {
                 "request_drain",
                 "wait_reader",
                 "record_timeout",
+                "terminate_process",
                 "cancel_pump",
                 "remove_session",
-                "nonblocking_cleanup",
+                "finish_terminated_cleanup",
             ]
+        );
+        assert_eq!(
+            hooks.terminated_cleanup_budget,
+            Some(EXIT_TERMINATION_CLEANUP_TIMEOUT)
         );
     }
 
@@ -2748,6 +2976,31 @@ mod tests {
         assert_eq!(hooks.drain_wait_budget, Some(Duration::from_millis(1_500)));
         assert_eq!(hooks.worker_wait_budget, Some(Duration::from_millis(300)));
         assert_eq!(hooks.timeout_count, 0);
+    }
+
+    #[test]
+    fn stop_cancellation_finishes_reader_and_worker_coordination() {
+        let clock = TestClock::new();
+        let mut hooks = FakeExitHooks::successful(clock);
+        hooks.drain_outcome = DrainOutcome::Cancelled;
+
+        assert_eq!(
+            coordinate_exit_shutdown(&mut hooks, EXIT_DRAIN_TIMEOUT),
+            ExitShutdownOutcome::Cancelled
+        );
+        assert_eq!(
+            hooks.events,
+            vec![
+                "request_drain",
+                "wait_reader",
+                "join_reader",
+                "wait_drain",
+                "cancel_pump",
+                "wait_worker",
+                "join_worker",
+                "remove_session",
+            ]
+        );
     }
 
     #[test]

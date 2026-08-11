@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
@@ -28,7 +28,8 @@ use coven_sessions::coven_sessions;
 use coven_sessions::is_safe_session_id;
 use pty_transport::{
     coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
-    ExitShutdownOutcome, OutputPump, EXIT_DRAIN_TIMEOUT,
+    ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
+    TransportSessionKey, EXIT_DRAIN_TIMEOUT,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -55,35 +56,461 @@ struct PtySession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pump: OutputPump,
+    terminator: PtyProcessTerminator,
 }
 
-static SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-static STARTING_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PtySessionToken {
+    thread_id: String,
+    generation: u64,
+}
+
+#[derive(Debug)]
+enum PtyLifecycleState<T> {
+    Starting { stop_requested: bool },
+    Running(T),
+    Stopping,
+    Exiting,
+}
+
+#[derive(Debug)]
+struct PtyLifecycleEntry<T> {
+    generation: u64,
+    state: PtyLifecycleState<T>,
+}
+
+#[derive(Debug)]
+struct PtyLifecycleRegistry<T> {
+    next_generation: u64,
+    entries: HashMap<String, PtyLifecycleEntry<T>>,
+}
+
+impl<T> Default for PtyLifecycleRegistry<T> {
+    fn default() -> Self {
+        Self {
+            next_generation: 1,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PtyLifecycleError {
+    AlreadyRunning { thread_id: String },
+    GenerationExhausted,
+    StaleStart { thread_id: String, generation: u64 },
+    NotFound { thread_id: String },
+    AlreadyStopping { thread_id: String, generation: u64 },
+}
+
+impl std::fmt::Display for PtyLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyRunning { thread_id } => {
+                write!(formatter, "thread '{thread_id}' already running")
+            }
+            Self::GenerationExhausted => formatter.write_str("PTY session generation exhausted"),
+            Self::StaleStart {
+                thread_id,
+                generation,
+            } => write!(
+                formatter,
+                "thread '{thread_id}' start generation {generation} is stale"
+            ),
+            Self::NotFound { thread_id } => write!(formatter, "thread '{thread_id}' not found"),
+            Self::AlreadyStopping {
+                thread_id,
+                generation,
+            } => write!(
+                formatter,
+                "thread '{thread_id}' generation {generation} is already stopping"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InstallSessionOutcome<T> {
+    Running,
+    StopImmediately(T),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopSessionOutcome<T> {
+    RecordedDuringStart { generation: u64 },
+    Terminate { generation: u64, session: T },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BeginExitOutcome<T> {
+    Emit { session: Option<T> },
+    Stale,
+}
+
+impl<T> PtyLifecycleRegistry<T> {
+    fn reserve(&mut self, thread_id: &str) -> Result<PtySessionToken, PtyLifecycleError> {
+        if self.entries.contains_key(thread_id) {
+            return Err(PtyLifecycleError::AlreadyRunning {
+                thread_id: thread_id.to_string(),
+            });
+        }
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(PtyLifecycleError::GenerationExhausted)?;
+        self.entries.insert(
+            thread_id.to_string(),
+            PtyLifecycleEntry {
+                generation,
+                state: PtyLifecycleState::Starting {
+                    stop_requested: false,
+                },
+            },
+        );
+        Ok(PtySessionToken {
+            thread_id: thread_id.to_string(),
+            generation,
+        })
+    }
+
+    fn install(
+        &mut self,
+        token: &PtySessionToken,
+        session: T,
+    ) -> Result<InstallSessionOutcome<T>, PtyLifecycleError> {
+        let entry = self
+            .entries
+            .get_mut(&token.thread_id)
+            .filter(|entry| entry.generation == token.generation)
+            .ok_or_else(|| PtyLifecycleError::StaleStart {
+                thread_id: token.thread_id.clone(),
+                generation: token.generation,
+            })?;
+        match entry.state {
+            PtyLifecycleState::Starting {
+                stop_requested: true,
+            } => {
+                entry.state = PtyLifecycleState::Stopping;
+                Ok(InstallSessionOutcome::StopImmediately(session))
+            }
+            PtyLifecycleState::Starting {
+                stop_requested: false,
+            } => {
+                entry.state = PtyLifecycleState::Running(session);
+                Ok(InstallSessionOutcome::Running)
+            }
+            _ => Err(PtyLifecycleError::StaleStart {
+                thread_id: token.thread_id.clone(),
+                generation: token.generation,
+            }),
+        }
+    }
+
+    fn stop(&mut self, thread_id: &str) -> Result<StopSessionOutcome<T>, PtyLifecycleError> {
+        let entry = self
+            .entries
+            .get_mut(thread_id)
+            .ok_or_else(|| PtyLifecycleError::NotFound {
+                thread_id: thread_id.to_string(),
+            })?;
+        match &mut entry.state {
+            PtyLifecycleState::Starting { stop_requested } => {
+                *stop_requested = true;
+                Ok(StopSessionOutcome::RecordedDuringStart {
+                    generation: entry.generation,
+                })
+            }
+            PtyLifecycleState::Running(_) => {
+                let state = std::mem::replace(&mut entry.state, PtyLifecycleState::Stopping);
+                let PtyLifecycleState::Running(session) = state else {
+                    unreachable!("running PTY state was checked before replacement");
+                };
+                Ok(StopSessionOutcome::Terminate {
+                    generation: entry.generation,
+                    session,
+                })
+            }
+            PtyLifecycleState::Stopping | PtyLifecycleState::Exiting => {
+                Err(PtyLifecycleError::AlreadyStopping {
+                    thread_id: thread_id.to_string(),
+                    generation: entry.generation,
+                })
+            }
+        }
+    }
+
+    fn begin_exit(&mut self, token: &PtySessionToken) -> BeginExitOutcome<T> {
+        let Some(entry) = self
+            .entries
+            .get_mut(&token.thread_id)
+            .filter(|entry| entry.generation == token.generation)
+        else {
+            return BeginExitOutcome::Stale;
+        };
+        match entry.state {
+            PtyLifecycleState::Running(_) => {
+                let state = std::mem::replace(&mut entry.state, PtyLifecycleState::Exiting);
+                let PtyLifecycleState::Running(session) = state else {
+                    unreachable!("running PTY state was checked before replacement");
+                };
+                BeginExitOutcome::Emit {
+                    session: Some(session),
+                }
+            }
+            PtyLifecycleState::Stopping => {
+                entry.state = PtyLifecycleState::Exiting;
+                BeginExitOutcome::Emit { session: None }
+            }
+            PtyLifecycleState::Starting { .. } | PtyLifecycleState::Exiting => {
+                BeginExitOutcome::Stale
+            }
+        }
+    }
+
+    fn finish_exit(&mut self, token: &PtySessionToken) -> bool {
+        let should_remove = self.entries.get(&token.thread_id).is_some_and(|entry| {
+            entry.generation == token.generation
+                && matches!(entry.state, PtyLifecycleState::Exiting)
+        });
+        if should_remove {
+            self.entries.remove(&token.thread_id);
+        }
+        should_remove
+    }
+
+    fn abort_start(&mut self, token: &PtySessionToken) -> bool {
+        let should_remove = self.entries.get(&token.thread_id).is_some_and(|entry| {
+            entry.generation == token.generation
+                && matches!(entry.state, PtyLifecycleState::Starting { .. })
+        });
+        if should_remove {
+            self.entries.remove(&token.thread_id);
+        }
+        should_remove
+    }
+
+    fn live(&self, thread_id: &str) -> Option<&T> {
+        self.entries
+            .get(thread_id)
+            .and_then(|entry| match &entry.state {
+                PtyLifecycleState::Running(session) => Some(session),
+                _ => None,
+            })
+    }
+
+    #[cfg(test)]
+    fn is_live(&self, thread_id: &str) -> bool {
+        self.live(thread_id).is_some()
+    }
+
+    fn live_thread_ids(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|(thread_id, entry)| {
+                matches!(entry.state, PtyLifecycleState::Running(_)).then(|| thread_id.clone())
+            })
+            .collect()
+    }
+}
+
+static PTY_LIFECYCLES: Lazy<Mutex<PtyLifecycleRegistry<PtySession>>> =
+    Lazy::new(|| Mutex::new(PtyLifecycleRegistry::default()));
+static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
+    Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PtyProcessIdentity {
+    child_pid: Option<u32>,
+    #[cfg(unix)]
+    confirmed_process_group: Option<libc::pid_t>,
+}
+
+impl PtyProcessIdentity {
+    #[cfg(test)]
+    fn direct_child(child_pid: Option<u32>) -> Self {
+        Self {
+            child_pid,
+            #[cfg(unix)]
+            confirmed_process_group: None,
+        }
+    }
+
+    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Self {
+        let child_pid = child.process_id();
+        #[cfg(unix)]
+        let confirmed_process_group = child_pid
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .filter(|pid| master.process_group_leader() == Some(*pid));
+        Self {
+            child_pid,
+            #[cfg(unix)]
+            confirmed_process_group,
+        }
+    }
+
+    #[cfg(unix)]
+    #[cfg(test)]
+    fn confirmed_unix_process_group(&self) -> Option<libc::pid_t> {
+        self.confirmed_process_group
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PtyTerminationOutcome {
+    DirectChild,
+    #[cfg(unix)]
+    ConfirmedProcessGroup {
+        leader: libc::pid_t,
+    },
+}
+
+#[derive(Clone)]
+struct PtyProcessTerminator {
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    identity: PtyProcessIdentity,
+}
+
+impl PtyProcessTerminator {
+    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Self {
+        Self::from_parts(
+            child.clone_killer(),
+            PtyProcessIdentity::from_spawned_child(child, master),
+        )
+    }
+
+    fn from_parts(
+        killer: Box<dyn ChildKiller + Send + Sync>,
+        identity: PtyProcessIdentity,
+    ) -> Self {
+        Self {
+            killer: Arc::new(Mutex::new(killer)),
+            identity,
+        }
+    }
+
+    #[cfg(test)]
+    fn identity(&self) -> PtyProcessIdentity {
+        self.identity
+    }
+
+    fn terminate(&self) -> Result<PtyTerminationOutcome, String> {
+        let mut killer = self.killer.lock();
+        terminate_platform_process(killer.as_mut(), self.identity).map_err(|error| {
+            format!(
+                "failed to terminate PTY child {:?}: {error}",
+                self.identity.child_pid
+            )
+        })
+    }
+}
+
+struct PtySpawnTerminationGuard {
+    terminator: Option<PtyProcessTerminator>,
+}
+
+impl PtySpawnTerminationGuard {
+    fn new(terminator: PtyProcessTerminator) -> Self {
+        Self {
+            terminator: Some(terminator),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.terminator = None;
+    }
+}
+
+impl Drop for PtySpawnTerminationGuard {
+    fn drop(&mut self) {
+        if let Some(terminator) = self.terminator.take() {
+            if let Err(error) = terminator.terminate() {
+                log::warn!("failed to terminate PTY after start setup error: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_platform_process(
+    killer: &mut dyn ChildKiller,
+    identity: PtyProcessIdentity,
+) -> std::io::Result<PtyTerminationOutcome> {
+    let killer_result = killer.kill();
+    let Some(leader) = identity.confirmed_process_group else {
+        killer_result?;
+        return Ok(PtyTerminationOutcome::DirectChild);
+    };
+    // portable-pty 0.8 calls setsid before exec on Unix. We additionally
+    // require the PTY foreground process group to equal the spawned child PID
+    // before signaling the group. Descendants that deliberately create a new
+    // session can still escape because portable-pty exposes no owned process
+    // tree handle on Unix.
+    if leader <= 0 || leader == unsafe { libc::getpgrp() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to signal an unverified PTY process group",
+        ));
+    }
+
+    let result = unsafe { libc::kill(-leader, libc::SIGKILL) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(PtyTerminationOutcome::ConfirmedProcessGroup { leader })
+}
+
+#[cfg(windows)]
+fn terminate_platform_process(
+    killer: &mut dyn ChildKiller,
+    _identity: PtyProcessIdentity,
+) -> std::io::Result<PtyTerminationOutcome> {
+    // portable-pty terminates its owned process handle. It does not expose a
+    // Windows Job Object, so descendants outside ConPTY's process tree may
+    // survive; owned PTY handles are still closed by the lifecycle cleanup.
+    killer.kill()?;
+    Ok(PtyTerminationOutcome::DirectChild)
+}
 
 #[derive(Debug)]
 struct PendingPtyStart {
-    thread_id: String,
+    token: PtySessionToken,
+    completed: bool,
 }
 
 impl PendingPtyStart {
     fn reserve(thread_id: &str) -> Result<Self, String> {
-        let sessions = SESSIONS.lock();
-        let mut starting = STARTING_SESSIONS.lock();
-        if sessions.contains_key(thread_id) || starting.contains(thread_id) {
-            return Err(format!("thread '{}' already running", thread_id));
-        }
-        starting.insert(thread_id.to_string());
+        let token = PTY_LIFECYCLES
+            .lock()
+            .reserve(thread_id)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
-            thread_id: thread_id.to_string(),
+            token,
+            completed: false,
         })
+    }
+
+    fn install(
+        mut self,
+        session: PtySession,
+    ) -> Result<(PtySessionToken, InstallSessionOutcome<PtySession>), String> {
+        let outcome = PTY_LIFECYCLES
+            .lock()
+            .install(&self.token, session)
+            .map_err(|error| error.to_string())?;
+        self.completed = true;
+        Ok((self.token.clone(), outcome))
     }
 }
 
 impl Drop for PendingPtyStart {
     fn drop(&mut self) {
-        let mut starting = STARTING_SESSIONS.lock();
-        starting.remove(&self.thread_id);
+        if !self.completed {
+            PTY_LIFECYCLES.lock().abort_start(&self.token);
+        }
     }
 }
 
@@ -443,6 +870,7 @@ fn canonical_project_path(root: String) -> Result<String, String> {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PtyExitEvent {
     pub thread_id: String,
+    pub generation: u64,
     pub code: Option<i32>,
 }
 
@@ -469,28 +897,33 @@ fn pump_pty_reader<R: Read>(mut reader: R, pump: OutputPump) -> Result<(), Strin
 }
 
 struct PtyExitShutdown {
-    thread_id: String,
+    token: PtySessionToken,
     pump: OutputPump,
+    terminator: PtyProcessTerminator,
     reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
     reader_thread: Option<std::thread::JoinHandle<()>>,
     reader_result: Option<Result<(), String>>,
     reader_completion_known: bool,
+    exit_event_allowed: bool,
 }
 
 impl PtyExitShutdown {
     fn new(
-        thread_id: String,
+        token: PtySessionToken,
         pump: OutputPump,
+        terminator: PtyProcessTerminator,
         reader_done_rx: std::sync::mpsc::Receiver<Result<(), String>>,
         reader_thread: std::thread::JoinHandle<()>,
     ) -> Self {
         Self {
-            thread_id,
+            token,
             pump,
+            terminator,
             reader_done_rx,
             reader_thread: Some(reader_thread),
             reader_result: None,
             reader_completion_known: false,
+            exit_event_allowed: false,
         }
     }
 
@@ -524,23 +957,60 @@ impl PtyExitShutdown {
         }
         if let Some(reader_thread) = self.reader_thread.take() {
             if reader_thread.join().is_err() {
-                log::warn!("PTY reader thread panicked for '{}'", self.thread_id);
+                log::warn!("PTY reader thread panicked for '{}'", self.token.thread_id);
             }
         }
         self.log_reader_result();
     }
 
-    fn remove_matching_session(&self) {
-        let removed_session = {
-            let mut guard = SESSIONS.lock();
-            let matches_exiting_pump = guard
-                .get(&self.thread_id)
-                .is_some_and(|session| session.pump.ptr_eq(&self.pump));
-            matches_exiting_pump
-                .then(|| guard.remove(&self.thread_id))
-                .flatten()
+    fn begin_matching_exit(&mut self) {
+        let outcome = {
+            let mut registry = PTY_LIFECYCLES.lock();
+            registry.begin_exit(&self.token)
         };
-        drop(removed_session);
+        match outcome {
+            BeginExitOutcome::Emit { session } => {
+                self.exit_event_allowed = true;
+                drop(session);
+            }
+            BeginExitOutcome::Stale => {
+                self.exit_event_allowed = false;
+            }
+        }
+    }
+
+    fn finish_terminated_threads(&mut self, timeout: std::time::Duration) {
+        let started_at = std::time::Instant::now();
+        let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
+        if !self.reader_completion_known {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .unwrap_or(std::time::Duration::ZERO);
+            let completion = self.reader_done_rx.recv_timeout(remaining);
+            self.store_reader_completion(completion);
+        }
+        self.join_reader_after_completion();
+
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .unwrap_or(std::time::Duration::ZERO);
+        if self.pump.wait_for_worker_timeout(remaining) == CompletionOutcome::Completed {
+            if self.pump.join_worker_after_completion().is_err() {
+                log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+            }
+        } else {
+            log::warn!(
+                "PTY output worker did not finish after terminating '{}'",
+                self.token.thread_id
+            );
+        }
+        if !self.reader_completion_known {
+            log::warn!(
+                "PTY reader did not finish after terminating '{}'; descendants may \
+                 remain on platforms without process-tree ownership",
+                self.token.thread_id
+            );
+        }
     }
 }
 
@@ -576,7 +1046,7 @@ impl ExitShutdownHooks for PtyExitShutdown {
 
     fn join_worker(&mut self) {
         if self.pump.join_worker_after_completion().is_err() {
-            log::warn!("PTY output worker panicked for '{}'", self.thread_id);
+            log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
         }
     }
 
@@ -584,35 +1054,43 @@ impl ExitShutdownHooks for PtyExitShutdown {
         self.pump.record_drain_timeout();
     }
 
-    fn remove_session(&mut self) {
-        self.remove_matching_session();
+    fn terminate_process(&mut self) {
+        if let Err(error) = self.terminator.terminate() {
+            log::warn!("PTY termination cleanup failed: {error}");
+        }
     }
 
-    fn finish_nonblocking_cleanup(&mut self) {
-        if !self.reader_completion_known {
-            match self.reader_done_rx.try_recv() {
-                Ok(result) => {
-                    self.reader_result = Some(result);
-                    self.reader_completion_known = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.reader_completion_known = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-        }
-        self.join_reader_after_completion();
-        if self
-            .pump
-            .join_worker_if_finished()
-            .is_some_and(|result| result.is_err())
-        {
-            log::warn!("PTY output worker panicked for '{}'", self.thread_id);
-        }
-        // portable-pty does not expose safe cross-platform read cancellation.
-        // Dropping the session closes owned PTY handles; an unfinished cloned
-        // reader is detached rather than extending the explicit exit deadline.
+    fn remove_session(&mut self) {
+        self.begin_matching_exit();
     }
+
+    fn finish_terminated_cleanup(&mut self, timeout: std::time::Duration) {
+        self.finish_terminated_threads(timeout);
+    }
+}
+
+fn terminate_pty_session(session: PtySession) -> Result<PtyTerminationOutcome, String> {
+    let result = session.terminator.terminate();
+    session.pump.cancel();
+    drop(session);
+    result
+}
+
+pub fn recent_pty_transport_snapshot(
+    thread_id: &str,
+    generation: u64,
+) -> Option<FinalOutputPumpSnapshot> {
+    RECENT_PTY_SNAPSHOTS
+        .lock()
+        .get(&TransportSessionKey::new(thread_id, generation))
+        .cloned()
+}
+
+pub fn latest_pty_transport_snapshot(thread_id: &str) -> Option<FinalOutputPumpSnapshot> {
+    RECENT_PTY_SNAPSHOTS
+        .lock()
+        .latest_for_thread(thread_id)
+        .cloned()
 }
 
 #[tauri::command]
@@ -674,6 +1152,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(resolved_cwd);
+    let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref());
+    let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let pump = OutputPump::new(thread_id.clone()).map_err(|e| e.to_string())?;
@@ -685,18 +1165,13 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    {
-        let mut guard = SESSIONS.lock();
-        guard.insert(
-            thread_id.clone(),
-            PtySession {
-                master: Arc::new(Mutex::new(pair.master)),
-                writer: Arc::new(Mutex::new(writer)),
-                pump: pump.clone(),
-            },
-        );
-    }
-    drop(pending_start);
+    let (session_token, install_outcome) = pending_start.install(PtySession {
+        master: Arc::new(Mutex::new(pair.master)),
+        writer: Arc::new(Mutex::new(writer)),
+        pump: pump.clone(),
+        terminator: terminator.clone(),
+    })?;
+    spawn_guard.disarm();
 
     let reader_pump = pump.clone();
     let (reader_done_tx, reader_done_rx) = std::sync::mpsc::sync_channel(1);
@@ -705,15 +1180,17 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
         let _ = reader_done_tx.send(reader_result);
     });
 
-    let exit_thread_id = thread_id.clone();
     let app_for_exit = app.clone();
     let exit_pump = pump;
+    let exit_token = session_token.clone();
+    let exit_terminator = terminator;
     std::thread::spawn(move || {
         let status = child.wait();
         let code = status.ok().map(|s| s.exit_code() as i32);
         let mut shutdown = PtyExitShutdown::new(
-            exit_thread_id.clone(),
+            exit_token.clone(),
             exit_pump,
+            exit_terminator,
             reader_done_rx,
             data_thread,
         );
@@ -730,14 +1207,33 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
                 snapshot.blocked_producers,
             );
         }
-        let _ = app_for_exit.emit(
-            "pty:exit",
-            PtyExitEvent {
-                thread_id: exit_thread_id,
-                code,
-            },
-        );
+        RECENT_PTY_SNAPSHOTS.lock().insert(FinalOutputPumpSnapshot {
+            key: TransportSessionKey::new(exit_token.thread_id.clone(), exit_token.generation),
+            outcome,
+            transport: shutdown.pump.snapshot(),
+        });
+        if shutdown.exit_event_allowed {
+            let _ = app_for_exit.emit(
+                "pty:exit",
+                PtyExitEvent {
+                    thread_id: exit_token.thread_id.clone(),
+                    generation: exit_token.generation,
+                    code,
+                },
+            );
+            PTY_LIFECYCLES.lock().finish_exit(&exit_token);
+        }
     });
+
+    if let InstallSessionOutcome::StopImmediately(session) = install_outcome {
+        let termination = terminate_pty_session(session)
+            .map(|outcome| format!("{outcome:?}"))
+            .unwrap_or_else(|error| error);
+        return Err(format!(
+            "thread '{}' generation {} was stopped during start ({termination})",
+            session_token.thread_id, session_token.generation
+        ));
+    }
 
     Ok(())
 }
@@ -745,9 +1241,9 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
 #[tauri::command]
 fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
     let writer = {
-        let guard = SESSIONS.lock();
+        let guard = PTY_LIFECYCLES.lock();
         let session = guard
-            .get(&thread_id)
+            .live(&thread_id)
             .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
         Arc::clone(&session.writer)
     };
@@ -760,9 +1256,9 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 #[tauri::command]
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     let master = {
-        let guard = SESSIONS.lock();
+        let guard = PTY_LIFECYCLES.lock();
         guard
-            .get(&thread_id)
+            .live(&thread_id)
             .map(|session| Arc::clone(&session.master))
     };
     if let Some(master) = master {
@@ -779,24 +1275,48 @@ fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyStopResult {
+    thread_id: String,
+    generation: u64,
+    state: &'static str,
+    termination_scope: Option<String>,
+}
+
 #[tauri::command]
-fn pty_stop(thread_id: String) {
-    let session = {
-        let mut guard = SESSIONS.lock();
-        guard.remove(&thread_id)
+fn pty_stop(thread_id: String) -> Result<PtyStopResult, String> {
+    let action = {
+        let mut registry = PTY_LIFECYCLES.lock();
+        registry
+            .stop(&thread_id)
+            .map_err(|error| error.to_string())?
     };
-    if let Some(session) = session {
-        let pump = session.pump.clone();
-        pump.cancel();
-        drop(session);
-        let _ = pump.cancel_and_join();
+    match action {
+        StopSessionOutcome::RecordedDuringStart { generation } => Ok(PtyStopResult {
+            thread_id,
+            generation,
+            state: "recorded-during-start",
+            termination_scope: None,
+        }),
+        StopSessionOutcome::Terminate {
+            generation,
+            session,
+        } => {
+            let outcome = terminate_pty_session(session)?;
+            Ok(PtyStopResult {
+                thread_id,
+                generation,
+                state: "termination-requested",
+                termination_scope: Some(format!("{outcome:?}")),
+            })
+        }
     }
 }
 
 #[tauri::command]
 fn pty_list() -> Vec<String> {
-    let guard = SESSIONS.lock();
-    guard.keys().cloned().collect()
+    PTY_LIFECYCLES.lock().live_thread_ids()
 }
 
 // ----------------------------------------------------------------------------
@@ -2364,8 +2884,30 @@ pub fn run() {
 #[cfg(test)]
 mod pty_runtime_tests {
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
 
     use super::*;
+    use portable_pty::ChildKiller;
+
+    #[derive(Debug)]
+    struct RecordingChildKiller {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ChildKiller for RecordingChildKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                calls: Arc::clone(&self.calls),
+            })
+        }
+    }
 
     #[test]
     fn pty_reader_enqueues_raw_bytes_for_the_batch_worker() {
@@ -2383,6 +2925,167 @@ mod pty_runtime_tests {
         assert_eq!(
             emitted,
             Some(("reader-test".to_string(), 1, b"ordered pty bytes".to_vec()))
+        );
+    }
+
+    #[test]
+    fn stop_during_start_is_recorded_and_installed_session_is_stopped() {
+        let mut registry = PtyLifecycleRegistry::default();
+        let start = registry.reserve("racing-start").unwrap();
+
+        assert_eq!(
+            registry.stop("racing-start").unwrap(),
+            StopSessionOutcome::RecordedDuringStart {
+                generation: start.generation,
+            }
+        );
+        assert_eq!(
+            registry.install(&start, "spawned-child").unwrap(),
+            InstallSessionOutcome::StopImmediately("spawned-child")
+        );
+        assert!(!registry.is_live("racing-start"));
+        assert!(registry.reserve("racing-start").is_err());
+        assert!(matches!(
+            registry.begin_exit(&start),
+            BeginExitOutcome::Emit { session: None }
+        ));
+        assert!(registry.finish_exit(&start));
+    }
+
+    #[test]
+    fn same_id_restart_waits_for_exit_and_old_generation_cannot_emit_again() {
+        let mut registry = PtyLifecycleRegistry::default();
+        let old = registry.reserve("same-id").unwrap();
+        assert_eq!(
+            registry.install(&old, "old-session").unwrap(),
+            InstallSessionOutcome::Running
+        );
+        assert_eq!(
+            registry.stop("same-id").unwrap(),
+            StopSessionOutcome::Terminate {
+                generation: old.generation,
+                session: "old-session",
+            }
+        );
+        assert!(matches!(
+            registry.begin_exit(&old),
+            BeginExitOutcome::Emit { session: None }
+        ));
+        assert!(registry.reserve("same-id").is_err());
+
+        assert!(registry.finish_exit(&old));
+        let replacement = registry.reserve("same-id").unwrap();
+        assert_ne!(replacement.generation, old.generation);
+        assert!(matches!(registry.begin_exit(&old), BeginExitOutcome::Stale));
+        assert_eq!(
+            registry
+                .install(&replacement, "replacement-session")
+                .unwrap(),
+            InstallSessionOutcome::Running
+        );
+        assert!(registry.is_live("same-id"));
+    }
+
+    #[test]
+    fn retained_child_killer_is_invoked_by_process_termination() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(41)),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::DirectChild
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        let failed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&failed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(42)),
+        );
+        drop(PtySpawnTerminationGuard::new(failed_terminator));
+        assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+
+        let installed_calls = Arc::new(AtomicUsize::new(0));
+        let installed_terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&installed_calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(43)),
+        );
+        let mut guard = PtySpawnTerminationGuard::new(installed_terminator);
+        guard.disarm();
+        drop(guard);
+        assert_eq!(installed_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_spawned_pty_group_termination_finishes_child_and_reader() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP TERM; (trap '' HUP TERM; exec sleep 30) & wait",
+        ]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        let child_pid = child.process_id().unwrap() as libc::pid_t;
+        let terminator =
+            PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref());
+        assert_eq!(
+            terminator.identity().confirmed_unix_process_group(),
+            Some(child_pid)
+        );
+
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = reader.read_to_end(&mut bytes);
+            let _ = reader_tx.send(result);
+        });
+        let (child_tx, child_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = child_tx.send(child.wait());
+        });
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroup { leader: child_pid }
+        );
+        drop(writer);
+        drop(pair.master);
+
+        child_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminated PTY child wait must finish")
+            .expect("terminated PTY child wait must succeed");
+        reader_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminated PTY reader must finish")
+            .expect("terminated PTY reader must exit cleanly");
+        assert_eq!(unsafe { libc::kill(-child_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
         );
     }
 }

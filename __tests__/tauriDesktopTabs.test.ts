@@ -97,10 +97,13 @@ describe('Tauri desktop tab shortcuts', () => {
   });
 
   it('keeps Tauri backend shared-state operations grouped correctly', () => {
-    expect(tauriLib).toMatch(/static\s+STARTING_SESSIONS:/);
+    expect(tauriLib).toMatch(
+      /static\s+PTY_LIFECYCLES:\s*Lazy<Mutex<PtyLifecycleRegistry<PtySession>>>/
+    );
+    expect(tauriLib).not.toMatch(/static\s+STARTING_SESSIONS:/);
     expect(tauriLib).toMatch(/let\s+pending_start\s*=\s*PendingPtyStart::reserve\(&thread_id\)\?/);
     expect(tauriLib).toMatch(
-      /guard\.insert\(\s*thread_id\.clone\(\),[\s\S]*?\);\s*\}\s*drop\(pending_start\);/
+      /pending_start\.install\(\s*PtySession\s*\{[\s\S]*?terminator:[\s\S]*?\}\s*\)/
     );
     expect(tauriLib).toMatch(
       /pump\.start_worker[\s\S]*?app_for_output[\s\S]*?\.emit\("pty:data-batch",\s*payload\)/
@@ -114,7 +117,10 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
     expect(tauriLib).toMatch(
-      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*SESSIONS\.lock\(\);[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
+      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?guard[\s\S]*?\.live\(&thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
+    );
+    expect(tauriLib).toMatch(
+      /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/
     );
     expect(tauriLib).toMatch(/fn\s+agent_skill_source_rank\(source:\s*&str\)\s*->\s*u8/);
     expect(tauriLib).toMatch(/"project"\s*=>\s*0,[\s\S]*?"user"\s*=>\s*1,[\s\S]*?"plugin"\s*=>\s*2/);
@@ -123,6 +129,28 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).toMatch(/out\.dedup_by\(\|a,\s*b\|\s*a\.name\s*==\s*b\.name\s*&&\s*a\.kind\s*==\s*b\.kind\)/);
     expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
+  });
+
+  it('retains a portable PTY killer and uses only verified target process termination', () => {
+    expect(tauriLib).toMatch(/portable_pty::\{[^}]*ChildKiller/);
+    expect(tauriLib).toMatch(/child\.clone_killer\(\)/);
+    expect(tauriLib).toMatch(/child\.process_id\(\)/);
+    expect(tauriLib).toMatch(/master\.process_group_leader\(\)/);
+    expect(tauriLib).toMatch(
+      /#\[cfg\(unix\)\][\s\S]*?fn\s+terminate_platform_process[\s\S]*?libc::kill\(\s*-leader,[\s\S]*?libc::SIGKILL/
+    );
+    const windowsStart = tauriLib.indexOf(
+      '#[cfg(windows)]\nfn terminate_platform_process'
+    );
+    expect(windowsStart).toBeGreaterThanOrEqual(0);
+    const windowsEnd = tauriLib.indexOf('\n#[cfg', windowsStart + 1);
+    const windowsTermination = tauriLib.slice(
+      windowsStart,
+      windowsEnd === -1 ? undefined : windowsEnd
+    );
+    expect(windowsTermination).toContain('killer.kill()');
+    expect(windowsTermination).not.toContain('libc::');
+    expect(windowsTermination).toMatch(/descendant|process tree/i);
   });
 
   it('keeps the Tauri app CSP free of broad unsafe allowances', () => {
