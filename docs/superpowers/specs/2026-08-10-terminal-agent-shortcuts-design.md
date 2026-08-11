@@ -1,7 +1,7 @@
 # Terminal and Agent Shortcuts Design
 
 **Date:** 2026-08-10
-**Status:** Approved design — implementation pending
+**Status:** Approved
 
 ## Goal
 

@@ -3712,6 +3712,85 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   white-space: nowrap;
 }
 
+.agent-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+  background: rgba(5, 5, 8, 0.62);
+  animation: menu-rise 140ms ease-out;
+}
+.agent-picker-overlay[hidden] { display: none; }
+.agent-picker {
+  width: min(440px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+}
+.agent-picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 6px 12px;
+}
+.agent-picker-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.agent-picker-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.agent-picker-list {
+  display: grid;
+  gap: 4px;
+  outline: none;
+}
+.agent-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-align: left;
+}
+.agent-picker-option:hover,
+.agent-picker-option.is-selected {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+.agent-picker-option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.agent-picker-label {
+  min-width: 0;
+}
+.agent-picker-option-command {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-picker-overlay { animation: none; }
+}
+
 /* -------- Diff viewer --------
    Split and stacked share one model, so they share one palette and one row
    metric; only the track layout differs. Added and removed text carry their

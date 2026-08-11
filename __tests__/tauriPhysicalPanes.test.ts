@@ -603,45 +603,121 @@ describe('Tauri physical terminal panes', () => {
     expect(functionSource('spawnPty')).toMatch(/already running[\s\S]*thread\.ptyStarted = true/);
   });
 
-  it('guards contextual terminal creation behind dirty-file navigation', async () => {
-    const terminalHost = { hidden: true };
-    let spawned = 0;
-    let focused = 0;
-    const acceptedCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+  it('creates a shell only after validating the active project, worktree, and terminal reveal', async () => {
+    const calls: string[] = [];
+    const visible = deferred<boolean>();
+    const project = { id: 'project', root: '/repo' };
+    const worktree = { path: '/repo' };
+    const acceptedCreate = compileFunction<() => Promise<{ kind: string } | null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => {
-          terminalHost.hidden = false;
-          expect(terminalHost.hidden).toBe(false);
-          spawned += 1;
-          focused += 1;
-          return { kind: 'coven-chat' };
+        activeProject: () => {
+          calls.push('project');
+          return project;
+        },
+        selectedWorktree: (candidate: { id: string; root: string }) => {
+          calls.push(`worktree:${candidate.id}`);
+          return worktree;
+        },
+        showTerminalView: async () => {
+          calls.push('show:start');
+          const result = await visible.promise;
+          calls.push(`show:end:${result}`);
+          return result;
+        },
+        spawnShellThread: (candidate: { id: string; root: string }) => {
+          calls.push(`spawn:${candidate.id}`);
+          return { kind: 'shell' };
+        },
+        setStatus: () => {
+          calls.push('status');
         },
       },
     );
-    await expect(acceptedCreate()).resolves.toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+    const pendingCreate = acceptedCreate();
+    await Promise.resolve();
+    expect(calls).toEqual(['project', 'worktree:project', 'show:start']);
+    visible.resolve(true);
+    await expect(pendingCreate).resolves.toEqual({ kind: 'shell' });
+    expect(calls).toEqual(['project', 'worktree:project', 'show:start', 'show:end:true', 'spawn:project']);
+  });
 
-    terminalHost.hidden = true;
-    const canceledCreate = compileFunction<() => Promise<boolean | null>>(
-      functionSource('createContextualTab'),
+  it('cancels shell creation when terminal reveal is rejected by dirty-file flow', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
       {
-        currentLayout: () => 'split',
-        markActiveSurface: () => undefined,
-        activeSurface: 'terminal',
-        openBlankBrowserTab: () => undefined,
-        spawnCovenThread: async () => null,
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        selectedWorktree: () => ({ path: '/repo' }),
+        showTerminalView: async () => {
+          calls.push('show:false');
+          return false;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: () => {
+          calls.push('status');
+        },
       },
     );
-    await expect(canceledCreate()).resolves.toBeNull();
-    expect(terminalHost.hidden).toBe(true);
-    expect(spawned).toBe(1);
-    expect(focused).toBe(1);
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['show:false']);
+  });
+
+  it('warns instead of creating a shell when there is no active project', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => null,
+        selectedWorktree: () => {
+          calls.push('worktree');
+          return { path: '/repo' };
+        },
+        showTerminalView: async () => {
+          calls.push('show');
+          return true;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: (text: string, level: string) => {
+          calls.push(`status:${level}:${text}`);
+        },
+      },
+    );
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['status:warn:Open a project before starting a terminal']);
+  });
+
+  it('warns instead of creating a shell when no worktree path is available', async () => {
+    const calls: string[] = [];
+    const createTerminalPane = compileFunction<() => Promise<null>>(
+      functionSource('createTerminalPane'),
+      {
+        activeProject: () => ({ id: 'project', root: '/repo' }),
+        selectedWorktree: () => ({ branch: 'main' }),
+        showTerminalView: async () => {
+          calls.push('show');
+          return true;
+        },
+        spawnShellThread: () => {
+          calls.push('spawn');
+          return { kind: 'wrong' };
+        },
+        setStatus: (text: string, level: string) => {
+          calls.push(`status:${level}:${text}`);
+        },
+      },
+    );
+
+    await expect(createTerminalPane()).resolves.toBeNull();
+    expect(calls).toEqual(['status:warn:Select an available worktree before starting a terminal']);
   });
 
   it('cancels a queued PTY start when the thread closes before animation frame', () => {

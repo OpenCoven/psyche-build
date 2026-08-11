@@ -627,6 +627,10 @@
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
   var helpOverlayEl = document.getElementById("help-overlay");
+  var agentPickerOverlayEl = document.getElementById("agent-picker-overlay");
+  var agentPickerListEl = document.getElementById("agent-picker-list");
+  var agentPickerIndex = 0;
+  var agentPickerPreviousFocus = null;
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
@@ -1656,7 +1660,7 @@
           thread.term.write("\r\n\x1b[31m[pty_start error]\x1b[0m " + msg + "\r\n");
         }
         if (state.activeThreadId === thread.id) {
-          setStatus("start failed", "error");
+          setStatus(thread.name + " failed to start: " + msg, "error");
         }
       }
       syncThreadPaneMetadata(thread);
@@ -5011,19 +5015,19 @@
       "</div>" +
       '<div class="canvas-empty-actions">' +
         '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
-          '<span class="glyph mono">❯_</span>Shell<span class="key">/new-shell</span></button>' +
+          '<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
-          '<span class="glyph">✳</span>Agent<span class="key">⌘T</span></button>' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
-          '<span class="glyph">◍</span>Browser<span class="key">⌘⌥B</span></button>' +
+          '<span class="glyph">◍</span>Browser<span class="key">Web +</span></button>' +
       "</div>";
     empty.addEventListener("click", function (event) {
       var button = event.target.closest("[data-empty-action]");
       if (!button) return;
       if (!activeProject()) { openProjectPicker(); return; }
       var action = button.dataset.emptyAction;
-      if (action === "term") runNewShellCommand();
-      else if (action === "agent") runNewThreadCommand();
+      if (action === "term") createTerminalPane();
+      else if (action === "agent") openAgentPicker();
       else openBlankBrowserTab();
     });
     terminalHost.appendChild(empty);
@@ -5853,8 +5857,7 @@
   }
 
   async function runNewShellCommand() {
-    if (!(await prepareDefaultThreadCreation())) return null;
-    return spawnShellThread();
+    return createTerminalPane();
   }
 
   async function runNewPsycheCommand() {
@@ -6622,7 +6625,19 @@
   }
   listen("browser:shortcut-new-tab", function () {
     markActiveSurface("browser");
-    openBlankBrowserTab();
+    var browser = ensureBrowserModel(project, worktreePath);
+    var tab = null;
+    if (existing || !browser.tabs.length) {
+      tab = createBrowserTab(project, "about:blank", true);
+    } else {
+      renderBrowserTabs();
+    }
+    syncProjectBrowser();
+    if (urlInput) urlInput.focus();
+    return tab || currentBrowserTab(project);
+  }
+  listen("browser:shortcut-terminal-pane", function () {
+    createTerminalPane();
   }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
@@ -6820,25 +6835,38 @@
     return showTerminalView();
   }
 
-  async function createContextualTab() {
-    if (activeSurface === "browser") {
-      await openBlankBrowserTab();
-      return true;
+  async function createTerminalPane() {
+    var project = activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting a terminal", "warn");
+      return null;
     }
-    return (await spawnCovenThread()) ? true : null;
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting a terminal", "warn");
+      return null;
+    }
+    if (!(await showTerminalView())) return null;
+    return spawnShellThread(project);
   }
 
   document.addEventListener("keydown", async function (e) {
+    if (routeAgentPickerModalKeydown(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
       await handleExplicitFileSave(e);
       return;
     }
-    // ⌘T is contextual: browser tab from the browser side, terminal pane otherwise.
+    // ⌘T always opens a plain login shell in the terminal canvas.
     if (String(e.key).toLowerCase() === "t") {
-      await createContextualTab();
-      e.preventDefault(); return;
+      e.preventDefault();
+      await createTerminalPane();
+      return;
+    }
+    if (String(e.key).toLowerCase() === "p") {
+      if (openAgentPicker()) e.preventDefault();
+      return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
     if (e.key === "o") { openProjectPicker(); e.preventDefault(); return; }
@@ -6949,7 +6977,7 @@
     if (trigger) trigger.setAttribute("aria-expanded", "false");
   }
   function toggleNewPaneMenu() {
-    if (!newPaneMenuEl) { createContextualTab(); return; }
+    if (!newPaneMenuEl) { createTerminalPane(); return; }
     var open = newPaneMenuEl.hidden;
     if (open) {
       var project = activeProject();
@@ -6971,12 +6999,11 @@
     el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
   }
   onMenuClick("new-pane-term", async function () {
-    await runNewShellCommand();
-    toast("Shell pane opened");
+    var thread = await createTerminalPane();
+    if (thread) toast("Terminal pane opened");
   });
-  onMenuClick("new-pane-agent", async function () {
-    await runNewThreadCommand();
-    toast("Agent pane opened — coven chat");
+  onMenuClick("new-pane-agent", function () {
+    openAgentPicker();
   });
   onMenuClick("new-pane-web", async function () {
     await openBlankBrowserTab();
@@ -6984,6 +7011,90 @@
   });
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
+
+  function consumeAgentPickerKey(event) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  function focusAgentPickerList() {
+    if (
+      agentPickerListEl &&
+      typeof agentPickerListEl.focus === "function"
+    ) {
+      agentPickerListEl.focus();
+    }
+  }
+
+  function handleAgentPickerListKeydown(event) {
+    var count = agentLaunchOptions().length;
+    if (event.key === "Tab") {
+      focusAgentPickerList();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "ArrowDown") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, -1, count);
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Home") {
+      agentPickerIndex = 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "End") {
+      agentPickerIndex = count ? count - 1 : 0;
+      renderAgentPicker();
+      consumeAgentPickerKey(event);
+      return true;
+    }
+    if (event.key === "Enter") {
+      consumeAgentPickerKey(event);
+      launchSelectedAgent();
+      return true;
+    }
+    if (event.key === "Escape") {
+      consumeAgentPickerKey(event);
+      closeAgentPicker();
+      return true;
+    }
+    return false;
+  }
+
+  function routeAgentPickerModalKeydown(event) {
+    if (!agentPickerOpen()) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      String(event.key).toLowerCase() === "p"
+    ) {
+      consumeAgentPickerKey(event);
+      openAgentPicker();
+      return true;
+    }
+    if (handleAgentPickerListKeydown(event)) return true;
+    consumeAgentPickerKey(event);
+    return true;
+  }
+
+  if (agentPickerListEl) {
+    agentPickerListEl.addEventListener("keydown", handleAgentPickerListKeydown);
+  }
+  if (agentPickerOverlayEl) {
+    agentPickerOverlayEl.addEventListener("pointerdown", function (event) {
+      if (event.target === agentPickerOverlayEl) closeAgentPicker();
+    });
+  }
 
   document.addEventListener("pointerdown", function (event) {
     if (newPaneMenuEl && !newPaneMenuEl.hidden &&
@@ -7005,9 +7116,9 @@
     ["Toggle the tools dock", "⌘⌥B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
-    ["New shell pane", "/new-shell"],
-    ["New agent pane (coven chat)", "⌘T"],
-    ["New browser tab", "focus Web, then ⌘T"],
+    ["New terminal pane", "⌘T"],
+    ["Choose an agent", "⌘P"],
+    ["New browser tab", "Web pane +"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
@@ -7044,8 +7155,10 @@
       (event.target && event.target.isContentEditable);
     // Esc cascade — one key, most-transient layer first, so it never skips
     // past something the user is looking at to undo something they aren't:
-    // help → menus → set picking → armed confirm → file return → focus mode.
+    // picker → help → menus → set picking → armed confirm → file return →
+    // focus mode.
     if (event.key === "Escape") {
+      if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
         (scopeMenuEl && !scopeMenuEl.hidden);
@@ -7854,6 +7967,140 @@
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
+  }
+
+  function agentLaunchOptions() {
+    return [
+      { id: "coven-code", label: "Coven Code", command: null, args: ["chat"], kind: "coven-chat" },
+      { id: "copilot", label: "Copilot CLI", command: "copilot", args: [], kind: "agent-copilot" },
+      { id: "codex", label: "Codex CLI", command: "codex", args: [], kind: "agent-codex" },
+      { id: "anthropic", label: "Anthropic CLI", command: "claude", args: [], kind: "agent-anthropic" },
+      { id: "grok-build", label: "Grok Build", command: "grok", args: [], kind: "agent-grok-build" },
+    ];
+  }
+
+  function nextAgentPickerIndex(current, delta, count) {
+    if (!count) return 0;
+    return (((current + delta) % count) + count) % count;
+  }
+
+  function agentPickerOpen() {
+    return Boolean(agentPickerOverlayEl && !agentPickerOverlayEl.hidden);
+  }
+
+  function renderAgentPicker() {
+    if (!agentPickerListEl) return;
+    var entries = agentLaunchOptions();
+    agentPickerIndex = nextAgentPickerIndex(agentPickerIndex, 0, entries.length);
+    agentPickerListEl.innerHTML = "";
+    entries.forEach(function (entry, index) {
+      var selected = index === agentPickerIndex;
+      var option = document.createElement("button");
+      option.type = "button";
+      option.id = "agent-picker-option-" + entry.id;
+      option.className = "agent-picker-option" + (selected ? " is-selected" : "");
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+      option.tabIndex = -1;
+      option.innerHTML =
+        '<span class="agent-picker-label">' + escapeHtml(entry.label) + "</span>" +
+        '<span class="agent-picker-option-command">' +
+          escapeHtml(entry.id === "coven-code" ? "coven chat" : (entry.command || "")) +
+        "</span>";
+      option.addEventListener("pointermove", function () {
+        if (agentPickerIndex === index) return;
+        agentPickerIndex = index;
+        renderAgentPicker();
+      });
+      option.addEventListener("click", function () {
+        agentPickerIndex = index;
+        launchSelectedAgent();
+      });
+      agentPickerListEl.appendChild(option);
+    });
+    if (entries[agentPickerIndex]) {
+      agentPickerListEl.setAttribute(
+        "aria-activedescendant",
+        "agent-picker-option-" + entries[agentPickerIndex].id
+      );
+    } else {
+      agentPickerListEl.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function openAgentPicker() {
+    if (!agentPickerOverlayEl || !agentPickerListEl) return false;
+    if (dirtyFileDialogEl && dirtyFileDialogEl.open) return false;
+    if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
+    setHelpOpen(false);
+    closeNewPaneMenu();
+    closeScopeMenu();
+    closeSessionContextMenu();
+    agentPickerIndex = 0;
+    renderAgentPicker();
+    agentPickerOverlayEl.hidden = false;
+    focusAgentPickerList();
+    return true;
+  }
+
+  function closeAgentPicker() {
+    if (agentPickerOverlayEl) agentPickerOverlayEl.hidden = true;
+    var previousFocus = agentPickerPreviousFocus;
+    agentPickerPreviousFocus = null;
+    if (
+      previousFocus &&
+      typeof previousFocus.focus === "function" &&
+      (!document.contains || document.contains(previousFocus))
+    ) {
+      previousFocus.focus();
+    }
+  }
+
+  function launchSelectedAgent() {
+    var entry = agentLaunchOptions()[agentPickerIndex];
+    if (!entry) return null;
+    closeAgentPicker();
+    return spawnAgentThread(entry.id);
+  }
+
+  async function spawnAgentThread(agentId, project) {
+    project = project || activeProject();
+    if (!project || !project.root) {
+      setStatus("Open a project before starting an agent", "warn");
+      return null;
+    }
+    var worktree = selectedWorktree(project);
+    if (!worktree || !worktree.path) {
+      setStatus("Select an available worktree before starting an agent", "warn");
+      return null;
+    }
+    var entry = agentLaunchOptions().find(function (option) {
+      return option.id === agentId;
+    });
+    if (!entry) {
+      setStatus("Unknown agent: " + agentId, "error");
+      return null;
+    }
+    var command = entry.command;
+    if (entry.id === "coven-code") {
+      command = state.env && state.env.coven_path;
+      if (!command) {
+        setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
+        return null;
+      }
+    }
+    if (!(await showTerminalView())) return null;
+    return createThread({
+      project: project,
+      worktreePath: worktree.path,
+      name: entry.label,
+      kind: entry.kind,
+      command: command,
+      args: entry.args.slice(),
+      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      projectRoot: project.root,
+      cwd: worktree.path,
+    });
   }
 
   function covenChatLaunch(project, worktreePath) {

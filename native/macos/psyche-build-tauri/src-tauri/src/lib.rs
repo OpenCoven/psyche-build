@@ -674,7 +674,7 @@ fn ensure_browser(
                               if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-new-tab", {{ label: browserLabel, url: location.href }});
+                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);
