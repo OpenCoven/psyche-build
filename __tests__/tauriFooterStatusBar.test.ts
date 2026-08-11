@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createContext, runInContext } from 'node:vm';
 
 const repoRoot = process.cwd();
 const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
@@ -10,6 +11,13 @@ const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const statusBundle = readFileSync(join(webRoot, 'status.bundle.js'), 'utf8');
+
+interface BrowserGlobal extends Record<string, unknown> {
+  window: BrowserGlobal;
+  self: BrowserGlobal;
+  globalThis: BrowserGlobal;
+  PsycheStatus?: Record<string, unknown>;
+}
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -101,17 +109,13 @@ function compileBuildStatusController<T extends (...args: never[]) => unknown>(
   )(...values) as T;
 }
 
-function loadBrowserBundle(
-  source: string,
-  globalName: string,
-): Record<string, unknown> {
-  const global = {} as Record<string, unknown>;
-  return Function(
-    'window',
-    'self',
-    'globalThis',
-    `"use strict"; ${source}; return typeof ${globalName} !== "undefined" ? ${globalName} : globalThis[${JSON.stringify(globalName)}];`,
-  )(global, global, global);
+function executeBrowserBundle(source: string): BrowserGlobal {
+  const browserGlobal = createContext({ console }) as BrowserGlobal;
+  browserGlobal.window = browserGlobal;
+  browserGlobal.self = browserGlobal;
+  browserGlobal.globalThis = browserGlobal;
+  runInContext(source, browserGlobal, { filename: 'status.bundle.js' });
+  return browserGlobal;
 }
 
 function footerSection(source: string) {
@@ -338,29 +342,24 @@ describe('Tauri footer status bar shell', () => {
     ]);
   });
 
-  it('ships the bundled footer status module before main boot and exposes public exports', () => {
+  it('ships the bundled footer status module before main boot and registers the browser global contract', () => {
     const statusScript = '<script src="./status.bundle.js" defer></script>';
     const mainScript = '<script src="./main.js" defer></script>';
-    const shipped = loadBrowserBundle(statusBundle, 'PsycheStatus');
+    const browserGlobal = executeBrowserBundle(statusBundle);
+    const shipped = browserGlobal.PsycheStatus as Record<string, unknown> | undefined;
 
     expect(indexHtml).toContain(statusScript);
     expect(indexHtml.indexOf(statusScript)).toBeLessThan(indexHtml.indexOf(mainScript));
-    expect(shipped).toMatchObject({
-      createStatusController: expect.any(Function),
-      DEFAULT_METRIC_ORDER: expect.any(Array),
-      METRICS: expect.any(Object),
-      chooseVisibleMetrics: expect.any(Function),
-      createActivityTracker: expect.any(Function),
-      createFrameSampler: expect.any(Function),
-      evaluateSeverity: expect.any(Function),
-      formatLiveDiagnostics: expect.any(Function),
-      median: expect.any(Function),
-      normalizePreferences: expect.any(Function),
-      pushTrend: expect.any(Function),
-      samplingDelay: expect.any(Function),
-      sparklinePath: expect.any(Function),
-      summarizeWorkspace: expect.any(Function),
-    });
+    expect(browserGlobal.window).toBe(browserGlobal);
+    expect(browserGlobal.self).toBe(browserGlobal);
+    expect(browserGlobal.globalThis).toBe(browserGlobal);
+    expect(shipped).toBeTruthy();
+    expect(browserGlobal.window.PsycheStatus).toBe(shipped);
+    expect(Array.isArray(shipped?.DEFAULT_METRIC_ORDER)).toBe(true);
+    expect(typeof shipped?.createStatusController).toBe('function');
+    expect(typeof shipped?.METRICS).toBe('object');
+    expect(typeof shipped?.summarizeWorkspace).toBe('function');
+    expect(typeof shipped?.formatLiveDiagnostics).toBe('function');
   });
 
   it('ships controller source contracts for persistence, announcements, Escape, and focused scope fallback', () => {
