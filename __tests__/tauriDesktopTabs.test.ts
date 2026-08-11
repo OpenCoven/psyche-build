@@ -146,19 +146,48 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toContain('libc::getsid');
     expect(tauriLib).toContain('libc::getpgid');
     expect(tauriLib).toMatch(/libc::SIGHUP[\s\S]*libc::SIGCONT[\s\S]*libc::SIGKILL/);
+    expect(tauriLib).not.toContain('UNIX_PTY_TERMINATION_GRACE');
+    expect(tauriLib).toMatch(
+      /for\s+signal\s+in\s+\[libc::SIGHUP,\s*libc::SIGCONT,\s*libc::SIGKILL\][\s\S]*?observe_termination\([^)]*identity[^)]*\)[\s\S]*?verified_unix_process_groups/
+    );
+    expect(tauriLib).toContain('original_session');
+    expect(tauriLib).toContain('original_group');
     expect(tauriLib).toMatch(/reader_cancellation\.cancel\(\)/);
   });
 
-  it('uses a directly owned Windows process handle with correct BOOL semantics', () => {
-    expect(tauriCargo).toMatch(
-      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys\s*=\s*\{[^}]*version\s*=\s*"=0\.59\.0"[^}]*Win32_Foundation[^}]*Win32_System_Threading/
+  it('disables the Unix raw-PID fallback before the exit watcher can wait or reap', () => {
+    expect(tauriLib).toMatch(
+      /fn\s+wait_for_child<[^>]+>[\s\S]*?disable_pid_fallback_before_wait\(\);[\s\S]*?wait\(\)/
     );
-    expect(tauriLib).toContain('const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0001;');
+    const watcherStart = tauriLib.indexOf('let exit_terminator = terminator;');
+    const waitStart = tauriLib.indexOf('exit_terminator.wait_for_child(|| child.wait())', watcherStart);
+    const shutdownStart = tauriLib.indexOf('PtyExitShutdown::new(', waitStart);
+    expect(watcherStart).toBeGreaterThanOrEqual(0);
+    expect(waitStart).toBeGreaterThan(watcherStart);
+    expect(shutdownStart).toBeGreaterThan(waitStart);
+  });
+
+  it('owns a kill-on-close Windows Job Object and terminates it before ConPTY teardown', () => {
+    expect(tauriCargo).toMatch(
+      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys\s*=\s*\{[^}]*version\s*=\s*"=0\.59\.0"[^}]*Win32_Foundation[^}]*Win32_Security[^}]*Win32_System_JobObjects[^}]*Win32_System_Threading/
+    );
+    expect(tauriLib).toContain('const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;');
+    expect(tauriLib).toContain('const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;');
     expect(tauriLib).toMatch(/OpenProcess\(\s*WINDOWS_REQUIRED_PROCESS_RIGHTS/);
+    expect(tauriLib).toContain('CreateJobObjectW');
+    expect(tauriLib).toContain('JobObjectExtendedLimitInformation');
+    expect(tauriLib).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
+    expect(tauriLib).toContain('SetInformationJobObject');
+    expect(tauriLib).toContain('AssignProcessToJobObject');
+    expect(tauriLib).toContain('TerminateJobObject');
     expect(tauriLib).toContain('TerminateProcess');
     expect(tauriLib).toContain('CloseHandle');
+    expect(tauriLib).toContain('WindowsExternalJobRestriction');
     expect(tauriLib).toMatch(/impl<[^>]*>\s+Drop\s+for\s+OwnedTerminationResource/);
     expect(tauriLib).toMatch(/if\s+result\s*!=\s*0\s*\{\s*Ok\(\(\)\)/);
+    expect(tauriLib).toMatch(
+      /let\s+result\s*=\s*unsafe\s*\{\s*TerminateJobObject\(self\.raw_handle\(\),\s*1\)\s*\};\s*check_windows_bool\(result,\s*std::io::Error::last_os_error\)/
+    );
     const windowsStart = tauriLib.indexOf(
       '#[cfg(windows)]\nfn terminate_platform_process'
     );
@@ -168,9 +197,26 @@ describe('Tauri desktop tab shortcuts', () => {
       windowsStart,
       windowsEnd === -1 ? undefined : windowsEnd
     );
-    expect(windowsTermination).toContain('process.terminate()');
+    expect(windowsTermination).toContain('process_tree.terminate()');
     expect(windowsTermination).not.toContain('killer.kill()');
     expect(windowsTermination).not.toContain('libc::');
+
+    const stopStart = tauriLib.indexOf('fn terminate_pty_session(');
+    const stopEnd = tauriLib.indexOf('\npub fn recent_pty_transport_snapshot', stopStart);
+    const stopSource = tauriLib.slice(stopStart, stopEnd);
+    expect(stopSource.indexOf('session.terminator.terminate()')).toBeGreaterThanOrEqual(0);
+    expect(stopSource.indexOf('drop(session)')).toBeGreaterThan(
+      stopSource.indexOf('session.terminator.terminate()')
+    );
+
+    const shutdownHooksStart = tauriLib.indexOf('impl ExitShutdownHooks for PtyExitShutdown');
+    const timeoutStart = tauriLib.indexOf('fn terminate_process(&mut self)', shutdownHooksStart);
+    const timeoutEnd = tauriLib.indexOf('fn finish_terminated_cleanup', timeoutStart);
+    const timeoutSource = tauriLib.slice(timeoutStart, timeoutEnd);
+    expect(timeoutSource.indexOf('self.terminator.terminate()')).toBeGreaterThanOrEqual(0);
+    expect(timeoutSource.indexOf('self.begin_matching_exit()')).toBeGreaterThan(
+      timeoutSource.indexOf('self.terminator.terminate()')
+    );
   });
 
   it('keeps the Tauri app CSP free of broad unsafe allowances', () => {

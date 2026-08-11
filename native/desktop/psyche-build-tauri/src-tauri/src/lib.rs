@@ -24,7 +24,14 @@ use tauri::{
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
-    System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+    System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
+        Threading::{OpenProcess, TerminateProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+    },
 };
 
 mod coven_sessions;
@@ -328,7 +335,92 @@ static RECENT_PTY_SNAPSHOTS: Lazy<Mutex<RecentOutputSnapshots>> =
     Lazy::new(|| Mutex::new(RecentOutputSnapshots::default()));
 
 #[cfg(any(test, windows))]
-const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0001;
+const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;
+#[cfg(any(test, windows))]
+const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
+
+#[cfg(any(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsJobAssignmentFailure {
+    ExternalJobRestriction,
+    Other,
+}
+
+#[cfg(any(test, windows))]
+fn classify_windows_job_assignment_error(error: &std::io::Error) -> WindowsJobAssignmentFailure {
+    if error.raw_os_error() == Some(WINDOWS_ERROR_ACCESS_DENIED) {
+        WindowsJobAssignmentFailure::ExternalJobRestriction
+    } else {
+        WindowsJobAssignmentFailure::Other
+    }
+}
+
+#[derive(Debug)]
+enum PtyProcessTerminatorSetupError {
+    Message(String),
+    #[cfg(windows)]
+    WindowsExternalJobRestriction {
+        process_id: u32,
+        assignment_error: std::io::Error,
+        cleanup_error: Option<std::io::Error>,
+    },
+    #[cfg(windows)]
+    WindowsJobAssignmentFailed {
+        process_id: u32,
+        assignment_error: std::io::Error,
+        cleanup_error: Option<std::io::Error>,
+    },
+}
+
+impl std::fmt::Display for PtyProcessTerminatorSetupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message) => formatter.write_str(message),
+            #[cfg(windows)]
+            Self::WindowsExternalJobRestriction {
+                process_id,
+                assignment_error,
+                cleanup_error,
+            } => {
+                write!(
+                    formatter,
+                    "WindowsExternalJobRestriction: failed to assign PTY process {process_id} \
+                     to its owned Job Object: {assignment_error}"
+                )?;
+                match cleanup_error {
+                    Some(error) => write!(
+                        formatter,
+                        "; direct-child fallback also failed: {error}; descendant termination \
+                         is not proven"
+                    ),
+                    None => formatter.write_str(
+                        "; the direct child was terminated, but descendant termination is not proven",
+                    ),
+                }
+            }
+            #[cfg(windows)]
+            Self::WindowsJobAssignmentFailed {
+                process_id,
+                assignment_error,
+                cleanup_error,
+            } => {
+                write!(
+                    formatter,
+                    "failed to assign Windows PTY process {process_id} to its owned Job Object: \
+                     {assignment_error}"
+                )?;
+                match cleanup_error {
+                    Some(error) => {
+                        write!(formatter, "; direct-child fallback also failed: {error}")
+                    }
+                    None => formatter.write_str("; the direct child was terminated"),
+                }
+            }
+        }
+    }
+}
 
 #[cfg(any(test, windows))]
 fn check_windows_bool<LastError>(result: i32, last_error: LastError) -> std::io::Result<()>
@@ -387,7 +479,7 @@ fn close_windows_handle(handle: isize) {
     let result = unsafe { CloseHandle(handle as HANDLE) };
     if result == 0 {
         log::warn!(
-            "failed to close retained PTY process handle: {}",
+            "failed to close retained PTY termination handle: {}",
             std::io::Error::last_os_error()
         );
     }
@@ -401,7 +493,10 @@ struct OwnedWindowsProcessHandle {
 #[cfg(windows)]
 impl OwnedWindowsProcessHandle {
     fn open(process_id: u32) -> std::io::Result<Self> {
-        debug_assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, PROCESS_TERMINATE);
+        debug_assert_eq!(
+            WINDOWS_REQUIRED_PROCESS_RIGHTS,
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE
+        );
         let handle = unsafe { OpenProcess(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0, process_id) };
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
@@ -411,13 +506,99 @@ impl OwnedWindowsProcessHandle {
         })
     }
 
-    fn terminate(&self) -> std::io::Result<()> {
-        let handle = *self
+    fn raw_handle(&self) -> HANDLE {
+        *self
             .handle
             .get()
-            .expect("owned Windows process handle must remain open until drop");
-        let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
+            .expect("owned Windows process handle must remain open until drop") as HANDLE
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        let result = unsafe { TerminateProcess(self.raw_handle(), 1) };
         check_windows_bool(result, std::io::Error::last_os_error)
+    }
+}
+
+#[cfg(windows)]
+struct OwnedWindowsJobObject {
+    handle: OwnedTerminationResource<isize, fn(isize)>,
+}
+
+#[cfg(windows)]
+impl OwnedWindowsJobObject {
+    fn create() -> std::io::Result<Self> {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle: OwnedTerminationResource::new(handle as isize, close_windows_handle),
+        })
+    }
+
+    fn raw_handle(&self) -> HANDLE {
+        *self
+            .handle
+            .get()
+            .expect("owned Windows Job Object handle must remain open until drop") as HANDLE
+    }
+
+    fn configure_kill_on_close(&self) -> std::io::Result<()> {
+        debug_assert_eq!(
+            WINDOWS_JOB_KILL_ON_CLOSE_LIMIT,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        );
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let result = unsafe {
+            SetInformationJobObject(
+                self.raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        check_windows_bool(result, std::io::Error::last_os_error)
+    }
+
+    fn assign_process(&self, process: &OwnedWindowsProcessHandle) -> std::io::Result<()> {
+        let result = unsafe { AssignProcessToJobObject(self.raw_handle(), process.raw_handle()) };
+        check_windows_bool(result, std::io::Error::last_os_error)
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        let result = unsafe { TerminateJobObject(self.raw_handle(), 1) };
+        check_windows_bool(result, std::io::Error::last_os_error)
+    }
+}
+
+#[cfg(windows)]
+struct OwnedWindowsProcessTree {
+    job: OwnedWindowsJobObject,
+    process: OwnedWindowsProcessHandle,
+}
+
+#[cfg(windows)]
+impl OwnedWindowsProcessTree {
+    fn terminate(&self) -> std::io::Result<()> {
+        match self.job.terminate() {
+            Ok(()) => Ok(()),
+            Err(job_error) => {
+                let fallback = self.process.terminate();
+                Err(std::io::Error::new(
+                    job_error.kind(),
+                    match fallback {
+                        Ok(()) => format!(
+                            "{job_error}; the direct-child fallback was terminated, but \
+                             descendant termination is not proven"
+                        ),
+                        Err(fallback_error) => format!(
+                            "{job_error}; direct-child fallback also failed: {fallback_error}"
+                        ),
+                    },
+                ))
+            }
+        }
     }
 }
 
@@ -431,6 +612,25 @@ fn terminate_borrowed_windows_child(child: &dyn Child) -> std::io::Result<()> {
     })?;
     let result = unsafe { TerminateProcess(handle as HANDLE, 1) };
     check_windows_bool(result, std::io::Error::last_os_error)
+}
+
+#[cfg(windows)]
+fn windows_setup_error(
+    operation: &str,
+    process_id: u32,
+    error: std::io::Error,
+    cleanup: std::io::Result<()>,
+) -> PtyProcessTerminatorSetupError {
+    PtyProcessTerminatorSetupError::Message(match cleanup {
+        Ok(()) => format!(
+            "failed to {operation} for Windows PTY process {process_id}: {error}; \
+             the direct child was terminated, but descendant termination is not proven"
+        ),
+        Err(cleanup_error) => format!(
+            "failed to {operation} for Windows PTY process {process_id}: {error}; \
+             direct-child fallback also failed: {cleanup_error}"
+        ),
+    })
 }
 
 #[cfg(unix)]
@@ -463,20 +663,63 @@ impl UnixPtyControl {
     fn descriptor(&self) -> RawFd {
         self.descriptor.as_raw_fd()
     }
+}
 
-    fn observe_termination(&self) -> std::io::Result<UnixTerminationObservation> {
+#[cfg(unix)]
+trait UnixTerminationPlatform: Send + Sync {
+    fn observe_termination(
+        &self,
+        identity: UnixPtyIdentity,
+    ) -> std::io::Result<Option<UnixTerminationObservation>>;
+
+    fn signal_process_group(
+        &self,
+        process_group: libc::pid_t,
+        signal: libc::c_int,
+    ) -> std::io::Result<()>;
+}
+
+#[cfg(unix)]
+impl UnixTerminationPlatform for UnixPtyControl {
+    fn observe_termination(
+        &self,
+        identity: UnixPtyIdentity,
+    ) -> std::io::Result<Option<UnixTerminationObservation>> {
         let current_pid = unsafe { libc::getpid() };
         let current_process_group = unsafe { libc::getpgrp() };
         let current_session = checked_unix_pid("getsid(0)", unsafe { libc::getsid(0) })?;
-        let tty_session =
-            checked_unix_pid("tcgetsid", unsafe { libc::tcgetsid(self.descriptor()) })?;
-        let foreground_process_group =
-            checked_unix_pid("tcgetpgrp", unsafe { libc::tcgetpgrp(self.descriptor()) })?;
+        let Some(tty_session) =
+            optional_unix_tty_pid("tcgetsid", unsafe { libc::tcgetsid(self.descriptor()) })?
+        else {
+            return Ok(None);
+        };
+        let Some(foreground_process_group) =
+            optional_unix_tty_pid("tcgetpgrp", unsafe { libc::tcgetpgrp(self.descriptor()) })?
+        else {
+            return Ok(None);
+        };
         let foreground_session =
-            optional_unix_pid(unsafe { libc::getsid(foreground_process_group) });
+            optional_unix_process_pid("getsid(foreground group leader)", unsafe {
+                libc::getsid(foreground_process_group)
+            })?;
         let foreground_group =
-            optional_unix_pid(unsafe { libc::getpgid(foreground_process_group) });
-        Ok(UnixTerminationObservation {
+            optional_unix_process_pid("getpgid(foreground group leader)", unsafe {
+                libc::getpgid(foreground_process_group)
+            })?;
+        let (original_session, original_group) =
+            if identity.original_process_group == foreground_process_group {
+                (foreground_session, foreground_group)
+            } else {
+                (
+                    optional_unix_process_pid("getsid(original group leader)", unsafe {
+                        libc::getsid(identity.original_process_group)
+                    })?,
+                    optional_unix_process_pid("getpgid(original group leader)", unsafe {
+                        libc::getpgid(identity.original_process_group)
+                    })?,
+                )
+            };
+        Ok(Some(UnixTerminationObservation {
             current_pid,
             current_process_group,
             current_session,
@@ -484,7 +727,17 @@ impl UnixPtyControl {
             foreground_process_group,
             foreground_session,
             foreground_group,
-        })
+            original_session,
+            original_group,
+        }))
+    }
+
+    fn signal_process_group(
+        &self,
+        process_group: libc::pid_t,
+        signal: libc::c_int,
+    ) -> std::io::Result<()> {
+        signal_unix_process_group(process_group, signal)
     }
 }
 
@@ -501,8 +754,44 @@ fn checked_unix_pid(operation: &str, result: libc::pid_t) -> std::io::Result<lib
 }
 
 #[cfg(unix)]
-fn optional_unix_pid(result: libc::pid_t) -> Option<libc::pid_t> {
-    (result > 0).then_some(result)
+fn optional_unix_process_pid(
+    operation: &str,
+    result: libc::pid_t,
+) -> std::io::Result<Option<libc::pid_t>> {
+    if result > 0 {
+        return Ok(Some(result));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(None)
+    } else {
+        Err(std::io::Error::new(
+            error.kind(),
+            format!("{operation} failed: {error}"),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn optional_unix_tty_pid(
+    operation: &str,
+    result: libc::pid_t,
+) -> std::io::Result<Option<libc::pid_t>> {
+    if result > 0 {
+        return Ok(Some(result));
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ESRCH) | Some(libc::ENOTTY) | Some(libc::EIO) | Some(libc::ENXIO)
+    ) {
+        Ok(None)
+    } else {
+        Err(std::io::Error::new(
+            error.kind(),
+            format!("{operation} failed: {error}"),
+        ))
+    }
 }
 
 #[cfg(unix)]
@@ -575,6 +864,8 @@ struct UnixTerminationObservation {
     foreground_process_group: libc::pid_t,
     foreground_session: Option<libc::pid_t>,
     foreground_group: Option<libc::pid_t>,
+    original_session: Option<libc::pid_t>,
+    original_group: Option<libc::pid_t>,
 }
 
 #[cfg(unix)]
@@ -596,7 +887,23 @@ fn verified_unix_process_groups(
     }
 
     let foreground = observation.foreground_process_group;
-    for group in [foreground, identity.original_process_group] {
+    let candidates = [
+        (
+            foreground,
+            observation.foreground_session,
+            observation.foreground_group,
+        ),
+        (
+            identity.original_process_group,
+            observation.original_session,
+            observation.original_group,
+        ),
+    ];
+    let mut groups = Vec::with_capacity(2);
+    for (group, observed_session, observed_group) in candidates {
+        if groups.contains(&group) {
+            continue;
+        }
         if group <= 1
             || group == observation.current_pid
             || group == observation.current_process_group
@@ -607,20 +914,26 @@ fn verified_unix_process_groups(
                 "refusing to signal Psyche's own process or an invalid process group",
             ));
         }
-    }
-    if identity.session_id == observation.current_session
-        || observation.foreground_session != Some(identity.session_id)
-        || observation.foreground_group != Some(foreground)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "foreground process group does not belong to the spawned PTY session",
-        ));
-    }
-
-    let mut groups = vec![foreground];
-    if identity.original_process_group != foreground {
-        groups.push(identity.original_process_group);
+        if identity.session_id == observation.current_session {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "spawned PTY session unexpectedly matches Psyche's own session",
+            ));
+        }
+        match (observed_session, observed_group) {
+            (None, _) | (_, None) => continue,
+            (Some(session), Some(observed_group))
+                if session == identity.session_id && observed_group == group =>
+            {
+                groups.push(group);
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "observed process group does not belong to the spawned PTY session",
+                ));
+            }
+        }
     }
     Ok(groups)
 }
@@ -651,7 +964,10 @@ impl PtyProcessIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PtyTerminationOutcome {
+    NoProcess,
     DirectChild,
+    #[cfg(windows)]
+    ProcessTree,
     #[cfg(unix)]
     ConfirmedProcessGroups {
         foreground_process_group: libc::pid_t,
@@ -660,44 +976,130 @@ enum PtyTerminationOutcome {
     },
 }
 
+#[cfg(not(windows))]
+enum RawPidFallbackState {
+    Available(Box<dyn ChildKiller + Send + Sync>),
+    Consumed,
+    DisabledBeforeWait,
+}
+
+#[cfg(not(windows))]
+struct RawPidFallback {
+    state: Mutex<RawPidFallbackState>,
+}
+
+#[cfg(not(windows))]
+impl RawPidFallback {
+    fn new(killer: Box<dyn ChildKiller + Send + Sync>) -> Self {
+        Self {
+            state: Mutex::new(RawPidFallbackState::Available(killer)),
+        }
+    }
+
+    fn disable_pid_fallback_before_wait(&self) {
+        let mut state = self.state.lock();
+        if matches!(*state, RawPidFallbackState::Available(_)) {
+            *state = RawPidFallbackState::DisabledBeforeWait;
+        }
+    }
+
+    fn invoke_once(&self) -> std::io::Result<bool> {
+        let mut guard = self.state.lock();
+        let state = std::mem::replace(&mut *guard, RawPidFallbackState::Consumed);
+        let result = match state {
+            RawPidFallbackState::Available(mut killer) => killer.kill().map(|()| true),
+            RawPidFallbackState::Consumed => Ok(false),
+            RawPidFallbackState::DisabledBeforeWait => {
+                *guard = RawPidFallbackState::DisabledBeforeWait;
+                Ok(false)
+            }
+        };
+        drop(guard);
+        result
+    }
+}
+
 #[derive(Clone)]
 struct PtyProcessTerminator {
     #[cfg(not(windows))]
-    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    raw_pid_fallback: Arc<RawPidFallback>,
     #[cfg(unix)]
-    unix_control: Option<Arc<UnixPtyControl>>,
+    unix_platform: Option<Arc<dyn UnixTerminationPlatform>>,
     #[cfg(windows)]
-    process: Arc<OwnedWindowsProcessHandle>,
+    process_tree: Arc<OwnedWindowsProcessTree>,
     identity: PtyProcessIdentity,
 }
 
 impl PtyProcessTerminator {
-    fn from_spawned_child(child: &dyn Child, master: &dyn MasterPty) -> Result<Self, String> {
+    fn from_spawned_child(
+        child: &dyn Child,
+        master: &dyn MasterPty,
+    ) -> Result<Self, PtyProcessTerminatorSetupError> {
         let child_pid = child.process_id();
         #[cfg(windows)]
         {
             let process_id = child_pid.ok_or_else(|| {
-                "spawned PTY child did not expose a Windows process id".to_string()
+                PtyProcessTerminatorSetupError::Message(
+                    "spawned PTY child did not expose a Windows process id".to_string(),
+                )
             })?;
             let process = match OwnedWindowsProcessHandle::open(process_id) {
                 Ok(process) => process,
                 Err(open_error) => {
                     let cleanup = terminate_borrowed_windows_child(child);
-                    return Err(match cleanup {
+                    return Err(PtyProcessTerminatorSetupError::Message(match cleanup {
                         Ok(()) => format!(
                             "failed to retain Windows PTY process handle for {process_id}: \
-                             {open_error}; spawned child was terminated"
+                             {open_error}; the direct child was terminated, but descendant \
+                             termination is not proven"
                         ),
                         Err(cleanup_error) => format!(
                             "failed to retain Windows PTY process handle for {process_id}: \
                              {open_error}; direct spawned-child cleanup also failed: \
                              {cleanup_error}"
                         ),
-                    });
+                    }));
                 }
             };
+            let job = OwnedWindowsJobObject::create().map_err(|error| {
+                windows_setup_error(
+                    "create an owned Job Object",
+                    process_id,
+                    error,
+                    process.terminate(),
+                )
+            })?;
+            job.configure_kill_on_close().map_err(|error| {
+                windows_setup_error(
+                    "configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE",
+                    process_id,
+                    error,
+                    process.terminate(),
+                )
+            })?;
+            if let Err(assignment_error) = job.assign_process(&process) {
+                let cleanup_error = process.terminate().err();
+                return Err(
+                    match classify_windows_job_assignment_error(&assignment_error) {
+                        WindowsJobAssignmentFailure::ExternalJobRestriction => {
+                            PtyProcessTerminatorSetupError::WindowsExternalJobRestriction {
+                                process_id,
+                                assignment_error,
+                                cleanup_error,
+                            }
+                        }
+                        WindowsJobAssignmentFailure::Other => {
+                            PtyProcessTerminatorSetupError::WindowsJobAssignmentFailed {
+                                process_id,
+                                assignment_error,
+                                cleanup_error,
+                            }
+                        }
+                    },
+                );
+            }
             Ok(Self {
-                process: Arc::new(process),
+                process_tree: Arc::new(OwnedWindowsProcessTree { job, process }),
                 identity: PtyProcessIdentity { child_pid },
             })
         }
@@ -708,10 +1110,12 @@ impl PtyProcessTerminator {
                 Ok(control) => control,
                 Err(error) => {
                     let cleanup = terminate_unretained_unix_child(child_pid, killer.as_mut());
-                    return Err(unix_terminator_setup_error(
-                        "retain PTY control descriptor",
-                        error,
-                        cleanup,
+                    return Err(PtyProcessTerminatorSetupError::Message(
+                        unix_terminator_setup_error(
+                            "retain PTY control descriptor",
+                            error,
+                            cleanup,
+                        ),
                     ));
                 }
             };
@@ -720,21 +1124,23 @@ impl PtyProcessTerminator {
                     Ok(identity) => identity,
                     Err(error) => {
                         let cleanup = terminate_unretained_unix_child(child_pid, killer.as_mut());
-                        return Err(unix_terminator_setup_error(
-                            "verify PTY process/session ownership",
-                            error,
-                            cleanup,
+                        return Err(PtyProcessTerminatorSetupError::Message(
+                            unix_terminator_setup_error(
+                                "verify PTY process/session ownership",
+                                error,
+                                cleanup,
+                            ),
                         ));
                     }
                 };
-            Ok(Self {
-                killer: Arc::new(Mutex::new(killer)),
-                unix_control: Some(Arc::new(control)),
-                identity: PtyProcessIdentity {
+            Ok(Self::from_unix_parts(
+                killer,
+                PtyProcessIdentity {
                     child_pid,
                     unix: Some(unix_identity),
                 },
-            })
+                Arc::new(control),
+            ))
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -751,9 +1157,22 @@ impl PtyProcessTerminator {
         identity: PtyProcessIdentity,
     ) -> Self {
         Self {
-            killer: Arc::new(Mutex::new(killer)),
+            raw_pid_fallback: Arc::new(RawPidFallback::new(killer)),
             #[cfg(unix)]
-            unix_control: None,
+            unix_platform: None,
+            identity,
+        }
+    }
+
+    #[cfg(unix)]
+    fn from_unix_parts(
+        killer: Box<dyn ChildKiller + Send + Sync>,
+        identity: PtyProcessIdentity,
+        unix_platform: Arc<dyn UnixTerminationPlatform>,
+    ) -> Self {
+        Self {
+            raw_pid_fallback: Arc::new(RawPidFallback::new(killer)),
+            unix_platform: Some(unix_platform),
             identity,
         }
     }
@@ -763,18 +1182,30 @@ impl PtyProcessTerminator {
         self.identity
     }
 
+    fn disable_pid_fallback_before_wait(&self) {
+        #[cfg(not(windows))]
+        self.raw_pid_fallback.disable_pid_fallback_before_wait();
+    }
+
+    fn wait_for_child<T>(&self, wait: impl FnOnce() -> T) -> T {
+        self.disable_pid_fallback_before_wait();
+        wait()
+    }
+
     fn terminate(&self) -> Result<PtyTerminationOutcome, String> {
         #[cfg(windows)]
-        let result = terminate_platform_process(self.process.as_ref(), self.identity);
+        let result = terminate_platform_process(self.process_tree.as_ref(), self.identity);
         #[cfg(unix)]
-        let result = {
-            let mut killer = self.killer.lock();
-            terminate_platform_process(killer.as_mut(), self.identity, self.unix_control.as_deref())
-        };
+        let result = terminate_platform_process(
+            self.raw_pid_fallback.as_ref(),
+            self.identity,
+            self.unix_platform.as_deref(),
+        );
         #[cfg(not(any(unix, windows)))]
-        let result = {
-            let mut killer = self.killer.lock();
-            killer.kill().map(|()| PtyTerminationOutcome::DirectChild)
+        let result = match self.raw_pid_fallback.invoke_once() {
+            Ok(true) => Ok(PtyTerminationOutcome::DirectChild),
+            Ok(false) => Ok(PtyTerminationOutcome::NoProcess),
+            Err(error) => Err(error),
         };
         result.map_err(|error| {
             format!(
@@ -853,9 +1284,6 @@ impl Drop for PtySpawnTerminationGuard {
 }
 
 #[cfg(unix)]
-const UNIX_PTY_TERMINATION_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
-
-#[cfg(unix)]
 fn signal_unix_process_group(
     process_group: libc::pid_t,
     signal: libc::c_int,
@@ -875,75 +1303,82 @@ fn signal_unix_process_group(
 #[cfg(unix)]
 fn unix_validation_error_with_fallback(
     error: std::io::Error,
-    killer: &mut dyn ChildKiller,
+    raw_pid_fallback: &RawPidFallback,
 ) -> std::io::Error {
-    let fallback = killer.kill();
-    std::io::Error::new(
-        error.kind(),
-        match fallback {
-            Ok(()) => format!(
-                "{error}; direct-child SIGHUP fallback was requested, but group termination \
-                 was not reported as successful"
+    match raw_pid_fallback.invoke_once() {
+        Ok(true) => std::io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; the one-shot direct-child fallback was requested, but group \
+                 termination was not reported as successful"
             ),
-            Err(fallback_error) => {
-                format!("{error}; direct-child SIGHUP fallback also failed: {fallback_error}")
-            }
-        },
-    )
+        ),
+        Ok(false) => error,
+        Err(fallback_error) => std::io::Error::new(
+            error.kind(),
+            format!("{error}; direct-child fallback also failed: {fallback_error}"),
+        ),
+    }
 }
 
 #[cfg(unix)]
 fn terminate_platform_process(
-    killer: &mut dyn ChildKiller,
+    raw_pid_fallback: &RawPidFallback,
     identity: PtyProcessIdentity,
-    control: Option<&UnixPtyControl>,
+    platform: Option<&dyn UnixTerminationPlatform>,
 ) -> std::io::Result<PtyTerminationOutcome> {
-    let (Some(unix_identity), Some(control)) = (identity.unix, control) else {
-        killer.kill()?;
-        return Ok(PtyTerminationOutcome::DirectChild);
+    let (Some(unix_identity), Some(platform)) = (identity.unix, platform) else {
+        return match raw_pid_fallback.invoke_once()? {
+            true => Ok(PtyTerminationOutcome::DirectChild),
+            false => Ok(PtyTerminationOutcome::NoProcess),
+        };
     };
-    let observation = control
-        .observe_termination()
-        .map_err(|error| unix_validation_error_with_fallback(error, killer))?;
-    let process_groups = verified_unix_process_groups(unix_identity, observation)
-        .map_err(|error| unix_validation_error_with_fallback(error, killer))?;
 
+    let mut reported_groups = None;
     let mut first_error = None;
-    for signal in [libc::SIGHUP, libc::SIGCONT] {
-        for process_group in process_groups.iter().copied() {
-            if let Err(error) = signal_unix_process_group(process_group, signal) {
+    for signal in [libc::SIGHUP, libc::SIGCONT, libc::SIGKILL] {
+        let Some(observation) = platform
+            .observe_termination(unix_identity)
+            .map_err(|error| unix_validation_error_with_fallback(error, raw_pid_fallback))?
+        else {
+            continue;
+        };
+        let process_groups = verified_unix_process_groups(unix_identity, observation)
+            .map_err(|error| unix_validation_error_with_fallback(error, raw_pid_fallback))?;
+        if reported_groups.is_none() && !process_groups.is_empty() {
+            reported_groups = Some((observation.foreground_process_group, process_groups.len()));
+        }
+        for process_group in process_groups {
+            if let Err(error) = platform.signal_process_group(process_group, signal) {
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
             }
         }
     }
-    std::thread::sleep(UNIX_PTY_TERMINATION_GRACE);
-    for process_group in process_groups.iter().copied() {
-        if let Err(error) = signal_unix_process_group(process_group, libc::SIGKILL) {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-    }
     if let Some(error) = first_error {
-        return Err(unix_validation_error_with_fallback(error, killer));
+        return Err(unix_validation_error_with_fallback(error, raw_pid_fallback));
     }
 
-    Ok(PtyTerminationOutcome::ConfirmedProcessGroups {
-        foreground_process_group: observation.foreground_process_group,
-        original_process_group: unix_identity.original_process_group,
-        group_count: process_groups.len(),
-    })
+    match reported_groups {
+        Some((foreground_process_group, group_count)) => {
+            Ok(PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group,
+                original_process_group: unix_identity.original_process_group,
+                group_count,
+            })
+        }
+        None => Ok(PtyTerminationOutcome::NoProcess),
+    }
 }
 
 #[cfg(windows)]
 fn terminate_platform_process(
-    process: &OwnedWindowsProcessHandle,
+    process_tree: &OwnedWindowsProcessTree,
     _identity: PtyProcessIdentity,
 ) -> std::io::Result<PtyTerminationOutcome> {
-    process.terminate()?;
-    Ok(PtyTerminationOutcome::DirectChild)
+    process_tree.terminate()?;
+    Ok(PtyTerminationOutcome::ProcessTree)
 }
 
 #[derive(Debug)]
@@ -1818,8 +2253,8 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     resolved_cwd.configure_command_cwd(&mut cmd)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(resolved_cwd);
-    let terminator =
-        PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())?;
+    let terminator = PtyProcessTerminator::from_spawned_child(child.as_ref(), pair.master.as_ref())
+        .map_err(|error| error.to_string())?;
     let mut spawn_guard = PtySpawnTerminationGuard::new(terminator.clone());
     let (mut reader, reader_cancellation) = prepare_pty_reader(pair.master.as_ref())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -1853,7 +2288,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let exit_token = session_token.clone();
     let exit_terminator = terminator;
     std::thread::spawn(move || {
-        let status = child.wait();
+        let status = exit_terminator.wait_for_child(|| child.wait());
         let code = status.ok().map(|s| s.exit_code() as i32);
         let mut shutdown = PtyExitShutdown::new(
             exit_token.clone(),
@@ -3552,6 +3987,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod pty_runtime_tests {
+    #[cfg(unix)]
+    use std::collections::VecDeque;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -3578,6 +4015,88 @@ mod pty_runtime_tests {
             Box::new(Self {
                 calls: Arc::clone(&self.calls),
             })
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum UnixObservationStep {
+        Observed(UnixTerminationObservation),
+        Disappeared,
+        PermissionDenied,
+    }
+
+    #[cfg(unix)]
+    struct RecordingUnixTerminationPlatform {
+        observations: Mutex<VecDeque<UnixObservationStep>>,
+        observation_count: AtomicUsize,
+        signals: Mutex<Vec<(libc::pid_t, libc::c_int)>>,
+    }
+
+    #[cfg(unix)]
+    impl RecordingUnixTerminationPlatform {
+        fn new(observations: impl IntoIterator<Item = UnixObservationStep>) -> Self {
+            Self {
+                observations: Mutex::new(observations.into_iter().collect()),
+                observation_count: AtomicUsize::new(0),
+                signals: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn signals(&self) -> Vec<(libc::pid_t, libc::c_int)> {
+            self.signals.lock().clone()
+        }
+    }
+
+    #[cfg(unix)]
+    impl UnixTerminationPlatform for RecordingUnixTerminationPlatform {
+        fn observe_termination(
+            &self,
+            _identity: UnixPtyIdentity,
+        ) -> std::io::Result<Option<UnixTerminationObservation>> {
+            self.observation_count.fetch_add(1, Ordering::SeqCst);
+            match self
+                .observations
+                .lock()
+                .pop_front()
+                .expect("test must provide one observation per escalation")
+            {
+                UnixObservationStep::Observed(observation) => Ok(Some(observation)),
+                UnixObservationStep::Disappeared => Ok(None),
+                UnixObservationStep::PermissionDenied => {
+                    Err(std::io::Error::from_raw_os_error(libc::EPERM))
+                }
+            }
+        }
+
+        fn signal_process_group(
+            &self,
+            process_group: libc::pid_t,
+            signal: libc::c_int,
+        ) -> std::io::Result<()> {
+            self.signals.lock().push((process_group, signal));
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_observation(
+        foreground_process_group: libc::pid_t,
+        foreground_session: Option<libc::pid_t>,
+        foreground_group: Option<libc::pid_t>,
+        original_session: Option<libc::pid_t>,
+        original_group: Option<libc::pid_t>,
+    ) -> UnixTerminationObservation {
+        UnixTerminationObservation {
+            current_pid: 100,
+            current_process_group: 100,
+            current_session: 100,
+            tty_session: 4_100,
+            foreground_process_group,
+            foreground_session,
+            foreground_group,
+            original_session,
+            original_group,
         }
     }
 
@@ -3627,6 +4146,23 @@ mod pty_runtime_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_process_group_disappears(process_group: libc::pid_t) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if unsafe { libc::kill(-process_group, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group {process_group} remained observable after SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -3697,6 +4233,8 @@ mod pty_runtime_tests {
                 foreground_process_group: 4_200,
                 foreground_session: Some(4_100),
                 foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
             },
         )
         .unwrap();
@@ -3720,6 +4258,8 @@ mod pty_runtime_tests {
                 foreground_process_group: 4_100,
                 foreground_session: Some(4_100),
                 foreground_group: Some(4_100),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
             },
         )
         .unwrap();
@@ -3743,6 +4283,8 @@ mod pty_runtime_tests {
                 foreground_process_group: 100,
                 foreground_session: Some(4_100),
                 foreground_group: Some(100),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
             },
         )
         .unwrap_err();
@@ -3767,6 +4309,8 @@ mod pty_runtime_tests {
                 foreground_process_group: 4_200,
                 foreground_session: Some(9_900),
                 foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
             },
         )
         .unwrap_err();
@@ -3776,8 +4320,21 @@ mod pty_runtime_tests {
     }
 
     #[test]
-    fn windows_termination_requests_only_process_terminate_access() {
-        assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0x0001);
+    fn windows_job_assignment_requests_only_required_process_access() {
+        assert_eq!(WINDOWS_REQUIRED_PROCESS_RIGHTS, 0x0101);
+    }
+
+    #[test]
+    fn windows_job_uses_kill_on_close_limit() {
+        assert_eq!(WINDOWS_JOB_KILL_ON_CLOSE_LIMIT, 0x2000);
+    }
+
+    #[test]
+    fn windows_access_denied_job_assignment_is_typed_as_external_restriction() {
+        assert_eq!(
+            classify_windows_job_assignment_error(&std::io::Error::from_raw_os_error(5)),
+            WindowsJobAssignmentFailure::ExternalJobRestriction
+        );
     }
 
     #[test]
@@ -3890,6 +4447,225 @@ mod pty_runtime_tests {
 
     #[cfg(not(windows))]
     #[test]
+    fn pid_fallback_is_disabled_before_the_wait_callback_runs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(44)),
+        );
+
+        let outcome = terminator.wait_for_child(|| terminator.terminate().unwrap());
+
+        assert_eq!(outcome, PtyTerminationOutcome::NoProcess);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn timeout_cleanup_after_wait_never_calls_the_raw_pid_killer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(45)),
+        );
+
+        terminator.wait_for_child(|| ());
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stop_before_wait_consumes_the_owned_killer_exactly_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminator = PtyProcessTerminator::from_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity::direct_child(Some(46)),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::DirectChild
+        );
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_each_escalation_uses_a_fresh_validation_snapshot() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(unix_observation(
+                4_300,
+                Some(4_100),
+                Some(4_300),
+                Some(4_100),
+                Some(4_100),
+            )),
+            UnixObservationStep::Observed(unix_observation(
+                4_400,
+                Some(4_100),
+                Some(4_400),
+                Some(4_100),
+                Some(4_100),
+            )),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::ConfirmedProcessGroups {
+                foreground_process_group: 4_200,
+                original_process_group: 4_100,
+                group_count: 2,
+            }
+        );
+        assert_eq!(platform.observation_count.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            platform.signals(),
+            vec![
+                (4_200, libc::SIGHUP),
+                (4_100, libc::SIGHUP),
+                (4_300, libc::SIGCONT),
+                (4_100, libc::SIGCONT),
+                (4_400, libc::SIGKILL),
+                (4_100, libc::SIGKILL),
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_recycled_original_group_identity_is_rejected_without_signaling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Observed(unix_observation(
+                4_200,
+                Some(4_100),
+                Some(4_200),
+                Some(9_900),
+                Some(4_100),
+            )),
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        let error = terminator.terminate().unwrap_err();
+
+        assert!(error.contains("spawned PTY session"));
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_disappeared_groups_are_a_successful_no_op() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::Disappeared,
+            UnixObservationStep::Disappeared,
+            UnixObservationStep::Disappeared,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        assert_eq!(
+            terminator.terminate().unwrap(),
+            PtyTerminationOutcome::NoProcess
+        );
+        assert_eq!(platform.observation_count.load(Ordering::SeqCst), 3);
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_permission_errors_surface_without_post_wait_pid_fallback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let platform = Arc::new(RecordingUnixTerminationPlatform::new([
+            UnixObservationStep::PermissionDenied,
+        ]));
+        let terminator = PtyProcessTerminator::from_unix_parts(
+            Box::new(RecordingChildKiller {
+                calls: Arc::clone(&calls),
+            }),
+            PtyProcessIdentity {
+                child_pid: Some(4_100),
+                unix: Some(UnixPtyIdentity {
+                    session_id: 4_100,
+                    original_process_group: 4_100,
+                }),
+            },
+            platform.clone(),
+        );
+        terminator.wait_for_child(|| ());
+
+        let error = terminator.terminate().unwrap_err();
+
+        assert!(error.contains("Operation not permitted"));
+        assert!(platform.signals().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn spawned_start_guard_terminates_on_setup_failure_but_not_after_install() {
         let failed_calls = Arc::new(AtomicUsize::new(0));
         let failed_terminator = PtyProcessTerminator::from_parts(
@@ -3993,16 +4769,8 @@ mod pty_runtime_tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("terminated PTY reader must finish")
             .expect("terminated PTY reader must exit cleanly");
-        assert_eq!(unsafe { libc::kill(-foreground_process_group, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-        assert_eq!(unsafe { libc::kill(-child_pid, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        assert_process_group_disappears(foreground_process_group);
+        assert_process_group_disappears(child_pid);
     }
 }
 
