@@ -155,11 +155,18 @@ function discoveryHarness(
   const invoke = (command: string, args: unknown) => new Promise((resolve) => {
     requests.push({ command, args, resolve });
   });
+  const statusSamples: Array<Record<string, unknown>> = [];
+  let statusRefreshes = 0;
+  let now = 1000;
+  const performance = { now: () => { now += 25; return now; } };
   const create = new Function(
     'PsycheSessions',
     'invoke',
     'initialProjects',
     'initialVisibilityState',
+    'noteStatusCovenSample',
+    'refreshStatusController',
+    'performance',
     `
       var state = { projects: initialProjects };
       var document = { visibilityState: initialVisibilityState };
@@ -177,13 +184,23 @@ function discoveryHarness(
       };
     `,
   );
-  const harness = create(PsycheSessions, invoke, projects, visibilityState);
-  return { ...harness, requests } as {
+  const harness = create(
+    PsycheSessions,
+    invoke,
+    projects,
+    visibilityState,
+    (sample: Record<string, unknown>) => { statusSamples.push(sample); },
+    () => { statusRefreshes += 1; return Promise.resolve(null); },
+    performance,
+  );
+  return { ...harness, requests, statusSamples, statusRefreshes: () => statusRefreshes } as {
     refresh: () => Promise<unknown>;
     setProjects: (projects: Array<Record<string, unknown>>) => void;
     setVisibility: (value: string) => void;
     discovery: () => ReturnType<typeof PsycheSessions.createCovenDiscoveryState>;
     requests: typeof requests;
+    statusSamples: typeof statusSamples;
+    statusRefreshes: () => number;
   };
 }
 
@@ -301,6 +318,62 @@ describe('macOS Coven session lifecycle boundary', () => {
 
     expect(harness.discovery().sessionsByProject.has('/alpha')).toBe(false);
     expect(harness.discovery().sessionsByProject.get('/beta')?.[0].id).toBe('new');
+  });
+
+  it('reports footer Coven health only for the request that still owns discovery state', async () => {
+    {
+      const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+      const first = harness.refresh();
+      harness.setProjects([{ root: '/beta', worktrees: [] }]);
+      const second = harness.refresh();
+
+      harness.requests[1].resolve({
+        status: 'error',
+        sessions: [],
+        message: 'new fail',
+      });
+      await second;
+      harness.requests[0].resolve({
+        status: 'ready',
+        sessions: [{ id: 'old', projectRoot: '/alpha', status: 'running' }],
+      });
+      await first;
+
+      expect(harness.statusSamples).toEqual([
+        expect.objectContaining({
+          phase: 'error',
+          error: 'new fail',
+          refreshedAt: expect.any(Number),
+          latencyMs: expect.any(Number),
+        }),
+      ]);
+      expect(harness.statusRefreshes()).toBe(1);
+    }
+
+    {
+      const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+      const first = harness.refresh();
+      harness.setProjects([{ root: '/beta', worktrees: [] }]);
+      const second = harness.refresh();
+
+      harness.requests[1].resolve({
+        status: 'ready',
+        sessions: [{ id: 'new', projectRoot: '/beta', status: 'running' }],
+      });
+      await second;
+      harness.requests[0].resolve(Promise.reject(new Error('stale fail')));
+      await first;
+
+      expect(harness.statusSamples).toEqual([
+        expect.objectContaining({
+          phase: 'ready',
+          error: '',
+          refreshedAt: expect.any(Number),
+          latencyMs: expect.any(Number),
+        }),
+      ]);
+      expect(harness.statusRefreshes()).toBe(1);
+    }
   });
 
   it('retains stored local Coven identity when creating threads', () => {
