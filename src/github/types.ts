@@ -192,6 +192,14 @@ export function parsePullRequestOverview(
     const commitCount = parseCommitCount(
       getOwnDataProperty(record, 'commits', invalidPullRequestOverview),
     );
+    const prUrl = requireHttpsUrl(
+      getOwnDataProperty(record, 'url', invalidPullRequestOverview),
+      invalidPullRequestOverview,
+    );
+    const prUrlHost = new URL(prUrl).hostname.toLowerCase().replace(/\.$/u, '');
+    if (prUrlHost !== parsedRepository.host) {
+      return invalidPullRequestOverview();
+    }
 
     return {
       repository: parsedRepository,
@@ -199,7 +207,7 @@ export function parsePullRequestOverview(
         getOwnDataProperty(record, 'number', invalidPullRequestOverview),
         invalidPullRequestOverview,
       ),
-      url: requireHttpsUrl(getOwnDataProperty(record, 'url', invalidPullRequestOverview), invalidPullRequestOverview),
+      url: prUrl,
       title: requireNonEmptyString(
         getOwnDataProperty(record, 'title', invalidPullRequestOverview),
         invalidPullRequestOverview,
