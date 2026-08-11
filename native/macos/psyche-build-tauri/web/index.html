@@ -126,13 +126,13 @@
           <div class="new-pane-menu" id="new-pane-menu" role="menu" aria-label="New pane" hidden>
             <div class="new-pane-menu-head" id="new-pane-menu-head">New pane</div>
             <button id="new-pane-term" class="new-pane-item" type="button" role="menuitem">
-              <span class="new-pane-glyph mono">❯_</span>Shell — login shell<span class="new-pane-key">/new-shell</span>
+              <span class="new-pane-glyph mono">❯_</span>Shell — login shell<span class="new-pane-key">⌘T</span>
             </button>
             <button id="new-pane-agent" class="new-pane-item" type="button" role="menuitem">
-              <span class="new-pane-glyph">✳</span>Agent — coven chat<span class="new-pane-key">⌘T</span>
+              <span class="new-pane-glyph">✳</span>Agent — choose CLI<span class="new-pane-key">⌘P</span>
             </button>
             <button id="new-pane-web" class="new-pane-item" type="button" role="menuitem">
-              <span class="new-pane-glyph">◍</span>Browser — web<span class="new-pane-key">⌘⌥B</span>
+              <span class="new-pane-glyph">◍</span>Browser — web<span class="new-pane-key">Web +</span>
             </button>
             <div class="new-pane-sep" role="separator"></div>
             <button id="new-pane-set" class="new-pane-item" type="button" role="menuitem"
@@ -361,6 +361,16 @@
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <input id="url" type="url" placeholder="example.com or localhost:5173 — Enter to load" />
+            <button id="open-surprise" class="icon-btn ghost-btn" title="Open surprise in new tab" aria-label="Open surprise in new tab">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.35"/>
+                <circle cx="5" cy="5" r="0.85" fill="currentColor"/>
+                <circle cx="11" cy="5" r="0.85" fill="currentColor"/>
+                <circle cx="8" cy="8" r="0.85" fill="currentColor"/>
+                <circle cx="5" cy="11" r="0.85" fill="currentColor"/>
+                <circle cx="11" cy="11" r="0.85" fill="currentColor"/>
+              </svg>
+            </button>
             <button id="open-external" class="icon-btn ghost-btn" title="Open in default browser" aria-label="Open in default browser">↗</button>
           </header>
           <div id="browser-tab-strip" class="browser-tab-strip"></div>
@@ -453,6 +463,28 @@
           </div>
           <div class="help-grid" id="help-grid"></div>
         </div>
+      </div>
+
+      <div class="agent-picker-overlay" id="agent-picker-overlay" hidden>
+        <section
+          class="agent-picker"
+          id="agent-picker"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="agent-picker-title"
+        >
+          <div class="agent-picker-head">
+            <span class="agent-picker-title" id="agent-picker-title">Choose agent</span>
+            <span class="agent-picker-hint">enter to launch · esc to close</span>
+          </div>
+          <div
+            class="agent-picker-list"
+            id="agent-picker-list"
+            role="listbox"
+            tabindex="0"
+            aria-label="Coding agents"
+          ></div>
+        </section>
       </div>
     </div>
     <dialog

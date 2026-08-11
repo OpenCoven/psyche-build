@@ -140,7 +140,7 @@ Immediately after `openBlankBrowserTab()`, add:
 
 ```js
   async function openDiceBrowserTab() {
-    var tab = await openBlankBrowserTab();
+    var tab = await openBlankBrowserTab({ requireNew: true });
     if (!tab) return;
     await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
@@ -172,7 +172,7 @@ Run:
 pnpm vitest --run __tests__/tauriBrowserDiceButton.test.ts
 ```
 
-Expected: PASS with 3 tests.
+Expected: PASS with 4 tests.
 
 - [ ] **Step 7: Commit the feature**
 

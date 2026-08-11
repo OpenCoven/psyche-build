@@ -77,9 +77,10 @@
   --composer-h: 54px;
   --session-row-h: 44px;
   --pane-head-h: 32px;
+  --pane-foot-h: 27px;
   --pane-gap: 2px;
   --pane-min-w: 200px;
-  --pane-min-h: 110px;
+  --pane-min-h: 137px;
   --browser-bar-h: 30px;
   --browser-tab-h: 22px;
   --splitter-w: 10px;
@@ -1254,7 +1255,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane {
   display: grid;
-  grid-template-rows: 24px minmax(0, 1fr);
+  grid-template-rows: 24px minmax(0, 1fr) var(--pane-foot-h);
   min-width: var(--pane-min-w);
   min-height: var(--pane-min-h);
   height: 100%;
@@ -1336,7 +1337,7 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
    restyle the frames it lays out to match the workspace redesign. */
 
 .terminal-pane {
-  grid-template-rows: var(--pane-head-h) minmax(0, 1fr);
+  grid-template-rows: var(--pane-head-h) minmax(0, 1fr) var(--pane-foot-h);
   border-radius: 4px;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.86));
   /* Panes degrade on their own width, not the window's: a pane can be narrow
@@ -1568,6 +1569,180 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   transition: background var(--transition-fast);
 }
 .terminal-pane-divider:hover { background: rgba(var(--rgb-accent), 0.12); }
+
+.terminal-pane-footer {
+  display: flex;
+  min-width: 0;
+  height: var(--pane-foot-h);
+  overflow: hidden;
+  flex-wrap: nowrap;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.018);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.terminal-pane-footer-items {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+.terminal-pane-footer-item,
+.terminal-pane-footer-overflow,
+.pane-footer-menu-item {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.terminal-pane-footer-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  overflow: hidden;
+}
+.terminal-pane-footer-item[data-footer-key="branch"],
+.terminal-pane-footer-item[data-footer-key="worktree"] {
+  flex: 1 1 120px;
+}
+.terminal-pane-footer-item[data-footer-key="pane"],
+.terminal-pane-footer-item[data-footer-key="model"],
+.terminal-pane-footer-item[data-footer-key="session"],
+.terminal-pane-footer-item[data-footer-key="context"],
+.terminal-pane-footer-item[data-footer-key="spend"] {
+  flex: 0 1 auto;
+  max-width: 132px;
+}
+.pane-footer-item-label {
+  flex: none;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pane-footer-item-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+}
+.terminal-pane-footer-item:hover,
+.terminal-pane-footer-overflow:hover,
+.pane-footer-menu-item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.terminal-pane-footer-item:active,
+.terminal-pane-footer-overflow:active,
+.pane-footer-menu-item:active {
+  background: var(--accent-soft);
+}
+.terminal-pane-footer-item:focus-visible,
+.terminal-pane-footer-overflow:focus-visible,
+.pane-footer-menu-item:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.terminal-pane-footer-overflow {
+  display: inline-flex;
+  flex: 0 0 27px;
+  align-items: center;
+  justify-content: center;
+  border-right: 0;
+  border-left: 1px solid var(--border);
+  font-size: 13px;
+}
+.terminal-pane-footer[data-tier="full"] .terminal-pane-footer-overflow,
+.terminal-pane-footer-overflow[hidden] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-session"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="session"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="session"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-spend"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="spend"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="spend"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="no-context"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="core"] [data-footer-key="context"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="context"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="core"] [data-footer-key="model"],
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="model"] {
+  display: none;
+}
+.terminal-pane-footer[data-tier="compact"] [data-footer-key="pane"] {
+  display: none;
+}
+.pane-footer-popover {
+  position: fixed;
+  z-index: 150;
+  box-sizing: border-box;
+  min-width: 190px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: rgba(var(--rgb-s1), 0.98);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  color: var(--text-soft);
+}
+.pane-usage-popover {
+  display: grid;
+  gap: 2px;
+}
+.pane-usage-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 5px;
+  font-size: 11px;
+}
+.pane-usage-row span {
+  color: var(--muted);
+}
+.pane-usage-row strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.pane-footer-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.pane-footer-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 28px;
+  padding: 0 8px;
+  border-right: 0;
+  border-radius: 4px;
+  text-align: left;
+}
 
 /* -------- 2D tiling: row splits and drag-to-reposition --------
    The pane tree lays out both axes; these rules turn a split's orientation into
@@ -3637,6 +3812,85 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 5px;
   padding: 1px 7px;
   white-space: nowrap;
+}
+
+.agent-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+  background: rgba(5, 5, 8, 0.62);
+  animation: menu-rise 140ms ease-out;
+}
+.agent-picker-overlay[hidden] { display: none; }
+.agent-picker {
+  width: min(440px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.99));
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+}
+.agent-picker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 6px 12px;
+}
+.agent-picker-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.agent-picker-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.agent-picker-list {
+  display: grid;
+  gap: 4px;
+  outline: none;
+}
+.agent-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-align: left;
+}
+.agent-picker-option:hover,
+.agent-picker-option.is-selected {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text);
+}
+.agent-picker-option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.agent-picker-label {
+  min-width: 0;
+}
+.agent-picker-option-command {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-picker-overlay { animation: none; }
 }
 
 /* -------- Diff viewer --------
