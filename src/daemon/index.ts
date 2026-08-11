@@ -9,10 +9,10 @@ import {
   type ClientRequest,
   type ServerResponse,
   type StreamId,
+  type CovenSessionSummary,
   encodeBinaryFrame,
 } from './protocol.js';
 import {
-  buildDesktopUseQuickInput,
   buildDesktopUseStateFromEvents,
 } from '../utils/covenDesktopUse.js';
 import { TmuxControl, tmuxSessionNameForRoot, tmuxSessionExists } from '../services/tmuxControl.js';
@@ -26,21 +26,24 @@ import {
   listProjectCovenSessions,
   listScopedProjects,
   createCovenClient,
-  mutateBridgeConfig,
-  launchProjectCovenSession,
-  openProjectCovenSession,
-  routeProjectCovenSessionCapability,
   readPaneStatus,
   resolveConfiguredPaneId,
-  spawnBridgePane,
   tmuxPaneExists,
+  type BridgeCovenOpenResult,
 } from './bridge.js';
+import { canonicalizeProjectRoot } from '../control/projectIdentity.js';
+import { createHostControlPlane } from '../control/host.js';
+import { ControlServer } from '../control/server.js';
+import { createControlCredentialStore } from '../control/credentials.js';
+import { controlEndpointForProject } from '../control/endpoint.js';
+import { createDaemonControlHandlers } from './controlHandlers.js';
+import type { ControlActorKind, ControlCommand, CommandOutcome } from '../control/types.js';
 import {
   AgenticCapabilityRouter,
   createCovenNativeCapabilityStrategy,
   type AgenticCapabilityStrategy,
+  type AgenticCapabilityExecution,
 } from '../orchestration/capabilityRouter.js';
-import type { CovenClient } from './bridge.js';
 import { readDaemonWorkspaceSnapshot } from './workspace.js';
 import type { WorkspaceSnapshot } from '../workspace/snapshot.js';
 import type { BridgeSpawnRequest, BridgeSpawnResult } from './bridge.js';
@@ -106,6 +109,41 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.error(`[tmux-control] ${msg.trim()}`);
   });
 
+  // The runtime is the single authority for pane mutations. Acquire the
+  // project owner fence before accepting any connection; a failed acquire must
+  // fail startup loudly rather than fall back to unfenced mutation.
+  const canonicalProjectRoot = await canonicalizeProjectRoot(projectRoot);
+  const controlHandlers = createDaemonControlHandlers({
+    tmux,
+    projectRoot: canonicalProjectRoot,
+    sessionName,
+    capabilityRouter,
+  });
+  const host = await createHostControlPlane(canonicalProjectRoot, { handlers: controlHandlers });
+
+  // Mount the canonical control socket alongside the v0 WebSocket. Both share
+  // the one host runtime, so every mutation — from either transport — passes
+  // through the single journaled, lease-revalidating authority. Everything that
+  // can fail after the owner fence is held runs inside the try so the fence is
+  // released before rethrowing and the lock never leaks.
+  const controlEndpoint = controlEndpointForProject(canonicalProjectRoot);
+  let controlServer: ControlServer;
+  try {
+    const controlCredentials = await createControlCredentialStore({
+      projectRoot: canonicalProjectRoot,
+    });
+    controlServer = await ControlServer.start({
+      endpoint: controlEndpoint,
+      projectRoot: canonicalProjectRoot,
+      ownerEpoch: host.epoch,
+      runtime: host.runtime,
+      credentials: controlCredentials,
+    });
+  } catch (error) {
+    await host.close().catch(() => undefined);
+    throw error;
+  }
+
   const wss = new WebSocketServer({
     host: '127.0.0.1',
     port,
@@ -133,6 +171,8 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
   console.log(`tmux session:  ${sessionName}${tmux['started'] ? '' : ' (not running — start psyche first)'}`);
   // eslint-disable-next-line no-console
   console.log(`token file:    ${tokenFilePath()}`);
+  // eslint-disable-next-line no-console
+  console.log(`control socket: ${controlEndpoint}`);
 
   wss.on('connection', (ws, req) => {
     const header = req.headers['authorization'];
@@ -141,11 +181,12 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
       && tokensMatch(token, header.slice('Bearer '.length));
     const conn = new Connection(ws, {
       token,
-      projectRoot,
+      projectRoot: canonicalProjectRoot,
       serverVersion,
       authedViaHeader,
       tmux,
-      capabilityRouter,
+      controlRuntime: host.runtime,
+      ownerEpoch: host.epoch,
     });
     conn.bind();
   });
@@ -155,7 +196,16 @@ export async function runDaemon(opts: Partial<DaemonOptions> = {}): Promise<void
     console.log(`\npsyche daemon shutting down (${signal})`);
     tmux.stop();
     wss.close();
-    process.exit(0);
+    // Close the control socket before releasing the owner fence. host.close()
+    // frees the fence, so if it ran concurrently a successor daemon could win
+    // the fence and try to bind the same endpoint while this control server is
+    // still tearing down its listener/socket file. Sequential teardown (reverse
+    // of mount order) closes and unlinks the socket first, then frees the fence.
+    void controlServer.close()
+      .catch(() => undefined)
+      .then(() => host.close())
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -167,13 +217,18 @@ export interface ConnectionDeps {
   serverVersion: string;
   authedViaHeader: boolean;
   tmux: TmuxControl;
-  capabilityRouter: AgenticCapabilityRouter;
+  /**
+   * The single authority for pane mutations.
+   *
+   * `Connection.dispatch` translates v0 protocol messages into canonical
+   * control commands and submits them here instead of driving tmux or the
+   * bridge spawn directly. The runtime revalidates leases and owner epoch and
+   * journals every transaction.
+   */
+  controlRuntime: { submit(command: ControlCommand): Promise<CommandOutcome> };
+  /** Current owner epoch, stamped onto every translated command. */
+  ownerEpoch: number;
   workspaceProvider?: () => Promise<WorkspaceSnapshot>;
-  spawnPane?: (
-    projectRoot: string,
-    sessionName: string,
-    request: BridgeSpawnRequest,
-  ) => Promise<BridgeSpawnResult>;
 }
 
 /**
@@ -186,6 +241,14 @@ export class Connection {
   private authed: boolean;
   private workspaceSequence = 0;
   private activeStreams = new Map<StreamId, { paneId: string }>();
+
+  /**
+   * Cached human lease per interactive stream. Keeping the takeover result lets
+   * repeated keystrokes reuse the same lease revision instead of re-preempting
+   * the pane on every character; `nonce` rotates the takeover idempotency key
+   * only when we must re-acquire after being preempted.
+   */
+  private streamLease = new Map<StreamId, { revision: number; nonce: number }>();
   private idempotentSpawns = new Map<string, {
     fingerprint: string;
     result: Promise<BridgeSpawnResult>;
@@ -201,6 +264,9 @@ export class Connection {
    * keeps the registration count at one and makes detach cleanup exact.
    */
   private outputHandler: ((paneId: string, data: Buffer) => void) | null = null;
+
+  /** Stable identity for every command this connection translates. */
+  private readonly actorId = randomUUID();
 
   constructor(
     private ws: WebSocket,
@@ -252,6 +318,7 @@ export class Connection {
         this.authTimer = null;
       }
       this.activeStreams.clear();
+      this.streamLease.clear();
       this.releaseOutputHandler();
     });
   }
@@ -354,6 +421,54 @@ export class Connection {
    * psyche, but it is a plain JSON file on disk, and a pane id is about to
    * become tmux command text.
    */
+  /**
+   * Build a canonical control command from a translated v0 request.
+   *
+   * The connection never trusts client-supplied actor or epoch fields: it
+   * stamps its own connection actor, the current owner epoch, and the project
+   * root. The runtime revalidates leases and epoch before any effect runs.
+   */
+  private buildCommand<K extends ControlCommand['kind']>(
+    kind: K,
+    payload: Extract<ControlCommand, { kind: K }>['payload'],
+    opts: { actorKind: ControlActorKind; idempotencyKey: string },
+  ): ControlCommand {
+    return {
+      id: randomUUID(),
+      idempotencyKey: opts.idempotencyKey,
+      kind,
+      projectRoot: this.deps.projectRoot,
+      actor: { id: this.actorId, kind: opts.actorKind, clientId: this.actorId },
+      ownerEpoch: this.deps.ownerEpoch,
+      createdAt: new Date().toISOString(),
+      payload,
+    } as ControlCommand;
+  }
+
+  private submitControl(command: ControlCommand): Promise<CommandOutcome> {
+    return this.deps.controlRuntime.submit(command);
+  }
+
+  /** Send the v0 error frame for a non-successful control outcome. */
+  private sendControlError(
+    requestId: string | undefined,
+    fallbackCode: string,
+    outcome: CommandOutcome,
+  ): void {
+    // The runtime reports `command_failed` for handler errors that carry no
+    // code of their own (e.g. a raw tmux failure). Those map back to the v0
+    // per-operation code so clients keep seeing the same wire codes as before.
+    const specificCode =
+      outcome.status !== 'succeeded' && outcome.code && outcome.code !== 'command_failed'
+        ? outcome.code
+        : undefined;
+    const code = specificCode ?? fallbackCode;
+    const message = outcome.status !== 'succeeded' && outcome.message
+      ? outcome.message
+      : 'control command failed';
+    this.send({ type: 'error', requestId, code, message });
+  }
+
   private async resolveScopedPaneId(paneId: unknown): Promise<string> {
     if (typeof paneId !== 'string' || !paneId) {
       throw bridgeErrorLike('missing_pane', 'pane id required');
@@ -428,46 +543,74 @@ export class Connection {
         return;
       }
       case 'coven.sessions.launch': {
-        try {
-          const session = await launchProjectCovenSession(this.deps.projectRoot, msg.launch, createCovenClient());
-          this.send({ type: 'coven.sessions.launch.result', requestId: msg.requestId, session });
-          await this.emitWorkspaceChanged();
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_launch_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.session.launch',
+          {
+            harness: msg.launch.harness,
+            prompt: msg.launch.prompt,
+            cwd: msg.launch.cwd,
+            title: msg.launch.title,
+          },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.launch:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_session_launch_failed', outcome);
+          return;
         }
+        const session = outcome.value as CovenSessionSummary;
+        this.send({ type: 'coven.sessions.launch.result', requestId: msg.requestId, session });
+        await this.emitWorkspaceChanged();
         return;
       }
       case 'coven.sessions.open': {
-        try {
-          const result = await openProjectCovenSession(this.deps.projectRoot, this.deps.tmux.sessionName, msg.id);
-          this.send({
-            type: 'coven.sessions.open.result',
-            requestId: msg.requestId,
-            id: result.id,
-            pane: result.pane,
-            session: result.session,
-          });
-          await this.emitWorkspaceChanged();
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_session_open_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.session.open',
+          { sessionId: msg.id },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.open:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_session_open_failed', outcome);
+          return;
         }
+        const result = outcome.value as BridgeCovenOpenResult;
+        this.send({
+          type: 'coven.sessions.open.result',
+          requestId: msg.requestId,
+          id: result.id,
+          pane: result.pane,
+          session: result.session,
+        });
+        await this.emitWorkspaceChanged();
         return;
       }
       case 'coven.capabilities.execute': {
-        try {
-          this.send(await dispatchCovenCapabilityRequest(
-            this.deps.projectRoot,
-            msg,
-            this.deps.capabilityRouter,
-          ));
-        } catch (e) {
-          this.send({
-            type: 'error',
-            requestId: msg.requestId,
-            code: bridgeErrorCode(e, 'coven_capability_execution_failed'),
-            message: bridgeErrorMessage(e),
-          });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.capability.execute',
+          {
+            sessionId: msg.sessionId,
+            capability: msg.capability.capability,
+            prompt: msg.capability.prompt,
+            provider: msg.capability.provider,
+            taskId: msg.capability.taskId,
+            traceId: msg.capability.traceId,
+            idempotencyKey: msg.capability.idempotencyKey,
+            title: msg.capability.title,
+            state: msg.capability.state,
+            attempt: msg.capability.attempt,
+          },
+          { actorKind: 'compatibility', idempotencyKey: msg.capability.idempotencyKey && msg.capability.idempotencyKey.length > 0 ? `v0:coven.capability:${msg.capability.idempotencyKey}` : `v0:coven.capability:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_capability_execution_failed', outcome);
+          return;
         }
+        const value = outcome.value as { sessionId: string; execution: AgenticCapabilityExecution };
+        this.send({
+          type: 'coven.capabilities.execute.result',
+          requestId: msg.requestId,
+          sessionId: value.sessionId,
+          execution: value.execution,
+        });
         return;
       }
       case 'coven.desktop.state': {
@@ -485,13 +628,22 @@ export class Connection {
         return;
       }
       case 'coven.desktop.action': {
-        try {
-          const client = createCovenClient();
-          await client.sendInput?.(msg.sessionId, buildDesktopUseQuickInput(msg.action));
-          this.send({ type: 'coven.desktop.action.result', requestId: msg.requestId, sessionId: msg.sessionId, action: msg.action, accepted: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: bridgeErrorCode(e, 'coven_desktop_action_failed'), message: bridgeErrorMessage(e) });
+        const outcome = await this.submitControl(this.buildCommand(
+          'coven.desktop.action',
+          { sessionId: msg.sessionId, action: msg.action },
+          { actorKind: 'compatibility', idempotencyKey: `v0:coven.desktop.action:${randomUUID()}` },
+        ));
+        if (outcome.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'coven_desktop_action_failed', outcome);
+          return;
         }
+        this.send({
+          type: 'coven.desktop.action.result',
+          requestId: msg.requestId,
+          sessionId: msg.sessionId,
+          action: msg.action,
+          accepted: true,
+        });
         return;
       }
       case 'panes.capture': {
@@ -545,17 +697,20 @@ export class Connection {
         }
 
         if (msg.cols && msg.rows) {
-          try {
-            this.deps.tmux.resizePane(paneId, msg.cols, msg.rows);
-          } catch {
+          await this.submitControl(this.buildCommand(
+            'pane.resize',
+            { paneId, cols: msg.cols, rows: msg.rows },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          )).catch(() => {
             // best-effort; resize errors shouldn't kill the attach
-          }
+          });
         }
 
         return;
       }
       case 'panes.detach': {
         if (this.activeStreams.delete(msg.streamId)) {
+          this.streamLease.delete(msg.streamId);
           this.releaseOutputHandler();
         }
         this.send({ type: 'ack', requestId: msg.requestId, ok: true });
@@ -583,11 +738,15 @@ export class Connection {
           });
           return;
         }
-        try {
-          this.deps.tmux.selectPane(paneId);
+        const outcome = await this.submitControl(this.buildCommand(
+          'pane.focus',
+          { paneId },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (outcome.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'focus_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'focus_failed', outcome);
         }
         return;
       }
@@ -597,20 +756,59 @@ export class Connection {
           this.send({ type: 'error', requestId: msg.requestId, code: 'no_stream', message: 'unknown streamId' });
           return;
         }
-        // `data` is base64 to preserve arbitrary bytes. This used to be a
-        // try/catch, which never fired: Buffer.from(..., 'base64') skips
-        // characters outside the alphabet instead of throwing, so a malformed
-        // payload was silently mangled and typed into the user's terminal.
         const bytes = decodeBase64Payload(msg.data);
         if (!bytes) {
           this.send({ type: 'error', requestId: msg.requestId, code: 'bad_base64', message: 'input must be base64' });
           return;
         }
-        try {
-          this.deps.tmux.sendKeysHex(stream.paneId, bytes);
+        // Interactive v0 input is a human takeover followed by human input.
+        // We cache the lease per stream so repeated keystrokes reuse the same
+        // revision instead of re-preempting the pane on every character. If a
+        // keystroke fails because the pane was preempted (stale revision), we
+        // re-acquire once with a fresh takeover and retry, preserving v0's
+        // "last writer can always type" behavior.
+        const acquire = async (fresh: boolean): Promise<CommandOutcome | null> => {
+          if (!fresh && this.streamLease.has(msg.streamId)) return null;
+          const prior = this.streamLease.get(msg.streamId);
+          const nonce = fresh ? (prior?.nonce ?? 0) + 1 : (prior?.nonce ?? 1);
+          const takeover = await this.submitControl(this.buildCommand(
+            'pane.takeover',
+            { paneId: stream.paneId },
+            { actorKind: 'human', idempotencyKey: `v0:takeover:${this.actorId}:${msg.streamId}:${nonce}` },
+          ));
+          if (takeover.status === 'succeeded') {
+            this.streamLease.set(msg.streamId, { revision: readLeaseRevision(takeover), nonce });
+          }
+          return takeover;
+        };
+        const sendInput = () => this.submitControl(this.buildCommand(
+          'pane.input',
+          {
+            paneId: stream.paneId,
+            dataBase64: msg.data,
+            leaseRevision: this.streamLease.get(msg.streamId)?.revision ?? 0,
+          },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+
+        const initialTakeover = await acquire(false);
+        if (initialTakeover && initialTakeover.status !== 'succeeded') {
+          this.sendControlError(msg.requestId, 'send_keys_failed', initialTakeover);
+          return;
+        }
+        let input = await sendInput();
+        if (input.status !== 'succeeded' && isStaleLeaseOutcome(input)) {
+          const retakeover = await acquire(true);
+          if (retakeover && retakeover.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'send_keys_failed', retakeover);
+            return;
+          }
+          input = await sendInput();
+        }
+        if (input.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'send_keys_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'send_keys_failed', input);
         }
         return;
       }
@@ -620,21 +818,34 @@ export class Connection {
           this.send({ type: 'error', requestId: msg.requestId, code: 'no_stream', message: 'unknown streamId' });
           return;
         }
-        try {
-          this.deps.tmux.resizePane(stream.paneId, msg.cols, msg.rows);
+        const outcome = await this.submitControl(this.buildCommand(
+          'pane.resize',
+          { paneId: stream.paneId, cols: msg.cols, rows: msg.rows },
+          { actorKind: 'human', idempotencyKey: randomUUID() },
+        ));
+        if (outcome.status === 'succeeded') {
           this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-        } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'resize_failed', message: String(e) });
+        } else {
+          this.sendControlError(msg.requestId, 'resize_failed', outcome);
         }
         return;
       }
       case 'panes.kill': {
         try {
           const paneId = await this.resolveScopedPaneId(msg.id);
-          this.deps.tmux.killPane(paneId);
+          const outcome = await this.submitControl(this.buildCommand(
+            'pane.kill',
+            { paneId },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          ));
+          if (outcome.status !== 'succeeded') {
+            this.sendControlError(msg.requestId, 'kill_failed', outcome);
+            return;
+          }
           for (const [sid, s] of this.activeStreams) {
             if (s.paneId !== paneId) continue;
             this.activeStreams.delete(sid);
+            this.streamLease.delete(sid);
             this.send({ type: 'panes.stream.exit', streamId: sid, reason: 'killed' });
           }
           this.releaseOutputHandler();
@@ -647,11 +858,23 @@ export class Connection {
       }
       case 'panes.meta': {
         try {
-          await updatePaneMeta(this.deps.projectRoot, msg.id, { title: msg.title, agent: msg.agent });
-          this.send({ type: 'ack', requestId: msg.requestId, ok: true });
-          await this.emitWorkspaceChanged();
+          const outcome = await this.submitControl(this.buildCommand(
+            'pane.meta.update',
+            { paneId: msg.id, title: msg.title, agent: msg.agent },
+            { actorKind: 'human', idempotencyKey: randomUUID() },
+          ));
+          if (outcome.status === 'succeeded') {
+            this.send({ type: 'ack', requestId: msg.requestId, ok: true });
+            await this.emitWorkspaceChanged();
+          } else {
+            this.sendControlError(msg.requestId, 'meta_failed', outcome);
+          }
         } catch (e) {
-          this.send({ type: 'error', requestId: msg.requestId, code: 'meta_failed', message: String(e) });
+          // submit() itself can reject on runtime infrastructure failure (e.g. a
+          // journal append error) before producing an outcome. Preserve the v0
+          // wire behavior: a correlated meta_failed frame rather than letting
+          // dispatch throw into the connection-level internal_error backstop.
+          this.send({ type: 'error', requestId: msg.requestId, code: 'meta_failed', message: bridgeErrorMessage(e) });
         }
         return;
       }
@@ -729,13 +952,32 @@ export class Connection {
     }
   }
 
+  private submitSpawn(request: BridgeSpawnRequest): Promise<BridgeSpawnResult> {
+    return this.submitControl(this.buildCommand(
+      'pane.spawn',
+      {
+        cwd: request.cwd,
+        agent: request.agent,
+        title: request.title,
+        prompt: request.prompt,
+        branch: request.branch,
+        startPointBranch: request.startPointBranch,
+        existingWorktree: request.existingWorktree,
+        requestId: request.requestId,
+      },
+      { actorKind: 'compatibility', idempotencyKey: `v0:spawn:${randomUUID()}` },
+    )).then((outcome) => {
+      if (outcome.status === 'succeeded') return outcome.value as BridgeSpawnResult;
+      throw Object.assign(new Error(outcome.message), { code: outcome.code });
+    });
+  }
+
   private spawnPane(
     request: BridgeSpawnRequest,
     idempotencyKey?: string,
   ): Promise<{ result: BridgeSpawnResult; replayed: boolean }> {
-    const spawn = this.deps.spawnPane ?? spawnBridgePane;
     if (idempotencyKey === undefined) {
-      return spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request)
+      return this.submitSpawn(request)
         .then((result) => ({ result, replayed: false }));
     }
     if (!validIdempotencyKey(idempotencyKey)) {
@@ -765,7 +1007,7 @@ export class Connection {
       return existing.result.then((result) => ({ result, replayed: true }));
     }
 
-    const result = spawn(this.deps.projectRoot, this.deps.tmux.sessionName, request);
+    const result = this.submitSpawn(request);
     this.idempotentSpawns.set(idempotencyKey, { fingerprint, result });
     if (this.idempotentSpawns.size > MAX_IDEMPOTENT_SPAWNS) {
       const oldest = this.idempotentSpawns.keys().next().value;
@@ -779,30 +1021,26 @@ function validIdempotencyKey(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 }
 
+/** Read the lease revision a successful takeover reports. */
+function readLeaseRevision(outcome: CommandOutcome): number {
+  if (outcome.status !== 'succeeded') return 0;
+  const value = outcome.value as { revision?: number; leaseRevision?: number } | undefined;
+  return value?.revision ?? value?.leaseRevision ?? 0;
+}
+
+/** True when an input failed because our cached human lease is stale. */
+function isStaleLeaseOutcome(outcome: CommandOutcome): boolean {
+  if (outcome.status === 'succeeded') return false;
+  return (
+    outcome.code === 'lease_revision_mismatch' ||
+    outcome.code === 'lane_conflict' ||
+    outcome.code === 'lease_expired'
+  );
+}
+
 function batchLaneIdempotencyKey(batchKey: string, index: number): string {
   const digest = createHash('sha256').update(batchKey).digest('hex').slice(0, 32);
   return `batch:${digest}:${index}`;
-}
-
-export async function dispatchCovenCapabilityRequest(
-  projectRoot: string,
-  request: Extract<ClientRequest, { type: 'coven.capabilities.execute' }>,
-  router: AgenticCapabilityRouter,
-  client: CovenClient = createCovenClient(),
-): Promise<Extract<ServerResponse, { type: 'coven.capabilities.execute.result' }>> {
-  const execution = await routeProjectCovenSessionCapability(
-    projectRoot,
-    request.sessionId,
-    request.capability,
-    router,
-    client,
-  );
-  return {
-    type: 'coven.capabilities.execute.result',
-    requestId: request.requestId,
-    sessionId: request.sessionId,
-    execution,
-  };
 }
 
 /** Error carrying a protocol `code`, matching what bridge.ts throws. */
@@ -828,30 +1066,11 @@ export function tokensMatch(expected: string, supplied: unknown): boolean {
 }
 
 /**
- * Patch a pane's metadata in the project config.
- *
- * Goes through `mutateBridgeConfig` rather than doing its own
- * read-parse-write. That gives it three things it did not have: serialization
- * against concurrent spawns (an inline read-modify-write here dropped panes
- * that a spawn appended between the read and the write), an atomic write
- * (a plain `writeFile` truncates first, so a crash left a torn registry), and
- * a read that refuses to fall back to an empty config when the file exists but
- * cannot be parsed.
+ * Re-exported from `./bridge.js`, where it lives so the control handler can
+ * reach it without importing this daemon entrypoint. Kept here for existing
+ * importers (tests).
  */
-export async function updatePaneMeta(
-  projectRoot: string,
-  paneId: string,
-  patch: { title?: string; agent?: string },
-): Promise<void> {
-  await mutateBridgeConfig(projectRoot, (config) => {
-    const panes = Array.isArray(config.panes) ? config.panes : [];
-    const pane = panes.find((p) => p.id === paneId || p.paneId === paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found`);
-    if (patch.title !== undefined) pane.title = patch.title;
-    if (patch.agent !== undefined) pane.agent = patch.agent;
-    config.panes = panes;
-  });
-}
+export { updatePaneMeta } from './bridge.js';
 
 function findGitRoot(): string | null {
   try {

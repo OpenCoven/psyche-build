@@ -87,6 +87,17 @@ export function statusPresentation(status) {
   }
 }
 
+/**
+ * The daemon reports every session it has ever recorded, so an unfiltered rail
+ * is dominated by finished CLI runs. Only sessions whose harness is still
+ * attached are worth a row: `statusPresentation().live` is the single source of
+ * truth for that. Note `idle` is deliberately not live — Coven writes it when a
+ * run *exits* with a resumable conversation, so the process is already gone.
+ */
+export function isLiveCovenSession(session) {
+  return statusPresentation(session?.status).live;
+}
+
 export function sortCovenSessions(sessions) {
   return [...(Array.isArray(sessions) ? sessions : [])].sort((left, right) => {
     const liveDifference = Number(statusPresentation(right?.status).live)
@@ -101,6 +112,28 @@ export function sortCovenSessions(sessions) {
 }
 
 export function groupCovenSessions(sessions) {
+  const grouped = new Map();
+
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    if (!session || !isSafeCovenSessionId(session.id)
+      || typeof session.projectRoot !== 'string' || !session.projectRoot
+      || !isLiveCovenSession(session)) {
+      continue;
+    }
+
+    const projectSessions = grouped.get(session.projectRoot) ?? [];
+    projectSessions.push(session);
+    grouped.set(session.projectRoot, projectSessions);
+  }
+
+  for (const [projectRoot, projectSessions] of grouped) {
+    grouped.set(projectRoot, sortCovenSessions(projectSessions));
+  }
+
+  return grouped;
+}
+
+export function groupAllCovenSessions(sessions) {
   const grouped = new Map();
 
   for (const session of Array.isArray(sessions) ? sessions : []) {
@@ -226,9 +259,11 @@ export function createCovenDiscoveryState() {
   return {
     phase: 'idle',
     sessionsByProject: new Map(),
+    allSessionsByProject: new Map(),
     message: null,
     requestId: 0,
     refreshedAt: null,
+    stale: false,
   };
 }
 
@@ -242,6 +277,7 @@ export function beginCovenRequest(state) {
       ...state,
       phase: initialRequest ? 'loading' : state.phase,
       sessionsByProject: initialRequest ? new Map() : state.sessionsByProject,
+      allSessionsByProject: initialRequest ? new Map() : state.allSessionsByProject,
       message: initialRequest ? null : state.message,
       requestId,
     },
@@ -258,9 +294,11 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
     return {
       ...state,
       phase: 'error',
-      sessionsByProject: new Map(),
+      sessionsByProject: state.sessionsByProject,
+      allSessionsByProject: state.allSessionsByProject,
       message: null,
       refreshedAt,
+      stale: state.allSessionsByProject.size > 0,
     };
   }
 
@@ -269,17 +307,21 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
       ...state,
       phase: 'ready',
       sessionsByProject: groupCovenSessions(response.sessions),
+      allSessionsByProject: groupAllCovenSessions(response.sessions),
       message,
       refreshedAt,
+      stale: false,
     };
   }
 
   return {
     ...state,
     phase: status,
-    sessionsByProject: new Map(),
+    sessionsByProject: state.sessionsByProject,
+    allSessionsByProject: state.allSessionsByProject,
     message,
     refreshedAt,
+    stale: state.allSessionsByProject.size > 0,
   };
 }
 
@@ -288,8 +330,10 @@ export function invalidateCovenRequests(state) {
     ...state,
     phase: 'idle',
     sessionsByProject: new Map(),
+    allSessionsByProject: new Map(),
     message: null,
     requestId: state.requestId + 1,
     refreshedAt: null,
+    stale: false,
   };
 }

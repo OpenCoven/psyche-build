@@ -1,9 +1,9 @@
 import {
-  createCovenClient,
-  launchProjectCovenSession,
+  defaultCovenClient,
+  defaultLaunchProjectCovenSession,
   type CovenClient,
-} from '../daemon/bridge.js';
-import type { CovenSessionSummary } from '../daemon/protocol.js';
+  type CovenSessionSummary,
+} from '../control/resources/coven.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
 
@@ -35,7 +35,7 @@ export interface CovenSessionBackend {
 export function createCovenSessionBackend(
   options: CovenSessionBackendOptions = {},
 ): CovenSessionBackend {
-  const client = options.client ?? createCovenClient();
+  const client = options.client ?? defaultCovenClient();
   const sessions = new Map<string, CovenSessionSummary>();
 
   const execute: LaneBackend = async (lane: OrchestrationLanePlan): Promise<LaneExecutionOutput> => {
@@ -56,7 +56,7 @@ export function createCovenSessionBackend(
 
     let session: CovenSessionSummary;
     try {
-      session = await launchProjectCovenSession(
+      session = await defaultLaunchProjectCovenSession(
         lane.projectRoot,
         {
           harness: lane.harness,

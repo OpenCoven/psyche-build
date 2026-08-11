@@ -1,22 +1,10 @@
-import {
-  readdir as fsReaddir,
-  readFile as fsReadFile,
-} from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
-const repositoryRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-);
-const readFile = (filePath: string, encoding: BufferEncoding) => (
-  fsReadFile(path.resolve(repositoryRoot, filePath), encoding)
-);
-const readdir = (
-  directory: string,
-  options: { withFileTypes: true },
-) => fsReaddir(path.resolve(repositoryRoot, directory), options);
+const execFileAsync = promisify(execFile);
 
 const releaseDocs = [
   'README.md',
@@ -24,20 +12,6 @@ const releaseDocs = [
   'docs/RELEASE.md',
   'native/ios/README.md',
 ] as const;
-
-const generatedOrDependencyDirectories = new Set([
-  '.build',
-  '.git',
-  '.psyche',
-  '.worktrees',
-  '__fixtures__',
-  'client',
-  'coverage',
-  'dist',
-  'fixtures',
-  'node_modules',
-  'target',
-]);
 
 const historicalDocDirectories = new Set([
   path.join('docs', 'superpowers', 'plans'),
@@ -65,24 +39,32 @@ function isActiveDocumentationFile(filePath: string): boolean {
 // AGENTS.md source published by the CLI. Historical plans/specs, build output
 // and dependencies are skipped by directory; non-document test/fixture sources
 // (including this contract test) are excluded by the file-type policy.
-async function listActiveDocFiles(directory = '.'): Promise<string[]> {
-  const files: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const filePath = directory === '.' ? entry.name : path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (
-        historicalDocDirectories.has(filePath) ||
-        generatedOrDependencyDirectories.has(entry.name) ||
-        entry.name.startsWith('.psyche-')
-      ) {
-        continue;
-      }
-      files.push(...(await listActiveDocFiles(filePath)));
-    } else if (entry.isFile() && isActiveDocumentationFile(filePath)) {
-      files.push(filePath);
-    }
-  }
-  return files.sort();
+// Enumerated from the index rather than by walking the working tree. The walk
+// swept up every untracked file too, which put anything transient -- a scratch
+// note, a half-written build artefact, another tool's leftovers -- inside a
+// contract that is supposed to describe the repository's documentation. That
+// made the test fail for reasons having nothing to do with the docs, and pass
+// again once the file went away. `git ls-files` is what "in the repository"
+// actually means, and it yields the identical set in a clean tree, so this
+// narrows the exposure without narrowing the coverage. It also removes the
+// walk's read-after-list race, since the index cannot change mid-enumeration.
+async function listActiveDocFiles(): Promise<string[]> {
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: process.cwd(),
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return stdout
+    .split('\0')
+    .filter(Boolean)
+    .map((entry) => path.normalize(entry))
+    .filter(
+      (filePath) =>
+        isActiveDocumentationFile(filePath) &&
+        ![...historicalDocDirectories].some(
+          (directory) => filePath.startsWith(`${directory}${path.sep}`),
+        ),
+    )
+    .sort();
 }
 
 function releaseEnvironmentSecretNames(runbook: string): string[] {
@@ -368,6 +350,22 @@ describe('v0.0.1 release documentation contract', () => {
     expect(iosReadme).toContain('0.0.1 (1)');
     expect(iosReadme).toMatch(/if[^\n]*available|when[^\n]*available/i);
     expect(iosReadme).not.toMatch(/(?:is|now|already) live|currently available/i);
+  });
+
+  it('ignores untracked files, so a stray doc cannot fail the contract', async () => {
+    // This test used to enumerate by walking the working tree, which meant any
+    // untracked file in the repo joined the contract: the suite failed for
+    // reasons unrelated to the docs and passed again once the file vanished.
+    const stray = 'RELEASE-DOCS-FLAKE-PROBE.md';
+    try {
+      await writeFile(stray, '# probe\n\nInstall with npm i psyche-build\n', 'utf8');
+      const activeFiles = await listActiveDocFiles();
+      expect(activeFiles).not.toContain(stray);
+      // The tracked set is what the contract is about, and it is still there.
+      expect(activeFiles).toContain('README.md');
+    } finally {
+      await rm(stray, { force: true });
+    }
   });
 
   it('contains no stale release identity or unsupported install claim in active docs', async () => {

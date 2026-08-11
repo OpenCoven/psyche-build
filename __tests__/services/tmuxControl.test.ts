@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TmuxControl, tmuxDimensionArg, unescapeTmuxOutput } from '../../src/services/tmuxControl.js';
 
 /**
@@ -133,5 +135,223 @@ describe('tmuxDimensionArg', () => {
   it('rejects dimensions outside tmux bounds', () => {
     expect(() => tmuxDimensionArg(0, 'cols')).toThrow('cols out of range');
     expect(() => tmuxDimensionArg(65536, 'rows')).toThrow('rows out of range');
+  });
+});
+
+// Drain the microtask + timer queues so serialized executeCommand transactions
+// advance to the next command before assertions.
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * Fake tmux control subprocess: records the commands written to stdin and lets
+ * a test drive the %begin/%end/%error acknowledgement blocks (and a disconnect)
+ * that TmuxControl correlates against outstanding transactions.
+ */
+function createFakeControlProcess() {
+  const stdout = new EventEmitter() as EventEmitter & { setEncoding: () => void };
+  stdout.setEncoding = () => {};
+  const stderr = new EventEmitter();
+  const proc = new EventEmitter() as unknown as ChildProcessWithoutNullStreams & EventEmitter;
+
+  const commands: string[] = [];
+  let nextNumber = 0;
+
+  (proc as unknown as { stdout: unknown }).stdout = stdout;
+  (proc as unknown as { stderr: unknown }).stderr = stderr;
+  (proc as unknown as { stdin: unknown }).stdin = {
+    write(chunk: string, cb?: (error?: Error | null) => void) {
+      commands.push(chunk.replace(/\n$/, ''));
+      if (cb) cb();
+      return true;
+    },
+    end() {},
+  };
+  (proc as unknown as { kill: () => void }).kill = () => {};
+
+  const emit = (line: string) => stdout.emit('data', `${line}\n`);
+
+  return {
+    process: proc as ChildProcessWithoutNullStreams,
+    commands: () => commands.slice(),
+    /** Emit the unsolicited acknowledgement block tmux sends for the attach. */
+    attach() {
+      const number = String(nextNumber++);
+      emit(`%begin 0 ${number} 0`);
+      emit(`%end 0 ${number} 0`);
+    },
+    acknowledgeNext() {
+      const number = String(nextNumber++);
+      emit(`%begin 0 ${number} 0`);
+      emit(`%end 0 ${number} 0`);
+    },
+    errorNext() {
+      const number = String(nextNumber++);
+      emit(`%begin 0 ${number} 0`);
+      emit(`%error 0 ${number} 0`);
+    },
+    disconnect() {
+      proc.emit('exit', 0);
+    },
+  };
+}
+
+/**
+ * Start a TmuxControl backed by a fake control process, then emit the initial
+ * attach acknowledgement block exactly as `tmux -C attach-session` does.
+ */
+function startControl() {
+  const fake = createFakeControlProcess();
+  const tmux = new TmuxControl('psyche-test', { spawnControl: () => fake.process });
+  tmux.start();
+  fake.attach();
+  return { fake, tmux };
+}
+
+describe('TmuxControl acknowledged submission', () => {
+  it('waits for tmux acknowledgement of text and Enter', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.sendPrompt('%3', 'continue 🧪', 'text-and-enter');
+    await tick();
+    // "continue " = 63 6f 6e 74 69 6e 75 65 20, 🧪 (U+1F9EA) = f0 9f a7 aa
+    expect(fake.commands()).toEqual([
+      "send-keys -t '%3' -H 63 6f 6e 74 69 6e 75 65 20 f0 9f a7 aa",
+    ]);
+
+    fake.acknowledgeNext();
+    await tick();
+    expect(fake.commands()).toEqual([
+      "send-keys -t '%3' -H 63 6f 6e 74 69 6e 75 65 20 f0 9f a7 aa",
+      "send-keys -t '%3' Enter",
+    ]);
+
+    fake.acknowledgeNext();
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('omits Enter for text-only submit mode', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.sendPrompt('%3', 'hi', 'text');
+    await tick();
+    fake.acknowledgeNext();
+    await expect(pending).resolves.toBeUndefined();
+    expect(fake.commands()).toEqual(["send-keys -t '%3' -H 68 69"]);
+  });
+
+  it.each(['before-text-ack', 'between-text-and-enter', 'after-enter-write'])(
+    'marks a disconnect %s as ambiguous so the prompt is never replayed',
+    async (point) => {
+      const { fake, tmux } = startControl();
+
+      const pending = tmux.sendPrompt('%3', 'continue', 'text-and-enter');
+      await tick();
+      if (point !== 'before-text-ack') {
+        fake.acknowledgeNext();
+        await tick();
+      }
+      fake.disconnect();
+      await expect(pending).rejects.toMatchObject({ ambiguous: true });
+    },
+  );
+
+  it('rejects with a non-ambiguous error when tmux reports %error', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.executeCommand("select-pane -t '%3'");
+    await tick();
+    fake.errorNext();
+
+    await expect(pending).rejects.toThrow(/tmux command failed/);
+    await pending.catch((error: unknown) => {
+      expect((error as { ambiguous?: boolean }).ambiguous).toBeUndefined();
+    });
+  });
+
+  it('resolves executeCommand only after the matching %end', async () => {
+    const { fake, tmux } = startControl();
+
+    let settled = false;
+    const pending = tmux.executeCommand("select-pane -t '%3'").then(() => {
+      settled = true;
+    });
+    await tick();
+    expect(settled).toBe(false);
+
+    fake.acknowledgeNext();
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('ignores the initial attach acknowledgement so the first command still correlates', async () => {
+    // startControl already emitted the attach block; a command issued afterward
+    // must resolve on its OWN block, not the leftover attach block.
+    const { fake, tmux } = startControl();
+
+    let settled = false;
+    const pending = tmux.executeCommand("select-pane -t '%3'").then(() => {
+      settled = true;
+    });
+    await tick();
+    expect(settled).toBe(false);
+
+    fake.acknowledgeNext();
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('serializes commands so each acknowledgement resolves its own transaction', async () => {
+    const { fake, tmux } = startControl();
+
+    const first = tmux.executeCommand("select-pane -t '%3'");
+    const second = tmux.executeCommand("kill-pane -t '%7'");
+    await tick();
+    // The second command is not written until the first is acknowledged.
+    expect(fake.commands()).toEqual(["select-pane -t '%3'"]);
+
+    fake.acknowledgeNext();
+    await first;
+    await tick();
+    expect(fake.commands()).toEqual(["select-pane -t '%3'", "kill-pane -t '%7'"]);
+
+    fake.acknowledgeNext();
+    await expect(second).resolves.toBeUndefined();
+  });
+
+  it('does not let a fire-and-forget command resolve a pending acknowledged transaction', async () => {
+    const { fake, tmux } = startControl();
+
+    const pending = tmux.executeCommand("send-keys -t '%3' -H 61");
+    // A fire-and-forget mutation races onto the same control connection before
+    // the acknowledged command's own write lands.
+    tmux.selectPane('%9');
+    await tick();
+    expect(fake.commands().slice().sort()).toEqual(
+      ["select-pane -t '%9'", "send-keys -t '%3' -H 61"].sort(),
+    );
+
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+
+    // tmux acknowledges the fire-and-forget block first: it must be discarded,
+    // never used to resolve the acknowledged transaction.
+    fake.acknowledgeNext();
+    await tick();
+    expect(settled).toBe(false);
+
+    // The acknowledged transaction resolves only on its own block.
+    fake.acknowledgeNext();
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('rejects every outstanding transaction as ambiguous on disconnect', async () => {
+    const { fake, tmux } = startControl();
+
+    const first = tmux.executeCommand("select-pane -t '%3'");
+    await tick();
+    fake.disconnect();
+    await expect(first).rejects.toMatchObject({ ambiguous: true });
   });
 });

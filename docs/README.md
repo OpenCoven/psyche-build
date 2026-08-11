@@ -58,6 +58,7 @@ are unavailable in `0.0.1`.
 ## Related docs
 
 - [Breaking changes](BREAKING-CHANGES.md)
+- [Control-plane architecture](CONTROL-PLANE.md)
 - [Coven sessions](COVEN-SESSIONS.md)
 - [psyche + Coven demo loop](COVEN-DEMO-LOOP.md)
 - [Product spec](PRODUCT-SPEC.md)

@@ -4,6 +4,10 @@ export type CovenSession = {
   cwd?: string;
   title?: string;
   harness?: string;
+  model?: string;
+  currentTask?: string;
+  inputTokens?: number;
+  outputTokens?: number;
   status?: string;
   createdAt?: string;
   updatedAt?: unknown;
@@ -23,9 +27,11 @@ export type LocalSession = {
 export type CovenDiscoveryState = {
   phase: 'idle' | 'loading' | 'ready' | 'unavailable' | 'incompatible' | 'error';
   sessionsByProject: Map<string, CovenSession[]>;
+  allSessionsByProject: Map<string, CovenSession[]>;
   message: string | null;
   requestId: number;
   refreshedAt: number | null;
+  stale: boolean;
 };
 
 export function isSafeCovenSessionId(id: unknown): id is string;
@@ -34,8 +40,12 @@ export function statusPresentation(status?: unknown): {
   label: string;
   live: boolean;
 };
+export function isLiveCovenSession(session?: Partial<CovenSession>): boolean;
 export function sortCovenSessions<T extends CovenSession>(sessions: T[]): T[];
 export function groupCovenSessions<T extends Partial<CovenSession>>(
+  sessions: T[],
+): Map<string, T[]>;
+export function groupAllCovenSessions<T extends Partial<CovenSession>>(
   sessions: T[],
 ): Map<string, T[]>;
 export function filterProjectSessions<L extends LocalSession, C extends CovenSession>(

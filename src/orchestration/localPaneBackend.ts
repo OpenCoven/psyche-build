@@ -1,6 +1,10 @@
 import type { PsychePane } from '../types.js';
 import type { AgentName } from '../utils/agentLaunch.js';
-import { createPane, type CreatePaneOptions, type CreatePaneResult } from '../utils/paneCreation.js';
+import {
+  defaultCreatePane,
+  type CreatePaneOptions,
+  type CreatePaneResult,
+} from '../control/resources/panes.js';
 import { laneSlugSuffix } from './adapters.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
@@ -66,7 +70,7 @@ export interface LocalPaneBackend {
  * pool over a shared cursor.
  */
 export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalPaneBackend {
-  const createPaneFn = options.createPaneFn ?? createPane;
+  const createPaneFn = options.createPaneFn ?? defaultCreatePane;
   const persistOrchestrationMetadata = options.persistOrchestrationMetadata
     ?? (async (originatingPane: PsychePane, nextPane: PsychePane): Promise<PsychePane> => {
       const mutation = await persistProjectPaneConfigPaneDelta(
