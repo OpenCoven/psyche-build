@@ -11,6 +11,7 @@ export interface UseCovenSessionsOptions {
   enabled?: boolean;
   refreshMs?: number;
   command?: string;
+  includeUnscoped?: boolean;
 }
 
 const INITIAL_COVEN_STATE: CovenSessionsLoadState = {
@@ -27,6 +28,7 @@ export function useCovenSessions(
 ): CovenSessionsLoadState {
   const enabled = options.enabled ?? !isVitest();
   const refreshMs = options.refreshMs ?? 15_000;
+  const includeUnscoped = options.includeUnscoped ?? false;
   const [state, setState] = useState<CovenSessionsLoadState>(INITIAL_COVEN_STATE);
 
   const projectRoots = useMemo(() => {
@@ -47,18 +49,14 @@ export function useCovenSessions(
         : await listCovenSessionsFromDaemon();
       if (cancelled) return;
 
-      if (result.status === 'unavailable') {
-        setState(result);
-        return;
-      }
-
-      const sessions = await filterCovenSessionsForProjectRoots(result.sessions, projectRoots);
+      const selectedState = await selectCovenSessionsLoadState(
+        result,
+        projectRoots,
+        { includeUnscoped },
+      );
       if (cancelled) return;
 
-      const loadedAt = result.loadedAt;
-      setState(sessions.length > 0
-        ? { status: 'ready', sessions, source: result.source, loadedAt }
-        : { status: 'empty', sessions: [], source: result.source, loadedAt });
+      setState(selectedState);
     };
 
     void load();
@@ -70,9 +68,30 @@ export function useCovenSessions(
       cancelled = true;
       clearInterval(timer);
     };
-  }, [enabled, options.command, projectRoots, refreshMs]);
+  }, [enabled, includeUnscoped, options.command, projectRoots, refreshMs]);
 
   return state;
+}
+
+export async function selectCovenSessionsLoadState(
+  result: CovenSessionsLoadState,
+  projectRoots: string[],
+  options: Pick<UseCovenSessionsOptions, 'includeUnscoped'> = {},
+): Promise<CovenSessionsLoadState> {
+  if (result.status !== 'ready') return result;
+
+  const sessions = options.includeUnscoped
+    ? result.sessions
+    : await filterCovenSessionsForProjectRoots(result.sessions, projectRoots);
+
+  return sessions.length > 0
+    ? { ...result, sessions }
+    : {
+        status: 'empty',
+        sessions: [],
+        source: result.source,
+        loadedAt: result.loadedAt,
+      };
 }
 
 function isVitest(): boolean {

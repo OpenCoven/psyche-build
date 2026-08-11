@@ -26,6 +26,13 @@ const READY_STATE: CovenSessionsLoadState = {
       status: 'archived',
       archivedAt: '2026-04-28T12:02:00.000Z',
     },
+    {
+      id: 'session-other',
+      projectRoot: '/other-repo',
+      harness: 'claude',
+      title: 'Unrelated project',
+      status: 'running',
+    },
   ],
 };
 
@@ -52,6 +59,7 @@ describe('Coven sessions panel', () => {
     expect(frame).toContain('[codex] Fix tests · running');
     expect(frame).toContain('[codex] Archived plan · archived');
     expect(frame).toContain('[o] open Archived plan');
+    expect(frame).not.toContain('Unrelated project');
   });
 
   it('renders nothing when inactive and Coven is unavailable', () => {
