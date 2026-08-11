@@ -30,7 +30,12 @@ import {
 } from "./utils/layoutManager.js"
 import { rollbackLocalPaneCreation } from "./utils/localPaneCreationRollback.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
-import { StateManager } from "./shared/StateManager.js"
+import {
+  StateManager,
+  synchronizeWorkspacePublication,
+  type WorkspacePublicationState,
+} from "./shared/StateManager.js"
+import { normalizeCovenSessionsForPublication } from "./workspace/tuiSnapshot.js"
 import {
   ANIMATION_DELAY,
   STATUS_MESSAGE_DURATION_SHORT,
@@ -382,6 +387,30 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     focusedPaneId,
     selectedPaneIdRef
   )
+  const covenSessionsState = useCovenSessions(
+    sessionProjectRoot,
+    sidebarProjects,
+    { includeUnscoped: true }
+  )
+  const publishedCovenSessions = useMemo(
+    () => normalizeCovenSessionsForPublication(covenSessionsState.sessions),
+    [covenSessionsState.sessions]
+  )
+
+  const workspacePublicationState = useRef<WorkspacePublicationState>({
+    daemon: bridgeDaemon,
+    ready: false,
+  })
+  useEffect(() => {
+    workspacePublicationState.current = synchronizeWorkspacePublication(
+      StateManager.getInstance(),
+      panes,
+      bridgeDaemon,
+      isLoading,
+      publishedCovenSessions,
+      workspacePublicationState.current,
+    )
+  }, [bridgeDaemon, isLoading, panes, publishedCovenSessions, sidebarProjects])
 
   // Check for tmux hooks preference on startup
   useEffect(() => {
@@ -607,10 +636,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     }
   }, [setPanes])
 
-  // Note: No need to sync panes with StateManager here.
-  // The ConfigWatcher automatically updates StateManager when the config file changes.
-  // This prevents unnecessary SSE broadcasts on every local state update.
-
   // Sync settings with StateManager
   useEffect(() => {
     const stateManager = StateManager.getInstance()
@@ -669,7 +694,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     ),
     [panes, sidebarProjects, sessionProjectRoot, projectName]
   )
-  const covenSessionsState = useCovenSessions(sessionProjectRoot, sidebarProjects)
   const desktopUseStates = useCovenDesktopUse(panes)
   const selectedPane = useMemo(() => {
     for (const group of projectActionLayout.groups) {

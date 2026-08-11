@@ -29,6 +29,20 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "FF7723641178B1E943F72C8C"
+               BuildableName = "PsycheAppTests.xctest"
+               BlueprintName = "PsycheAppTests"
+               ReferencedContainer = "container:Psyche.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "74A409596775FB76C108C60D"
                BuildableName = "PsycheAppUITests.xctest"
                BlueprintName = "PsycheAppUITests"
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "7BB8397E93E6CC7E68808C4A"
                BuildableName = "PsycheCoreTests.xctest"
                BlueprintName = "PsycheCoreTests"
+               ReferencedContainer = "container:Psyche.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "FF7723641178B1E943F72C8C"
+               BuildableName = "PsycheAppTests.xctest"
+               BlueprintName = "PsycheAppTests"
                ReferencedContainer = "container:Psyche.xcodeproj">
             </BuildableReference>
          </TestableReference>

@@ -85,6 +85,10 @@ import { BridgeDaemon } from './services/bridge/BridgeDaemon.js';
 import type { PaneSnapshot, Project, Ritual } from './services/bridge/wireProtocol.js';
 import { tmuxSessionNameForRoot } from './services/tmuxControl.js';
 import { listAvailableRituals } from './utils/rituals.js';
+import {
+  createTuiWorkspaceProvider,
+  groupCovenSessionsByProject,
+} from './workspace/tuiSnapshot.js';
 import os from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -693,10 +697,38 @@ class Psyche {
     // Start the bridge daemon so iOS/macOS clients can connect to this TUI session.
     // paneProvider and projectProvider are lazy: they read live state on each call.
     try {
+      const workspaceProvider = createTuiWorkspaceProvider({
+        primaryProjectRoot: this.projectRoot,
+        primaryProjectName: this.projectName,
+        panes: () => this.stateManager.getPanes(),
+        covenSessionsByProject: () => groupCovenSessionsByProject(
+          this.stateManager.getCovenSessions(),
+        ),
+        sidebarProjects: async () => {
+          const rawConfig = await fs.readFile(this.panesFile, 'utf8');
+          const config = JSON.parse(rawConfig) as Partial<PsycheConfig>;
+          return normalizeSidebarProjects(
+            config.sidebarProjects,
+            this.stateManager.getPanes(),
+            this.projectRoot,
+            this.projectName,
+          );
+        },
+        onWorktreeReadError: (projectRoot, error) => {
+          LogService.getInstance().warn(
+            `mobile workspace could not read worktrees for ${projectRoot}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'BridgeDaemon',
+          );
+        },
+      });
+
       this.bridgeDaemon = new BridgeDaemon({
         serverName: os.hostname(),
         projectName: this.projectName || null,
         sessionName: tmuxSessionNameForRoot(this.projectRoot),
+        workspaceProvider,
         paneProvider: (): PaneSnapshot[] => {
           return this.stateManager.getPanes().map((p: PsychePane): PaneSnapshot => {
             let status: PaneSnapshot['status'];

@@ -133,6 +133,27 @@ export function groupCovenSessions(sessions) {
   return grouped;
 }
 
+export function groupAllCovenSessions(sessions) {
+  const grouped = new Map();
+
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    if (!session || !isSafeCovenSessionId(session.id)
+      || typeof session.projectRoot !== 'string' || !session.projectRoot) {
+      continue;
+    }
+
+    const projectSessions = grouped.get(session.projectRoot) ?? [];
+    projectSessions.push(session);
+    grouped.set(session.projectRoot, projectSessions);
+  }
+
+  for (const [projectRoot, projectSessions] of grouped) {
+    grouped.set(projectRoot, sortCovenSessions(projectSessions));
+  }
+
+  return grouped;
+}
+
 export function filterProjectSessions(project, psycheSessions, covenSessions, query) {
   const normalizedQuery = typeof query === 'string' ? query.trim().toLowerCase() : '';
   const projectMatches = Boolean(normalizedQuery) && contains(project?.name, normalizedQuery);
@@ -238,6 +259,7 @@ export function createCovenDiscoveryState() {
   return {
     phase: 'idle',
     sessionsByProject: new Map(),
+    allSessionsByProject: new Map(),
     message: null,
     requestId: 0,
     refreshedAt: null,
@@ -255,6 +277,7 @@ export function beginCovenRequest(state) {
       ...state,
       phase: initialRequest ? 'loading' : state.phase,
       sessionsByProject: initialRequest ? new Map() : state.sessionsByProject,
+      allSessionsByProject: initialRequest ? new Map() : state.allSessionsByProject,
       message: initialRequest ? null : state.message,
       requestId,
     },
@@ -272,9 +295,10 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
       ...state,
       phase: 'error',
       sessionsByProject: state.sessionsByProject,
+      allSessionsByProject: state.allSessionsByProject,
       message: null,
       refreshedAt,
-      stale: state.sessionsByProject.size > 0,
+      stale: state.allSessionsByProject.size > 0,
     };
   }
 
@@ -283,6 +307,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
       ...state,
       phase: 'ready',
       sessionsByProject: groupCovenSessions(response.sessions),
+      allSessionsByProject: groupAllCovenSessions(response.sessions),
       message,
       refreshedAt,
       stale: false,
@@ -293,9 +318,10 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
     ...state,
     phase: status,
     sessionsByProject: state.sessionsByProject,
+    allSessionsByProject: state.allSessionsByProject,
     message,
     refreshedAt,
-    stale: state.sessionsByProject.size > 0,
+    stale: state.allSessionsByProject.size > 0,
   };
 }
 
@@ -304,6 +330,7 @@ export function invalidateCovenRequests(state) {
     ...state,
     phase: 'idle',
     sessionsByProject: new Map(),
+    allSessionsByProject: new Map(),
     message: null,
     requestId: state.requestId + 1,
     refreshedAt: null,
