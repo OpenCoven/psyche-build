@@ -1707,6 +1707,37 @@ export function createStatusController(options = {}) {
     };
   }
 
+  function rebaseRefreshContext() {
+    const context = getContext();
+    pruneActivityTracker(activity, context?.threads ?? []);
+
+    const scopeState = effectiveScopeForContext(context);
+    const previous = lastSampleContext;
+    const sampledAt = finiteNumber(previous?.sampledAt) ?? now();
+
+    lastSampleContext = {
+      sampledAt,
+      context,
+      summary: summarizeForScope(sampledAt, context, scopeState),
+      scopeState,
+      nativeSnapshot: cachedNativeSnapshot(scopeState),
+      nativeHealth: previous?.nativeHealth ?? nativeHealthView(nativeHealth, sampledAt),
+      activity: previous?.activity ?? lastActivitySample,
+      frame: previous?.frame ?? lastFrameSample,
+      covenHealth: previous?.covenHealth ?? covenHealthView(covenHealth),
+      outputBaseline: finiteNumber(previous?.outputBaseline) ?? 0,
+      agentToolCalls: scopedAgentToolCalls(context, scopeState),
+    };
+
+    scheduleNativeHealthTransition();
+    renderView(lastSampleContext);
+
+    return {
+      context,
+      scopeState,
+    };
+  }
+
   function closeMoreMenu({ restoreFocus = false } = {}) {
     if (elements.moreMenu.hidden) return;
     elements.moreMenu.hidden = true;
@@ -2148,10 +2179,10 @@ export function createStatusController(options = {}) {
     }, delay);
   }
 
-  async function runPoll(token) {
-    let context = getContext();
+  async function runPoll(token, rebasedState = null) {
+    let context = rebasedState?.context ?? getContext();
     pruneActivityTracker(activity, context?.threads ?? []);
-    let scopeState = effectiveScopeForContext(context);
+    let scopeState = rebasedState?.scopeState ?? effectiveScopeForContext(context);
     const requestScope = nativeRequestScope(scopeState);
     const startedAt = performanceApi.now();
 
@@ -2226,13 +2257,14 @@ export function createStatusController(options = {}) {
   }
 
   function refresh() {
+    const rebasedState = rebaseRefreshContext();
     if (pollInFlight) {
       refreshQueued = true;
       return pollInFlight;
     }
 
     const token = lifecycleToken;
-    const request = runPoll(token);
+    const request = runPoll(token, rebasedState);
     const trackedRequest = request.finally(() => {
       if (pollInFlight === trackedRequest) {
         pollInFlight = null;
