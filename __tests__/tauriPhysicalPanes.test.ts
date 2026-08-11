@@ -348,7 +348,7 @@ describe('Tauri physical terminal panes', () => {
   it('keeps pane topology process-local and keys it by project and worktree', () => {
     expect(mainJs).toMatch(/var paneLayouts = new Map\(\);/);
     expect(mainJs).toMatch(/var paneCounter = 0;/);
-    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 200, height: 110, separator: 6 \};/);
+    expect(mainJs).toMatch(/var PANE_MINIMUMS = \{ width: 200, height: 137, separator: 6 \};/);
     expect(functionSource('paneLayoutKey')).toMatch(/projectId[\s\S]*worktreePath/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.createLeaf/);
     expect(functionSource('preparePanePlacement')).toMatch(/PsychePanes\.insertBelow/);
@@ -1486,7 +1486,7 @@ describe('Tauri physical terminal panes', () => {
 
     it('keeps the CSS pane floor and the tree\'s minimums in agreement', () => {
       expect(stylesCss).toMatch(/--pane-min-w:\s*200px;/);
-      expect(stylesCss).toMatch(/--pane-min-h:\s*110px;/);
+      expect(stylesCss).toMatch(/--pane-min-h:\s*137px;/);
       expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*min-width:\s*var\(--pane-min-w\);[^}]*min-height:\s*var\(--pane-min-h\);/s);
     });
 
