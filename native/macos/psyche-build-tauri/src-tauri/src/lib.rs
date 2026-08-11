@@ -22,6 +22,7 @@ use tauri::{
 mod coven_sessions;
 mod workspace_contract;
 use coven_sessions::coven_sessions;
+use coven_sessions::is_safe_session_id;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
 
@@ -53,6 +54,7 @@ static SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> =
 static STARTING_SESSIONS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static AUGMENTED_PATH: Lazy<String> = Lazy::new(compute_augmented_path);
 
+#[derive(Debug)]
 struct PendingPtyStart {
     thread_id: String,
 }
@@ -82,12 +84,318 @@ impl Drop for PendingPtyStart {
 pub struct StartOptions {
     pub thread_id: String,
     pub project_root: Option<String>,
+    pub cwd: Option<String>,
+    pub launch_kind: Option<String>,
+    pub coven_session_id: Option<String>,
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     /// Extra environment variables on top of the inherited environment.
     pub env: Option<HashMap<String, String>>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct OpenedPtyCwd {
+    _directory: std::fs::File,
+    spawn_path: PathBuf,
+    canonical_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+struct OpenedPtyCwd {
+    spawn_path: PathBuf,
+    canonical_path: PathBuf,
+}
+
+impl OpenedPtyCwd {
+    fn configure_command_cwd(&self, command: &mut CommandBuilder) -> Result<(), String> {
+        #[cfg(unix)]
+        if !locator_matches_open_directory(&self.spawn_path, &self._directory) {
+            return Err(format!(
+                "stable PTY cwd locator is unavailable: {}",
+                self.spawn_path.display()
+            ));
+        }
+        #[cfg(not(unix))]
+        if !self.spawn_path.is_dir() {
+            return Err(format!(
+                "stable PTY cwd locator is unavailable: {}",
+                self.spawn_path.display()
+            ));
+        }
+        command.cwd(&self.spawn_path);
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn locator_matches_open_directory(locator: &Path, directory: &std::fs::File) -> bool {
+    let Ok(locator_metadata) = locator.metadata() else {
+        return false;
+    };
+    let Ok(directory_metadata) = directory.metadata() else {
+        return false;
+    };
+    locator_metadata.is_dir()
+        && locator_metadata.dev() == directory_metadata.dev()
+        && locator_metadata.ino() == directory_metadata.ino()
+}
+
+fn validate_opened_pty_cwd(
+    canonical_root: &Path,
+    canonical_candidate: &Path,
+    linked_worktrees: &[PathBuf],
+    cwd: &str,
+) -> Result<(), String> {
+    if canonical_candidate.starts_with(canonical_root) {
+        return Ok(());
+    }
+
+    for worktree in linked_worktrees {
+        let canonical_worktree = match worktree.canonicalize() {
+            Ok(path) if path.is_dir() => path,
+            _ => continue,
+        };
+        if canonical_candidate.starts_with(canonical_worktree) {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "PTY cwd is outside the project and its linked worktrees: {}",
+        cwd
+    ))
+}
+
+#[cfg(unix)]
+fn directory_path_from_handle(directory: &std::fs::File, cwd: &str) -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        let result = unsafe {
+            libc::fcntl(
+                directory.as_raw_fd(),
+                libc::F_GETPATH,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+            )
+        };
+        if result == -1 {
+            return Err(format!(
+                "PTY cwd '{}': {}",
+                cwd,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        return Ok(PathBuf::from(std::ffi::OsStr::from_bytes(
+            &buffer[..length],
+        )));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+            .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))
+    }
+}
+
+#[cfg(unix)]
+fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, String> {
+    let directory =
+        std::fs::File::open(candidate).map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    let metadata = directory
+        .metadata()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    if !metadata.is_dir() {
+        return Err(format!("PTY cwd is not a directory: {}", cwd));
+    }
+    #[cfg(target_os = "macos")]
+    let locator_candidates = vec![PathBuf::from(format!(
+        "/.vol/{}/{}",
+        metadata.dev(),
+        metadata.ino()
+    ))];
+    #[cfg(not(target_os = "macos"))]
+    let locator_candidates = vec![
+        PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())),
+        PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd())),
+    ];
+    let spawn_path = locator_candidates
+        .into_iter()
+        .find(|locator| locator_matches_open_directory(locator, &directory))
+        .ok_or_else(|| format!("stable PTY cwd locator is unavailable for '{}'", cwd))?;
+    let canonical_path = directory_path_from_handle(&directory, cwd)?;
+    Ok(OpenedPtyCwd {
+        _directory: directory,
+        spawn_path,
+        canonical_path,
+    })
+}
+
+#[cfg(not(unix))]
+fn open_pty_cwd_candidate(candidate: &Path, cwd: &str) -> Result<OpenedPtyCwd, String> {
+    let canonical_path = candidate
+        .canonicalize()
+        .map_err(|e| format!("PTY cwd '{}': {}", cwd, e))?;
+    if !canonical_path.is_dir() {
+        return Err(format!("PTY cwd is not a directory: {}", cwd));
+    }
+    Ok(OpenedPtyCwd {
+        spawn_path: canonical_path.clone(),
+        canonical_path,
+    })
+}
+
+fn pty_cwd_candidate(canonical_root: &Path, cwd: &str) -> PathBuf {
+    let requested = Path::new(cwd);
+    if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    }
+}
+
+// Test-only variant of `open_pty_cwd` that takes the linked worktrees as an
+// argument instead of shelling out to `git worktree list`, so the containment
+// checks can be exercised without a real multi-worktree repo on disk.
+#[cfg(test)]
+fn open_pty_cwd_with_worktrees(
+    project_root: &str,
+    cwd: &str,
+    linked_worktrees: &[PathBuf],
+) -> Result<OpenedPtyCwd, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
+    let opened = open_pty_cwd_candidate(&candidate, cwd)?;
+    validate_opened_pty_cwd(
+        &canonical_root,
+        &opened.canonical_path,
+        linked_worktrees,
+        cwd,
+    )?;
+    Ok(opened)
+}
+
+#[cfg(test)]
+fn resolve_pty_cwd_with_worktrees(
+    project_root: &str,
+    cwd: &str,
+    linked_worktrees: &[PathBuf],
+) -> Result<PathBuf, String> {
+    open_pty_cwd_with_worktrees(project_root, cwd, linked_worktrees)
+        .map(|opened| opened.canonical_path)
+}
+
+fn linked_worktree_roots(project_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let root = project_root
+        .to_str()
+        .ok_or_else(|| "project root is not valid UTF-8".to_string())?;
+    let raw = run_git(root, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_git_worktrees(&raw)
+        .into_iter()
+        .filter(|worktree| !worktree.bare && !worktree.prunable && !worktree.missing)
+        .filter_map(|worktree| {
+            let canonical = Path::new(&worktree.path).canonicalize().ok()?;
+            canonical.is_dir().then_some(canonical)
+        })
+        .collect())
+}
+
+fn open_pty_cwd(project_root: &str, cwd: &str) -> Result<OpenedPtyCwd, String> {
+    let canonical_root = canonical_project_root(project_root)?;
+    let candidate = pty_cwd_candidate(&canonical_root, cwd);
+    let opened = open_pty_cwd_candidate(&candidate, cwd)?;
+    if opened.canonical_path.starts_with(&canonical_root) {
+        return Ok(opened);
+    }
+
+    let linked_worktrees = linked_worktree_roots(&canonical_root)?;
+    validate_opened_pty_cwd(
+        &canonical_root,
+        &opened.canonical_path,
+        &linked_worktrees,
+        cwd,
+    )?;
+    Ok(opened)
+}
+
+#[cfg(test)]
+fn resolve_pty_cwd(project_root: &str, cwd: &str) -> Result<PathBuf, String> {
+    open_pty_cwd(project_root, cwd).map(|opened| opened.canonical_path)
+}
+
+fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedPtyCwd), String> {
+    let thread_id = options.thread_id.clone();
+    let pending_start = PendingPtyStart::reserve(&thread_id)?;
+    let project_root = options
+        .project_root
+        .as_deref()
+        .ok_or_else(|| "projectRoot is required".to_string())?;
+    let cwd = options.cwd.as_deref().unwrap_or(project_root);
+    let resolved_cwd = open_pty_cwd(project_root, cwd)?;
+    Ok((pending_start, resolved_cwd))
+}
+
+fn validate_coven_launch_with(
+    options: &StartOptions,
+    resolved_coven: Option<&str>,
+) -> Result<(), String> {
+    let Some(launch_kind) = options.launch_kind.as_deref() else {
+        return Ok(());
+    };
+    if !matches!(launch_kind, "coven-chat" | "coven-attach") {
+        return Err(format!("unsupported launch kind: {launch_kind}"));
+    }
+
+    let resolved_coven = resolved_coven.ok_or_else(|| "Coven executable not found".to_string())?;
+    if options.command.as_deref() != Some(resolved_coven) {
+        return Err("Coven launch command does not match the resolved executable".to_string());
+    }
+
+    match launch_kind {
+        "coven-chat" => {
+            if options.coven_session_id.is_some() {
+                return Err("coven-chat does not accept a session id".to_string());
+            }
+            match options.args.as_deref() {
+                Some([verb]) if verb == "chat" => Ok(()),
+                _ => Err("coven-chat requires exactly one 'chat' argument".to_string()),
+            }
+        }
+        "coven-attach" => {
+            let session_id = options
+                .coven_session_id
+                .as_deref()
+                .ok_or_else(|| "coven-attach requires a session id".to_string())?;
+            if !is_safe_session_id(session_id) {
+                return Err("coven-attach session id is unsafe".to_string());
+            }
+            match options.args.as_deref() {
+                Some([verb, argument]) if verb == "attach" && argument == session_id => Ok(()),
+                _ => Err(
+                    "coven-attach requires exactly 'attach' and the validated session id"
+                        .to_string(),
+                ),
+            }
+        }
+        _ => unreachable!("launch kind was checked above"),
+    }
+}
+
+fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
+    let resolved_coven = which_on_path("coven");
+    validate_coven_launch_with(options, resolved_coven.as_deref())
+}
+
+#[tauri::command]
+fn canonical_project_path(root: String) -> Result<String, String> {
+    canonical_project_root(&root).map(|path| path.to_string_lossy().to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -112,7 +420,8 @@ pub struct BrowserPageLoadEvent {
 #[tauri::command]
 fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let thread_id = options.thread_id.clone();
-    let pending_start = PendingPtyStart::reserve(&thread_id)?;
+    let (pending_start, resolved_cwd) = prepare_pty_start(&options)?;
+    validate_coven_launch(&options)?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -128,9 +437,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     let args = options.args.unwrap_or_else(|| vec!["-l".to_string()]);
     let mut cmd = CommandBuilder::new(command);
     cmd.args(args);
-    if let Some(root) = &options.project_root {
-        cmd.cwd(root);
-    }
+    resolved_cwd.configure_command_cwd(&mut cmd)?;
     // Build a sane child environment. When the .app is launched from
     // Finder/Dock, launchd hands us a stripped PATH that lacks
     // /opt/homebrew/bin, so psyche can't find tmux/git/gh/etc. Augment PATH
@@ -167,6 +474,7 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     cmd.env_remove("PREFIX");
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(resolved_cwd);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
@@ -463,6 +771,7 @@ pub struct AppEnvironment {
     pub repo_root: Option<String>,
     pub psyche_entry: Option<String>,
     pub node_path: Option<String>,
+    pub coven_path: Option<String>,
     pub default_shell: String,
     pub native_workspace_v2: bool,
 }
@@ -491,6 +800,7 @@ fn app_environment() -> AppEnvironment {
     // launching `node` from there should work even if PATH munging in spawn
     // misses common Homebrew paths.
     let node_path = which_on_path("node");
+    let coven_path = which_on_path("coven");
 
     // Heuristic: if the binary is being run from a built .app inside a
     // worktree, the worktree root is a couple of levels up from the .app.
@@ -509,6 +819,7 @@ fn app_environment() -> AppEnvironment {
         repo_root,
         psyche_entry,
         node_path,
+        coven_path,
         default_shell,
         native_workspace_v2,
     }
@@ -878,11 +1189,43 @@ fn parse_nvm_node_version(name: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn executable_in_dir(binary: &str, dir: &Path) -> Option<String> {
+    let canonical = dir.join(binary).canonicalize().ok()?;
+    if is_executable_file(&canonical) {
+        return Some(canonical.to_string_lossy().to_string());
+    }
+    None
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn which_on_path_with(binary: &str, path: &std::ffi::OsStr) -> Option<String> {
+    std::env::split_paths(path).find_map(|dir| executable_in_dir(binary, &dir))
+}
+
 fn which_on_path(binary: &str) -> Option<String> {
     for dir in std::env::split_paths(augmented_path()) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().to_string());
+        if let Some(executable) = executable_in_dir(binary, &dir) {
+            return Some(executable);
         }
     }
     None
@@ -1709,11 +2052,15 @@ fn bounded_diff(text: String) -> GitDiffResult {
     }
 }
 
+/// Upper bound on `-U` context lines a caller may request.
+const MAX_DIFF_CONTEXT: u32 = 2000;
+
 #[tauri::command]
 fn git_diff(
     root: String,
     path: Option<String>,
     staged: Option<bool>,
+    context: Option<u32>,
 ) -> Result<GitDiffResult, String> {
     let root = canonical_project_root(&root)?.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
@@ -1722,6 +2069,12 @@ fn git_diff(
         "--no-color".into(),
         "--relative".into(),
     ];
+    // Context lines, for expanding a hunk in place. Clamped rather than passed
+    // through: the value reaches a subprocess argument, and an unbounded one
+    // would let the caller ask git to render an arbitrarily large diff.
+    if let Some(lines) = context {
+        args.push(format!("-U{}", lines.min(MAX_DIFF_CONTEXT)));
+    }
     if staged.unwrap_or(false) {
         args.push("--cached".into());
     }
@@ -1804,6 +2157,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             pty_start,
+            canonical_project_path,
             pty_write,
             pty_resize,
             pty_stop,
@@ -1849,6 +2203,8 @@ pub fn run() {
 #[cfg(test)]
 mod workspace_panel_tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempTree {
@@ -1880,6 +2236,356 @@ mod workspace_panel_tests {
 
     fn path_text(path: &Path) -> &str {
         path.to_str().expect("test paths must be UTF-8")
+    }
+
+    #[cfg(unix)]
+    fn write_test_executable(path: &Path, mode: u32) {
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_the_first_executable_on_path_to_its_canonical_path() {
+        let tree = TempTree::new("coven-path-order");
+        let first = tree.root.join("first");
+        let second = tree.root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        write_test_executable(&first.join("real-coven"), 0o700);
+        symlink(first.join("real-coven"), first.join("coven")).unwrap();
+        write_test_executable(&second.join("coven"), 0o700);
+        let path = std::env::join_paths([&first, &second]).unwrap();
+
+        assert_eq!(
+            which_on_path_with("coven", &path),
+            Some(path_text(&first.join("real-coven").canonicalize().unwrap()).to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_resolution_requires_effective_execute_access_and_rejects_directories() {
+        let tree = TempTree::new("coven-path-executable");
+        let non_executable = tree.root.join("non-executable");
+        let group_only = tree.root.join("group-only");
+        let other_only = tree.root.join("other-only");
+        let directory = tree.root.join("directory");
+        let executable = tree.root.join("executable");
+        for dir in [
+            &non_executable,
+            &group_only,
+            &other_only,
+            &directory,
+            &executable,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        write_test_executable(&non_executable.join("coven"), 0o600);
+        write_test_executable(&group_only.join("coven"), 0o010);
+        write_test_executable(&other_only.join("coven"), 0o001);
+        std::fs::create_dir_all(directory.join("coven")).unwrap();
+        write_test_executable(&executable.join("coven"), 0o700);
+        let effective_uid = unsafe { libc::geteuid() };
+        let mut search_dirs = vec![&non_executable];
+        if effective_uid != 0 {
+            search_dirs.extend([&group_only, &other_only]);
+        }
+        search_dirs.extend([&directory, &executable]);
+        let path = std::env::join_paths(search_dirs).unwrap();
+
+        assert_eq!(
+            which_on_path_with("coven", &path),
+            Some(path_text(&executable.join("coven").canonicalize().unwrap()).to_string())
+        );
+        assert!(!is_executable_file(&non_executable.join("coven")));
+        assert!(!is_executable_file(&directory.join("coven")));
+        if effective_uid == 0 {
+            // POSIX grants root X_OK when any execute bit is set.
+            assert!(is_executable_file(&group_only.join("coven")));
+            assert!(is_executable_file(&other_only.join("coven")));
+        } else {
+            assert!(!is_executable_file(&group_only.join("coven")));
+            assert!(!is_executable_file(&other_only.join("coven")));
+        }
+    }
+
+    fn launch_options(
+        launch_kind: Option<&str>,
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+    ) -> StartOptions {
+        StartOptions {
+            thread_id: "launch-validation".to_string(),
+            project_root: Some("/project".to_string()),
+            cwd: None,
+            launch_kind: launch_kind.map(str::to_string),
+            coven_session_id: session_id.map(str::to_string),
+            command: command.map(str::to_string),
+            args: args.map(|values| values.iter().map(|value| (*value).to_string()).collect()),
+            cols: None,
+            rows: None,
+            env: None,
+        }
+    }
+
+    #[test]
+    fn accepts_exact_native_coven_chat_and_attach_launches() {
+        let coven = "/canonical/bin/coven";
+        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        let attach = launch_options(
+            Some("coven-attach"),
+            Some("release:fix_01.a-b"),
+            Some(coven),
+            Some(&["attach", "release:fix_01.a-b"]),
+        );
+
+        assert_eq!(validate_coven_launch_with(&chat, Some(coven)), Ok(()));
+        assert_eq!(validate_coven_launch_with(&attach, Some(coven)), Ok(()));
+    }
+
+    #[test]
+    fn preserves_legacy_launches_without_a_launch_kind() {
+        let legacy = launch_options(None, Some("ignored"), Some("/bin/zsh"), Some(&["-l"]));
+        assert_eq!(validate_coven_launch_with(&legacy, None), Ok(()));
+    }
+
+    #[test]
+    fn rejects_malformed_or_unresolved_native_coven_launches() {
+        let coven = "/canonical/bin/coven";
+        let invalid = [
+            launch_options(Some("coven-chat"), None, Some(coven), None),
+            launch_options(
+                Some("coven-chat"),
+                None,
+                Some(coven),
+                Some(&["chat", "extra"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                Some("unexpected"),
+                Some(coven),
+                Some(&["chat"]),
+            ),
+            launch_options(
+                Some("coven-chat"),
+                None,
+                Some("/wrong/coven"),
+                Some(&["chat"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                None,
+                Some(coven),
+                Some(&["attach", "safe"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("../unsafe"),
+                Some(coven),
+                Some(&["attach", "../unsafe"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach"]),
+            ),
+            launch_options(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach", "other"]),
+            ),
+            launch_options(Some("unknown"), None, Some(coven), Some(&["chat"])),
+        ];
+
+        for options in invalid {
+            assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
+        }
+        let chat = launch_options(Some("coven-chat"), None, Some(coven), Some(&["chat"]));
+        assert!(validate_coven_launch_with(&chat, None).is_err());
+    }
+
+    #[test]
+    fn resolves_pty_cwd_inside_project_or_verified_linked_worktree() {
+        let tree = TempTree::new("pty-cwd-contained");
+        let project = tree.root.join("project");
+        let nested = project.join("packages").join("app");
+        let linked = tree.root.join("linked-review");
+        let linked_nested = linked.join("crates").join("native");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_test_git(&project, &["init", "-q"]);
+        run_test_git(&project, &["config", "user.name", "Psyche Tests"]);
+        run_test_git(
+            &project,
+            &["config", "user.email", "psyche-tests@example.invalid"],
+        );
+        run_test_git(&project, &["commit", "--allow-empty", "-qm", "baseline"]);
+        run_test_git(
+            &project,
+            &["worktree", "add", "-q", "-b", "review", path_text(&linked)],
+        );
+        std::fs::create_dir_all(&linked_nested).unwrap();
+
+        assert_eq!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&nested), &[]).unwrap(),
+            nested.canonicalize().unwrap(),
+        );
+        assert_eq!(
+            resolve_pty_cwd_with_worktrees(
+                path_text(&project),
+                path_text(&linked_nested),
+                &[linked.canonicalize().unwrap()],
+            )
+            .unwrap(),
+            linked_nested.canonicalize().unwrap(),
+        );
+        assert_eq!(
+            resolve_pty_cwd(path_text(&project), path_text(&linked_nested)).unwrap(),
+            linked_nested.canonicalize().unwrap(),
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_missing_and_file_pty_cwds() {
+        let tree = TempTree::new("pty-cwd-rejected");
+        let project = tree.root.join("project");
+        let sibling = tree.root.join("sibling");
+        let file = project.join("README.md");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(&file, "not a directory\n").unwrap();
+
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&sibling), &[]).is_err()
+        );
+        assert!(resolve_pty_cwd(path_text(&project), path_text(&sibling)).is_err());
+        assert!(resolve_pty_cwd_with_worktrees(
+            path_text(&project),
+            path_text(&project.join("missing")),
+            &[],
+        )
+        .is_err());
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&file), &[]).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_pty_cwd_symlinks_that_escape_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("pty-cwd-symlink");
+        let project = tree.root.join("project");
+        let outside = tree.root.join("outside");
+        let link = project.join("escape");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        assert!(
+            resolve_pty_cwd_with_worktrees(path_text(&project), path_text(&link), &[]).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_pty_cwd_cannot_retarget_after_rename_and_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("pty-cwd-handle");
+        let project = tree.root.join("project");
+        let original = project.join("workspace");
+        let moved = project.join("workspace-moved");
+        let outside = tree.root.join("outside");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let opened =
+            open_pty_cwd_with_worktrees(path_text(&project), path_text(&original), &[]).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        symlink(&outside, &original).unwrap();
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 10,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/pwd");
+        command.arg("-P");
+        opened.configure_command_cwd(&mut command).unwrap();
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(opened);
+        drop(pair.slave);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            reader.read_to_string(&mut output).unwrap();
+            sender.send(output).unwrap();
+        });
+        let writer = pair.master.take_writer().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(writer);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "portable-pty child failed: {status}");
+        drop(pair.master);
+        let actual = receiver.recv().unwrap();
+        assert_eq!(actual.trim(), path_text(&moved.canonicalize().unwrap()));
+        assert_ne!(actual.trim(), path_text(&outside.canonicalize().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_unavailable_pty_cwd_locator_before_command_construction() {
+        let tree = TempTree::new("pty-cwd-locator");
+        let project = tree.root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut opened =
+            open_pty_cwd_with_worktrees(path_text(&project), path_text(&project), &[]).unwrap();
+        opened.spawn_path = tree.root.join("unavailable-locator");
+        let mut command = CommandBuilder::new("/bin/pwd");
+
+        let error = opened.configure_command_cwd(&mut command).unwrap_err();
+
+        assert!(error.contains("stable PTY cwd locator is unavailable"));
+        assert!(command.get_cwd().is_none());
+    }
+
+    #[test]
+    fn reserves_thread_before_invalid_cwd_validation_and_releases_on_failure() {
+        let tree = TempTree::new("pty-reservation-order");
+        let thread_id = format!("duplicate-{}", tree.root.display());
+        let reserved = PendingPtyStart::reserve(&thread_id).unwrap();
+        let duplicate = StartOptions {
+            thread_id: thread_id.clone(),
+            project_root: None,
+            cwd: Some("/definitely/missing".to_string()),
+            launch_kind: None,
+            coven_session_id: None,
+            command: None,
+            args: None,
+            cols: None,
+            rows: None,
+            env: None,
+        };
+
+        let error = prepare_pty_start(&duplicate).unwrap_err();
+        assert!(error.contains("already running"));
+        drop(reserved);
+
+        let invalid = StartOptions {
+            project_root: Some(path_text(&tree.root.join("missing")).to_string()),
+            ..duplicate
+        };
+        assert!(prepare_pty_start(&invalid).is_err());
+        assert!(PendingPtyStart::reserve(&thread_id).is_ok());
     }
 
     fn run_test_git(root: &Path, args: &[&str]) {
@@ -2245,6 +2951,7 @@ mod workspace_panel_tests {
             path_text(&project).to_string(),
             Some("inside.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         assert!(diff.text.contains("+inside changed"));
@@ -2301,6 +3008,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("large.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -2332,6 +3040,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("untracked.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -2354,6 +3063,7 @@ mod workspace_panel_tests {
             path_text(&tree.root).to_string(),
             Some("notes.txt".to_string()),
             Some(false),
+            None,
         )
         .unwrap();
         let expected = "--- /dev/null\n+++ b/notes.txt\n+one\n+two\n";
@@ -2362,6 +3072,62 @@ mod workspace_panel_tests {
         assert_eq!(diff.bytes, expected.len() as u64);
         assert_eq!(diff.lines, expected.lines().count() as u64);
         assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn git_diff_widens_context_and_clamps_the_request() {
+        let tree = TempTree::new("git-diff-context");
+        run_git(path_text(&tree.root), &["init", "--quiet"]).unwrap();
+        let mut body = String::new();
+        for index in 0..40 {
+            body.push_str(&format!("line {}\n", index));
+        }
+        std::fs::write(tree.root.join("wide.txt"), &body).unwrap();
+        run_git(path_text(&tree.root), &["add", "-A"]).unwrap();
+        run_git(
+            path_text(&tree.root),
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "seed",
+                "--quiet",
+            ],
+        )
+        .unwrap();
+        let edited = body.replace("line 20\n", "line twenty\n");
+        std::fs::write(tree.root.join("wide.txt"), edited).unwrap();
+
+        let narrow = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            None,
+        )
+        .unwrap();
+        let wide = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(30),
+        )
+        .unwrap();
+        // More context means more surrounding lines for the same one-line edit.
+        assert!(wide.text.lines().count() > narrow.text.lines().count());
+
+        // Beyond the cap the request is clamped, not honoured: the argument
+        // reaches a subprocess and an unbounded one is not ours to forward.
+        let clamped = git_diff(
+            path_text(&tree.root).to_string(),
+            Some("wide.txt".to_string()),
+            Some(false),
+            Some(u32::MAX),
+        )
+        .unwrap();
+        assert!(clamped.text.contains("line twenty"));
     }
 
     #[test]

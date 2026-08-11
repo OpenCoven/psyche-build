@@ -50,6 +50,7 @@ export class LaneLeaseStore {
       expiresAt: new Date(this.clock().getTime() + ttlMs).toISOString(),
       ...(taskId ? { taskId } : {}),
     };
+    Object.freeze(lease);
     this.leases.set(paneId, lease);
     return lease;
   }
@@ -61,11 +62,15 @@ export class LaneLeaseStore {
     revision: number,
   ): LaneLease {
     const lease = this.leases.get(paneId);
-    if (!lease || lease.revision !== revision) throw new Error('lease revision mismatch');
-    if (lease.actorId !== actorId || lease.actorKind !== actorKind) {
-      throw new Error('lane is controlled by another actor');
+    if (!lease || lease.revision !== revision) {
+      throw Object.assign(new Error('lease revision mismatch'), { code: 'lease_revision_mismatch' });
     }
-    if (Date.parse(lease.expiresAt) <= this.clock().getTime()) throw new Error('lease expired');
+    if (lease.actorId !== actorId || lease.actorKind !== actorKind) {
+      throw Object.assign(new Error('lane is controlled by another actor'), { code: 'lane_conflict' });
+    }
+    if (Date.parse(lease.expiresAt) <= this.clock().getTime()) {
+      throw Object.assign(new Error('lease expired'), { code: 'lease_expired' });
+    }
     return lease;
   }
 }

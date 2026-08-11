@@ -12,9 +12,10 @@ import {
  * Thin wrapper around `tmux -C attach-session` (tmux control mode).
  *
  * One subprocess per tmux session. Parses `%output`, `%exit`, and
- * `%window-close` events. Commands are written to stdin as plain tmux
- * commands terminated with \n; responses come back as %begin/%end blocks
- * but we don't use them yet — most ops are fire-and-forget for now.
+ * `%window-close` events. Fire-and-forget ops (`command`, `sendKeysHex`,
+ * `resizePane`, ...) write a command and move on. `executeCommand`/`sendPrompt`
+ * instead correlate the `%begin/%end/%error` acknowledgement block so prompt
+ * submission is integrity-checked and safe against replay on an ambiguous drop.
  *
  * Originally lifted from meow/psyche-daemon-ws commit cda47c5 per
  * docs/superpowers/plans/2026-04-25-psyche-bridge-daemon.md, then copied a
@@ -24,22 +25,62 @@ import {
  * and only the daemon copy had selectPane. Both transports — the LAN bridge
  * in ./bridge/ and the loopback daemon in ../daemon/ — now use this module.
  */
+export interface TmuxControlOptions {
+  /**
+   * Inject the control subprocess. Tests supply a fake so acknowledged
+   * submission can be exercised without a live tmux server.
+   */
+  spawnControl?: () => ChildProcessWithoutNullStreams;
+}
+
+interface AckWaiter {
+  resolve: () => void;
+  reject: (error: Error & { ambiguous?: boolean }) => void;
+}
+
 export class TmuxControl extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private stdoutBuf = '';
   private started = false;
 
-  constructor(public readonly sessionName: string) {
+  /**
+   * FIFO of acknowledgement waiters, one entry per command written to the
+   * control connection. tmux answers every command with exactly one
+   * `%begin ... %end`/`%error` block, in the order the commands were sent, so
+   * the front of this queue always corresponds to the next block to arrive.
+   * Fire-and-forget commands push `null` (their block is discarded);
+   * `executeCommand` pushes a waiter that resolves/rejects on its block.
+   *
+   * `commandTail` additionally serializes `executeCommand` writes so an
+   * acknowledged command is not issued until the previous one has settled.
+   */
+  private commandTail: Promise<void> = Promise.resolve();
+  private readonly ackQueue: Array<AckWaiter | null> = [];
+
+  /**
+   * Attaching in control mode emits one unsolicited `%begin/%end` block for the
+   * attach itself, before any client command. Consume it so it does not shift a
+   * real command off the FIFO.
+   */
+  private attachAckConsumed = false;
+
+  constructor(
+    public readonly sessionName: string,
+    private readonly options: TmuxControlOptions = {},
+  ) {
     super();
   }
 
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.attachAckConsumed = false;
 
-    this.proc = spawn('tmux', ['-C', 'attach-session', '-t', this.sessionName], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    this.proc = this.options.spawnControl
+      ? this.options.spawnControl()
+      : spawn('tmux', ['-C', 'attach-session', '-t', this.sessionName], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
 
     this.proc.stdout.setEncoding('utf8');
     this.proc.stdout.on('data', (chunk: string) => this.onStdout(chunk));
@@ -49,10 +90,18 @@ export class TmuxControl extends EventEmitter {
     });
 
     this.proc.on('exit', (code) => {
+      this.rejectAllPending(
+        Object.assign(new Error('tmux command outcome is unknown'), { ambiguous: true }),
+      );
       this.emit('exit', code);
       this.proc = null;
       this.started = false;
     });
+  }
+
+  private rejectAllPending(error: Error & { ambiguous?: boolean }): void {
+    const waiters = this.ackQueue.splice(0, this.ackQueue.length);
+    for (const waiter of waiters) waiter?.reject(error);
   }
 
   stop(): void {
@@ -75,6 +124,59 @@ export class TmuxControl extends EventEmitter {
     assertSingleTmuxCommandLine(line);
     if (!this.proc) throw new Error('tmux control mode not started');
     this.proc.stdin.write(line + '\n');
+    // Fire-and-forget, but still consumes one acknowledgement block so it stays
+    // aligned with the FIFO used by executeCommand().
+    this.ackQueue.push(null);
+  }
+
+  /**
+   * Send a tmux command and resolve only once tmux acknowledges it with its
+   * `%end`, reject on `%error`, and reject as *ambiguous* when the control
+   * connection drops with the command still outstanding (or the write itself
+   * fails). Ambiguous failures must never be auto-retried: tmux may already
+   * have applied them.
+   */
+  executeCommand(line: string): Promise<void> {
+    assertSingleTmuxCommandLine(line);
+    const run = () =>
+      new Promise<void>((resolve, reject) => {
+        if (!this.proc) {
+          reject(new Error('tmux control mode not started'));
+          return;
+        }
+        const waiter: AckWaiter = { resolve, reject };
+        this.ackQueue.push(waiter);
+        this.proc.stdin.write(`${line}\n`, (error) => {
+          if (!error) return;
+          const idx = this.ackQueue.indexOf(waiter);
+          if (idx !== -1) this.ackQueue.splice(idx, 1);
+          reject(Object.assign(error, { ambiguous: true }));
+        });
+      });
+    const result = this.commandTail.then(run, run);
+    this.commandTail = result.catch(() => {});
+    return result;
+  }
+
+  /**
+   * Acknowledged prompt submission: send the UTF-8 body as hex-encoded keys,
+   * then optionally Enter, waiting for each to be acknowledged. A disconnect at
+   * any point surfaces as an ambiguous rejection so the dispatcher records the
+   * outcome as `unknown` rather than replaying the prompt.
+   */
+  async sendPrompt(
+    paneId: string,
+    utf8: string,
+    submitMode: 'text' | 'text-and-enter',
+  ): Promise<void> {
+    const target = assertTmuxPaneId(paneId);
+    const hex = Array.from(Buffer.from(utf8, 'utf8'), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join(' ');
+    await this.executeCommand(`send-keys -t ${quote(target)} -H ${hex}`);
+    if (submitMode === 'text-and-enter') {
+      await this.executeCommand(`send-keys -t ${quote(target)} Enter`);
+    }
   }
 
   sendKeysHex(paneId: string, data: Buffer): void {
@@ -133,7 +235,29 @@ export class TmuxControl extends EventEmitter {
       this.emit('windowClose', line);
       return;
     }
-    // %begin/%end/%error blocks ignored for now
+
+    // Command acknowledgement blocks: %begin/%end/%error <time> <number> <flags>.
+    // Every command produces exactly one block, delivered in send order, so the
+    // front of ackQueue is the block being closed. %begin only opens the block.
+    if (line.startsWith('%begin')) {
+      return;
+    }
+    if (line.startsWith('%end') || line.startsWith('%error')) {
+      // The first acknowledgement block belongs to the implicit attach, not to
+      // a client command, so consume it without touching the queue.
+      if (!this.attachAckConsumed) {
+        this.attachAckConsumed = true;
+        return;
+      }
+      const waiter = this.ackQueue.shift();
+      if (!waiter) return; // fire-and-forget block (null) or an unexpected extra
+      if (line.startsWith('%error')) {
+        waiter.reject(new Error(`tmux command failed: ${line}`));
+      } else {
+        waiter.resolve();
+      }
+      return;
+    }
   }
 }
 

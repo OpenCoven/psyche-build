@@ -12,160 +12,296 @@
     <script src="./xterm-addon-webgl.js"></script>
   </head>
   <body>
-    <div class="app" id="app">
-      <aside class="rail sidebar" id="sidebar" data-tauri-drag-region aria-label="Sessions">
-        <div class="sidebar-head">
-          <input
-            id="session-search"
-            class="session-search"
-            type="search"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="Search sessions…"
-            aria-label="Search sessions"
-          />
-          <button id="rail-new-tab" class="rail-btn" title="New session (⌘T)" aria-label="New session">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-              <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
-                    stroke-width="1.6" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button id="rail-open-project" class="rail-btn" title="Open project (⌘O)" aria-label="Open project">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-              <path d="M2.25 4.4c0-.9.7-1.6 1.6-1.6h2.3l1.3 1.5h4.6c.9 0 1.6.7 1.6 1.6v5.7c0 .9-.7 1.6-1.6 1.6H3.85c-.9 0-1.6-.7-1.6-1.6z"
-                    fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
-            </svg>
-          </button>
-        </div>
-        <div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project"></div>
-        <div class="sidebar-foot">
-          <div class="theme-row">
-            <select id="theme-select" class="theme-select" aria-label="Theme">
-              <option value="coven-purple">Coven Purple</option>
-              <option value="claude-orange">Claude Orange</option>
-              <option value="codex-blackish">Codex Blackish</option>
-              <option value="gemini-blue">Gemini Blue</option>
-              <option value="emerald">Emerald</option>
-              <option value="rose">Rose</option>
-            </select>
-            <label class="solid-toggle" title="Opaque background instead of macOS vibrancy">
-              <input id="solid-bg" type="checkbox" />
-              <span>Solid</span>
-            </label>
-          </div>
-          <label class="bg-opacity-row" for="bg-opacity">
-            <span class="bg-opacity-label">Background</span>
-            <input
-              id="bg-opacity"
-              class="bg-opacity-slider"
-              type="range"
-              min="0.3"
-              max="1"
-              step="0.05"
-              value="1"
-              aria-label="Background opacity"
-            />
-            <span class="bg-opacity-value" id="bg-opacity-value">100%</span>
-          </label>
-        </div>
-      </aside>
-
+    <div class="app" id="app" data-sidebar="open" data-dock="open">
       <header class="titlebar" data-tauri-drag-region>
-        <div class="titlebar-left" data-tauri-drag-region>
-          <span class="brand" data-tauri-drag-region>psyche</span>
-          <span class="brand-sub" data-tauri-drag-region>workspace</span>
-        </div>
-        <div class="titlebar-center" data-tauri-drag-region></div>
-        <div class="titlebar-right" data-tauri-drag-region>
-          <button
-            id="browser-toggle"
-            class="chrome-btn"
-            data-browser-toggle
-            title="Show browser preview (⌘⌥B). Right-click to cycle side."
-            aria-pressed="false"
-          >
-            <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
-              <rect x="1.25" y="2.25" width="11.5" height="9.5" rx="1.6"
-                    fill="none" stroke="currentColor" stroke-width="1.3"/>
-              <line x1="9" y1="2.25" x2="9" y2="11.75"
-                    stroke="currentColor" stroke-width="1.3"/>
-              <path class="panel-fill"
-                    d="M9 2.25 H11.15 a1.6 1.6 0 0 1 1.6 1.6 V10.15 a1.6 1.6 0 0 1 -1.6 1.6 H9 Z"
-                    fill="currentColor" opacity="0"/>
-            </svg>
-          </button>
-          <span class="status-pill" id="shell-status" hidden>starting…</span>
-        </div>
+        <span class="traffic-gutter" data-tauri-drag-region aria-hidden="true"></span>
+        <span class="brand" data-tauri-drag-region>psyche</span>
+        <span class="titlebar-spacer" data-tauri-drag-region></span>
+        <span
+          class="daemon-status"
+          id="daemon-status"
+          title="Local session runtime. Green: a pane is running. Amber: starting. Red: the last pane exited. Hollow: no pane open."
+        >
+          <span class="daemon-dot" id="daemon-dot"></span>
+          <span class="daemon-label" id="daemon-label">psyche · local</span>
+        </span>
+        <span class="titlebar-sep" aria-hidden="true"></span>
+        <span class="status-pill" id="shell-status" hidden>starting…</span>
+        <button
+          id="help-toggle"
+          class="chrome-btn help-btn"
+          type="button"
+          title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts"
+        >?</button>
       </header>
 
-      <main class="detail" id="detail" data-layout="terminal" data-browser-side="right" data-panel="browser">
-        <section class="terminal-area">
-          <div class="tab-strip" id="tab-strip"></div>
-          <div class="terminal-host" id="terminal-host"></div>
-          <div class="file-view" id="file-view" hidden>
-            <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
-              <span class="file-language" id="file-language">Plain Text</span>
-              <span class="file-view-title" id="file-view-title">No file selected</span>
-              <span class="file-dirty" id="file-dirty" title="Unsaved changes" aria-label="Unsaved changes" hidden></span>
-              <span class="file-view-meta" id="file-view-meta"></span>
-              <button
-                id="file-save"
-                class="file-save"
-                type="button"
-                title="Save file (⌘S)"
-                aria-label="Save file"
-                disabled
-              >
-                Save <kbd>⌘S</kbd>
-              </button>
-            </div>
-            <div class="file-view-path" id="file-view-path" aria-label="Project-relative file path">No file selected</div>
-            <div class="file-editor-stage">
-              <div class="file-editor-host" id="file-editor-host" aria-label="File editor"></div>
-              <div
-                class="file-read-only-message"
-                id="file-read-only-message"
-                role="status"
-                aria-live="polite"
-                hidden
-              >
-                Read-only — this file cannot be edited.
-              </div>
-            </div>
-            <div class="file-status-bar">
-              <span id="file-status" role="status" aria-live="polite">Ready</span>
-              <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
-            </div>
-          </div>
-          <div class="command-bar" id="command-bar">
-            <span class="command-prompt">›</span>
+      <div class="workbench" id="workbench">
+        <aside class="rail sidebar" id="sidebar" aria-label="Sessions">
+          <div class="sidebar-head">
             <input
-              id="command-input"
-              type="text"
+              id="session-search"
+              class="session-search"
+              type="search"
               spellcheck="false"
               autocomplete="off"
-              placeholder="Slash command — psyche (/new-thread, /preview), agent skills + plugins (/security-review, /myplugin:foo), or any text → active terminal"
+              placeholder="Search sessions… ( / )"
+              aria-label="Search sessions"
             />
-          </div>
-          <div class="palette" id="palette" hidden></div>
-        </section>
-        <div
-          class="splitter"
-          id="splitter"
-          role="separator"
-          aria-orientation="vertical"
-          aria-valuemin="25"
-          aria-valuemax="85"
-          aria-valuenow="60"
-          tabindex="0"
-          title="Resize terminal and browser panes"
-        ></div>
-        <section class="browser-pane">
-        <div class="panel panel-browser">
-          <header class="pane-header browser-bar">
-            <button id="browser-collapse" class="icon-btn ghost-btn" title="Hide panel (⌘⌥B)" aria-label="Hide panel">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <button id="rail-new-tab" class="rail-btn" title="New pane (t / a / w)" aria-label="New pane" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
+                      stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
             </button>
+            <button id="sidebar-collapse" class="rail-btn" title="Collapse sidebar (⌘B)" aria-label="Collapse sidebar">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+                <path d="M10.5 6 8.5 8l2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="new-pane-menu" id="new-pane-menu" role="menu" aria-label="New pane" hidden>
+            <div class="new-pane-menu-head" id="new-pane-menu-head">New pane</div>
+            <button id="new-pane-term" class="new-pane-item" type="button" role="menuitem">
+              <span class="new-pane-glyph mono">❯_</span>Shell — login shell<span class="new-pane-key">/new-shell</span>
+            </button>
+            <button id="new-pane-agent" class="new-pane-item" type="button" role="menuitem">
+              <span class="new-pane-glyph">✳</span>Agent — coven chat<span class="new-pane-key">⌘T</span>
+            </button>
+            <button id="new-pane-web" class="new-pane-item" type="button" role="menuitem">
+              <span class="new-pane-glyph">◍</span>Browser — web<span class="new-pane-key">⌘⌥B</span>
+            </button>
+            <div class="new-pane-sep" role="separator"></div>
+            <button id="new-pane-set" class="new-pane-item" type="button" role="menuitem"
+                    title="Multi-select panes, then create the set">
+              <span class="new-pane-glyph">▩</span>Focus set — pick panes<span class="new-pane-key">multi</span>
+            </button>
+            <button id="new-pane-project" class="new-pane-item" type="button" role="menuitem">
+              <span class="new-pane-glyph">▦</span>Open project…<span class="new-pane-key">⌘O</span>
+            </button>
+          </div>
+
+          <div class="sidebar-tabs" role="tablist" aria-label="Sidebar sections">
+            <button class="sidebar-tab is-active" data-sidebar-tab="sessions" type="button" role="tab" aria-selected="true">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.75 4.25h10.5M2.75 8h10.5M2.75 11.75h6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              <span>Sessions</span>
+            </button>
+            <button class="sidebar-tab" data-sidebar-tab="files" type="button" role="tab" aria-selected="false">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.4 4.6A1.35 1.35 0 0 1 3.75 3.25h2.3c.42 0 .82.2 1.07.54l.62.83h4.51a1.35 1.35 0 0 1 1.35 1.35v5.68a1.35 1.35 0 0 1-1.35 1.35H3.75a1.35 1.35 0 0 1-1.35-1.35z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+              <span>Files</span>
+            </button>
+          </div>
+
+          <div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project"></div>
+
+          <div class="sidebar-files" id="sidebar-files" hidden>
+            <div class="sidebar-subbar">
+              <span class="panel-crumb" id="files-crumb"></span>
+              <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <div class="file-tree" id="file-tree" role="tree" aria-label="Project files"></div>
+          </div>
+
+          <div class="sidebar-foot">
+            <details class="sidebar-settings" id="sidebar-settings">
+              <summary title="Theme and background">
+                <span class="appearance-swatch" aria-hidden="true"></span>
+                <span class="appearance-label">Appearance</span>
+                <span class="appearance-caret" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="theme-row">
+                <select id="theme-select" class="theme-select" aria-label="Theme">
+                  <option value="coven-purple">Coven Purple</option>
+                  <option value="claude-orange">Claude Orange</option>
+                  <option value="codex-blackish">Codex Blackish</option>
+                  <option value="gemini-blue">Gemini Blue</option>
+                  <option value="emerald">Emerald</option>
+                  <option value="rose">Rose</option>
+                </select>
+                <label class="solid-toggle" title="Opaque background instead of macOS vibrancy">
+                  <input id="solid-bg" type="checkbox" />
+                  <span>Solid</span>
+                </label>
+              </div>
+              <label class="bg-opacity-row" for="bg-opacity">
+                <input
+                  id="bg-opacity"
+                  class="bg-opacity-slider"
+                  type="range"
+                  min="0.3"
+                  max="1"
+                  step="0.05"
+                  value="1"
+                  aria-label="Background opacity"
+                />
+                <span class="bg-opacity-value" id="bg-opacity-value">100%</span>
+              </label>
+            </details>
+          </div>
+
+          <div
+            class="sidebar-resize"
+            id="sidebar-resize"
+            role="separator"
+            aria-orientation="vertical"
+            title="Drag to resize the sidebar"
+          ></div>
+        </aside>
+
+        <aside class="mini-rail sidebar-mini" id="sidebar-mini" hidden aria-label="Sidebar (collapsed)">
+          <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar">»</button>
+        </aside>
+
+        <main class="detail" id="detail" data-layout="terminal" data-panel="git">
+          <section class="terminal-area">
+            <div class="terminal-host" id="terminal-host"></div>
+            <div class="file-view" id="file-view" hidden>
+              <div class="tab-strip" id="tab-strip"></div>
+              <div class="file-editor-toolbar" role="toolbar" aria-label="File editor actions">
+                <span class="file-language" id="file-language">Plain Text</span>
+                <span class="file-view-title" id="file-view-title">No file selected</span>
+                <span class="file-dirty" id="file-dirty" title="Unsaved changes" aria-label="Unsaved changes" hidden></span>
+                <span class="file-view-meta" id="file-view-meta"></span>
+                <button
+                  id="file-save"
+                  class="file-save"
+                  type="button"
+                  title="Save file (⌘S)"
+                  aria-label="Save file"
+                  disabled
+                >
+                  Save <kbd>⌘S</kbd>
+                </button>
+              </div>
+              <div class="file-view-path" id="file-view-path" aria-label="Project-relative file path">No file selected</div>
+              <div class="file-editor-stage">
+                <div class="file-editor-host" id="file-editor-host" aria-label="File editor"></div>
+                <div
+                  class="file-read-only-message"
+                  id="file-read-only-message"
+                  role="status"
+                  aria-live="polite"
+                  hidden
+                >
+                  Read-only — this file cannot be edited.
+                </div>
+              </div>
+              <div class="file-status-bar">
+                <span id="file-status" role="status" aria-live="polite">Ready</span>
+                <span id="file-cursor" aria-label="Cursor position">Ln 1, Col 1</span>
+              </div>
+            </div>
+          </section>
+
+          <div
+            class="splitter"
+            id="splitter"
+            role="separator"
+            aria-orientation="vertical"
+            aria-valuemin="25"
+            aria-valuemax="85"
+            aria-valuenow="60"
+            tabindex="0"
+            title="Resize the canvas and the tools dock"
+          ></div>
+
+
+          <section class="git-dock dock" aria-label="Git tools">
+            <div class="panel panel-git">
+              <header class="pane-header panel-bar">
+                <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse Git dock (⌘⌥B)" aria-label="Collapse Git dock">
+                  <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                    <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                    <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+                    <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <span class="panel-title">Git</span>
+                <span class="dock-tab-count" id="dock-git-count" hidden></span>
+                <button id="git-pop-out" class="icon-btn ghost-btn" type="button"
+                        draggable="true"
+                        title="Open Git as a pane — or drag it onto the canvas"
+                        aria-label="Open Git as a pane">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <span class="panel-crumb" id="git-branch"></span>
+                <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button id="git-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh git state">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </header>
+              <div class="dock-popped-note" id="git-popped-note" hidden>
+                Git is open as a pane. <button id="git-dock-back" type="button">Return it to the dock</button>
+              </div>
+              <div class="panel-body panel-git-body" id="git-surface">
+                <div class="sidebar-tabs dock-tabs-segmented" role="tablist" aria-label="Git sections">
+                  <button class="sidebar-tab is-active" data-git-tab="changes" type="button" role="tab" aria-selected="true">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9.5 11.5h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/><path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".5"/></svg>
+                    <span>Changes</span><span class="sidebar-tab-count" id="git-changes-count" hidden></span>
+                  </button>
+                  <button class="sidebar-tab" data-git-tab="commit" type="button" role="tab" aria-selected="false">
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2.3 8h3.1M10.6 8h3.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Commit</span>
+                  </button>
+                </div>
+
+                <div class="git-tab-panel" id="git-tab-changes">
+                  <div class="panel-subbar">
+                    <span class="panel-crumb" id="diffs-summary"></span>
+                    <button id="diffs-refresh" class="icon-btn ghost-btn" title="Refresh diffs" aria-label="Refresh diffs">
+                      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                  </div>
+                  <div class="panel-body panel-split">
+                    <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
+                    <div class="diff-detail" id="diff-detail">
+                      <div class="diff-detail-status">
+                        <span role="group" aria-label="Diff layout" class="diff-layout-toggle">
+                          <button id="diff-view-split" type="button" class="diff-layout-btn is-active" aria-pressed="true" title="Side-by-side diff">Split</button>
+                          <button id="diff-view-stacked" type="button" class="diff-layout-btn" aria-pressed="false" title="Unified diff">Stacked</button>
+                        </span>
+                        <span id="diff-metadata" role="status" aria-live="polite"></span>
+                        <span id="diff-truncation" role="alert" hidden></span>
+                      </div>
+                      <div class="diff-rows" id="diff-rows" role="table" aria-label="Diff"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="git-tab-panel" id="git-tab-commit" hidden>
+                  <div class="git-view" id="git-view"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <nav class="mini-rail dock-mini" id="rail-right" hidden
+             role="toolbar" aria-orientation="vertical" aria-label="Panels">
+          <button class="mini-rail-btn" data-panel-btn="git" type="button" aria-pressed="false"
+                  title="Git / GitHub" aria-label="Git panel">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+              <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+              <circle cx="11.2" cy="6.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
+              <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+              <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
+                    stroke-width="1.35" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </nav>
+      </div>
+
+      <div id="browser-surface-staging" hidden>
+        <div class="browser-surface" id="browser-surface">
+          <header class="pane-header browser-bar">
             <button id="back" class="icon-btn nav-btn" title="Back" aria-label="Back">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.75 4.25 6 8l3.75 3.75" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -183,104 +319,92 @@
             <div class="preview-empty">No browser tab yet — type a URL above or press +</div>
           </div>
         </div>
+      </div>
 
-        <div class="panel panel-files">
-          <header class="pane-header panel-bar">
-            <span class="panel-title">Files</span>
-            <span class="panel-crumb" id="files-crumb"></span>
-            <button id="files-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh file tree">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </header>
-          <div class="panel-body">
-            <div class="file-tree" id="file-tree" role="tree" aria-label="Project files"></div>
-          </div>
+      <footer class="composer" id="composer">
+        <button
+          id="scope-btn"
+          class="scope-btn"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          title="Choose where the composer sends text: this pane, the whole project, or every agent pane"
+        >
+          <span class="scope-kicker">To</span>
+          <span class="scope-dot" id="scope-dot"></span>
+          <span class="scope-label" id="scope-label">Pane</span>
+          <span class="scope-caret" aria-hidden="true">▾</span>
+        </button>
+
+        <div class="composer-field">
+          <span class="command-prompt" aria-hidden="true">›</span>
+          <input
+            id="command-input"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
+            aria-label="Command composer"
+          />
+          <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
         </div>
 
-        <div class="panel panel-diffs">
-          <header class="pane-header panel-bar">
-            <span class="panel-title">Diffs</span>
-            <span class="panel-crumb" id="diffs-summary"></span>
-            <button id="diffs-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh diffs">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </header>
-          <div class="panel-body panel-split">
-            <div class="diff-files" id="diff-files" role="list" aria-label="Changed files"></div>
-            <div class="diff-detail" id="diff-detail">
-              <div class="diff-detail-status">
-                <span id="diff-metadata" role="status" aria-live="polite"></span>
-                <span id="diff-truncation" role="alert" hidden></span>
-              </div>
-              <div class="diff-editor-host" id="diff-editor-host"></div>
-            </div>
-          </div>
+        <button id="composer-mic" class="composer-btn" type="button" title="Dictate a prompt (voice input)" aria-label="Start voice input">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <rect x="6" y="1.8" width="4" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M3.6 7.8a4.4 4.4 0 0 0 8.8 0M8 12.4V14.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button id="composer-call" class="composer-btn composer-call-btn" type="button"
+                title="Start a voice call with the focused agent" aria-label="Start a voice call">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.9c.5-.5 1.3-.5 1.8 0l.9.9c.5.5.5 1.2.1 1.7l-.5.7a.7.7 0 0 0 0 .9 12 12 0 0 0 2.6 2.6c.3.2.6.2.9 0l.7-.5c.5-.4 1.2-.4 1.7.1l.9.9c.5.5.5 1.3 0 1.8l-.6.6c-.5.5-1.2.7-1.9.4-2-.8-3.8-2-5.3-3.5S3.3 7.1 2.5 5.1c-.3-.7-.1-1.4.4-1.9z" fill="currentColor"/></svg>
+        </button>
+        <button id="composer-send" class="composer-send" type="button" hidden>Send <span class="composer-send-key mono">↵</span></button>
+
+        <div class="scope-menu" id="scope-menu" role="menu" aria-label="Commands go to" hidden>
+          <div class="scope-menu-head">Commands go to</div>
+          <button class="scope-item" type="button" role="menuitem" data-scope="pane">
+            <span class="scope-dot scope-dot-pane"></span>
+            <span class="scope-item-text">Focused pane<span class="scope-item-desc" id="scope-desc-pane">Text is typed into the focused pane</span></span>
+            <span class="scope-item-key mono">⌥1</span>
+          </button>
+          <button class="scope-item" type="button" role="menuitem" data-scope="project">
+            <span class="scope-dot scope-dot-project"></span>
+            <span class="scope-item-text">Project<span class="scope-item-desc" id="scope-desc-project">Every pane in the active project</span></span>
+            <span class="scope-item-key mono">⌥2</span>
+          </button>
+          <button class="scope-item" type="button" role="menuitem" data-scope="agents">
+            <span class="scope-dot scope-dot-agents"></span>
+            <span class="scope-item-text">All agents<span class="scope-item-desc" id="scope-desc-agents">Broadcast to every agent pane</span></span>
+            <span class="scope-item-key mono">⌥3</span>
+          </button>
         </div>
 
-        <div class="panel panel-git">
-          <header class="pane-header panel-bar">
-            <span class="panel-title">Git</span>
-            <span class="panel-crumb" id="git-branch"></span>
-            <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-            <button id="git-refresh" class="icon-btn ghost-btn" title="Refresh" aria-label="Refresh git state">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M12.2 6.2A4.6 4.6 0 1 0 12.6 9" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/><path d="M12.25 3.8v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </header>
-          <div class="panel-body">
-            <div class="git-view" id="git-view"></div>
-          </div>
+        <div class="call-bar" id="call-bar" role="status" aria-live="polite" hidden>
+          <span class="call-dot" aria-hidden="true"></span>
+          <span class="call-title">Voice call — <span class="call-target" id="call-target"></span></span>
+          <span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="call-note" id="call-note"></span>
+          <span class="call-spacer"></span>
+          <span class="call-timer mono" id="call-timer">0:00</span>
+          <button id="call-mute" class="call-btn" type="button">Mute</button>
+          <button id="call-end" class="call-btn call-end" type="button">End call</button>
         </div>
-        </section>
-      </main>
 
-      <nav class="rail rail-right" id="rail-right" data-tauri-drag-region
-           role="toolbar" aria-orientation="vertical" aria-label="Panels">
-        <button class="rail-btn" data-panel-btn="browser" aria-pressed="false"
-                title="Browser (⌘⌥B)" aria-label="Browser panel">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.35"/>
-            <path d="M2.4 8h11.2M8 2.4c1.5 1.7 2.3 3.6 2.3 5.6S9.5 12 8 13.6C6.5 12 5.7 10 5.7 8s.8-3.9 2.3-5.6z"
-                  fill="none" stroke="currentColor" stroke-width="1.35"/>
-          </svg>
-        </button>
-        <button class="rail-btn" data-panel-btn="files" aria-pressed="false"
-                title="Files" aria-label="File tree panel">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <path d="M3.5 2.5v9.25a1.25 1.25 0 0 0 1.25 1.25H7"
-                  fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-            <path d="M3.5 7.5H7" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-            <rect x="8" y="2" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-            <rect x="8" y="6" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-            <rect x="8" y="11" width="5" height="3" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-          </svg>
-        </button>
-        <button class="rail-btn" data-panel-btn="diffs" aria-pressed="false"
-                title="Diffs" aria-label="Diff viewer panel">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <path d="M4.4 2.4v4.2M2.3 4.5h4.2" fill="none" stroke="currentColor"
-                  stroke-width="1.5" stroke-linecap="round"/>
-            <path d="M9.5 11.5h4.2" fill="none" stroke="currentColor"
-                  stroke-width="1.5" stroke-linecap="round"/>
-            <path d="M2.6 9.4h5M2.6 12.2h4" fill="none" stroke="currentColor"
-                  stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
-            <path d="M9.3 4.2h4.4M9.3 6.9h3.2" fill="none" stroke="currentColor"
-                  stroke-width="1.2" stroke-linecap="round" opacity=".5"/>
-          </svg>
-        </button>
-        <button class="rail-btn" data-panel-btn="git" aria-pressed="false"
-                title="Git / GitHub" aria-label="Git panel">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-            <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-            <circle cx="11.2" cy="6.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-            <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-            <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
-                  stroke-width="1.35" stroke-linecap="round"/>
-          </svg>
-        </button>
-      </nav>
+        <div class="palette" id="palette" hidden></div>
+      </footer>
+
+      <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+      <div class="help-overlay" id="help-overlay" hidden>
+        <div class="help-card" role="dialog" aria-modal="true" aria-labelledby="help-title">
+          <div class="help-head">
+            <span class="help-title" id="help-title">Keyboard</span>
+            <span class="help-sub">press esc to close</span>
+          </div>
+          <div class="help-grid" id="help-grid"></div>
+        </div>
+      </div>
     </div>
     <dialog
       class="file-decision-dialog"
@@ -303,7 +427,10 @@
       </div>
     </dialog>
     <script src="./editor.bundle.js" defer></script>
+    <script src="./diffs.bundle.js" defer></script>
     <script src="./sessions.bundle.js" defer></script>
+    <script src="./panes.bundle.js" defer></script>
+    <script src="./input.bundle.js" defer></script>
     <script src="./main.js" defer></script>
   </body>
 </html>

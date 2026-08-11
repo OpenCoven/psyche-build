@@ -44,13 +44,24 @@ export class ControlScope {
     );
   }
 
-  async requireContainedPath(candidate: string): Promise<string> {
-    let resolved: string;
-    try {
-      resolved = await realpath(path.resolve(candidate));
-    } catch {
-      resolved = path.resolve(candidate);
+  private async resolveWithExistingAncestor(absolute: string): Promise<string> {
+    const pending: string[] = [];
+    let current = absolute;
+    for (;;) {
+      try {
+        const real = await realpath(current);
+        return pending.length > 0 ? path.join(real, ...pending.reverse()) : real;
+      } catch {
+        const parent = path.dirname(current);
+        if (parent === current) return absolute;
+        pending.push(path.basename(current));
+        current = parent;
+      }
     }
+  }
+
+  async requireContainedPath(candidate: string): Promise<string> {
+    const resolved = await this.resolveWithExistingAncestor(path.resolve(candidate));
     if (isContained(this.canonicalRoot, resolved)) return resolved;
     for (const worktree of this.worktrees) {
       if (isContained(worktree, resolved)) return resolved;

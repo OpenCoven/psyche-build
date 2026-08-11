@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "psyche",
+  "project_id": "8b005b06-b735-409c-8463-3bca9f440a83"
+}
