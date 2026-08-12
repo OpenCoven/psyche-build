@@ -3906,7 +3906,25 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
    <html data-theme="...">, persisted as settings.theme.
    ========================================================================== */
 
-/* Coven Purple is the default and lives in :root, so it needs no block. */
+/* Coven Purple used to live in :root and needed no block. That stopped being
+   true when the redesign restated :root as the neutral ramp — the default
+   theme kept its name and its violet accent but lost every surface tint, so
+   the one theme most windows run rendered flat grey while the other five kept
+   their colour. It gets an explicit block like everyone else now; :root stays
+   neutral as the fallback for an unrecognised data-theme. */
+:root[data-theme="coven-purple"] {
+  --rgb-accent: 184, 157, 255;
+  --accent: #b89dff;
+  --accent-strong: #9d80f0;
+  --rgb-deep: 13, 11, 22;
+  --rgb-s1:   20, 18, 30;
+  --rgb-s2:   28, 25, 42;
+  --rgb-s3:   38, 33, 56;
+  --rgb-term: 13, 12, 20;
+  --text: #f5f2fb;
+  --text-soft: #c8c2d8;
+  --muted: #8a8499;
+}
 
 :root[data-theme="claude-orange"] {
   --rgb-accent: 217, 119, 87;
