@@ -10,6 +10,10 @@ const libSourcePath = resolve(
   process.cwd(),
   'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
 );
+const mainSourcePath = resolve(
+  process.cwd(),
+  'native/macos/psyche-build-tauri/web/main.js',
+);
 
 function bracedBody(source: string, start: number): string {
   const bodyStart = source.indexOf('{', start);
@@ -42,6 +46,28 @@ function blockingClosureBody(command: string): string {
 }
 
 describe('Tauri Coven session native contract', () => {
+  test('wires Psyche provenance through native chat and attach launch seams', async () => {
+    const [mainSource, libSource] = await Promise.all([
+      readFile(mainSourcePath, 'utf8'),
+      readFile(libSourcePath, 'utf8'),
+    ]);
+    const chatStart = mainSource.indexOf('function covenChatLaunch');
+    const chatEnd = mainSource.indexOf('async function spawnCovenThread', chatStart);
+    expect(chatStart).toBeGreaterThanOrEqual(0);
+    expect(chatEnd).toBeGreaterThan(chatStart);
+    const chatLaunch = mainSource.slice(chatStart, chatEnd);
+    expect(chatLaunch).toContain('env: { COVEN_SESSION_SOURCE: "psyche-build" }');
+
+    const applyLaunchEnv = functionBody(libSource, 'apply_launch_env');
+    expect(applyLaunchEnv).toContain('launch_kind == Some("coven-attach")');
+    expect(applyLaunchEnv).toContain('cmd.env_remove(COVEN_SESSION_SOURCE)');
+
+    const ptyStart = functionBody(libSource, 'pty_start');
+    expect(ptyStart.indexOf('prepare_pty_start(&options)?')).toBeLessThan(
+      ptyStart.indexOf('validate_coven_launch(&options)?'),
+    );
+  });
+
   test('registers non-blocking Coven discovery under the coven_sessions command', async () => {
     const [covenSessionsSource, libSource] = await Promise.all([
       readFile(covenSessionsSourcePath, 'utf8'),

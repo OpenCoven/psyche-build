@@ -9,6 +9,7 @@ export type CovenSession = {
   inputTokens?: number;
   outputTokens?: number;
   status?: string;
+  labels?: string[];
   createdAt?: string;
   updatedAt?: unknown;
   archivedAt?: string;
@@ -41,6 +42,10 @@ export function statusPresentation(status?: unknown): {
   live: boolean;
 };
 export function isLiveCovenSession(session?: Partial<CovenSession>): boolean;
+export const PSYCHE_COVEN_SOURCE_LABEL: 'source:psyche-build';
+export function isPsycheOwnedActiveCovenSession(
+  session: Partial<CovenSession> | null | undefined,
+): boolean;
 export function sortCovenSessions<T extends CovenSession>(sessions: T[]): T[];
 export function groupCovenSessions<T extends Partial<CovenSession>>(
   sessions: T[],

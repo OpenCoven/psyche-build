@@ -803,8 +803,12 @@ describe('Tauri footer status bar shell', () => {
   it('feeds PTY, Coven, visibility, focus, project/worktree, and lifecycle events into the controller while keeping the rail live-only', () => {
     const refreshCoven = functionSource(mainJs, 'refreshCovenSessions');
 
+    // The liveness guard used to be spelled `!thread || thread.closing` inline.
+    // isLiveThread() is that plus a membership check against state.threads, so
+    // it is strictly stronger; the assertion tracks the helper rather than the
+    // literal it replaced.
     expect(mainJs).toMatch(
-      /listen\("pty:data"[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!thread \|\| thread\.closing\) return;[\s\S]*noteStatusPtyData\(payload\.thread_id,\s*bytes\);/s
+      /listen\("pty:data"[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!isLiveThread\(thread\)\) return;[\s\S]*noteStatusPtyData\(payload\.thread_id,\s*bytes\);/s
     );
     expect(refreshCoven).toMatch(/performance\.now\(\)/);
     expect(refreshCoven).toMatch(
@@ -846,7 +850,8 @@ describe('Tauri footer status bar shell', () => {
     expect(mainJs).toMatch(
       /window\.addEventListener\("beforeunload", function \(\) \{[\s\S]*saveWorkspaceNow\(\);[\s\S]*if \(statusController\) statusController\.stop\(\);[\s\S]*\}\);/s
     );
-    expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('sessionsByProject.get(root) || []');
+    expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('covenSessionAssignments()');
+    expect(functionSource(mainJs, 'covenSessionsForProject')).toContain('owned.get(project.id) || []');
     expect(functionSource(mainJs, 'covenSessionsForProject')).not.toContain('allSessionsByProject');
     expect(functionSource(mainJs, 'allCovenSessionsForProject')).toContain('allSessionsByProject.get(root) || []');
   });

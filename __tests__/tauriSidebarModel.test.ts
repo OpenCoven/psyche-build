@@ -47,6 +47,10 @@ function covenSession(id: string, values: Record<string, unknown> = {}) {
     status: 'running',
     cwd: '/repo/psyche-build-wt',
     projectRoot: '/repo/psyche-build',
+    // Psyche only surfaces sessions it owns, which it proves with this label.
+    // Without it the sidebar model filters every fixture out and the Agents
+    // category disappears. Overridable via values for the negative cases.
+    labels: ['source:psyche-build'],
     ...values,
   };
 }

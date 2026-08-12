@@ -325,15 +325,71 @@
       return roots;
     }, []);
   }
-  function covenSessionsForProject(project) {
-    var roots = [project.root].concat(
-      (project.worktrees || []).map(function (worktree) { return worktree.path; })
-    ).filter(function (root, index, candidates) {
-      return root && candidates.indexOf(root) === index;
+  function covenRootDepth(root) {
+    if (typeof root !== "string") return 0;
+    return root.split("/").filter(function (component) { return component.length > 0; }).length;
+  }
+  function covenProjectCandidate(project, sessionRoot) {
+    if (!project || !project.id || typeof project.root !== "string" || !project.root ||
+        typeof sessionRoot !== "string" || !sessionRoot) return null;
+    if (project.root === sessionRoot) {
+      return { project: project, rank: 0, depth: covenRootDepth(project.root) };
+    }
+    var ownsWorktree = (project.worktrees || []).some(function (worktree) {
+      return worktree && worktree.path === sessionRoot && !worktree.missing &&
+        !worktree.prunable && !worktree.bare;
     });
-    return roots.reduce(function (sessions, root) {
-      return sessions.concat(covenDiscovery.sessionsByProject.get(root) || []);
-    }, []);
+    if (!ownsWorktree) return null;
+    return {
+      project: project,
+      rank: 1,
+      depth: covenRootDepth(project.root),
+    };
+  }
+  function compareCovenProjectCandidates(left, right) {
+    if (left.rank !== right.rank) return left.rank - right.rank;
+    if (left.depth !== right.depth) return right.depth - left.depth;
+    var leftId = String(left.project.id);
+    var rightId = String(right.project.id);
+    return leftId < rightId ? -1 : (leftId > rightId ? 1 : 0);
+  }
+  function covenSessionAssignments() {
+    var sessionsById = new Map();
+    covenDiscovery.sessionsByProject.forEach(function (sessions) {
+      (sessions || []).forEach(function (session) {
+        if (!session || !session.id) return;
+        var records = sessionsById.get(session.id) || [];
+        records.push(session);
+        sessionsById.set(session.id, records);
+      });
+    });
+    var assignments = new Map();
+    sessionsById.forEach(function (records) {
+      var candidates = [];
+      records.forEach(function (session) {
+        state.projects.forEach(function (project) {
+          var candidate = covenProjectCandidate(project, session.projectRoot);
+          if (candidate) candidates.push({ session: session, candidate: candidate });
+        });
+      });
+      candidates.sort(function (left, right) {
+        var ownerOrder = compareCovenProjectCandidates(left.candidate, right.candidate);
+        if (ownerOrder) return ownerOrder;
+        var leftRoot = String(left.session.projectRoot);
+        var rightRoot = String(right.session.projectRoot);
+        return leftRoot < rightRoot ? -1 : (leftRoot > rightRoot ? 1 : 0);
+      });
+      var winner = candidates[0];
+      if (!winner) return;
+      var ownerSessions = assignments.get(winner.candidate.project.id) || [];
+      ownerSessions.push(winner.session);
+      assignments.set(winner.candidate.project.id, ownerSessions);
+    });
+    return assignments;
+  }
+  function covenSessionsForProject(project, assignments) {
+    var owned = assignments || covenSessionAssignments();
+    return owned.get(project.id) || [];
   }
   function allCovenSessionsForProject(project) {
     var roots = [project.root].concat(
@@ -1704,10 +1760,16 @@
     return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
+  // An exited pane is not an attachment you can focus, so it must not make a
+  // row read as attached. main added that guard to isReusableCovenAttachment
+  // alongside createCovenSessionRow; this branch replaced that render path with
+  // the sidebar model, so the guard is carried here instead of being lost with
+  // the function it arrived in.
   function covenRowAttached(state, projectId, sessionId) {
     return state.threads.some(function (thread) {
       return thread.projectId === projectId
         && threadCovenSessionId(thread) === sessionId
+        && thread.status !== "exited"
         && !thread.closeStarted;
     });
   }
@@ -4746,12 +4808,18 @@
     return new Promise(function (resolve) { requestAnimationFrame(resolve); });
   }
 
+  function isReusableCovenAttachment(thread, project, session, threadId) {
+    return !!thread
+      && (!threadId || thread.id === threadId)
+      && thread.projectId === project.id
+      && threadCovenSessionId(thread) === session.id
+      && thread.status !== "exited"
+      && !thread.closeStarted;
+  }
+
   function findCovenAttachment(project, session, threadId) {
     return state.threads.find(function (thread) {
-      return (!threadId || thread.id === threadId)
-        && thread.projectId === project.id
-        && threadCovenSessionId(thread) === session.id
-        && !thread.closeStarted;
+      return isReusableCovenAttachment(thread, project, session, threadId);
     }) || null;
   }
 
@@ -5352,6 +5420,7 @@
     var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
     var onCanvasIds = canvasThreadIds();
+    var covenAssignments = covenSessionAssignments();
 
     var persistedSelectionExists = !settings.selectedSessionKey ||
       state.projects.some(function (project) {
@@ -5390,7 +5459,15 @@
       var localRows = state.threads.filter(function (t) {
         return t.projectId === project.id && !t.hidden && !isDormantThread(t);
       });
-      var remoteRows = covenSessionsForProject(project);
+      // This branch calls buildSidebarProjectModel instead of reaching for
+      // buildProjectRailModel directly; the rail model still exists and
+      // sidebar-model.mjs builds on it. The sidebar model also carries the
+      // query/filter/selection that used to be applied afterwards here, which
+      // is why the surrounding code reads projectModel.visibleCount rather than
+      // filtering worktrees itself. main's covenAssignments argument survives the
+      // swap: it hoists the assignment map out of the per-project loop, which
+      // covenSessionsForProject would otherwise rebuild once per project.
+      var remoteRows = covenSessionsForProject(project, covenAssignments);
       var projectModel = PsycheSessions.buildSidebarProjectModel({
         project: project,
         localSessions: localRows,
@@ -7433,17 +7510,8 @@
   }
   listen("browser:shortcut-new-tab", function () {
     markActiveSurface("browser");
-    var browser = ensureBrowserModel(project, worktreePath);
-    var tab = null;
-    if (existing || !browser.tabs.length) {
-      tab = createBrowserTab(project, "about:blank", true);
-    } else {
-      renderBrowserTabs();
-    }
-    syncProjectBrowser();
-    if (urlInput) urlInput.focus();
-    return tab || currentBrowserTab(project);
-  }
+    openBlankBrowserTab();
+  }).catch(function () {});
   listen("browser:shortcut-terminal-pane", function () {
     createTerminalPane();
   }).catch(function () {});
@@ -8923,7 +8991,7 @@
     return {
       command: state.env.coven_path,
       args: ["code", "--session-id", sessionId],
-      env: {},
+      env: { COVEN_SESSION_SOURCE: "psyche-build" },
       projectRoot: project.root,
       cwd: worktree.path,
       kind: "coven-chat",
