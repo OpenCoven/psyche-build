@@ -132,10 +132,27 @@ public protocol BonjourBrowsing: Sendable {
     func stop()
 }
 
+struct BonjourHostDiscoveryLifecycle: @unchecked Sendable {
+    let didTerminateObservation: @Sendable () -> Void
+    let beforeFinishObservation: @Sendable () async -> Void
+    let didFinishObservation: @Sendable () -> Void
+
+    init(
+        didTerminateObservation: @escaping @Sendable () -> Void = {},
+        beforeFinishObservation: @escaping @Sendable () async -> Void = {},
+        didFinishObservation: @escaping @Sendable () -> Void = {}
+    ) {
+        self.didTerminateObservation = didTerminateObservation
+        self.beforeFinishObservation = beforeFinishObservation
+        self.didFinishObservation = didFinishObservation
+    }
+}
+
 /// Browses the LAN and publishes only the hosts that survived parsing.
 public actor BonjourHostDiscovery {
     private let browser: any BonjourBrowsing
     private let resolver: any BonjourServiceResolving
+    private let lifecycle: BonjourHostDiscoveryLifecycle
     private var observationTask: Task<Void, Never>?
     private var batchTask: Task<Void, Never>?
     private var continuation: AsyncStream<[DiscoveredHost]>.Continuation?
@@ -160,6 +177,17 @@ public actor BonjourHostDiscovery {
     ) {
         self.browser = browser
         self.resolver = resolver
+        self.lifecycle = .init()
+    }
+
+    init(
+        browser: any BonjourBrowsing,
+        resolver: any BonjourServiceResolving,
+        lifecycle: BonjourHostDiscoveryLifecycle = .init()
+    ) {
+        self.browser = browser
+        self.resolver = resolver
+        self.lifecycle = lifecycle
     }
 
     public func start() -> AsyncStream<[DiscoveredHost]> {
@@ -186,7 +214,9 @@ public actor BonjourHostDiscovery {
                     using: resolver
                 )
             }
+            await self.lifecycle.beforeFinishObservation()
             self.finishObservation(currentObservationID)
+            self.lifecycle.didFinishObservation()
         }
         observationTask = task
         continuation.onTermination = { [weak self] _ in
@@ -310,6 +340,9 @@ public actor BonjourHostDiscovery {
               continuation != nil else {
             return
         }
+        // Invalidate this reader before cancelling it so its trailing
+        // finishObservation call cannot own browser shutdown a second time.
+        self.observationID &+= 1
         observationTask?.cancel()
         observationTask = nil
         batchTask?.cancel()
@@ -317,6 +350,7 @@ public actor BonjourHostDiscovery {
         activeBatch = nil
         publishedHosts = [:]
         continuation = nil
+        lifecycle.didTerminateObservation()
         browser.stop()
     }
 

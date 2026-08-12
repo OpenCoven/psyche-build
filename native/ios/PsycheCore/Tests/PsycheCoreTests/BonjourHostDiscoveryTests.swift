@@ -525,6 +525,54 @@ final class BonjourHostDiscoveryTests: XCTestCase {
         XCTAssertEqual(events.cancellationCount(for: blocked), 1)
     }
 
+    func testConsumerTerminationStopsBrowserExactlyOnceAfterObservationTaskQuiesces() async {
+        let blocked = BonjourServiceKey(name: "Blocked", domain: "local.")
+        let started = XCTestExpectation(description: "blocked resolution started")
+        let cancelled = XCTestExpectation(description: "blocked resolution cancelled")
+        let observationTerminated = XCTestExpectation(description: "consumer termination owned observation cleanup")
+        let observationReadyToFinish = XCTestExpectation(description: "cancelled observation task is ready to finish")
+        let observationFinished = XCTestExpectation(description: "cancelled observation task finished")
+        let events = ResolverEventLog(started: [blocked: started], cancelled: [blocked: cancelled])
+        let browser = FakeBonjourBrowser()
+        let resolver = ControlledBonjourServiceResolver(modes: [blocked: .blocked], events: events)
+        let lifecycle = DiscoveryLifecycleBoundary(
+            observationTerminated: observationTerminated,
+            observationReadyToFinish: observationReadyToFinish,
+            observationFinished: observationFinished
+        )
+        let discovery = BonjourHostDiscovery(
+            browser: browser,
+            resolver: resolver,
+            lifecycle: .init(didTerminateObservation: {
+                lifecycle.recordObservationTerminated()
+            }, beforeFinishObservation: {
+                await lifecycle.waitBeforeFinish()
+            }, didFinishObservation: {
+                lifecycle.recordObservationFinished()
+            })
+        )
+        let consumerReady = XCTestExpectation(description: "consumer owns the discovery stream")
+        let consumer = Task {
+            let stream = await discovery.start()
+            consumerReady.fulfill()
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+
+        await fulfillment(of: [consumerReady], timeout: 1)
+        browser.emit([
+            makeRecord(name: "Blocked", txt: ["serverId": "blocked", "fingerprint": fingerprint, "versions": "3"])
+        ])
+        await fulfillment(of: [started], timeout: 1)
+
+        consumer.cancel()
+
+        await fulfillment(of: [cancelled, observationReadyToFinish, observationTerminated], timeout: 1)
+        lifecycle.allowFinish()
+        await fulfillment(of: [observationFinished], timeout: 1)
+        XCTAssertEqual(browser.stopCount, 1)
+    }
+
     func testResolverCancellationBeforeContinuationRegistrationDoesNotStartOrRetainWork() async throws {
         let boundary = ResolverRegistrationBoundary()
         let lifecycle = NetServiceResolutionLifecycle(
@@ -869,6 +917,59 @@ private final class SnapshotBatchRecorder: @unchecked Sendable {
         if fulfill.1 {
             refreshPublished.fulfill()
         }
+    }
+}
+
+private final class DiscoveryLifecycleBoundary: @unchecked Sendable {
+    private let lock = NSLock()
+    private let observationTerminated: XCTestExpectation
+    private let observationReadyToFinish: XCTestExpectation
+    private let observationFinished: XCTestExpectation
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var didAllowFinish = false
+
+    init(
+        observationTerminated: XCTestExpectation,
+        observationReadyToFinish: XCTestExpectation,
+        observationFinished: XCTestExpectation
+    ) {
+        self.observationTerminated = observationTerminated
+        self.observationReadyToFinish = observationReadyToFinish
+        self.observationFinished = observationFinished
+    }
+
+    func recordObservationTerminated() {
+        observationTerminated.fulfill()
+    }
+
+    func waitBeforeFinish() async {
+        observationReadyToFinish.fulfill()
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock { () -> Bool in
+                if didAllowFinish {
+                    return true
+                }
+                self.continuation = continuation
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    func allowFinish() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            didAllowFinish = true
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume()
+    }
+
+    func recordObservationFinished() {
+        observationFinished.fulfill()
     }
 }
 
