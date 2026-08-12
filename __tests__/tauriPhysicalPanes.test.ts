@@ -1304,6 +1304,7 @@ describe('Tauri physical terminal panes', () => {
       root: PsychePanes.createLeaf('leaf-a', thread.id),
       focusedLeafId: 'leaf-a' as string | null,
       maximizedLeafId: 'leaf-a' as string | null,
+      activeSetId: 'coven-set' as string | null,
     };
     let renders = 0;
     let refreshes = 0;
@@ -1314,6 +1315,7 @@ describe('Tauri physical terminal panes', () => {
       state,
       findThread: () => thread,
       activePaneLayout: () => layout,
+      findFocusSet: () => ({ threadIds: [thread.id] }),
       PsychePanes,
     });
     const activatePaneLayoutFocus = compileFunction<(
@@ -1350,6 +1352,7 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeThreadId).toBeNull();
     expect(layout.focusedLeafId).toBeNull();
     expect(layout.maximizedLeafId).toBeNull();
+    expect(layout.activeSetId).toBeNull();
     expect(renders).toBe(1);
     expect(refreshes).toBe(1);
   });

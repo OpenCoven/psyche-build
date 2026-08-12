@@ -6335,6 +6335,16 @@
     }
     layout = layout || activePaneLayout();
     if (!layout || !layout.root) return;
+    if (layout.activeSetId) {
+      var activeSet = findFocusSet(layout.activeSetId);
+      var hasPassiveThread = activeSet && activeSet.threadIds.some(function (threadId) {
+        var thread = findThread(threadId);
+        return thread && !thread.hidden &&
+          thread.kind !== "coven-chat" && thread.kind !== "coven-attach" &&
+          !!PsychePanes.findLeafByThreadId(layout.root, threadId);
+      });
+      if (!hasPassiveThread) layout.activeSetId = null;
+    }
     ["focusedLeafId", "maximizedLeafId"].forEach(function (key) {
       var leaf = layout[key] ? PsychePanes.findLeafById(layout.root, layout[key]) : null;
       var thread = leaf ? findThread(leaf.threadId) : null;
