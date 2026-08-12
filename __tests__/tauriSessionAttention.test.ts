@@ -326,9 +326,77 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toContain('row.needsAttention');
   });
 
+  it('suppresses and restores branch status glow as attention changes', () => {
+    const paneClasses = new Set(['terminal-pane']);
+    const branch = {
+      classList: { contains: (name: string) => name === 'terminal-pane-branch' },
+      dataset: { paneStatus: 'failed' } as Record<string, string>,
+      firstElementChild: null as null | {
+        classList: {
+          contains: (name: string) => boolean;
+          toggle: (name: string, enabled: boolean) => void;
+        };
+        dataset: Record<string, string>;
+      },
+    };
+    const pane = {
+      classList: {
+        contains: (name: string) => paneClasses.has(name),
+        toggle: (name: string, enabled: boolean) => {
+          if (enabled) paneClasses.add(name);
+          else paneClasses.delete(name);
+        },
+      },
+      dataset: { status: 'failed' },
+      parentElement: branch,
+    };
+    branch.firstElementChild = pane;
+    const attention = {
+      hidden: true,
+      textContent: '',
+      title: '',
+      setAttribute: () => undefined,
+    };
+    const syncPaneBranchStatusChrome = compileFunction<(value: typeof branch) => void>(
+      functionSource('syncPaneBranchStatusChrome'),
+      {},
+    );
+    const syncThreadAttentionChrome = compileFunction<(
+      value: { id: string; needsAttention: boolean; attentionReason: string | null;
+        pane: typeof pane; paneAttention: typeof attention },
+    ) => void>(functionSource('syncThreadAttentionChrome'), {
+      syncPaneBranchStatusChrome,
+      PsycheSessions: { attentionLabel: () => 'Waiting for input' },
+      terminalArea: { querySelector: () => null },
+    });
+    const thread: {
+      id: string;
+      needsAttention: boolean;
+      attentionReason: string | null;
+      pane: typeof pane;
+      paneAttention: typeof attention;
+    } = {
+      id: 'thread-a',
+      needsAttention: true,
+      attentionReason: 'question',
+      pane,
+      paneAttention: attention,
+    };
+
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(true);
+    expect('paneStatus' in branch.dataset).toBe(false);
+
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(false);
+    expect(branch.dataset.paneStatus).toBe('failed');
+  });
+
   it('states the waiting reason in words, never in colour alone', () => {
     const statusGlowSelector =
-      '.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention))';
+      '.terminal-pane-branch:is([data-pane-status="starting"], [data-pane-status="failed"], [data-pane-status="exited"])';
     const rootStatusGlowSelector =
       '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
 

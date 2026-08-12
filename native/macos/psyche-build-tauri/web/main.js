@@ -1626,6 +1626,7 @@
     if (!thread) return;
     if (thread.pane) {
       thread.pane.classList.toggle("needs-attention", !!thread.needsAttention);
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (thread.paneAttention) {
       var label = PsycheSessions.attentionLabel(thread.attentionReason);
@@ -2622,6 +2623,24 @@
     pane.setAttribute("aria-description", "Status: " + label);
   }
 
+  function syncPaneBranchStatusChrome(branch) {
+    if (!branch || !branch.classList ||
+        !branch.classList.contains("terminal-pane-branch")) return;
+    var pane = branch.firstElementChild;
+    var status = pane && pane.classList &&
+      pane.classList.contains("terminal-pane") && pane.dataset
+      ? pane.dataset.status || ""
+      : "";
+    var glows = status === "starting" || status === "failed" || status === "exited";
+    var needsAttention = pane && pane.classList &&
+      pane.classList.contains("needs-attention");
+    if (glows && !needsAttention) {
+      branch.dataset.paneStatus = status;
+    } else if (branch.dataset) {
+      delete branch.dataset.paneStatus;
+    }
+  }
+
   function handlePanePointerDown(thread, body, close, event) {
     var target = event.target;
     if ((body && body.contains(target)) || (close && close.contains(target))) return;
@@ -3179,10 +3198,12 @@
     first.className = "terminal-pane-branch";
     first.style.flexGrow = String(ratio);
     first.appendChild(renderPaneNode(node.first, splitRatios));
+    syncPaneBranchStatusChrome(first);
     var second = document.createElement("div");
     second.className = "terminal-pane-branch";
     second.style.flexGrow = String(1 - ratio);
     second.appendChild(renderPaneNode(node.second, splitRatios));
+    syncPaneBranchStatusChrome(second);
     split.appendChild(first);
     split.appendChild(createPaneDivider(node, ratio));
     split.appendChild(second);
@@ -3467,6 +3488,7 @@
     }
     if (thread.pane) {
       applyPaneStatus(thread.pane, thread.status);
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
