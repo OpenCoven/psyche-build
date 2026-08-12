@@ -377,6 +377,7 @@ function createRenderer(options: {
   const setActiveProject = vi.fn().mockResolvedValue(true);
   const focusThread = vi.fn().mockResolvedValue(undefined);
   const closeThread = vi.fn();
+  const closeBrowserPane = vi.fn();
   const hideThread = vi.fn();
   const editLabelInline = vi.fn();
   const renameThread = vi.fn((id: string, value: string) => {
@@ -440,8 +441,9 @@ function createRenderer(options: {
   const harness = Function(
     'document', 'sessionListEl', 'editingContext', 'sessionFilter', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
-    'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
+    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
+    'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
+    'openCovenSession', 'setStatus',
     'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval',
     'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
@@ -477,6 +479,12 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    closeBrowserPane,
+    (thread: { id: string; kind?: string } | null) => {
+      if (!thread) return Promise.resolve(false);
+      if (thread.kind === 'web') return Promise.resolve(closeBrowserPane(thread));
+      return Promise.resolve(closeThread(thread.id));
+    },
     hideThread,
     renameThread,
     editLabelInlineImpl,
