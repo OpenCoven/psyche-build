@@ -11,7 +11,11 @@ import {
   getTerminalDimensions,
   splitPane,
 } from './tmux.js';
-import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import type { PsychePane, PsycheConfig } from '../types.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import {
@@ -179,6 +183,14 @@ async function reopenWorktreeWithReuseReservation(
 
   // Determine if this is the first content pane
   const isFirstContentPane = existingPanes.length === 0;
+  const panesFile = optionsSessionConfigPath
+    || path.join(sessionProjectRoot, '.psyche', 'psyche.config.json');
+  const insertion = isFirstContentPane
+    ? undefined
+    : await capturePaneInsertion({
+      panesFile,
+      panes: existingPanes,
+    });
 
   // Resolve all record fields before tmux allocation. Once a split succeeds,
   // the exact identity is available immediately for recovery persistence.
@@ -211,10 +223,9 @@ async function reopenWorktreeWithReuseReservation(
   if (isFirstContentPane) {
     paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
   } else {
-    // Subsequent panes - always split horizontally
-    const psychePaneIds = existingPanes.map(p => p.paneId);
-    const targetPane = psychePaneIds[psychePaneIds.length - 1];
-    paneInfo = splitPane({ targetPane });
+    paneInfo = splitPane(
+      insertion ? { targetPane: insertion.targetTmuxPaneId } : {}
+    );
   }
 
   const tmuxServerIdentity = allocationGeneration;
@@ -253,18 +264,17 @@ async function reopenWorktreeWithReuseReservation(
       : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
     await tmuxService.setPaneTitle(paneInfo, paneTitle);
 
-    if (controlPaneId) {
-      const dimensions = getTerminalDimensions();
-      const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-      await recalculateAndApplyLayout(
-        controlPaneId,
-        allContentPaneIds,
-        dimensions.width,
-        dimensions.height,
-      );
-      await tmuxService.refreshClient();
+    if (!controlPaneId) {
+      throw new Error('Pane layout cannot be updated without a control pane');
     }
-
+    await insertPaneIntoStoredLayout({
+      panesFile,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth: SIDEBAR_WIDTH,
+    });
     await options.persistReopenedPane(newPane);
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);

@@ -191,6 +191,24 @@ describe('createNewPane', () => {
 });
 
 describe('createPanesForAgents', () => {
+  it('forwards the captured focused target to new agent creation', async () => {
+    createPaneMock.mockResolvedValue({ pane: pane('created'), needsAgentChoice: false });
+    const h = harness([pane('selected')]);
+
+    await h.api.createNewPane('Fix auth', 'claude', {
+      focusedTmuxPaneId: '%selected',
+      selectedPaneId: 'selected',
+    });
+
+    expect(createPaneMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        focusedTmuxPaneId: '%selected',
+        selectedPaneId: 'selected',
+      }),
+      expect.anything()
+    );
+  });
+
   it('creates one pane per selected agent', async () => {
     let n = 0;
     createPaneMock.mockImplementation(async () => ({

@@ -14,6 +14,8 @@ const tmuxService = vi.hoisted(() => ({
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%9'));
 const persistExactMock = vi.hoisted(() => vi.fn());
 const beginReservationMock = vi.hoisted(() => vi.fn());
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 
 vi.mock('../src/services/TmuxService.js', () => ({
   TmuxService: { getInstance: () => tmuxService },
@@ -22,6 +24,11 @@ vi.mock('../src/utils/tmux.js', () => ({
   enforceControlPaneSize: vi.fn(async () => {}),
   ensurePaneBorderStatusForCurrentSession: vi.fn(),
   splitPane: splitPaneMock,
+}));
+vi.mock('../src/utils/layoutManager.js', () => ({
+  SIDEBAR_WIDTH: 40,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 vi.mock('../src/utils/settingsManager.js', () => ({
   SettingsManager: vi.fn(() => ({
@@ -62,6 +69,7 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   compareAndRemoveProjectPaneConfigPaneIdentities: vi.fn(),
   ensureProjectPaneConfigPane: vi.fn(),
   projectPaneConfigPath: (root: string) => `${root}/.psyche/psyche.config.json`,
+  readProjectPaneConfig: vi.fn(async () => ({ controlPaneId: '%0', panes: [] })),
 }));
 vi.mock('../src/constants/timing.js', () => ({
   TMUX_LAYOUT_APPLY_DELAY: 0,

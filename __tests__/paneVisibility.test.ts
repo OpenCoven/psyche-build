@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PsychePane } from '../src/types.js';
+import { applyPaneLayoutMutation } from '../src/layout/PaneLayoutController.js';
+import { seedPaneLayout } from '../src/layout/PaneLayoutTree.js';
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
@@ -74,6 +76,43 @@ describe('paneVisibility', () => {
       'psyche-1',
       'psyche-3',
     ]);
+  });
+
+  it('keeps hidden panes in topology and restores their original sibling position when unhidden', async () => {
+    const paneLayout = seedPaneLayout(['psyche-1', 'psyche-2', 'psyche-3']);
+    const hiddenPanes = [
+      pane('psyche-1'),
+      pane('psyche-2', true),
+      pane('psyche-3'),
+    ];
+    const hiddenSelectLayout = vi.fn((_layout: string) => true);
+
+    const hiddenResult = await applyPaneLayoutMutation({
+      paneLayout,
+      panes: hiddenPanes,
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      mutation: { kind: 'reconcile' },
+      selectLayout: hiddenSelectLayout,
+    });
+
+    expect(hiddenResult.layout).toEqual(paneLayout);
+    expect(hiddenSelectLayout.mock.calls[0][0]).not.toMatch(/,2,/);
+
+    const visibleSelectLayout = vi.fn((_layout: string) => true);
+    const visibleResult = await applyPaneLayoutMutation({
+      paneLayout: hiddenResult.layout,
+      panes: hiddenPanes.map((entry) => ({ ...entry, hidden: false })),
+      controlPaneId: '%0',
+      terminalWidth: 201,
+      terminalHeight: 60,
+      mutation: { kind: 'reconcile' },
+      selectLayout: visibleSelectLayout,
+    });
+
+    expect(visibleResult.layout).toEqual(paneLayout);
+    expect(visibleSelectLayout.mock.calls[0][0]).toMatch(/,2,/);
   });
 
   it('partitions panes by project root', () => {

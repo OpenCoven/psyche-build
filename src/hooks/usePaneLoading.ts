@@ -610,11 +610,12 @@ export async function recreateKilledWorktreePanes(
       const dimensions = getTerminalDimensions();
 
       const contentPaneIds = getVisiblePanes(updatedPanes).map(p => p.paneId);
-      recalculateAndApplyLayout(
+      await recalculateAndApplyLayout(
         config.controlPaneId,
         contentPaneIds,
         dimensions.width,
-        dimensions.height
+        dimensions.height,
+        panesFile,
       );
 
   //       LogService.getInstance().debug(
