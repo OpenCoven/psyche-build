@@ -61,10 +61,14 @@ export interface EditorSearchState {
 }
 
 export const EDITOR_LIMITS = Object.freeze({
+  count: 10_000,
+  countDigits: 5,
   registerEntries: 64,
   registerBytes: 1024 * 1024,
   macroDepth: 16,
   macroActions: 10_000,
+  searchPatternBytes: 4 * 1024,
+  exCommandBytes: 64 * 1024,
   exHistoryEntries: 100,
   exHistoryBytes: 64 * 1024,
 });
@@ -331,6 +335,19 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+function truncateBytes(value: string, limit: number): string {
+  if (byteLength(value) <= limit) return value;
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const size = byteLength(character);
+    if (bytes + size > limit) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
+}
+
 /** Pure editor state machine. All document effects flow through EditorDocumentPort. */
 export function createEditorMachine(
   document: EditorDocumentPort,
@@ -344,6 +361,7 @@ export function createEditorMachine(
   let visualAnchor = 0;
   let visualHead = 0;
   let inputBuffer = '';
+  let inputBufferBytes = 0;
   let searchState: EditorSearchState | undefined;
   let insertFirstEdit = true;
   let insertChange: EditorInput[] | undefined;
@@ -471,10 +489,23 @@ export function createEditorMachine(
     activeRegister = undefined;
   }
 
+  function appendCount(digit: string): EditorResult {
+    const next = `${countBuffer}${digit}`;
+    if (next.length > EDITOR_LIMITS.countDigits || Number(next) > EDITOR_LIMITS.count) {
+      resetPending();
+      return snapshot([{
+        type: 'status', level: 'error', message: `Count exceeds limit (${EDITOR_LIMITS.count})`,
+      }]);
+    }
+    countBuffer = next;
+    return snapshot();
+  }
+
   function enter(next: EditorMode): EditorResult {
     mode = next;
     resetPending();
     inputBuffer = '';
+    inputBufferBytes = 0;
     if (next.startsWith('visual-')) {
       visualAnchor = visualHead = document.selections()[0]?.head ?? 0;
       select(visualHead);
@@ -716,10 +747,19 @@ export function createEditorMachine(
   }
 
   async function executeEx(commandText: string): Promise<EditorResult> {
+    if (byteLength(commandText) > EDITOR_LIMITS.exCommandBytes) {
+      mode = 'normal';
+      inputBuffer = '';
+      inputBufferBytes = 0;
+      return snapshot([{
+        type: 'status', level: 'error', message: `Ex command exceeds limit (${EDITOR_LIMITS.exCommandBytes} bytes)`,
+      }]);
+    }
     const command = commandText.trim();
     pushExHistory(command);
     mode = 'normal';
     inputBuffer = '';
+    inputBufferBytes = 0;
     if (command.includes('|')) return snapshot([{ type: 'status', level: 'error', message: 'Pipes are not allowed' }]);
     if (command.startsWith('!')) return snapshot([{ type: 'status', level: 'error', message: 'Shell commands are not allowed' }]);
     if (/^source(?:\s|$)/iu.test(command)) {
@@ -758,10 +798,38 @@ export function createEditorMachine(
         active: false,
       }]);
     }
-    return snapshot([{ type: 'status', level: 'error', message: `Unknown Ex command: ${command}` }]);
+    return snapshot([{
+      type: 'status',
+      level: 'error',
+      message: truncateBytes(`Unknown Ex command: ${command}`, EDITOR_LIMITS.exCommandBytes),
+    }]);
   }
 
-  async function replay(inputs: readonly EditorInput[], macro: boolean): Promise<EditorResult> {
+  async function replay(
+    inputs: readonly EditorInput[],
+    macro: boolean,
+    repetitions = 1,
+  ): Promise<EditorResult> {
+    const recovery = {
+      mode,
+      pending,
+      countBuffer,
+      operatorCount,
+      activeRegister,
+      visualAnchor,
+      visualHead,
+      inputBuffer,
+      inputBufferBytes,
+      searchState,
+      insertFirstEdit,
+      insertChange,
+      lastChange,
+      lastVisualChange,
+      activeVisualChange,
+      macroDepth,
+      macroActions,
+      invocationGroup,
+    };
     if (macro) {
       if (macroDepth >= EDITOR_LIMITS.macroDepth) {
         return snapshot([{
@@ -774,22 +842,50 @@ export function createEditorMachine(
       }
       macroDepth += 1;
     } else invocationGroup = { used: false };
-    let result = snapshot();
-    for (const input of inputs) {
-      if (macro && ++macroActions > EDITOR_LIMITS.macroActions) {
-        result = snapshot([{
-          type: 'status', level: 'error', message: `Macro action limit reached (${EDITOR_LIMITS.macroActions})`,
-        }]);
-        break;
+    let failed = false;
+    try {
+      let result = snapshot();
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        for (const input of inputs) {
+          if (macro && ++macroActions > EDITOR_LIMITS.macroActions) {
+            return snapshot([{
+              type: 'status', level: 'error', message: `Macro action limit reached (${EDITOR_LIMITS.macroActions})`,
+            }]);
+          }
+          result = await handle(input, true);
+          if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) return result;
+        }
       }
-      result = await handle(input, true);
-      if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) break;
+      return result;
+    } catch {
+      failed = true;
+      ({
+        mode,
+        pending,
+        countBuffer,
+        operatorCount,
+        activeRegister,
+        visualAnchor,
+        visualHead,
+        inputBuffer,
+        inputBufferBytes,
+        searchState,
+        insertFirstEdit,
+        insertChange,
+        lastChange,
+        lastVisualChange,
+        activeVisualChange,
+        macroDepth,
+        macroActions,
+        invocationGroup,
+      } = recovery);
+      return snapshot([{ type: 'status', level: 'error', message: 'Editor replay failed' }]);
+    } finally {
+      if (!failed) {
+        macroDepth = recovery.macroDepth;
+        invocationGroup = recovery.invocationGroup;
+      }
     }
-    if (macro) {
-      macroDepth -= 1;
-      if (macroDepth === 0) invocationGroup = undefined;
-    } else invocationGroup = undefined;
-    return result;
   }
 
   async function handle(input: EditorInput, replaying = false): Promise<EditorResult> {
@@ -845,6 +941,7 @@ export function createEditorMachine(
     if (mode === 'command-line' || mode === 'search') {
       if (key === 'Backspace') {
         inputBuffer = inputBuffer.slice(0, previousGrapheme(inputBuffer, inputBuffer.length));
+        inputBufferBytes = byteLength(inputBuffer);
         return snapshot();
       }
       if (key === 'Enter') {
@@ -860,18 +957,31 @@ export function createEditorMachine(
         mode = 'normal';
         return search(direction);
       }
-      if (!value.ctrl && !value.alt && !value.meta && key.length === 1) inputBuffer += key;
+      if (!value.ctrl && !value.alt && !value.meta && key.length === 1) {
+        const nextBytes = inputBufferBytes + byteLength(key);
+        const limit = mode === 'search' ? EDITOR_LIMITS.searchPatternBytes : EDITOR_LIMITS.exCommandBytes;
+        if (nextBytes > limit) {
+          const label = mode === 'search' ? 'Search pattern' : 'Ex command';
+          mode = 'normal';
+          inputBuffer = '';
+          inputBufferBytes = 0;
+          resetPending();
+          return snapshot([{
+            type: 'status', level: 'error', message: `${label} exceeds limit (${limit} bytes)`,
+          }]);
+        }
+        inputBuffer += key;
+        inputBufferBytes = nextBytes;
+      }
       return snapshot();
     }
 
     if ((!pending || /^[dcy]$/u.test(pending))
       && !value.ctrl && !value.alt && !value.meta && /^[1-9]$/u.test(value.key)) {
-      countBuffer += value.key;
-      return snapshot();
+      return appendCount(value.key);
     }
     if (!pending && countBuffer && value.key === '0') {
-      countBuffer += '0';
-      return snapshot();
+      return appendCount('0');
     }
 
     if (pending === '"') {
@@ -926,7 +1036,7 @@ export function createEditorMachine(
       if (!macro) return snapshot([{ type: 'status', level: 'error', message: `Macro ${key} is not set` }]);
       const repetitions = countBuffer ? Number(countBuffer) : 1;
       resetPending();
-      return replay(Array.from({ length: repetitions }, () => macro).flat(), true);
+      return replay(macro, true, repetitions);
     }
 
     if (!pending) {
