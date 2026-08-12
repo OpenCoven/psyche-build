@@ -344,8 +344,6 @@ kbd {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.session-legend-button { margin-left: auto; }
-
 .sidebar-files {
   display: flex;
   flex-direction: column;
