@@ -310,10 +310,13 @@ describe('desktop shell wiring', () => {
     expect(stylesCss).toContain('.terminal-pane-attention');
     expect(stylesCss).toMatch(/\.terminal-pane\.needs-attention/);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
-    // The header grew a seventh track for the chip; leaving it at six would
-    // wrap the close button onto a second row the moment a pane waits.
+    expect(functionSource('mountTerminal')).toMatch(
+      /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
+    );
+    // The terminal header needs one track per mounted child once the attention
+    // chip joins the row, or the controls wrap when a pane is waiting.
     expect(stylesCss).toMatch(
-      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto auto;/
+      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto;/
     );
   });
 });

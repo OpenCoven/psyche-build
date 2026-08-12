@@ -1770,12 +1770,12 @@ describe('Tauri physical terminal panes', () => {
   });
 
   describe('pane frame', () => {
-    it('gives the header a track per child so its buttons never clip', () => {
-      // Seven since the attention chip joined: a header with more children than
-      // tracks wraps the close button onto a second row, which is exactly the
-      // state a pane is in when it most needs to look deliberate.
+    it('gives terminal headers six tracks and web/tool panes their own five-track override', () => {
       expect(stylesCss).toMatch(
-        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto auto;/s,
+        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto;/s,
+      );
+      expect(stylesCss).toMatch(
+        /\.terminal-pane:is\(\.is-web,\s*\.is-tool\)\s+\.terminal-pane-header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
         /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
@@ -1794,11 +1794,33 @@ describe('Tauri physical terminal panes', () => {
       expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*min-width:\s*var\(--pane-min-w\);[^}]*min-height:\s*var\(--pane-min-h\);/s);
     });
 
-    it('words every status but running, which stays a static dot', () => {
-      expect(stylesCss).toMatch(/\.terminal-pane-status\s*\{[^}]*border-radius:\s*999px;/s);
-      expect(stylesCss).toMatch(/\.terminal-pane-status\.running\s*\{[^}]*border-radius:\s*50%;/s);
-      // Board 5 gives the only pulse to "needs you"; running is steady.
-      expect(stylesCss).not.toMatch(/\.terminal-pane-status\.running\s*\{[^}]*animation:/s);
+    it('renders exception status as pane glow instead of a header status chip', () => {
+      expect(functionSource('mountTerminal')).not.toContain('terminal-pane-status');
+      expect(functionSource('mountBrowserPane')).not.toContain('terminal-pane-status');
+      expect(functionSource('mountToolPane')).not.toContain('terminal-pane-status');
+      expect(stylesCss).not.toMatch(/\.terminal-pane-status\b/);
+      expect(stylesCss).toMatch(
+        /\.terminal-pane\[data-status="starting"\]\s*\{\s*--pane-status-rgb:\s*251,\s*191,\s*36;\s*\}/,
+      );
+      expect(stylesCss).toMatch(
+        /\.terminal-pane\[data-status="failed"\]\s*\{\s*--pane-status-rgb:\s*248,\s*113,\s*113;\s*\}/,
+      );
+      expect(stylesCss).toMatch(
+        /\.terminal-pane\[data-status="exited"\]\s*\{\s*--pane-status-rgb:\s*138,\s*132,\s*153;\s*\}/,
+      );
+      expect(stylesCss).not.toMatch(/\[data-status="running"\]/);
+      expect(stylesCss).toMatch(
+        /\.terminal-pane:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*box-shadow:\s*0 0 0 1px rgba\(var\(--pane-status-rgb\), 0\.2\),\s*0 0 12px rgba\(var\(--pane-status-rgb\), 0\.24\);/s,
+      );
+      expect(stylesCss).toMatch(
+        /\.terminal-pane\.focused:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*border-color:\s*rgba\(var\(--rgb-accent\), 0\.55\);[^}]*box-shadow:\s*0 0 0 1px rgba\(var\(--rgb-accent\), 0\.22\),\s*0 0 12px rgba\(var\(--pane-status-rgb\), 0\.24\);/s,
+      );
+      expect(stylesCss).not.toMatch(
+        /\.terminal-pane:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*animation:/s,
+      );
+      expect(stylesCss).not.toMatch(
+        /\.terminal-pane\.focused:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*animation:/s,
+      );
     });
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {

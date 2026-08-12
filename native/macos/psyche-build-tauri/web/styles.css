@@ -1199,10 +1199,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.terminal-pane-status {
-  flex: none;
-  text-transform: lowercase;
-}
 .terminal-pane-close {
   flex: none;
   border: 0;
@@ -1279,6 +1275,22 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane.needs-attention .terminal-pane-header {
   background: rgba(251, 191, 36, 0.09);
 }
+.terminal-pane[data-status="starting"] { --pane-status-rgb: 251, 191, 36; }
+.terminal-pane[data-status="failed"] { --pane-status-rgb: 248, 113, 113; }
+.terminal-pane[data-status="exited"] { --pane-status-rgb: 138, 132, 153; }
+
+.terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  box-shadow:
+    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
+
+.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  border-color: rgba(var(--rgb-accent), 0.55);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.22),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
 /* Worded chip, matching how every other pane state is spelled out rather than
    left to colour alone. */
 .terminal-pane-attention {
@@ -1292,20 +1304,23 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   white-space: nowrap;
 }
 
-/* Seven tracks: glyph · label · attention · status · span · maximise · close.
-   The label is the only flexible one, so the buttons keep their footprint at
-   any width instead of being squeezed out of the row. The attention chip is
-   hidden (display:none) unless the pane is waiting, so its track collapses to
+/* Six tracks: glyph · label · attention · span · maximise · close. The label
+   is the only flexible one, so the buttons keep their footprint at any width
+   instead of being squeezed out of the row. The attention chip is hidden
+   (display:none) unless the pane is waiting, so its track collapses to
    nothing rather than reserving space for a state most panes never reach. */
 .terminal-pane-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px 0 8px;
   background: rgba(255, 255, 255, 0.025);
   font-size: 12.5px;
   user-select: none;
+}
+.terminal-pane:is(.is-web, .is-tool) .terminal-pane-header {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
 }
 .terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
 
@@ -1352,43 +1367,6 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--muted);
-}
-
-/* Status is a worded chip, never a bare colour. Running is the exception and
-   only because it is the steady state of nearly every pane: a static green dot
-   carries it, and the word stays in the aria-label. */
-.terminal-pane-status {
-  justify-self: end;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.terminal-pane-status:empty { display: none; }
-.terminal-pane-status.starting {
-  background: rgba(251, 191, 36, 0.14);
-  color: var(--warn);
-}
-.terminal-pane-status.failed {
-  background: rgba(248, 113, 113, 0.14);
-  color: var(--error);
-}
-.terminal-pane-status.exited {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--muted);
-}
-.terminal-pane-status.running {
-  display: block;
-  width: 7px;
-  height: 7px;
-  padding: 0;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.5);
-  align-self: center;
 }
 
 /* Header controls: span cycle, maximise, close. Identical footprint so the
@@ -1468,12 +1446,11 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane-max[aria-pressed="true"] { color: var(--accent); }
 
 /* Pane tiers. Information drops in reverse order of usefulness: the meta line
-   is repeated in the sidebar, the status word is not. */
+   is repeated in the sidebar, so it goes first. */
 @container pane (max-width: 460px) {
   .terminal-pane-meta { display: none; }
 }
 @container pane (max-width: 300px) {
-  .terminal-pane-status:not(.running) { display: none; }
   .terminal-pane-header { gap: 4px; padding: 0 4px 0 6px; }
 }
 .terminal-pane-divider {
