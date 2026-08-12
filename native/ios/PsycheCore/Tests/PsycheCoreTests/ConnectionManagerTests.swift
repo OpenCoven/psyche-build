@@ -567,8 +567,8 @@ final class ConnectionManagerTests: XCTestCase {
         await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
         await secureStore.waitUntilReadBegins()
         pairing.cancel()
-        let cancellation = await pairing.value
         secureStore.releaseRead()
+        let cancellation = await pairing.value
 
         do {
             _ = try cancellation.get()
@@ -579,6 +579,67 @@ final class ConnectionManagerTests: XCTestCase {
         for _ in 0..<100 { await Task.yield() }
         let persistedHosts = try await pairedHostStore.hosts()
         XCTAssertEqual(persistedHosts, [])
+    }
+
+    func testStoreCancellationRetiresPairingGenerationBeforeFreshRecovery() async throws {
+        let fake = FakeTransport()
+        let secureStore = CancellationOnceSecureStore()
+        let pairedHostStore = PairedHostStore(secureStore: secureStore)
+        let requestClient = ControlRequestClient(transport: fake)
+        let workspaceStore = WorkspaceStore(controlRequests: requestClient)
+        let manager = ConnectionManager(
+            transport: fake,
+            workspaceStore: workspaceStore,
+            requestClient: requestClient,
+            pairedHostStore: pairedHostStore,
+            clientID: "test-client",
+            clientName: "Psyche Tests"
+        )
+        let firstConnect = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await firstConnect.value
+
+        let firstPairing = pairingResult(code: "123456", on: manager)
+        try await waitForPairRequest(on: fake)
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "cancelled-token"))))
+        let firstResult = await firstPairing.value
+        do {
+            _ = try firstResult.get()
+            XCTFail("Expected store cancellation to fail pairing")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .cancelled)
+        }
+        try await waitForDisconnectCount(1, on: fake)
+
+        do {
+            _ = try await manager.pair(code: "654321")
+            XCTFail("Expected the retired generation to require reconnect")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .reconnectRequired)
+        }
+        let pairRequestsBeforeRecovery = await fake.sentMessages.filter {
+            if case .legacy(.pair) = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(pairRequestsBeforeRecovery.count, 1)
+
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "late-token"))))
+        for _ in 0..<100 { await Task.yield() }
+        let disconnectCountAfterLateResponse = await fake.disconnectCount
+        let hostsAfterLateResponse = try await pairedHostStore.hosts()
+        XCTAssertEqual(disconnectCountAfterLateResponse, 1)
+        XCTAssertEqual(hostsAfterLateResponse, [])
+
+        let secondConnect = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await secondConnect.value
+        let secondPairing = pairingResult(code: "654321", on: manager)
+        try await waitForPairRequest(on: fake, occurrence: 2)
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "fresh-token"))))
+        let recovered = try await secondPairing.value.get()
+        XCTAssertEqual(recovered.token, "fresh-token")
     }
 
     func testPairSendFailurePoisonsGenerationAndCleansUpBeforeRetry() async throws {
@@ -2488,6 +2549,34 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
 
     func removeValue(forKey key: String) throws {
         _ = condition.withLock {
+            storage.removeValue(forKey: key)
+        }
+    }
+}
+
+private final class CancellationOnceSecureStore: SecureStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: Data] = [:]
+    private var shouldCancelNextRead = true
+
+    func data(forKey key: String) throws -> Data? {
+        try lock.withLock {
+            if shouldCancelNextRead {
+                shouldCancelNextRead = false
+                throw CancellationError()
+            }
+            return storage[key]
+        }
+    }
+
+    func set(_ data: Data, forKey key: String) throws {
+        lock.withLock {
+            storage[key] = data
+        }
+    }
+
+    func removeValue(forKey key: String) throws {
+        lock.withLock {
             storage.removeValue(forKey: key)
         }
     }

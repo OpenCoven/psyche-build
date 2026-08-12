@@ -640,6 +640,10 @@ public actor ConnectionManager {
                     generation: generation,
                     with: .failure(PairingError.cancelled)
                 )
+                await tearDownActiveConnection(
+                    generation: generation,
+                    finalState: .disconnected
+                )
                 return .ignored
             } catch {
                 pairingRequiresReconnect = true
