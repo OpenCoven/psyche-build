@@ -2523,7 +2523,9 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
         let session = guard
             .live(&thread_id)
             .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
-        Arc::clone(&session.writer)
+        let writer = Arc::clone(&session.writer);
+        drop(guard);
+        writer
     };
     let mut writer = writer.lock();
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -2535,9 +2537,11 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     let master = {
         let guard = PTY_LIFECYCLES.lock();
-        guard
+        let master = guard
             .live(&thread_id)
-            .map(|session| Arc::clone(&session.master))
+            .map(|session| Arc::clone(&session.master));
+        drop(guard);
+        master
     };
     if let Some(master) = master {
         master
