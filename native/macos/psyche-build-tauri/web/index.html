@@ -38,29 +38,85 @@
 
       <div class="workbench" id="workbench">
         <aside class="rail sidebar" id="sidebar" aria-label="Sessions">
-          <div class="sidebar-head">
-            <input
-              id="session-search"
-              class="session-search"
-              type="search"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder="Search sessions… ( / )"
-              aria-label="Search sessions"
-            />
-            <button id="rail-new-tab" class="rail-btn" title="New pane (t / a / w)" aria-label="New pane" aria-haspopup="menu" aria-expanded="false">
-              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
-                      stroke-width="1.6" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button id="sidebar-collapse" class="rail-btn" title="Collapse sidebar (⌘B)" aria-label="Collapse sidebar">
-              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                <path d="M10.5 6 8.5 8l2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
+          <div class="sidebar-controls">
+            <div class="sidebar-tabs" role="tablist" aria-label="Sidebar sections">
+              <button class="sidebar-tab is-active" data-sidebar-tab="sessions" type="button" role="tab" aria-selected="true">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.75 4.25h10.5M2.75 8h10.5M2.75 11.75h6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span>Sessions</span>
+              </button>
+              <button class="sidebar-tab" data-sidebar-tab="files" type="button" role="tab" aria-selected="false">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.4 4.6A1.35 1.35 0 0 1 3.75 3.25h2.3c.42 0 .82.2 1.07.54l.62.83h4.51a1.35 1.35 0 0 1 1.35 1.35v5.68a1.35 1.35 0 0 1-1.35 1.35H3.75a1.35 1.35 0 0 1-1.35-1.35z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+                <span>Files</span>
+              </button>
+            </div>
+
+            <div class="sidebar-head">
+              <label
+                class="session-search-wrap has-tooltip"
+                for="session-search"
+                data-tooltip="Press / to search sessions"
+                title="Press / to search sessions"
+              >
+                <input
+                  id="session-search"
+                  class="session-search"
+                  type="search"
+                  spellcheck="false"
+                  autocomplete="off"
+                  placeholder="Search projects, branches, sessions…"
+                  aria-label="Search projects, branches, agents, shells, and session metadata"
+                  aria-keyshortcuts="/"
+                />
+                <kbd class="session-search-key">/</kbd>
+              </label>
+              <button
+                id="rail-new-tab"
+                class="rail-btn has-tooltip"
+                type="button"
+                data-tooltip="Create a new session"
+                title="Create a new session (t / a / w)"
+                aria-label="Create a new session"
+                aria-haspopup="menu"
+                aria-expanded="false"
+              >
+                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                  <path d="M8 3.75v8.5M3.75 8h8.5" fill="none" stroke="currentColor"
+                        stroke-width="1.6" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <button
+                id="sidebar-collapse"
+                class="rail-btn has-tooltip"
+                type="button"
+                data-tooltip="Collapse sidebar"
+                title="Collapse sidebar (⌘B)"
+                aria-label="Collapse sidebar"
+              >
+                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                  <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                  <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
+                  <path d="M10.5 6 8.5 8l2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+
+            <div class="session-filter-row" role="toolbar" aria-label="Filter sessions">
+              <button class="session-filter is-active" type="button" data-session-filter="all" aria-pressed="true">All</button>
+              <button class="session-filter" type="button" data-session-filter="agents" aria-pressed="false">Agents</button>
+              <button class="session-filter" type="button" data-session-filter="shells" aria-pressed="false">Shells</button>
+              <button class="session-filter" type="button" data-session-filter="active" aria-pressed="false">Active</button>
+              <button class="session-filter" type="button" data-session-filter="attention" aria-pressed="false">Attention</button>
+              <button
+                class="session-legend-button has-tooltip"
+                type="button"
+                aria-label="Session status legend"
+                aria-describedby="session-status-legend"
+                data-tooltip="Purple selected/current, Green active, Blue busy, Yellow attention, Gray idle"
+              >?</button>
+            </div>
+            <div class="sr-only" id="session-status-legend">
+              Session status legend: purple marks the selected or current session, green marks active sessions, blue marks busy sessions, yellow marks sessions needing attention, gray marks idle sessions, and red marks exited sessions.
+            </div>
           </div>
 
           <div class="new-pane-menu" id="new-pane-menu" role="menu" aria-label="New pane" hidden>
@@ -84,18 +140,7 @@
             </button>
           </div>
 
-          <div class="sidebar-tabs" role="tablist" aria-label="Sidebar sections">
-            <button class="sidebar-tab is-active" data-sidebar-tab="sessions" type="button" role="tab" aria-selected="true">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.75 4.25h10.5M2.75 8h10.5M2.75 11.75h6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-              <span>Sessions</span>
-            </button>
-            <button class="sidebar-tab" data-sidebar-tab="files" type="button" role="tab" aria-selected="false">
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2.4 4.6A1.35 1.35 0 0 1 3.75 3.25h2.3c.42 0 .82.2 1.07.54l.62.83h4.51a1.35 1.35 0 0 1 1.35 1.35v5.68a1.35 1.35 0 0 1-1.35 1.35H3.75a1.35 1.35 0 0 1-1.35-1.35z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
-              <span>Files</span>
-            </button>
-          </div>
-
-          <div class="session-list" id="session-list" role="navigation" aria-label="Sessions grouped by project"></div>
+          <div class="session-list" id="session-list" role="tree" aria-label="Sessions by project, branch, and category"></div>
 
           <div class="sidebar-files" id="sidebar-files" hidden>
             <div class="sidebar-subbar">

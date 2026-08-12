@@ -30,6 +30,8 @@ use metrics::{MetricsCollector, MetricsScope, MetricsSnapshot, TrackedPty};
 use pane_metrics::PaneSessionMetrics;
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
+const COVEN_SESSION_SOURCE: &str = "COVEN_SESSION_SOURCE";
+const PSYCHE_SESSION_SOURCE: &str = "psyche-build";
 
 fn safe_browser_label(label: Option<String>) -> String {
     let raw = label.unwrap_or_else(|| "default".to_string());
@@ -354,6 +356,15 @@ fn prepare_pty_start(options: &StartOptions) -> Result<(PendingPtyStart, OpenedP
     Ok((pending_start, resolved_cwd))
 }
 
+fn has_exact_psyche_source(env: Option<&HashMap<String, String>>) -> bool {
+    matches!(env, Some(values) if values.len() == 1
+        && values.get(COVEN_SESSION_SOURCE).map(String::as_str) == Some(PSYCHE_SESSION_SOURCE))
+}
+
+fn has_no_launch_env(env: Option<&HashMap<String, String>>) -> bool {
+    env.map_or(true, HashMap::is_empty)
+}
+
 fn validate_coven_launch_with(
     options: &StartOptions,
     resolved_coven: Option<&str>,
@@ -372,6 +383,11 @@ fn validate_coven_launch_with(
 
     match launch_kind {
         "coven-chat" => {
+            if !has_exact_psyche_source(options.env.as_ref()) {
+                return Err(
+                    "coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string(),
+                );
+            }
             let session_id = options
                 .coven_session_id
                 .as_deref()
@@ -392,6 +408,9 @@ fn validate_coven_launch_with(
             }
         }
         "coven-attach" => {
+            if !has_no_launch_env(options.env.as_ref()) {
+                return Err("coven-attach does not accept launch environment entries".to_string());
+            }
             let session_id = options
                 .coven_session_id
                 .as_deref()
@@ -414,6 +433,27 @@ fn validate_coven_launch_with(
 fn validate_coven_launch(options: &StartOptions) -> Result<(), String> {
     let resolved_coven = which_on_path("coven");
     validate_coven_launch_with(options, resolved_coven.as_deref())
+}
+
+fn apply_launch_env(
+    cmd: &mut CommandBuilder,
+    env: Option<&HashMap<String, String>>,
+    launch_kind: Option<&str>,
+) {
+    if let Some(extra_env) = env {
+        for (key, value) in extra_env {
+            // Empty-string values are treated as "unset this variable" so the
+            // JS layer can scrub TMUX (which tmux uses to detect nesting).
+            if value.is_empty() {
+                cmd.env_remove(key);
+            } else {
+                cmd.env(key, value);
+            }
+        }
+    }
+    if launch_kind == Some("coven-attach") {
+        cmd.env_remove(COVEN_SESSION_SOURCE);
+    }
 }
 
 #[tauri::command]
@@ -506,17 +546,11 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
     if std::env::var("LC_ALL").is_err() {
         cmd.env("LC_ALL", "en_US.UTF-8");
     }
-    if let Some(extra_env) = options.env {
-        for (k, v) in extra_env {
-            // Empty-string values are treated as "unset this variable" so the
-            // JS layer can scrub TMUX (which tmux uses to detect nesting).
-            if v.is_empty() {
-                cmd.env_remove(&k);
-            } else {
-                cmd.env(k, v);
-            }
-        }
-    }
+    apply_launch_env(
+        &mut cmd,
+        options.env.as_ref(),
+        options.launch_kind.as_deref(),
+    );
     // Always make sure TMUX is unset unless something downstream explicitly
     // wants it. Inheriting it from the Tauri parent process makes nested-tmux
     // checks misfire.
@@ -2407,6 +2441,16 @@ mod workspace_panel_tests {
         command: Option<&str>,
         args: Option<&[&str]>,
     ) -> StartOptions {
+        launch_options_with_env(launch_kind, session_id, command, args, None)
+    }
+
+    fn launch_options_with_env(
+        launch_kind: Option<&str>,
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+        env: Option<&[(&str, &str)]>,
+    ) -> StartOptions {
         StartOptions {
             thread_id: "launch-validation".to_string(),
             project_root: Some("/project".to_string()),
@@ -2417,16 +2461,34 @@ mod workspace_panel_tests {
             args: args.map(|values| values.iter().map(|value| (*value).to_string()).collect()),
             cols: None,
             rows: None,
-            env: None,
+            env: env.map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect()
+            }),
         }
+    }
+
+    fn native_chat_options(
+        session_id: Option<&str>,
+        command: Option<&str>,
+        args: Option<&[&str]>,
+    ) -> StartOptions {
+        launch_options_with_env(
+            Some("coven-chat"),
+            session_id,
+            command,
+            args,
+            Some(&[(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE)]),
+        )
     }
 
     #[test]
     fn accepts_exact_native_coven_chat_and_attach_launches() {
         let coven = "/canonical/bin/coven";
         let session_id = "12345678-1234-4abc-8def-1234567890ab";
-        let chat = launch_options(
-            Some("coven-chat"),
+        let chat = native_chat_options(
             Some(session_id),
             Some(coven),
             Some(&["code", "--session-id", session_id]),
@@ -2443,110 +2505,234 @@ mod workspace_panel_tests {
     }
 
     #[test]
+    fn rejects_invalid_native_coven_launch_environments() {
+        let coven = "/canonical/bin/coven";
+        let chat_envs = [
+            None,
+            Some(&[][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "other")][..]),
+            Some(&[("OTHER", "psyche-build")][..]),
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build"), ("OTHER", "value")][..]),
+        ];
+        for env in chat_envs {
+            let chat = launch_options_with_env(
+                Some("coven-chat"),
+                None,
+                Some(coven),
+                Some(&["chat"]),
+                env,
+            );
+            assert_eq!(
+                validate_coven_launch_with(&chat, Some(coven)),
+                Err("coven-chat requires exactly COVEN_SESSION_SOURCE=psyche-build".to_string())
+            );
+        }
+
+        for env in [
+            Some(&[("COVEN_SESSION_SOURCE", "psyche-build")][..]),
+            Some(&[("OTHER", "value")][..]),
+        ] {
+            let attach = launch_options_with_env(
+                Some("coven-attach"),
+                Some("safe"),
+                Some(coven),
+                Some(&["attach", "safe"]),
+                env,
+            );
+            assert_eq!(
+                validate_coven_launch_with(&attach, Some(coven)),
+                Err("coven-attach does not accept launch environment entries".to_string())
+            );
+        }
+
+        let empty_env_attach = launch_options_with_env(
+            Some("coven-attach"),
+            Some("safe"),
+            Some(coven),
+            Some(&["attach", "safe"]),
+            Some(&[]),
+        );
+        assert_eq!(
+            validate_coven_launch_with(&empty_env_attach, Some(coven)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn applies_effective_launch_environment_without_relabeling_attachments() {
+        let mut attach_without_env = CommandBuilder::new("/bin/coven");
+        attach_without_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        apply_launch_env(&mut attach_without_env, None, Some("coven-attach"));
+        assert_eq!(attach_without_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let empty_env = HashMap::new();
+        let mut attach_with_empty_env = CommandBuilder::new("/bin/coven");
+        attach_with_empty_env.env(COVEN_SESSION_SOURCE, PSYCHE_SESSION_SOURCE);
+        apply_launch_env(
+            &mut attach_with_empty_env,
+            Some(&empty_env),
+            Some("coven-attach"),
+        );
+        assert_eq!(attach_with_empty_env.get_env(COVEN_SESSION_SOURCE), None);
+
+        let mut legacy = CommandBuilder::new("/bin/zsh");
+        legacy.env(COVEN_SESSION_SOURCE, "inherited");
+        apply_launch_env(&mut legacy, None, None);
+        assert_eq!(
+            legacy.get_env(COVEN_SESSION_SOURCE),
+            Some(std::ffi::OsStr::new("inherited"))
+        );
+
+        let chat_env = HashMap::from([(
+            COVEN_SESSION_SOURCE.to_string(),
+            PSYCHE_SESSION_SOURCE.to_string(),
+        )]);
+        let mut chat = CommandBuilder::new("/bin/coven");
+        chat.env(COVEN_SESSION_SOURCE, "inherited");
+        apply_launch_env(&mut chat, Some(&chat_env), Some("coven-chat"));
+        assert_eq!(
+            chat.get_env(COVEN_SESSION_SOURCE),
+            Some(std::ffi::OsStr::new(PSYCHE_SESSION_SOURCE))
+        );
+    }
+
+    #[test]
+    fn empty_descriptor_environment_values_still_unset_variables() {
+        let env = HashMap::from([("REMOVE_ME".to_string(), String::new())]);
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.env("REMOVE_ME", "inherited");
+
+        apply_launch_env(&mut command, Some(&env), None);
+
+        assert_eq!(command.get_env("REMOVE_ME"), None);
+    }
+
+    #[test]
     fn preserves_legacy_launches_without_a_launch_kind() {
-        let legacy = launch_options(None, Some("ignored"), Some("/bin/zsh"), Some(&["-l"]));
+        let legacy = launch_options_with_env(
+            None,
+            Some("ignored"),
+            Some("/bin/zsh"),
+            Some(&["-l"]),
+            Some(&[("LEGACY_ENV", "unrestricted")]),
+        );
         assert_eq!(validate_coven_launch_with(&legacy, None), Ok(()));
     }
 
     #[test]
     fn rejects_malformed_or_unresolved_native_coven_launches() {
         let coven = "/canonical/bin/coven";
+        let session_id = "12345678-1234-4abc-8def-1234567890ab";
         let invalid = [
-            launch_options(Some("coven-chat"), None, Some(coven), None),
-            launch_options(
-                Some("coven-chat"),
-                None,
-                Some(coven),
-                Some(&[
-                    "code",
-                    "--session-id",
-                    "12345678-1234-4abc-8def-1234567890ab",
-                ]),
+            (
+                native_chat_options(Some(session_id), Some(coven), None),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
             ),
-            launch_options(
-                Some("coven-chat"),
-                Some("12345678-1234-4abc-8def-1234567890ab"),
-                Some(coven),
-                Some(&[
-                    "code",
-                    "--session-id",
-                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                ]),
+            (
+                native_chat_options(
+                    None,
+                    Some(coven),
+                    Some(&["code", "--session-id", session_id]),
+                ),
+                "coven-chat requires a session id",
             ),
-            launch_options(
-                Some("coven-chat"),
-                Some("../unsafe"),
-                Some(coven),
-                Some(&["code", "--session-id", "../unsafe"]),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some(coven),
+                    Some(&[
+                        "code",
+                        "--session-id",
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    ]),
+                ),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
             ),
-            launch_options(
-                Some("coven-chat"),
-                Some("12345678-1234-4abc-8def-1234567890ab"),
-                Some("/wrong/coven"),
-                Some(&[
-                    "code",
-                    "--session-id",
-                    "12345678-1234-4abc-8def-1234567890ab",
-                ]),
+            (
+                native_chat_options(
+                    Some("../unsafe"),
+                    Some(coven),
+                    Some(&["code", "--session-id", "../unsafe"]),
+                ),
+                "coven-chat session id is unsafe",
             ),
-            launch_options(
-                Some("coven-chat"),
-                Some("12345678-1234-4abc-8def-1234567890ab"),
-                Some(coven),
-                Some(&["code", "12345678-1234-4abc-8def-1234567890ab"]),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some("/wrong/coven"),
+                    Some(&["code", "--session-id", session_id]),
+                ),
+                "Coven launch command does not match the resolved executable",
             ),
-            launch_options(
-                Some("coven-chat"),
-                Some("12345678-1234-4abc-8def-1234567890ab"),
-                Some(coven),
-                Some(&[
-                    "code",
-                    "--session-id",
-                    "12345678-1234-4abc-8def-1234567890ab",
-                    "extra",
-                ]),
+            (
+                native_chat_options(Some(session_id), Some(coven), Some(&["code", session_id])),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
             ),
-            launch_options(
-                Some("coven-attach"),
-                None,
-                Some(coven),
-                Some(&["attach", "safe"]),
+            (
+                native_chat_options(
+                    Some(session_id),
+                    Some(coven),
+                    Some(&["code", "--session-id", session_id, "extra"]),
+                ),
+                "coven-chat requires exactly 'code --session-id' and the validated session id",
             ),
-            launch_options(
-                Some("coven-attach"),
-                Some("../unsafe"),
-                Some(coven),
-                Some(&["attach", "../unsafe"]),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    None,
+                    Some(coven),
+                    Some(&["attach", "safe"]),
+                ),
+                "coven-attach requires a session id",
             ),
-            launch_options(
-                Some("coven-attach"),
-                Some("safe"),
-                Some(coven),
-                Some(&["attach"]),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("../unsafe"),
+                    Some(coven),
+                    Some(&["attach", "../unsafe"]),
+                ),
+                "coven-attach session id is unsafe",
             ),
-            launch_options(
-                Some("coven-attach"),
-                Some("safe"),
-                Some(coven),
-                Some(&["attach", "other"]),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("safe"),
+                    Some(coven),
+                    Some(&["attach"]),
+                ),
+                "coven-attach requires exactly 'attach' and the validated session id",
             ),
-            launch_options(Some("unknown"), None, Some(coven), Some(&["chat"])),
+            (
+                launch_options(
+                    Some("coven-attach"),
+                    Some("safe"),
+                    Some(coven),
+                    Some(&["attach", "other"]),
+                ),
+                "coven-attach requires exactly 'attach' and the validated session id",
+            ),
+            (
+                launch_options(Some("unknown"), None, Some(coven), Some(&["chat"])),
+                "unsupported launch kind: unknown",
+            ),
         ];
 
-        for options in invalid {
-            assert!(validate_coven_launch_with(&options, Some(coven)).is_err());
+        for (options, expected) in invalid {
+            assert_eq!(
+                validate_coven_launch_with(&options, Some(coven)),
+                Err(expected.to_string())
+            );
         }
-        let chat = launch_options(
-            Some("coven-chat"),
-            Some("12345678-1234-4abc-8def-1234567890ab"),
+        let chat = native_chat_options(
+            Some(session_id),
             Some(coven),
-            Some(&[
-                "code",
-                "--session-id",
-                "12345678-1234-4abc-8def-1234567890ab",
-            ]),
+            Some(&["code", "--session-id", session_id]),
         );
-        assert!(validate_coven_launch_with(&chat, None).is_err());
+        assert_eq!(
+            validate_coven_launch_with(&chat, None),
+            Err("Coven executable not found".to_string())
+        );
     }
 
     #[test]
