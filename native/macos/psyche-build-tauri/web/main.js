@@ -3570,6 +3570,12 @@
     browser.tabs.forEach(function (tab) {
       invalidateBrowserNavigation(tab);
     });
+    var navigationTails = browser.tabs.map(function (tab) {
+      return browserTabLifecycle(tab).navigationTail;
+    }).filter(function (tail) {
+      return !!tail;
+    });
+    if (navigationTails.length) await Promise.all(navigationTails);
     var outcome;
     try {
       outcome = labels.length
@@ -7269,7 +7275,6 @@
       var b = visibleBrowserBounds(); if (!b) return false;
       var normalised = normaliseUrl(rawUrl); if (!normalised) return false;
       var previousTitle = tab.title;
-      var previousLoading = tab.loading;
       var generation = beginBrowserNavigation(tab);
       var label = browserLabelForTab(project, tab);
       var context = {
@@ -7311,7 +7316,7 @@
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
-        tab.loading = previousLoading;
+        tab.loading = false;
         tab.title = previousTitle;
         renderBrowserTabs(); updateBrowserControls(); writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;

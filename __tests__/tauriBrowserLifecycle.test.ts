@@ -290,7 +290,7 @@ function browserNavigationDependencies(
     nativeBrowserLabel: (label: string) => label,
     markBrowserTabLoaded: () => {},
     writeToActive: (_text: string) => {},
-    setTimeout: () => 0,
+    setTimeout: (_callback: () => void) => 0,
     setStatus: () => {},
     browserNavigationIsCurrent: (context: {
       tab: BrowserNavigationTab;
@@ -1000,6 +1000,8 @@ describe('Tauri native browser lifecycle', () => {
   it('serializes rapid same-tab navigation when the first succeeds and the second fails', async () => {
     let resolveFirst!: () => void;
     let rejectSecond!: (error: Error) => void;
+    const fallbackTimers: Array<() => void> = [];
+    let loadedCalls = 0;
     const commands: string[] = [];
     const nativeCalls: Array<{ command: string; url?: unknown }> = [];
     const project = { id: 'project-a' };
@@ -1013,9 +1015,7 @@ describe('Tauri native browser lifecycle', () => {
       historyIndex: 0,
     };
     const browser = { activeTabId: tab.id, tabs: [tab] };
-    const navigateBrowser = compileFunction<
-      (url: string, options: Record<string, unknown>) => Promise<boolean>
-    >(functionSource(mainJs, 'navigateBrowser'), browserNavigationDependencies(
+    const dependencies = browserNavigationDependencies(
       project,
       browser,
       tab,
@@ -1028,7 +1028,18 @@ describe('Tauri native browser lifecycle', () => {
         }
         return new Promise<void>((_resolve, reject) => { rejectSecond = reject; });
       },
-    ));
+    );
+    dependencies.setTimeout = (callback: () => void) => {
+      fallbackTimers.push(callback);
+      return fallbackTimers.length;
+    };
+    dependencies.markBrowserTabLoaded = () => {
+      loadedCalls += 1;
+      tab.loading = false;
+    };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
 
     const first = navigateBrowser('https://first.example', { tabId: tab.id });
     const second = navigateBrowser('https://second.example', { tabId: tab.id });
@@ -1053,11 +1064,17 @@ describe('Tauri native browser lifecycle', () => {
     await expect(second).resolves.toBe(false);
     expect(tab).toMatchObject({
       created: true,
+      loading: false,
       url: 'https://first.example',
       title: 'https://first.example',
       history: ['https://old.example', 'https://first.example'],
       historyIndex: 1,
     });
+    expect(fallbackTimers).toHaveLength(1);
+    fallbackTimers.forEach((callback) => callback());
+    await Promise.resolve();
+    expect(tab.loading).toBe(false);
+    expect(loadedCalls).toBe(0);
     expect(commands).not.toContain('browser_destroy');
     expect(tab).not.toHaveProperty('generation');
     expect(tab).not.toHaveProperty('invalidationGeneration');
@@ -1486,7 +1503,17 @@ describe('Tauri native browser lifecycle', () => {
     await expect(navigateBrowser('https://blocked.example', { tabId: tab.id })).resolves.toBe(false);
     await expect(openBlankBrowserTab({ requireNew: true })).resolves.toBeNull();
     await expect(closeBrowserPane(thread)).resolves.toBe(false);
-    expect(calls).toEqual(['browser_navigate', 'browser_destroy_many']);
+    expect(calls).toEqual(['browser_navigate']);
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    await expect(queuedNavigation).resolves.toBe(false);
+    await Promise.resolve();
+    expect(calls).toEqual([
+      'browser_navigate',
+      'browser_destroy',
+      'browser_destroy_many',
+    ]);
 
     resolveTeardown({
       destroyed: ['project-a:tab-a'],
@@ -1501,9 +1528,6 @@ describe('Tauri native browser lifecycle', () => {
       historyIndex: 0,
     });
 
-    resolveNavigation();
-    await expect(navigation).resolves.toBe(false);
-    await expect(queuedNavigation).resolves.toBe(false);
     expect(tab).toMatchObject({
       created: false,
       loading: false,
@@ -1514,13 +1538,170 @@ describe('Tauri native browser lifecycle', () => {
     });
     expect(calls).toEqual([
       'browser_navigate',
+      'browser_destroy',
       'browser_destroy_many',
       'save',
       'stage',
       'close',
       'surface',
-      'browser_destroy',
     ]);
+  });
+
+  it('drains stale navigation cleanup before partial pane recovery recreates its native label', async () => {
+    let resolveNavigation!: () => void;
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    const thread = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/workspace',
+      closing: false,
+      closeStarted: false,
+    };
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      created: true,
+      loading: false,
+      url: 'https://saved.example',
+      title: 'Saved title',
+      history: ['https://saved.example'],
+      historyIndex: 0,
+    };
+    const failedTab: BrowserNavigationTab = {
+      id: 'tab-b',
+      created: true,
+      loading: false,
+      url: 'https://failed.example',
+      title: 'Failed tab',
+      history: ['https://failed.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, failedTab] };
+    const nativeViews = new Set(['project-a:tab-a', 'project-a:tab-b']);
+    const invoke = (
+      command: string,
+      args: { labels?: string[]; label?: string; url?: string },
+    ): Promise<unknown> => {
+      if (command === 'browser_navigate' && args.url === 'https://new.example') {
+        calls.push(`navigate:${args.label}`);
+        return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+      }
+      if (command === 'browser_destroy') {
+        calls.push(`destroy:${args.label}`);
+        nativeViews.delete(String(args.label));
+        return Promise.resolve();
+      }
+      if (command === 'browser_destroy_many') {
+        calls.push(`destroy-many:${args.labels?.join(',')}`);
+        nativeViews.delete('project-a:tab-a');
+        return Promise.resolve({
+          destroyed: ['project-a:tab-a'],
+          failures: [{
+            label: 'project-a:tab-b',
+            error: 'tab-b destroy failed',
+          }],
+        });
+      }
+      if (command === 'browser_navigate') {
+        calls.push(`recover:${args.label}`);
+        nativeViews.add(String(args.label));
+        return Promise.resolve();
+      }
+      throw new Error(`unexpected command ${command}`);
+    };
+    const navigationDependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      invoke as (command: string, args: Record<string, unknown>) => Promise<void>,
+    );
+    Object.assign(navigationDependencies, lifecycle, {
+      activeWorkspaceRoot: () => '/workspace',
+      createBrowserPane: async () => thread,
+      findBrowserPane: () => thread,
+      findThread: () => thread,
+      discardObsoleteBrowserNavigation: async (context: {
+        tab: BrowserNavigationTab;
+        browser: typeof browser;
+        label: string;
+        previousTitle: string;
+      }) => {
+        lifecycle.invalidateBrowserNavigation(context.tab);
+        await invoke('browser_destroy', { label: context.label });
+        if (context.browser.tabs.includes(context.tab)) {
+          context.tab.created = false;
+          context.tab.loading = false;
+          context.tab.title = context.previousTitle;
+        }
+        return true;
+      },
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+    const closeBrowserPane = compileFunction<
+      (value: typeof thread) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...lifecycle,
+      findProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke,
+      browserLabelForTab: (_: typeof project, value: BrowserNavigationTab) =>
+        `${project.id}:${value.id}`,
+      setStatus: (text: string, level: string) => statuses.push([text, level]),
+      saveWorkspaceSoon: () => calls.push('save'),
+      stageBrowserSurface: () => calls.push('stage'),
+      closeThread: () => { calls.push('close'); return true; },
+      syncProjectBrowser: () => calls.push('sync'),
+      state: { activeThreadId: 'web-pane' },
+      markActiveSurface: () => calls.push('surface'),
+    });
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(['navigate:project-a:tab-a']);
+
+    const closing = closeBrowserPane(thread);
+    let closeSettled = false;
+    closing.then(() => { closeSettled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(closeSettled).toBe(false);
+    expect(calls).toEqual(['navigate:project-a:tab-a']);
+    await expect(navigateBrowser('https://blocked.example', { tabId: tab.id })).resolves.toBe(false);
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    await expect(closing).resolves.toBe(false);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(tab).toMatchObject({
+      created: true,
+      loading: false,
+      url: 'https://saved.example',
+      history: ['https://saved.example'],
+      historyIndex: 0,
+    });
+    expect(failedTab.created).toBe(true);
+    expect(nativeViews).toEqual(new Set(['project-a:tab-a', 'project-a:tab-b']));
+    expect(calls).toEqual([
+      'navigate:project-a:tab-a',
+      'destroy:project-a:tab-a',
+      'destroy-many:project-a:tab-a,project-a:tab-b',
+      'recover:project-a:tab-a',
+      'sync',
+      'save',
+    ]);
+    expect(statuses).toEqual([[
+      'browser pane close failed; native close failures: project-a:tab-b: tab-b destroy failed; recreated 1/1 confirmed-destroyed live tabs',
+      'error',
+    ]]);
   });
 
   it('destroys pane views before staging and preserves tabs as dormant', async () => {
