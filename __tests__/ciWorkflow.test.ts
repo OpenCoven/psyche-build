@@ -27,7 +27,9 @@ describe('pull request CI workflow contract', () => {
 
     expect(workflow).toContain('name: CI');
     expect(workflow).toMatch(/pull_request:\s*\n/);
-    expect(workflow).toMatch(/push:\s*\n\s+branches: \[main\]/);
+    expect(workflow).toMatch(
+      /push:\s*\n\s+branches: \[main, feat\/gpu-accelerated-ade\]/,
+    );
     expect(workflow).toContain('contents: read');
     expect(workflow).toContain('group: ci-${{ github.workflow }}-${{ github.ref }}');
     expect(workflow).toContain('cancel-in-progress: true');
