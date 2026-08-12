@@ -256,6 +256,45 @@ final class BonjourHostDiscoveryTests: XCTestCase {
         withExtendedLifetime(stream) {}
     }
 
+    func testResolverCancellationBeforeContinuationRegistrationDoesNotStartOrRetainWork() async throws {
+        let boundary = ResolverRegistrationBoundary()
+        let lifecycle = NetServiceResolutionLifecycle(
+            beforeContinuationRegistration: {
+                boundary.arriveAndWait()
+            },
+            didCreateTimeoutTask: {
+                boundary.recordTimeoutTask()
+            },
+            didStartService: {
+                boundary.recordServiceStart()
+            }
+        )
+        let resolution = NetServiceResolution(
+            name: "Studio",
+            domain: "local.",
+            timeout: 60,
+            lifecycle: lifecycle
+        )
+        let task = Task {
+            try await resolution.resolve()
+        }
+
+        await fulfillment(of: [boundary.registrationReached], timeout: 1)
+        task.cancel()
+        boundary.allowRegistration()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(boundary.timeoutTaskCount, 0)
+        XCTAssertEqual(boundary.serviceStartCount, 0)
+        XCTAssertFalse(resolution.hasPendingResolution)
+    }
+
     private func makeRecord(
         name: String = "Studio",
         domain: String = "local.",
@@ -330,6 +369,34 @@ private actor CancelTrackingBonjourServiceResolver: BonjourServiceResolving {
     func waitUntilCancelled() async {
         if cancelled > 0 { return }
         await withCheckedContinuation { cancellationContinuation = $0 }
+    }
+}
+
+private final class ResolverRegistrationBoundary: @unchecked Sendable {
+    let registrationReached = XCTestExpectation(description: "resolver reached registration boundary")
+    private let lock = NSLock()
+    private let registrationGate = DispatchSemaphore(value: 0)
+    private var storedTimeoutTaskCount = 0
+    private var storedServiceStartCount = 0
+
+    var timeoutTaskCount: Int { lock.withLock { storedTimeoutTaskCount } }
+    var serviceStartCount: Int { lock.withLock { storedServiceStartCount } }
+
+    func arriveAndWait() {
+        registrationReached.fulfill()
+        registrationGate.wait()
+    }
+
+    func allowRegistration() {
+        registrationGate.signal()
+    }
+
+    func recordTimeoutTask() {
+        lock.withLock { storedTimeoutTaskCount += 1 }
+    }
+
+    func recordServiceStart() {
+        lock.withLock { storedServiceStartCount += 1 }
     }
 }
 

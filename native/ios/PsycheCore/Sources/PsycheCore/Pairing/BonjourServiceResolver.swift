@@ -36,20 +36,50 @@ public final class NetServiceBonjourResolver: BonjourServiceResolving, @unchecke
     }
 }
 
-private final class NetServiceResolution: NSObject, NetServiceDelegate, @unchecked Sendable {
+struct NetServiceResolutionLifecycle: @unchecked Sendable {
+    let beforeContinuationRegistration: @Sendable () -> Void
+    let didCreateTimeoutTask: @Sendable () -> Void
+    let didStartService: @Sendable () -> Void
+
+    init(
+        beforeContinuationRegistration: @escaping @Sendable () -> Void = {},
+        didCreateTimeoutTask: @escaping @Sendable () -> Void = {},
+        didStartService: @escaping @Sendable () -> Void = {}
+    ) {
+        self.beforeContinuationRegistration = beforeContinuationRegistration
+        self.didCreateTimeoutTask = didCreateTimeoutTask
+        self.didStartService = didStartService
+    }
+}
+
+private enum NetServiceRegistration {
+    case registered
+    case terminal(Error)
+    case duplicate
+}
+
+final class NetServiceResolution: NSObject, NetServiceDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let service: NetService
     private let timeout: TimeInterval
+    private let lifecycle: NetServiceResolutionLifecycle
     private var continuation: CheckedContinuation<ResolvedBonjourEndpoint, Error>?
     private var timeoutTask: Task<Void, Never>?
+    private var terminalResult: Result<ResolvedBonjourEndpoint, Error>?
 
-    init(name: String, domain: String, timeout: TimeInterval) {
+    init(
+        name: String,
+        domain: String,
+        timeout: TimeInterval,
+        lifecycle: NetServiceResolutionLifecycle = .init()
+    ) {
         self.service = NetService(
             domain: domain,
             type: "\(BonjourHostParser.serviceType).",
             name: name
         )
         self.timeout = timeout
+        self.lifecycle = lifecycle
     }
 
     func resolve() async throws -> ResolvedBonjourEndpoint {
@@ -76,17 +106,31 @@ private final class NetServiceResolution: NSObject, NetServiceDelegate, @uncheck
     }
 
     private func begin(_ continuation: CheckedContinuation<ResolvedBonjourEndpoint, Error>) {
-        guard !Task.isCancelled else {
-            continuation.resume(throwing: CancellationError())
-            return
-        }
-        let shouldStart = lock.withLock {
-            guard self.continuation == nil else { return false }
+        lifecycle.beforeContinuationRegistration()
+        let registration = lock.withLock { () -> NetServiceRegistration in
+            if let terminalResult {
+                switch terminalResult {
+                case .success:
+                    return .terminal(BonjourServiceResolverError.unresolved)
+                case let .failure(error):
+                    return .terminal(error)
+                }
+            }
+            guard self.continuation == nil else {
+                return .duplicate
+            }
             self.continuation = continuation
-            return true
+            return .registered
         }
-        guard shouldStart else {
-            continuation.resume(throwing: BonjourServiceResolverError.unresolved)
+        guard case .registered = registration else {
+            switch registration {
+            case let .terminal(error):
+                continuation.resume(throwing: error)
+            case .duplicate:
+                continuation.resume(throwing: BonjourServiceResolverError.unresolved)
+            case .registered:
+                break
+            }
             return
         }
 
@@ -99,10 +143,20 @@ private final class NetServiceResolution: NSObject, NetServiceDelegate, @uncheck
                 // Completion and cancellation both cancel this bounded timer.
             }
         }
-        lock.withLock { self.timeoutTask = timeoutTask }
+        let retainedTimer = lock.withLock { () -> Bool in
+            guard continuation != nil else { return false }
+            self.timeoutTask = timeoutTask
+            return true
+        }
+        guard retainedTimer else {
+            timeoutTask.cancel()
+            return
+        }
+        lifecycle.didCreateTimeoutTask()
 
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isPending else { return }
+            self.lifecycle.didStartService()
             self.service.delegate = self
             self.service.schedule(in: .main, forMode: .default)
             self.service.resolve(withTimeout: self.timeout)
@@ -113,9 +167,18 @@ private final class NetServiceResolution: NSObject, NetServiceDelegate, @uncheck
         lock.withLock { continuation != nil }
     }
 
+    var hasPendingResolution: Bool {
+        lock.withLock { continuation != nil || timeoutTask != nil }
+    }
+
     private func finish(_ result: Result<ResolvedBonjourEndpoint, Error>) {
         let completion = lock.withLock { () -> (CheckedContinuation<ResolvedBonjourEndpoint, Error>, Task<Void, Never>?)? in
-            guard let continuation else { return nil }
+            guard let continuation else {
+                if terminalResult == nil {
+                    terminalResult = result
+                }
+                return nil
+            }
             self.continuation = nil
             let timeoutTask = self.timeoutTask
             self.timeoutTask = nil
