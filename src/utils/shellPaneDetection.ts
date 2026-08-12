@@ -7,8 +7,13 @@
 import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { resolveProjectRootFromPath } from './projectRoot.js';
+import {
+  resolveGitWorktreeRootFromPath,
+  resolveProjectRootFromPath,
+} from './projectRoot.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import { createPsychePaneId } from './paneIdentity.js';
+import type { TmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 
 /**
  * Detects the shell type running in a tmux pane
@@ -157,7 +162,7 @@ export async function getUntrackedPanes(
 
 async function detectPaneProjectInfo(
   paneId: string
-): Promise<{ projectRoot?: string; projectName?: string }> {
+): Promise<{ projectRoot?: string; projectName?: string; cwdReference?: string }> {
   try {
     const { execSync } = await import('child_process');
     const panePath = execSync(
@@ -169,10 +174,29 @@ async function detectPaneProjectInfo(
       return {};
     }
 
-    const resolved = resolveProjectRootFromPath(panePath, panePath);
+    let projectRoot: string | undefined;
+    let projectName: string | undefined;
+    try {
+      const resolved = resolveProjectRootFromPath(panePath, panePath);
+      projectRoot = resolved.projectRoot;
+      projectName = resolved.projectName;
+    } catch {
+      // A shell outside Git still remains trackable as a generic shell pane.
+    }
+
+    let cwdReference: string | undefined;
+    try {
+      // Unlike the project root, this resolves a linked worktree's checkout
+      // root even when the pane itself is in a nested subdirectory.
+      cwdReference = resolveGitWorktreeRootFromPath(panePath, panePath);
+    } catch {
+      // No Git checkout means this pane cannot protect a worktree cleanup.
+    }
+
     return {
-      projectRoot: resolved.projectRoot,
-      projectName: resolved.projectName,
+      ...(projectRoot ? { projectRoot } : {}),
+      ...(projectName ? { projectName } : {}),
+      ...(cwdReference ? { cwdReference } : {}),
     };
   } catch {
     return {};
@@ -186,8 +210,27 @@ async function detectPaneProjectInfo(
  * @param existingTitle Optional existing title (used for display but not for tracking)
  * @returns PsychePane object for the shell pane
  */
-export async function createShellPane(paneId: string, nextId: number, existingTitle?: string): Promise<PsychePane> {
+export interface CreateShellPaneOptions {
+  /** Captured synchronously by a transactional allocator. */
+  tmuxServerIdentity?: TmuxServerIdentity;
+  /** Defer title mutation until the caller has durably persisted the record. */
+  setPaneTitle?: boolean;
+}
+
+export async function createShellPane(
+  paneId: string,
+  nextId: number,
+  existingTitle?: string,
+  options: CreateShellPaneOptions = {},
+): Promise<PsychePane> {
   const tmuxService = TmuxService.getInstance();
+  const tmuxServerIdentity = options.tmuxServerIdentity
+    ?? tmuxService.getServerIdentity?.(paneId);
+  if (!tmuxServerIdentity) {
+    throw new Error(
+      `Cannot track shell pane ${paneId} without its tmux server generation`,
+    );
+  }
   const shellType = await detectShellType(paneId);
   const paneProjectInfo = await detectPaneProjectInfo(paneId);
 
@@ -198,22 +241,26 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
   const slug = `shell-${nextId}`;
 
   // Always set the title to ensure unique titles for proper rebinding
-  try {
-    await tmuxService.setPaneTitle(paneId, slug);
-  } catch (error) {
-    // LogService.getInstance().debug(
-    //   `Failed to set title for shell pane ${paneId}`,
-    //   'shellDetection'
-    // );
+  if (options.setPaneTitle !== false) {
+    try {
+      await tmuxService.setPaneTitle(paneId, slug);
+    } catch (error) {
+      // LogService.getInstance().debug(
+      //   `Failed to set title for shell pane ${paneId}`,
+      //   'shellDetection'
+      // );
+    }
   }
 
   return {
-    id: `psyche-${nextId}`,
+    id: createPsychePaneId(),
     slug,
     prompt: '', // No prompt for manually created panes
     paneId,
+    tmuxServerIdentity,
     projectRoot: paneProjectInfo.projectRoot,
     projectName: paneProjectInfo.projectName,
+    cwdReference: paneProjectInfo.cwdReference,
     type: 'shell',
     shellType,
   };
@@ -227,11 +274,16 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
 export function getNextPsycheId(existingPanes: PsychePane[]): number {
   if (existingPanes.length === 0) return 1;
 
-  // Extract numeric IDs from all panes
+  // New pane IDs are UUID-backed, but shell/desktop slugs retain a compact
+  // numeric suffix for display. Read both legacy numeric IDs and those slugs
+  // so a new UUID does not reset the next shell number to 1.
   const ids = existingPanes
-    .map(p => {
-      const match = p.id.match(/^psyche-(\d+)$/);
-      return match ? parseInt(match[1], 10) : 0;
+    .flatMap(p => {
+      const legacyId = p.id.match(/^psyche-(\d+)$/)?.[1];
+      const shellSuffix = p.slug.match(/^(?:shell|desktop-use)-(\d+)$/)?.[1];
+      return [legacyId, shellSuffix]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => parseInt(value, 10));
     })
     .filter(id => id > 0);
 

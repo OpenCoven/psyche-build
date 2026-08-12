@@ -32,6 +32,58 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function cssDeclarations(selector: string) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  const declarations = new Map<string, string>();
+  let found = false;
+  for (const match of source.matchAll(rulePattern)) {
+    if (match[1].replace(/\s+/g, ' ').trim() !== normalizedSelector) continue;
+    found = true;
+    for (const declaration of match[2].split(';').map((item) => item.trim()).filter(Boolean)) {
+      const separator = declaration.indexOf(':');
+      declarations.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).replace(/\s+/g, ' ').trim(),
+      );
+    }
+  }
+  if (found) return declarations;
+  throw new Error(`missing CSS rule ${selector}`);
+}
+
+function paneHeaderBackground(paneClasses: string[]) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  let winner: { specificity: number; order: number; value: string } | null = null;
+  let order = 0;
+  for (const match of source.matchAll(rulePattern)) {
+    const background = match[2].match(/(?:^|;)\s*background:\s*([^;]+)/)?.[1].trim();
+    if (!background) continue;
+    for (const rawSelector of match[1].split(',')) {
+      const selector = rawSelector.replace(/\s+/g, ' ').trim();
+      if (!selector.endsWith('.terminal-pane-header')) continue;
+      const paneSelector = selector.slice(0, -'.terminal-pane-header'.length).trim();
+      if (paneSelector) {
+        const required = [...paneSelector.matchAll(/(?<!:not\()\.([\w-]+)/g)]
+          .map((item) => item[1]);
+        const excluded = [...paneSelector.matchAll(/:not\(\.([\w-]+)\)/g)]
+          .map((item) => item[1]);
+        if (!required.every((name) => paneClasses.includes(name)) ||
+            excluded.some((name) => paneClasses.includes(name))) continue;
+      }
+      const specificity = (selector.match(/\.[\w-]+/g) || []).length;
+      if (!winner || specificity > winner.specificity ||
+          (specificity === winner.specificity && order >= winner.order)) {
+        winner = { specificity, order, value: background };
+      }
+    }
+    order += 1;
+  }
+  return winner?.value;
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -577,15 +629,103 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toContain('rowModel.needsAttention');
   });
 
+  it('suppresses and restores branch status glow as attention changes', () => {
+    const paneClasses = new Set(['terminal-pane']);
+    const branch = {
+      classList: { contains: (name: string) => name === 'terminal-pane-branch' },
+      dataset: { status: 'failed' } as Record<string, string>,
+      firstElementChild: null as null | {
+        classList: {
+          contains: (name: string) => boolean;
+          toggle: (name: string, enabled: boolean) => void;
+        };
+        dataset: Record<string, string>;
+      },
+    };
+    const pane = {
+      classList: {
+        contains: (name: string) => paneClasses.has(name),
+        toggle: (name: string, enabled: boolean) => {
+          if (enabled) paneClasses.add(name);
+          else paneClasses.delete(name);
+        },
+      },
+      dataset: { status: 'failed' },
+      parentElement: branch,
+    };
+    branch.firstElementChild = pane;
+    const attention = {
+      hidden: true,
+      textContent: '',
+      title: '',
+      setAttribute: () => undefined,
+    };
+    const syncPaneBranchStatusChrome = compileFunction<(value: typeof branch) => void>(
+      functionSource('syncPaneBranchStatusChrome'),
+      {},
+    );
+    const syncThreadAttentionChrome = compileFunction<(
+      value: { id: string; needsAttention: boolean; attentionReason: string | null;
+        pane: typeof pane; paneAttention: typeof attention },
+    ) => void>(functionSource('syncThreadAttentionChrome'), {
+      syncPaneBranchStatusChrome,
+      PsycheSessions: { attentionLabel: () => 'Waiting for input' },
+      terminalArea: { querySelector: () => null },
+    });
+    const thread: {
+      id: string;
+      needsAttention: boolean;
+      attentionReason: string | null;
+      pane: typeof pane;
+      paneAttention: typeof attention;
+    } = {
+      id: 'thread-a',
+      needsAttention: true,
+      attentionReason: 'question',
+      pane,
+      paneAttention: attention,
+    };
+
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(true);
+    expect('status' in branch.dataset).toBe(false);
+
+    thread.needsAttention = false;
+    thread.attentionReason = null;
+    syncThreadAttentionChrome(thread);
+    expect(paneClasses.has('needs-attention')).toBe(false);
+    expect(branch.dataset.status).toBe('failed');
+  });
+
   it('states the waiting reason in words, never in colour alone', () => {
+    const statusGlowSelector =
+      '.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"])';
+    const rootStatusGlowSelector =
+      '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
+
     expect(mainJs).toMatch(/PsycheSessions\.attentionLabel\(thread\.attentionReason\)/);
     expect(stylesCss).toContain('.terminal-pane-attention');
-    expect(stylesCss).toMatch(/\.terminal-pane\.needs-attention/);
+    expect(cssDeclarations('.terminal-pane.needs-attention, .terminal-pane.focused.needs-attention'))
+      .toEqual(new Map([
+        ['border-color', 'rgba(251, 191, 36, 0.6)'],
+        ['box-shadow', '0 0 0 1px rgba(251, 191, 36, 0.28)'],
+      ]));
+    expect(paneHeaderBackground(['terminal-pane', 'focused']))
+      .toBe('rgba(var(--rgb-accent), 0.07)');
+    expect(paneHeaderBackground(['terminal-pane', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
+    expect(paneHeaderBackground(['terminal-pane', 'focused', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
+    expect(cssDeclarations(statusGlowSelector).has('box-shadow')).toBe(true);
+    expect(cssDeclarations(rootStatusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
-    // The header grew a seventh track for the chip; leaving it at six would
-    // wrap the close button onto a second row the moment a pane waits.
+    expect(functionSource('mountTerminal')).toMatch(
+      /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
+    );
+    // The terminal header needs one track per mounted child once the attention
+    // chip joins the row, or the controls wrap when a pane is waiting.
     expect(stylesCss).toMatch(
-      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto auto;/
+      /\.terminal-pane-header \{[\s\S]{0,120}grid-template-columns: auto minmax\(0, 1fr\) auto auto auto auto;/
     );
   });
 });

@@ -1,18 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { execSync } from 'child_process';
-import { getGitStatus } from '../src/utils/mergeValidation.js';
+import { execFileSync } from 'node:child_process';
+import { commitChanges, getGitStatus } from '../src/utils/mergeValidation.js';
 
-vi.mock('child_process', () => ({
-  execSync: vi.fn(),
+vi.mock('node:child_process', () => ({
+  execFileSync: vi.fn(),
 }));
 
 describe('mergeValidation', () => {
   beforeEach(() => {
-    vi.mocked(execSync).mockReset();
+    vi.mocked(execFileSync).mockReset();
   });
 
   it('ignores psyche metadata directories when checking git status', () => {
-    vi.mocked(execSync).mockReturnValue(
+    vi.mocked(execFileSync).mockReturnValue(
       '?? .psyche/\nM  .psyche/worktrees/feature-a\n'
     );
 
@@ -26,7 +26,7 @@ describe('mergeValidation', () => {
   });
 
   it('ignores untracked hook scaffolding but preserves real hook changes', () => {
-    vi.mocked(execSync).mockReturnValue(
+    vi.mocked(execFileSync).mockReturnValue(
       [
         '?? .psyche-hooks/',
         '?? .psyche-hooks/AGENTS.md',
@@ -49,7 +49,7 @@ describe('mergeValidation', () => {
   });
 
   it('keeps non-psyche files in the dirty-state result', () => {
-    vi.mocked(execSync).mockReturnValue(
+    vi.mocked(execFileSync).mockReturnValue(
       ' M src/index.ts\nM package.json\n'
     );
 
@@ -60,5 +60,16 @@ describe('mergeValidation', () => {
       files: ['src/index.ts', 'package.json'],
       summary: 'M src/index.ts\nM package.json',
     });
+  });
+
+  it('passes hostile commit messages as one literal git argument', () => {
+    const message = 'fix: $(touch sentinel) `backtick` "quoted"; newline\n--leading-dash';
+
+    expect(commitChanges('/repo', message)).toEqual({ success: true });
+    expect(execFileSync).toHaveBeenLastCalledWith(
+      'git',
+      ['commit', '-m', message],
+      { cwd: '/repo', stdio: 'pipe' },
+    );
   });
 });

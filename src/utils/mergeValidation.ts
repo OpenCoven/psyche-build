@@ -4,7 +4,7 @@
  * Provides comprehensive pre-merge validation to detect issues before attempting merge
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'node:child_process';
 import { LogService } from '../services/LogService.js';
 import { getCurrentBranch as getCurrentBranchUtil } from './git.js';
 
@@ -37,6 +37,23 @@ const PSYCHE_HOOK_SCAFFOLD_PATHS = new Set([
   '.psyche-hooks/examples',
   '.psyche-hooks/examples/',
 ]);
+
+function getGitOutput(repoPath: string, args: readonly string[]): string {
+  return execFileSync('git', args, {
+    cwd: repoPath,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+  });
+}
+
+function resolveGitRevision(repoPath: string, ref: string): string {
+  return getGitOutput(repoPath, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `${ref}^{commit}`,
+  ]).trim();
+}
 
 function parseGitStatusLine(line: string): { statusCode: string; filename: string } {
   const trimmed = line.trimStart();
@@ -74,11 +91,7 @@ function shouldIgnoreGitStatusEntry(statusCode: string, filename: string): boole
 export function getGitStatus(repoPath: string): GitStatus {
   try {
     LogService.getInstance().info(`Getting git status for: ${repoPath}`, 'mergeValidation');
-    const statusOutput = execSync('git status --porcelain', {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const statusOutput = getGitOutput(repoPath, ['status', '--porcelain']);
 
     const entries = statusOutput
       .trim()
@@ -142,11 +155,14 @@ export function hasCommitsToMerge(repoPath: string, fromBranch: string, toBranch
     const fromRef = fromBranch.trim() || 'HEAD';
     const toRef = toBranch.trim() || 'HEAD';
 
-    const output = execSync(`git rev-list --count "${toRef}..${fromRef}"`, {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const fromCommit = resolveGitRevision(repoPath, fromRef);
+    const toCommit = resolveGitRevision(repoPath, toRef);
+    const output = getGitOutput(repoPath, [
+      'rev-list',
+      '--count',
+      '--end-of-options',
+      `${toCommit}..${fromCommit}`,
+    ]);
 
     const commitCount = Number.parseInt(output.trim(), 10);
     return Number.isFinite(commitCount) && commitCount > 0;
@@ -170,14 +186,19 @@ export function detectMergeConflicts(
 ): { hasConflicts: boolean; conflictFiles: string[] } {
   try {
     // Use git merge-tree to simulate merge without touching working directory
-    const output = execSync(
-      `git merge-tree $(git merge-base ${targetBranch} ${sourceBranch}) ${targetBranch} ${sourceBranch}`,
-      {
-        cwd: repoPath,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-      }
-    );
+    const sourceCommit = resolveGitRevision(repoPath, sourceBranch);
+    const targetCommit = resolveGitRevision(repoPath, targetBranch);
+    const mergeBase = getGitOutput(repoPath, [
+      'merge-base',
+      targetCommit,
+      sourceCommit,
+    ]).trim();
+    const output = getGitOutput(repoPath, [
+      'merge-tree',
+      mergeBase,
+      targetCommit,
+      sourceCommit,
+    ]);
 
     // Check for conflict markers in output
     const hasConflicts = output.includes('<<<<<<<') || output.includes('>>>>>>>');
@@ -207,14 +228,15 @@ export function detectMergeConflicts(
     // If git merge-tree fails, try a simpler approach
     try {
       // Check if branches have diverged (different commits)
-      const diverged = execSync(
-        `git rev-list --left-right --count ${targetBranch}...${sourceBranch}`,
-        {
-          cwd: repoPath,
-          encoding: 'utf-8',
-          stdio: 'pipe',
-        }
-      );
+      const sourceCommit = resolveGitRevision(repoPath, sourceBranch);
+      const targetCommit = resolveGitRevision(repoPath, targetBranch);
+      const diverged = getGitOutput(repoPath, [
+        'rev-list',
+        '--left-right',
+        '--count',
+        '--end-of-options',
+        `${targetCommit}...${sourceCommit}`,
+      ]);
 
       const [behind, ahead] = diverged.trim().split('\t').map(Number);
 
@@ -222,14 +244,12 @@ export function detectMergeConflicts(
       // If only one side has commits, it's a fast-forward merge (no conflicts)
       if (behind > 0 && ahead > 0) {
         // Get list of changed files on both sides
-        const changedFiles = execSync(
-          `git diff --name-only ${targetBranch}...${sourceBranch}`,
-          {
-            cwd: repoPath,
-            encoding: 'utf-8',
-            stdio: 'pipe',
-          }
-        ).trim().split('\n').filter(Boolean);
+        const changedFiles = getGitOutput(repoPath, [
+          'diff',
+          '--name-only',
+          `${targetCommit}...${sourceCommit}`,
+          '--',
+        ]).trim().split('\n').filter(Boolean);
 
         return { hasConflicts: true, conflictFiles: changedFiles };
       }
@@ -330,14 +350,14 @@ export function stageAllChanges(repoPath: string): { success: boolean; error?: s
   try {
     LogService.getInstance().info(`Staging all changes in: ${repoPath}`, 'stageAllChanges');
 
-    execSync('git add -A', {
+    execFileSync('git', ['add', '-A'], {
       cwd: repoPath,
       stdio: 'pipe',
     });
 
     // Check if anything was actually staged
     try {
-      execSync('git diff --cached --quiet', {
+      execFileSync('git', ['diff', '--cached', '--quiet'], {
         cwd: repoPath,
         stdio: 'pipe',
       });
@@ -371,7 +391,7 @@ export function commitChanges(
     LogService.getInstance().info(`Commit message: ${message}`, 'commitChanges');
 
     // Check if there are staged changes before committing
-    const stagedCheck = execSync('git diff --cached --quiet', {
+    const stagedCheck = execFileSync('git', ['diff', '--cached', '--quiet'], {
       cwd: repoPath,
       stdio: 'pipe',
     });
@@ -381,7 +401,7 @@ export function commitChanges(
   }
 
   try {
-    execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+    execFileSync('git', ['commit', '-m', message], {
       cwd: repoPath,
       stdio: 'pipe',
     });
@@ -393,7 +413,7 @@ export function commitChanges(
     let errorMessage = 'Unknown error';
     if (error instanceof Error) {
       errorMessage = error.message;
-      // execSync errors have stderr in the error object
+      // execFileSync errors have stderr in the error object
       const execError = error as Error & { stderr?: Buffer | string };
       if (execError.stderr) {
         const stderr = typeof execError.stderr === 'string'
@@ -417,7 +437,7 @@ export function commitChanges(
  */
 export function stashChanges(repoPath: string): { success: boolean; error?: string } {
   try {
-    execSync('git stash push -u -m "psyche: auto-stash before merge"', {
+    execFileSync('git', ['stash', 'push', '-u', '-m', 'psyche: auto-stash before merge'], {
       cwd: repoPath,
       stdio: 'pipe',
     });

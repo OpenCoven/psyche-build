@@ -65,7 +65,7 @@ describe('renameAction', () => {
         slug: 'test-pane',
         displayName: 'QA Review',
       }),
-    ]);
+    ], [pane]);
     expect(onPaneUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         id: pane.id,
@@ -95,7 +95,7 @@ describe('renameAction', () => {
         slug: 'test-pane',
         displayName: undefined,
       }),
-    ]);
+    ], [pane]);
   });
 
   it('persists worktree display names so reopened panes keep the rename', async () => {

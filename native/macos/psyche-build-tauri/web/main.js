@@ -552,10 +552,6 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      if (!options || options.ensureCoven !== false) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setStatus("no pane — launching Coven…", "");
-      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -809,9 +805,6 @@
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
-  var scopeBtnEl = document.getElementById("scope-btn");
-  var scopeLabelEl = document.getElementById("scope-label");
-  var scopeMenuEl = document.getElementById("scope-menu");
   var composerSendEl = document.getElementById("composer-send");
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
@@ -1678,6 +1671,7 @@
     if (!thread) return;
     if (thread.pane) {
       thread.pane.classList.toggle("needs-attention", !!thread.needsAttention);
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (thread.paneAttention) {
       var label = PsycheSessions.attentionLabel(thread.attentionReason);
@@ -2259,13 +2253,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2301,7 +2292,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2318,7 +2308,6 @@
     thread.toolBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2468,14 +2457,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2519,7 +2504,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2539,7 +2523,6 @@
     thread.browserBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2567,14 +2550,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2615,7 +2594,6 @@
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(attention);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2659,7 +2637,6 @@
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2730,17 +2707,37 @@
     thread.fit = fit;
   }
 
-  // Status never travels as colour alone: starting, exited and failed are
-  // worded chips. Running is the one exception, and only because it is the
-  // steady state of nearly every pane — it gets a static green dot, and the
-  // word stays in the title and aria-label so nothing is lost without colour.
-  function applyPaneStatus(element, status) {
-    if (!element) return;
+  function applyPaneStatus(pane, status) {
+    if (!pane) return "";
     var label = status || "";
-    element.className = "terminal-pane-status " + label;
-    element.textContent = label === "running" ? "" : label;
-    element.title = label;
-    element.setAttribute("aria-label", label);
+    var supported = label === "running" || label === "starting" ||
+      label === "failed" || label === "exited";
+    if (!supported) {
+      if (pane.dataset) delete pane.dataset.status;
+      pane.removeAttribute("aria-description");
+      return "";
+    }
+    pane.dataset.status = label;
+    pane.setAttribute("aria-description", "Status: " + label);
+    return label;
+  }
+
+  function syncPaneBranchStatusChrome(branch) {
+    if (!branch || !branch.classList ||
+        !branch.classList.contains("terminal-pane-branch")) return;
+    var pane = branch.firstElementChild;
+    var status = pane && pane.classList &&
+      pane.classList.contains("terminal-pane") && pane.dataset
+      ? pane.dataset.status || ""
+      : "";
+    var glows = status === "starting" || status === "failed" || status === "exited";
+    var needsAttention = pane && pane.classList &&
+      pane.classList.contains("needs-attention");
+    if (glows && !needsAttention) {
+      branch.dataset.status = status;
+    } else if (branch.dataset) {
+      delete branch.dataset.status;
+    }
   }
 
   function handlePanePointerDown(thread, body, close, event) {
@@ -3300,10 +3297,12 @@
     first.className = "terminal-pane-branch";
     first.style.flexGrow = String(ratio);
     first.appendChild(renderPaneNode(node.first, splitRatios));
+    syncPaneBranchStatusChrome(first);
     var second = document.createElement("div");
     second.className = "terminal-pane-branch";
     second.style.flexGrow = String(1 - ratio);
     second.appendChild(renderPaneNode(node.second, splitRatios));
+    syncPaneBranchStatusChrome(second);
     split.appendChild(first);
     split.appendChild(createPaneDivider(node, ratio));
     split.appendChild(second);
@@ -3586,8 +3585,13 @@
       thread.paneMeta.textContent = (thread.kind || "shell") + " · " +
         threadLaneLabel(thread);
     }
-    if (thread.paneStatus) {
-      applyPaneStatus(thread.paneStatus, thread.status);
+    if (thread.pane) {
+      var normalizedStatus = applyPaneStatus(thread.pane, thread.status);
+      thread.pane.setAttribute(
+        "aria-label",
+        thread.name + (normalizedStatus ? ", status " + normalizedStatus : "")
+      );
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
@@ -4889,7 +4893,7 @@
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         if (!(await activateProjectWorktree(
-          project, existing.worktreePath, { ensureCoven: false }
+          project, existing.worktreePath
         ))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
@@ -4909,7 +4913,7 @@
     var opening = Promise.resolve().then(async function () {
       var worktree = covenWorktreeForSession(project, session);
       if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      if (!(await activateProjectWorktree(project, worktree.path))) return null;
       await waitForTerminalLayout();
       return createThread({
         project: project,
@@ -6772,7 +6776,7 @@
   }
 
   async function runNewThreadCommand() {
-    return spawnCovenThread();
+    return ensureProjectCoven(activeProject());
   }
 
   async function runNewShellCommand() {
@@ -6987,7 +6991,7 @@
     });
   }
 
-  /** `!line` runs in the nearest shell pane regardless of composer scope. */
+  /** `!line` runs in the focused shell pane, or the first open shell in the active project. */
   function runShellSigil(line) {
     if (!line) return;
     var focused = findThread(state.activeThreadId);
@@ -7022,8 +7026,17 @@
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
-      // Not a slash command — pipe it to whatever the composer scope names.
-      sendToScope(trimmed + "\n");
+      // Not a slash command — it goes to the focused pane.
+      var focused = findThread(state.activeThreadId);
+      if (!focused) {
+        toast("No focused pane to send to");
+        return;
+      }
+      if (focused.kind === "web" || focused.status === "exited" || focused.status === "failed") {
+        toast("Focused pane cannot receive text");
+        return;
+      }
+      sendToThread(focused, trimmed + "\n");
       return;
     }
     commandHistory.push(trimmed);
@@ -7062,62 +7075,11 @@
     sendToThread(thread, text);
   }
 
-  // ---- Composer scope ----
+  // ---- Composer chrome ----
   //
-  // Plain text needs an explicit destination once several panes are visible at
-  // once, so the composer carries a scope chip: the focused pane, every pane in
-  // the project, or only the agent panes.
-  var composerScope = "pane";
-  var SCOPE_LABELS = { pane: "Pane", project: "Project", agents: "All agents" };
-
-  function scopeTargets() {
-    var project = activeProject();
-    if (composerScope === "pane") {
-      var focused = findThread(state.activeThreadId);
-      return focused ? [focused] : [];
-    }
-    return state.threads.filter(function (thread) {
-      if (!project || thread.projectId !== project.id) return false;
-      if (thread.hidden || thread.status === "exited") return false;
-      if (composerScope === "agents") return (thread.kind || "shell") !== "shell";
-      return true;
-    });
-  }
-
-  function sendToScope(text) {
-    var targets = scopeTargets();
-    if (!targets.length) {
-      toast(composerScope === "pane" ? "No focused pane to send to" : "No pane matches this scope");
-      return;
-    }
-    targets.forEach(function (thread) { sendToThread(thread, text); });
-    if (targets.length > 1) toast("Sent to " + targets.length + " panes");
-  }
-
+  // Plain text always lands in the focused pane, so the composer only has to
+  // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var project = activeProject();
-    var focused = findThread(state.activeThreadId);
-    if (scopeBtnEl) scopeBtnEl.dataset.scope = composerScope;
-    if (scopeLabelEl) {
-      scopeLabelEl.textContent = composerScope === "pane"
-        ? "Pane · " + (focused ? focused.name : "—")
-        : composerScope === "project"
-          ? "Project · " + (project ? project.name : "—")
-          : "All agents · " + scopeTargets().length;
-    }
-    var paneDesc = document.getElementById("scope-desc-pane");
-    if (paneDesc) {
-      paneDesc.textContent = focused
-        ? "Typed into " + focused.name
-        : "Typed into the focused pane";
-    }
-    var projectDesc = document.getElementById("scope-desc-project");
-    if (projectDesc && project) projectDesc.textContent = "Every pane in " + project.name;
-    if (scopeMenuEl) {
-      Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-        item.setAttribute("aria-checked", item.dataset.scope === composerScope ? "true" : "false");
-      });
-    }
     var value = commandInput ? commandInput.value.trim() : "";
     if (composerSendEl) {
       composerSendEl.hidden = value.length === 0;
@@ -7130,29 +7092,10 @@
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
-        : "→ " + (SCOPE_LABELS[composerScope] || "pane").toLowerCase();
+        : "→ focused pane";
     }
   }
 
-  function closeScopeMenu() {
-    if (scopeMenuEl) scopeMenuEl.hidden = true;
-    if (scopeBtnEl) scopeBtnEl.setAttribute("aria-expanded", "false");
-  }
-  if (scopeBtnEl && scopeMenuEl) {
-    scopeBtnEl.addEventListener("click", function () {
-      var open = scopeMenuEl.hidden;
-      if (open) { closeNewPaneMenu(); hidePalette(); syncComposerChrome(); }
-      scopeMenuEl.hidden = !open;
-      scopeBtnEl.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-      item.addEventListener("click", function () {
-        composerScope = item.dataset.scope;
-        closeScopeMenu();
-        syncComposerChrome();
-      });
-    });
-  }
   if (composerSendEl) {
     composerSendEl.addEventListener("click", function () {
       var line = commandInput.value;
@@ -7900,7 +7843,6 @@
           ? "New pane on " + worktree.branch
           : project ? "New pane in " + project.name : "New pane";
       }
-      closeScopeMenu();
     }
     newPaneMenuEl.hidden = !open;
     var trigger = document.getElementById("rail-new-tab");
@@ -8015,11 +7957,6 @@
         !event.target.closest("#rail-new-tab")) {
       closeNewPaneMenu();
     }
-    if (scopeMenuEl && !scopeMenuEl.hidden &&
-        !scopeMenuEl.contains(event.target) &&
-        !event.target.closest("#scope-btn")) {
-      closeScopeMenu();
-    }
   });
 
   // ---- Keyboard shortcuts overlay ----
@@ -8073,10 +8010,8 @@
     if (event.key === "Escape") {
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
-      var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
-        (scopeMenuEl && !scopeMenuEl.hidden);
+      var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
       closeNewPaneMenu();
-      closeScopeMenu();
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
@@ -8874,11 +8809,7 @@
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      var project = await addProject(selected);
-      if (project) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setProjectStatus(project, "ok");
-      }
+      await addProject(selected);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
@@ -8949,7 +8880,6 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeScopeMenu();
     closeSessionContextMenu();
     agentPickerIndex = 0;
     renderAgentPicker();
@@ -8996,13 +8926,12 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
-    var command = entry.command;
     if (entry.id === "coven-code") {
-      command = state.env && state.env.coven_path;
-      if (!command) {
+      if (!state.env || !state.env.coven_path) {
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
         return null;
       }
+      return ensureProjectCoven(project);
     }
     if (!(await showTerminalView())) return null;
     return createThread({
@@ -9010,9 +8939,9 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: command,
+      command: entry.command,
       args: entry.args.slice(),
-      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,
     });
@@ -9070,7 +8999,9 @@
     if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
-        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+        t.kind === "coven-chat" &&
+        (t.status === "starting" || t.status === "running") &&
+        !t.closing && !t.hidden;
     });
     if (existing) {
       return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
@@ -9187,7 +9118,6 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);

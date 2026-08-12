@@ -4,10 +4,11 @@
  * Uses AI to help resolve merge conflicts intelligently
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { LogService } from '../services/LogService.js';
+import { runProcess } from './runProcess.js';
 
 /**
  * Fetch with timeout wrapper
@@ -81,15 +82,12 @@ export async function callOpenRouter(prompt: string, maxTokens: number = 1000, t
  */
 async function callClaudeCode(prompt: string, timeoutMs: number = 15000): Promise<string | null> {
   try {
-    const result = execSync(
-      `echo "${prompt.replace(/"/g, '\\"')}" | claude --no-interactive --max-turns 1 2>/dev/null`,
-      {
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: timeoutMs,
-      }
-    );
-    return result.trim() || null;
+    const result = await runProcess('claude', {
+      args: ['--no-interactive', '--max-turns', '1'],
+      input: prompt,
+      timeoutMs,
+    });
+    return result.stdout.trim() || null;
   } catch {
     return null;
   }
@@ -103,7 +101,7 @@ export function getComprehensiveDiff(repoPath: string): { diff: string; summary:
 
   try {
     // Get staged changes first, then fall back to unstaged if nothing staged
-    let diff = execSync('git diff --cached', {
+    let diff = execFileSync('git', ['diff', '--cached'], {
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: 'pipe',
@@ -114,7 +112,7 @@ export function getComprehensiveDiff(repoPath: string): { diff: string; summary:
 
     // If nothing staged, check unstaged changes
     if (!diff.trim()) {
-      diff = execSync('git diff', {
+      diff = execFileSync('git', ['diff'], {
         cwd: repoPath,
         encoding: 'utf-8',
         stdio: 'pipe',
@@ -124,12 +122,15 @@ export function getComprehensiveDiff(repoPath: string): { diff: string; summary:
     }
 
     // Get file summary
-    const statusCmd = staged ? 'git diff --cached --stat' : 'git diff --stat';
-    const summary = execSync(statusCmd, {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-    });
+    const summary = execFileSync(
+      'git',
+      staged ? ['diff', '--cached', '--stat'] : ['diff', '--stat'],
+      {
+        cwd: repoPath,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }
+    );
 
     LogService.getInstance().info(`getComprehensiveDiff result - diff: ${diff.length} chars, summary: ${summary.trim().substring(0, 100)}`, 'aiMerge');
     return { diff, summary };
@@ -345,7 +346,7 @@ export async function aiResolveAllConflicts(
         await fs.writeFile(path.join(repoPath, file), result.resolvedContent, 'utf-8');
 
         // Stage the resolved file
-        execSync(`git add "${file}"`, {
+        execFileSync('git', ['add', '--', file], {
           cwd: repoPath,
           stdio: 'pipe',
         });

@@ -635,11 +635,14 @@ async function createAndMonitorConflictPane(
       agent,
       projectName: context.projectName,
       existingPanes: context.panes,
+      sessionProjectRoot: pane.projectRoot || worktree.parentRepoPath,
+      persistConflictPane: async (nextPane) => {
+        await context.savePanes([...context.panes, nextPane], context.panes);
+      },
     });
 
-    // Add the new pane to the panes list
+    // The conflict transaction made the record durable before launching Git.
     const updatedPanes = [...context.panes, conflictPane];
-    await context.savePanes(updatedPanes);
 
     // Notify about the new pane
     if (context.onPaneUpdate) {
@@ -657,15 +660,25 @@ async function createAndMonitorConflictPane(
           console.error(`[multiMerge] Conflicts resolved for ${worktree.repoName}, cleaning up conflict pane`);
           const tmuxService = TmuxService.getInstance();
 
-          // Kill the conflict pane
-          await tmuxService.killPane(conflictPane.paneId);
-
-          // Remove conflict pane from state
-          const { StateManager } = await import('../../shared/StateManager.js');
-          const stateManager = StateManager.getInstance();
-          const currentPanes = stateManager.getPanes();
-          const panesWithoutConflictPane = currentPanes.filter((p: PsychePane) => p.id !== conflictPane.id);
-          await context.savePanes(panesWithoutConflictPane);
+          // Remove only this exact conflict pane from the fresh registry.
+          if (!context.removePaneIdentitiesFromConfig) {
+            throw new Error('Multi-merge requires exact pane identity removal support');
+          }
+          const panesWithoutConflictPane = await context.removePaneIdentitiesFromConfig(
+            [{ id: conflictPane.id, paneId: conflictPane.paneId }],
+            async () => {
+              const { tearDownPaneWithVerification } = await import('../../utils/paneTeardown.js');
+              const teardown = await tearDownPaneWithVerification({
+                probe: () => tmuxService.probePanePresence(conflictPane.paneId),
+                kill: () => tmuxService.killPane(conflictPane.paneId),
+              });
+              if (teardown.presence !== 'absent') {
+                throw new Error(
+                  `Could not confirm conflict pane ${conflictPane.paneId} closed (${teardown.presence})`,
+                );
+              }
+            },
+          );
 
           // Mark this worktree as completed
           item.status = 'completed';
