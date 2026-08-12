@@ -103,61 +103,6 @@ describe('Tauri Coven launch project scope', () => {
     expect(deduplicate).toBeGreaterThan(canonicalize);
   });
 
-  it('clears the previous pane when adding a new project without auto-launching Coven', async () => {
-    const state = {
-      projects: [{ id: 'old', root: '/old' }],
-      activeProjectId: 'old',
-      activeThreadId: 'old-thread' as string | null,
-    };
-    const calls: string[] = [];
-    const project = {
-      id: 'new-project',
-      root: '/new',
-      selectedWorktreePath: '/new',
-      worktrees: [],
-      browsersByWorktree: {},
-    };
-    const addProject = compileFunction<(root: string) => Promise<typeof project | null>>(
-      functionSource('addProject'),
-      {
-        canonicalProjectPath: async () => '/new',
-        state,
-        settings: { maxProjects: 10 },
-        HARD_MAX_PROJECTS: 10,
-        setStatus: () => undefined,
-        showTerminalView: async () => true,
-        makeProjectId: () => project.id,
-        ensureProjectLayout: () => undefined,
-        restoreProjectLayout: () => { calls.push('layout'); },
-        renderPaneWorkspace: () => { calls.push(`panes:${state.activeThreadId}`); },
-        refreshSidebar: () => { calls.push('sidebar'); },
-        refreshTabs: () => { calls.push('tabs'); },
-        refreshProjectWorktrees: async () => { calls.push('worktrees'); },
-        syncProjectBrowser: () => { calls.push('browser'); },
-        saveWorkspaceSoon: () => { calls.push('save'); },
-        startCovenPolling: () => { calls.push('poll'); },
-        refreshStatusController: () => { calls.push('status'); },
-      },
-    );
-
-    const added = await addProject('/new');
-
-    expect(added).toMatchObject({ id: project.id, root: project.root });
-    expect(state.activeProjectId).toBe(project.id);
-    expect(state.activeThreadId).toBeNull();
-    expect(calls).toEqual([
-      'layout',
-      'panes:null',
-      'sidebar',
-      'tabs',
-      'worktrees',
-      'browser',
-      'save',
-      'poll',
-      'status',
-    ]);
-  });
-
   it('canonicalizes saved roots concurrently before restoring projects', () => {
     const boot = functionSource('boot');
     expect(boot).toContain('restoreSavedProjects');
@@ -166,6 +111,18 @@ describe('Tauri Coven launch project scope', () => {
     const discover = boot.indexOf('refreshProjectWorktrees');
     expect(canonicalize).toBeGreaterThanOrEqual(0);
     expect(discover).toBeGreaterThan(canonicalize);
+  });
+
+  it('ignores retired layout state while sanitizing saved projects', () => {
+    const sanitizeSavedProject = compileFunction<
+      (saved: Record<string, unknown>) => Record<string, unknown>
+    >(functionSource('sanitizeSavedProject'), {});
+    const project = sanitizeSavedProject({
+      id: 'saved',
+      root: '/repo',
+      layout: { mode: 'split', panel: 'git', splitFrac: 0.62 },
+    });
+    expect(project).not.toHaveProperty('layout');
   });
 
   it('passively restores a saved workspace without launching Coven', async () => {
@@ -185,7 +142,6 @@ describe('Tauri Coven launch project scope', () => {
           { path: '/repo/a', collapsed: false },
           { path: '/repo/a/worktrees/feature-a', collapsed: true },
         ],
-        layout: { mode: 'split', side: 'right', splitFrac: 0.62 },
         browsersByWorktree: {},
       },
       {
@@ -193,7 +149,6 @@ describe('Tauri Coven launch project scope', () => {
         root: '/repo/b',
         selectedWorktreePath: '/repo/b',
         worktrees: [{ path: '/repo/b', collapsed: false }],
-        layout: { mode: 'terminal', side: 'right', splitFrac: 0.6 },
         browsersByWorktree: {},
       },
     ];
@@ -230,7 +185,6 @@ describe('Tauri Coven launch project scope', () => {
           calls.push('activeProject');
           return state.projects.find((project) => project.id === state.activeProjectId) || null;
         },
-        restoreProjectLayout: (project: { id: string }) => { calls.push(`restoreProjectLayout:${project.id}`); },
         refreshProjectWorktrees: (project: { id: string }) => {
           calls.push(`refreshProjectWorktrees:${project.id}`);
           const refresh = refreshes.get(project.id);
@@ -283,7 +237,6 @@ describe('Tauri Coven launch project scope', () => {
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
       'activeProject',
-      'restoreProjectLayout:restored-a',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
     ]);
@@ -304,7 +257,6 @@ describe('Tauri Coven launch project scope', () => {
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
       'activeProject',
-      'restoreProjectLayout:restored-a',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
     ]);
@@ -325,11 +277,9 @@ describe('Tauri Coven launch project scope', () => {
       'installTerminalImageDrop',
       'restoreSavedProjects:2:restored-a:5',
       'activeProject',
-      'restoreProjectLayout:restored-a',
       'refreshProjectWorktrees:restored-a',
       'refreshProjectWorktrees:restored-b',
       'currentBrowserTab:restored-a',
-      'restoreProjectLayout:restored-a',
       'refreshSidebar',
       'refreshTabs',
       'renderBrowserTabs',
@@ -352,7 +302,6 @@ describe('Tauri Coven launch project scope', () => {
       root: '/repo/root',
       selectedWorktreePath: '/repo/root',
       worktrees: [{ path: '/repo/root', collapsed: false }],
-      layout: { mode: 'terminal', side: 'right', splitFrac: 0.6 },
       browsersByWorktree: {},
     };
     const calls: string[] = [];
@@ -379,7 +328,6 @@ describe('Tauri Coven launch project scope', () => {
         activeProject: () => {
           throw new Error('activeProject should not run without saved projects');
         },
-        restoreProjectLayout: (value: { id: string }) => { calls.push(`restoreProjectLayout:${value.id}`); },
         refreshProjectWorktrees: async () => {
           throw new Error('refreshProjectWorktrees should be owned by addProject');
         },
@@ -428,7 +376,6 @@ describe('Tauri Coven launch project scope', () => {
       'installTerminalImageDrop',
       'addProject:/repo/root',
       'currentBrowserTab:fresh-project',
-      'restoreProjectLayout:fresh-project',
       'refreshSidebar',
       'refreshTabs',
       'renderBrowserTabs',
@@ -440,7 +387,7 @@ describe('Tauri Coven launch project scope', () => {
       'refreshVisiblePaneMetrics',
     ]);
     expect(calls.indexOf('startCovenPolling')).toBeGreaterThan(
-      calls.indexOf('restoreProjectLayout:fresh-project'),
+      calls.indexOf('currentBrowserTab:fresh-project'),
     );
   });
 
@@ -548,7 +495,7 @@ describe('Tauri Coven launch project scope', () => {
       target: Record<string, any>, incoming: Record<string, any>, preferIncoming: boolean,
     ) => Record<string, any>>(functionSource('mergeRestoredProject'), {});
     const target = {
-      root: '/real/repo', selectedWorktreePath: '/real/repo', layout: { mode: 'terminal' },
+      root: '/real/repo', selectedWorktreePath: '/real/repo',
       worktrees: [
         { path: '/real/repo/nested', collapsed: false },
         { path: '/external', collapsed: false },
@@ -559,7 +506,7 @@ describe('Tauri Coven launch project scope', () => {
       },
     };
     const incoming = {
-      root: '/real/repo', selectedWorktreePath: '/external', layout: { mode: 'browser' },
+      root: '/real/repo', selectedWorktreePath: '/external',
       worktrees: [
         { path: '/real/repo/nested', collapsed: true },
         { path: '/incoming-external', collapsed: true },
@@ -575,7 +522,7 @@ describe('Tauri Coven launch project scope', () => {
     mergeRestoredProject(target, incoming, true);
 
     expect(target.selectedWorktreePath).toBe('/external');
-    expect(target.layout).toEqual({ mode: 'browser' });
+    expect(target).not.toHaveProperty('layout');
     expect(target.worktrees).toEqual([
       { path: '/real/repo/nested', collapsed: true },
       { path: '/external', collapsed: false },
@@ -728,6 +675,7 @@ describe('native Coven launch routing', () => {
     ) => Record<string, any> | null>(
       functionSource('duplicateThread'),
       {
+        threadIsToolPane: () => false,
         findProject: () => project,
         covenChatLaunch,
         createThread: (options: Record<string, any>) => {
@@ -776,6 +724,26 @@ describe('native Coven launch routing', () => {
     });
   });
 
+  it('rejects duplicate requests for non-PTY tool panes', () => {
+    let creates = 0;
+    const duplicateThread = compileFunction<(
+      value: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(
+      functionSource('duplicateThread'),
+      {
+        threadIsToolPane: (thread: Record<string, unknown>) =>
+          thread.kind === 'git' || thread.kind === 'web',
+        findProject: () => ({ id: 'project' }),
+        covenChatLaunch: () => null,
+        createThread: () => { creates += 1; return {}; },
+      },
+    );
+
+    expect(duplicateThread({ kind: 'git', status: 'running' })).toBeNull();
+    expect(duplicateThread({ kind: 'web', status: 'running' })).toBeNull();
+    expect(creates).toBe(0);
+  });
+
   it('does not create a duplicate Coven chat thread when secure session generation fails', () => {
     const project = { id: 'project', root: '/repo' };
     const statuses: Array<{ text: string; tone: string | undefined }> = [];
@@ -803,6 +771,7 @@ describe('native Coven launch routing', () => {
     ) => Record<string, any> | null>(
       functionSource('duplicateThread'),
       {
+        threadIsToolPane: () => false,
         findProject: () => project,
         covenChatLaunch,
         createThread: () => {
@@ -1302,12 +1271,12 @@ describe('native Coven launch routing', () => {
         state,
         showTerminalView: async () => true,
         findProject: () => project,
-        restoreProjectLayout: () => undefined,
         clearPassiveCovenPaneFocus: () => undefined,
         loadAgentSkills: () => undefined,
         activeWorkspaceRoot: () => '/repo',
         focusThread: async () => true,
         renderPaneWorkspace: () => { renderCalls += 1; },
+        renderGitSurface: () => false,
         refreshSidebar: () => { sidebarCalls += 1; },
         refreshTabs: () => { tabCalls += 1; },
         syncProjectBrowser: () => { syncCalls += 1; },

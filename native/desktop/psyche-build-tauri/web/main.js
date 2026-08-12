@@ -261,8 +261,9 @@
     var refreshStatus = !options || options.refreshStatus !== false;
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
+    var projectChanged = project.id !== state.activeProjectId;
     project.selectedWorktreePath = worktreePath;
-    if (project.id !== state.activeProjectId) {
+    if (projectChanged) {
       var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
       if (!(await setActiveProject(project.id, projectOptions))) {
         project.selectedWorktreePath = previousWorktreePath;
@@ -271,8 +272,10 @@
     } else {
       activatePaneLayoutFocus(project, worktreePath);
     }
-    renderPaneWorkspace();
-    renderPanel(currentPanel());
+    if (!projectChanged) {
+      renderPaneWorkspace();
+      renderGitSurface();
+    }
     loadAgentSkills();
     refreshSidebar();
     syncProjectBrowser();
@@ -536,11 +539,19 @@
   }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
+    var previousWorkspaceRoot = activeWorkspaceRoot(project);
+    function invalidateChangedDiffScope() {
+      if (project.id === state.activeProjectId &&
+          activeWorkspaceRoot(project) !== previousWorkspaceRoot) {
+        suspendGitRequests();
+      }
+    }
     if (state.env && state.env.native_workspace_v2 === false) {
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
       project.selectedWorktreePath = project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
@@ -550,6 +561,7 @@
       project.worktrees = mergeWorktreePresentationState(project, worktrees);
       var selected = selectedWorktree(project);
       project.selectedWorktreePath = selected ? selected.path : project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -560,6 +572,7 @@
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
       project.selectedWorktreePath = project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
@@ -586,7 +599,6 @@
     state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
-    restoreProjectLayout(project);
     clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
@@ -617,6 +629,7 @@
       refreshTabs();
       syncProjectBrowser();
     }
+    renderGitSurface();
     syncProjectBrowser();
     saveWorkspaceSoon();
     if (refreshStatus && typeof refreshStatusController === "function") {
@@ -741,7 +754,7 @@
     return project.browsersByWorktree;
   }
   function persistableProject(project) {
-    return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
+    return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), browsersByWorktree: persistableBrowsers(project) };
   }
   function workspaceModel() {
     return window.PsycheWorkspace || null;
@@ -800,11 +813,6 @@
       collapsed: saved.collapsed === true,
       selectedWorktreePath: saved.selectedWorktreePath || saved.root,
       worktrees: Array.isArray(saved.worktreePresentation) ? saved.worktreePresentation : [],
-      layout: {
-        mode: saved.layout && saved.layout.mode ? saved.layout.mode : "terminal",
-        side: saved.layout && saved.layout.side ? saved.layout.side : "right",
-        splitFrac: typeof (saved.layout && saved.layout.splitFrac) === "number" ? saved.layout.splitFrac : 0.6,
-      },
       browsersByWorktree: {},
     };
     var savedBrowsers = saved.browsersByWorktree && typeof saved.browsersByWorktree === "object"
@@ -857,7 +865,6 @@
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
-  var dockMiniEl = document.getElementById("rail-right");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
   var newPaneMenuHeadEl = document.getElementById("new-pane-menu-head");
   var toastEl = document.getElementById("toast");
@@ -872,7 +879,6 @@
   var composerSendEl = document.getElementById("composer-send");
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
-  var dockGitCountEl = document.getElementById("dock-git-count");
 
   // -------- Voice call bar --------
   // Board 4's call bar. The bar, its timer and its mute state are real UI; what
@@ -1115,7 +1121,7 @@
 
   // ---- Toast ----
   // Short-lived confirmation for actions whose effect happens off-screen
-  // (a pane spawned behind a maximised pane, a dock panel switched, …).
+  // (for example, a pane spawned behind a maximised pane).
   var toastTimer = 0;
   function toast(message) {
     if (!toastEl) return;
@@ -1126,6 +1132,11 @@
       toastEl.hidden = true;
       toastTimer = 0;
     }, 2600);
+  }
+
+  function showPanePlacementWarning(message) {
+    setStatus(message, "warn");
+    toast(message);
   }
 
   async function copyPaneFooterValue(label, value) {
@@ -1216,174 +1227,6 @@
     daemonStatusEl.dataset.state = stateName;
     if (daemonLabelEl) daemonLabelEl.textContent = label;
   }
-
-  // ============================================================
-  // 4. Layout — canvas plus an optional Git dock.
-  //    `--split-frac` is always the fraction of the canvas in split.
-  // ============================================================
-
-  var PANELS = ["git"];
-  // Diffs used to be its own tab. It now lives inside the git panel, so every
-  // stored layout naming it, and every `panelIsVisible("diffs")` gate, resolves
-  // to the tab that actually shows it.
-  var PANEL_ALIASES = { diffs: "git" };
-  function resolvePanelName(name) {
-    return Object.prototype.hasOwnProperty.call(PANEL_ALIASES, name)
-      ? PANEL_ALIASES[name]
-      : name;
-  }
-  var detailStyleRule = null;
-
-  function currentLayout() { return detail.dataset.layout || "terminal"; }
-  function getDetailStyleRule() {
-    if (detailStyleRule) return detailStyleRule;
-    for (var i = 0; i < document.styleSheets.length; i++) {
-      var rules;
-      try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
-      for (var j = 0; j < rules.length; j++) {
-        if (rules[j].selectorText === ".detail") {
-          detailStyleRule = rules[j];
-          return detailStyleRule;
-        }
-      }
-    }
-    return null;
-  }
-  function setDetailSplitFrac(value) {
-    var rule = getDetailStyleRule();
-    if (rule) rule.style.setProperty("--split-frac", String(value));
-    else detail.style.setProperty("--split-frac", String(value));
-  }
-  function currentSplitFrac() {
-    var rule = getDetailStyleRule();
-    var value = rule ? rule.style.getPropertyValue("--split-frac") : "";
-    if (!value) value = window.getComputedStyle(detail).getPropertyValue("--split-frac");
-    return parseFloat(value) || 0.6;
-  }
-  function ensureProjectLayout(project) {
-    if (!project) return null;
-    // A new project opens with the tools dock showing Git: the dock is a
-    // first-class surface now, not an occasional overlay. Saved projects keep
-    // whatever layout they were left in.
-    if (!project.layout) {
-      project.layout = { mode: "split", splitFrac: 0.62, panel: "git" };
-    }
-    return project.layout;
-  }
-  function rememberProjectLayout(project) {
-    project = project || activeProject();
-    var layout = ensureProjectLayout(project);
-    if (!layout) return;
-    layout.mode = currentLayout();
-    layout.splitFrac = currentSplitFrac();
-    layout.panel = currentPanel();
-    saveWorkspaceSoon();
-  }
-  function restoreProjectLayout(project) {
-    var layout = ensureProjectLayout(project);
-    if (!layout) return;
-    var previousLayout = currentLayout();
-    setDetailSplitFrac(layout.splitFrac || 0.6);
-    setPanel(layout.panel || project.panel || "git", { render: false });
-    applyLayout(layout.mode === "split" ? "split" : "terminal", { persist: false });
-    // Panels read from the project root, so re-render for the project we just
-    // switched to rather than showing the previous one's tree/diff/log.
-    if (previousLayout === "split" && currentLayout() === "split") {
-      renderPanel(currentPanel());
-    }
-  }
-
-  function applyLayout(layout, opts) {
-    var previousLayout = currentLayout();
-    if (layout === "splitV") layout = "split";
-    if (layout !== "split") layout = "terminal";
-    detail.dataset.layout = layout;
-    if (!opts || opts.persist !== false) rememberProjectLayout();
-    syncPanelButtons();
-    var splitterEl = document.getElementById("splitter");
-    if (splitterEl) splitterEl.setAttribute("aria-orientation", "vertical");
-    syncDockChrome();
-    handlePanelLayoutTransition(previousLayout, layout);
-    requestAnimationFrame(function () {
-      scheduleVisiblePaneFit();
-      syncBrowserBounds();
-    });
-  }
-
-  // Collapsing the Git dock hands its column to the mini rail.
-  function syncDockChrome() {
-    var open = currentLayout() !== "terminal";
-    if (appEl) appEl.dataset.dock = open ? "open" : "collapsed";
-    if (dockMiniEl) dockMiniEl.hidden = open;
-  }
-
-  function handlePanelLayoutTransition(previousLayout, nextLayout) {
-    var panel = currentPanel();
-    if (previousLayout === "split" && nextLayout !== "split" && panel === "git") {
-      suspendDiffRequests();
-    }
-    if (previousLayout !== "split" && nextLayout === "split") {
-      renderPanel(panel);
-    }
-  }
-
-  function toggleDock() {
-    applyLayout(currentLayout() === "split" ? "terminal" : "split");
-  }
-  // ---- Right-rail panel switching ----
-  // The rail is a radio group over the dock's panels. Clicking the
-  // panel that is already showing collapses the pane, so one button both opens
-  // and closes — the usual activity-bar behaviour.
-  function currentPanel() {
-    var p = detail.dataset.panel;
-    return PANELS.indexOf(p) === -1 ? PANELS[0] : p;
-  }
-  function syncPanelButtons() {
-    var open = currentLayout() === "split";
-    var panel = currentPanel();
-    Array.prototype.forEach.call(
-      document.querySelectorAll("[data-panel-btn]"),
-      function (btn) {
-        btn.setAttribute(
-          "aria-pressed",
-          open && btn.dataset.panelBtn === panel ? "true" : "false"
-        );
-      }
-    );
-  }
-  function setPanel(name, opts) {
-    name = resolvePanelName(name);
-    if (PANELS.indexOf(name) === -1) name = PANELS[0];
-    detail.dataset.panel = name;
-    var project = activeProject();
-    if (project) project.panel = name;
-    if (!opts || opts.render !== false) renderPanel(name);
-    syncBrowserBounds();
-    syncPanelButtons();
-  }
-  function renderPanel(name) {
-    if (name === "git") {
-      // One tab, two sections: repository state above, changed files below.
-      renderGitPanel();
-      renderDiffsPanel();
-    }
-  }
-  Array.prototype.forEach.call(
-    document.querySelectorAll("[data-panel-btn]"),
-    function (btn) {
-      btn.addEventListener("click", function () {
-        var name = btn.dataset.panelBtn;
-        if (currentLayout() === "split" && currentPanel() === name) {
-          applyLayout("terminal");
-          return;
-        }
-        var panelWasVisible = currentLayout() === "split";
-        setPanel(name, { render: false });
-        applyLayout("split");
-        if (panelWasVisible) renderPanel(name);
-      });
-    }
-  );
 
   // ============================================================
   // 5. PTY event plumbing
@@ -1852,6 +1695,11 @@
     return thread && thread.launch && thread.launch.covenSessionId || null;
   }
 
+  // An exited pane is not an attachment you can focus, so it must not make a
+  // row read as attached. main added that guard to isReusableCovenAttachment
+  // alongside createCovenSessionRow; this branch replaced that render path with
+  // the sidebar model, so the guard is carried here instead of being lost with
+  // the function it arrived in.
   function covenRowAttached(state, projectId, sessionId) {
     return state.threads.some(function (thread) {
       return thread.projectId === projectId
@@ -2277,35 +2125,82 @@
   }
 
   // -------- Tools on the canvas --------
-  // The git surface is a single element with two possible homes: the dock, or a
-  // pane. Moving it rather than rendering it twice is what keeps the two in
-  // sync -- there is only ever one of it, so there is nothing to diverge.
+  // The Git surface has one neutral staging host and one pane owner at a time.
 
   var gitSurfaceEl = document.getElementById("git-surface");
-  var gitPanelEl = document.querySelector(".panel-git");
-  var gitPoppedNoteEl = document.getElementById("git-popped-note");
+  var gitSurfaceStagingEl = document.getElementById("git-surface-staging");
+  var gitRefreshFlight = null;
 
-  /** The thread holding the git pane, if it is popped out. */
-  function gitPaneThread() {
+  function stageGitSurface() {
+    if (gitSurfaceEl && gitSurfaceStagingEl &&
+        gitSurfaceEl.parentElement !== gitSurfaceStagingEl) {
+      gitSurfaceStagingEl.appendChild(gitSurfaceEl);
+    }
+  }
+
+  /** The thread holding the Git pane for one project and worktree. */
+  function gitPaneThread(projectId, workspaceRoot) {
     for (var i = 0; i < state.threads.length; i++) {
-      if (state.threads[i].kind === "git" && !state.threads[i].closing) return state.threads[i];
+      var thread = state.threads[i];
+      if (thread.kind === "git" &&
+          thread.projectId === projectId &&
+          thread.worktreePath === workspaceRoot &&
+          !thread.closing) return thread;
     }
     return null;
   }
 
-  function syncGitDockChrome() {
-    var popped = Boolean(gitPaneThread());
-    if (gitPoppedNoteEl) gitPoppedNoteEl.hidden = !popped;
-    var popBtn = document.getElementById("git-pop-out");
-    if (popBtn) popBtn.hidden = popped;
+  function gitPaneIsVisible(project) {
+    project = project || activeProject();
+    if (!project || project.id !== state.activeProjectId) return false;
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var thread = gitPaneThread(project.id, workspaceRoot);
+    return !!thread && !thread.hidden && !thread.closing &&
+      canvasThreadIds().indexOf(thread.id) !== -1;
   }
 
-  /** Put the surface back in the dock, wherever it currently is. */
-  function dockGitSurface() {
-    if (gitSurfaceEl && gitPanelEl && gitSurfaceEl.parentElement !== gitPanelEl) {
-      gitPanelEl.appendChild(gitSurfaceEl);
+  function renderGitSurface(options) {
+    var project = activeProject();
+    if (!gitPaneIsVisible(project)) {
+      suspendGitRequests();
+      return false;
     }
-    syncGitDockChrome();
+    var projectId = project.id;
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var scopeKey = projectId + "\0" + workspaceRoot;
+    if (gitRefreshFlight && gitRefreshFlight.scopeKey === scopeKey &&
+        !(options && options.force)) {
+      return gitRefreshFlight.promise;
+    }
+
+    var refreshGeneration = gitRefreshRequestGate.next();
+    var gitGeneration = gitPanelRequestGate.next();
+    var diffGeneration = diffPanelRequestGate.next();
+    diffRequestGate.next();
+    prepareGitSurfaceRefresh();
+    setGitChangesCount(0);
+
+    var flight = { scopeKey: scopeKey, promise: null };
+    var statusRequest;
+    try {
+      statusRequest = invoke("git_status", { root: workspaceRoot });
+    } catch (err) {
+      statusRequest = Promise.reject(err);
+    }
+    flight.promise = Promise.resolve(statusRequest).then(function (status) {
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration)) return;
+      setGitChangesCount(status && status.is_repo ? (status.files || []).length : 0);
+      renderDiffsPanel(project, workspaceRoot, status, diffGeneration, refreshGeneration);
+      return renderGitPanel(project, workspaceRoot, status, gitGeneration, refreshGeneration);
+    }).catch(function (err) {
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration)) return;
+      setGitChangesCount(0);
+      renderGitSurfaceError(err);
+    }).finally(function () {
+      if (gitRefreshFlight === flight) gitRefreshFlight = null;
+    });
+    gitRefreshFlight = flight;
+    return flight.promise;
   }
 
   function mountToolPane(thread) {
@@ -2345,8 +2240,8 @@
     var close = document.createElement("button");
     close.type = "button";
     close.className = "terminal-pane-close";
-    close.title = "Return Git to the dock";
-    close.setAttribute("aria-label", "Return Git to the dock");
+    close.title = "Close Git pane";
+    close.setAttribute("aria-label", "Close Git pane");
     close.textContent = "\u00d7";
     close.addEventListener("click", function (event) {
       event.stopPropagation();
@@ -2387,25 +2282,39 @@
   }
 
   /**
-   * Open Git as a pane. `dropTarget` optionally places it next to an existing
-   * pane, which is how a drag from the dock lands where it was dropped.
+   * Open Git as a pane, or focus the existing pane for this scope.
    */
-  async function popOutGitPane(dropTarget) {
-    var existing = gitPaneThread();
-    if (existing) { await focusThread(existing.id); return existing; }
+  async function openOrFocusGitPane() {
     var project = activeProject();
     if (!project) { setStatus("No project open", "warn"); return null; }
-    var worktreePath = activeWorkspaceRoot(project);
+    if (!(await showTerminalView())) return null;
+    // The file guard can await user input, so project/worktree selection may
+    // have changed while it was open. Resolve and dedupe only after it passes.
+    project = activeProject();
+    if (!project) { setStatus("No project open", "warn"); return null; }
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var existing = gitPaneThread(project.id, workspaceRoot);
+    if (existing) {
+      var reopened = existing.hidden;
+      if (reopened && !reopenThread(existing.id)) {
+        showPanePlacementWarning("Not enough space for another pane");
+        return null;
+      }
+      revealGitPane(existing);
+      await focusThread(existing.id);
+      if (!reopened) renderGitSurface();
+      return existing;
+    }
     var id = makeThreadId();
-    var placement = preparePanePlacement(id, project.id, worktreePath);
+    var placement = preparePanePlacement(id, project.id, workspaceRoot);
     if (!placement) {
-      setStatus("Not enough space for another pane", "warn");
+      showPanePlacementWarning("Not enough space for another pane");
       return null;
     }
     var thread = {
       id: id,
       projectId: project.id,
-      worktreePath: worktreePath,
+      worktreePath: workspaceRoot,
       name: "Git",
       kind: "git",
       status: "",
@@ -2421,95 +2330,20 @@
       ptyStarted: false,
     };
     commitPanePlacement(placement);
+    revealGitPane(thread);
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountToolPane(thread);
-    if (dropTarget && dropTarget.threadId && dropTarget.position) {
-      movePaneTo(id, dropTarget.threadId, dropTarget.position);
-    }
     await focusThread(id);
-    syncGitDockChrome();
+    renderGitSurface();
     refreshSidebar();
+    saveWorkspaceSoon();
     return thread;
   }
 
-  /** Close the pane and hand the surface back to the dock. */
+  /** Close the pane after returning its shared surface to neutral staging. */
   function closeToolPane(thread) {
-    if (!thread || thread.closeStarted) return;
-    thread.closeStarted = true;
-    thread.closing = true;
-    if (typeof noteStatusActivity === "function") noteStatusActivity();
-    // Move the surface home before the pane is torn down, or it would be
-    // removed from the document along with its container.
-    dockGitSurface();
-    forgetThreadInSets(thread.id);
-    var nextThreadId = detachThreadPane(thread);
-    state.threads = state.threads.filter(function (t) { return t.id !== thread.id; });
-    if (thread.pane && thread.pane.parentNode) thread.pane.parentNode.removeChild(thread.pane);
-    if (state.activeThreadId === thread.id) state.activeThreadId = nextThreadId;
-    syncGitDockChrome();
-    renderPaneWorkspace();
-    refreshSidebar();
-    saveWorkspaceSoon();
-  }
-
-  // Click pops out; dragging the same control onto the canvas pops out where it
-  // lands. One affordance, two gestures, so the tab does not need a second
-  // control for the second gesture.
-  var gitPopOutBtn = document.getElementById("git-pop-out");
-  if (gitPopOutBtn) {
-    gitPopOutBtn.addEventListener("click", function () { popOutGitPane(); });
-    gitPopOutBtn.addEventListener("dragstart", function (event) {
-      if (!event.dataTransfer) return;
-      event.dataTransfer.setData("text/x-psyche-tool", "git");
-      event.dataTransfer.effectAllowed = "move";
-      document.body.classList.add("is-tool-dragging");
-    });
-    gitPopOutBtn.addEventListener("dragend", function () {
-      document.body.classList.remove("is-tool-dragging");
-      clearPaneDropIndicator();
-    });
-  }
-  var gitDockBackBtn = document.getElementById("git-dock-back");
-  if (gitDockBackBtn) {
-    gitDockBackBtn.addEventListener("click", function () {
-      var thread = gitPaneThread();
-      if (thread) closeToolPane(thread);
-    });
-  }
-
-  function toolDropTargetAt(clientX, clientY) {
-    var hit = paneElementAt(clientX, clientY);
-    if (!hit) return null;
-    return {
-      threadId: hit.thread.id,
-      position: paneDropZone(hit.rect, clientX, clientY),
-      rect: hit.rect,
-    };
-  }
-
-  if (terminalHost) {
-    terminalHost.addEventListener("dragover", function (event) {
-      if (!event.dataTransfer || event.dataTransfer.types.indexOf("text/x-psyche-tool") === -1) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      var target = toolDropTargetAt(event.clientX, event.clientY);
-      // Reuse the pane-drag indicator so a tool lands with the same affordance
-      // as moving a pane; a second visual language here would be noise.
-      if (target) showPaneDropIndicator(target.rect, target.position);
-      else clearPaneDropIndicator();
-    });
-    terminalHost.addEventListener("dragleave", function (event) {
-      if (event.target === terminalHost) clearPaneDropIndicator();
-    });
-    terminalHost.addEventListener("drop", function (event) {
-      if (!event.dataTransfer || event.dataTransfer.getData("text/x-psyche-tool") !== "git") return;
-      event.preventDefault();
-      var target = toolDropTargetAt(event.clientX, event.clientY);
-      clearPaneDropIndicator();
-      document.body.classList.remove("is-tool-dragging");
-      popOutGitPane(target);
-    });
+    return thread ? closeThread(thread.id) : false;
   }
 
   function mountBrowserPane(thread) {
@@ -2879,7 +2713,7 @@
   }
 
   // The drop highlight is shared by both drags -- repositioning a pane and
-  // dragging a tool out of the dock -- so the two gestures read identically.
+  // repositioning any canvas pane uses this one shared affordance.
   // Fixed positioning takes the client rects as-is, so it needs no positioned
   // ancestor and cannot be clipped by a pane's own overflow.
   var paneDropIndicator = null;
@@ -3149,6 +2983,28 @@
     return thread ? paneLayoutFor(thread.projectId, thread.worktreePath) : null;
   }
 
+  /** Make a Git leaf visible without discarding compatible presentation state. */
+  function revealGitPane(thread) {
+    var layout = paneLayoutForThread(thread);
+    var leaf = layout && layout.root && PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    if (!layout || !leaf) return false;
+    var changed = false;
+    if (layout.activeSetId) {
+      var set = findFocusSet(layout.activeSetId);
+      if (!set || set.threadIds.indexOf(thread.id) === -1) {
+        layout.activeSetId = null;
+        layout.spanRoot = null;
+        layout.spanSignature = null;
+        changed = true;
+      }
+    }
+    if (layout.maximizedLeafId && layout.maximizedLeafId !== leaf.id) {
+      layout.maximizedLeafId = null;
+      changed = true;
+    }
+    return changed;
+  }
+
   // -------- Focus-set interactions --------
 
   /** Enter multi-select. The set is only created when the user confirms. */
@@ -3383,6 +3239,7 @@
   function renderPaneWorkspace() {
     if (!terminalHost) return;
     stageBrowserSurface();
+    stageGitSurface();
     terminalHost.replaceChildren();
     var layout = activePaneLayout();
     if (!layout || !layout.root) {
@@ -3612,6 +3469,9 @@
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    var project = findProject(thread.projectId);
+    var scopeChanged = state.activeProjectId !== thread.projectId ||
+      !project || activeWorkspaceRoot(project) !== thread.worktreePath;
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
@@ -3619,7 +3479,6 @@
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
       state.activeProjectId = thread.projectId;
     }
-    var project = findProject(thread.projectId);
     if (project) {
       if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
         project.lastActiveThreadId = id;
@@ -3630,6 +3489,7 @@
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
     renderPaneWorkspace();
+    if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
@@ -3676,10 +3536,9 @@
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
-      thread.paneClose.setAttribute(
-        "aria-label",
-        thread.kind === "web" ? "Close Web pane" : "Stop and close " + thread.name
-      );
+      var closeLabel = sessionCloseLabel(thread);
+      thread.paneClose.title = closeLabel;
+      thread.paneClose.setAttribute("aria-label", closeLabel);
     }
   }
 
@@ -3930,6 +3789,10 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    if (thread.kind === "git") {
+      suspendGitRequests();
+      stageGitSurface();
+    }
     if (thread.kind === "web" && state.activeThreadId === id) {
       markActiveSurface("terminal");
     }
@@ -3946,7 +3809,9 @@
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.kind !== "web" && !thread.startInFlight) stopThreadPty(thread);
+    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
+      stopThreadPty(thread);
+    }
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
@@ -3976,6 +3841,7 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    if (thread.kind === "git") suspendGitRequests();
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
       clearTimeout(thread.metricsRefreshTimer);
@@ -3991,6 +3857,7 @@
       }
     }
     renderPaneWorkspace();
+    if (thread.kind === "git") stageGitSurface();
     refreshSidebar();
     refreshTabs();
     return true;
@@ -4019,7 +3886,9 @@
       project.lastActiveThreadId = thread.id;
     }
     state.activeThreadId = thread.id;
+    if (thread.kind === "git") revealGitPane(thread);
     renderPaneWorkspace();
+    if (thread.kind === "git") renderGitSurface();
     refreshSidebar();
     return true;
   }
@@ -4043,8 +3912,12 @@
     return reopened;
   }
 
+  function threadIsToolPane(thread) {
+    return !!thread && (thread.kind === "git" || thread.kind === "web");
+  }
+
   function duplicateThread(thread) {
-    if (!thread || thread.status === "exited") return null;
+    if (!thread || thread.status === "exited" || threadIsToolPane(thread)) return null;
     var project = findProject(thread.projectId);
     var launch = thread.launch;
     if (launch && launch.launchKind === "coven-chat") {
@@ -4058,6 +3931,42 @@
       worktreePath: thread.worktreePath,
       launch: launch,
     });
+  }
+
+  function sessionCloseLabel(thread) {
+    if (thread && thread.kind === "git") return "Close Git pane";
+    if (thread && thread.kind === "web") return "Close Web pane";
+    return "Stop and close" + (thread && thread.name ? " " + thread.name : "");
+  }
+
+  /** Context actions are capability-based: tool panes never receive PTY actions. */
+  function localSessionContextActions(thread, memberships, callbacks) {
+    var isTool = threadIsToolPane(thread);
+    var actions = [{ label: "Focus", run: callbacks.focus }];
+    if (!isTool && memberships.length) {
+      actions.push({
+        label: "Show only " + memberships[0].name,
+        run: callbacks.showSet,
+      });
+      actions.push({
+        label: "Remove from " + memberships[0].name,
+        run: callbacks.removeSet,
+      });
+    }
+    if (!isTool) {
+      actions.push({ label: "Rename…", run: callbacks.rename });
+      if (thread.status !== "exited") {
+        actions.push({ label: "Duplicate", run: callbacks.duplicate });
+        actions.push({ label: "Interrupt", run: callbacks.interrupt });
+      }
+    }
+    actions.push({ label: "Hide", run: callbacks.hide });
+    actions.push({
+      label: isTool ? sessionCloseLabel(thread) : "Stop and close",
+      danger: true,
+      run: callbacks.close,
+    });
+    return actions;
   }
 
   var sessionContextMenu = null;
@@ -6083,40 +5992,30 @@
               });
               row.addEventListener("contextmenu", function (event) {
                 var memberships = setsForThread(thread);
-                openSessionContextMenu(event, [
-                  { label: "Focus", run: function () { focusThread(thread.id); } },
-                  memberships.length
-                    ? { label: "Show only " + memberships[0].name, run: function () {
-                        activateFocusSet(memberships[0].id);
-                      } }
-                    : null,
-                  memberships.length
-                    ? { label: "Remove from " + memberships[0].name, run: function () {
-                        removeFromFocusSet(memberships[0].id, thread.id);
-                      } }
-                    : null,
-                  { label: "Rename…", run: function () {
+                openSessionContextMenu(event, localSessionContextActions(
+                  thread,
+                  memberships,
+                  {
+                    focus: function () { focusThread(thread.id); },
+                    showSet: function () { activateFocusSet(memberships[0].id); },
+                    removeSet: function () {
+                      removeFromFocusSet(memberships[0].id, thread.id);
+                    },
+                    rename: function () {
                       beginSessionRename({ stopPropagation: function () {} });
-                    } },
-                  thread.status !== "exited"
-                    ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
-                    : null,
-                  thread.status !== "exited"
-                    ? { label: "Interrupt", run: function () {
-                        sendToThread(thread, "\x03");
-                      } }
-                    : null,
-                  { label: "Hide", run: function () { hideThread(thread.id); } },
-                  { label: "Stop and close", danger: true, run: function () {
-                      armLocalClose();
-                    } },
-                ]);
+                    },
+                    duplicate: function () { duplicateThread(thread); },
+                    interrupt: function () { sendToThread(thread, "\x03"); },
+                    hide: function () { hideThread(thread.id); },
+                    close: armLocalClose,
+                  }
+                ));
               });
 
               var close = document.createElement("button");
               close.type = "button";
               close.className = "session-close";
-              close.title = "Stop and close " + thread.name;
+              close.title = sessionCloseLabel(thread);
               close.setAttribute("aria-label", close.title);
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
@@ -6694,10 +6593,9 @@
           ? project.lastActiveThreadId
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
-      restoreProjectLayout(project);
       clearPassiveCovenPaneFocus();
       renderPaneWorkspace();
-      applyLayout("terminal", { persist: false });
+      renderGitSurface();
       loadAgentSkills();
       syncProjectBrowser();
       saveWorkspaceSoon();
@@ -6740,6 +6638,7 @@
     }
     if (!canShowTerminal) return false;
     clearFileFocusPresentation();
+    clearPassiveCovenPaneFocus();
     renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
@@ -6981,8 +6880,10 @@
         renderFileChrome(file);
       }
       refreshTabs();
-      if (panelIsVisible("diffs")) renderDiffsPanel();
-      if (currentPanel() === "git") renderGitPanel();
+      var editedWorkspaceRoot = file.workspaceRoot || project.root;
+      if (activeProject() && activeProject().id === project.id &&
+          activeWorkspaceRoot(project) === editedWorkspaceRoot &&
+          gitPaneIsVisible(project)) renderGitSurface({ force: true });
       setTimeout(function () {
         if (!file.dirty && file.saveState === "saved") {
           file.saveState = "clean";
@@ -7197,19 +7098,15 @@
       cmd: "/preview",
       desc: "Load a URL in the browser pane: /preview localhost:5173",
       run: function (rest) {
-        if (!rest) { applyLayout("split"); return; }
-        applyLayout("split");
-        navigateBrowser(rest);
+        return rest ? navigateBrowser(rest) : openBlankBrowserTab();
       },
     },
     {
       cmd: "/browser-tab",
       desc: "Open a project-scoped browser tab: /browser-tab example.com",
-      run: function (rest) {
-        var tab = createBrowserTab(activeProject(), rest || "about:blank", true);
-        applyLayout("split");
-        if (tab && rest) navigateBrowser(rest, { tabId: tab.id, replace: true });
-        else syncProjectBrowser();
+      run: async function (rest) {
+        var tab = await openBlankBrowserTab({ requireNew: true });
+        if (tab && rest) return navigateBrowser(rest, { tabId: tab.id, replace: true });
       },
     },
     {
@@ -7255,19 +7152,19 @@
       },
     },
     {
-      cmd: "/split",
-      desc: "Toggle the Git tools dock",
-      run: function () { toggleDock(); },
-    },
-    {
       cmd: "/browser",
       desc: "Open or focus the Web pane",
       run: function () { openBlankBrowserTab(); },
     },
     {
+      cmd: "/git",
+      desc: "Open or focus the Git pane",
+      run: function () { return openOrFocusGitPane(); },
+    },
+    {
       cmd: "/terminal",
-      desc: "Switch to terminal-only layout",
-      run: function () { applyLayout("terminal"); },
+      desc: "Show the terminal canvas",
+      run: function () { return showTerminalView(); },
     },
     {
       cmd: "/run",
@@ -8243,106 +8140,6 @@
   });
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
-  // -------- Resizable splitter between canvas and Git dock --------
-  //
-  // Pointer events use horizontal clamping so neither side can collapse past
-  // its CSS minimum while the divider is dragged.
-  //
-  // Overflow note: while dragging, `.detail.resizing` disables the
-  // grid-template transition so the layout snaps instantly to each
-  // fraction, keeping the painted child WKWebView in sync with the DOM.
-
-  var splitter = document.getElementById("splitter");
-  if (splitter) {
-    var dragging = false;
-    var splitFrame = 0;
-
-    // The splitter only ever divides the canvas from the tools dock now, so
-    // the clamp is always horizontal.
-    function splitClampBounds() {
-      var rect = detail.getBoundingClientRect();
-      var styles = window.getComputedStyle(detail);
-      var size = rect.width;
-      var termMin = parseFloat(styles.getPropertyValue("--terminal-min")) || 220;
-      var brMin   = parseFloat(styles.getPropertyValue("--browser-min")) || 220;
-      var splitW  = parseFloat(styles.getPropertyValue("--splitter-w")) || 10;
-      var min = Math.max(0.2, termMin / size);
-      var max = Math.min(0.85, (size - brMin - splitW) / size);
-      if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
-        min = 0.2; max = 0.85;
-      }
-      return { rect: rect, min: min, max: max };
-    }
-
-    function scheduleSplitLayoutSync() {
-      if (splitFrame) return;
-      splitFrame = requestAnimationFrame(function () {
-        splitFrame = 0;
-        scheduleVisiblePaneFit();
-        syncBrowserBounds();
-      });
-    }
-
-    function setSplitFrac(frac) {
-      var bounds = splitClampBounds();
-      var next = Math.max(bounds.min, Math.min(bounds.max, frac));
-      setDetailSplitFrac(next.toFixed(4));
-      splitter.setAttribute("aria-valuenow", String(Math.round(next * 100)));
-      rememberProjectLayout();
-      scheduleSplitLayoutSync();
-      return next;
-    }
-
-    // `--split-frac` is always the *terminal* pane's share. Inverted on
-    // leading-edge sides (left/top) so the divider always tracks the pointer.
-    function splitFracFromEvent(e) {
-      var b = splitClampBounds();
-      return (e.clientX - b.rect.left) / b.rect.width;
-    }
-
-    splitter.addEventListener("pointerdown", function (e) {
-      if (currentLayout() !== "split") return;
-      dragging = true;
-      splitter.classList.add("dragging");
-      detail.classList.add("resizing");
-      document.body.classList.add("split-resizing");
-      document.body.dataset.axis = "x";
-      try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
-      e.preventDefault();
-    });
-    splitter.addEventListener("pointermove", function (e) {
-      if (!dragging) return;
-      setSplitFrac(splitFracFromEvent(e));
-      e.preventDefault();
-    });
-    function endSplitDrag(e) {
-      if (!dragging) return;
-      dragging = false;
-      splitter.classList.remove("dragging");
-      detail.classList.remove("resizing");
-      document.body.classList.remove("split-resizing");
-      delete document.body.dataset.axis;
-      if (e && typeof e.pointerId === "number") {
-        try { splitter.releasePointerCapture(e.pointerId); } catch (_) {}
-      }
-      scheduleSplitLayoutSync();
-    }
-    splitter.addEventListener("pointerup", endSplitDrag);
-    splitter.addEventListener("pointercancel", endSplitDrag);
-
-    // Keyboard on focused splitter: arrow keys shift --split-frac. Direction
-    // tracks the side so the splitter feels physical. Shift halves the step.
-    splitter.addEventListener("keydown", function (e) {
-      if (currentLayout() !== "split") return;
-      var current = currentSplitFrac();
-      var step = e.shiftKey ? 0.01 : 0.04;
-      var grow = "ArrowRight", shrink = "ArrowLeft";
-      if (e.key === shrink)    { setSplitFrac(current - step); e.preventDefault(); }
-      else if (e.key === grow) { setSplitFrac(current + step); e.preventDefault(); }
-    });
-    setSplitFrac(currentSplitFrac());
-  }
-
   // ============================================================
   // 11. Keyboard shortcuts
   // ============================================================
@@ -8366,8 +8163,32 @@
     return spawnShellThread(project);
   }
 
-  document.addEventListener("keydown", async function (e) {
+  function isTextEntryTarget(target) {
+    var tag = String(target && target.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" ||
+      Boolean(target && target.isContentEditable);
+  }
+
+  function gitPaneShortcutBlocked() {
+    return Boolean(
+      (dirtyFileDialogEl && dirtyFileDialogEl.open) ||
+      agentPickerOpen() ||
+      (helpOverlayEl && !helpOverlayEl.hidden)
+    );
+  }
+
+  function routeGitPaneShortcut(event) {
+    if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
+        String(event.key).toLowerCase() !== "g" ||
+        isTextEntryTarget(event.target) || gitPaneShortcutBlocked()) return false;
+    event.preventDefault();
+    openOrFocusGitPane().catch(function () {});
+    return true;
+  }
+
+  async function routeGlobalShortcut(e) {
     if (routeAgentPickerModalKeydown(e)) return;
+    if (routeGitPaneShortcut(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
@@ -8394,7 +8215,6 @@
       return;
     }
     if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
-    if (e.key === "\\") { toggleDock(); e.preventDefault(); return; }
     // ⌘B collapses the sessions sidebar.
     if (e.code === "KeyB" && !e.altKey && !e.shiftKey) { toggleSidebar(); e.preventDefault(); return; }
     // ⌃1–9 addresses the panes on the canvas; ⌘1–9 stays on file tabs.
@@ -8406,9 +8226,6 @@
         return;
       }
     }
-    // ⌘⌥B toggles the Git tools dock. Match by code so option-B (which
-    // produces ∫ on macOS) still resolves to KeyB.
-    if (e.code === "KeyB" && e.altKey) { toggleDock(); e.preventDefault(); return; }
     // The tab strip shows files, so ⌘[ / ⌘] and ⌘1-9 address file tabs. With
     // no files open they fall back to projects, which the sidebar also drives.
     if (e.key === "[") { e.preventDefault(); await switchTab(-1); return; }
@@ -8423,6 +8240,10 @@
       var p = state.projects[n - 1];
       if (p) { e.preventDefault(); await setActiveProject(p.id); }
     }
+  }
+
+  document.addEventListener("keydown", function (e) {
+    routeGlobalShortcut(e);
   }, true);
   // ---- Side rails ----
   // Each rail button is a click affordance for a shortcut that already exists;
@@ -8437,7 +8258,7 @@
   onRailClick("rail-palette", function () { commandInput.focus(); openPalette("/", true); });
 
   // ============================================================
-  // 11a. Shell chrome — sidebar, dock, new-pane menu, help
+  // 11a. Shell chrome — sidebar, new-pane menu, help
   // ============================================================
 
   function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
@@ -8461,10 +8282,7 @@
       setSidebarOpen(true);
     });
   }
-  onRailClick("dock-collapse", function () { applyLayout("terminal"); });
-
-  // Sidebar width is a CSS custom property so the grid, the rails and the
-  // splitter clamps all read one number.
+  // Sidebar width is a CSS custom property shared by the grid and the rail.
   if (sidebarResizeEl) {
     sidebarResizeEl.addEventListener("pointerdown", function (event) {
       event.preventDefault();
@@ -8487,10 +8305,25 @@
     });
   }
 
-  function closeNewPaneMenu() {
+  function newPaneMenuItems() {
+    if (!newPaneMenuEl) return [];
+    return Array.prototype.filter.call(
+      newPaneMenuEl.querySelectorAll('[role="menuitem"]'),
+      function (item) { return !item.disabled; }
+    );
+  }
+  function focusNewPaneMenuItem(index) {
+    var items = newPaneMenuItems();
+    if (!items.length) return false;
+    var next = ((index % items.length) + items.length) % items.length;
+    items[next].focus();
+    return true;
+  }
+  function closeNewPaneMenu(restoreTriggerFocus) {
     if (newPaneMenuEl) newPaneMenuEl.hidden = true;
     var trigger = document.getElementById("rail-new-tab");
     if (trigger) trigger.setAttribute("aria-expanded", "false");
+    if (restoreTriggerFocus && trigger && trigger.focus) trigger.focus();
   }
   function toggleNewPaneMenu() {
     if (!newPaneMenuEl) { createTerminalPane(); return; }
@@ -8504,15 +8337,77 @@
           : project ? "New pane in " + project.name : "New pane";
       }
     }
-    newPaneMenuEl.hidden = !open;
     var trigger = document.getElementById("rail-new-tab");
-    if (trigger) trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) { closeNewPaneMenu(); return; }
+    newPaneMenuEl.hidden = false;
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    focusNewPaneMenuItem(0);
+  }
+  function handleNewPaneMenuKeydown(event) {
+    if (!newPaneMenuEl || newPaneMenuEl.hidden) return false;
+    var items = newPaneMenuItems();
+    if (!items.length) return false;
+    var index = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusNewPaneMenuItem(index < 0 ? 0 : index + 1);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusNewPaneMenuItem(index < 0 ? items.length - 1 : index - 1);
+      return true;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      focusNewPaneMenuItem(0);
+      return true;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      focusNewPaneMenuItem(items.length - 1);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      items[index < 0 ? 0 : index].click();
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (event.stopPropagation) event.stopPropagation();
+      closeNewPaneMenu(true);
+      return true;
+    }
+    if (event.key === "Tab") {
+      closeNewPaneMenu();
+      return false;
+    }
+    return false;
   }
   function onMenuClick(id, handler) {
     var el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
   }
+
+  function focusGitPaneEntry() {
+    var surface = document.getElementById("git-surface");
+    if (!surface || !surface.isConnected) return false;
+    var entry = surface.querySelector("[data-git-tab].is-active") ||
+      surface.querySelector("[data-git-tab]") ||
+      surface.querySelector("#git-refresh");
+    if (!entry || typeof entry.focus !== "function") return false;
+    entry.focus();
+    return true;
+  }
+
+  async function openGitPaneFromNewPaneMenu() {
+    var thread = await openOrFocusGitPane();
+    if (thread) focusGitPaneEntry();
+    return thread;
+  }
+
   onMenuClick("new-pane-term", async function () {
     var thread = await createTerminalPane();
     if (thread) toast("Terminal pane opened");
@@ -8524,8 +8419,10 @@
     await openBlankBrowserTab();
     toast("Web pane opened");
   });
+  onMenuClick("new-pane-git", openGitPaneFromNewPaneMenu);
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
+  if (newPaneMenuEl) newPaneMenuEl.addEventListener("keydown", handleNewPaneMenuKeydown);
 
   function consumeAgentPickerKey(event) {
     event.preventDefault();
@@ -8623,12 +8520,12 @@
   var HELP_ROWS = [
     ["Open the composer", "⌘K"],
     ["Toggle the sessions sidebar", "⌘B"],
-    ["Toggle the tools dock", "⌘⌥B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
     ["New terminal pane", "⌘T"],
     ["Choose an agent", "⌘P"],
     ["New browser tab", "Web pane +"],
+    ["Open or focus Git", "⌘G"],
     ["Close the focused file / project", "⌘W"],
     ["Rename a session", "double-click"],
     ["Cycle file tabs", "⌘[ · ⌘]"],
@@ -8671,7 +8568,7 @@
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
-      closeNewPaneMenu();
+      closeNewPaneMenu(menuWasOpen);
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
@@ -8705,18 +8602,13 @@
   var diffMetadataEl = document.getElementById("diff-metadata");
   var diffTruncationEl = document.getElementById("diff-truncation");
   var diffsSummaryEl = document.getElementById("diffs-summary");
-  /** Working-tree file count, mirrored onto the dock's Git tab. */
+  /** Working-tree file count shown on the Git pane's Changes tab. */
   var gitChangesCountEl = document.getElementById("git-changes-count");
-  function setDockGitCount(count) {
-    // The count rides both the dock tab and the Changes tab, so the number of
-    // pending changes is legible whether or not the panel is open.
+  function setGitChangesCount(count) {
     if (gitChangesCountEl) {
       gitChangesCountEl.textContent = String(count || 0);
       gitChangesCountEl.hidden = !count;
     }
-    if (!dockGitCountEl) return;
-    dockGitCountEl.textContent = String(count || 0);
-    dockGitCountEl.hidden = !count;
   }
   var gitViewEl = document.getElementById("git-view");
   var gitBranchEl = document.getElementById("git-branch");
@@ -8729,6 +8621,8 @@
   var diffCache = window.PsycheCodeEditor.createLruCache(6);
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var gitPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var gitRefreshRequestGate = window.PsycheCodeEditor.createRequestGate();
 
   function diffCacheKey(projectId, workspaceRoot, path, staged, context) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
@@ -8745,8 +8639,55 @@
     diffRequestGate.next();
   }
 
-  function panelIsVisible(panel) {
-    return currentLayout() === "split" && currentPanel() === resolvePanelName(panel);
+  function suspendGitRequests() {
+    gitRefreshRequestGate.next();
+    gitPanelRequestGate.next();
+    suspendDiffRequests();
+    gitRefreshFlight = null;
+    setGitChangesCount(0);
+  }
+
+  function gitSurfaceRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return gitRefreshRequestGate.isCurrent(generation) &&
+      !!project && project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
+  }
+
+  function gitPanelRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return gitPanelRequestGate.isCurrent(generation) &&
+      !!project &&
+      project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
+  }
+
+  function diffPanelRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return diffPanelRequestGate.isCurrent(generation) &&
+      !!project &&
+      project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
+  }
+
+  function prepareGitSurfaceRefresh() {
+    if (gitViewEl) panelMessage(gitViewEl, "Loading repository…");
+    if (gitBranchEl) gitBranchEl.textContent = "";
+    gitRemoteWebUrl = null;
+    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = true;
+    resetDiffDetail("Loading changes…");
+    if (diffFilesEl) panelMessage(diffFilesEl, "Loading changes…");
+    if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
+  }
+
+  function renderGitSurfaceError(error) {
+    if (gitViewEl) panelMessage(gitViewEl, String(error), "panel-error");
+    if (diffFilesEl) panelMessage(diffFilesEl, String(error), "panel-error");
+    clearDiffSelection("");
+    if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
   }
 
   // The tree highlights whichever file currently owns the main area.
@@ -9036,45 +8977,20 @@
     }
   }
 
-  function currentDiffRequestMatches(projectId, key, generation) {
+  function currentDiffRequestMatches(projectId, workspaceRoot, key, generation) {
     var project = activeProject();
     return diffRequestGate.isCurrent(generation) &&
       selectedDiffKey === key &&
       !!project && project.id === projectId &&
-      panelIsVisible("diffs");
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
   }
 
-  async function renderDiffsPanel() {
+  function renderDiffsPanel(project, workspaceRoot, status, panelGeneration, refreshGeneration) {
     if (!diffFilesEl) return;
-    if (!panelIsVisible("diffs")) return;
-    var panelGeneration = diffPanelRequestGate.next();
-    diffRequestGate.next();
-    var project = activeProject();
-    if (!project) {
-      panelMessage(diffFilesEl, "No project open — ⌘O to add one.");
-      clearDiffSelection("");
-      if (diffsSummaryEl) diffsSummaryEl.textContent = "";
-      return;
-    }
-    resetDiffDetail("Loading changes…");
-    panelMessage(diffFilesEl, "Loading changes…");
-    if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
     var projectId = project.id;
-    var status;
-    try {
-      status = await invoke("git_status", { root: activeWorkspaceRoot(project) });
-    } catch (err) {
-      if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
-          !activeProject() || activeProject().id !== projectId ||
-          !panelIsVisible("diffs")) return;
-      panelMessage(diffFilesEl, String(err), "panel-error");
-      clearDiffSelection("");
-      if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
-      return;
-    }
-    if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
-        !activeProject() || activeProject().id !== projectId ||
-        !panelIsVisible("diffs")) return;
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) {
       panelMessage(diffFilesEl, "Not a git repository.");
       clearDiffSelection("");
@@ -9086,7 +9002,6 @@
         ? status.files.length + " changed"
         : "clean";
     }
-    setDockGitCount(status.files.length);
     if (status.files.length === 0) {
       panelMessage(diffFilesEl, "No uncommitted changes.");
       clearDiffSelection("");
@@ -9098,21 +9013,23 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext);
+      var key = diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext);
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
         '<span class="diff-code">' + escapeHtml(f.code) + "</span>" +
         '<span class="diff-path">' + escapeHtml(shortenRelPath(f.path)) + "</span>";
-      row.addEventListener("click", function () { showDiff(project, f); });
+      row.addEventListener("click", function () {
+        showDiff(project, f, { workspaceRoot: workspaceRoot });
+      });
       diffFilesEl.appendChild(row);
     });
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
+      return diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
     }) || status.files[0];
-    showDiff(project, target);
+    showDiff(project, target, { workspaceRoot: workspaceRoot });
   }
 
   var shownDiffTarget = null;
@@ -9120,18 +9037,31 @@
   /** Re-fetch whatever is on screen, at the current context width. */
   function refreshSelectedDiff() {
     if (!shownDiffTarget) return;
-    showDiff(shownDiffTarget.project, shownDiffTarget.entry, { keepContext: true });
+    showDiff(shownDiffTarget.project, shownDiffTarget.entry, {
+      keepContext: true,
+      workspaceRoot: shownDiffTarget.workspaceRoot,
+    });
   }
 
   async function showDiff(project, entry, options) {
     if (!project || !entry || !diffRowsEl) return;
+    var workspaceRoot = options && options.workspaceRoot
+      ? options.workspaceRoot
+      : activeWorkspaceRoot(project);
+    var currentProject = activeProject();
+    if (!currentProject || currentProject.id !== project.id ||
+        activeWorkspaceRoot(currentProject) !== workspaceRoot ||
+        !gitPaneIsVisible(project)) return;
     // A new file starts narrow again: an expansion belongs to the view you
     // expanded, not to the panel.
     if (!(options && options.keepContext)) diffContext = null;
-    shownDiffTarget = { project: project, entry: entry };
-    if (!activeProject() || activeProject().id !== project.id || !panelIsVisible("diffs")) return;
+    shownDiffTarget = {
+      project: project,
+      entry: entry,
+      workspaceRoot: workspaceRoot,
+    };
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged, diffContext);
+    var key = diffCacheKey(project.id, workspaceRoot, entry.path, staged, diffContext);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
@@ -9140,23 +9070,23 @@
     });
     var cached = diffCache.get(key);
     if (cached !== undefined) {
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       renderDiffResult(cached);
       return;
     }
     resetDiffDetail("Loading diff…");
     try {
       var result = await invoke("git_diff", {
-        root: activeWorkspaceRoot(project),
+        root: workspaceRoot,
         path: entry.path,
         staged: staged,
         context: diffContext,
       });
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       diffCache.set(key, result);
       renderDiffResult(result);
     } catch (err) {
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       resetDiffDetail("Unable to load diff: " + String(err));
     }
   }
@@ -9164,38 +9094,35 @@
   function refreshDiffs() {
     var project = activeProject();
     if (project) invalidateProjectDiffs(project.id);
-    renderDiffsPanel();
+    renderGitSurface({ force: true });
   }
 
   onRailClick("diffs-refresh", refreshDiffs);
 
   // ---- Git / GitHub ----
 
-  async function renderGitPanel() {
+  async function renderGitPanel(project, workspaceRoot, status, panelGeneration, refreshGeneration) {
     if (!gitViewEl) return;
-    var project = activeProject();
-    if (!project) { panelMessage(gitViewEl, "No project open — ⌘O to add one."); return; }
-    gitViewEl.innerHTML = "";
-    if (gitBranchEl) gitBranchEl.textContent = "";
-    gitRemoteWebUrl = null;
-    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = true;
-
-    var status, commits;
+    var projectId = project.id;
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+    var commits;
     try {
-      var workspaceRoot = activeWorkspaceRoot(project);
-      status = await invoke("git_status", { root: workspaceRoot });
       commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+          !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
     }
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) { panelMessage(gitViewEl, "Not a git repository."); return; }
 
+    gitViewEl.innerHTML = "";
     gitRemoteWebUrl = status.web_url || null;
     if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = !gitRemoteWebUrl;
     if (gitBranchEl) gitBranchEl.textContent = status.branch || "(detached)";
-    setDockGitCount((status.files || []).length);
-
     var head = document.createElement("div");
     head.className = "git-branch-line";
     var track = "";
@@ -9254,7 +9181,7 @@
     });
   }
 
-  onRailClick("git-refresh", function () { renderGitPanel(); });
+  onRailClick("git-refresh", function () { renderGitSurface({ force: true }); });
   onRailClick("git-open-remote", function () {
     if (gitRemoteWebUrl && openUrl) openUrl(gitRemoteWebUrl).catch(function () {});
   });
@@ -9384,7 +9311,6 @@
     if (preferIncoming) {
       target.collapsed = incoming.collapsed;
       target.selectedWorktreePath = incoming.selectedWorktreePath;
-      target.layout = incoming.layout;
       target.name = incoming.name;
     }
     return target;
@@ -9440,14 +9366,11 @@
     var parts = rootPath.split("/");
     var name = parts[parts.length - 1] || rootPath;
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
-    ensureProjectLayout(project);
     state.projects.push(project);
     state.activeProjectId = project.id;
     state.activeThreadId = null;
-    restoreProjectLayout(project);
     renderPaneWorkspace();
     refreshSidebar();
-    refreshTabs();
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -9766,7 +9689,6 @@
       state.projects = restored.projects;
       state.activeProjectId = restored.activeProjectId;
       project = activeProject();
-      if (project) restoreProjectLayout(project);
       isRestoringWorkspace = false;
       await Promise.all(state.projects.map(function (savedProject) {
         return refreshProjectWorktrees(savedProject);
@@ -9776,7 +9698,6 @@
     if (project) {
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
-      restoreProjectLayout(project);
     }
     refreshSidebar(); refreshTabs(); renderBrowserTabs(); syncProjectBrowser(); loadAgentSkills(); saveWorkspaceNow();
     startCovenPolling();

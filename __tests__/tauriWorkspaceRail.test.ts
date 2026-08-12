@@ -126,7 +126,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(selection).toBeGreaterThan(-1);
     for (const sync of [
       'renderPaneWorkspace();',
-      'renderPanel(currentPanel());',
+      'renderGitSurface();',
       'refreshSidebar();',
       'syncProjectBrowser();',
       'saveWorkspaceSoon();',
@@ -201,9 +201,8 @@ describe('Tauri project/worktree/pane rail', () => {
       'armSessionClose(row, close, thread.name, function () {',
     );
     expect(renderSessionList).toContain('return requestThreadClose(thread);');
-    expect(renderSessionList).toContain(
-      '{ label: "Hide", run: function () { hideThread(thread.id); } },',
-    );
+    expect(renderSessionList).toContain('localSessionContextActions(');
+    expect(renderSessionList).toContain('hide: function () { hideThread(thread.id); }');
   });
 
   it('wires visit-local search, persisted filters, summaries, and shortcut guidance', () => {

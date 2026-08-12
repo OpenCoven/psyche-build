@@ -42,6 +42,31 @@ const tauriPackage = JSON.parse(
   devDependencies: Record<string, string>;
 };
 
+function functionSource(name: string) {
+  const asyncStart = mainJs.indexOf(`async function ${name}(`);
+  const syncStart = mainJs.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
+  if (start === -1) throw new Error(`missing ${name}`);
+  const bodyStart = mainJs.indexOf('{', start);
+  let depth = 0;
+  for (let i = bodyStart; i < mainJs.length; i += 1) {
+    if (mainJs[i] === '{') depth += 1;
+    if (mainJs[i] === '}') depth -= 1;
+    if (depth === 0) return mainJs.slice(start, i + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('Tauri workspace panels', () => {
   it('registers a scoped pane-session metrics command', () => {
     expect(tauriLib).toContain('mod pane_metrics;');
@@ -90,12 +115,21 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('keeps a Git-only dock with Changes and Commit', () => {
+  it('keeps Git pane-only with Changes and Commit', () => {
     expect(indexHtml).not.toContain('class="dock-tab"');
     expect(stylesCss).not.toMatch(/\.dock-tab\s*\{/);
     expect(stylesCss).not.toContain('--dock-tabs-h');
     expect(indexHtml).not.toContain('data-browser-column-toggle');
-    expect(indexHtml).toContain('class="panel panel-git"');
+    expect(indexHtml).not.toContain('class="git-dock dock"');
+    expect(indexHtml).not.toContain('id="splitter"');
+    expect(indexHtml).not.toContain('id="rail-right"');
+    expect(indexHtml).not.toContain('id="dock-collapse"');
+    expect(indexHtml).not.toContain('id="git-pop-out"');
+    expect(indexHtml).not.toContain('id="git-dock-back"');
+    expect(indexHtml).not.toContain('data-dock=');
+    expect(indexHtml).not.toContain('data-panel=');
+    expect(indexHtml).toMatch(/id="git-surface-staging"[\s\S]*id="git-surface"/);
+    expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
     expect(indexHtml).toContain('data-git-tab="changes"');
     expect(indexHtml).toContain('data-git-tab="commit"');
     // Diffs is no longer a tab of its own...
@@ -114,7 +148,7 @@ describe('Tauri workspace panels', () => {
     expect(fileView.slice(0, fileView.indexOf('</div>') + 6)).toContain('id="tab-strip"');
     // ...but its markup still exists, inside the git panel, with the element
     // ids the diff renderer writes into.
-    const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
+    const gitPanel = indexHtml.slice(indexHtml.indexOf('id="git-surface"'));
     for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-rows']) {
       expect(gitPanel).toContain(`id="${id}"`);
     }
@@ -226,7 +260,7 @@ describe('Tauri workspace panels', () => {
 
     it('mirrors the changed-file count onto the Changes tab', () => {
       expect(indexHtml).toContain('id="git-changes-count"');
-      expect(mainJs).toMatch(/function setDockGitCount\(count\)[\s\S]*gitChangesCountEl\.textContent/);
+      expect(mainJs).toMatch(/function setGitChangesCount\(count\)[\s\S]*gitChangesCountEl\.textContent/);
     });
   });
 
@@ -273,26 +307,25 @@ describe('Tauri workspace panels', () => {
     });
   });
 
-  describe('dock to canvas', () => {
+  describe('staged Git canvas surface', () => {
     it('moves one live surface rather than rendering it twice', () => {
       // Two renderings of the git panel could diverge; one element with two
       // possible homes cannot.
       expect(indexHtml).toContain('id="git-surface"');
-      expect(mainJs).toMatch(/function dockGitSurface\(\)[\s\S]*gitPanelEl\.appendChild\(gitSurfaceEl\)/);
+      expect(mainJs).toMatch(/function stageGitSurface\(\)[\s\S]*gitSurfaceStagingEl\.appendChild\(gitSurfaceEl\)/);
       expect(mainJs).toMatch(/thread\.kind === "git" && thread\.toolBody && gitSurfaceEl/);
       // Only one git surface exists in the markup.
       expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
     });
 
-    it('offers pop-out and drag from the same control', () => {
-      expect(indexHtml).toMatch(/id="git-pop-out"[\s\S]*draggable="true"/);
-      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("click"[\s\S]*popOutGitPane\(\)/);
-      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("dragstart"[\s\S]*text\/x-psyche-tool/);
-    });
-
-    it('lands a dropped tool where it was dropped', () => {
-      expect(mainJs).toMatch(/terminalHost\.addEventListener\("drop"[\s\S]*popOutGitPane\(target\)/);
-      expect(mainJs).toMatch(/movePaneTo\(id, dropTarget\.threadId, dropTarget\.position\)/);
+    it('keeps Git actions inside the shared surface', () => {
+      expect(indexHtml).toContain('class="git-pane-toolbar"');
+      expect(indexHtml).toMatch(
+        /id="git-surface"[\s\S]*id="git-branch"[\s\S]*id="git-open-remote"[\s\S]*id="git-refresh"/,
+      );
+      expect(stylesCss).toMatch(
+        /\.panel-git-body\s*\{[^}]*grid-template-rows:\s*auto\s+auto\s+minmax\(0,\s*1fr\);/,
+      );
     });
 
     it('shares one drop indicator with the pane drag', () => {
@@ -305,7 +338,11 @@ describe('Tauri workspace panels', () => {
     it('hands the surface back before the pane is torn down', () => {
       // Removing the pane first would take the surface out of the document
       // with it.
-      expect(mainJs).toMatch(/function closeToolPane\(thread\)[\s\S]*dockGitSurface\(\)[\s\S]*detachThreadPane\(thread\)/);
+      const close = functionSource('closeThread');
+      expect(close.indexOf('stageGitSurface();')).toBeGreaterThan(-1);
+      expect(close.indexOf('stageGitSurface();')).toBeLessThan(
+        close.indexOf('detachThreadPane(thread)'),
+      );
     });
 
     it('files a tool pane as a tool, not an agent', () => {
@@ -321,6 +358,855 @@ describe('Tauri workspace panels', () => {
         /row\.type === 'agents' && !isToolRow\(row\)/,
       );
     });
+  });
+
+  describe('Git pane ownership', () => {
+    it('offers tool-owned sidebar actions without PTY mutations or stop wording', () => {
+      const actionsFor = Function(
+        `"use strict";
+         var sessionCloseLabel = ${functionSource('sessionCloseLabel')};
+         var threadIsToolPane = ${functionSource('threadIsToolPane')};
+         return (${functionSource('localSessionContextActions')});`,
+      )() as (
+        thread: Record<string, unknown>,
+        memberships: unknown[],
+        callbacks: Record<string, () => void>,
+      ) => Array<{ label: string }>;
+      const callbacks = {
+        focus: () => undefined,
+        showSet: () => undefined,
+        removeSet: () => undefined,
+        rename: () => undefined,
+        duplicate: () => undefined,
+        interrupt: () => undefined,
+        hide: () => undefined,
+        close: () => undefined,
+      };
+
+      expect(actionsFor(
+        { kind: 'git', name: 'Git', status: 'running' },
+        [{ name: 'Focus set' }],
+        callbacks,
+      ).map((action) => action.label)).toEqual([
+        'Focus', 'Hide', 'Close Git pane',
+      ]);
+      expect(actionsFor(
+        { kind: 'web', name: 'Web', status: 'running' },
+        [],
+        callbacks,
+      ).map((action) => action.label)).toEqual([
+        'Focus', 'Hide', 'Close Web pane',
+      ]);
+    });
+
+    it('coalesces one scoped status snapshot across Changes and Commit', async () => {
+      const status = deferred<{ is_repo: boolean; files: unknown[] }>();
+      const statusCalls: string[] = [];
+      const paints: Array<{ panel: string; status: unknown; generation: number }> = [];
+      let refreshGeneration = 0;
+      let gitGeneration = 0;
+      let diffGeneration = 0;
+      let detailGeneration = 0;
+      const gates = {
+        refresh: {
+          next: () => ++refreshGeneration,
+          isCurrent: (candidate: number) => candidate === refreshGeneration,
+        },
+        git: { next: () => ++gitGeneration },
+        diff: { next: () => ++diffGeneration },
+        detail: { next: () => ++detailGeneration },
+      };
+      const project = { id: 'project-a', root: '/worktree-a' };
+      const factory = Function(
+        'activeProject', 'activeWorkspaceRoot', 'gitPaneIsVisible', 'invoke',
+        'gitRefreshRequestGate', 'gitPanelRequestGate', 'diffPanelRequestGate',
+        'diffRequestGate', 'setGitChangesCount', 'prepareGitSurfaceRefresh',
+        'gitSurfaceRequestMatches', 'renderGitPanel', 'renderDiffsPanel', 'renderGitSurfaceError',
+        `"use strict";
+         var gitRefreshFlight = null;
+         return (${functionSource('renderGitSurface')});`,
+      );
+      const renderGitSurface = factory(
+        () => project,
+        (value: typeof project) => value.root,
+        () => true,
+        (command: string, args: { root: string }) => {
+          statusCalls.push(`${command}:${args.root}`);
+          return status.promise;
+        },
+        gates.refresh,
+        gates.git,
+        gates.diff,
+        gates.detail,
+        () => undefined,
+        () => undefined,
+        () => true,
+        (_project: unknown, _root: string, snapshot: unknown, generation: number) => {
+          paints.push({ panel: 'commit', status: snapshot, generation });
+        },
+        (_project: unknown, _root: string, snapshot: unknown, generation: number) => {
+          paints.push({ panel: 'changes', status: snapshot, generation });
+        },
+        () => undefined,
+      ) as () => Promise<void>;
+
+      const first = renderGitSurface();
+      const second = renderGitSurface();
+      expect(second).toBe(first);
+      expect(statusCalls).toEqual(['git_status:/worktree-a']);
+
+      const snapshot = { is_repo: true, files: [{ path: 'a.ts' }] };
+      status.resolve(snapshot);
+      await first;
+      expect(paints).toEqual([
+        { panel: 'changes', status: snapshot, generation: 1 },
+        { panel: 'commit', status: snapshot, generation: 1 },
+      ]);
+      expect({ refreshGeneration, gitGeneration, diffGeneration, detailGeneration })
+        .toEqual({ refreshGeneration: 1, gitGeneration: 1, diffGeneration: 1, detailGeneration: 1 });
+    });
+
+    it('invalidates a hidden Git request and reopens with exactly one fresh refresh', async () => {
+      const pending = deferred<{ is_repo: boolean; files: unknown[] }>();
+      const project = { id: 'project-a', root: '/worktree-a' };
+      let visible = true;
+      let statusCalls = 0;
+      const paints: string[] = [];
+      const badgeCounts: number[] = [];
+      function gate() {
+        let generation = 0;
+        return {
+          next: () => ++generation,
+          isCurrent: (candidate: number) => candidate === generation,
+        };
+      }
+      const refreshGate = gate();
+      const gitGate = gate();
+      const diffGate = gate();
+      const detailGate = gate();
+      const api = Function(
+        'activeProject', 'activeWorkspaceRoot', 'gitPaneIsVisible', 'invoke',
+        'gitRefreshRequestGate', 'gitPanelRequestGate', 'diffPanelRequestGate',
+        'diffRequestGate', 'setGitChangesCount', 'prepareGitSurfaceRefresh',
+        'gitSurfaceRequestMatches', 'renderGitPanel', 'renderDiffsPanel', 'renderGitSurfaceError',
+        `"use strict";
+         var gitRefreshFlight = null;
+         var suspendDiffRequests = function () {
+           diffPanelRequestGate.next();
+           diffRequestGate.next();
+         };
+         var suspendGitRequests = ${functionSource('suspendGitRequests')};
+         var renderGitSurface = ${functionSource('renderGitSurface')};
+         return { renderGitSurface, suspendGitRequests };`,
+      )(
+        () => project,
+        (value: typeof project) => value.root,
+        () => visible,
+        () => {
+          statusCalls += 1;
+          if (statusCalls === 1) return pending.promise;
+          if (statusCalls === 2) {
+            return Promise.resolve({
+              is_repo: true,
+              files: [{ path: 'fresh-a.ts' }, { path: 'fresh-b.ts' }],
+            });
+          }
+          return Promise.reject(new Error('status unavailable'));
+        },
+        refreshGate,
+        gitGate,
+        diffGate,
+        detailGate,
+        (count: number) => { badgeCounts.push(count); },
+        () => undefined,
+        (_projectId: string, _root: string, generation: number) =>
+          refreshGate.isCurrent(generation) && visible,
+        () => { paints.push('commit'); },
+        () => { paints.push('changes'); },
+        () => undefined,
+      ) as {
+        renderGitSurface: () => Promise<void>;
+        suspendGitRequests: () => void;
+      };
+
+      const stale = api.renderGitSurface();
+      visible = false;
+      api.suspendGitRequests();
+      pending.resolve({ is_repo: true, files: [{ path: 'stale.ts' }] });
+      await stale;
+      expect(paints).toEqual([]);
+
+      visible = true;
+      const reopened = api.renderGitSurface();
+      expect(api.renderGitSurface()).toBe(reopened);
+      await reopened;
+      expect(statusCalls).toBe(2);
+      expect(paints).toEqual(['changes', 'commit']);
+      expect(badgeCounts.at(-1)).toBe(2);
+
+      project.id = 'project-b';
+      project.root = '/worktree-b';
+      const failed = api.renderGitSurface();
+      expect(badgeCounts.at(-1)).toBe(0);
+      await failed;
+      expect(statusCalls).toBe(3);
+      expect(badgeCounts.at(-1)).toBe(0);
+      expect(functionSource('hideThread')).toContain('suspendGitRequests()');
+      expect(functionSource('reopenThread')).toContain('renderGitSurface()');
+    });
+
+    it('supersedes pending history when Changes requests an authoritative refresh', async () => {
+      const oldLog = deferred<void>();
+      const project = { id: 'project-a', root: '/worktree-a' };
+      let refreshGeneration = 0;
+      let gitGeneration = 0;
+      let diffGeneration = 0;
+      let detailGeneration = 0;
+      let statusCalls = 0;
+      const paints: string[] = [];
+      const refreshGate = {
+        next: () => ++refreshGeneration,
+        isCurrent: (candidate: number) => candidate === refreshGeneration,
+      };
+      const renderGitSurface = Function(
+        'activeProject', 'activeWorkspaceRoot', 'gitPaneIsVisible', 'invoke',
+        'gitRefreshRequestGate', 'gitPanelRequestGate', 'diffPanelRequestGate',
+        'diffRequestGate', 'setGitChangesCount', 'prepareGitSurfaceRefresh',
+        'gitSurfaceRequestMatches', 'renderGitPanel', 'renderDiffsPanel', 'renderGitSurfaceError',
+        `"use strict";
+         var gitRefreshFlight = null;
+         return (${functionSource('renderGitSurface')});`,
+      )(
+        () => project,
+        (value: typeof project) => value.root,
+        () => true,
+        () => {
+          statusCalls += 1;
+          return Promise.resolve({
+            marker: statusCalls === 1 ? 'A' : 'B',
+            is_repo: true,
+            files: statusCalls === 1 ? [{ path: 'old.ts' }] : [{ path: 'new.ts' }],
+          });
+        },
+        refreshGate,
+        { next: () => ++gitGeneration },
+        { next: () => ++diffGeneration },
+        { next: () => ++detailGeneration },
+        () => undefined,
+        () => undefined,
+        (_projectId: string, _root: string, generation: number) =>
+          refreshGate.isCurrent(generation),
+        async (
+          _project: unknown,
+          _root: string,
+          status: { marker: string },
+          _gitGeneration: number,
+          generation: number,
+        ) => {
+          if (status.marker === 'A') await oldLog.promise;
+          if (refreshGate.isCurrent(generation)) paints.push(`commit:${status.marker}`);
+        },
+        (
+          _project: unknown,
+          _root: string,
+          status: { marker: string },
+        ) => { paints.push(`changes:${status.marker}`); },
+        () => undefined,
+      ) as (options?: { force?: boolean }) => Promise<void>;
+      const refreshDiffs = Function(
+        'activeProject', 'invalidateProjectDiffs', 'renderGitSurface',
+        `"use strict"; return (${functionSource('refreshDiffs')});`,
+      )(
+        () => project,
+        () => undefined,
+        renderGitSurface,
+      ) as () => void;
+
+      const stale = renderGitSurface();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(paints).toEqual(['changes:A']);
+
+      refreshDiffs();
+      expect(statusCalls).toBe(2);
+      const current = renderGitSurface();
+      await current;
+      expect(paints).toEqual(['changes:A', 'changes:B', 'commit:B']);
+
+      oldLog.resolve();
+      await stale;
+      expect(paints).toEqual(['changes:A', 'changes:B', 'commit:B']);
+    });
+
+    it('keeps a successful status badge when history loading fails', async () => {
+      let badge = 3;
+      const messages: string[] = [];
+      const renderGitPanel = Function(
+        'gitViewEl', 'gitSurfaceRequestMatches', 'gitPanelRequestMatches',
+        'invoke', 'setGitChangesCount', 'panelMessage',
+        `"use strict"; return (${functionSource('renderGitPanel')});`,
+      )(
+        {},
+        () => true,
+        () => true,
+        async () => { throw new Error('history unavailable'); },
+        (count: number) => { badge = count; },
+        (_element: unknown, message: string) => { messages.push(message); },
+      ) as (
+        project: { id: string },
+        root: string,
+        status: { is_repo: boolean; files: unknown[] },
+        panelGeneration: number,
+        refreshGeneration: number,
+      ) => Promise<void>;
+
+      await renderGitPanel(
+        { id: 'project-a' },
+        '/worktree-a',
+        { is_repo: true, files: [{}, {}, {}] },
+        1,
+        1,
+      );
+      expect(messages).toEqual(['Error: history unavailable']);
+      expect(badge).toBe(3);
+    });
+
+    it('scopes lookup to project and worktree', () => {
+      const source = functionSource('gitPaneThread');
+      expect(source).toContain('thread.projectId === projectId');
+      expect(source).toContain('thread.worktreePath === workspaceRoot');
+      expect(source).toContain('!thread.closing');
+    });
+
+    it('focuses an existing owner before allocating a pane', () => {
+      const source = functionSource('openOrFocusGitPane');
+      expect(source).toContain('var project = activeProject();');
+      expect(source).toContain('var workspaceRoot = activeWorkspaceRoot(project);');
+      expect(source).toMatch(/gitPaneThread\(project\.id, workspaceRoot\)/);
+      expect(source).toMatch(
+        /if \(existing\) \{[\s\S]*revealGitPane\(existing\);[\s\S]*await focusThread\(existing\.id\);[\s\S]*return existing;/,
+      );
+      expect(source).toContain('preparePanePlacement(id, project.id, workspaceRoot)');
+    });
+
+    it('uses pane membership as the only Git visibility contract', () => {
+      const visible = functionSource('gitPaneIsVisible');
+      expect(visible).toContain('gitPaneThread(project.id, workspaceRoot)');
+      expect(visible).toContain('canvasThreadIds().indexOf(thread.id) !== -1');
+      expect(functionSource('currentDiffRequestMatches')).toContain('gitPaneIsVisible(project)');
+    });
+
+    it('keeps the shared surface mounted in a Git pane owned by the newly active scope', () => {
+      expect(functionSource('renderPaneNode')).toMatch(
+        /thread\.kind === "git" && thread\.toolBody && gitSurfaceEl[\s\S]*thread\.toolBody\.appendChild\(gitSurfaceEl\)/,
+      );
+    });
+
+    it('owns status and invalidation at the Git refresh coordinator', () => {
+      const surface = functionSource('renderGitSurface');
+      expect(surface).toContain('invoke("git_status", { root: workspaceRoot })');
+      expect(surface.match(/invoke\("git_status"/g)).toHaveLength(1);
+      expect(surface).toContain('gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration)');
+      expect(functionSource('renderGitPanel')).not.toContain('invoke("git_status"');
+      expect(functionSource('renderGitPanel')).not.toMatch(
+        /setGitChangesCount\(\(status\.files \|\| \[\]\)\.length\)/,
+      );
+      expect(functionSource('renderDiffsPanel')).not.toContain('invoke("git_status"');
+      expect(functionSource('suspendGitRequests')).toContain('gitRefreshRequestGate.next()');
+      expect(functionSource('suspendGitRequests')).toContain('gitPanelRequestGate.next()');
+      expect(functionSource('suspendGitRequests')).toContain('suspendDiffRequests()');
+    });
+
+    it('keys diff list and detail continuations to the captured worktree root', () => {
+      const panel = functionSource('renderDiffsPanel');
+      expect(panel).toContain('function renderDiffsPanel(project, workspaceRoot, status');
+      expect(panel).toContain(
+        'diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)',
+      );
+      expect(panel).toContain(
+        'diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext)',
+      );
+      expect(panel).toContain(
+        'showDiff(project, target, { workspaceRoot: workspaceRoot })',
+      );
+
+      const detail = functionSource('showDiff');
+      expect(detail).toContain('var workspaceRoot = options && options.workspaceRoot');
+      expect(detail.indexOf('var currentProject = activeProject();')).toBeLessThan(
+        detail.indexOf('if (!(options && options.keepContext)) diffContext = null;'),
+      );
+      expect(detail).toContain('root: workspaceRoot');
+      expect(detail).toContain(
+        'currentDiffRequestMatches(project.id, workspaceRoot, key, generation)',
+      );
+
+      const matcher = functionSource('currentDiffRequestMatches');
+      expect(matcher).toContain('activeWorkspaceRoot(project) === workspaceRoot');
+    });
+
+    it('deduplicates a Git pane in the active scope before allocation', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const existing = { id: 'git-existing' };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => existing,
+        async () => true,
+        () => undefined,
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => undefined,
+        { threads: [] },
+        () => undefined,
+        () => undefined,
+        () => { calls.push('render'); },
+        () => undefined,
+        () => undefined,
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(calls).toEqual(['focus:git-existing', 'render']);
+    });
+
+    it('reopens a hidden Git owner before revealing and focusing without allocating a duplicate', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const existing = { id: 'git-existing', hidden: true };
+      const state = { threads: [existing] };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
+        'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => existing,
+        async () => true,
+        (id: string) => {
+          calls.push(`reopen:${id}`);
+          existing.hidden = false;
+          calls.push('render');
+          return true;
+        },
+        () => { calls.push('reveal'); },
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('render'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(existing.hidden).toBe(false);
+      expect(state.threads).toEqual([existing]);
+      expect(calls).toEqual([
+        'reopen:git-existing', 'render', 'reveal', 'focus:git-existing',
+      ]);
+    });
+
+    it('cancels before allocating Git state when leaving a dirty file is declined', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const state = { threads: [] as unknown[] };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => { calls.push('lookup'); return null; },
+        async () => { calls.push('guard'); return false; },
+        () => { calls.push('reveal'); },
+        async () => { calls.push('focus'); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return { id: 'placement' }; },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('render'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<null>;
+
+      await expect(openOrFocusGitPane()).resolves.toBeNull();
+      expect(state.threads).toEqual([]);
+      expect(calls).toEqual(['guard']);
+    });
+
+    it('rechecks scope and deduplicates after the terminal transition', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      let project = { id: 'project-a' };
+      const existing = { id: 'git-project-b' };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => project,
+        () => undefined,
+        (value: typeof project) => value.id === 'project-a' ? '/worktree-a' : '/worktree-b',
+        (projectId: string, workspaceRoot: string) => {
+          calls.push(`lookup:${projectId}:${workspaceRoot}`);
+          return projectId === 'project-b' ? existing : null;
+        },
+        async () => { project = { id: 'project-b' }; return true; },
+        () => { calls.push('reveal'); },
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => { calls.push('commit'); },
+        { threads: [] },
+        () => undefined,
+        () => undefined,
+        () => { calls.push('render'); },
+        () => undefined,
+        () => undefined,
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(calls).toEqual([
+        'lookup:project-b:/worktree-b', 'reveal', 'focus:git-project-b', 'render',
+      ]);
+    });
+
+    it('reveals an existing Git pane excluded by the current focus set', () => {
+      const layout = {
+        root: {
+          type: 'split', id: 'split', orientation: 'column', ratio: 0.5,
+          first: { type: 'leaf', id: 'git-leaf', threadId: 'git' },
+          second: { type: 'leaf', id: 'other-leaf', threadId: 'other' },
+        },
+        focusedLeafId: 'other-leaf', activeSetId: 'other-set',
+        spanRoot: { stale: true }, spanSignature: 'stale', maximizedLeafId: null,
+      };
+      const revealGitPane = Function(
+        'paneLayoutForThread', 'PsychePanes', 'seedSets',
+        `"use strict";
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         return (${functionSource('revealGitPane')});`,
+      )(
+        () => layout,
+        {
+          findLeafByThreadId(root: typeof layout.root, threadId: string) {
+            return threadId === 'git' ? root.first : root.second;
+          },
+        },
+        [{ id: 'other-set', threadIds: ['other'] }],
+      ) as (thread: { id: string }) => boolean;
+
+      expect(revealGitPane({ id: 'git' })).toBe(true);
+      expect(layout.activeSetId).toBeNull();
+      expect(layout.spanRoot).toBeNull();
+      expect(layout.spanSignature).toBeNull();
+    });
+
+    it('leaves compatible scope intact but clears another pane\'s maximize state before focusing Git', () => {
+      const layout = {
+        root: {
+          type: 'split', id: 'split', orientation: 'column', ratio: 0.5,
+          first: { type: 'leaf', id: 'git-leaf', threadId: 'git' },
+          second: { type: 'leaf', id: 'other-leaf', threadId: 'other' },
+        },
+        focusedLeafId: 'other-leaf', activeSetId: 'shared-set',
+        spanRoot: { keep: true }, spanSignature: 'keep', maximizedLeafId: 'other-leaf',
+      };
+      const revealGitPane = Function(
+        'paneLayoutForThread', 'PsychePanes', 'seedSets',
+        `"use strict";
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         return (${functionSource('revealGitPane')});`,
+      )(
+        () => layout,
+        {
+          findLeafByThreadId(root: typeof layout.root, threadId: string) {
+            return threadId === 'git' ? root.first : root.second;
+          },
+        },
+        [{ id: 'shared-set', threadIds: ['git', 'other'] }],
+      ) as (thread: { id: string }) => boolean;
+
+      expect(revealGitPane({ id: 'git' })).toBe(true);
+      expect(layout.activeSetId).toBe('shared-set');
+      expect(layout.spanRoot).toEqual({ keep: true });
+      expect(layout.spanSignature).toBe('keep');
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
+    it('allocates a separate Git pane for another scope', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const state = { threads: [] as Array<{ id: string; projectId: string; worktreePath: string }> };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-b' }),
+        () => undefined,
+        () => '/worktree-b',
+        (projectId: string, workspaceRoot: string) => {
+          calls.push(`lookup:${projectId}:${workspaceRoot}`);
+          return null;
+        },
+        async () => true,
+        () => undefined,
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => 'git-new',
+        (id: string, projectId: string, workspaceRoot: string) => {
+          calls.push(`place:${id}:${projectId}:${workspaceRoot}`);
+          return { id };
+        },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('render'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<{ id: string; projectId: string; worktreePath: string }>;
+
+      await expect(openOrFocusGitPane()).resolves.toMatchObject({
+        id: 'git-new', projectId: 'project-b', worktreePath: '/worktree-b',
+      });
+      expect(state.threads).toHaveLength(1);
+      expect(calls).toEqual([
+        'lookup:project-b:/worktree-b', 'place:git-new:project-b:/worktree-b',
+        'commit', 'activity', 'mount', 'focus:git-new', 'render', 'sidebar', 'save',
+      ]);
+    });
+
+    it('does not mutate pane state when placement fails', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const state = { threads: [] as unknown[] };
+      const calls: string[] = [];
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon', 'showPanePlacementWarning',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        (message: string) => { calls.push(`status:${message}`); },
+        () => '/worktree-a',
+        () => null,
+        async () => true,
+        () => undefined,
+        async () => { calls.push('focus'); },
+        () => 'git-new',
+        () => null,
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('render'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+        (message: string) => { calls.push(`status:${message}`); },
+      ) as () => Promise<null>;
+
+      await expect(openOrFocusGitPane()).resolves.toBeNull();
+      expect(state.threads).toEqual([]);
+      expect(calls).toEqual(['status:Not enough space for another pane']);
+    });
+
+    it('announces every Git placement failure through the visible accessibility status', async () => {
+      expect(indexHtml).toMatch(
+        /id="toast"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/,
+      );
+      const warning = 'Not enough space for another pane';
+      async function exercise(existing: { id: string; hidden: boolean } | null) {
+        const liveStatus = {
+          hidden: true,
+          textContent: '',
+          role: 'status',
+          ariaLive: 'polite',
+        };
+        const state = { threads: [] as unknown[] };
+        const calls: string[] = [];
+        const showPanePlacementWarning = Function(
+          'setStatus', 'toast',
+          `"use strict"; return (${functionSource('showPanePlacementWarning')});`,
+        )(
+          (message: string) => { calls.push(`hidden-status:${message}`); },
+          (message: string) => {
+            liveStatus.textContent = message;
+            liveStatus.hidden = false;
+          },
+        ) as (message: string) => void;
+        const openOrFocusGitPane = Function(
+          'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+          'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
+          'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+          'state', 'noteStatusActivity', 'mountToolPane', 'renderGitSurface',
+          'refreshSidebar', 'saveWorkspaceSoon', 'showPanePlacementWarning',
+          `"use strict"; return (${functionSource('openOrFocusGitPane')});`,
+        )(
+          () => ({ id: 'project-a' }),
+          () => undefined,
+          () => '/worktree-a',
+          () => existing,
+          async () => true,
+          () => false,
+          () => { calls.push('reveal'); },
+          async () => { calls.push('focus'); },
+          () => 'git-new',
+          () => null,
+          () => { calls.push('commit'); },
+          state,
+          () => { calls.push('activity'); },
+          () => { calls.push('mount'); },
+          () => { calls.push('render'); },
+          () => { calls.push('sidebar'); },
+          () => { calls.push('save'); },
+          showPanePlacementWarning,
+        ) as () => Promise<null>;
+
+        await expect(openOrFocusGitPane()).resolves.toBeNull();
+        expect(liveStatus).toEqual({
+          hidden: false,
+          textContent: warning,
+          role: 'status',
+          ariaLive: 'polite',
+        });
+        expect(state.threads).toEqual([]);
+        expect(calls).not.toContain('commit');
+        expect(calls).not.toContain('mount');
+        return calls;
+      }
+
+      await exercise(null);
+      await exercise({ id: 'git-hidden', hidden: true });
+    });
+  });
+
+  it('removes dock layout persistence, chrome, and shortcuts atomically', () => {
+    for (const token of ['.git-dock', '.dock-mini', '.dock-collapse', '--split-frac', '--terminal-col']) {
+      expect(stylesCss).not.toContain(token);
+    }
+    expect(functionSource('persistableProject')).not.toContain('layout:');
+    expect(functionSource('sanitizeSavedProject')).not.toContain('saved.layout');
+    expect(mainJs).not.toContain('applyLayout');
+    expect(mainJs).not.toContain('toggleDock');
+    expect(mainJs).not.toContain('panelIsVisible');
+    expect(mainJs).not.toContain('cmd: "/split"');
+    expect(mainJs).not.toMatch(/e\.key === "\\\\"/);
+    expect(mainJs).not.toMatch(/e\.code === "KeyB" && e\.altKey/);
+    expect(stylesCss).not.toContain('@keyframes browser-pane-in');
+  });
+
+  it('stages Git before every shared close path and preserves the Git close label', () => {
+    const calls: string[] = [];
+    const attributes = new Map<string, string>();
+    const thread = {
+      id: 'git',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Git',
+      kind: 'git',
+      status: '',
+      closing: false,
+      closeStarted: false,
+      metricsGeneration: 0,
+      metricsRefreshTimer: 0,
+      startInFlight: false,
+      term: null,
+      pane: null,
+      paneTitle: null,
+      paneMeta: null,
+      paneClose: {
+        title: 'stale',
+        setAttribute: (name: string, value: string) => attributes.set(name, value),
+      },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const closeThread = Function(
+      'findThread', 'markActiveSurface', 'stageGitSurface', 'suspendGitRequests', 'clearTimeout',
+      'noteStatusActivity', 'pendingDataBuffers', 'forgetThreadInSets',
+      'detachThreadPane', 'stopThreadPty', 'state',
+      'retainFileFocusAfterThreadRemoval', 'renderPaneWorkspace',
+      'setProjectStatus', 'findProject', 'focusThread', 'refreshSidebar', 'refreshTabs',
+      `"use strict"; return (${functionSource('closeThread')});`,
+    )(
+      () => thread,
+      () => undefined,
+      () => { calls.push('stage'); },
+      () => { calls.push('suspend'); },
+      () => undefined,
+      () => undefined,
+      new Map(),
+      () => undefined,
+      () => { calls.push('detach'); return null; },
+      () => { calls.push('stop'); return Promise.resolve(true); },
+      state,
+      () => false,
+      () => undefined,
+      () => undefined,
+      () => ({ id: 'project' }),
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    ) as (id: string) => boolean;
+
+    expect(closeThread(thread.id)).toBe(true);
+    expect(calls.slice(0, 3)).toEqual(['suspend', 'stage', 'detach']);
+    expect(calls).not.toContain('stop');
+
+    const syncThreadPaneMetadata = Function(
+      'applyPaneStatus', 'syncPaneBranchStatusChrome', 'syncPaneFooter',
+      'paneLayoutForThread', 'PsychePanes', 'syncPaneSpanControl', 'syncPaneMaxControl',
+      'sessionCloseLabel',
+      `"use strict"; return (${functionSource('syncThreadPaneMetadata')});`,
+    )(
+      () => '',
+      () => undefined,
+      () => undefined,
+      () => null,
+      {},
+      () => undefined,
+      () => undefined,
+      (value: typeof thread) => value.kind === 'git' ? 'Close Git pane' : `Stop and close ${value.name}`,
+    ) as (value: typeof thread) => void;
+    syncThreadPaneMetadata(thread);
+    expect(thread.paneClose.title).toBe('Close Git pane');
+    expect(attributes.get('aria-label')).toBe('Close Git pane');
+
+    expect(functionSource('closeToolPane')).toContain('closeThread(thread.id)');
+    expect(functionSource('renderSessionList')).toContain('requestThreadClose(thread)');
+    expect(functionSource('requestThreadClose')).toContain('closeThread(thread.id)');
+    expect(mainJs).toMatch(
+      /cmd: "\/close"[\s\S]{0,180}requestThreadClose\(findThread\(state\.activeThreadId\)\)/,
+    );
   });
 
   describe('voice call bar', () => {

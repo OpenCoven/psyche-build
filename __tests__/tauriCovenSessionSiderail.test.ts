@@ -562,6 +562,9 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'toggleSessionTreeDisclosure'),
     extractFunctionSource(mainJs, 'activateSessionTreeItem'),
     extractFunctionSource(mainJs, 'handleSessionTreeKeydown'),
+    extractFunctionSource(mainJs, 'threadIsToolPane'),
+    extractFunctionSource(mainJs, 'sessionCloseLabel'),
+    extractFunctionSource(mainJs, 'localSessionContextActions'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
   const harness = Function(

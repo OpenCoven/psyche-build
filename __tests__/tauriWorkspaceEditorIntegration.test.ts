@@ -373,67 +373,18 @@ describe('native CodeMirror workspace editor surface', () => {
       'diffCache.deleteWhere(function (key) { return key.startsWith(projectId + "\\0"); })'
     );
     expect(extractFunctionSource(mainJs, 'refreshDiffs')).toMatch(
-      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderDiffsPanel\(\)/
+      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderGitSurface\(\{ force: true \}\)/
     );
-    expect(extractFunctionSource(mainJs, 'renderDiffsPanel')).toMatch(
-      /if \(!panelIsVisible\("diffs"\)\) return;/
-    );
+    expect(extractFunctionSource(mainJs, 'renderGitSurface')).toContain('gitPaneIsVisible(project)');
     expect(extractFunctionSource(mainJs, 'performFileSave')).toMatch(
-      /invalidateProjectDiffs\(project\.id\);[\s\S]*if \(panelIsVisible\("diffs"\)\) renderDiffsPanel\(\);/
+      /invalidateProjectDiffs\(project\.id\);[\s\S]*gitPaneIsVisible\(project\)[\s\S]*renderGitSurface\(\{ force: true \}\);/
     );
   });
 
-  it('suspends pending diffs on collapse and refreshes the active panel on reopen', () => {
-    expect(extractFunctionSource(mainJs, 'applyLayout')).toMatch(
-      /handlePanelLayoutTransition\(previousLayout, layout\)/
-    );
-    const transitions: string[] = [];
-    const handlePanelLayoutTransition = compileFunction<
-      (previous: string, next: string) => void
-    >(extractFunctionSource(mainJs, 'handlePanelLayoutTransition'), {
-      // Diffs live in the git panel now, so git is the tab whose collapse has
-      // to suspend in-flight diff requests.
-      currentPanel: () => 'git',
-      suspendDiffRequests: () => { transitions.push('suspend'); },
-      renderPanel: (panel: string) => { transitions.push(`render:${panel}`); },
-    });
-
-    handlePanelLayoutTransition('split', 'terminal');
-    handlePanelLayoutTransition('terminal', 'split');
-
-    expect(transitions).toEqual(['suspend', 'render:git']);
-  });
-
-  it('does not render hidden panels and clears stale diff summaries on status errors', async () => {
-    const panelIsVisible = compileFunction<(panel: string) => boolean>(
-      extractFunctionSource(mainJs, 'panelIsVisible'),
-      { currentLayout: () => 'terminal', currentPanel: () => 'diffs' },
-    );
-    expect(panelIsVisible('diffs')).toBe(false);
-
-    const summary = { textContent: '3 changed' };
-    const messages: string[] = [];
-    const renderDiffsPanel = compileFunction<() => Promise<void>>(
-      extractFunctionSource(mainJs, 'renderDiffsPanel'),
-      {
-        diffFilesEl: {},
-        panelIsVisible: () => true,
-        activeProject: () => ({ id: 'p1', root: '/repo' }),
-        diffPanelRequestGate: { next: () => 1, isCurrent: () => true },
-        diffRequestGate: { next: () => 1 },
-        resetDiffDetail: (message: string) => { messages.push(message); },
-        diffsSummaryEl: summary,
-        invoke: async () => { throw new Error('status unavailable'); },
-        panelMessage: () => undefined,
-        clearDiffSelection: () => undefined,
-        currentPanel: () => 'diffs',
-        currentLayout: () => 'split',
-      },
-    );
-
-    await renderDiffsPanel();
-    expect(messages).toEqual(['Loading changes…']);
-    expect(summary.textContent).toBe('error');
+  it('resets stale badges and summaries at refresh start and status errors', () => {
+    expect(extractFunctionSource(mainJs, 'renderGitSurface')).toContain('setGitChangesCount(0)');
+    expect(extractFunctionSource(mainJs, 'renderGitSurfaceError')).toContain('diffsSummaryEl.textContent = "error"');
+    expect(extractFunctionSource(mainJs, 'renderGitSurfaceError')).toContain('clearDiffSelection("")');
   });
 
   it('serves cached diffs without invoking and ignores stale results and errors', async () => {
@@ -446,9 +397,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const common = {
       diffRowsEl: { replaceChildren: () => undefined },
       activeProject: () => project,
-      currentPanel: () => 'diffs',
-      currentLayout: () => 'split',
-      panelIsVisible: () => true,
+      gitPaneIsVisible: () => true,
       activeWorkspaceRoot: (owner: typeof project) => owner.root,
       stagedDiffFor: () => false,
       diffCacheKey: () => 'p1\0src/a.ts\0unstaged\0default',
@@ -582,8 +531,7 @@ describe('native CodeMirror workspace editor surface', () => {
       /catch \(error\) \{[\s\S]*shouldRenderFileSaveChrome\(state\.activeFileId, file\.id\)[\s\S]*renderFileChrome\(file\)[\s\S]*return false;/
     );
     expect(mainJs).toContain('invalidateProjectDiffs(project.id)');
-    expect(mainJs).toMatch(/panelIsVisible\("diffs"\)[\s\S]*renderDiffsPanel\(\)/);
-    expect(mainJs).toMatch(/currentPanel\(\) === "git"[\s\S]*renderGitPanel\(\)/);
+    expect(mainJs).toMatch(/gitPaneIsVisible\(project\)[\s\S]*renderGitSurface\(\)/);
     expect(mainJs).toMatch(/fileSaveEl\.addEventListener\("click", function \(\) \{[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/);
     expect(extractFunctionSource(mainJs, 'handleExplicitFileSave')).toMatch(
       /event\.preventDefault\(\)[\s\S]*saveFile\(findOpenFile\(state\.activeFileId\)\)/
@@ -714,12 +662,15 @@ describe('native CodeMirror workspace editor surface', () => {
     expect(inactive.dirty).toBe(true);
   });
 
-  it('reveals the actual failed-save editor from a stored browser-only layout', () => {
+  it('reveals the actual failed-save editor without restoring retired dock layout', () => {
+    const previousProject = {
+      id: 'p1',
+      selectedWorktreePath: '/old-repo',
+    };
     const project = {
       id: 'p2',
       lastActiveThreadId: 't2',
       selectedWorktreePath: '/repo',
-      layout: { mode: 'browser', side: 'right' },
     };
     const file = { id: 'inactive', projectId: project.id, dirty: true };
     const state = {
@@ -731,16 +682,28 @@ describe('native CodeMirror workspace editor surface', () => {
         worktreePath: '/repo', hidden: false,
       }],
     };
-    let visibleLayout = 'terminal';
     let editorVisible = false;
-    const liveLayoutCalls: Array<{ layout: string; options: unknown }> = [];
+    let generation = 1;
+    const activeProject = () => state.activeProjectId === project.id ? project : previousProject;
+    const activeWorkspaceRoot = (value: typeof project | typeof previousProject) =>
+      value.selectedWorktreePath;
+    const requestMatches = compileFunction<(
+      projectId: string,
+      workspaceRoot: string,
+      candidate: number,
+    ) => boolean>(extractFunctionSource(mainJs, 'gitPanelRequestMatches'), {
+      activeProject,
+      activeWorkspaceRoot,
+      gitPanelRequestGate: { isCurrent: (candidate: number) => candidate === generation },
+      gitPaneIsVisible: () => true,
+    });
     const revealFileForDecision = compileFunction<
       (target: typeof file) => boolean
     >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
       findOpenFile: () => file,
       findProject: () => project,
       state,
-      activeWorkspaceRoot: () => project.selectedWorktreePath,
+      activeWorkspaceRoot,
       terminalHost: {
         children: [{
           dataset: { threadId: 't2' },
@@ -748,22 +711,19 @@ describe('native CodeMirror workspace editor surface', () => {
         }],
       },
       renderPaneWorkspace: () => undefined,
-      restoreProjectLayout: () => { visibleLayout = project.layout.mode; },
+      renderGitSurface: () => { generation += 1; return true; },
       clearPassiveCovenPaneFocus: () => undefined,
-      applyLayout: (layout: string, options: unknown) => {
-        visibleLayout = layout;
-        liveLayoutCalls.push({ layout, options });
-      },
       loadAgentSkills: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
       activateFileTabNow: (id: string) => {
         state.activeFileId = id;
-        editorVisible = visibleLayout !== 'browser';
+        editorVisible = true;
       },
       refreshSidebar: () => undefined,
     });
 
+    const previousGeneration = generation;
     expect(revealFileForDecision(file)).toBe(true);
     expect(state).toMatchObject({
       activeProjectId: project.id,
@@ -771,67 +731,9 @@ describe('native CodeMirror workspace editor surface', () => {
       activeFileId: file.id,
     });
     expect(editorVisible).toBe(true);
-    expect(visibleLayout).toBe('terminal');
-    expect(project.layout.mode).toBe('browser');
-    expect(liveLayoutCalls).toEqual([{
-      layout: 'terminal',
-      options: { persist: false },
-    }]);
-  });
-
-  it('does not restore a remembered Coven pane while revealing a file decision', () => {
-    const project = {
-      id: 'p2',
-      lastActiveThreadId: 'coven',
-      selectedWorktreePath: '/repo',
-      layout: { mode: 'browser', side: 'right' },
-    };
-    const file = { id: 'inactive', projectId: project.id, dirty: true };
-    const state = {
-      activeProjectId: 'p1',
-      activeThreadId: 'previous',
-      activeFileId: 'active',
-      threads: [
-        {
-          id: 'coven', kind: 'coven-chat', projectId: project.id,
-          worktreePath: '/repo', hidden: false,
-        },
-        {
-          id: 'hidden-shell', kind: 'shell', projectId: project.id,
-          worktreePath: '/repo', hidden: true,
-        },
-        {
-          id: 'other-shell', kind: 'shell', projectId: project.id,
-          worktreePath: '/other', hidden: false,
-        },
-        {
-          id: 'shell', kind: 'shell', projectId: project.id,
-          worktreePath: '/repo', hidden: false,
-        },
-      ],
-    };
-    let clearedCovenFocus = 0;
-    const revealFileForDecision = compileFunction<
-      (target: typeof file) => boolean
-    >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
-      findOpenFile: () => file,
-      findProject: () => project,
-      state,
-      activeWorkspaceRoot: () => project.selectedWorktreePath,
-      renderPaneWorkspace: () => undefined,
-      restoreProjectLayout: () => undefined,
-      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
-      applyLayout: () => undefined,
-      loadAgentSkills: () => undefined,
-      syncProjectBrowser: () => undefined,
-      saveWorkspaceSoon: () => undefined,
-      activateFileTabNow: () => true,
-      refreshSidebar: () => undefined,
-    });
-
-    expect(revealFileForDecision(file)).toBe(true);
-    expect(state.activeThreadId).toBe('shell');
-    expect(clearedCovenFocus).toBe(1);
+    expect(generation).toBe(previousGeneration + 1);
+    expect(requestMatches(previousProject.id, '/old-repo', previousGeneration)).toBe(false);
+    expect(requestMatches(project.id, '/repo', generation)).toBe(true);
   });
 
   it('gates explicit save while any guarded file decision is pending', async () => {
@@ -1236,6 +1138,7 @@ describe('native CodeMirror workspace editor surface', () => {
         guardDirtyFile: async () => true,
         findOpenFile: () => ({ id: 'file-a', dirty: false }),
         clearFileFocusPresentation: () => { calls.push('clear'); },
+        clearPassiveCovenPaneFocus: () => undefined,
         activePaneLayout: () => layout,
         renderPaneMinimap: (value: unknown, file: unknown) => {
           expect(value).toBe(layout);
@@ -1269,7 +1172,6 @@ describe('native CodeMirror workspace editor surface', () => {
     const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
     const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
     let cleared = 0;
-    let clearedCovenFocus = 0;
     let rendered = 0;
     const closeFileTab = compileFunction<
       (id: string) => Promise<boolean>
@@ -1286,18 +1188,14 @@ describe('native CodeMirror workspace editor surface', () => {
         cleared += 1;
         state.activeFileId = null;
       },
-      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace: () => { rendered += 1; },
     });
 
     await expect(closeFileTab(file.id)).resolves.toBe(true);
     expect(state.openFiles).toEqual([]);
     expect(state.activeFileId).toBeNull();
-    expect({ cleared, clearedCovenFocus, rendered }).toEqual({
-      cleared: 1,
-      clearedCovenFocus: 1,
-      rendered: 1,
-    });
+    expect({ cleared, rendered }).toEqual({ cleared: 1, rendered: 1 });
   });
 
   it('reserves the focus-mode minimap column for the fullscreen file editor', () => {
