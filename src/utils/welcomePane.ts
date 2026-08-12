@@ -24,7 +24,8 @@ export const WELCOME_PANE_THEME_OPTION = '@psyche_welcome_theme';
 export async function createWelcomePane(
   controlPaneId: string,
   cwd?: string,
-  themeName?: PsycheThemeName
+  themeName?: PsycheThemeName,
+  sidebarWidth: number = SIDEBAR_WIDTH
 ): Promise<string | undefined> {
   const logService = LogService.getInstance();
   const tmuxService = TmuxService.getInstance();
@@ -66,7 +67,7 @@ export async function createWelcomePane(
       const dimensions = await tmuxService.getTerminalDimensions();
 
       // Apply main-vertical layout FIRST (this locks sidebar width)
-      execSync(`tmux set-window-option main-pane-width ${SIDEBAR_WIDTH}`, { stdio: 'pipe' });
+      execSync(`tmux set-window-option main-pane-width ${sidebarWidth}`, { stdio: 'pipe' });
       execSync(`tmux select-layout main-vertical`, { stdio: 'pipe' });
 
       // Refresh to apply layout changes

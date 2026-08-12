@@ -1,3 +1,5 @@
+export const SIDE_PANEL_EXPAND_GLYPH = '›';
+export const SIDE_PANEL_COLLAPSE_GLYPH = '‹';
 export const SIDE_PANEL_EXPANDED_WIDTH = 40;
 export const SIDE_PANEL_COLLAPSED_WIDTH = 4;
 export const SIDE_PANEL_MOBILE_BREAKPOINT = 140; // Increased from 100; 40 sidebar + 100 content = readable minimum

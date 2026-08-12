@@ -8,6 +8,7 @@ import path from 'path';
 import type { PsycheConfig } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
+import { applyStoredPaneLayout, SIDEBAR_WIDTH } from './layoutManager.js';
 
 /**
  * Recreate welcome pane and recalculate layout after the last pane is removed
@@ -15,7 +16,10 @@ import { TmuxService } from '../services/TmuxService.js';
  *
  * @param projectRoot - The project root directory
  */
-export async function handleLastPaneRemoved(projectRoot: string): Promise<void> {
+export async function handleLastPaneRemoved(
+  projectRoot: string,
+  sidebarWidth: number = SIDEBAR_WIDTH
+): Promise<void> {
   const tmuxService = TmuxService.getInstance();
 
   try {
@@ -37,18 +41,28 @@ export async function handleLastPaneRemoved(projectRoot: string): Promise<void> 
 
     // Recreate welcome pane
     const { createWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-    await createWelcomePaneCoordinated(projectRoot, controlPaneId);
-
-    // Recalculate layout to fix sidebar size
-    const { recalculateAndApplyLayout } = await import('./layoutManager.js');
-    const dimensions = await tmuxService.getTerminalDimensions();
-
-    recalculateAndApplyLayout(
+    await createWelcomePaneCoordinated(
+      projectRoot,
       controlPaneId,
-      [], // No content panes
-      dimensions.width,
-      dimensions.height
+      undefined,
+      sidebarWidth
     );
+
+    const dimensions = await tmuxService.getTerminalDimensions();
+    const panesFile = path.join(projectRoot, '.psyche', 'psyche.config.json');
+    const config = JSON.parse(await fs.readFile(panesFile, 'utf-8')) as PsycheConfig;
+    if (Array.isArray(config)) {
+      throw new Error('Pane layout requires an object-form config');
+    }
+    await applyStoredPaneLayout({
+      panesFile,
+      panes: config.panes || [],
+      controlPaneId,
+      terminalWidth: dimensions.width,
+      terminalHeight: dimensions.height,
+      sidebarWidth,
+      mutation: { kind: 'reconcile' },
+    });
   } catch (error) {
     LogService.getInstance().error(
       'Failed to handle last pane removal',

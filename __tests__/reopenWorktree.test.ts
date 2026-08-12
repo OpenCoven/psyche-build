@@ -22,6 +22,8 @@ const tmuxServiceMock = vi.hoisted(() => ({
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%1'));
 const setupSidebarLayoutMock = vi.hoisted(() => vi.fn(() => '%1'));
 const recalculateAndApplyLayoutMock = vi.hoisted(() => vi.fn(async () => {}));
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 const getInstalledAgentsMock = vi.hoisted(() => vi.fn(async () => ['claude', 'codex']));
 const filterEnabledAgentsMock = vi.hoisted(() => vi.fn((agents: string[]) => agents));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
@@ -64,6 +66,8 @@ vi.mock('../src/utils/tmux.js', () => ({
 vi.mock('../src/utils/layoutManager.js', () => ({
   SIDEBAR_WIDTH: 40,
   recalculateAndApplyLayout: recalculateAndApplyLayoutMock,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 
 vi.mock('../src/utils/settingsManager.js', () => ({
@@ -117,6 +121,7 @@ vi.mock('../src/services/WorktreeCleanupService.js', () => ({
 vi.mock('../src/services/ProjectPaneConfig.js', () => ({
   mutateProjectPaneConfig: mutateProjectPaneConfigMock,
   ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
+  readProjectPaneConfig: vi.fn(async () => ({ controlPaneId: '%0', panes: [] })),
   projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
 }));
 
