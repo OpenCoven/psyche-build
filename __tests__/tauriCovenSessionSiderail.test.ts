@@ -428,6 +428,8 @@ function createRenderer(options: {
   activeProjectId?: string | null;
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
+  invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+  refreshCovenSessions?: () => Promise<unknown>;
   realEdit?: boolean;
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
@@ -486,6 +488,8 @@ function createRenderer(options: {
   ) as (element: FakeElement, surface: string, editOptions: unknown) => void;
   const editLabelInlineImpl = options.realEdit ? realEditLabelInline : editLabelInline;
   const openCovenSession = vi.fn(options.openCovenSession ?? (() => Promise.resolve()));
+  const invoke = vi.fn(options.invoke ?? (() => Promise.resolve()));
+  const refreshCovenSessions = vi.fn(options.refreshCovenSessions ?? (() => Promise.resolve()));
   const setStatus = vi.fn();
   const onCanvasIds = options.canvasThreadIds ?? [];
   const canvasThreadIds = vi.fn(() => onCanvasIds);
@@ -512,6 +516,7 @@ function createRenderer(options: {
   const sources = [
     'var SESSION_CLOSE_SECONDS = 3;',
     'var armedSessionClose = null;',
+    'var covenSessionCloseFlights = new Set();',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
     'var sessionTreeFocusKey = "";',
@@ -533,6 +538,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'sessionLaneLabel'),
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
+    extractFunctionSource(mainJs, 'closeCovenSession'),
     extractFunctionSource(mainJs, 'threadCovenSessionId'),
     // createCovenSessionRow is gone on this branch and isReusableCovenAttachment
     // is not on renderSessionList's path any more — the sidebar tree below
@@ -566,13 +572,14 @@ function createRenderer(options: {
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
     'settings', 'saveSettings', 'seedSessionTypeFilter', 'findThread', 'findProject',
     'saveWorkspaceSoon', 'activateProjectWorktree', 'setSessionTypeFilter',
-    'openSessionContextMenu',
+    'openSessionContextMenu', 'invoke', 'refreshCovenSessions',
     `"use strict"; ${sources.join('\n')}; return {
       render: renderSessionList,
       setFilter: function (value) { sessionFilter = value; },
       setDiscovery: function (value) { covenDiscovery = value; },
       armSessionClose: armSessionClose,
       disarmSessionClose: disarmSessionClose,
+      closeCovenSession: closeCovenSession,
       handleTreeKeydown: handleSessionTreeKeydown,
       toggleSetPick: toggleSetPick,
       picked: function () { return setPicking ? setPicking.picked.slice() : null; }
@@ -627,6 +634,8 @@ function createRenderer(options: {
     activateProjectWorktree,
     setSessionTypeFilter,
     openSessionContextMenu,
+    invoke,
+    refreshCovenSessions,
   ) as {
     render: () => void;
     setFilter: (value: string) => void;
@@ -635,6 +644,7 @@ function createRenderer(options: {
       host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
     ) => void;
     disarmSessionClose: (options?: { restoreFocus?: boolean }) => void;
+    closeCovenSession: (session: RemoteSession) => Promise<boolean>;
     handleTreeKeydown: (event: FakeEvent) => void;
     toggleSetPick: (threadId: string) => void;
     picked: () => string[] | null;
@@ -668,6 +678,8 @@ function createRenderer(options: {
     renameThread,
     editLabelInline,
     openCovenSession,
+    invoke,
+    refreshCovenSessions,
     setStatus,
     canvasThreadIds,
   };
@@ -2749,6 +2761,160 @@ describe('Tauri Coven session project rail', () => {
         (item) => item.getAttribute('tabindex') === '0',
       )).toHaveLength(1);
       expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Coven row close control', () => {
+    const session: RemoteSession = {
+      id: 'coven-1', projectRoot: '/alpha', cwd: '/alpha', title: 'Agent Coven', status: 'running',
+      labels: ['source:psyche-build'],
+    };
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('stops and refreshes an eligible Coven session only after confirmation succeeds', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      const close = row.querySelector('.session-close')!;
+
+      expect(close).not.toBeNull();
+      expect(close.title).toBe('Stop and close Agent Coven');
+      expect(close.getAttribute('aria-label')).toBe('Stop and close Agent Coven');
+      expect(close.getAttribute('tabindex')).toBe('-1');
+
+      const closeEvent = await close.emit('click');
+      expect(closeEvent.propagationStopped).toBe(true);
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => {
+        expect(renderer.invoke).toHaveBeenCalledTimes(1);
+        expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+      });
+      expect(renderer.invoke).toHaveBeenCalledWith('coven_session_kill', {
+        sessionId: 'coven-1',
+        session_id: 'coven-1',
+      });
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(renderer.document.activeElement).not.toBe(row);
+    });
+
+    it('retains the Coven row and reports an error when native stop fails', async () => {
+      const renderer = createRenderer({
+        sessions: [session],
+        invoke: () => Promise.reject(new Error('daemon refused')),
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.querySelector('.session-close')!.emit('click');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => {
+        expect(renderer.setStatus).toHaveBeenCalledWith(
+          'Stop and close failed: Error: daemon refused',
+          'error',
+        );
+      });
+
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
+      expect(renderer.sessionListEl.querySelectorAll('.session-row')
+        .some((candidate) => candidate.dataset.sessionId === session.id)).toBe(true);
+    });
+
+    it('deduplicates native stop calls while one session close is in flight', async () => {
+      let resolveInvoke!: () => void;
+      const pending = new Promise<void>((resolve) => { resolveInvoke = resolve; });
+      const renderer = createRenderer({ sessions: [session], invoke: () => pending });
+
+      const first = renderer.closeCovenSession(session);
+      const second = renderer.closeCovenSession(session);
+      expect(renderer.invoke).toHaveBeenCalledTimes(1);
+      expect(await second).toBe(false);
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
+
+      resolveInvoke();
+      expect(await first).toBe(true);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+    });
+
+    it('guards Delete on a focused Coven row without activating it', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      row.focus();
+
+      const event = await row.emit('keydown', { key: 'Delete' });
+      expect(event.defaultPrevented).toBe(true);
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => expect(renderer.invoke).toHaveBeenCalledTimes(1));
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+    });
+
+    it('offers Attach and guarded Stop and close context actions without row activation', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.emit('contextmenu');
+      const actions = renderer.openSessionContextMenu.mock.calls[0]?.[1] as Array<{
+        label: string;
+        danger?: boolean;
+        run: () => void;
+      }>;
+      expect(actions[0]?.label).toBe('Attach');
+      const stop = actions.find((action) => action?.label === 'Stop and close');
+      expect(stop).toMatchObject({ label: 'Stop and close', danger: true });
+
+      stop?.run();
+      expect(renderer.invoke).not.toHaveBeenCalled();
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+      expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      await vi.waitFor(() => expect(renderer.invoke).toHaveBeenCalledTimes(1));
+      expect(renderer.openCovenSession).not.toHaveBeenCalled();
+    });
+
+    it('labels the first context action Focus attachment for attached Coven rows', async () => {
+      const renderer = createRenderer({
+        sessions: [session],
+        threads: [{
+          id: 'attached', projectId: 'alpha', name: 'Agent Coven', status: 'running',
+          launch: { covenSessionId: session.id },
+        }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.emit('contextmenu');
+      expect(renderer.openSessionContextMenu.mock.calls[0]?.[1]?.[0]?.label)
+        .toBe('Focus attachment');
+    });
+
+    it('restores roving focus to a Coven row after its confirmation times out', async () => {
+      const renderer = createRenderer({ sessions: [session] });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+      await row.querySelector('.session-close')!.emit('click');
+
+      vi.advanceTimersByTime(3000);
+
+      expect(renderer.document.activeElement).toBe(row);
+      expect(row.getAttribute('tabindex')).toBe('0');
+      expect(renderer.invoke).not.toHaveBeenCalled();
     });
   });
 

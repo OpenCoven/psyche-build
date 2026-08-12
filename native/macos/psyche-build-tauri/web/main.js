@@ -116,6 +116,7 @@
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenSessionCloseFlights = new Set();
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
@@ -468,6 +469,21 @@
       return covenDiscovery;
     })();
     return flight.promise;
+  }
+  async function closeCovenSession(session) {
+    if (!session || !session.id || covenSessionCloseFlights.has(session.id)) return false;
+    var id = session.id;
+    covenSessionCloseFlights.add(id);
+    try {
+      await invoke("coven_session_kill", { sessionId: id, session_id: id });
+      await refreshCovenSessions();
+      return true;
+    } catch (error) {
+      setStatus("Stop and close failed: " + String(error), "error");
+      return false;
+    } finally {
+      covenSessionCloseFlights.delete(id);
+    }
   }
   function stopCovenPolling() {
     if (covenPollTimer) clearInterval(covenPollTimer);
@@ -5641,6 +5657,7 @@
               if (rowModel.source === "coven") {
                 var attached = covenRowAttached(state, project.id, rowModel.id);
                 row.dataset.sessionId = rowModel.id;
+                row.setAttribute("aria-keyshortcuts", "Delete");
                 row.title = (attached ? "Focus attachment — " : "Attach — ") + row.title;
                 function activateCovenRow() {
                   settings.selectedSessionKey = rowModel.selectionKey;
@@ -5648,6 +5665,35 @@
                   openCovenSession(project, rowModel.value);
                 }
                 row.addEventListener("click", activateCovenRow);
+                var covenClose = document.createElement("button");
+                covenClose.type = "button";
+                covenClose.className = "session-close";
+                covenClose.title = "Stop and close " + rowModel.title;
+                covenClose.setAttribute("aria-label", covenClose.title);
+                covenClose.setAttribute("tabindex", "-1");
+                covenClose.textContent = "×";
+                function armCovenClose() {
+                  armSessionClose(row, covenClose, rowModel.title, function () {
+                    closeCovenSession(rowModel.value);
+                  });
+                }
+                covenClose.addEventListener("click", function (event) {
+                  event.stopPropagation();
+                  armCovenClose();
+                });
+                row.addEventListener("keydown", function (event) {
+                  if (event.target !== row || document.activeElement !== row) return;
+                  if (event.key !== "Delete") return;
+                  event.preventDefault();
+                  armCovenClose();
+                });
+                row.addEventListener("contextmenu", function (event) {
+                  openSessionContextMenu(event, [
+                    { label: attached ? "Focus attachment" : "Attach", run: activateCovenRow },
+                    { label: "Stop and close", danger: true, run: armCovenClose },
+                  ]);
+                });
+                row.appendChild(covenClose);
                 categoryGroup.appendChild(wrapper);
                 return;
               }
