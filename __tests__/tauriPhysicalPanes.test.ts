@@ -512,7 +512,10 @@ describe('Tauri physical terminal panes', () => {
       'split-2',
     );
     const key = 'project\0worktree';
-    const paneLayouts = new Map([[key, { root, focusedLeafId: 'a' }]]);
+    const paneLayouts = new Map<string, {
+      root: Record<string, unknown>;
+      focusedLeafId: string | null;
+    }>([[key, { root, focusedLeafId: 'a' }]]);
     const paneLayoutKey = () => key;
     const detachThreadPane = compileFunction<(thread: {
       id: string; projectId: string; worktreePath: string;
@@ -551,6 +554,13 @@ describe('Tauri physical terminal panes', () => {
       },
       second: { threadId: 'thread-c' },
     });
+
+    paneLayouts.set(key, { root: leafA, focusedLeafId: null });
+    const fallbackPlacement = preparePanePlacement('thread-e', 'project', 'worktree');
+    expect(PsychePanes.leafIds(fallbackPlacement?.value.root || null)).toEqual([
+      'a',
+      fallbackPlacement?.value.focusedLeafId,
+    ]);
   });
 
   it('does not deduplicate a hidden Coven thread when ensuring a workspace', async () => {
@@ -577,6 +587,47 @@ describe('Tauri physical terminal panes', () => {
     await expect(ensureProjectCoven(project)).resolves.toBe(replacement);
     expect(thread.hidden).toBe(true);
     expect({ focused, spawned }).toEqual({ focused: 0, spawned: 1 });
+  });
+
+  it('reopens a hidden Coven pane without replacing the passive restoration pointer', () => {
+    const project = {
+      id: 'project',
+      selectedWorktreePath: '/repo',
+      lastActiveThreadId: 'shell-a',
+    };
+    const thread = {
+      id: 'coven-a',
+      kind: 'coven-attach',
+      projectId: project.id,
+      worktreePath: '/repo',
+      hidden: true,
+      pane: null,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null as string | null,
+    };
+    const reopenThread = compileFunction<(id: string) => boolean>(
+      functionSource('reopenThread'),
+      {
+        findThread: () => thread,
+        findProject: () => project,
+        state,
+        activeWorkspaceRoot: () => project.selectedWorktreePath,
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        noteStatusActivity: () => undefined,
+        commitPanePlacement: () => undefined,
+        createPaneFooter: () => null,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      },
+    );
+
+    expect(reopenThread(thread.id)).toBe(true);
+    expect(thread.hidden).toBe(false);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe('shell-a');
   });
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
@@ -1217,6 +1268,7 @@ describe('Tauri physical terminal panes', () => {
       PsychePanes,
       findThread: () => thread,
       state,
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1244,23 +1296,36 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
-  it('restores an existing Coven layout leaf during passive worktree selection', async () => {
+  it('does not make a Coven layout leaf active during passive worktree selection', async () => {
     const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: 'shell-a' };
     const thread = { id: 'thread-coven', kind: 'coven-attach' };
     const state = { activeProjectId: project.id, activeThreadId: 'stale-thread' as string | null };
+    const layout = {
+      root: PsychePanes.createLeaf('leaf-a', thread.id),
+      focusedLeafId: 'leaf-a' as string | null,
+      maximizedLeafId: 'leaf-a' as string | null,
+      activeSetId: 'coven-set' as string | null,
+    };
     let renders = 0;
     let refreshes = 0;
     const renderPaneWorkspace = () => { renders += 1; };
+    const clearPassiveCovenPaneFocus = compileFunction<
+      (value: typeof layout) => void
+    >(functionSource('clearPassiveCovenPaneFocus'), {
+      state,
+      findThread: () => thread,
+      activePaneLayout: () => layout,
+      findFocusSet: () => ({ threadIds: [thread.id] }),
+      PsychePanes,
+    });
     const activatePaneLayoutFocus = compileFunction<(
       value: typeof project, path: string,
     ) => void>(functionSource('activatePaneLayoutFocus'), {
-      paneLayoutFor: () => ({
-        root: PsychePanes.createLeaf('leaf-a', thread.id),
-        focusedLeafId: 'leaf-a',
-      }),
+      paneLayoutFor: () => layout,
       PsychePanes,
       findThread: () => thread,
       state,
+      clearPassiveCovenPaneFocus,
       renderPaneWorkspace,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1283,8 +1348,11 @@ describe('Tauri physical terminal panes', () => {
 
     await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
     expect(project.selectedWorktreePath).toBe('/target');
-    expect(project.lastActiveThreadId).toBe(thread.id);
-    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe('shell-a');
+    expect(state.activeThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(layout.maximizedLeafId).toBeNull();
+    expect(layout.activeSetId).toBeNull();
     expect(renders).toBe(1);
     expect(refreshes).toBe(1);
   });
@@ -1316,6 +1384,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1360,7 +1429,7 @@ describe('Tauri physical terminal panes', () => {
     expect(options).toEqual({ refreshStatus: true });
   });
 
-  it('restores a visible local Coven pane during passive project activation', async () => {
+  it('does not restore a visible local Coven pane during passive project activation', async () => {
     const project = {
       id: 'project',
       selectedWorktreePath: '/target',
@@ -1387,6 +1456,21 @@ describe('Tauri physical terminal panes', () => {
       ],
     };
     const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    const layout = {
+      root: PsychePanes.createLeaf('coven-leaf', 'thread-chat'),
+      focusedLeafId: 'coven-leaf' as string | null,
+      maximizedLeafId: 'coven-leaf' as string | null,
+    };
+    const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+      functionSource('clearPassiveCovenPaneFocus'),
+      {
+        state,
+        findThread: (id: string | null) =>
+          state.threads.find((thread) => thread.id === id) || null,
+        activePaneLayout: () => layout,
+        PsychePanes,
+      },
+    );
     let renderCalls = 0;
     let sidebarCalls = 0;
     let tabCalls = 0;
@@ -1399,6 +1483,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1415,14 +1500,15 @@ describe('Tauri physical terminal panes', () => {
 
     await expect(setActiveProject(project.id)).resolves.toBe(true);
     expect(state.activeProjectId).toBe(project.id);
-    expect(state.activeThreadId).toBe('thread-chat');
-    expect(focusCalls).toEqual([
-      { id: 'thread-chat', options: { refreshStatus: false } },
-    ]);
-    expect(renderCalls).toBe(0);
-    expect(sidebarCalls).toBe(0);
-    expect(tabCalls).toBe(0);
-    expect(syncCalls).toBe(1);
+    expect(state.activeThreadId).toBeNull();
+    expect(project.lastActiveThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(layout.maximizedLeafId).toBeNull();
+    expect(focusCalls).toEqual([]);
+    expect(renderCalls).toBe(1);
+    expect(sidebarCalls).toBe(1);
+    expect(tabCalls).toBe(1);
+    expect(syncCalls).toBe(2);
   });
 
   it('refreshes direct focusThread by default and allows batched suppression', async () => {
@@ -1470,6 +1556,48 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
+  it('does not persist explicit Coven focus for passive restoration', async () => {
+    const state = { activeProjectId: 'project', activeThreadId: null as string | null };
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'shell-a',
+      selectedWorktreePath: '/repo',
+    };
+    const thread = {
+      id: 'coven-a',
+      kind: 'coven-chat',
+      projectId: project.id,
+      worktreePath: '/repo/coven',
+      status: 'running',
+      term: { focus: () => undefined },
+    };
+    const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('focusThread'),
+      {
+        findThread: () => thread,
+        showTerminalView: async () => true,
+        markActiveSurface: () => undefined,
+        state,
+        findProject: () => project,
+        paneLayoutFor: () => null,
+        PsychePanes,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => undefined,
+        syncBrowserBounds: () => undefined,
+        setProjectStatus: () => undefined,
+        statusLevel: () => 'ok',
+        refreshStatusController: () => undefined,
+      },
+    );
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe('shell-a');
+    expect(project.selectedWorktreePath).toBe(thread.worktreePath);
+  });
+
   it('refreshes direct setActiveProject once while honoring suppressed outer refresh', async () => {
     const createSetActiveProject = (
       state: {
@@ -1492,6 +1620,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1740,6 +1869,176 @@ describe('Tauri physical terminal panes', () => {
       expect(resolveFileFocusThreadId('thread-a')).toBe('thread-b');
       threads.get('thread-b')!.hidden = true;
       expect(resolveFileFocusThreadId('thread-a')).toBeNull();
+    });
+
+    it('allows Coven file return only when the destination was explicitly selected', () => {
+      const project = { id: 'project' };
+      const coven = {
+        id: 'coven',
+        kind: 'coven-chat',
+        projectId: project.id,
+        worktreePath: '/repo',
+        hidden: false,
+      };
+      const shell = {
+        id: 'shell',
+        kind: 'shell',
+        projectId: project.id,
+        worktreePath: '/repo',
+        hidden: false,
+      };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('coven-leaf', coven.id),
+          'coven-leaf',
+          PsychePanes.createLeaf('shell-leaf', shell.id),
+          'split',
+        ),
+        focusedLeafId: 'coven-leaf',
+      };
+      const threads = new Map([
+        [coven.id, coven],
+        [shell.id, shell],
+      ]);
+      const fileFocusThreadIsAvailable = compileFunction<
+        (
+          thread: typeof coven,
+          root: Record<string, unknown>,
+          value: typeof project,
+          workspaceRoot: string,
+          allowCoven: boolean,
+        ) => boolean
+      >(functionSource('fileFocusThreadIsAvailable'), { PsychePanes });
+      const resolveFileFocusThreadId = compileFunction<
+        (preferredId: string, allowPreferredCoven: boolean) => string | null
+      >(functionSource('resolveFileFocusThreadId'), {
+        activeProject: () => project,
+        activeWorkspaceRoot: () => '/repo',
+        activePaneLayout: () => layout,
+        scopedPaneRoot: (value: Layout) => value.root,
+        findThread: (id: string) => threads.get(id) || null,
+        PsychePanes,
+        fileFocusThreadIsAvailable,
+      });
+
+      expect(resolveFileFocusThreadId(coven.id, false)).toBe(shell.id);
+      expect(resolveFileFocusThreadId(coven.id, true)).toBe(coven.id);
+    });
+
+    it('clears stale Coven focus when passive file return has no shell destination', async () => {
+      const coven = { id: 'coven', kind: 'coven-chat' };
+      const state = { activeFileId: 'file', activeThreadId: coven.id as string | null };
+      const layout: Layout = {
+        root: PsychePanes.createLeaf('coven-leaf', coven.id),
+        focusedLeafId: 'coven-leaf',
+        maximizedLeafId: 'coven-leaf',
+      };
+      const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+        functionSource('clearPassiveCovenPaneFocus'),
+        {
+          state,
+          findThread: (id: string | null) => id === coven.id ? coven : null,
+          activePaneLayout: () => layout,
+          PsychePanes,
+        },
+      );
+      const returnFromFileFocus = compileFunction<
+        (explicitThreadId?: string, maximizeDestination?: boolean) => Promise<boolean>
+      >(functionSource('returnFromFileFocus'), {
+        state,
+        fileFocus: { returnThreadId: coven.id },
+        findOpenFile: () => ({ id: 'file' }),
+        resolveFileFocusThreadId: () => null,
+        activePaneLayout: () => layout,
+        PsychePanes,
+        focusThread: async () => false,
+        renderPaneMinimap: () => undefined,
+        showTerminalView: async () => true,
+        clearPassiveCovenPaneFocus,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      });
+
+      await expect(returnFromFileFocus()).resolves.toBe(true);
+      expect(state.activeThreadId).toBeNull();
+      expect(layout.focusedLeafId).toBeNull();
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
+    it('clears stale Coven maximize before passively returning to a shell', async () => {
+      const coven = { id: 'coven', kind: 'coven-chat' };
+      const shell = { id: 'shell', kind: 'shell' };
+      const state = { activeFileId: 'file', activeThreadId: coven.id as string | null };
+      const layout: Layout = {
+        root: PsychePanes.insertBelow(
+          PsychePanes.createLeaf('coven-leaf', coven.id),
+          'coven-leaf',
+          PsychePanes.createLeaf('shell-leaf', shell.id),
+          'split',
+        ),
+        focusedLeafId: 'coven-leaf',
+        maximizedLeafId: 'coven-leaf',
+      };
+      const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+        functionSource('clearPassiveCovenPaneFocus'),
+        {
+          state,
+          findThread: (id: string | null) => id === coven.id ? coven : shell,
+          activePaneLayout: () => layout,
+          PsychePanes,
+        },
+      );
+      const returnFromFileFocus = compileFunction<
+        (explicitThreadId?: string, maximizeDestination?: boolean) => Promise<boolean>
+      >(functionSource('returnFromFileFocus'), {
+        state,
+        fileFocus: { returnThreadId: coven.id },
+        findOpenFile: () => ({ id: 'file' }),
+        resolveFileFocusThreadId: () => shell.id,
+        clearPassiveCovenPaneFocus,
+        activePaneLayout: () => layout,
+        PsychePanes,
+        focusThread: async (id: string) => {
+          state.activeThreadId = id;
+          layout.focusedLeafId = 'shell-leaf';
+          return true;
+        },
+        renderPaneMinimap: () => undefined,
+        showTerminalView: async () => true,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      });
+
+      await expect(returnFromFileFocus()).resolves.toBe(true);
+      expect(state.activeThreadId).toBe(shell.id);
+      expect(layout.focusedLeafId).toBe('shell-leaf');
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
+    it('preserves passive Coven return state when file exit is cancelled', async () => {
+      const state = { activeFileId: 'file', activeThreadId: 'coven' };
+      let sanitizes = 0;
+      let focuses = 0;
+      const returnFromFileFocus = compileFunction<
+        () => Promise<boolean>
+      >(functionSource('returnFromFileFocus'), {
+        state,
+        fileFocus: { returnThreadId: 'coven' },
+        findOpenFile: () => ({ id: 'file' }),
+        resolveFileFocusThreadId: () => 'shell',
+        showTerminalView: async () => false,
+        clearPassiveCovenPaneFocus: () => { sanitizes += 1; },
+        activePaneLayout: () => null,
+        PsychePanes,
+        focusThread: async () => { focuses += 1; return true; },
+        renderPaneMinimap: () => undefined,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      });
+
+      await expect(returnFromFileFocus()).resolves.toBe(false);
+      expect(state).toEqual({ activeFileId: 'file', activeThreadId: 'coven' });
+      expect({ sanitizes, focuses }).toEqual({ sanitizes: 0, focuses: 0 });
     });
 
     it('lists the active file before pane entries in the minimap helper', () => {

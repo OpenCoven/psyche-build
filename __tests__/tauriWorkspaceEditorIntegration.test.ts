@@ -718,6 +718,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const project = {
       id: 'p2',
       lastActiveThreadId: 't2',
+      selectedWorktreePath: '/repo',
       layout: { mode: 'browser', side: 'right' },
     };
     const file = { id: 'inactive', projectId: project.id, dirty: true };
@@ -725,7 +726,10 @@ describe('native CodeMirror workspace editor surface', () => {
       activeProjectId: 'p1',
       activeThreadId: 't1',
       activeFileId: 'active',
-      threads: [{ id: 't2', projectId: project.id }],
+      threads: [{
+        id: 't2', kind: 'shell', projectId: project.id,
+        worktreePath: '/repo', hidden: false,
+      }],
     };
     let visibleLayout = 'terminal';
     let editorVisible = false;
@@ -736,6 +740,7 @@ describe('native CodeMirror workspace editor surface', () => {
       findOpenFile: () => file,
       findProject: () => project,
       state,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
       terminalHost: {
         children: [{
           dataset: { threadId: 't2' },
@@ -744,6 +749,7 @@ describe('native CodeMirror workspace editor surface', () => {
       },
       renderPaneWorkspace: () => undefined,
       restoreProjectLayout: () => { visibleLayout = project.layout.mode; },
+      clearPassiveCovenPaneFocus: () => undefined,
       applyLayout: (layout: string, options: unknown) => {
         visibleLayout = layout;
         liveLayoutCalls.push({ layout, options });
@@ -771,6 +777,61 @@ describe('native CodeMirror workspace editor surface', () => {
       layout: 'terminal',
       options: { persist: false },
     }]);
+  });
+
+  it('does not restore a remembered Coven pane while revealing a file decision', () => {
+    const project = {
+      id: 'p2',
+      lastActiveThreadId: 'coven',
+      selectedWorktreePath: '/repo',
+      layout: { mode: 'browser', side: 'right' },
+    };
+    const file = { id: 'inactive', projectId: project.id, dirty: true };
+    const state = {
+      activeProjectId: 'p1',
+      activeThreadId: 'previous',
+      activeFileId: 'active',
+      threads: [
+        {
+          id: 'coven', kind: 'coven-chat', projectId: project.id,
+          worktreePath: '/repo', hidden: false,
+        },
+        {
+          id: 'hidden-shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/repo', hidden: true,
+        },
+        {
+          id: 'other-shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/other', hidden: false,
+        },
+        {
+          id: 'shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/repo', hidden: false,
+        },
+      ],
+    };
+    let clearedCovenFocus = 0;
+    const revealFileForDecision = compileFunction<
+      (target: typeof file) => boolean
+    >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
+      findOpenFile: () => file,
+      findProject: () => project,
+      state,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
+      renderPaneWorkspace: () => undefined,
+      restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
+      applyLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      activateFileTabNow: () => true,
+      refreshSidebar: () => undefined,
+    });
+
+    expect(revealFileForDecision(file)).toBe(true);
+    expect(state.activeThreadId).toBe('shell');
+    expect(clearedCovenFocus).toBe(1);
   });
 
   it('gates explicit save while any guarded file decision is pending', async () => {
@@ -828,6 +889,7 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshTabs: () => undefined,
       activateFileTabNow: () => undefined,
       clearFileFocusPresentation: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace: () => undefined,
     });
 
@@ -1207,6 +1269,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
     const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
     let cleared = 0;
+    let clearedCovenFocus = 0;
     let rendered = 0;
     const closeFileTab = compileFunction<
       (id: string) => Promise<boolean>
@@ -1223,13 +1286,18 @@ describe('native CodeMirror workspace editor surface', () => {
         cleared += 1;
         state.activeFileId = null;
       },
+      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
       renderPaneWorkspace: () => { rendered += 1; },
     });
 
     await expect(closeFileTab(file.id)).resolves.toBe(true);
     expect(state.openFiles).toEqual([]);
     expect(state.activeFileId).toBeNull();
-    expect({ cleared, rendered }).toEqual({ cleared: 1, rendered: 1 });
+    expect({ cleared, clearedCovenFocus, rendered }).toEqual({
+      cleared: 1,
+      clearedCovenFocus: 1,
+      rendered: 1,
+    });
   });
 
   it('reserves the focus-mode minimap column for the fullscreen file editor', () => {
