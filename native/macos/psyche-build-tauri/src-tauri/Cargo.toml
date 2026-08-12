@@ -30,6 +30,9 @@ sysinfo = "0.36.1"
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 portable-pty = "0.8"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 codegen-units = 1
 lto = true
