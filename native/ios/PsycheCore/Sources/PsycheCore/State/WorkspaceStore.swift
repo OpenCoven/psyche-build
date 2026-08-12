@@ -258,7 +258,7 @@ public final class WorkspaceStore: ObservableObject {
         return result.snapshot
     }
 
-    public func readFile(_ path: String, inPane paneID: String) async throws -> String {
+    public func readFile(_ path: String, inPane paneID: String) async throws -> MobileFilesReadResult {
         let requests = try requireInspectionRequests(forPane: paneID)
         let requestID = await requests.nextRequestID()
         let response = try await requests.send(.readFile(MobileFilesReadRequest(
@@ -273,7 +273,7 @@ public final class WorkspaceStore: ObservableObject {
         else {
             throw WorkspaceStoreError.unexpectedResponse
         }
-        return result.content
+        return result
     }
 
     public func diffFile(_ path: String, inPane paneID: String) async throws -> String {

@@ -1,5 +1,6 @@
 import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import stripAnsi from 'strip-ansi';
 import {
   loadBrowserSnapshot,
   loadDiffPreview,
@@ -134,7 +135,9 @@ export function createMobileInspection(
 
     async diff(root: string, relativePath: string, statusCode: string): Promise<string> {
       const { canonicalRoot, repositoryPath } = await resolveInside(root, relativePath);
-      return loadDiffPreview(canonicalRoot, repositoryPath, statusCode, 'never').join('\n');
+      return stripAnsi(
+        loadDiffPreview(canonicalRoot, repositoryPath, statusCode, 'never').join('\n'),
+      );
     },
   };
 }

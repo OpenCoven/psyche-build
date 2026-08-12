@@ -1165,17 +1165,19 @@ public struct MobileFilesReadResult: Codable, Sendable, Equatable {
     public let paneID: String
     public let path: String
     public let content: String
+    public let truncated: Bool
 
-    public init(requestID: String, paneID: String, path: String, content: String) {
+    public init(requestID: String, paneID: String, path: String, content: String, truncated: Bool) {
         self.type = "files.read.result"
         self.requestID = requestID
         self.paneID = paneID
         self.path = path
         self.content = content
+        self.truncated = truncated
     }
 
     enum CodingKeys: String, CodingKey {
-        case type, path, content
+        case type, path, content, truncated
         case requestID = "requestId"
         case paneID = "paneId"
     }

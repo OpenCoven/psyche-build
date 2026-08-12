@@ -11,11 +11,12 @@ final class WorkspaceStoreInspectionTests: XCTestCase {
         let store = makeStore(requests)
 
         let snapshot = try await store.listFiles(inPane: paneID)
-        let content = try await store.readFile("Sources/App.swift", inPane: paneID)
+        let preview = try await store.readFile("Sources/App.swift", inPane: paneID)
         let diff = try await store.diffFile("Sources/App.swift", inPane: paneID)
 
         XCTAssertEqual(snapshot.files.map(\.path), ["Sources/App.swift"])
-        XCTAssertEqual(content, "struct App {}\n")
+        XCTAssertEqual(preview.content, "struct App {}\n")
+        XCTAssertEqual(preview.truncated, true)
         XCTAssertEqual(diff, "@@ -1 +1 @@\n-old\n+new")
         let sent = await requests.sent
         XCTAssertEqual(sent, [
@@ -135,7 +136,8 @@ private actor InspectionControlRequests: ControlRequesting {
                 requestID: payload.requestID,
                 paneID: payload.paneID,
                 path: payload.path,
-                content: "struct App {}\n"
+                content: "struct App {}\n",
+                truncated: true
             ))
         case .diffFile(let payload):
             return .filesDiff(MobileFilesDiffResult(

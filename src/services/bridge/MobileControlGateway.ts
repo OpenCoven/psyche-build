@@ -281,6 +281,7 @@ export class MobileControlGateway {
           paneId,
           path: file.path,
           content: preview.text,
+          truncated: preview.truncated,
         };
       }
       case 'files.diff': {

@@ -333,6 +333,7 @@ export type MobileFilesReadResult = {
   paneId: string;
   path: string;
   content: string;
+  truncated: boolean;
 };
 
 export type MobileFilesDiffResult = {

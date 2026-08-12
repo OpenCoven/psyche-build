@@ -403,6 +403,7 @@ describe('MobileControlGateway file inspection', () => {
       paneId: '%3',
       path: 'src/index.ts',
       content: 'export {};\n',
+      truncated: false,
     });
     expect(reads).toEqual([{ root: '/repo', relativePath: 'src/index.ts' }]);
   });

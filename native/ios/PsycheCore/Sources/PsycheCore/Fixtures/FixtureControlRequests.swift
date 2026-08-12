@@ -66,7 +66,8 @@ public actor FixtureControlRequests: ControlRequesting {
                 requestID: requestID,
                 paneID: read.paneID,
                 path: read.path,
-                content: "struct App {}\n"
+                content: "struct App {}\n",
+                truncated: true
             ))
 
         case .diffFile(let diff):

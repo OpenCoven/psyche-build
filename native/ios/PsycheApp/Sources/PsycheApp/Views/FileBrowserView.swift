@@ -246,6 +246,7 @@ private struct FilePreviewView: View {
     let file: BrowserFile
 
     @State private var content: String?
+    @State private var isTruncated = false
     @State private var isLoading = false
     @State private var errorMessage: String?
 
@@ -266,23 +267,34 @@ private struct FilePreviewView: View {
                     description: Text(errorMessage)
                 )
             } else if let content {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(content.components(separatedBy: .newlines).enumerated()), id: \.offset) { index, line in
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                Text("\(index + 1)")
-                                    .foregroundStyle(.secondary)
-                                    .frame(minWidth: 32, alignment: .trailing)
-                                    .accessibilityHidden(true)
-                                Text(line.isEmpty ? " " : line)
-                                    .foregroundStyle(PsycheTheme.terminalText)
-                            }
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                            .accessibilityLabel("Line \(index + 1): \(line)")
-                        }
+                VStack(spacing: 0) {
+                    if isTruncated {
+                        Label("Preview truncated to the safe size limit", systemImage: "scissors")
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                            .background(PsycheTheme.key)
+                            .accessibilityIdentifier("file-preview-truncated")
                     }
-                    .padding()
+                    ScrollView([.horizontal, .vertical]) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(content.components(separatedBy: .newlines).enumerated()), id: \.offset) { index, line in
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    Text("\(index + 1)")
+                                        .foregroundStyle(.secondary)
+                                        .frame(minWidth: 32, alignment: .trailing)
+                                        .accessibilityHidden(true)
+                                    Text(line.isEmpty ? " " : line)
+                                        .foregroundStyle(PsycheTheme.terminalText)
+                                }
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityLabel("Line \(index + 1): \(line)")
+                            }
+                        }
+                        .padding()
+                    }
                 }
                 .background(PsycheTheme.terminal)
             } else {
@@ -315,7 +327,9 @@ private struct FilePreviewView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            content = try await store.readFile(file.path, inPane: paneID)
+            let preview = try await store.readFile(file.path, inPane: paneID)
+            content = preview.content
+            isTruncated = preview.truncated
         } catch {
             errorMessage = error.localizedDescription
         }

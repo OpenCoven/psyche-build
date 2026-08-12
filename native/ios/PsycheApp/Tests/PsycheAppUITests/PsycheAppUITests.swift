@@ -153,6 +153,25 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertEqual(addition.label, "Added: new")
     }
 
+    func testFilePreviewShowsTruncationBanner() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+        let files = app.buttons["pane-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+
+        let sources = app.buttons["Sources"]
+        XCTAssertTrue(sources.waitForExistence(timeout: 10))
+        sources.tap()
+        let file = row("file-Sources/App.swift", in: app)
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+
+        XCTAssertTrue(
+            element("file-preview-truncated", in: app).waitForExistence(timeout: 10)
+        )
+    }
+
     func testFileBrowserShowsHostInspectionErrors() throws {
         let app = launchApp(arguments: [
             "-uiFixture", "multiproject", "-uiInspectionFailure",

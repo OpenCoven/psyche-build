@@ -502,6 +502,7 @@ export const MOBILE_CONTROL_FIXTURES = {
       paneId: '%3',
       path: 'src/index.ts',
       content: 'export {};\n',
+      truncated: true,
     },
   },
   filesDiffResult: {

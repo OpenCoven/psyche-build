@@ -146,6 +146,16 @@ describe('mobile inspection', () => {
     expect(diff).not.toMatch(/\u001b\[/);
   });
 
+  it('strips embedded ANSI escapes from file content in diffs', async () => {
+    const relativePath = 'nested/ansi.txt';
+    writeFileSync(path.join(repositoryRoot, relativePath), '\u001b[31mred\u001b[0m\n');
+
+    const diff = await createMobileInspection().diff(repositoryRoot, relativePath, '??');
+
+    expect(diff).toContain('+red');
+    expect(diff).not.toContain('\u001b');
+  });
+
   it('exposes a stable typed error class', () => {
     const error = new MobileInspectionError('path_outside_root', 'outside');
     expect(error).toMatchObject({

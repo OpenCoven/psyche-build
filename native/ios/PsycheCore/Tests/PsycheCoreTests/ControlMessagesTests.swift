@@ -235,6 +235,7 @@ final class ControlMessagesTests: XCTestCase {
         }
         XCTAssertEqual(readResult.path, "src/index.ts")
         XCTAssertEqual(readResult.content, "export {};\n")
+        XCTAssertEqual(readResult.truncated, true)
 
         guard case let .filesDiff(diffResult) = try decodeResponseFixture(
             "filesDiffResult",
