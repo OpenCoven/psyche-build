@@ -189,18 +189,70 @@ type PersistedBrowserTabFixture = BrowserNavigationTab & {
   loading: boolean;
 };
 
+function browserLifecycleHarness() {
+  const tabStates = new WeakMap<object, { closing: boolean; generation: number }>();
+  const paneStates = new WeakMap<object, { tearingDown: boolean }>();
+  const browserTabLifecycle = (tab: object | null) => {
+    if (!tab) return { closing: false, generation: 0 };
+    let lifecycle = tabStates.get(tab);
+    if (!lifecycle) {
+      lifecycle = { closing: false, generation: 0 };
+      tabStates.set(tab, lifecycle);
+    }
+    return lifecycle;
+  };
+  const browserPaneLifecycle = (pane: object | null) => {
+    if (!pane) return { tearingDown: false };
+    let lifecycle = paneStates.get(pane);
+    if (!lifecycle) {
+      lifecycle = { tearingDown: false };
+      paneStates.set(pane, lifecycle);
+    }
+    return lifecycle;
+  };
+  return {
+    browserTabLifecycle,
+    browserPaneLifecycle,
+    browserTabIsClosing: (tab: object | null) => !!tab && browserTabLifecycle(tab).closing,
+    browserPaneIsClosing: (pane: ({ closing?: boolean; closeStarted?: boolean } & object) | null) =>
+      !!pane && (
+        pane.closing === true ||
+        pane.closeStarted === true ||
+        browserPaneLifecycle(pane).tearingDown
+      ),
+    invalidateBrowserNavigation: (tab: object) => {
+      const lifecycle = browserTabLifecycle(tab);
+      lifecycle.generation += 1;
+      return lifecycle.generation;
+    },
+  };
+}
+
 function browserNavigationDependencies(
   project: { id: string },
   browser: { activeTabId: string; tabs: BrowserNavigationTab[] },
   tab: BrowserNavigationTab,
   invoke: (command: string, args: Record<string, unknown>) => Promise<void>,
 ) {
+  const lifecycle = browserLifecycleHarness();
+  const pane = {
+    id: 'web-pane',
+    kind: 'web',
+    projectId: project.id,
+    worktreePath: '/workspace',
+    closing: false,
+    closeStarted: false,
+  };
   return {
+    ...lifecycle,
     activeProject: () => project,
-    createBrowserPane: async () => ({ id: 'web-pane' }),
+    activeWorkspaceRoot: () => '/workspace',
+    createBrowserPane: async () => pane,
     ensureBrowserModel: () => browser,
     currentBrowserTab: () => tab,
     createBrowserTab: (): BrowserNavigationTab | null => null,
+    findBrowserPane: () => pane,
+    findThread: () => pane,
     visibleBrowserBounds: () => ({ x: 1, y: 2, w: 3, h: 4 }),
     normaliseUrl: (url: string) => url,
     tabTitle: (url: string) => url,
@@ -216,6 +268,33 @@ function browserNavigationDependencies(
     markBrowserTabLoaded: () => {},
     writeToActive: (_text: string) => {},
     setTimeout: () => 0,
+    setStatus: () => {},
+    browserNavigationIsCurrent: (context: {
+      tab: BrowserNavigationTab;
+      pane: typeof pane;
+      browser: typeof browser;
+      generation: number;
+    }) => (
+      !lifecycle.browserTabIsClosing(context.tab) &&
+      !lifecycle.browserPaneIsClosing(context.pane) &&
+      lifecycle.browserTabLifecycle(context.tab).generation === context.generation &&
+      context.browser.tabs.includes(context.tab)
+    ),
+    discardObsoleteBrowserNavigation: async (context: {
+      tab: BrowserNavigationTab;
+      browser: typeof browser;
+      label: string;
+      previousTitle: string;
+    }) => {
+      lifecycle.invalidateBrowserNavigation(context.tab);
+      await invoke('browser_destroy', { label: context.label });
+      if (context.browser.tabs.includes(context.tab)) {
+        context.tab.created = false;
+        context.tab.loading = false;
+        context.tab.title = context.previousTitle;
+      }
+      return true;
+    },
   };
 }
 
@@ -243,9 +322,23 @@ describe('Tauri native browser lifecycle', () => {
     );
 
     const browserDestroyMany = rustFunctionSource(nativeLib, 'browser_destroy_many');
+    expect(nativeLib).toContain(
+      '#[derive(Serialize)]\n#[serde(rename_all = "camelCase")]\nstruct BrowserDestroyFailure',
+    );
+    expect(nativeLib).toContain('struct BrowserDestroyManyOutcome');
+    expect(nativeLib).toContain('destroyed: Vec<String>');
+    expect(nativeLib).toContain('failures: Vec<BrowserDestroyFailure>');
     expect(browserDestroyMany).toContain('#[tauri::command]\nfn browser_destroy_many(');
+    expect(browserDestroyMany).toContain(') -> BrowserDestroyManyOutcome {');
     expect(browserDestroyMany).toContain('for label in labels {');
-    expect(browserDestroyMany).toContain('destroy_browser_webview(&app, Some(label))?;');
+    expect(browserDestroyMany).toContain(
+      'match destroy_browser_webview(&app, Some(label.clone())) {',
+    );
+    expect(browserDestroyMany).toContain('Ok(()) => outcome.destroyed.push(label)');
+    expect(browserDestroyMany).toContain(
+      '.push(BrowserDestroyFailure { label, error })',
+    );
+    expect(browserDestroyMany).not.toContain('?;');
 
     const handlers = tauriHandlerNames(nativeLib);
     const first = handlers.indexOf('browser_hide_all_except');
@@ -260,6 +353,30 @@ describe('Tauri native browser lifecycle', () => {
       'browser_destroy_many',
       'browser_reload',
     ]    );
+
+    expect(mainJs).toContain('var browserTabLifecycleStates = new WeakMap();');
+    expect(mainJs).toContain('var browserPaneLifecycleStates = new WeakMap();');
+    const navigationCurrent = functionSource(mainJs, 'browserNavigationIsCurrent');
+    expect(navigationCurrent).toContain(
+      'browserTabLifecycle(context.tab).generation !== context.generation',
+    );
+    expect(navigationCurrent).toContain(
+      'context.browser.tabs.indexOf(context.tab) === -1',
+    );
+    expect(navigationCurrent).toContain(
+      'findThread(context.pane.id) !== context.pane',
+    );
+    expect(navigationCurrent).toContain(
+      'findBrowserPane(context.project.id, context.worktreePath) === context.pane',
+    );
+    const discardObsoleteNavigation = functionSource(
+      mainJs,
+      'discardObsoleteBrowserNavigation',
+    );
+    expect(discardObsoleteNavigation).toContain(
+      'await invoke("browser_destroy", { label: context.label })',
+    );
+    expect(discardObsoleteNavigation).toContain('context.tab.created = false');
   });
 
   it('destroys a browser view before removing its tab state', async () => {
@@ -279,6 +396,7 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserTab = compileFunction<
       (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
       invoke: async (command: string, args: { label: string }) => {
@@ -318,6 +436,7 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserTab = compileFunction<
       (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
       invoke: async () => { throw new Error('native unavailable'); },
@@ -358,6 +477,7 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserTab = compileFunction<
       (project: IdentifiedBrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
       invoke: (command: string, args: { label: string }) => {
@@ -374,12 +494,11 @@ describe('Tauri native browser lifecycle', () => {
     const firstClose = closeBrowserTab(project, 'tab-b');
     const duplicateClose = closeBrowserTab(project, 'tab-b');
     await Promise.resolve();
-    expect(destroyResolvers).toHaveLength(2);
+    await expect(duplicateClose).resolves.toBe(false);
+    expect(destroyResolvers).toHaveLength(1);
 
     destroyResolvers[0]();
     await expect(firstClose).resolves.toBe(true);
-    destroyResolvers[1]();
-    await expect(duplicateClose).resolves.toBe(false);
 
     expect(project.browsersByWorktree['/workspace']).toEqual({
       activeTabId: 'tab-a',
@@ -390,11 +509,221 @@ describe('Tauri native browser lifecycle', () => {
     });
     expect(calls).toEqual([
       'browser_destroy:project-a:tab-b',
-      'browser_destroy:project-a:tab-b',
       'render',
       'sync',
       'save',
     ]);
+  });
+
+  it('blocks activation and navigation while a tab close is pending', async () => {
+    let resolveDestroy!: () => void;
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {
+        '/workspace': {
+          activeTabId: 'tab-b',
+          tabs: [
+            {
+              id: 'tab-a',
+              created: true,
+              loading: false,
+              url: 'https://old.example',
+              title: 'Old',
+              history: ['https://old.example'],
+              historyIndex: 0,
+            },
+            {
+              id: 'tab-b',
+              created: true,
+              loading: false,
+              url: 'https://active.example',
+              title: 'Active',
+              history: ['https://active.example'],
+              historyIndex: 0,
+            },
+          ],
+        },
+      },
+    };
+    const browser = project.browsersByWorktree['/workspace'];
+    const tab = browser.tabs[0];
+    const closeBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke: (command: string) => {
+        calls.push(command);
+        return new Promise<void>((resolve) => { resolveDestroy = resolve; });
+      },
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: () => {},
+      renderBrowserTabs: () => calls.push('render'),
+      syncProjectBrowser: () => calls.push('sync'),
+      saveWorkspaceSoon: () => calls.push('save'),
+    });
+    const activateBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      ensureBrowserModel: () => browser,
+      findBrowserPane: () => null,
+      markActiveSurface: () => calls.push('surface'),
+      renderBrowserTabs: () => calls.push('activate-render'),
+      syncProjectBrowser: () => calls.push('activate-sync'),
+      saveWorkspaceSoon: () => calls.push('activate-save'),
+      restoreDormantBrowserTab: async () => true,
+    });
+    const navigationDependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command) => { calls.push(`navigate:${command}`); },
+    );
+    Object.assign(navigationDependencies, lifecycle, {
+      createBrowserPane: async () => {
+        calls.push('create-pane');
+        return null;
+      },
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+
+    const closing = closeBrowserTab(project, tab.id);
+    await Promise.resolve();
+
+    await expect(activateBrowserTab(project, tab.id)).resolves.toBe(false);
+    await expect(navigateBrowser('https://new.example', { tabId: tab.id })).resolves.toBe(false);
+    await expect(closeBrowserTab(project, tab.id)).resolves.toBe(false);
+    expect(browser.activeTabId).toBe('tab-b');
+    expect(browser.tabs).toContain(tab);
+    expect(calls).toEqual(['browser_destroy']);
+
+    resolveDestroy();
+    await expect(closing).resolves.toBe(true);
+    expect(browser.tabs).not.toContain(tab);
+    expect(calls).toEqual(['browser_destroy', 'render', 'sync', 'save']);
+  });
+
+  it('destroys a native view created by navigation that became obsolete during tab close', async () => {
+    let resolveNavigation!: () => void;
+    let resolveClose!: () => void;
+    let destroyCalls = 0;
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      created: true,
+      loading: false,
+      url: 'https://old.example',
+      title: 'Saved title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const successor: BrowserNavigationTab = {
+      id: 'tab-b',
+      created: true,
+      loading: false,
+      url: 'https://successor.example',
+      title: 'Successor',
+      history: ['https://successor.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab, successor] };
+    const pane = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+      closing: false,
+      closeStarted: false,
+    };
+    const invoke = (command: string): Promise<void> => {
+      calls.push(command);
+      if (command === 'browser_navigate') {
+        return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+      }
+      if (command === 'browser_destroy') {
+        destroyCalls += 1;
+        if (destroyCalls === 1) {
+          return new Promise<void>((resolve) => { resolveClose = resolve; });
+        }
+      }
+      return Promise.resolve();
+    };
+    const navigationDependencies = browserNavigationDependencies(project, browser, tab, invoke);
+    Object.assign(navigationDependencies, lifecycle, {
+      createBrowserPane: async () => pane,
+      findBrowserPane: () => pane,
+      findThread: () => pane,
+      browserNavigationIsCurrent: (context: {
+        tab: BrowserNavigationTab;
+        browser: typeof browser;
+        generation: number;
+      }) => (
+        !lifecycle.browserTabIsClosing(context.tab) &&
+        lifecycle.browserTabLifecycle(context.tab).generation === context.generation &&
+        context.browser.tabs.includes(context.tab)
+      ),
+      discardObsoleteBrowserNavigation: async (context: {
+        tab: BrowserNavigationTab;
+        browser: typeof browser;
+        label: string;
+        previousTitle: string;
+      }) => {
+        lifecycle.invalidateBrowserNavigation(context.tab);
+        await invoke('browser_destroy');
+        if (context.browser.tabs.includes(context.tab)) {
+          context.tab.created = false;
+          context.tab.loading = false;
+          context.tab.title = context.previousTitle;
+        }
+        return true;
+      },
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+    const closeBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke,
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: () => {},
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+    });
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    await Promise.resolve();
+    const closing = closeBrowserTab(project, tab.id);
+    await Promise.resolve();
+    expect(calls).toEqual(['browser_navigate', 'browser_destroy']);
+
+    resolveClose();
+    await expect(closing).resolves.toBe(true);
+    expect(browser.tabs).toEqual([successor]);
+    expect(browser.activeTabId).toBe(successor.id);
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    expect(calls).toEqual(['browser_navigate', 'browser_destroy', 'browser_destroy']);
+    expect(tab).toMatchObject({
+      url: 'https://old.example',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
   });
 
   it('awaits restoration when active close promotes a dormant saved tab', async () => {
@@ -423,6 +752,7 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserTab = compileFunction<
       (value: typeof project, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
       invoke: async (command: string) => { calls.push(command); },
@@ -530,7 +860,10 @@ describe('Tauri native browser lifecycle', () => {
     const activateBrowserTab = compileFunction<
       (value: typeof project, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
       ensureBrowserModel: () => browser,
       markActiveSurface: () => calls.push('surface'),
       renderBrowserTabs: () => calls.push('render'),
@@ -572,6 +905,9 @@ describe('Tauri native browser lifecycle', () => {
     const restoreDormantBrowserTab = compileFunction<
       (project: unknown, tab: DormantBrowserTabFixture) => Promise<boolean>
     >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      ...browserLifecycleHarness(),
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
       navigateBrowser: async (url: string, options: Record<string, unknown>) => {
         navigations.push([url, options]);
         await Promise.resolve();
@@ -660,7 +996,12 @@ describe('Tauri native browser lifecycle', () => {
     ));
     const restoreDormantBrowserTab = compileFunction<
       (value: typeof project, valueTab: BrowserNavigationTab) => Promise<boolean>
-    >(functionSource(mainJs, 'restoreDormantBrowserTab'), { navigateBrowser });
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      ...browserLifecycleHarness(),
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
+      navigateBrowser,
+    });
 
     const restoration = restoreDormantBrowserTab(project, tab);
     let settled = false;
@@ -678,15 +1019,15 @@ describe('Tauri native browser lifecycle', () => {
     expect(tab.historyIndex).toBe(1);
   });
 
-  it('returns false after native navigation failure without changing browser history', async () => {
+  it('preserves title, URL, history, and created state after native navigation failure', async () => {
     const writes: string[] = [];
     const project = { id: 'project-a' };
     const tab: BrowserNavigationTab = {
       id: 'tab-a',
       url: 'https://old.example',
-      created: false,
+      created: true,
       loading: false,
-      title: 'Old',
+      title: 'Saved title',
       history: ['https://old.example', 'https://older.example'],
       historyIndex: 1,
     };
@@ -706,8 +1047,9 @@ describe('Tauri native browser lifecycle', () => {
 
     await expect(navigateBrowser('https://example.com', { tabId: tab.id })).resolves.toBe(false);
     expect(tab).toMatchObject({
-      created: false,
+      created: true,
       loading: false,
+      title: 'Saved title',
       url: 'https://old.example',
       history: ['https://old.example', 'https://older.example'],
       historyIndex: 1,
@@ -736,7 +1078,14 @@ describe('Tauri native browser lifecycle', () => {
     );
     dependencies.createBrowserPane = async () => {
       calls.push('create-pane');
-      return { id: 'web-pane' };
+      return {
+        id: 'web-pane',
+        kind: 'web',
+        projectId: project.id,
+        worktreePath: '/workspace',
+        closing: false,
+        closeStarted: false,
+      };
     };
     dependencies.createBrowserTab = () => {
       calls.push('create-tab');
@@ -762,6 +1111,9 @@ describe('Tauri native browser lifecycle', () => {
     const restoreDormantBrowserTab = compileFunction<
       (project: unknown, tab: { created?: boolean; url?: string; id?: string } | null) => Promise<boolean>
     >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      ...browserLifecycleHarness(),
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
       navigateBrowser: async () => { throw new Error('must not navigate'); },
     });
 
@@ -784,7 +1136,10 @@ describe('Tauri native browser lifecycle', () => {
     const activateBrowserTab = compileFunction<
       (project: BrowserProjectFixture, tabId: string) => Promise<boolean>
     >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
       ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
       markActiveSurface: () => calls.push('surface'),
       renderBrowserTabs: () => calls.push('render'),
@@ -809,6 +1164,7 @@ describe('Tauri native browser lifecycle', () => {
     const openBlankBrowserTab = compileFunction<
       (options?: { requireNew?: boolean }) => Promise<ActiveDormantBrowserTabFixture | null>
     >(functionSource(mainJs, 'openBlankBrowserTab'), {
+      ...browserLifecycleHarness(),
       activeProject: () => project,
       activeWorkspaceRoot: () => '/workspace',
       findBrowserPane: () => null,
@@ -830,6 +1186,173 @@ describe('Tauri native browser lifecycle', () => {
     expect(calls).toEqual(['surface', 'render', 'sync', 'restore:tab-a', 'focus']);
   });
 
+  it('invalidates in-flight navigation and blocks navigation or new tabs during pane teardown', async () => {
+    let resolveNavigation!: () => void;
+    let resolveTeardown!: (outcome: {
+      destroyed: string[];
+      failures: Array<{ label: string; error: string }>;
+    }) => void;
+    const lifecycle = browserLifecycleHarness();
+    const calls: string[] = [];
+    const thread = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: 'project-a',
+      worktreePath: '/workspace',
+      closing: false,
+      closeStarted: false,
+    };
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      created: true,
+      loading: false,
+      url: 'https://old.example',
+      title: 'Saved title',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const invoke = (
+      command: string,
+      args: Record<string, unknown>,
+    ): Promise<unknown> => {
+      calls.push(command);
+      if (command === 'browser_navigate') {
+        return new Promise<void>((resolve) => { resolveNavigation = resolve; });
+      }
+      if (command === 'browser_destroy_many') {
+        return new Promise((resolve) => { resolveTeardown = resolve; });
+      }
+      if (command === 'browser_destroy') {
+        expect(args).toEqual({ label: 'project-a:tab-a' });
+        return Promise.resolve();
+      }
+      return Promise.resolve();
+    };
+    const navigationDependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      invoke as (command: string, args: Record<string, unknown>) => Promise<void>,
+    );
+    Object.assign(navigationDependencies, lifecycle, {
+      activeWorkspaceRoot: () => '/workspace',
+      createBrowserPane: async () => thread,
+      findBrowserPane: () => thread,
+      findThread: () => thread,
+      browserNavigationIsCurrent: (context: {
+        tab: BrowserNavigationTab;
+        pane: typeof thread;
+        browser: typeof browser;
+        generation: number;
+      }) => (
+        !lifecycle.browserTabIsClosing(context.tab) &&
+        !lifecycle.browserPaneIsClosing(context.pane) &&
+        lifecycle.browserTabLifecycle(context.tab).generation === context.generation &&
+        context.browser.tabs.includes(context.tab)
+      ),
+      discardObsoleteBrowserNavigation: async (context: {
+        tab: BrowserNavigationTab;
+        browser: typeof browser;
+        label: string;
+        previousTitle: string;
+      }) => {
+        lifecycle.invalidateBrowserNavigation(context.tab);
+        await invoke('browser_destroy', { label: context.label });
+        if (context.browser.tabs.includes(context.tab)) {
+          context.tab.created = false;
+          context.tab.loading = false;
+          context.tab.title = context.previousTitle;
+        }
+        return true;
+      },
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), navigationDependencies);
+    const closeBrowserPane = compileFunction<
+      (value: typeof thread) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...lifecycle,
+      findProject: () => project,
+      ensureBrowserModel: () => browser,
+      invoke,
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: () => {},
+      saveWorkspaceSoon: () => calls.push('save'),
+      stageBrowserSurface: () => calls.push('stage'),
+      closeThread: () => {
+        calls.push('close');
+        thread.closeStarted = true;
+        thread.closing = true;
+        return true;
+      },
+      state: { activeThreadId: 'web-pane' },
+      markActiveSurface: () => calls.push('surface'),
+    });
+    const openBlankBrowserTab = compileFunction<
+      (options?: { requireNew?: boolean }) => Promise<BrowserNavigationTab | null>
+    >(functionSource(mainJs, 'openBlankBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => thread,
+      createBrowserPane: async () => { throw new Error('must not create pane'); },
+      markActiveSurface: () => { throw new Error('must not activate'); },
+      ensureBrowserModel: () => browser,
+      createBrowserTab: () => { throw new Error('must not create tab'); },
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      restoreDormantBrowserTab: async () => false,
+      currentBrowserTab: () => tab,
+      urlInput: null,
+    });
+
+    const navigation = navigateBrowser('https://new.example', { tabId: tab.id });
+    await Promise.resolve();
+    const closing = closeBrowserPane(thread);
+    await Promise.resolve();
+
+    await expect(navigateBrowser('https://blocked.example', { tabId: tab.id })).resolves.toBe(false);
+    await expect(openBlankBrowserTab({ requireNew: true })).resolves.toBeNull();
+    await expect(closeBrowserPane(thread)).resolves.toBe(false);
+    expect(calls).toEqual(['browser_navigate', 'browser_destroy_many']);
+
+    resolveTeardown({
+      destroyed: ['project-a:tab-a'],
+      failures: [],
+    });
+    await expect(closing).resolves.toBe(true);
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      url: 'https://old.example',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(false);
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      title: 'Saved title',
+      url: 'https://old.example',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    });
+    expect(calls).toEqual([
+      'browser_navigate',
+      'browser_destroy_many',
+      'save',
+      'stage',
+      'close',
+      'surface',
+      'browser_destroy',
+    ]);
+  });
+
   it('destroys pane views before staging and preserves tabs as dormant', async () => {
     const calls: string[] = [];
     const thread: BrowserPaneThreadFixture = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
@@ -841,10 +1364,12 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserPane = compileFunction<
       (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...browserLifecycleHarness(),
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs, activeTabId: 'tab-a' }),
       invoke: async (command: string, args: { labels: string[] }) => {
         calls.push(`${command}:${args.labels.join(',')}`);
+        return { destroyed: args.labels, failures: [] };
       },
       browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
       setStatus: () => {},
@@ -869,13 +1394,14 @@ describe('Tauri native browser lifecycle', () => {
     ]);
   });
 
-  it('skips native pane destruction for zero tabs and leaves tabs dormant when recovery fails', async () => {
+  it('skips native pane destruction for zero tabs and clears the pane guard on transport failure', async () => {
     const thread: BrowserPaneThreadFixture = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
     const project = { id: 'project-a' };
     const emptyCalls: string[] = [];
     const emptyCloseBrowserPane = compileFunction<
       (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...browserLifecycleHarness(),
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs: [] }),
       invoke: async () => emptyCalls.push('invoke'),
@@ -893,9 +1419,11 @@ describe('Tauri native browser lifecycle', () => {
     const tabs = [{ id: 'tab-a', created: true, loading: true }];
     const statuses: Array<[string, string]> = [];
     const failureCalls: string[] = [];
+    const lifecycle = browserLifecycleHarness();
     const failedCloseBrowserPane = compileFunction<
       (thread: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...lifecycle,
       findProject: () => project,
       ensureBrowserModel: () => ({ tabs }),
       invoke: async (command: string) => {
@@ -912,15 +1440,11 @@ describe('Tauri native browser lifecycle', () => {
       markActiveSurface: () => failureCalls.push('surface'),
     });
     await expect(failedCloseBrowserPane(thread)).resolves.toBe(false);
-    expect(tabs).toEqual([{ id: 'tab-a', created: false, loading: false }]);
-    expect(failureCalls).toEqual([
-      'browser_destroy_many',
-      'browser_navigate',
-      'sync',
-      'save',
-    ]);
+    expect(tabs).toEqual([{ id: 'tab-a', created: true, loading: true }]);
+    expect(failureCalls).toEqual(['browser_destroy_many']);
+    expect(lifecycle.browserPaneLifecycle(thread).tearingDown).toBe(false);
     expect(statuses).toEqual([[
-      'browser pane close failed; reconciled 0/1 live tabs after possibly partial native teardown; all tabs left dormant; recovery errors: tab-a: Error: native unavailable; close error: Error: native unavailable',
+      'browser pane close failed before structured teardown outcome: Error: native unavailable',
       'error',
     ]]);
   });
@@ -960,13 +1484,20 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserPane = compileFunction<
       (value: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...browserLifecycleHarness(),
       findProject: () => project,
       ensureBrowserModel: () => browser,
       invoke: async (command: string, args: { labels?: string[]; label?: string }) => {
         if (command === 'browser_destroy_many') {
           calls.push(`${command}:${args.labels?.join(',')}`);
           nativeViews.delete('project-a:tab-a');
-          throw new Error('destroy failed at project-a:tab-b');
+          return {
+            destroyed: ['project-a:tab-a'],
+            failures: [{
+              label: 'project-a:tab-b',
+              error: 'destroy failed at project-a:tab-b',
+            }],
+          };
         }
         if (command === 'browser_navigate') {
           calls.push(`${command}:${args.label}`);
@@ -1002,7 +1533,7 @@ describe('Tauri native browser lifecycle', () => {
       },
       {
         id: 'tab-b',
-        created: false,
+        created: true,
         loading: false,
         url: 'https://b.example',
         title: 'B home',
@@ -1014,12 +1545,11 @@ describe('Tauri native browser lifecycle', () => {
     expect(calls).toEqual([
       'browser_destroy_many:project-a:tab-a,project-a:tab-b',
       'browser_navigate:project-a:tab-a',
-      'browser_navigate:project-a:tab-b',
       'sync',
       'save',
     ]);
     expect(statuses).toEqual([[
-      'browser pane close failed; reconciled 1/2 live tabs after possibly partial native teardown; all tabs left dormant; recovery errors: tab-a: Error: tab-a restore unavailable; close error: Error: destroy failed at project-a:tab-b',
+      'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 0/1 confirmed-destroyed live tabs; recreation failures: tab-a: Error: tab-a restore unavailable',
       'error',
     ]]);
   });
@@ -1068,13 +1598,20 @@ describe('Tauri native browser lifecycle', () => {
     const closeBrowserPane = compileFunction<
       (value: BrowserPaneThreadFixture) => Promise<boolean>
     >(functionSource(mainJs, 'closeBrowserPane'), {
+      ...browserLifecycleHarness(),
       findProject: () => project,
       ensureBrowserModel: () => browser,
       invoke: async (command: string, args: { labels?: string[]; label?: string }) => {
         if (command === 'browser_destroy_many') {
           calls.push(`${command}:${args.labels?.join(',')}`);
           nativeViews.delete('project-a:tab-a');
-          throw new Error('destroy failed at project-a:tab-b');
+          return {
+            destroyed: ['project-a:tab-a', 'project-a:tab-c'],
+            failures: [{
+              label: 'project-a:tab-b',
+              error: 'destroy failed at project-a:tab-b',
+            }],
+          };
         }
         if (command === 'browser_navigate') {
           calls.push(`${command}:${args.label}`);
@@ -1128,12 +1665,11 @@ describe('Tauri native browser lifecycle', () => {
     expect(calls).toEqual([
       'browser_destroy_many:project-a:tab-a,project-a:tab-b,project-a:tab-c',
       'browser_navigate:project-a:tab-a',
-      'browser_navigate:project-a:tab-b',
       'sync',
       'save',
     ]);
     expect(statuses).toEqual([[
-      'browser pane close failed; reconciled 2/2 live tabs after possibly partial native teardown; close error: Error: destroy failed at project-a:tab-b',
+      'browser pane close failed; native close failures: project-a:tab-b: destroy failed at project-a:tab-b; recreated 1/1 confirmed-destroyed live tabs',
       'error',
     ]]);
   });

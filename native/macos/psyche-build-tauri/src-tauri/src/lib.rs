@@ -876,12 +876,35 @@ fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> 
     destroy_browser_webview(&app, label)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyFailure {
+    label: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyManyOutcome {
+    destroyed: Vec<String>,
+    failures: Vec<BrowserDestroyFailure>,
+}
+
 #[tauri::command]
-fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> Result<(), String> {
+fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+    let mut outcome = BrowserDestroyManyOutcome {
+        destroyed: Vec::new(),
+        failures: Vec::new(),
+    };
     for label in labels {
-        destroy_browser_webview(&app, Some(label))?;
+        match destroy_browser_webview(&app, Some(label.clone())) {
+            Ok(()) => outcome.destroyed.push(label),
+            Err(error) => outcome
+                .failures
+                .push(BrowserDestroyFailure { label, error }),
+        }
     }
-    Ok(())
+    outcome
 }
 
 #[tauri::command]
