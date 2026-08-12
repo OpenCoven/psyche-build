@@ -1,5 +1,7 @@
+const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
 export function starts(text: string): number[] {
-  const result = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
+  const result = [...segmenter.segment(text)]
     .map((part) => part.index);
   result.push(text.length);
   return result;
@@ -73,7 +75,7 @@ export function vertical(text: string, position: number, delta: number): number 
   const targetStart = lineAt(text, Math.max(0, lineNumber(text, position) + delta));
   const targetEnd = lineEnd(text, targetStart);
   const boundaries = starts(text.slice(targetStart, targetEnd));
-  return targetStart + boundaries[Math.min(column, Math.max(0, boundaries.length - 1)]!;
+  return targetStart + boundaries[Math.min(column, Math.max(0, boundaries.length - 1))]!;
 }
 
 export function kind(character: string, big: boolean): 'space' | 'word' | 'punctuation' {
@@ -83,14 +85,15 @@ export function kind(character: string, big: boolean): 'space' | 'word' | 'punct
 }
 
 export function graphemes(text: string): { value: string; index: number }[] {
-  return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
+  return [...segmenter.segment(text)]
     .map((part) => ({ value: part.segment, index: part.index }));
 }
 
 export function wordForward(text: string, position: number, count: number, big: boolean): number {
   const parts = graphemes(text);
-  let index = Math.max(0, parts.findIndex((part) => part.index >= position));
-  if (index < 0) return text.length;
+  const found = parts.findIndex((part) => part.index >= position);
+  if (found < 0) return text.length;
+  let index = found;
   for (let step = 0; step < count; step += 1) {
     const current = kind(parts[index]?.value ?? ' ', big);
     while (index < parts.length && kind(parts[index]!.value, big) === current) index += 1;
@@ -115,7 +118,9 @@ export function wordBackward(text: string, position: number, count: number, big:
 
 export function wordEnd(text: string, position: number, count: number, big: boolean): number {
   const parts = graphemes(text);
-  let index = Math.max(0, parts.findIndex((part) => part.index >= position));
+  const found = parts.findIndex((part) => part.index >= position);
+  if (found < 0) return text.length;
+  let index = found;
   for (let step = 0; step < count; step += 1) {
     if (step > 0) index += 1;
     while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;

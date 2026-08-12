@@ -3,7 +3,26 @@ import { EDITOR_LIMITS } from './editor/limits.js';
 import { substituteText } from './editor/ex-executor.js';
 import { parseExCommand } from './editor/ex-parser.js';
 import { mapPosition, relocateMark } from './editor/marks.js';
+import {
+  graphemeColumn,
+  graphemeCount,
+  lastLineStart,
+  lineAt,
+  lineEnd,
+  lineNumber,
+  lineStart,
+  matchingDelimiter,
+  nextGrapheme,
+  paragraph,
+  positionAtGraphemeColumn,
+  previousGrapheme,
+  vertical,
+  wordBackward,
+  wordEnd,
+  wordForward,
+} from './editor/motions.js';
 import { compilePattern, escapePattern } from './editor/patterns.js';
+import { objectRange } from './editor/ranges.js';
 import { consumeReplayAction, type ReplayBudget } from './editor/replay.js';
 import { findMatch, wordAt } from './editor/search.js';
 import { editorTransaction, positionsAfterChanges } from './editor/transactions.js';
@@ -73,237 +92,6 @@ function isCommittedText(input: EditorInput): input is Extract<EditorInput, { ki
 
 function inputDisplay(input: EditorInput): string {
   return isCommittedText(input) ? input.text : displayToken(token(input));
-}
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-
-function starts(text: string): number[] {
-  const result = [...segmenter.segment(text)].map((part) => part.index);
-  result.push(text.length);
-  return result;
-}
-
-function previousGrapheme(text: string, position: number): number {
-  let previous = 0;
-  for (const start of starts(text)) {
-    if (start >= position) break;
-    previous = start;
-  }
-  return previous;
-}
-
-function nextGrapheme(text: string, position: number): number {
-  for (const start of starts(text)) if (start > position) return start;
-  return text.length;
-}
-
-function graphemeCount(text: string): number {
-  return Math.max(0, starts(text).length - 1);
-}
-
-function graphemeColumn(text: string, line: number, position: number): number {
-  const relative = Math.max(0, Math.min(lineEnd(text, line) - line, position - line));
-  const boundaries = starts(text.slice(line, lineEnd(text, line)));
-  let column = 0;
-  for (let index = 0; index < boundaries.length; index += 1) {
-    if (boundaries[index]! > relative) break;
-    column = index;
-  }
-  return column;
-}
-
-function positionAtGraphemeColumn(text: string, line: number, column: number): number {
-  const boundaries = starts(text.slice(line, lineEnd(text, line)));
-  return line + boundaries[Math.min(Math.max(0, column), boundaries.length - 1)]!;
-}
-
-function lineStart(text: string, position: number): number {
-  return text.lastIndexOf('\n', Math.max(0, position - 1)) + 1;
-}
-
-function lineEnd(text: string, position: number): number {
-  const end = text.indexOf('\n', position);
-  return end < 0 ? text.length : end;
-}
-
-function lineNumber(text: string, position: number): number {
-  return text.slice(0, position).split('\n').length - 1;
-}
-
-function lineAt(text: string, target: number): number {
-  if (target <= 0) return 0;
-  let position = 0;
-  for (let line = 0; line < target; line += 1) {
-    const end = text.indexOf('\n', position);
-    if (end < 0) return lineStart(text, text.length);
-    position = end + 1;
-  }
-  return position;
-}
-
-function lastLineStart(text: string): number {
-  return lineStart(text, text.length);
-}
-
-function vertical(text: string, position: number, delta: number): number {
-  const start = lineStart(text, position);
-  const column = starts(text.slice(start, position)).length - 1;
-  const targetStart = lineAt(text, Math.max(0, lineNumber(text, position) + delta));
-  const targetEnd = lineEnd(text, targetStart);
-  const boundaries = starts(text.slice(targetStart, targetEnd));
-  return targetStart + boundaries[Math.min(column, Math.max(0, boundaries.length - 1))]!;
-}
-
-function kind(character: string, big: boolean): 'space' | 'word' | 'punctuation' {
-  if (/\s/u.test(character)) return 'space';
-  if (big || /[\p{Letter}\p{Number}_]/u.test(character)) return 'word';
-  return 'punctuation';
-}
-
-function graphemes(text: string): { value: string; index: number }[] {
-  return [...segmenter.segment(text)].map((part) => ({ value: part.segment, index: part.index }));
-}
-
-function wordForward(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
-  const found = parts.findIndex((part) => part.index >= position);
-  if (found < 0) return text.length;
-  let index = found;
-  for (let step = 0; step < count; step += 1) {
-    const current = kind(parts[index]?.value ?? ' ', big);
-    while (index < parts.length && kind(parts[index]!.value, big) === current) index += 1;
-    while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;
-  }
-  return parts[index]?.index ?? text.length;
-}
-
-function wordBackward(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
-  let index = parts.findIndex((part) => part.index >= position);
-  if (index < 0) index = parts.length;
-  index -= 1;
-  for (let step = 0; step < count; step += 1) {
-    while (index > 0 && kind(parts[index]!.value, big) === 'space') index -= 1;
-    const current = kind(parts[index]?.value ?? ' ', big);
-    while (index > 0 && kind(parts[index - 1]!.value, big) === current) index -= 1;
-    if (step + 1 < count) index -= 1;
-  }
-  return parts[Math.max(0, index)]?.index ?? 0;
-}
-
-function wordEnd(text: string, position: number, count: number, big: boolean): number {
-  const parts = graphemes(text);
-  const found = parts.findIndex((part) => part.index >= position);
-  if (found < 0) return text.length;
-  let index = found;
-  for (let step = 0; step < count; step += 1) {
-    if (step > 0) index += 1;
-    while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;
-    const current = kind(parts[index]?.value ?? ' ', big);
-    while (index + 1 < parts.length && kind(parts[index + 1]!.value, big) === current) index += 1;
-  }
-  return parts[index]?.index ?? text.length;
-}
-
-const pairs: Readonly<Record<string, string>> = { '(': ')', '[': ']', '{': '}', '<': '>' };
-const reversePairs: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{', '>': '<' };
-
-function matchingDelimiter(text: string, position: number): number | undefined {
-  const character = text[position];
-  const close = character ? pairs[character] : undefined;
-  const open = character ? reversePairs[character] : undefined;
-  if (!close && !open) return undefined;
-  const direction = close ? 1 : -1;
-  const target = close ?? open!;
-  let depth = 0;
-  for (let cursor = position + direction; cursor >= 0 && cursor < text.length; cursor += direction) {
-    if (text[cursor] === character) depth += 1;
-    if (text[cursor] === target) {
-      if (depth === 0) return cursor;
-      depth -= 1;
-    }
-  }
-  return undefined;
-}
-
-function paragraph(text: string, position: number, direction: 1 | -1): number {
-  if (direction > 0) {
-    const match = /\n\s*\n/g.exec(text.slice(position));
-    return match ? position + match.index + 1 : lastLineStart(text);
-  }
-  const prefix = text.slice(0, lineStart(text, position));
-  let boundary = -1;
-  for (const match of prefix.matchAll(/\n\s*\n/g)) boundary = match.index! + match[0].length;
-  return boundary < 0 ? 0 : boundary;
-}
-
-function objectRange(
-  text: string,
-  position: number,
-  object: string,
-  around: boolean,
-): { from: number; to: number } | undefined {
-  if (object === 'p') {
-    let from = lineStart(text, position);
-    let to = lineEnd(text, position);
-    while (from > 0) {
-      const previous = lineStart(text, Math.max(0, from - 1));
-      if (!text.slice(previous, lineEnd(text, previous)).trim()) break;
-      from = previous;
-    }
-    while (to < text.length) {
-      const next = to + 1;
-      if (!text.slice(next, lineEnd(text, next)).trim()) {
-        if (around) to = Math.min(text.length, lineEnd(text, next) + 1);
-        break;
-      }
-      to = lineEnd(text, next);
-    }
-    if (to < text.length && text[to] === '\n') to += 1;
-    return { from, to };
-  }
-  if (object === 'w' || object === 'W') {
-    const parts = graphemes(text);
-    let index = parts.findIndex((part, partIndex) => {
-      const end = parts[partIndex + 1]?.index ?? text.length;
-      return part.index <= position && position < end;
-    });
-    if (index < 0) return undefined;
-    const big = object === 'W';
-    while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;
-    if (index >= parts.length) return undefined;
-    const objectKind = kind(parts[index]!.value, big);
-    let first = index;
-    let last = index + 1;
-    while (first > 0 && kind(parts[first - 1]!.value, big) === objectKind) first -= 1;
-    while (last < parts.length && kind(parts[last]!.value, big) === objectKind) last += 1;
-    if (around) {
-      if (last < parts.length && kind(parts[last]!.value, big) === 'space') {
-        while (last < parts.length && kind(parts[last]!.value, big) === 'space') last += 1;
-      } else {
-        while (first > 0 && kind(parts[first - 1]!.value, big) === 'space') first -= 1;
-      }
-    }
-    return { from: parts[first]!.index, to: parts[last]?.index ?? text.length };
-  }
-
-  if ('"\'`'.includes(object)) {
-    const from = text.lastIndexOf(object, position);
-    const to = from < 0 ? -1 : text.indexOf(object, Math.max(position + 1, from + 1));
-    if (from < lineStart(text, position) || to < 0 || to > lineEnd(text, position)) return undefined;
-    return around ? { from, to: to + object.length } : { from: from + object.length, to };
-  }
-
-  const open = ')]}'.includes(object) ? reversePairs[object]! : object;
-  const close = pairs[open];
-  if (!close) return undefined;
-  for (let from = text.lastIndexOf(open, position); from >= 0; from = text.lastIndexOf(open, from - 1)) {
-    const to = matchingDelimiter(text, from);
-    if (to !== undefined && from <= position && position <= to) {
-      return around ? { from, to: to + 1 } : { from: from + 1, to };
-    }
-  }
-  return undefined;
 }
 
 function displayToken(value: Token): string {
