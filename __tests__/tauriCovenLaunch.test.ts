@@ -98,7 +98,7 @@ describe('Tauri Coven launch project scope', () => {
     expect(libRs).toContain('if !matches!(launch_kind, "coven-chat" | "coven-attach")');
 
     const spawnAgentThread = functionSource('spawnAgentThread');
-    expect(spawnAgentThread).toContain('launchKind: entry.kind === "coven-chat" ? entry.kind : null');
+    expect(spawnAgentThread).toContain('launchKind: null');
 
     const covenChatLaunch = functionSource('covenChatLaunch');
     expect(covenChatLaunch).toContain('launchKind: "coven-chat"');
@@ -1483,7 +1483,7 @@ describe('native Coven launch routing', () => {
     );
   });
 
-  it('keeps Coven available only through explicit shell and agent launch surfaces', () => {
+  it('keeps Coven available only through explicit guarded launch surfaces', () => {
     expect(mainJs).toContain('Launch a lane — Coven, a shell, or a browser');
     expect(mainJs).not.toContain('No terminal pane yet — opening Psyche…');
     expect(mainJs).not.toMatch(/canvas-empty-sub[\s\S]{0,200}Psyche TUI/);
@@ -1492,14 +1492,22 @@ describe('native Coven launch routing', () => {
     expect(mainJs).toMatch(/cmd:\s*"\/new-thread"[\s\S]*?run:\s*runNewThreadCommand/);
     expect(mainJs).toMatch(/cmd:\s*"\/new-shell"[\s\S]*?run:\s*runNewShellCommand/);
     expect(mainJs).toMatch(/cmd:\s*"\/new-psyche"[\s\S]*?run:\s*runNewPsycheCommand/);
-    expect(functionSource('runNewThreadCommand')).toMatch(/spawnCovenThread/);
+    expect(functionSource('runNewThreadCommand')).toContain(
+      'return ensureProjectCoven(activeProject());',
+    );
     expect(functionSource('runNewShellCommand')).toMatch(/return createTerminalPane\(\);/);
     expect(functionSource('runNewPsycheCommand')).toMatch(/spawnPsycheThread/);
+    expect(functionSource('spawnAgentThread')).toMatch(
+      /if \(entry\.id === "coven-code"\) \{[\s\S]*return ensureProjectCoven\(project\);[\s\S]*\}\s*if \(!\(await showTerminalView\(\)\)\) return null;/,
+    );
     expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
     expect(functionSource('setActiveProject')).not.toContain('ensureCoven');
     expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
     expect(functionSource('boot')).not.toContain('ensureProjectCoven');
     expect(mainJs).toContain('label: "Open Coven Terminal"');
+    expect(mainJs).toMatch(
+      /label: "Open Coven Terminal"[\s\S]*await ensureProjectCoven\(project\);/,
+    );
     expect(mainJs).toMatch(/\/new-thread[\s\S]*\/new-shell[\s\S]*\/new-psyche/);
   });
 });
