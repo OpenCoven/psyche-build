@@ -131,12 +131,16 @@ plan, every design spec, and the three explicit retired manuals.
 Run:
 
 ```bash
-grep -Ev \
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+if invalid_paths="$(grep -Ev \
   '^(docs/superpowers/(plans|specs)/.+\.md|docs/(BREAKING-CHANGES|PRODUCT-SPEC|RELEASE)\.md)$' \
-  "$(git rev-parse --git-path psyche-retired-doc-paths)"
+  "$RETIRED_PATHS_FILE")"; then
+  printf '%s\n' "$invalid_paths"
+  exit 1
+fi
 ```
 
-Expected: no output and exit 1 from `grep`.
+Expected: exit 0 with no output.
 
 ### Task 2: Add the commit-history contract
 
@@ -929,11 +933,14 @@ Run:
 ```bash
 BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
 BASELINE="$(cat "$BASELINE_FILE")"
-git diff --name-only "$BASELINE" -- | grep -Ev \
-  '^(\.github/workflows/ci\.yml|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|package\.json|__tests__/(documentationHistory|releaseDocs|releaseVersion)\.test\.ts|docs/|native/ios/README\.md)$'
+if invalid_paths="$(git diff --name-only "$BASELINE" -- | grep -Ev \
+  '^(\.github/workflows/ci\.yml|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|package\.json|__tests__/(documentationHistory|releaseDocs|releaseVersion)\.test\.ts|docs/|native/ios/README\.md)$')"; then
+  printf '%s\n' "$invalid_paths"
+  exit 1
+fi
 ```
 
-Expected: no output and exit 1 from `grep`. Product source files remain
+Expected: exit 0 with no output. Product source files remain
 unchanged.
 
 ### Task 9: Create the atomic cleanup commit
