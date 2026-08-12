@@ -5100,17 +5100,23 @@
           }
         }
       }
+      function reportCloseFailure(error) {
+        var detail = error && error.message ? ": " + error.message : "";
+        setStatus("Failed to close " + label + detail, "error");
+      }
       var result;
       try {
         result = onConfirm();
       } catch (err) {
+        reportCloseFailure(err);
         if (confirmOwnedFocus) restoreFocusIfNeeded();
         return;
       }
       if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
       Promise.resolve(result).then(function (succeeded) {
-        if (succeeded !== false) restoreFocusIfNeeded();
-      }, function () {
+        if (succeeded === false) restoreFocusIfNeeded();
+      }, function (error) {
+        reportCloseFailure(error);
         restoreFocusIfNeeded();
       });
     });

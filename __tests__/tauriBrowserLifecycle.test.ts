@@ -2999,7 +2999,10 @@ describe('Tauri native browser lifecycle', () => {
     await expect(requestThreadClose({ id: 'web', kind: 'web' })).resolves.toBe(true);
     await expect(requestThreadClose({ id: 'shell', kind: 'shell' })).resolves.toBe(true);
 
-    expect(functionSource(mainJs, 'armSessionClose')).toContain('var result = onConfirm();');
+    const armSessionClose = functionSource(mainJs, 'armSessionClose');
+    expect(armSessionClose).toContain('result = onConfirm();');
+    expect(armSessionClose).toContain('if (succeeded === false) restoreFocusIfNeeded();');
+    expect(armSessionClose).toContain('reportCloseFailure(error);');
     expect(mainJs).toContain('return requestThreadClose(thread);');
     expect(mainJs).toContain('requestThreadClose(findThread(state.activeThreadId))');
     expect(mainJs).toMatch(

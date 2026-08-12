@@ -650,7 +650,7 @@ function createRenderer(options: {
     setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
     armSessionClose: (
-      host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
+      host: FakeElement, close: FakeElement, label: string, onConfirm: () => unknown,
     ) => void;
     disarmSessionClose: (options?: { restoreFocus?: boolean }) => void;
     closeCovenSession: (session: RemoteSession) => Promise<boolean>;
@@ -2608,6 +2608,65 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).toHaveBeenCalledWith('local');
       expect(event.propagationStopped).toBe(true);
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+    });
+
+    it('restores focus only when an async close reports failure', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
+      const row = wrapper.querySelector('.session-row')!;
+      const close = wrapper.querySelector('.session-close')!;
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.resolve(false));
+      const failedConfirm = wrapper.querySelector('.session-close-confirm')!;
+      failedConfirm.focus();
+      await failedConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.document.activeElement).toBe(row);
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.resolve(true));
+      const successfulConfirm = wrapper.querySelector('.session-close-confirm')!;
+      successfulConfirm.focus();
+      await successfulConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.document.activeElement).not.toBe(row);
+    });
+
+    it('reports thrown and rejected close failures while restoring focus', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
+      const row = wrapper.querySelector('.session-row')!;
+      const close = wrapper.querySelector('.session-close')!;
+
+      renderer.armSessionClose(row, close, 'Local', () => {
+        throw new Error('sync failure');
+      });
+      const thrownConfirm = wrapper.querySelector('.session-close-confirm')!;
+      thrownConfirm.focus();
+      await thrownConfirm.emit('click');
+      expect(renderer.setStatus).toHaveBeenLastCalledWith(
+        'Failed to close Local: sync failure',
+        'error',
+      );
+      expect(renderer.document.activeElement).toBe(row);
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.reject(
+        new Error('async failure'),
+      ));
+      const rejectedConfirm = wrapper.querySelector('.session-close-confirm')!;
+      rejectedConfirm.focus();
+      await rejectedConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.setStatus).toHaveBeenLastCalledWith(
+        'Failed to close Local: async failure',
+        'error',
+      );
+      expect(renderer.document.activeElement).toBe(row);
     });
 
     it('rejects an overdue confirmation click without waiting for timer callbacks', async () => {
