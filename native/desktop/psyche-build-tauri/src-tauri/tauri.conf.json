@@ -23,6 +23,7 @@
         "transparent": false
       }
     ],
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; frame-src https: http:; connect-src 'self' ipc: http://ipc.localhost https: http:"

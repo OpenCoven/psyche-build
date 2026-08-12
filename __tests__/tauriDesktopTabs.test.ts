@@ -197,8 +197,8 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(
       /let\s+result\s*=\s*unsafe\s*\{\s*TerminateJobObject\(self\.raw_handle\(\),\s*1\)\s*\};\s*check_windows_bool\(result,\s*std::io::Error::last_os_error\)/
     );
-    const windowsStart = tauriLib.indexOf(
-      '#[cfg(windows)]\nfn terminate_platform_process'
+    const windowsStart = tauriLib.search(
+      /#\[cfg\(windows\)\]\r?\nfn terminate_platform_process/,
     );
     expect(windowsStart).toBeGreaterThanOrEqual(0);
     const windowsEnd = tauriLib.indexOf('\n#[cfg', windowsStart + 1);

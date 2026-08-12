@@ -892,12 +892,15 @@ fn verified_unix_process_groups(
     identity: UnixPtyIdentity,
     observation: UnixTerminationObservation,
 ) -> std::io::Result<Vec<libc::pid_t>> {
+    // The per-group session checks below establish ownership. Some PTYs report
+    // a changed terminal session while their foreground and original groups
+    // still independently prove they belong to this spawned session.
     if observation.current_pid <= 1
         || observation.current_process_group <= 1
         || observation.current_session <= 1
+        || observation.tty_session <= 1
         || identity.session_id <= 1
         || identity.original_process_group != identity.session_id
-        || observation.tty_session != identity.session_id
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -4402,6 +4405,31 @@ mod pty_runtime_tests {
                 current_process_group: 100,
                 current_session: 100,
                 tty_session: 4_100,
+                foreground_process_group: 4_200,
+                foreground_session: Some(4_100),
+                foreground_group: Some(4_200),
+                original_session: Some(4_100),
+                original_group: Some(4_100),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(groups, vec![4_200, 4_100]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_uses_independently_verified_groups_when_tty_session_changes() {
+        let groups = verified_unix_process_groups(
+            UnixPtyIdentity {
+                session_id: 4_100,
+                original_process_group: 4_100,
+            },
+            UnixTerminationObservation {
+                current_pid: 100,
+                current_process_group: 100,
+                current_session: 100,
+                tty_session: 4_200,
                 foreground_process_group: 4_200,
                 foreground_session: Some(4_100),
                 foreground_group: Some(4_200),

@@ -27,6 +27,7 @@ function stalePathReferences(): string[] {
       && file !== '__tests__/tauriDesktopPlatform.test.ts'
       && !file.startsWith('docs/superpowers/')
       && textExtensions.has(extname(file)))
+    .filter((file) => existsSync(join(root, file)))
     .filter((file) => stalePathPattern.test(readFileSync(join(root, file), 'utf8')));
 }
 
@@ -152,9 +153,9 @@ describe('desktop Tauri layout', () => {
     const linux = json('tauri.linux.conf.json');
 
     expect(base.app.windows[0]).toMatchObject({ transparent: false, decorations: true });
-    expect(base.app).not.toHaveProperty('macOSPrivateApi');
+    expect(base.app.macOSPrivateApi).toBe(true);
     expect(mac.app.windows[0]).toMatchObject({ transparent: true, titleBarStyle: 'Overlay' });
-    expect(mac.app.macOSPrivateApi).toBe(true);
+    expect(mac.app).not.toHaveProperty('macOSPrivateApi');
     expect(win.app.windows[0].transparent).toBe(false);
     expect(linux.app.windows[0].transparent).toBe(false);
     expect(base.app.security.csp).toBe(originalBaseCsp);
