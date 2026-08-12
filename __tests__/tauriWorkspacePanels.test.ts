@@ -362,7 +362,7 @@ describe('Tauri workspace panels', () => {
       expect(source).toContain('var workspaceRoot = activeWorkspaceRoot(project);');
       expect(source).toMatch(/gitPaneThread\(project\.id, workspaceRoot\)/);
       expect(source).toMatch(
-        /if \(existing\) \{ await focusThread\(existing\.id\); return existing; \}/,
+        /if \(existing\) \{[\s\S]*revealGitPane\(existing\);[\s\S]*await focusThread\(existing\.id\);[\s\S]*return existing;/,
       );
       expect(source).toContain('preparePanePlacement(id, project.id, workspaceRoot)');
     });
@@ -547,7 +547,7 @@ describe('Tauri workspace panels', () => {
       const existing = { id: 'git-existing' };
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
-        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
         'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
         'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
@@ -556,6 +556,8 @@ describe('Tauri workspace panels', () => {
         () => undefined,
         () => '/worktree-a',
         () => existing,
+        async () => true,
+        () => undefined,
         async (id: string) => { calls.push(`focus:${id}`); },
         () => { calls.push('allocate'); return 'git-new'; },
         () => { calls.push('place'); return null; },
@@ -573,13 +575,153 @@ describe('Tauri workspace panels', () => {
       expect(calls).toEqual(['focus:git-existing']);
     });
 
+    it('cancels before allocating Git state when leaving a dirty file is declined', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const state = { threads: [] as unknown[] };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
+        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => { calls.push('lookup'); return null; },
+        async () => { calls.push('guard'); return false; },
+        () => { calls.push('reveal'); },
+        async () => { calls.push('focus'); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return { id: 'placement' }; },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('move'); },
+        () => { calls.push('chrome'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<null>;
+
+      await expect(openOrFocusGitPane()).resolves.toBeNull();
+      expect(state.threads).toEqual([]);
+      expect(calls).toEqual(['guard']);
+    });
+
+    it('rechecks scope and deduplicates after the terminal transition', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      let project = { id: 'project-a' };
+      const existing = { id: 'git-project-b' };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
+        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => project,
+        () => undefined,
+        (value: typeof project) => value.id === 'project-a' ? '/worktree-a' : '/worktree-b',
+        (projectId: string, workspaceRoot: string) => {
+          calls.push(`lookup:${projectId}:${workspaceRoot}`);
+          return projectId === 'project-b' ? existing : null;
+        },
+        async () => { project = { id: 'project-b' }; return true; },
+        () => { calls.push('reveal'); },
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => { calls.push('commit'); },
+        { threads: [] },
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(calls).toEqual([
+        'lookup:project-b:/worktree-b', 'reveal', 'focus:git-project-b',
+      ]);
+    });
+
+    it('reveals an existing Git pane excluded by the current focus set', () => {
+      const layout = {
+        root: {
+          type: 'split', id: 'split', orientation: 'column', ratio: 0.5,
+          first: { type: 'leaf', id: 'git-leaf', threadId: 'git' },
+          second: { type: 'leaf', id: 'other-leaf', threadId: 'other' },
+        },
+        focusedLeafId: 'other-leaf', activeSetId: 'other-set',
+        spanRoot: { stale: true }, spanSignature: 'stale', maximizedLeafId: null,
+      };
+      const revealGitPane = Function(
+        'paneLayoutForThread', 'PsychePanes', 'seedSets',
+        `"use strict";
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         return (${functionSource('revealGitPane')});`,
+      )(
+        () => layout,
+        {
+          findLeafByThreadId(root: typeof layout.root, threadId: string) {
+            return threadId === 'git' ? root.first : root.second;
+          },
+        },
+        [{ id: 'other-set', threadIds: ['other'] }],
+      ) as (thread: { id: string }) => boolean;
+
+      expect(revealGitPane({ id: 'git' })).toBe(true);
+      expect(layout.activeSetId).toBeNull();
+      expect(layout.spanRoot).toBeNull();
+      expect(layout.spanSignature).toBeNull();
+    });
+
+    it('leaves compatible scope intact but clears another pane\'s maximize state before focusing Git', () => {
+      const layout = {
+        root: {
+          type: 'split', id: 'split', orientation: 'column', ratio: 0.5,
+          first: { type: 'leaf', id: 'git-leaf', threadId: 'git' },
+          second: { type: 'leaf', id: 'other-leaf', threadId: 'other' },
+        },
+        focusedLeafId: 'other-leaf', activeSetId: 'shared-set',
+        spanRoot: { keep: true }, spanSignature: 'keep', maximizedLeafId: 'other-leaf',
+      };
+      const revealGitPane = Function(
+        'paneLayoutForThread', 'PsychePanes', 'seedSets',
+        `"use strict";
+         var focusSets = seedSets;
+         var findFocusSet = ${functionSource('findFocusSet')};
+         return (${functionSource('revealGitPane')});`,
+      )(
+        () => layout,
+        {
+          findLeafByThreadId(root: typeof layout.root, threadId: string) {
+            return threadId === 'git' ? root.first : root.second;
+          },
+        },
+        [{ id: 'shared-set', threadIds: ['git', 'other'] }],
+      ) as (thread: { id: string }) => boolean;
+
+      expect(revealGitPane({ id: 'git' })).toBe(true);
+      expect(layout.activeSetId).toBe('shared-set');
+      expect(layout.spanRoot).toEqual({ keep: true });
+      expect(layout.spanSignature).toBe('keep');
+      expect(layout.maximizedLeafId).toBeNull();
+    });
+
     it('allocates a separate Git pane for another scope', async () => {
       const source = functionSource('openOrFocusGitPane');
       const calls: string[] = [];
       const state = { threads: [] as Array<{ id: string; projectId: string; worktreePath: string }> };
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
-        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
         'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
         'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
@@ -591,6 +733,8 @@ describe('Tauri workspace panels', () => {
           calls.push(`lookup:${projectId}:${workspaceRoot}`);
           return null;
         },
+        async () => true,
+        () => undefined,
         async (id: string) => { calls.push(`focus:${id}`); },
         () => 'git-new',
         (id: string, projectId: string, workspaceRoot: string) => {
@@ -623,7 +767,7 @@ describe('Tauri workspace panels', () => {
       const calls: string[] = [];
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
-        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
         'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
         'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
@@ -632,6 +776,8 @@ describe('Tauri workspace panels', () => {
         (message: string) => { calls.push(`status:${message}`); },
         () => '/worktree-a',
         () => null,
+        async () => true,
+        () => undefined,
         async () => { calls.push('focus'); },
         () => 'git-new',
         () => null,

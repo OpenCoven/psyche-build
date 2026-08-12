@@ -2348,9 +2348,18 @@
   async function openOrFocusGitPane(dropTarget) {
     var project = activeProject();
     if (!project) { setStatus("No project open", "warn"); return null; }
+    if (!(await showTerminalView())) return null;
+    // The file guard can await user input, so project/worktree selection may
+    // have changed while it was open. Resolve and dedupe only after it passes.
+    project = activeProject();
+    if (!project) { setStatus("No project open", "warn"); return null; }
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = gitPaneThread(project.id, workspaceRoot);
-    if (existing) { await focusThread(existing.id); return existing; }
+    if (existing) {
+      revealGitPane(existing);
+      await focusThread(existing.id);
+      return existing;
+    }
     var id = makeThreadId();
     var placement = preparePanePlacement(id, project.id, workspaceRoot);
     if (!placement) {
@@ -2376,6 +2385,7 @@
       ptyStarted: false,
     };
     commitPanePlacement(placement);
+    revealGitPane(thread);
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountToolPane(thread);
@@ -3110,6 +3120,28 @@
 
   function paneLayoutForThread(thread) {
     return thread ? paneLayoutFor(thread.projectId, thread.worktreePath) : null;
+  }
+
+  /** Make a Git leaf visible without discarding compatible presentation state. */
+  function revealGitPane(thread) {
+    var layout = paneLayoutForThread(thread);
+    var leaf = layout && layout.root && PsychePanes.findLeafByThreadId(layout.root, thread.id);
+    if (!layout || !leaf) return false;
+    var changed = false;
+    if (layout.activeSetId) {
+      var set = findFocusSet(layout.activeSetId);
+      if (!set || set.threadIds.indexOf(thread.id) === -1) {
+        layout.activeSetId = null;
+        layout.spanRoot = null;
+        layout.spanSignature = null;
+        changed = true;
+      }
+    }
+    if (layout.maximizedLeafId && layout.maximizedLeafId !== leaf.id) {
+      layout.maximizedLeafId = null;
+      changed = true;
+    }
+    return changed;
   }
 
   // -------- Focus-set interactions --------
@@ -7809,8 +7841,32 @@
     return spawnShellThread(project);
   }
 
+  function isTextEntryTarget(target) {
+    var tag = String(target && target.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" ||
+      Boolean(target && target.isContentEditable);
+  }
+
+  function gitPaneShortcutBlocked() {
+    return Boolean(
+      (dirtyFileDialogEl && dirtyFileDialogEl.open) ||
+      agentPickerOpen() ||
+      (helpOverlayEl && !helpOverlayEl.hidden)
+    );
+  }
+
+  async function routeGitPaneShortcut(event) {
+    if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
+        String(event.key).toLowerCase() !== "g" ||
+        isTextEntryTarget(event.target) || gitPaneShortcutBlocked()) return false;
+    event.preventDefault();
+    await openOrFocusGitPane();
+    return true;
+  }
+
   document.addEventListener("keydown", async function (e) {
     if (routeAgentPickerModalKeydown(e)) return;
+    if (await routeGitPaneShortcut(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
@@ -7825,11 +7881,6 @@
     }
     if (String(e.key).toLowerCase() === "p") {
       if (openAgentPicker()) e.preventDefault();
-      return;
-    }
-    if (String(e.key).toLowerCase() === "g" && !e.altKey && !e.shiftKey) {
-      e.preventDefault();
-      await openOrFocusGitPane();
       return;
     }
     // ⌘O opens a new project (folder picker → addProject → Coven).
@@ -7935,10 +7986,25 @@
     });
   }
 
-  function closeNewPaneMenu() {
+  function newPaneMenuItems() {
+    if (!newPaneMenuEl) return [];
+    return Array.prototype.filter.call(
+      newPaneMenuEl.querySelectorAll('[role="menuitem"]'),
+      function (item) { return !item.disabled; }
+    );
+  }
+  function focusNewPaneMenuItem(index) {
+    var items = newPaneMenuItems();
+    if (!items.length) return false;
+    var next = ((index % items.length) + items.length) % items.length;
+    items[next].focus();
+    return true;
+  }
+  function closeNewPaneMenu(restoreTriggerFocus) {
     if (newPaneMenuEl) newPaneMenuEl.hidden = true;
     var trigger = document.getElementById("rail-new-tab");
     if (trigger) trigger.setAttribute("aria-expanded", "false");
+    if (restoreTriggerFocus && trigger && trigger.focus) trigger.focus();
   }
   function toggleNewPaneMenu() {
     if (!newPaneMenuEl) { createTerminalPane(); return; }
@@ -7952,9 +8018,53 @@
           : project ? "New pane in " + project.name : "New pane";
       }
     }
-    newPaneMenuEl.hidden = !open;
     var trigger = document.getElementById("rail-new-tab");
-    if (trigger) trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) { closeNewPaneMenu(); return; }
+    newPaneMenuEl.hidden = false;
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    focusNewPaneMenuItem(0);
+  }
+  function handleNewPaneMenuKeydown(event) {
+    if (!newPaneMenuEl || newPaneMenuEl.hidden) return false;
+    var items = newPaneMenuItems();
+    if (!items.length) return false;
+    var index = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusNewPaneMenuItem(index < 0 ? 0 : index + 1);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusNewPaneMenuItem(index < 0 ? items.length - 1 : index - 1);
+      return true;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      focusNewPaneMenuItem(0);
+      return true;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      focusNewPaneMenuItem(items.length - 1);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      items[index < 0 ? 0 : index].click();
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (event.stopPropagation) event.stopPropagation();
+      closeNewPaneMenu(true);
+      return true;
+    }
+    if (event.key === "Tab") {
+      closeNewPaneMenu();
+      return false;
+    }
+    return false;
   }
   function onMenuClick(id, handler) {
     var el = document.getElementById(id);
@@ -7978,6 +8088,7 @@
   });
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
+  if (newPaneMenuEl) newPaneMenuEl.addEventListener("keydown", handleNewPaneMenuKeydown);
 
   function consumeAgentPickerKey(event) {
     event.preventDefault();
@@ -8124,7 +8235,7 @@
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
       var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
-      closeNewPaneMenu();
+      closeNewPaneMenu(menuWasOpen);
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }

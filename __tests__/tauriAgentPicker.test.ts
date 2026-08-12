@@ -345,6 +345,65 @@ describe('Tauri agent picker', () => {
     expect(listKeydownSource).toContain('event.key === "Escape"');
   });
 
+  it('routes Git only from an unmodified Command-G outside text and modal contexts', async () => {
+    const source = [
+      'isTextEntryTarget', 'gitPaneShortcutBlocked', 'routeGitPaneShortcut',
+    ].map(functionSource).join('\n');
+    let opened = 0;
+    let dirtyDialog = { open: false };
+    const routeGitPaneShortcut = Function(
+      'openOrFocusGitPane', 'dirtyFileDialogEl', 'agentPickerOpen', 'helpOverlayEl',
+      `"use strict"; ${source}; return routeGitPaneShortcut;`,
+    )(
+      async () => { opened += 1; return { id: 'git' }; },
+      dirtyDialog,
+      () => false,
+      { hidden: true },
+    ) as (event: {
+      key: string;
+      metaKey?: boolean;
+      ctrlKey?: boolean;
+      altKey?: boolean;
+      shiftKey?: boolean;
+      target?: { tagName?: string; isContentEditable?: boolean };
+      preventDefault: () => void;
+    }) => Promise<boolean>;
+    const event = (overrides: Record<string, unknown> = {}) => {
+      let prevented = 0;
+      return {
+        value: {
+          key: 'g', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false,
+          target: { tagName: 'DIV' },
+          preventDefault: () => { prevented += 1; },
+          ...overrides,
+        },
+        prevented: () => prevented,
+      };
+    };
+
+    const commandG = event();
+    await expect(routeGitPaneShortcut(commandG.value)).resolves.toBe(true);
+    expect(opened).toBe(1);
+    expect(commandG.prevented()).toBe(1);
+
+    for (const overrides of [
+      { metaKey: false, ctrlKey: true },
+      { altKey: true },
+      { shiftKey: true },
+      { target: { tagName: 'INPUT' } },
+      { target: { tagName: 'DIV', isContentEditable: true } },
+    ]) {
+      const ignored = event(overrides);
+      await expect(routeGitPaneShortcut(ignored.value)).resolves.toBe(false);
+      expect(ignored.prevented()).toBe(0);
+    }
+    dirtyDialog.open = true;
+    const modal = event();
+    await expect(routeGitPaneShortcut(modal.value)).resolves.toBe(false);
+    expect(modal.prevented()).toBe(0);
+    expect(opened).toBe(1);
+  });
+
   it('stops propagation for picker-owned keys, especially Escape', () => {
     let renderCalls = 0;
     let launchCalls = 0;
@@ -821,14 +880,95 @@ describe('Tauri agent picker', () => {
     expect(mainJs).toMatch(
       /cmd: "\/git",[\s\S]*desc: "Open or focus the Git pane"[\s\S]*openOrFocusGitPane\(\)/,
     );
-    expect(mainJs).toMatch(
-      /String\(e\.key\)\.toLowerCase\(\) === "g"[\s\S]*await openOrFocusGitPane\(\)/,
-    );
 
     const emptyState = functionSource('renderTerminalEmptyState');
     expect(emptyState).toContain('if (action === "term") createTerminalPane();');
     expect(emptyState).toContain('else if (action === "agent") openAgentPicker();');
     expect(emptyState).toContain('else openBlankBrowserTab();');
+  });
+
+  it('supports standard non-modal keyboard navigation for the New Pane menu', () => {
+    expect(indexHtml).toMatch(/id="rail-new-tab"[\s\S]*aria-controls="new-pane-menu"/);
+    const items: Array<{ disabled: boolean; focus: () => void; click: () => void }> = [];
+    const trigger = {
+      attributes: {} as Record<string, string>,
+      focusCalls: 0,
+      setAttribute(name: string, value: string) { this.attributes[name] = value; },
+      focus() { this.focusCalls += 1; },
+    };
+    const menu = {
+      hidden: true,
+      querySelectorAll: () => items,
+    };
+    const document = {
+      activeElement: null as unknown,
+      getElementById: (id: string) => id === 'rail-new-tab' ? trigger : null,
+    };
+    const clicks = [0, 0, 0];
+    for (let index = 0; index < 3; index += 1) {
+      items.push({
+        disabled: false,
+        focus: () => { document.activeElement = items[index]; },
+        click: () => { clicks[index] += 1; },
+      });
+    }
+    const source = [
+      'newPaneMenuItems', 'focusNewPaneMenuItem', 'closeNewPaneMenu',
+      'toggleNewPaneMenu', 'handleNewPaneMenuKeydown',
+    ].map(functionSource).join('\n');
+    const api = Function(
+      'document', 'menu',
+      `"use strict";
+       var newPaneMenuEl = menu;
+       var newPaneMenuHeadEl = { textContent: '' };
+       var activeProject = function () { return null; };
+       var selectedWorktree = function () { return null; };
+       var createTerminalPane = function () { throw new Error('menu is present'); };
+       ${source}
+       return { toggleNewPaneMenu, handleNewPaneMenuKeydown };`,
+    )(document, menu) as {
+      toggleNewPaneMenu: () => void;
+      handleNewPaneMenuKeydown: (event: {
+        key: string;
+        preventDefault: () => void;
+      }) => boolean;
+    };
+    const key = (value: string) => {
+      let prevented = 0;
+      return {
+        event: { key: value, preventDefault: () => { prevented += 1; } },
+        prevented: () => prevented,
+      };
+    };
+
+    api.toggleNewPaneMenu();
+    expect(menu.hidden).toBe(false);
+    expect(document.activeElement).toBe(items[0]);
+    expect(trigger.attributes['aria-expanded']).toBe('true');
+
+    const down = key('ArrowDown');
+    expect(api.handleNewPaneMenuKeydown(down.event)).toBe(true);
+    expect(document.activeElement).toBe(items[1]);
+    expect(down.prevented()).toBe(1);
+    api.handleNewPaneMenuKeydown(key('End').event);
+    expect(document.activeElement).toBe(items[2]);
+    api.handleNewPaneMenuKeydown(key('Enter').event);
+    expect(clicks).toEqual([0, 0, 1]);
+    api.handleNewPaneMenuKeydown(key('Home').event);
+    api.handleNewPaneMenuKeydown(key(' ').event);
+    expect(clicks).toEqual([1, 0, 1]);
+
+    const escape = key('Escape');
+    expect(api.handleNewPaneMenuKeydown(escape.event)).toBe(true);
+    expect(menu.hidden).toBe(true);
+    expect(trigger.focusCalls).toBe(1);
+    expect(escape.prevented()).toBe(1);
+
+    api.toggleNewPaneMenu();
+    const tab = key('Tab');
+    expect(api.handleNewPaneMenuKeydown(tab.event)).toBe(false);
+    expect(menu.hidden).toBe(true);
+    expect(tab.prevented()).toBe(0);
   });
 
   it('keeps Coven startup behind explicit launch surfaces', () => {
