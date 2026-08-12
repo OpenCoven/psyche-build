@@ -9,6 +9,7 @@ import type { ActionResult, ActionContext } from '../types.js';
 import type { PsychePane } from '../../types.js';
 import type { WorktreeInfo, MergeQueueItem, MultiMergeResult } from './types.js';
 import type { MergeValidationResult } from '../../utils/mergeValidation.js';
+import { tearDownGenerationBoundPane } from '../../utils/TmuxGenerationGuard.js';
 import { getWorktreeDisplayLabel } from '../../utils/worktreeDiscovery.js';
 import {
   getAgentDescription,
@@ -665,16 +666,35 @@ async function createAndMonitorConflictPane(
             throw new Error('Multi-merge requires exact pane identity removal support');
           }
           const panesWithoutConflictPane = await context.removePaneIdentitiesFromConfig(
-            [{ id: conflictPane.id, paneId: conflictPane.paneId }],
-            async () => {
-              const { tearDownPaneWithVerification } = await import('../../utils/paneTeardown.js');
-              const teardown = await tearDownPaneWithVerification({
-                probe: () => tmuxService.probePanePresence(conflictPane.paneId),
-                kill: () => tmuxService.killPane(conflictPane.paneId),
-              });
+            [{
+              id: conflictPane.id,
+              paneId: conflictPane.paneId,
+              ...(conflictPane.tmuxServerIdentity
+                ? { tmuxServerIdentity: conflictPane.tmuxServerIdentity }
+                : {}),
+            }],
+            async (_freshPanes, exactPanes) => {
+              const current = exactPanes?.[0];
+              if (!current) {
+                throw new Error(
+                  `Fresh conflict pane record "${conflictPane.id}" is missing or rebound`,
+                );
+              }
+              if (!current.tmuxServerIdentity) {
+                throw new Error(
+                  `Could not verify tmux generation for conflict pane ${current.paneId}`,
+                );
+              }
+              const teardown = await tearDownGenerationBoundPane(
+                tmuxService,
+                current.paneId,
+                current.tmuxServerIdentity,
+              );
               if (teardown.presence !== 'absent') {
                 throw new Error(
-                  `Could not confirm conflict pane ${conflictPane.paneId} closed (${teardown.presence})`,
+                  `Could not confirm conflict pane ${current.paneId} closed (${teardown.presence})${
+                    teardown.error ? `: ${teardown.error}` : ''
+                  }`,
                 );
               }
             },

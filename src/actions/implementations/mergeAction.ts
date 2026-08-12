@@ -165,6 +165,9 @@ async function executeSingleRootMerge(
         siblingPanes.map((sibling) => ({
           id: sibling.id,
           paneId: sibling.paneId,
+          ...(sibling.tmuxServerIdentity
+            ? { tmuxServerIdentity: sibling.tmuxServerIdentity }
+            : {}),
         })),
         async (freshPanes, exactPanes) => {
           const fresh = (exactPanes || []).map((pane) => pane as PsychePane);

@@ -213,6 +213,14 @@ describe('merge sibling teardown', () => {
     const result = await confirmation.onConfirm!();
 
     expect(result).toMatchObject({ type: 'confirm', title: 'Merge Worktree' });
+    expect(removePaneIdentitiesFromConfigMock).toHaveBeenCalledWith(
+      [{
+        id: sibling.id,
+        paneId: sibling.paneId,
+        tmuxServerIdentity: pane.tmuxServerIdentity,
+      }],
+      expect.any(Function),
+    );
     expect(tmuxServiceMock.killWindow).toHaveBeenCalledWith('@8');
     expect(tmuxServiceMock.killPane).toHaveBeenCalledWith('%2');
     expect(order).toEqual(['kill-window', 'kill-pane', 'remove-record']);
