@@ -6992,6 +6992,16 @@
     if (findThread(context.pane.id) !== context.pane) return false;
     return findBrowserPane(context.project.id, context.worktreePath) === context.pane;
   }
+  function browserNavigationOwnsVisiblePane(context) {
+    if (!context || !context.project || state.activeProjectId !== context.project.id) return false;
+    var project = activeProject();
+    if (!project || project !== context.project || project.id !== context.project.id ||
+        activeWorkspaceRoot(project) !== context.worktreePath) return false;
+    if (findThread(context.pane.id) !== context.pane ||
+        findBrowserPane(context.project.id, context.worktreePath) !== context.pane ||
+        browserPaneIsClosing(context.pane) || context.pane.hidden) return false;
+    return !!visibleBrowserBounds();
+  }
   async function discardObsoleteBrowserNavigation(context) {
     invalidateBrowserNavigation(context.tab);
     try {
@@ -7294,7 +7304,6 @@
           await discardObsoleteBrowserNavigation(context);
           return false;
         }
-        browser.activeTabId = tab.id;
         tab.created = true; tab.url = normalised;
         if (opts.fromHistory && typeof opts.historyIndex === "number") {
           tab.historyIndex = opts.historyIndex;
@@ -7303,8 +7312,9 @@
           tab.history.push(normalised);
           tab.historyIndex = tab.history.length - 1;
         }
-        if (previewEmpty) previewEmpty.hidden = true;
-        renderBrowserTabs(); syncUrlInput(); saveWorkspaceSoon(); invoke("browser_hide_all_except", { label: label }).catch(function () {});
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else syncBrowserBounds();
+        saveWorkspaceSoon();
         setTimeout(function () {
           if (browserNavigationIsCurrent(context) && tab.loading && tab.url === normalised) {
             markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
@@ -7318,7 +7328,9 @@
         }
         tab.loading = false;
         tab.title = previousTitle;
-        renderBrowserTabs(); updateBrowserControls(); writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else syncBrowserBounds();
+        writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
         return false;
       }
     };

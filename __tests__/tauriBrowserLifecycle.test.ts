@@ -268,6 +268,7 @@ function browserNavigationDependencies(
   };
   return {
     ...lifecycle,
+    state: { activeProjectId: project.id },
     activeProject: () => project,
     activeWorkspaceRoot: () => '/workspace',
     createBrowserPane: async () => pane,
@@ -286,12 +287,15 @@ function browserNavigationDependencies(
     invoke,
     previewEmpty: { hidden: false },
     syncUrlInput: () => {},
+    syncProjectBrowser: () => {},
+    syncBrowserBounds: () => {},
     saveWorkspaceSoon: () => {},
     nativeBrowserLabel: (label: string) => label,
     markBrowserTabLoaded: () => {},
     writeToActive: (_text: string) => {},
     setTimeout: (_callback: () => void) => 0,
     setStatus: () => {},
+    browserNavigationOwnsVisiblePane: () => true,
     browserNavigationIsCurrent: (context: {
       tab: BrowserNavigationTab;
       pane: typeof pane;
@@ -997,6 +1001,203 @@ describe('Tauri native browser lifecycle', () => {
     expect(tab.history).toEqual(['https://old.example', 'https://example.com']);
   });
 
+  it('updates project A metadata without resurfacing A after switching to project B', async () => {
+    let resolveNavigation!: () => void;
+    const state = { activeProjectId: 'project-a' };
+    const projectA = {
+      id: 'project-a',
+      selectedWorktreePath: '/workspace-a',
+    };
+    const projectB = {
+      id: 'project-b',
+      selectedWorktreePath: '/workspace-b',
+    };
+    const tabA: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old-a.example',
+      created: false,
+      loading: false,
+      title: 'Old A',
+      history: ['https://old-a.example'],
+      historyIndex: 0,
+    };
+    const tabB: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://b.example',
+      created: true,
+      loading: false,
+      title: 'B',
+      history: ['https://b.example'],
+      historyIndex: 0,
+    };
+    const browserA = { activeTabId: tabA.id, tabs: [tabA] };
+    const browserB = { activeTabId: tabB.id, tabs: [tabB] };
+    const paneA = {
+      id: 'web-pane-a',
+      kind: 'web',
+      projectId: projectA.id,
+      worktreePath: projectA.selectedWorktreePath,
+      hidden: false,
+    };
+    const paneB = {
+      id: 'web-pane-b',
+      kind: 'web',
+      projectId: projectB.id,
+      worktreePath: projectB.selectedWorktreePath,
+      hidden: false,
+    };
+    const nativeCalls: Array<[string, Record<string, unknown>]> = [];
+    const controlCalls: string[] = [];
+    let visibleLabel: string | null = null;
+    const activeProject = () => state.activeProjectId === projectA.id ? projectA : projectB;
+    const activeWorkspaceRoot = (project: typeof projectA | typeof projectB) =>
+      project.selectedWorktreePath;
+    const ensureBrowserModel = (project: typeof projectA | typeof projectB) =>
+      project.id === projectA.id ? browserA : browserB;
+    const findBrowserPane = (projectId: string, worktreePath: string) => {
+      if (projectId === projectA.id && worktreePath === projectA.selectedWorktreePath) return paneA;
+      if (projectId === projectB.id && worktreePath === projectB.selectedWorktreePath) return paneB;
+      return null;
+    };
+    const findThread = (threadId: string) => {
+      if (threadId === paneA.id) return paneA;
+      if (threadId === paneB.id) return paneB;
+      return null;
+    };
+    const currentBrowserTab = (project: typeof projectA | typeof projectB) => {
+      const browser = ensureBrowserModel(project);
+      return browser.tabs.find((tab) => tab.id === browser.activeTabId) ?? null;
+    };
+    const browserLabelForTab = (
+      project: typeof projectA | typeof projectB,
+      tab: BrowserNavigationTab,
+    ) => `${project.id}:${tab.id}`;
+    const visibleBrowserBounds = () => ({ x: 10, y: 20, w: 300, h: 200 });
+    const invoke = (
+      command: string,
+      args: Record<string, unknown>,
+    ): Promise<void> => {
+      nativeCalls.push([command, args]);
+      if (command === 'browser_navigate') {
+        return new Promise<void>((resolve) => {
+          resolveNavigation = () => {
+            visibleLabel = String(args.label);
+            resolve();
+          };
+        });
+      }
+      if (command === 'browser_hide_all_except') {
+        visibleLabel = typeof args.label === 'string' ? args.label : null;
+      }
+      return Promise.resolve();
+    };
+    const browserNavigationOwnsVisiblePane = compileFunction<
+      (context: {
+        project: typeof projectA;
+        worktreePath: string;
+        pane: typeof paneA;
+      }) => boolean
+    >(functionSource(mainJs, 'browserNavigationOwnsVisiblePane'), {
+      state,
+      activeProject,
+      activeWorkspaceRoot,
+      findBrowserPane,
+      findThread,
+      browserPaneIsClosing: browserLifecycleHarness().browserPaneIsClosing,
+      visibleBrowserBounds,
+    });
+    const syncBrowserBounds = compileFunction<
+      () => void
+    >(functionSource(mainJs, 'syncBrowserBounds'), {
+      activeProject,
+      currentBrowserTab,
+      browserLabelForTab,
+      visibleBrowserBounds,
+      invoke,
+    });
+    const dependencies = browserNavigationDependencies(
+      projectA,
+      browserA,
+      tabA,
+      invoke,
+    );
+    Object.assign(dependencies, {
+      state,
+      activeProject,
+      activeWorkspaceRoot,
+      ensureBrowserModel,
+      currentBrowserTab,
+      createBrowserPane: async () => paneA,
+      findBrowserPane,
+      findThread,
+      visibleBrowserBounds,
+      browserLabelForTab,
+      renderBrowserTabs: () => controlCalls.push(`render:${state.activeProjectId}`),
+      updateBrowserControls: () => controlCalls.push(`controls:${state.activeProjectId}`),
+      syncUrlInput: () => controlCalls.push(`url:${state.activeProjectId}`),
+      syncProjectBrowser: () => {
+        controlCalls.push(`sync:${state.activeProjectId}`);
+        syncBrowserBounds();
+      },
+      syncBrowserBounds,
+      browserNavigationOwnsVisiblePane,
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    const navigation = navigateBrowser('https://new-a.example', { tabId: tabA.id });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(nativeCalls).toEqual([[
+      'browser_navigate',
+      {
+        label: 'project-a:tab-a',
+        url: 'https://new-a.example',
+        x: 10,
+        y: 20,
+        w: 300,
+        h: 200,
+      },
+    ]]);
+
+    state.activeProjectId = projectB.id;
+    syncBrowserBounds();
+    const controlsBeforeCompletion = controlCalls.slice();
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(true);
+
+    expect(tabA).toMatchObject({
+      created: true,
+      url: 'https://new-a.example',
+      title: 'https://new-a.example',
+      history: ['https://old-a.example', 'https://new-a.example'],
+      historyIndex: 1,
+    });
+    expect(browserB.activeTabId).toBe(tabB.id);
+    expect(controlCalls).toEqual(controlsBeforeCompletion);
+    expect(visibleLabel).toBe('project-b:tab-b');
+    expect(nativeCalls.slice(1)).toEqual([
+      ['browser_hide_all_except', { label: 'project-b:tab-b' }],
+      ['browser_set_bounds', {
+        label: 'project-b:tab-b',
+        x: 10,
+        y: 20,
+        w: 300,
+        h: 200,
+      }],
+      ['browser_hide_all_except', { label: 'project-b:tab-b' }],
+      ['browser_set_bounds', {
+        label: 'project-b:tab-b',
+        x: 10,
+        y: 20,
+        w: 300,
+        h: 200,
+      }],
+    ]);
+  });
+
   it('serializes rapid same-tab navigation when the first succeeds and the second fails', async () => {
     let resolveFirst!: () => void;
     let rejectSecond!: (error: Error) => void;
@@ -1195,6 +1396,111 @@ describe('Tauri native browser lifecycle', () => {
     expect(tab.created).toBe(true);
     expect(tab.history).toEqual(['https://example.com', 'https://example.org']);
     expect(tab.historyIndex).toBe(1);
+  });
+
+  async function expectLatestDormantSelectionWins(
+    completionOrder: ['tab-a' | 'tab-b', 'tab-a' | 'tab-b'],
+  ) {
+    const project = { id: 'project-a' };
+    const pane = {
+      id: 'web-pane',
+      kind: 'web',
+      projectId: project.id,
+      worktreePath: '/workspace',
+      closing: false,
+      closeStarted: false,
+    };
+    const tabA: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://a.example',
+      created: false,
+      loading: false,
+      title: 'A',
+      history: ['https://a.example'],
+      historyIndex: 0,
+    };
+    const tabB: BrowserNavigationTab = {
+      id: 'tab-b',
+      url: 'https://b.example',
+      created: false,
+      loading: false,
+      title: 'B',
+      history: ['https://b.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tabA.id, tabs: [tabA, tabB] };
+    const pending = new Map<string, () => void>();
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tabA,
+      (command, args) => {
+        if (command !== 'browser_navigate') return Promise.resolve();
+        const tabId = String(args.label).split(':').at(-1) ?? '';
+        return new Promise<void>((resolve) => { pending.set(tabId, resolve); });
+      },
+    );
+    Object.assign(dependencies, {
+      createBrowserPane: async () => pane,
+      findBrowserPane: () => pane,
+      findThread: () => pane,
+    });
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+    const lifecycle = browserLifecycleHarness();
+    const restoreDormantBrowserTab = compileFunction<
+      (value: typeof project, tab: BrowserNavigationTab) => Promise<boolean>
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      ...lifecycle,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => pane,
+      navigateBrowser,
+    });
+    const activateBrowserTab = compileFunction<
+      (value: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'activateBrowserTab'), {
+      ...lifecycle,
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => pane,
+      ensureBrowserModel: () => browser,
+      markActiveSurface: () => {},
+      renderBrowserTabs: () => {},
+      syncProjectBrowser: () => {},
+      saveWorkspaceSoon: () => {},
+      restoreDormantBrowserTab,
+    });
+
+    const activateA = activateBrowserTab(project, tabA.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(pending.has(tabA.id)).toBe(true);
+
+    const activateB = activateBrowserTab(project, tabB.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(pending.has(tabB.id)).toBe(true);
+    expect(browser.activeTabId).toBe(tabB.id);
+
+    pending.get(completionOrder[0])?.();
+    await Promise.resolve();
+    pending.get(completionOrder[1])?.();
+    await Promise.all([activateA, activateB]);
+
+    expect(browser.activeTabId).toBe(tabB.id);
+    expect(tabA.created).toBe(true);
+    expect(tabB.created).toBe(true);
+  }
+
+  it('keeps dormant tab B selected when A restoration completes before B', async () => {
+    await expectLatestDormantSelectionWins(['tab-a', 'tab-b']);
+  });
+
+  it('keeps dormant tab B selected when B restoration completes before A', async () => {
+    await expectLatestDormantSelectionWins(['tab-b', 'tab-a']);
   });
 
   it('preserves title, URL, history, and created state after native navigation failure', async () => {
