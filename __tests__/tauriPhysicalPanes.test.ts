@@ -396,13 +396,26 @@ describe('Tauri physical terminal panes', () => {
     expect(mountTerminal).toMatch(/pane\.dataset\.threadId = thread\.id/);
     expect(mountTerminal).toMatch(/className = "terminal-pane-header"/);
     expect(mountTerminal).toMatch(/title\.id = "terminal-pane-title-" \+ thread\.id/);
-    expect(mountTerminal).toMatch(/pane\.setAttribute\("aria-labelledby", title\.id\)/);
+    expect(mountTerminal).not.toContain('aria-labelledby');
     expect(mountTerminal).toMatch(/className = "terminal-pane-body"/);
     expect(mountTerminal).toMatch(/className = "term-instance"/);
     expect(mountTerminal).toMatch(/title = "Stop and close terminal"/);
     expect(mountTerminal).toMatch(/"Stop and close " \+ thread\.name/);
     expect(mountTerminal).toMatch(/thread\.pane = pane[\s\S]*thread\.host = container[\s\S]*renderPaneWorkspace\(\)/);
     expect(mountTerminal).not.toMatch(/terminalHost\.appendChild\(container\)/);
+  });
+
+  it('uses the shared accessible-name fallback for terminal, Web, and tool panes', () => {
+    for (const mount of ['mountTerminal', 'mountBrowserPane', 'mountToolPane']) {
+      const source = functionSource(mount);
+      expect(source).not.toContain('aria-labelledby');
+      expect(source).toMatch(
+        /thread\.pane = pane[\s\S]*thread\.paneTitle = title[\s\S]*syncThreadPaneMetadata\(thread\)/,
+      );
+    }
+    expect(functionSource('syncThreadPaneMetadata')).toMatch(
+      /applyPaneStatus\(thread\.pane, thread\.status\)[\s\S]*thread\.pane\.setAttribute\(\s*"aria-label"/,
+    );
   });
 
   it('focuses from pane chrome without duplicating body focus or racing close', () => {
@@ -586,7 +599,7 @@ describe('Tauri physical terminal panes', () => {
       paneClose: { setAttribute: (name: string, value: string) => attributes.set(name, value) },
     };
     branch.firstElementChild = thread.pane;
-    const applyPaneStatus = compileFunction<(element: unknown, status: string) => void>(
+    const applyPaneStatus = compileFunction<(element: unknown, status: string) => string>(
       functionSource('applyPaneStatus'),
       {},
     );
@@ -610,32 +623,43 @@ describe('Tauri physical terminal panes', () => {
     );
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('starting');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status starting');
     expect(paneAttributes.get('aria-description')).toBe('Status: starting');
     expect(branch.dataset.status).toBe('starting');
 
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('running');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status running');
     expect(paneAttributes.get('aria-description')).toBe('Status: running');
     expect('status' in branch.dataset).toBe(false);
 
     thread.status = 'failed';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('failed');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status failed');
     expect(paneAttributes.get('aria-description')).toBe('Status: failed');
     expect(branch.dataset.status).toBe('failed');
 
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('exited');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status exited');
     expect(paneAttributes.get('aria-description')).toBe('Status: exited');
     expect(branch.dataset.status).toBe('exited');
 
     thread.status = 'paused';
     syncThreadPaneMetadata(thread);
     expect('status' in thread.pane.dataset).toBe(false);
+    expect(paneAttributes.get('aria-label')).toBe('Psyche');
     expect(paneAttributes.has('aria-description')).toBe(false);
     expect('status' in branch.dataset).toBe(false);
+
+    thread.status = '';
+    syncThreadPaneMetadata(thread);
+    expect('status' in thread.pane.dataset).toBe(false);
+    expect(paneAttributes.get('aria-label')).toBe('Psyche');
+    expect(paneAttributes.has('aria-description')).toBe(false);
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
@@ -649,8 +673,11 @@ describe('Tauri physical terminal panes', () => {
         statusLevel: () => 'ok',
       },
     );
+    thread.status = 'running';
     expect(renameThread(thread.id, 'Renamed')).toBe(true);
     expect(thread.paneTitle.textContent).toBe('Renamed');
+    expect(paneAttributes.get('aria-label')).toBe('Renamed, status running');
+    expect(paneAttributes.get('aria-description')).toBe('Status: running');
     expect(attributes.get('aria-label')).toBe('Stop and close Renamed');
 
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "running";[\s\S]*syncThreadPaneMetadata\(thread\)/);

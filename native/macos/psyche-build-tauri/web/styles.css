@@ -1344,7 +1344,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 .terminal-pane:is(.is-web, .is-tool) .terminal-pane-header {
   grid-template-columns: auto minmax(0, 1fr) auto auto auto;
 }
-.terminal-pane.focused .terminal-pane-header { background: rgba(var(--rgb-accent), 0.07); }
+.terminal-pane.focused:not(.needs-attention) .terminal-pane-header {
+  background: rgba(var(--rgb-accent), 0.07);
+}
 
 /* Title and meta share one track and ellipsize independently: the title gives
    up space last (flex 0 1) and the meta first (flex 0 4). */

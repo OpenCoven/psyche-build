@@ -51,6 +51,37 @@ function cssDeclarations(selector: string) {
   throw new Error(`missing CSS rule ${selector}`);
 }
 
+function paneHeaderBackground(paneClasses: string[]) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  let winner: { specificity: number; order: number; value: string } | null = null;
+  let order = 0;
+  for (const match of source.matchAll(rulePattern)) {
+    const background = match[2].match(/(?:^|;)\s*background:\s*([^;]+)/)?.[1].trim();
+    if (!background) continue;
+    for (const rawSelector of match[1].split(',')) {
+      const selector = rawSelector.replace(/\s+/g, ' ').trim();
+      if (!selector.endsWith('.terminal-pane-header')) continue;
+      const paneSelector = selector.slice(0, -'.terminal-pane-header'.length).trim();
+      if (paneSelector) {
+        const required = [...paneSelector.matchAll(/(?<!:not\()\.([\w-]+)/g)]
+          .map((item) => item[1]);
+        const excluded = [...paneSelector.matchAll(/:not\(\.([\w-]+)\)/g)]
+          .map((item) => item[1]);
+        if (!required.every((name) => paneClasses.includes(name)) ||
+            excluded.some((name) => paneClasses.includes(name))) continue;
+      }
+      const specificity = (selector.match(/\.[\w-]+/g) || []).length;
+      if (!winner || specificity > winner.specificity ||
+          (specificity === winner.specificity && order >= winner.order)) {
+        winner = { specificity, order, value: background };
+      }
+    }
+    order += 1;
+  }
+  return winner?.value;
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -407,6 +438,12 @@ describe('desktop shell wiring', () => {
         ['border-color', 'rgba(251, 191, 36, 0.6)'],
         ['box-shadow', '0 0 0 1px rgba(251, 191, 36, 0.28)'],
       ]));
+    expect(paneHeaderBackground(['terminal-pane', 'focused']))
+      .toBe('rgba(var(--rgb-accent), 0.07)');
+    expect(paneHeaderBackground(['terminal-pane', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
+    expect(paneHeaderBackground(['terminal-pane', 'focused', 'needs-attention']))
+      .toBe('rgba(251, 191, 36, 0.09)');
     expect(cssDeclarations(statusGlowSelector).has('box-shadow')).toBe(true);
     expect(cssDeclarations(rootStatusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);

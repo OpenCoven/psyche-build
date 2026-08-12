@@ -2152,7 +2152,6 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
@@ -2357,7 +2356,6 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
@@ -2451,7 +2449,6 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
@@ -2610,17 +2607,18 @@
   }
 
   function applyPaneStatus(pane, status) {
-    if (!pane) return;
+    if (!pane) return "";
     var label = status || "";
     var supported = label === "running" || label === "starting" ||
       label === "failed" || label === "exited";
     if (!supported) {
       if (pane.dataset) delete pane.dataset.status;
       pane.removeAttribute("aria-description");
-      return;
+      return "";
     }
     pane.dataset.status = label;
     pane.setAttribute("aria-description", "Status: " + label);
+    return label;
   }
 
   function syncPaneBranchStatusChrome(branch) {
@@ -3487,7 +3485,11 @@
         threadLaneLabel(thread);
     }
     if (thread.pane) {
-      applyPaneStatus(thread.pane, thread.status);
+      var paneStatus = applyPaneStatus(thread.pane, thread.status);
+      thread.pane.setAttribute(
+        "aria-label",
+        thread.name + (paneStatus ? ", status " + paneStatus : "")
+      );
       syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
