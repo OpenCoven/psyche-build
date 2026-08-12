@@ -103,6 +103,61 @@ describe('Tauri Coven launch project scope', () => {
     expect(deduplicate).toBeGreaterThan(canonicalize);
   });
 
+  it('clears the previous pane when adding a new project without auto-launching Coven', async () => {
+    const state = {
+      projects: [{ id: 'old', root: '/old' }],
+      activeProjectId: 'old',
+      activeThreadId: 'old-thread' as string | null,
+    };
+    const calls: string[] = [];
+    const project = {
+      id: 'new-project',
+      root: '/new',
+      selectedWorktreePath: '/new',
+      worktrees: [],
+      browsersByWorktree: {},
+    };
+    const addProject = compileFunction<(root: string) => Promise<typeof project | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async () => '/new',
+        state,
+        settings: { maxProjects: 10 },
+        HARD_MAX_PROJECTS: 10,
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        makeProjectId: () => project.id,
+        ensureProjectLayout: () => undefined,
+        restoreProjectLayout: () => { calls.push('layout'); },
+        renderPaneWorkspace: () => { calls.push(`panes:${state.activeThreadId}`); },
+        refreshSidebar: () => { calls.push('sidebar'); },
+        refreshTabs: () => { calls.push('tabs'); },
+        refreshProjectWorktrees: async () => { calls.push('worktrees'); },
+        syncProjectBrowser: () => { calls.push('browser'); },
+        saveWorkspaceSoon: () => { calls.push('save'); },
+        startCovenPolling: () => { calls.push('poll'); },
+        refreshStatusController: () => { calls.push('status'); },
+      },
+    );
+
+    const added = await addProject('/new');
+
+    expect(added).toMatchObject({ id: project.id, root: project.root });
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(calls).toEqual([
+      'layout',
+      'panes:null',
+      'sidebar',
+      'tabs',
+      'worktrees',
+      'browser',
+      'save',
+      'poll',
+      'status',
+    ]);
+  });
+
   it('canonicalizes saved roots concurrently before restoring projects', () => {
     const boot = functionSource('boot');
     expect(boot).toContain('restoreSavedProjects');

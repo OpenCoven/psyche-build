@@ -544,6 +544,13 @@
       return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
         t.kind !== "coven-chat" && t.kind !== "coven-attach";
     });
+    var rememberedThread = project.lastActiveThreadId && state.threads.find(function (thread) {
+      return thread.id === project.lastActiveThreadId;
+    });
+    if (rememberedThread &&
+        (rememberedThread.kind === "coven-chat" || rememberedThread.kind === "coven-attach")) {
+      project.lastActiveThreadId = null;
+    }
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
         ? project.lastActiveThreadId
@@ -3518,7 +3525,9 @@
     }
     var project = findProject(thread.projectId);
     if (project) {
-      project.lastActiveThreadId = id;
+      if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+        project.lastActiveThreadId = id;
+      }
       project.selectedWorktreePath = thread.worktreePath;
     }
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
@@ -3721,7 +3730,9 @@
       if (staleFooter) staleFooter.remove();
       thread.pane.appendChild(createPaneFooter(thread));
     }
-    project.lastActiveThreadId = thread.id;
+    if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+      project.lastActiveThreadId = thread.id;
+    }
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
     refreshSidebar();
@@ -6268,7 +6279,8 @@
     if (project) {
       state.activeProjectId = project.id;
       var threads = state.threads.filter(function (thread) {
-        return thread.projectId === project.id;
+        return thread.projectId === project.id &&
+          thread.kind !== "coven-chat" && thread.kind !== "coven-attach";
       });
       var nextThreadId = project.lastActiveThreadId &&
         threads.some(function (thread) { return thread.id === project.lastActiveThreadId; })
@@ -8815,8 +8827,11 @@
     ensureProjectLayout(project);
     state.projects.push(project);
     state.activeProjectId = project.id;
+    state.activeThreadId = null;
     restoreProjectLayout(project);
+    renderPaneWorkspace();
     refreshSidebar();
+    refreshTabs();
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -8974,7 +8989,7 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: entry.command,
+      command: command,
       args: entry.args.slice(),
       launchKind: null,
       projectRoot: project.root,

@@ -545,6 +545,47 @@ describe('Tauri physical terminal panes', () => {
     expect({ focused, spawned }).toEqual({ focused: 0, spawned: 1 });
   });
 
+  it('reopens a hidden Coven pane without replacing the passive restoration pointer', () => {
+    const project = {
+      id: 'project',
+      selectedWorktreePath: '/repo',
+      lastActiveThreadId: 'shell-a',
+    };
+    const thread = {
+      id: 'coven-a',
+      kind: 'coven-attach',
+      projectId: project.id,
+      worktreePath: '/repo',
+      hidden: true,
+      pane: null,
+    };
+    const state = {
+      activeProjectId: project.id,
+      activeThreadId: null as string | null,
+    };
+    const reopenThread = compileFunction<(id: string) => boolean>(
+      functionSource('reopenThread'),
+      {
+        findThread: () => thread,
+        findProject: () => project,
+        state,
+        activeWorkspaceRoot: () => project.selectedWorktreePath,
+        preparePanePlacement: () => ({ key: 'layout', value: {} }),
+        setStatus: () => undefined,
+        noteStatusActivity: () => undefined,
+        commitPanePlacement: () => undefined,
+        createPaneFooter: () => null,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+      },
+    );
+
+    expect(reopenThread(thread.id)).toBe(true);
+    expect(thread.hidden).toBe(false);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe('shell-a');
+  });
+
   it('keeps mounted pane metadata current for status and rename changes', () => {
     const attributes = new Map<string, string>();
     const statusAttributes = new Map<string, string>();
@@ -1334,6 +1375,7 @@ describe('Tauri physical terminal panes', () => {
     await expect(setActiveProject(project.id)).resolves.toBe(true);
     expect(state.activeProjectId).toBe(project.id);
     expect(state.activeThreadId).toBeNull();
+    expect(project.lastActiveThreadId).toBeNull();
     expect(focusCalls).toEqual([]);
     expect(renderCalls).toBe(1);
     expect(sidebarCalls).toBe(1);
@@ -1384,6 +1426,48 @@ describe('Tauri physical terminal panes', () => {
     expect(project.lastActiveThreadId).toBe(thread.id);
     expect(project.selectedWorktreePath).toBe('/repo');
     expect(refreshes).toBe(1);
+  });
+
+  it('does not persist explicit Coven focus for passive restoration', async () => {
+    const state = { activeProjectId: 'project', activeThreadId: null as string | null };
+    const project = {
+      id: 'project',
+      lastActiveThreadId: 'shell-a',
+      selectedWorktreePath: '/repo',
+    };
+    const thread = {
+      id: 'coven-a',
+      kind: 'coven-chat',
+      projectId: project.id,
+      worktreePath: '/repo/coven',
+      status: 'running',
+      term: { focus: () => undefined },
+    };
+    const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('focusThread'),
+      {
+        findThread: () => thread,
+        showTerminalView: async () => true,
+        markActiveSurface: () => undefined,
+        state,
+        findProject: () => project,
+        paneLayoutFor: () => null,
+        PsychePanes,
+        renderPaneWorkspace: () => undefined,
+        refreshSidebar: () => undefined,
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => undefined,
+        syncBrowserBounds: () => undefined,
+        setProjectStatus: () => undefined,
+        statusLevel: () => 'ok',
+        refreshStatusController: () => undefined,
+      },
+    );
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(project.lastActiveThreadId).toBe('shell-a');
+    expect(project.selectedWorktreePath).toBe(thread.worktreePath);
   });
 
   it('refreshes direct setActiveProject once while honoring suppressed outer refresh', async () => {
