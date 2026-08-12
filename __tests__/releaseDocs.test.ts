@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -57,6 +58,7 @@ async function listActiveDocFiles(): Promise<string[]> {
     .split('\0')
     .filter(Boolean)
     .map((entry) => path.normalize(entry))
+    .filter((filePath) => existsSync(filePath))
     .filter(
       (filePath) =>
         isActiveDocumentationFile(filePath) &&

@@ -4,11 +4,11 @@ import { join } from 'node:path';
 
 const repoRoot = process.cwd();
 const indexHtml = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'),
   'utf8'
 );
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8'
 );
 

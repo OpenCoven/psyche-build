@@ -297,7 +297,7 @@ export function applyCovenResponse(state, requestId, response, refreshedAt = Dat
   if (requestId !== state.requestId) return state;
 
   const status = normalizeStatus(response?.status);
-  const message = normalizedMessage(response?.message);
+  const message = normalizedMessage(response?.message) ?? normalizedMessage(response?.reason);
   const allowedStatuses = new Set(['ready', 'empty', 'unavailable', 'incompatible', 'error']);
   if (!allowedStatuses.has(status)) {
     return {
