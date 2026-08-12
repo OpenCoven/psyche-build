@@ -124,7 +124,7 @@ final class PairedHostStoreTests: XCTestCase {
         let saveTask = Task {
             try await store.save(host, for: generation)
         }
-        await secureStore.waitUntilReadBegins()
+        try await secureStore.waitUntilReadBegins()
 
         generation.invalidate()
         secureStore.releaseRead()
@@ -147,6 +147,21 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(loaded?.token, "token-refreshed")
         XCTAssertEqual(loaded?.certificateFingerprint, fingerprint)
         XCTAssertEqual(all.count, 1)
+    }
+
+    func testSaveBoundarySecureStoreWaitTimesOutWhenNoReadBegins() async {
+        let secureStore = SaveBoundarySecureStore()
+
+        secureStore.blockNextRead()
+
+        do {
+            try await secureStore.waitUntilReadBegins(timeout: .milliseconds(20))
+            XCTFail("Expected the bounded save-boundary read gate to time out")
+        } catch let error as BoundedAsyncSignal.WaitError {
+            XCTAssertEqual(error, .timedOut("paired host store secure-store read to begin"))
+        } catch {
+            XCTFail("Expected WaitError.timedOut, got \(error)")
+        }
     }
 
     func testPairingStatusReportsUnpairedPairedAndRePairing() async throws {
@@ -252,31 +267,24 @@ final class PairedHostStoreTests: XCTestCase {
 
 private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
     private let condition = NSCondition()
+    private let readBeganSignal = BoundedAsyncSignal()
     private var storage: [String: Data] = [:]
     private var shouldBlockNextRead = false
-    private var readBegan = false
     private var readReleased = false
-    private var readBeganWaiters: [CheckedContinuation<Void, Never>] = []
 
     func blockNextRead() {
+        readBeganSignal.reset()
         condition.withLock {
             shouldBlockNextRead = true
-            readBegan = false
             readReleased = false
         }
     }
 
-    func waitUntilReadBegins() async {
-        await withCheckedContinuation { continuation in
-            let shouldResume = condition.withLock {
-                guard !readBegan else { return true }
-                readBeganWaiters.append(continuation)
-                return false
-            }
-            if shouldResume {
-                continuation.resume()
-            }
-        }
+    func waitUntilReadBegins(timeout: Duration = .milliseconds(250)) async throws {
+        try await readBeganSignal.wait(
+            for: "paired host store secure-store read to begin",
+            timeout: timeout
+        )
     }
 
     func releaseRead() {
@@ -290,11 +298,8 @@ private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
         condition.lock()
         if shouldBlockNextRead {
             shouldBlockNextRead = false
-            readBegan = true
-            let waiters = readBeganWaiters
-            readBeganWaiters.removeAll()
             condition.unlock()
-            waiters.forEach { $0.resume() }
+            readBeganSignal.signal()
             condition.lock()
             while !readReleased {
                 condition.wait()
