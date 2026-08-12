@@ -318,7 +318,7 @@ describe('native Coven launch routing', () => {
     expect(covenChatLaunch(project, project.selectedWorktreePath)).toEqual({
       command: '/opt/homebrew/bin/coven',
       args: ['code', '--session-id', COVEN_SESSION_ID],
-      env: {},
+      env: { COVEN_SESSION_SOURCE: 'psyche-build' },
       projectRoot: '/repo',
       cwd: '/repo/.worktrees/feature',
       kind: 'coven-chat',
@@ -406,7 +406,7 @@ describe('native Coven launch routing', () => {
     expect(duplicate?.launch).toEqual({
       command: '/bin/coven',
       args: ['code', '--session-id', DUPLICATE_COVEN_SESSION_ID],
-      env: {},
+      env: { COVEN_SESSION_SOURCE: 'psyche-build' },
       projectRoot: '/repo',
       cwd: '/repo/wt',
       kind: 'coven-chat',
@@ -484,6 +484,41 @@ describe('native Coven launch routing', () => {
     expect(statuses).toEqual([
       { text: 'Secure session ID generation is unavailable', tone: 'error' },
     ]);
+  });
+
+  it('does not relabel an attached Coven session as Psyche-owned', async () => {
+    const project = { id: 'project', root: '/repo', selectedWorktreePath: '/repo/wt' };
+    const session = { id: 'safe-session', title: 'Existing session', cwd: '/repo/wt' };
+    let descriptor: Record<string, unknown> | null = null;
+    const openCovenSession = compileFunction<(
+      value: typeof project,
+      attached: typeof session,
+    ) => Promise<Record<string, unknown> | null>>(functionSource('openCovenSession'), {
+      PsycheSessions: { isSafeCovenSessionId: () => true },
+      setStatus: () => undefined,
+      state: { env: { coven_path: '/bin/coven' } },
+      findCovenAttachment: () => null,
+      covenAttachKey: () => 'project:safe-session',
+      covenAttachInFlight: new Map(),
+      covenWorktreeForSession: () => ({ path: '/repo/wt' }),
+      activateProjectWorktree: async () => true,
+      waitForTerminalLayout: async () => undefined,
+      createThread: (options: Record<string, unknown>) => {
+        descriptor = options;
+        return options;
+      },
+    });
+
+    await openCovenSession(project, session);
+
+    expect(descriptor).toMatchObject({
+      command: '/bin/coven',
+      args: ['attach', 'safe-session'],
+      launchKind: 'coven-attach',
+      covenSessionId: 'safe-session',
+    });
+    expect(descriptor).not.toHaveProperty('env');
+    expect(JSON.stringify(descriptor)).not.toContain('COVEN_SESSION_SOURCE');
   });
 
   it('copies one launch descriptor onto the thread and starts from that copy only', async () => {
