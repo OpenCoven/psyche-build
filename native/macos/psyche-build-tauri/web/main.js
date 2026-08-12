@@ -552,10 +552,6 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      if (!options || options.ensureCoven !== false) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setStatus("no pane — launching Coven…", "");
-      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -4855,7 +4851,7 @@
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         if (!(await activateProjectWorktree(
-          project, existing.worktreePath, { ensureCoven: false }
+          project, existing.worktreePath
         ))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
@@ -4875,7 +4871,7 @@
     var opening = Promise.resolve().then(async function () {
       var worktree = covenWorktreeForSession(project, session);
       if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      if (!(await activateProjectWorktree(project, worktree.path))) return null;
       await waitForTerminalLayout();
       return createThread({
         project: project,
@@ -8840,11 +8836,7 @@
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      var project = await addProject(selected);
-      if (project) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setProjectStatus(project, "ok");
-      }
+      await addProject(selected);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
@@ -9153,7 +9145,6 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);

@@ -774,7 +774,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
       threads: [existing],
     };
-    let defaultLaunches = 0;
     const openCovenSession = compileOpenWithProjectActivation<(
       p: typeof project, s: typeof session,
     ) => Promise<unknown>>({
@@ -791,7 +790,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
       saveWorkspaceSoon: () => undefined,
       activatePaneLayoutFocus: () => undefined,
       renderPanel: () => undefined,
@@ -801,10 +799,8 @@ describe('macOS Coven session lifecycle boundary', () => {
       covenAttachKey: () => 'unused',
       covenAttachInFlight: new Map(),
     });
-
     await expect(openCovenSession(project, session)).resolves.toBe(existing);
     expect(project.selectedWorktreePath).toBe('/alpha-feature');
-    expect(defaultLaunches).toBe(0);
   });
 
   it('does not launch default Coven while creating an attachment in an inactive project', async () => {
@@ -819,7 +815,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
       threads: [],
     };
-    let defaultLaunches = 0;
     let createdOptions: Record<string, unknown> | null = null;
     const openCovenSession = compileOpenWithProjectActivation<(
       p: typeof project, s: typeof session,
@@ -837,7 +832,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
       saveWorkspaceSoon: () => undefined,
       activatePaneLayoutFocus: () => undefined,
       renderPanel: () => undefined,
@@ -852,11 +846,9 @@ describe('macOS Coven session lifecycle boundary', () => {
         return { id: 'attached' };
       },
     });
-
     await expect(openCovenSession(project, session)).resolves.toEqual({ id: 'attached' });
     expect(project.selectedWorktreePath).toBe('/repo/feature');
     expect(createdOptions).toMatchObject({ worktreePath: '/repo/feature' });
-    expect(defaultLaunches).toBe(0);
   });
 
   it('rejects invalid or unavailable attach targets before reservation', async () => {

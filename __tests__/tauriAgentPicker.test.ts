@@ -814,9 +814,9 @@ describe('Tauri agent picker', () => {
     expect(emptyState).toContain('else openBlankBrowserTab();');
   });
 
-  it('keeps automatic project startup on Coven while the picker handles manual agent choice', () => {
-    expect(functionSource('setActiveProject')).toContain('await ensureProjectCoven(project);');
-    expect(functionSource('openProjectPicker')).toContain('await ensureProjectCoven(project);');
-    expect(functionSource('boot')).toContain('await ensureProjectCoven(project);');
+  it('keeps Coven startup behind explicit launch surfaces', () => {
+    expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
+    expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
+    expect(functionSource('boot')).not.toContain('ensureProjectCoven');
   });
 });
