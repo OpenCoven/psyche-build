@@ -8,8 +8,10 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function safeString(value) {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+function safeString(value, maximum = 4096) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= maximum ? normalized : null;
 }
 
 function safeId(value) {
@@ -160,7 +162,7 @@ export function sanitizeSessionDescriptor(saved) {
   if (!isObject(saved)) return null;
 
   const id = safeId(saved.id);
-  const projectId = safeString(saved.projectId);
+  const projectId = safeId(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
   const launchKind = normalizeKind(saved.launchKind);
 
@@ -175,7 +177,7 @@ export function sanitizeSessionDescriptor(saved) {
     kind: normalizeKind(saved.kind) || launchKind,
   };
 
-  const name = safeString(saved.name);
+  const name = safeString(saved.name, 256);
   if (name) descriptor.name = name;
 
   if (launchKind === 'coven-attach') {
@@ -252,7 +254,7 @@ function sanitizePaneLayout(
 ) {
   if (!isObject(saved)) return null;
 
-  const projectId = safeString(saved.projectId);
+  const projectId = safeId(saved.projectId);
   const worktreePath = safeString(saved.worktreePath);
   if (!projectId || !worktreePath || !projectIds.has(projectId)) return null;
 
@@ -289,7 +291,7 @@ export function sanitizeWorkspaceV3(saved) {
   const sessionScopes = new Map();
 
   for (const project of projects) {
-    const projectId = safeString(project && project.id);
+    const projectId = safeId(project && project.id);
     if (projectId) {
       projectIds.add(projectId);
     }
@@ -297,7 +299,13 @@ export function sanitizeWorkspaceV3(saved) {
 
   for (const descriptor of Array.isArray(saved.sessions) ? saved.sessions : []) {
     const session = sanitizeSessionDescriptor(descriptor);
-    if (!session || knownThreadIds.has(session.id)) continue;
+    if (
+      !session ||
+      !projectIds.has(session.projectId) ||
+      knownThreadIds.has(session.id)
+    ) {
+      continue;
+    }
     knownThreadIds.add(session.id);
     sessions.push(session);
 
@@ -307,11 +315,11 @@ export function sanitizeWorkspaceV3(saved) {
     sessionScopes.set(scopeKey, scopedThreadIds);
   }
 
-  const activeProjectId = safeString(saved.activeProjectId) && projects.some((project) => project && project.id === safeString(saved.activeProjectId))
-    ? safeString(saved.activeProjectId)
+  const activeProjectId = safeId(saved.activeProjectId) && projectIds.has(safeId(saved.activeProjectId))
+    ? safeId(saved.activeProjectId)
     : null;
-  const activeThreadId = safeString(saved.activeThreadId) && knownThreadIds.has(safeString(saved.activeThreadId))
-    ? safeString(saved.activeThreadId)
+  const activeThreadId = safeId(saved.activeThreadId) && knownThreadIds.has(safeId(saved.activeThreadId))
+    ? safeId(saved.activeThreadId)
     : null;
 
   const seenLayouts = new Set();
@@ -325,7 +333,7 @@ export function sanitizeWorkspaceV3(saved) {
       : [];
 
   for (const layout of layouts) {
-    const layoutProjectId = safeString(layout && layout.projectId);
+    const layoutProjectId = safeId(layout && layout.projectId);
     const layoutWorktreePath = safeString(layout && layout.worktreePath);
     const scopedThreadIds =
       layoutProjectId && layoutWorktreePath

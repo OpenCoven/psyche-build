@@ -11,6 +11,7 @@ const packageJson = JSON.parse(
   readFileSync(join(tauriRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
 const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
+const mainSource = readFileSync(join(webRoot, 'main.js'), 'utf8');
 
 const workspaceModel = await import(
   pathToFileURL(join(workspaceRoot, 'workspace-model.mjs')).href
@@ -714,6 +715,30 @@ describe('Tauri workspace persistence model', () => {
     });
   });
 
+  test('drops sessions whose owners are not saved projects', () => {
+    expect(
+      workspaceModel.sanitizeWorkspaceV3({
+        version: 3,
+        activeProjectId: 'project-a',
+        activeThreadId: 'orphan-thread',
+        projects: [{ id: 'project-a', root: '/repo' }],
+        sessions: [
+          {
+            id: 'orphan-thread',
+            projectId: 'project-missing',
+            worktreePath: '/repo',
+            kind: 'shell',
+            launchKind: 'shell',
+          },
+        ],
+        paneLayouts: [],
+      }),
+    ).toMatchObject({
+      activeThreadId: null,
+      sessions: [],
+    });
+  });
+
   test('filters pane layouts to the matching project and worktree session scope', () => {
     expect(
       workspaceModel.sanitizeWorkspaceV3({
@@ -853,5 +878,14 @@ describe('Tauri workspace persistence model', () => {
       'sanitizeSessionDescriptor',
       'sanitizeWorkspaceV3',
     ]);
+  });
+
+  test('serializes native workspace saves in mutation order', () => {
+    expect(mainSource).toContain('var workspaceSaveQueue = Promise.resolve();');
+    expect(mainSource).toContain(
+      'workspaceSaveQueue = workspaceSaveQueue.then(function () {',
+    );
+    expect(mainSource).toContain('return workspaceSaveQueue;');
+    expect(mainSource).toContain('await saveWorkspaceNow();');
   });
 });

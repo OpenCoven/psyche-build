@@ -24,7 +24,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 const WORKSPACE_VERSION: i64 = 3;
 const WORKSPACE_FILE_RELATIVE: &str = ".psyche/macos-app/workspace-v3.json";
-const WORKSPACE_ROLLBACK_COPY_LIMIT: u64 = 16 * 1024 * 1024;
+const WORKSPACE_DOCUMENT_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
 const ABSENT_ROLLBACK_MARKER: &[u8] = b"psyche-workspace-absent-rollback-v1\n";
 const ABSENT_FORWARD_MARKER: &[u8] = b"psyche-workspace-forward-commit-v1\n";
 const ABSENT_MARKER_SIZE_LIMIT: u64 = 128;
@@ -180,20 +180,17 @@ fn load_workspace_from_locked_in(
     workspace_dir: &SecureWorkspaceDir,
     path: &Path,
 ) -> Result<Option<Value>, String> {
-    let mut bytes = Vec::new();
     match open_existing_regular_file(workspace_dir, path, "workspace", false)? {
         Some(mut file) => {
-            file.read_to_end(&mut bytes)
-                .map_err(|e| format!("read workspace '{}': {}", path.display(), e))?;
+            let bytes = read_bounded_workspace_file(&mut file, path, "workspace")?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("parse workspace '{}': {}", path.display(), e))?;
+            validate_workspace(&value)
+                .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
+            Ok(Some(value))
         }
-        None => return Ok(None),
+        None => Ok(None),
     }
-
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parse workspace '{}': {}", path.display(), e))?;
-    validate_workspace(&value)
-        .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
-    Ok(Some(value))
 }
 
 pub(crate) fn save_workspace_to(path: &Path, value: &Value) -> Result<(), String> {
@@ -237,6 +234,14 @@ where
         .map_err(|e| format!("validate workspace '{}': {}", path.display(), e))?;
     let bytes = serde_json::to_vec(value)
         .map_err(|e| format!("serialize workspace '{}': {}", path.display(), e))?;
+    if bytes.len() as u64 > WORKSPACE_DOCUMENT_SIZE_LIMIT {
+        return Err(format!(
+            "workspace '{}' is too large: {} bytes (limit {})",
+            path.display(),
+            bytes.len(),
+            WORKSPACE_DOCUMENT_SIZE_LIMIT
+        ));
+    }
 
     let parent = path
         .parent()
@@ -1779,9 +1784,44 @@ fn read_workspace_artifact_bytes(
     let Some(mut file) = open_existing_regular_file(workspace_dir, path, context, false)? else {
         return Err(format!("{context} '{}' is missing", path.display()));
     };
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    read_bounded_workspace_file(&mut file, path, context)
+}
+
+fn read_bounded_workspace_file(
+    file: &mut File,
+    path: &Path,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect {context} '{}': {}", path.display(), error))?;
+    if metadata.len() > WORKSPACE_DOCUMENT_SIZE_LIMIT {
+        return Err(format!(
+            "{context} '{}' is too large: {} bytes (limit {})",
+            path.display(),
+            metadata.len(),
+            WORKSPACE_DOCUMENT_SIZE_LIMIT
+        ));
+    }
+
+    let capacity = usize::try_from(metadata.len()).map_err(|_| {
+        format!(
+            "{context} '{}' is too large for this platform",
+            path.display()
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    Read::by_ref(file)
+        .take(WORKSPACE_DOCUMENT_SIZE_LIMIT + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
+    if bytes.len() as u64 > WORKSPACE_DOCUMENT_SIZE_LIMIT {
+        return Err(format!(
+            "{context} '{}' exceeded the {} byte limit while reading",
+            path.display(),
+            WORKSPACE_DOCUMENT_SIZE_LIMIT
+        ));
+    }
     Ok(bytes)
 }
 
@@ -1796,9 +1836,7 @@ fn read_workspace_restore_source_bytes(
     let metadata = file
         .metadata()
         .map_err(|error| format!("inspect {context} '{}': {}", path.display(), error))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("read {context} '{}': {}", path.display(), error))?;
+    let bytes = read_bounded_workspace_file(&mut file, path, context)?;
     if bytes.len() as u64 != metadata.len() {
         return Err(format!(
             "read {context} '{}' changed length: read {} of {} bytes",
@@ -3385,12 +3423,12 @@ where
     let metadata = source
         .metadata()
         .map_err(|e| format!("inspect rollback source '{}': {}", path.display(), e))?;
-    if metadata.len() > WORKSPACE_ROLLBACK_COPY_LIMIT {
+    if metadata.len() > WORKSPACE_DOCUMENT_SIZE_LIMIT {
         return Err(format!(
             "workspace '{}' is too large for rollback copy: {} bytes (limit {})",
             path.display(),
             metadata.len(),
-            WORKSPACE_ROLLBACK_COPY_LIMIT
+            WORKSPACE_DOCUMENT_SIZE_LIMIT
         ));
     }
     let mut candidate =
@@ -6364,6 +6402,35 @@ mod tests {
 
         let err = load_workspace_from(&path).expect_err("load should fail");
         assert!(err.contains("parse workspace"));
+    }
+
+    #[test]
+    fn native_workspace_tests_rejects_oversized_workspace_before_reading() {
+        let (_dir, path) = temp_workspace_path();
+        File::create(&path)
+            .and_then(|file| file.set_len(WORKSPACE_DOCUMENT_SIZE_LIMIT + 1))
+            .expect("create oversized workspace");
+
+        let err = load_workspace_from(&path).expect_err("load should reject oversized workspace");
+        assert!(err.contains("workspace"));
+        assert!(err.contains("too large"));
+    }
+
+    #[test]
+    fn native_workspace_tests_rejects_oversized_save_before_creating_storage() {
+        let (dir, path) = temp_parent_workspace_path();
+        let oversized = serde_json::json!({
+            "version": 3,
+            "projects": [],
+            "sessions": [],
+            "paneLayouts": [],
+            "padding": "x".repeat(WORKSPACE_DOCUMENT_SIZE_LIMIT as usize),
+        });
+
+        let err = save_workspace_to(&path, &oversized)
+            .expect_err("save should reject oversized workspace");
+        assert!(err.contains("too large"));
+        assert!(!dir.path().join(".psyche").exists());
     }
 
     #[test]
