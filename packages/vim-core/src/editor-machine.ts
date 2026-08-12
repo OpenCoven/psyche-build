@@ -84,8 +84,9 @@ type Token = { key: string; ctrl: boolean; alt: boolean; shift: boolean; meta: b
 
 function token(input: EditorInput): Token {
   if (typeof input !== 'string') return normalizeKeyboardEvent(input);
-  const shift = input.length === 1 && input.toLocaleLowerCase() !== input;
-  return { key: shift ? input.toLocaleLowerCase() : input, ctrl: false, alt: false, shift, meta: false };
+  const lower = input.toLowerCase();
+  const shift = input.length === 1 && lower !== input;
+  return { key: shift ? lower : input, ctrl: false, alt: false, shift, meta: false };
 }
 
 function starts(text: string): number[] {
