@@ -1249,6 +1249,7 @@ describe('native Coven launch routing', () => {
         state,
         showTerminalView: async () => true,
         findProject: () => project,
+        clearPassiveCovenPaneFocus: () => undefined,
         loadAgentSkills: () => undefined,
         activeWorkspaceRoot: () => '/repo',
         focusThread: async () => true,

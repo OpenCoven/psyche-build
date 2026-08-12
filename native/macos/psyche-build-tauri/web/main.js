@@ -247,8 +247,13 @@
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var thread = leaf && findThread(leaf.threadId);
-    state.activeThreadId = thread ? thread.id : null;
-    if (thread) project.lastActiveThreadId = thread.id;
+    var activeThread = thread &&
+      thread.kind !== "coven-chat" && thread.kind !== "coven-attach"
+        ? thread
+        : null;
+    state.activeThreadId = activeThread ? activeThread.id : null;
+    if (activeThread) project.lastActiveThreadId = activeThread.id;
+    clearPassiveCovenPaneFocus(layout);
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     var refreshStatus = !options || options.refreshStatus !== false;
@@ -293,10 +298,16 @@
     var key = paneLayoutKey(projectId, worktreePath);
     var current = paneLayouts.get(key) || null;
     var leaf = PsychePanes.createLeaf(nextPaneId("leaf"), threadId);
+    var anchorLeaf = current && current.root
+      ? PsychePanes.findLeafById(current.root, current.focusedLeafId)
+      : null;
+    var anchorLeafId = anchorLeaf
+      ? anchorLeaf.id
+      : (current && current.root ? PsychePanes.leafIds(current.root)[0] : null);
     var root = current && current.root
       ? PsychePanes.insertBelow(
           current.root,
-          current.focusedLeafId,
+          anchorLeafId,
           leaf,
           nextPaneId("split")
         )
@@ -573,13 +584,22 @@
     state.activeProjectId = id;
     var project = findProject(id);
     if (!project) return false;
+    clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
     var workspaceRoot = activeWorkspaceRoot(project);
     var threads = state.threads.filter(function (t) {
-      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden;
+      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
+        t.kind !== "coven-chat" && t.kind !== "coven-attach";
     });
+    var rememberedThread = project.lastActiveThreadId && state.threads.find(function (thread) {
+      return thread.id === project.lastActiveThreadId;
+    });
+    if (rememberedThread &&
+        (rememberedThread.kind === "coven-chat" || rememberedThread.kind === "coven-attach")) {
+      project.lastActiveThreadId = null;
+    }
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
         ? project.lastActiveThreadId
@@ -1664,7 +1684,7 @@
     return state.threads.some(function (thread) {
       return thread.projectId === projectId
         && threadCovenSessionId(thread) === sessionId
-        && thread.status !== "exited"
+        && (thread.status === "starting" || thread.status === "running")
         && !thread.closeStarted;
     });
   }
@@ -3390,7 +3410,9 @@
       state.activeProjectId = thread.projectId;
     }
     if (project) {
-      project.lastActiveThreadId = id;
+      if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+        project.lastActiveThreadId = id;
+      }
       project.selectedWorktreePath = thread.worktreePath;
     }
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
@@ -3603,7 +3625,9 @@
       if (staleFooter) staleFooter.remove();
       thread.pane.appendChild(createPaneFooter(thread));
     }
-    project.lastActiveThreadId = thread.id;
+    if (thread.kind !== "coven-chat" && thread.kind !== "coven-attach") {
+      project.lastActiveThreadId = thread.id;
+    }
     state.activeThreadId = thread.id;
     renderPaneWorkspace();
     refreshSidebar();
@@ -4731,7 +4755,7 @@
       && (!threadId || thread.id === threadId)
       && thread.projectId === project.id
       && threadCovenSessionId(thread) === session.id
-      && thread.status !== "exited"
+      && (thread.status === "starting" || thread.status === "running")
       && !thread.closeStarted;
   }
 
@@ -6046,22 +6070,26 @@
     return state.openFiles.filter(function (f) { return f.id === id; })[0] || null;
   }
 
-  function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot) {
+  function fileFocusThreadIsAvailable(thread, root, project, workspaceRoot, allowCoven) {
     return !!thread &&
       !thread.hidden &&
       thread.projectId === project.id &&
       thread.worktreePath === workspaceRoot &&
+      (allowCoven ||
+        (thread.kind !== "coven-chat" && thread.kind !== "coven-attach")) &&
       !!PsychePanes.findLeafByThreadId(root, thread.id);
   }
 
-  function resolveFileFocusThreadId(preferredId) {
+  function resolveFileFocusThreadId(preferredId, allowPreferredCoven) {
     var project = activeProject();
     var layout = activePaneLayout();
     if (!project || !layout || !layout.root) return null;
     var root = scopedPaneRoot(layout);
     var workspaceRoot = activeWorkspaceRoot(project);
     var preferred = preferredId ? findThread(preferredId) : null;
-    if (fileFocusThreadIsAvailable(preferred, root, project, workspaceRoot)) {
+    if (fileFocusThreadIsAvailable(
+      preferred, root, project, workspaceRoot, allowPreferredCoven
+    )) {
       return preferred.id;
     }
 
@@ -6069,7 +6097,7 @@
       ? PsychePanes.findLeafById(root, layout.focusedLeafId)
       : null;
     var focusedThread = focused ? findThread(focused.threadId) : null;
-    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot)) {
+    if (fileFocusThreadIsAvailable(focusedThread, root, project, workspaceRoot, false)) {
       return focusedThread.id;
     }
 
@@ -6077,7 +6105,7 @@
     for (var i = 0; i < leafIds.length; i++) {
       var leaf = PsychePanes.findLeafById(root, leafIds[i]);
       var thread = leaf ? findThread(leaf.threadId) : null;
-      if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot)) {
+      if (fileFocusThreadIsAvailable(thread, root, project, workspaceRoot, false)) {
         return thread.id;
       }
     }
@@ -6107,13 +6135,43 @@
     syncPaneMetricsVisibility();
   }
 
+  function clearPassiveCovenPaneFocus(layout) {
+    var activeThread = findThread(state.activeThreadId);
+    if (activeThread &&
+      (activeThread.kind === "coven-chat" || activeThread.kind === "coven-attach")) {
+      state.activeThreadId = null;
+    }
+    layout = layout || activePaneLayout();
+    if (!layout || !layout.root) return;
+    if (layout.activeSetId) {
+      var activeSet = findFocusSet(layout.activeSetId);
+      var hasPassiveThread = activeSet && activeSet.threadIds.some(function (threadId) {
+        var thread = findThread(threadId);
+        return thread && !thread.hidden &&
+          thread.kind !== "coven-chat" && thread.kind !== "coven-attach" &&
+          !!PsychePanes.findLeafByThreadId(layout.root, threadId);
+      });
+      if (!hasPassiveThread) layout.activeSetId = null;
+    }
+    ["focusedLeafId", "maximizedLeafId"].forEach(function (key) {
+      var leaf = layout[key] ? PsychePanes.findLeafById(layout.root, layout[key]) : null;
+      var thread = leaf ? findThread(leaf.threadId) : null;
+      if (thread && (thread.kind === "coven-chat" || thread.kind === "coven-attach")) {
+        layout[key] = null;
+      }
+    });
+  }
+
   async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
     if (!state.activeFileId) return false;
     var activeFile = findOpenFile(state.activeFileId);
     var destinationId = resolveFileFocusThreadId(
-      explicitThreadId || fileFocus.returnThreadId
+      explicitThreadId || fileFocus.returnThreadId,
+      Boolean(explicitThreadId)
     );
     if (destinationId) {
+      if (!(await showTerminalView())) return false;
+      if (!explicitThreadId) clearPassiveCovenPaneFocus();
       var layout = activePaneLayout();
       var leaf = layout && layout.root
         ? PsychePanes.findLeafByThreadId(layout.root, destinationId)
@@ -6133,6 +6191,7 @@
       return focused;
     }
     if (!(await showTerminalView())) return false;
+    clearPassiveCovenPaneFocus();
     renderPaneWorkspace();
     refreshSidebar();
     return true;
@@ -6212,14 +6271,18 @@
     var project = findProject(file.projectId);
     if (project) {
       state.activeProjectId = project.id;
+      var workspaceRoot = activeWorkspaceRoot(project);
       var threads = state.threads.filter(function (thread) {
-        return thread.projectId === project.id;
+        return thread.projectId === project.id && !thread.hidden &&
+          thread.worktreePath === workspaceRoot &&
+          thread.kind !== "coven-chat" && thread.kind !== "coven-attach";
       });
       var nextThreadId = project.lastActiveThreadId &&
         threads.some(function (thread) { return thread.id === project.lastActiveThreadId; })
           ? project.lastActiveThreadId
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
+      clearPassiveCovenPaneFocus();
       renderPaneWorkspace();
       loadAgentSkills();
       syncProjectBrowser();
@@ -6263,6 +6326,7 @@
     }
     if (!canShowTerminal) return false;
     clearFileFocusPresentation();
+    clearPassiveCovenPaneFocus();
     renderPaneMinimap(activePaneLayout(), null);
     refreshTabs();
     requestAnimationFrame(function () { scheduleVisiblePaneFit(); });
@@ -6290,6 +6354,7 @@
     if (next) activateFileTabNow(next.id);
     else {
       clearFileFocusPresentation();
+      clearPassiveCovenPaneFocus();
       refreshTabs();
       renderPaneWorkspace();
     }
@@ -8685,6 +8750,8 @@
     var project = { id: makeProjectId(), name: name, root: rootPath, collapsed: false, selectedWorktreePath: rootPath, worktrees: [], browsersByWorktree: {} };
     state.projects.push(project);
     state.activeProjectId = project.id;
+    state.activeThreadId = null;
+    renderPaneWorkspace();
     refreshSidebar();
     await refreshProjectWorktrees(project);
     syncProjectBrowser();
@@ -8827,6 +8894,7 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
+    var command = entry.command;
     if (entry.id === "coven-code") {
       if (!state.env || !state.env.coven_path) {
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
@@ -8840,7 +8908,7 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: entry.command,
+      command: command,
       args: entry.args.slice(),
       launchKind: null,
       projectRoot: project.root,

@@ -686,13 +686,17 @@ describe('native CodeMirror workspace editor surface', () => {
     const project = {
       id: 'p2',
       lastActiveThreadId: 't2',
+      selectedWorktreePath: '/repo',
     };
     const file = { id: 'inactive', projectId: project.id, dirty: true };
     const state = {
       activeProjectId: 'p1',
       activeThreadId: 't1',
       activeFileId: 'active',
-      threads: [{ id: 't2', projectId: project.id }],
+      threads: [{
+        id: 't2', kind: 'shell', projectId: project.id,
+        worktreePath: '/repo', hidden: false,
+      }],
     };
     let editorVisible = false;
     const revealFileForDecision = compileFunction<
@@ -701,6 +705,7 @@ describe('native CodeMirror workspace editor surface', () => {
       findOpenFile: () => file,
       findProject: () => project,
       state,
+      activeWorkspaceRoot: () => '/repo',
       terminalHost: {
         children: [{
           dataset: { threadId: 't2' },
@@ -708,6 +713,7 @@ describe('native CodeMirror workspace editor surface', () => {
         }],
       },
       renderPaneWorkspace: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       syncProjectBrowser: () => undefined,
       saveWorkspaceSoon: () => undefined,
@@ -782,6 +788,7 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshTabs: () => undefined,
       activateFileTabNow: () => undefined,
       clearFileFocusPresentation: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace: () => undefined,
     });
 
@@ -1128,6 +1135,7 @@ describe('native CodeMirror workspace editor surface', () => {
         guardDirtyFile: async () => true,
         findOpenFile: () => ({ id: 'file-a', dirty: false }),
         clearFileFocusPresentation: () => { calls.push('clear'); },
+        clearPassiveCovenPaneFocus: () => undefined,
         activePaneLayout: () => layout,
         renderPaneMinimap: (value: unknown, file: unknown) => {
           expect(value).toBe(layout);
@@ -1177,6 +1185,7 @@ describe('native CodeMirror workspace editor surface', () => {
         cleared += 1;
         state.activeFileId = null;
       },
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace: () => { rendered += 1; },
     });
 
