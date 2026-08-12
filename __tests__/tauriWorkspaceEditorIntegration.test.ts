@@ -1095,6 +1095,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const fileFocus = { returnThreadId: null as string | null };
     const classes = new Set<string>();
     const minimapCalls: Array<{ layout: unknown; fileId: string }> = [];
+    let ptyVisibilitySyncs = 0;
     const layout = { root: { type: 'leaf', id: 'leaf-a', threadId: 'thread-a' } };
     const fileViewEl = { hidden: true };
     const terminalHost = { hidden: false };
@@ -1111,6 +1112,7 @@ describe('native CodeMirror workspace editor surface', () => {
       fileViewEl,
       terminalHost,
       syncPaneMetricsVisibility: () => true,
+      syncAllPtyVisibility: () => { ptyVisibilitySyncs += 1; },
       activePaneLayout: () => layout,
       renderPaneMinimap: (value: unknown, file: { id: string }) => {
         minimapCalls.push({ layout: value, fileId: file.id });
@@ -1132,6 +1134,7 @@ describe('native CodeMirror workspace editor surface', () => {
       { layout, fileId: 'file-a' },
       { layout, fileId: 'file-b' },
     ]);
+    expect(ptyVisibilitySyncs).toBe(2);
     expect(extractFunctionSource(mainJs, 'enterFileFocus')).not.toMatch(
       /applyLayout|data\.layout|sidebar/
     );

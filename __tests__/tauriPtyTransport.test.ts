@@ -409,6 +409,45 @@ describe('typed frontend PTY batch consumer', () => {
     });
   });
 
+  test('ignores stale write callbacks from an earlier PTY generation', async () => {
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi.fn(async () => undefined);
+    runtimeThreadIds.add('thread-c-generation');
+    const client = createPtyClient({
+      threadId: 'thread-c-generation',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c-generation', 1, [1]))).toBe(true);
+
+    client.prepareForPtyStart();
+
+    expect(routePtyBatch(batch('thread-c-generation', 1, [2]))).toBe(true);
+    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
+    expect(writes).toHaveLength(2);
+
+    writes[0].callback();
+    await Promise.resolve();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(writes).toHaveLength(2);
+
+    writes[1].callback();
+    await Promise.resolve();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('pty_ack', {
+      threadId: 'thread-c-generation',
+      thread_id: 'thread-c-generation',
+      sequence: 1,
+    });
+    expect(writes).toHaveLength(3);
+    expect(Array.from(writes[2].bytes)).toEqual([3]);
+  });
+
   test('does not acknowledge when xterm write throws', async () => {
     const invoke = vi.fn(async () => undefined);
     runtimeThreadIds.add('thread-d');

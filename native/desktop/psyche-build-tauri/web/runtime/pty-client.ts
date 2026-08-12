@@ -28,6 +28,7 @@ export interface PtyClientController {
 type QueuedBatch = {
   sequence: number;
   bytes: Uint8Array;
+  generation: number;
 };
 
 type PtyClientState = PtyClientController & {
@@ -35,6 +36,7 @@ type PtyClientState = PtyClientController & {
   deliveryStopped: boolean;
   invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
   write(bytes: Uint8Array, callback: () => void): void;
+  generation: number;
   nextSequence: number;
   activeBatch: QueuedBatch | null;
   queuedBatch: QueuedBatch | null;
@@ -78,9 +80,10 @@ function drainQueuedBatch(state: PtyClientState): void {
   startWrite(state, queued);
 }
 
-function completeActiveBatch(state: PtyClientState, sequence: number): void {
+function completeActiveBatch(state: PtyClientState, sequence: number, generation: number): void {
   if (state.disposed || state.deliveryStopped) return;
-  if (!state.activeBatch || state.activeBatch.sequence !== sequence) return;
+  if (!state.activeBatch) return;
+  if (state.activeBatch.sequence !== sequence || state.activeBatch.generation !== generation) return;
 
   state.activeBatch = null;
   void state.invoke('pty_ack', acknowledgementArgs(state.threadId, sequence)).catch(() => {});
@@ -91,7 +94,7 @@ function startWrite(state: PtyClientState, batch: QueuedBatch): boolean {
   state.activeBatch = batch;
   try {
     state.write(batch.bytes, () => {
-      completeActiveBatch(state, batch.sequence);
+      completeActiveBatch(state, batch.sequence, batch.generation);
     });
     return true;
   } catch {
@@ -120,6 +123,7 @@ function createClientState(options: PtyClientOptions): PtyClientState {
     deliveryStopped: false,
     invoke: options.invoke,
     write: options.write,
+    generation: 0,
     nextSequence: 1,
     activeBatch: null,
     queuedBatch: null,
@@ -127,6 +131,7 @@ function createClientState(options: PtyClientOptions): PtyClientState {
     ptyStarted: false,
     lastVisibilitySent: null,
     prepareForPtyStart() {
+      state.generation += 1;
       state.deliveryStopped = false;
       state.activeBatch = null;
       state.queuedBatch = null;
@@ -177,6 +182,7 @@ export function routePtyBatch(batch: PtyDataBatch): boolean {
   const queued = {
     sequence: batch.sequence,
     bytes: normalizeBatchBytes(batch),
+    generation: state.generation,
   };
 
   let accepted = false;
