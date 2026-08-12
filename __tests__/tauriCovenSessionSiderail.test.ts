@@ -2710,6 +2710,46 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
       expect(renderer.sessionListEl.querySelector('.session-close-confirm')).toBeNull();
     });
+
+    it('does not steal search focus when an abandoned confirmation times out', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      renderer.sessionSearchEl.focus();
+
+      vi.advanceTimersByTime(3000);
+
+      expect(row.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === row).toBe(false);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
+
+    it('does not steal search focus when Escape disarms an abandoned confirmation', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelector('.session-row')!;
+      await row.querySelector('.session-close')?.emit('click');
+      renderer.sessionSearchEl.focus();
+
+      renderer.disarmSessionClose();
+
+      expect(row.querySelector('.session-close-confirm')).toBeNull();
+      expect(renderer.document.activeElement === renderer.sessionSearchEl).toBe(true);
+      expect(renderer.document.activeElement === row).toBe(false);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+      expect(renderer.closeThread).not.toHaveBeenCalled();
+    });
   });
 
   describe('local row close control', () => {

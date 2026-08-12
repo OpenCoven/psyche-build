@@ -4753,11 +4753,13 @@
   function disarmSessionClose(options) {
     if (!armedSessionClose) return;
     var armed = armedSessionClose;
+    var confirmOwnedFocus = document.activeElement === armed.confirm;
     armedSessionClose = null;
     clearInterval(armed.timer);
     armed.confirm.remove();
     if (armed.close.isConnected) armed.close.hidden = false;
-    if ((!options || options.restoreFocus !== false) && armed.host.isConnected) {
+    if ((!options || options.restoreFocus !== false) && confirmOwnedFocus &&
+        armed.host.isConnected) {
       if (armed.host.dataset && armed.host.dataset.treeItem) {
         focusSessionTreeItem(armed.host);
       } else {
