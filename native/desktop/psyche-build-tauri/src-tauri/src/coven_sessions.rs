@@ -74,6 +74,7 @@ struct CovenSessionSummary {
     id: String,
     project_root: String,
     cwd: Option<String>,
+    labels: Vec<String>,
     harness: Option<String>,
     model: Option<String>,
     current_task: Option<String>,
@@ -1043,6 +1044,7 @@ fn normalize_session(
         id: id.to_string(),
         project_root: project_scope.project_root.clone(),
         cwd,
+        labels: normalized_labels(fields)?,
         harness: optional_string(fields, "harness", "harness")?,
         model: optional_string(fields, "model", "model")?,
         current_task: optional_string(fields, "currentTask", "current_task")?,
@@ -1054,6 +1056,32 @@ fn normalize_session(
         updated_at: optional_string(fields, "updatedAt", "updated_at")?,
         archived_at: optional_string(fields, "archivedAt", "archived_at")?,
     })
+}
+
+fn normalized_labels(fields: &Map<String, Value>) -> Option<Vec<String>> {
+    let Some(values) = fields.get("labels") else {
+        return Some(Vec::new());
+    };
+    let values = values.as_array()?;
+    if values.len() > 16 {
+        return None;
+    }
+
+    let mut seen = HashSet::with_capacity(values.len());
+    let mut labels = Vec::with_capacity(values.len());
+    for value in values {
+        let label = value.as_str()?;
+        if !(1..=64).contains(&label.len())
+            || !label.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+            || !seen.insert(label)
+        {
+            return None;
+        }
+        labels.push(label.to_string());
+    }
+    Some(labels)
 }
 
 fn required_string<'a>(
@@ -1679,6 +1707,7 @@ mod tests {
                 id: "session".to_string(),
                 project_root: "/project".to_string(),
                 cwd: None,
+                labels: vec!["source:psyche-build".to_string()],
                 harness: None,
                 model: None,
                 current_task: None,
@@ -1701,6 +1730,7 @@ mod tests {
                     "id": "session",
                     "projectRoot": "/project",
                     "cwd": null,
+                    "labels": ["source:psyche-build"],
                     "harness": null,
                     "model": null,
                     "currentTask": null,
@@ -1769,6 +1799,7 @@ mod tests {
                     "id": "camel",
                     "projectRoot": project,
                     "cwd": "  ",
+                    "labels": ["source:psyche-build"],
                     "harness": "  codex  ",
                     "model": "  claude-sonnet  ",
                     "currentTask": "  review tests  ",
@@ -1783,6 +1814,7 @@ mod tests {
                 {
                     "id": "snake",
                     "project_root": project,
+                    "labels": ["source:psyche-build"],
                     "model": "gpt-5.5",
                     "current_task": "answer follow-up",
                     "input_tokens": 22,
@@ -1802,6 +1834,7 @@ mod tests {
 
         let sessions = normalize_sessions(payload, &requested).unwrap();
         assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].labels, vec!["source:psyche-build"]);
         assert_eq!(sessions[0].harness.as_deref(), Some("codex"));
         assert_eq!(sessions[0].model.as_deref(), Some("claude-sonnet"));
         assert_eq!(sessions[0].current_task.as_deref(), Some("review tests"));
@@ -1813,6 +1846,7 @@ mod tests {
         assert_eq!(sessions[0].updated_at.as_deref(), Some("u1"));
         assert_eq!(sessions[0].archived_at.as_deref(), Some("a1"));
         assert_eq!(sessions[0].cwd, None);
+        assert_eq!(sessions[1].labels, vec!["source:psyche-build"]);
         assert_eq!(sessions[1].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             sessions[1].current_task.as_deref(),
@@ -1869,6 +1903,74 @@ mod tests {
         assert_eq!(sessions[0].id, "unsafe-tokens");
         assert_eq!(sessions[0].input_tokens, None);
         assert_eq!(sessions[0].output_tokens, None);
+    }
+
+    #[test]
+    fn normalizes_missing_session_labels_to_an_empty_list() {
+        let tree = TempTree::new("missing-labels");
+        let project = tree.directory("project");
+        let requested = vec![project.clone()];
+        let payload = json!([{ "id": "legacy", "projectRoot": project }]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].labels.is_empty());
+    }
+
+    #[test]
+    fn normalizes_label_boundaries_and_preserves_request_order() {
+        let tree = TempTree::new("label-boundaries");
+        let project = tree.directory("project");
+        let requested = vec![project.clone()];
+        let mut labels = vec!["a._:-Z9".to_string(), "x".repeat(64)];
+        labels.extend((2..16).map(|index| format!("label-{index}")));
+        let payload = json!([{
+            "id": "boundaries",
+            "projectRoot": project,
+            "labels": labels
+        }]);
+
+        let sessions = normalize_sessions(payload, &requested).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].labels, labels);
+    }
+
+    #[test]
+    fn normalizes_by_dropping_sessions_with_malformed_labels() {
+        let tree = TempTree::new("malformed-labels");
+        let project = tree.directory("project");
+        let requested = vec![project.clone()];
+        let malformed = [
+            ("non-array", json!("source:psyche-build")),
+            ("non-string", json!(["valid", 1])),
+            (
+                "too-many",
+                Value::Array(
+                    (0..17)
+                        .map(|index| json!(format!("label-{index}")))
+                        .collect(),
+                ),
+            ),
+            ("duplicate", json!(["duplicate", "duplicate"])),
+            ("empty", json!([""])),
+            ("too-long", json!(["x".repeat(65)])),
+            ("non-ascii", json!(["café"])),
+            ("illegal-space", json!(["has space"])),
+        ];
+
+        for (case, labels) in malformed {
+            let payload = json!([{
+                "id": case,
+                "projectRoot": project,
+                "labels": labels
+            }]);
+
+            let sessions = normalize_sessions(payload, &requested).unwrap();
+
+            assert!(sessions.is_empty(), "accepted malformed {case} labels");
+        }
     }
 
     #[test]

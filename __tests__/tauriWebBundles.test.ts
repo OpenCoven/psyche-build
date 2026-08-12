@@ -107,6 +107,11 @@ describe('committed web bundles', () => {
     expect(launcher?.packageBinPath).not.toBe(shimPath);
   });
 
+  it('parses the native workspace shell before packaging it', () => {
+    expect(() => execFileSync(process.execPath, ['--check', join(webRoot, 'main.js')]))
+      .not.toThrow();
+  });
+
   it('builds every bundle index.html loads', () => {
     // If a bundle stops being produced, the freshness checks below would have
     // nothing to compare and would quietly pass.

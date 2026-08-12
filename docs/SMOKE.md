@@ -132,22 +132,64 @@ Run this section when Coven is installed locally and you want to verify the opti
 
 1. Launch the unsigned macOS app with `coven` available on the augmented PATH.
 2. Open the linked-worktree path itself as the project.
-3. Confirm project open creates one `coven chat` PTY owned by that linked worktree.
-4. Press Command-T twice and confirm three simultaneous physical panes.
-5. Type distinct input in each pane and confirm focus/input isolation.
-6. Type a partial prompt in Coven, drag PNG and JPEG files from Finder onto the
-   pane, confirm quoted absolute paths appear at cursor without submitting.
-7. Drop a mix of image/non-image files, confirm every image path is inserted in
-   Finder order and skipped count is reported.
-8. Start a Coven turn, press Ctrl+C, confirm PTY remains running while
-   pane/session rail/minimap return to **Waiting for you** after prompt settles.
-9. Drag a divider and use its arrow-key controls; confirm all visible PTYs resize.
-10. Select a durable session in the Coven rail twice; confirm one native
-   `coven attach <id>` pane is created and the second action focuses it.
-11. Close the attachment and confirm `coven sessions` still lists the durable session.
-12. Stop the daemon and confirm new `coven chat` panes still launch while the rail
+3. Confirm project open creates one `coven chat` PTY owned by that linked
+   worktree. This pane delegates into Coven Code without psyche tmux. Find its
+   daemon session ID and define `PSYCHE_SESSION_ID=<id>`.
+4. Inspect the daemon record:
+
+   ```bash
+   coven sessions --json | jq -e --arg id "$PSYCHE_SESSION_ID" \
+     '.sessions[] | select(.id == $id) | {id, status, labels}'
+   ```
+
+   Confirm `labels` contains the exact `source:psyche-build` marker and `status` is
+   `starting`, `running`, or `waiting`.
+5. Confirm exactly one active daemon-backed Coven row appears for
+   `$PSYCHE_SESSION_ID`.
+6. Press Command-T twice and confirm three simultaneous physical panes.
+7. Type distinct input in each pane and confirm focus/input isolation.
+8. Type a partial prompt in Coven, drag PNG and JPEG files from Finder onto the
+   pane, confirm quoted absolute paths appear at cursor without submitting; for
+   mixed drops, confirm every image path is inserted in Finder order and the
+   skipped count is reported.
+9. Start a Coven turn, press Ctrl+C, and confirm the PTY remains running while
+   pane, rail, and minimap return to **Waiting for you** after the prompt settles.
+10. Drag a divider and use its arrow-key controls; confirm all visible PTYs resize.
+11. Start a concurrent active Coven Code session outside psyche in the same
+   repository and record its ID as `EXTERNAL_SESSION_ID=<id>`. Confirm daemon
+   JSON lists it:
+
+    ```bash
+    coven sessions --json | jq -e --arg id "$EXTERNAL_SESSION_ID" \
+      '.sessions[] | select(.id == $id) | {id, status, labels}'
+    ```
+
+    Confirm no row for `$EXTERNAL_SESSION_ID` appears in the psyche rail,
+    including after searching for it.
+12. Capture the owned session labels, select its active Coven rail row twice,
+    then compare the labels again:
+
+    ```bash
+    BEFORE_LABELS="$(coven sessions --json | jq -ce --arg id "$PSYCHE_SESSION_ID" \
+      '.sessions[] | select(.id == $id) | .labels | sort')" || exit 1
+    test -n "$BEFORE_LABELS" || exit 1
+    # Select the $PSYCHE_SESSION_ID row twice in the Coven rail.
+    AFTER_LABELS="$(coven sessions --json | jq -ce --arg id "$PSYCHE_SESSION_ID" \
+      '.sessions[] | select(.id == $id) | .labels | sort')" || exit 1
+    test -n "$AFTER_LABELS" || exit 1
+    test "$BEFORE_LABELS" = "$AFTER_LABELS"
+    ```
+
+    Confirm the first selection creates one native physical
+    `coven attach <id>` pane, the second focuses it, and the labels are unchanged.
+13. Close the attachment and confirm daemon JSON still lists the durable session.
+14. Complete `$PSYCHE_SESSION_ID` and confirm its Coven row disappears after the
+    next successful refresh. The refresh must not create, close, or focus a local
+    pane; the exited/local pane remains governed by the normal close and focus
+    controls.
+15. Stop the daemon and confirm new `coven chat` panes still launch while the rail
    shows stale/unavailable discovery state.
-13. Run `/new-shell` and `/new-psyche`; confirm the former is a login shell and
+16. Run `/new-shell` and `/new-psyche`; confirm the former is a login shell and
     only the latter starts the legacy tmux-backed TUI.
 
 Expected:
@@ -156,9 +198,15 @@ Expected:
 - When Coven is running for the same project, the sidebar shows matching rows in a `Coven` subsection.
 - Clicking a durable Coven row opens one visible native pane with `coven attach <session-id>`; clicking it again focuses that attachment.
 - When Coven is unavailable, the rail shows one global unavailable or stale-discovery state and psyche keeps running.
-- Finder image drops target only running terminal pane under pointer, never Web/editor/sidebar/failed/exited.
-- Image drops insert shell-safe paths only and never synthesize Enter.
-- Ctrl+C leaves healthy Coven PTY running and re-arms local attention for returned prompt.
+- Finder image drops target only the running terminal pane under the pointer,
+  insert shell-safe paths without synthesizing Enter, and never target Web,
+  editor, sidebar, failed, or exited panes.
+- Ctrl+C leaves a healthy Coven PTY running and re-arms local attention when the
+  prompt returns.
+- Compatible rollout requires Coven label persistence and Coven Code marker
+  mapping. Older Coven or Coven Code versions fail closed to no Coven rows while
+  native PTY panes remain functional. Historical sessions are not migrated;
+  only sessions created after compatible versions are installed can appear.
 
 ## Merge / PR smoke
 

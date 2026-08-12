@@ -116,26 +116,39 @@ describe('Tauri Coven session model', () => {
     expect(model.isLiveCovenSession()).toBe(false);
   });
 
-  test('groups only safe, project-scoped, live sessions into sorted copies', () => {
+  test('groups only Psyche-owned active Coven sessions into sorted copies', () => {
     const sessions = [
-      { id: 'later', projectRoot: '/alpha', status: 'waiting', updatedAt: '2025-01-01T00:00:00Z' },
-      { id: 'live', projectRoot: '/alpha', status: 'running', updatedAt: '2026-01-01T00:00:00Z' },
-      { id: 'beta', projectRoot: '/beta', status: 'waiting' },
-      { id: 'unsafe id', projectRoot: '/alpha', status: 'running' },
-      { id: 'missing-root', status: 'running' },
-      { projectRoot: '/alpha', status: 'running' },
-      { id: 'empty-root', projectRoot: '', status: 'running' },
-      { id: 'finished', projectRoot: '/alpha', status: 'completed' },
-      { id: 'resumable', projectRoot: '/alpha', status: 'idle' },
-      { id: 'beta-orphan', projectRoot: '/beta', status: 'orphaned' },
+      {
+        id: 'running', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build'], updatedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        id: 'starting', projectRoot: '/alpha', status: 'starting',
+        labels: ['source:psyche-build'], updatedAt: '2026-01-03T00:00:00Z',
+      },
+      { id: 'waiting', projectRoot: '/beta', status: 'waiting', labels: ['source:psyche-build'] },
+      ...['idle', 'completed', 'failed', 'killed', 'orphaned', 'archived'].map((status) => ({
+        id: status, projectRoot: '/alpha', status, labels: ['source:psyche-build'],
+      })),
+      { id: 'missing-labels', projectRoot: '/alpha', status: 'running' },
+      { id: 'empty-labels', projectRoot: '/alpha', status: 'running', labels: [] },
+      { id: 'foreign', projectRoot: '/alpha', status: 'running', labels: ['source:foreign'] },
+      {
+        id: 'prefix-only', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build-extra'],
+      },
+      { id: 'unsafe id', projectRoot: '/alpha', status: 'running', labels: ['source:psyche-build'] },
+      { id: 'missing-root', status: 'running', labels: ['source:psyche-build'] },
+      { projectRoot: '/alpha', status: 'running', labels: ['source:psyche-build'] },
+      { id: 'empty-root', projectRoot: '', status: 'running', labels: ['source:psyche-build'] },
     ];
 
     const grouped = model.groupCovenSessions(sessions);
 
     expect([...grouped.keys()]).toEqual(['/alpha', '/beta']);
-    expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['live', 'later']);
-    expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['beta']);
-    expect(sessions).toHaveLength(10);
+    expect(grouped.get('/alpha')?.map((session) => session.id)).toEqual(['starting', 'running']);
+    expect(grouped.get('/beta')?.map((session) => session.id)).toEqual(['waiting']);
+    expect(sessions).toHaveLength(17);
   });
 
   test('groups all safe project-scoped sessions separately from the live rail', () => {
@@ -161,8 +174,8 @@ describe('Tauri Coven session model', () => {
 
   test('drops a project whose sessions have all finished', () => {
     const grouped = model.groupCovenSessions([
-      { id: 'done', projectRoot: '/alpha', status: 'completed' },
-      { id: 'gone', projectRoot: '/alpha', status: 'orphaned' },
+      { id: 'done', projectRoot: '/alpha', status: 'completed', labels: ['source:psyche-build'] },
+      { id: 'gone', projectRoot: '/alpha', status: 'orphaned', labels: ['source:psyche-build'] },
     ]);
 
     expect([...grouped.keys()]).toEqual([]);
@@ -175,8 +188,14 @@ describe('Tauri Coven session model', () => {
       { name: 'Other', title: 'Review changes' },
     ];
     const covenSessions = [
-      { id: 'z', title: 'Ship release', harness: 'coven-code', status: 'completed' },
-      { id: 'remote-id', title: 'Build feature', harness: 'other', status: 'running' },
+      {
+        id: 'z', title: 'Ship release', harness: 'coven-code', status: 'waiting',
+        labels: ['source:psyche-build'],
+      },
+      {
+        id: 'remote-id', title: 'Build feature', harness: 'other', status: 'running',
+        labels: ['source:psyche-build'],
+      },
     ];
     const localOriginal = [...psycheSessions];
     const remoteOriginal = [...covenSessions];
@@ -203,6 +222,28 @@ describe('Tauri Coven session model', () => {
     expect(covenSessions).toEqual(remoteOriginal);
   });
 
+  test('does not reveal inactive or foreign Coven sessions through direct filtering', () => {
+    const hiddenCompleted = {
+      id: 'completed-secret-id', title: 'Completed secret title', status: 'completed',
+      labels: ['source:psyche-build'],
+    };
+    const hiddenForeign = {
+      id: 'foreign-secret-id', title: 'Foreign secret title', status: 'running',
+      labels: ['source:foreign'],
+    };
+
+    for (const query of [
+      hiddenCompleted.title, hiddenCompleted.id, hiddenForeign.title, hiddenForeign.id,
+    ]) {
+      expect(model.filterProjectSessions(
+        { name: 'Alpha' },
+        [],
+        [hiddenCompleted, hiddenForeign],
+        query,
+      ).covenSessions).toEqual([]);
+    }
+  });
+
   test('normalizes local and Coven sessions into their most-specific worktree rows', () => {
     const project = {
       name: 'Alpha',
@@ -219,6 +260,7 @@ describe('Tauri Coven session model', () => {
       [{
         id: 'remote', projectRoot: '/external/feature',
         cwd: '/external/feature/nested/app', title: 'Remote', status: 'waiting',
+        labels: ['source:psyche-build'],
       }],
       '',
     );
@@ -294,7 +336,9 @@ describe('Tauri Coven session model', () => {
     const next = model.applyCovenResponse(started.state, started.requestId, {
       status: 'ready',
       sessions: [
-        { id: 'live', projectRoot: '/repo', status: 'running' },
+        {
+          id: 'live', projectRoot: '/repo', status: 'running', labels: ['source:psyche-build'],
+        },
         { id: 'done', projectRoot: '/repo', status: 'completed' },
         { id: 'failed', projectRoot: '/repo', status: 'failed' },
       ],
@@ -311,7 +355,7 @@ describe('Tauri Coven session model', () => {
     const ready = model.applyCovenResponse(requested.state, requested.requestId, {
       status: 'ready',
       sessions: [
-        { id: 'live', projectRoot: '/alpha', status: 'running' },
+        { id: 'live', projectRoot: '/alpha', status: 'running', labels: ['source:psyche-build'] },
         { id: 'done', projectRoot: '/alpha', status: 'completed' },
       ],
     }, 100);
@@ -338,7 +382,10 @@ describe('Tauri Coven session model', () => {
       const recovered = model.applyCovenResponse(recovery.state, recovery.requestId, {
         status: 'ready',
         sessions: [
-          { id: 'recovered', projectRoot: '/beta', status: 'running' },
+          {
+            id: 'recovered', projectRoot: '/beta', status: 'running',
+            labels: ['source:psyche-build'],
+          },
           { id: 'beta-done', projectRoot: '/beta', status: 'completed' },
         ],
       }, 102);
