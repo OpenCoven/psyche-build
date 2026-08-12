@@ -77,13 +77,13 @@ const BUILD_PROVENANCE_BASE_RECORD_KEYS = [
 ];
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const COMMAND_MAX_BUFFER = 20 * 1024 * 1024;
+const COMMAND_ABORT_POLL_MS = 10;
 const DEV_SOURCE_PATHSPECS = [
   ':(top,glob)**',
   ':(top,glob,exclude)**/target/**',
   ':(top,glob,exclude)**/node_modules/**',
   ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
 ];
-
 export function parseBuildArguments(argv) {
   const tokens = argv.filter((value) => value !== '--');
   const [channel, ...rest] = tokens;
@@ -136,104 +136,54 @@ export async function runCommand(command, args, options = {}) {
     throw new TypeError('runCommand requires an array of string arguments');
   }
 
-  const cwd = path.resolve(options.cwd ?? process.cwd());
-  let child;
-
   try {
-    child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    return await executeFileCommand(command, args, options);
   } catch (cause) {
-    throw createCommandFailure(command, args, options, cause, '', '', cwd);
-  }
+    const stage =
+      typeof options.stage === 'string' && options.stage.trim() !== ''
+        ? options.stage.trim()
+        : 'run command';
+    const cwd = path.resolve(options.cwd ?? process.cwd());
+    const stdout = typeof cause?.stdout === 'string' ? cause.stdout : '';
+    const stderr = typeof cause?.stderr === 'string' ? cause.stderr : '';
+    const exitCode = typeof cause?.code === 'number' ? cause.code : undefined;
+    const code = typeof cause?.code === 'string' ? cause.code : undefined;
+    const signal = typeof cause?.signal === 'string' ? cause.signal : undefined;
+    const sections = [
+      `Stage: ${stage}`,
+      `cwd: ${cwd}`,
+      `Command: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
+    ];
 
-  return await new Promise((resolve, reject) => {
-    let stdout = '';
-    let stderr = '';
-    let processError;
-    let abortKillTimer;
-
-    const killChild = () => {
-      if (!child.killed) {
-        child.kill('SIGTERM');
-      }
-    };
-
-    const cancelAbortKillTimer = () => {
-      if (abortKillTimer) {
-        clearTimeout(abortKillTimer);
-        abortKillTimer = undefined;
-      }
-    };
-
-    const handleAbort = () => {
-      processError = createAbortCause(options.signal);
-      if (stdout !== '' || stderr !== '') {
-        killChild();
-        return;
-      }
-      abortKillTimer = setTimeout(killChild, 50);
-    };
-
-    const appendOutput = (streamName, chunk) => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      if (streamName === 'stdout') {
-        stdout += text;
-      } else {
-        stderr += text;
-      }
-
-      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > COMMAND_MAX_BUFFER) {
-        processError = Object.assign(
-          new Error(`Command output exceeded ${COMMAND_MAX_BUFFER} bytes`),
-          { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
-        );
-        child.kill('SIGTERM');
-      }
-      if (abortKillTimer) {
-        cancelAbortKillTimer();
-        killChild();
-      }
-    };
-
-    if (options.signal?.aborted) {
-      handleAbort();
-    } else {
-      options.signal?.addEventListener('abort', handleAbort, { once: true });
+    if (exitCode !== undefined) {
+      sections.push(`exit code ${exitCode}`);
+    } else if (code !== undefined) {
+      sections.push(`spawn code ${code}`);
     }
-    child.stdout?.on('data', (chunk) => appendOutput('stdout', chunk));
-    child.stderr?.on('data', (chunk) => appendOutput('stderr', chunk));
-    child.once('error', (error) => {
-      processError = error;
-    });
-    child.once('close', (exitCode, signal) => {
-      cancelAbortKillTimer();
-      options.signal?.removeEventListener('abort', handleAbort);
-      if (!processError && exitCode === 0 && signal === null) {
-        resolve({ stdout, stderr });
-        return;
-      }
+    if (signal !== undefined) {
+      sections.push(`signal ${signal}`);
+    }
+    if (options.signal?.aborted) {
+      sections.push(`abort reason: ${describeError(options.signal.reason)}`);
+    }
+    sections.push(
+      `stdout:\n${stdout}`,
+      `stderr:\n${stderr}`,
+      `cause: ${describeError(cause)}`,
+    );
 
-      const cause =
-        processError ??
-        createProcessExitCause(exitCode, signal);
-      reject(
-        createCommandFailure(
-          command,
-          args,
-          options,
-          cause,
-          stdout,
-          stderr,
-          cwd,
-          exitCode,
-          signal,
-        ),
-      );
-    });
-  });
+    const error = new Error(sections.join('\n'), { cause });
+    error.command = command;
+    error.args = [...args];
+    error.cwd = cwd;
+    error.stage = stage;
+    error.exitCode = exitCode;
+    error.code = code;
+    error.signal = signal;
+    error.stdout = stdout;
+    error.stderr = stderr;
+    throw error;
+  }
 }
 
 export async function resolveCommit(root, ref, execute = runCommand) {
@@ -1037,6 +987,9 @@ export async function smokeLaunchBundle(appPath, overrides) {
   if (!executableName) {
     throw new Error('smokeLaunchBundle requires a nonblank executableName');
   }
+  if (overrides.signal?.aborted) {
+    throw createSmokeAbortError(appPath, overrides.signal.reason);
+  }
 
   const args = [...(overrides.args ?? [])];
   const smokeMs = overrides.smokeMs ?? DEFAULT_SMOKE_MS;
@@ -1061,7 +1014,6 @@ export async function smokeLaunchBundle(appPath, overrides) {
           ...temporaryHomeEnvironment(tempHome),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
-        ...(overrides.signal ? { signal: overrides.signal } : {}),
       });
     } catch (error) {
       throw new StartupSmokeFailure(error);
@@ -1070,31 +1022,50 @@ export async function smokeLaunchBundle(appPath, overrides) {
     stdout = collectStreamOutput(child.stdout);
     stderr = collectStreamOutput(child.stderr);
     const exitPromise = waitForProcessExit(child);
-    const smokeResult = await Promise.race([
-      exitPromise.then((exit) => ({ type: 'exit', exit })),
-      sleep(smokeMs).then(() => ({ type: 'smoke' })),
-    ]);
+    const abortWaiter = createAbortWaiter(overrides.signal);
 
-    if (smokeResult.type === 'exit') {
-      throw new Error(buildEarlyExitMessage(appPath, smokeMs, smokeResult.exit, stdout(), stderr()));
-    }
-
-    child.kill('SIGTERM');
-    const termResult = await Promise.race([
-      exitPromise.then((exit) => ({ type: 'exit', exit })),
-      sleep(termTimeoutMs).then(() => ({ type: 'timeout' })),
-    ]);
-
-    if (termResult.type === 'timeout') {
-      child.kill('SIGKILL');
-      const killResult = await Promise.race([
+    try {
+      const smokeResult = await Promise.race([
         exitPromise.then((exit) => ({ type: 'exit', exit })),
-        sleep(postKillTimeoutMs).then(() => ({ type: 'timeout' })),
+        sleep(smokeMs).then(() => ({ type: 'smoke' })),
+        abortWaiter.promise.then(() => ({ type: 'abort' })),
       ]);
 
-      if (killResult.type === 'timeout') {
-        throw new Error(buildPostKillTimeoutMessage(appPath, postKillTimeoutMs, child.pid));
+      if (smokeResult.type === 'exit') {
+        throw new Error(buildEarlyExitMessage(appPath, smokeMs, smokeResult.exit, stdout(), stderr()));
       }
+
+      if (smokeResult.type === 'abort') {
+        const abortError = createSmokeAbortError(appPath, overrides.signal?.reason);
+        try {
+          await terminateSmokeChild(
+            child,
+            exitPromise,
+            sleep,
+            termTimeoutMs,
+            postKillTimeoutMs,
+            appPath,
+          );
+        } catch (terminationError) {
+          throw combineErrors(
+            abortError,
+            terminationError,
+            'Smoke cancellation failed to stop child process',
+          );
+        }
+        throw abortError;
+      }
+
+      await terminateSmokeChild(
+        child,
+        exitPromise,
+        sleep,
+        termTimeoutMs,
+        postKillTimeoutMs,
+        appPath,
+      );
+    } finally {
+      abortWaiter.cleanup();
     }
   } catch (error) {
     operationError = normalizeSmokeLaunchError(appPath, error, stdout(), stderr());
@@ -1390,6 +1361,72 @@ function waitForProcessExit(child) {
   });
 }
 
+function createAbortWaiter(signal) {
+  if (!signal) {
+    return {
+      promise: new Promise(() => {}),
+      cleanup() {},
+    };
+  }
+  if (signal.aborted) {
+    return {
+      promise: Promise.resolve(),
+      cleanup() {},
+    };
+  }
+
+  let resolveAbort;
+  const promise = new Promise((resolve) => {
+    resolveAbort = resolve;
+  });
+  const onAbort = () => resolveAbort();
+  signal.addEventListener('abort', onAbort, { once: true });
+  return {
+    promise,
+    cleanup() {
+      signal.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+async function terminateSmokeChild(
+  child,
+  exitPromise,
+  sleep,
+  termTimeoutMs,
+  postKillTimeoutMs,
+  appPath,
+) {
+  child.kill('SIGTERM');
+  const termResult = await Promise.race([
+    exitPromise.then((exit) => ({ type: 'exit', exit })),
+    sleep(termTimeoutMs).then(() => ({ type: 'timeout' })),
+  ]);
+
+  if (termResult.type === 'exit') {
+    return;
+  }
+
+  child.kill('SIGKILL');
+  const killResult = await Promise.race([
+    exitPromise.then((exit) => ({ type: 'exit', exit })),
+    sleep(postKillTimeoutMs).then(() => ({ type: 'timeout' })),
+  ]);
+  if (killResult.type === 'timeout') {
+    throw new Error(buildPostKillTimeoutMessage(appPath, postKillTimeoutMs, child.pid));
+  }
+}
+
+function createSmokeAbortError(appPath, reason) {
+  const error = new Error(
+    `Smoke launch cancelled for "${appPath}": ${describeError(reason)}.`,
+    { cause: reason instanceof Error ? reason : undefined },
+  );
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
 function normalizeSmokeLaunchError(appPath, error, stdout, stderr) {
   if (error instanceof StartupSmokeFailure) {
     return new Error(buildStartupSmokeErrorMessage(appPath, error.cause, stdout, stderr));
@@ -1452,93 +1489,6 @@ function describeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function createProcessExitCause(exitCode, signal) {
-  if (typeof exitCode === 'number') {
-    return Object.assign(new Error(`Command exited with code ${exitCode}`), {
-      code: exitCode,
-    });
-  }
-  if (typeof signal === 'string') {
-    return Object.assign(new Error(`Command terminated by signal ${signal}`), {
-      signal,
-    });
-  }
-  return new Error('Command exited without a status code or signal');
-}
-
-function createAbortCause(signal) {
-  return Object.assign(new Error('The operation was aborted'), {
-    name: 'AbortError',
-    code: 'ABORT_ERR',
-    cause: signal?.reason,
-  });
-}
-
-function createCommandFailure(
-  command,
-  args,
-  options,
-  cause,
-  stdout,
-  stderr,
-  cwd = path.resolve(options.cwd ?? process.cwd()),
-  closeExitCode,
-  closeSignal,
-) {
-  const stage =
-    typeof options.stage === 'string' && options.stage.trim() !== ''
-      ? options.stage.trim()
-      : 'run command';
-  const exitCode =
-    typeof cause?.code === 'number'
-      ? cause.code
-      : typeof closeExitCode === 'number'
-        && typeof cause?.code !== 'string'
-        ? closeExitCode
-        : undefined;
-  const code = typeof cause?.code === 'string' ? cause.code : undefined;
-  const signal =
-    typeof cause?.signal === 'string'
-      ? cause.signal
-      : typeof closeSignal === 'string'
-        ? closeSignal
-        : undefined;
-  const sections = [
-    `Stage: ${stage}`,
-    `cwd: ${cwd}`,
-    `Command: ${[command, ...args].map((value) => JSON.stringify(value)).join(' ')}`,
-  ];
-
-  if (exitCode !== undefined) {
-    sections.push(`exit code ${exitCode}`);
-  } else if (code !== undefined) {
-    sections.push(`spawn code ${code}`);
-  }
-  if (signal !== undefined) {
-    sections.push(`signal ${signal}`);
-  }
-  if (options.signal?.aborted) {
-    sections.push(`abort reason: ${describeError(options.signal.reason)}`);
-  }
-  sections.push(
-    `stdout:\n${stdout}`,
-    `stderr:\n${stderr}`,
-    `cause: ${describeError(cause)}`,
-  );
-
-  const error = new Error(sections.join('\n'), { cause });
-  error.command = command;
-  error.args = [...args];
-  error.cwd = cwd;
-  error.stage = stage;
-  error.exitCode = exitCode;
-  error.code = code;
-  error.signal = signal;
-  error.stdout = stdout;
-  error.stderr = stderr;
-  return error;
-}
-
 function combineErrors(primaryError, secondaryError, secondaryContext) {
   return new AggregateError(
     [primaryError, secondaryError],
@@ -1549,6 +1499,246 @@ function combineErrors(primaryError, secondaryError, secondaryContext) {
 
 function isEnoentError(error) {
   return Boolean(error) && typeof error === 'object' && error.code === 'ENOENT';
+}
+
+async function executeFileCommand(command, args, options) {
+  const signal = options.signal;
+  if (signal?.aborted) {
+    throw createCommandAbortCause(signal.reason, {
+      error: undefined,
+      stdout: '',
+      stderr: '',
+    });
+  }
+
+  let child;
+  const completion = new Promise((resolve) => {
+    try {
+      child = spawn(
+        command,
+        args,
+        {
+          cwd: options.cwd,
+          env: options.env,
+          detached: Boolean(signal) && process.platform !== 'win32',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      let stdoutLength = 0;
+      let stderrLength = 0;
+      let processError;
+
+      const collectOutput = (chunks, length, streamName, chunk) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        chunks.push(buffer);
+        const nextLength = length + buffer.length;
+        if (nextLength > COMMAND_MAX_BUFFER && !processError) {
+          processError = new Error(
+            `${streamName} maxBuffer length exceeded ${COMMAND_MAX_BUFFER} bytes`,
+          );
+          processError.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          child.kill('SIGTERM');
+        }
+        return nextLength;
+      };
+
+      child.stdout.on('data', (chunk) => {
+        stdoutLength = collectOutput(
+          stdoutChunks,
+          stdoutLength,
+          'stdout',
+          chunk,
+        );
+      });
+      child.stderr.on('data', (chunk) => {
+        stderrLength = collectOutput(
+          stderrChunks,
+          stderrLength,
+          'stderr',
+          chunk,
+        );
+      });
+      child.once('error', (error) => {
+        processError = processError ?? error;
+      });
+      child.once('close', (code, exitSignal) => {
+        if (!processError && (code !== 0 || exitSignal)) {
+          processError = new Error(
+            exitSignal
+              ? `Command terminated by ${exitSignal}`
+              : `Command exited with code ${String(code)}`,
+          );
+          if (typeof code === 'number') {
+            processError.code = code;
+          }
+          if (exitSignal) {
+            processError.signal = exitSignal;
+          }
+        }
+        if (processError && exitSignal && typeof processError.signal !== 'string') {
+          processError.signal = exitSignal;
+        }
+          resolve({
+            error: processError,
+            stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+            stderr: Buffer.concat(stderrChunks).toString('utf8'),
+          });
+      });
+    } catch (error) {
+      resolve({
+        error,
+        stdout: '',
+        stderr: '',
+      });
+    }
+  });
+
+  if (!signal) {
+    return unwrapCommandExecution(await completion);
+  }
+
+  let resolveAbort;
+  const abort = new Promise((resolve) => {
+    resolveAbort = resolve;
+  });
+  const onAbort = () => resolveAbort();
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    const first = await Promise.race([
+      completion.then((execution) => ({ type: 'completion', execution })),
+      abort.then(() => ({ type: 'abort' })),
+    ]);
+
+    if (first.type === 'completion') {
+      return unwrapCommandExecution(first.execution);
+    }
+
+    let terminationError;
+    try {
+      await terminateCommandProcessGroup(
+        child,
+        DEFAULT_TERM_TIMEOUT_MS,
+        DEFAULT_POST_KILL_TIMEOUT_MS,
+      );
+    } catch (error) {
+      terminationError = error;
+    }
+    const execution = await completion;
+    throw createCommandAbortCause(
+      signal.reason,
+      execution,
+      terminationError,
+    );
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function unwrapCommandExecution(execution) {
+  if (execution.error) {
+    execution.error.stdout = execution.stdout;
+    execution.error.stderr = execution.stderr;
+    throw execution.error;
+  }
+  return {
+    stdout: execution.stdout,
+    stderr: execution.stderr,
+  };
+}
+
+function createCommandAbortCause(reason, execution, terminationError) {
+  const details = ['The operation was aborted'];
+  if (reason !== undefined) {
+    details.push(`abort reason: ${describeError(reason)}`);
+  }
+  if (terminationError) {
+    details.push(`process-group termination failed: ${describeError(terminationError)}`);
+  }
+  const error = new Error(details.join('\n'), {
+    cause: reason instanceof Error ? reason : undefined,
+  });
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  error.signal =
+    typeof execution.error?.signal === 'string'
+      ? execution.error.signal
+      : undefined;
+  error.stdout = execution.stdout;
+  error.stderr = execution.stderr;
+  if (terminationError) {
+    error.terminationError = terminationError;
+  }
+  return error;
+}
+
+async function terminateCommandProcessGroup(child, termTimeoutMs, postKillTimeoutMs) {
+  if (!child || typeof child.pid !== 'number') {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    child.kill('SIGTERM');
+    return;
+  }
+
+  const processGroupId = child.pid;
+  signalProcessGroup(processGroupId, 'SIGTERM');
+  if (await waitForProcessGroupExit(processGroupId, termTimeoutMs)) {
+    return;
+  }
+
+  signalProcessGroup(processGroupId, 'SIGKILL');
+  if (await waitForProcessGroupExit(processGroupId, postKillTimeoutMs)) {
+    return;
+  }
+
+  throw new Error(
+    `process group ${processGroupId} did not exit within ` +
+      `${postKillTimeoutMs}ms after SIGKILL`,
+  );
+}
+
+function signalProcessGroup(processGroupId, signal) {
+  try {
+    process.kill(-processGroupId, signal);
+  } catch (error) {
+    if (!isMissingProcessError(error)) {
+      throw error;
+    }
+  }
+}
+
+async function waitForProcessGroupExit(processGroupId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(processGroupId)) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await defaultSleep(Math.min(COMMAND_ABORT_POLL_MS, deadline - Date.now()));
+  }
+  return true;
+}
+
+function processGroupExists(processGroupId) {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    if (isMissingProcessError(error)) {
+      return false;
+    }
+    if (error?.code === 'EPERM') {
+      return true;
+    }
+    throw error;
+  }
+}
+
+function isMissingProcessError(error) {
+  return isEnoentError(error) || error?.code === 'ESRCH';
 }
 
 function withAbortSignal(execute, signal) {
@@ -1596,7 +1786,7 @@ async function appendSourcePathFingerprint(hash, root, relativePath) {
 
   let stats;
   try {
-    stats = await lstat(absolutePath);
+    stats = await lstat(absolutePath, { bigint: true });
   } catch (error) {
     if (isEnoentError(error)) {
       appendFingerprintPart(hash, 'source-path', relativePath);
@@ -1619,8 +1809,10 @@ async function appendSourcePathFingerprint(hash, root, relativePath) {
     'source-metadata',
     JSON.stringify({
       type,
-      mode: stats.mode & 0o177777,
-      size: stats.size,
+      mode: (stats.mode & 0o177777n).toString(),
+      size: stats.size.toString(),
+      mtimeNs: stats.mtimeNs.toString(),
+      ctimeNs: stats.ctimeNs.toString(),
     }),
   );
 

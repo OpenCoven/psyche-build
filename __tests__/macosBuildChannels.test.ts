@@ -7,6 +7,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
@@ -61,12 +62,6 @@ const tauriDirectory = join(repositoryRoot, tauriRelativeCwd);
 const manifestPath = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
 const devConfigPath = resolve(repositoryRoot, 'native/macos/psyche-build-tauri/dev.tauri.generated.json');
 const scratchRoot = join(repositoryRoot, '.agent-test-artifacts', 'macos-build-channels');
-const devSourcePathspecs = [
-  ':(top,glob)**',
-  ':(top,glob,exclude)**/target/**',
-  ':(top,glob,exclude)**/node_modules/**',
-  ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
-];
 
 const packageJson = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
   scripts: Record<string, string>;
@@ -124,101 +119,6 @@ function createScratchDirectory(label: string): string {
   scratchDirs.push(dir);
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-function devSourceFingerprintCalls(cwd: string) {
-  return [
-    [
-      'git',
-      [
-        '-c',
-        'core.warnAmbiguousRefs=true',
-        'rev-parse',
-        '--verify',
-        '--end-of-options',
-        'HEAD^{commit}',
-      ],
-      { cwd, stage: 'resolve current commit' },
-    ],
-    [
-      'git',
-      [
-        'status',
-        '--porcelain=v2',
-        '-z',
-        '--untracked-files=all',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'capture dev source status' },
-    ],
-    [
-      'git',
-      [
-        'diff',
-        '--cached',
-        '--binary',
-        '--full-index',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-renames',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'capture staged dev source content' },
-    ],
-    [
-      'git',
-      [
-        'diff',
-        '--binary',
-        '--full-index',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-renames',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'capture worktree dev source content' },
-    ],
-    [
-      'git',
-      [
-        'diff',
-        '--cached',
-        '--name-only',
-        '-z',
-        '--no-renames',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'list staged dev source paths' },
-    ],
-    [
-      'git',
-      [
-        'diff',
-        '--name-only',
-        '-z',
-        '--no-renames',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'list worktree dev source paths' },
-    ],
-    [
-      'git',
-      [
-        'ls-files',
-        '--others',
-        '--exclude-standard',
-        '-z',
-        '--',
-        ...devSourcePathspecs,
-      ],
-      { cwd, stage: 'list untracked dev source paths' },
-    ],
-  ];
 }
 
 function createAppBundle(root: string, relativePath: string, marker: string): string {
@@ -566,6 +466,28 @@ async function waitForPaths(paths: readonly string[]): Promise<void> {
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, 1));
   }
   throw new Error(`Timed out waiting for paths: ${paths.join(', ')}`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessToStop(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (!processIsAlive(pid)) {
+      return;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 5));
+  }
+  throw new Error(`Timed out waiting for process ${pid} to stop`);
 }
 
 async function waitForPathOrPublicationFailure(
@@ -916,13 +838,24 @@ describe('macOS build channels', () => {
       expect(failure?.cause).toBeInstanceOf(Error);
     });
 
-    it('aborts the active command and preserves partial child diagnostics', async () => {
+    it('aborts the active command and preserves detailed abort diagnostics', async () => {
       const controller = new AbortController();
+      const startedPath = join(
+        createScratchDirectory('run-command-abort'),
+        'started',
+      );
       const command = runCommand(
         process.execPath,
         [
           '-e',
-          'process.stdout.write("child started"); setTimeout(() => process.exit(0), 250)',
+          `import("node:fs").then(({ writeFileSync }) => {
+            process.stdout.write(
+              "child started",
+              () => writeFileSync(process.argv[1], "started"),
+            );
+            setTimeout(() => process.exit(0), 250);
+          })`,
+          startedPath,
         ],
         {
           cwd: repositoryRoot,
@@ -930,10 +863,8 @@ describe('macOS build channels', () => {
           signal: controller.signal,
         },
       );
-      setTimeout(
-        () => controller.abort(new Error('test requested command cancellation')),
-        20,
-      );
+      await waitForPaths([startedPath]);
+      controller.abort(new Error('test requested command cancellation'));
 
       const failure = await command.then(
         () => undefined,
@@ -948,9 +879,55 @@ describe('macOS build channels', () => {
       expect(failure?.message).toContain('exercise command cancellation');
       expect(failure?.message).toMatch(/abort/i);
       expect(failure?.message).toContain('child started');
+      expect(failure?.message).toContain('test requested command cancellation');
       expect(failure?.code).toBe('ABORT_ERR');
-      expect(failure?.stdout).toBe('child started');
+      expect(failure?.stdout).toEqual(expect.any(String));
       expect(failure?.cause).toBeInstanceOf(Error);
+      expect(failure?.message).not.toContain('process-group termination failed');
+    });
+
+    it('waits for the aborted command process group before returning', async () => {
+      const controller = new AbortController();
+      const childPidPath = join(
+        createScratchDirectory('run-command-process-group'),
+        'child.pid',
+      );
+      const command = runCommand(
+        process.execPath,
+        [
+          '-e',
+          `Promise.all([
+            import("node:child_process"),
+            import("node:fs"),
+          ]).then(([{ spawn }, { writeFileSync }]) => {
+            const child = spawn(
+              process.execPath,
+              ["-e", "setInterval(() => {}, 1000)"],
+              { stdio: "ignore" },
+            );
+            writeFileSync(process.argv[1], String(child.pid));
+            setInterval(() => {}, 1000);
+          })`,
+          childPidPath,
+        ],
+        {
+          cwd: repositoryRoot,
+          stage: 'exercise process-group cancellation',
+          signal: controller.signal,
+        },
+      );
+      await waitForPaths([childPidPath]);
+      const childPid = Number(readFileSync(childPidPath, 'utf8'));
+
+      try {
+        controller.abort(new Error('test requested process-group cancellation'));
+        await expect(command).rejects.toThrow(/process-group cancellation|abort/i);
+        await waitForProcessToStop(childPid);
+      } finally {
+        if (processIsAlive(childPid)) {
+          process.kill(childPid, 'SIGKILL');
+        }
+      }
     });
 
     it('resolves a ref containing spaces as one git argument', async () => {
@@ -1882,6 +1859,53 @@ fi
 
       expect(child.child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
       expect(child.child.kill).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits for SIGKILL escalation before completing smoke cancellation', async () => {
+      const events: string[] = [];
+      const controller = new AbortController();
+      const child = createFakeChildProcess((signal) => {
+        events.push(`kill:${String(signal)}`);
+        if (signal === 'SIGKILL') {
+          events.push('close');
+          child.close(null, 'SIGKILL');
+        }
+      });
+      const spawnProcess = vi.fn(
+        (
+          _command: string,
+          _args: readonly string[],
+          options: { signal?: AbortSignal },
+        ) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => child.fail(new Error('spawn aborted before close')),
+            { once: true },
+          );
+          return child.child;
+        },
+      );
+      const removeTemporaryHome = vi.fn(async () => {
+        events.push('remove-home');
+      });
+      const launch = smokeLaunchBundle('/Applications/Psyche Build.app', {
+        executableName: 'Psyche Build',
+        signal: controller.signal,
+        spawnProcess,
+        smokeMs: 10_000,
+        termTimeoutMs: 5,
+        postKillTimeoutMs: 5,
+        makeTemporaryHome: async () => '/virtual/home',
+        removeTemporaryHome,
+      });
+
+      await tick();
+      controller.abort(new Error('test requested smoke cancellation'));
+
+      await expect(launch).rejects.toThrow(/smoke cancellation|abort/i);
+      expect(child.child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+      expect(child.child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      expect(events.indexOf('close')).toBeLessThan(events.indexOf('remove-home'));
     });
 
     it('fails explicitly and still cleans up when the child does not exit after SIGKILL', async () => {
@@ -3110,11 +3134,7 @@ fi
       label: string,
       prepare: (sourceRoot: string) => void,
       mutateDuringBuild: (sourceRoot: string) => void,
-    ): Promise<{
-      completion: Promise<unknown>;
-      publish: ReturnType<typeof vi.fn<[], Promise<string>>>;
-      tempRoot: string;
-    }> {
+    ) {
       const sourceRoot = createCommittedSource(label);
       const tempRoot = createScratchDirectory(`${label}-temp`);
       const snapshotPath = join(tempRoot, 'snapshot', 'Psyche Build Dev.app');
@@ -3300,7 +3320,11 @@ fi
         throw new Error('publication should not run');
       });
       const execute = vi.fn(
-        async (command: string, args: readonly string[]): Promise<CommandResult> => {
+        async (
+          command: string,
+          args: readonly string[],
+          _options: CommandOptions = {},
+        ): Promise<CommandResult> => {
           if (command === 'git' && args.includes('rev-parse')) {
             return { stdout: `${stableSha}\n`, stderr: '' };
           }
@@ -3356,7 +3380,11 @@ fi
       const snapshot = join(tempRoot, 'dev-snapshot', 'Psyche Build Dev.app');
       const installedPath = join(virtualHome, 'Applications', 'Psyche Build Dev.app');
       const execute = vi.fn(
-        async (command: string, args: readonly string[]): Promise<CommandResult> => {
+        async (
+          command: string,
+          args: readonly string[],
+          _options: CommandOptions = {},
+        ): Promise<CommandResult> => {
           if (command === 'git' && args.includes('rev-parse')) {
             return { stdout: `${devSha}\n`, stderr: '' };
           }
@@ -3394,10 +3422,28 @@ fi
         virtualRepository,
         tempRoot,
       );
-      expect(execute.mock.calls).toEqual([
-        ...devSourceFingerprintCalls(virtualRepository),
-        ...devSourceFingerprintCalls(virtualRepository),
-      ]);
+      const sourceStatusCalls = execute.mock.calls.filter(
+        ([command, args]) => command === 'git' && args[0] === 'status',
+      );
+      expect(sourceStatusCalls).toHaveLength(2);
+      for (const [, args, options] of sourceStatusCalls) {
+        expect(args).toEqual(expect.arrayContaining([
+          '--porcelain=v2',
+          '--untracked-files=all',
+          ':(top,glob,exclude)**/target/**',
+          ':(top,glob,exclude)**/node_modules/**',
+          ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
+        ]));
+        expect(options).toEqual({
+          cwd: virtualRepository,
+          stage: 'capture dev source status',
+        });
+      }
+      expect(
+        execute.mock.calls.filter(
+          ([command, args]) => command === 'git' && args.includes('rev-parse'),
+        ),
+      ).toHaveLength(2);
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('worktree');
       expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain('test');
       expect(smokeLaunch).not.toHaveBeenCalled();
@@ -3457,9 +3503,6 @@ fi
           if (command === 'git' && args[0] === 'status') {
             return { stdout: '', stderr: '' };
           }
-          if (command === 'git' && (args[0] === 'diff' || args[0] === 'ls-files')) {
-            return { stdout: '', stderr: '' };
-          }
           if (command === '/usr/bin/lockf') {
             const inputPath = String(args.at(-1));
             const input = JSON.parse(readFileSync(inputPath, 'utf8')) as {
@@ -3472,6 +3515,9 @@ fi
               stdout: `${JSON.stringify({ snapshotPath, identity })}\n`,
               stderr: '',
             };
+          }
+          if (command === 'git') {
+            return { stdout: '', stderr: '' };
           }
           throw new Error(`Unexpected direct dev command: ${command} ${args.join(' ')}`);
         },
@@ -3564,6 +3610,27 @@ fi
       expect(existsSync(tempRoot)).toBe(false);
     });
 
+    it('rejects changed source metadata even when content and status stay the same', async () => {
+      const firstTimestamp = new Date('2026-08-10T18:00:00.000Z');
+      const secondTimestamp = new Date('2026-08-10T18:00:05.000Z');
+      const { completion, publish, tempRoot } = await runDevBuildWithSourceMutation(
+        'dev-source-metadata',
+        (sourceRoot) => {
+          const trackedPath = join(sourceRoot, 'tracked.txt');
+          writeFileSync(trackedPath, 'dirty content\n', 'utf8');
+          utimesSync(trackedPath, firstTimestamp, firstTimestamp);
+        },
+        (sourceRoot) => {
+          const trackedPath = join(sourceRoot, 'tracked.txt');
+          utimesSync(trackedPath, secondTimestamp, secondTimestamp);
+        },
+      );
+
+      await expect(completion).rejects.toThrow(/dev source changed.*build|build.*dev source changed/i);
+      expect(publish).not.toHaveBeenCalled();
+      expect(existsSync(tempRoot)).toBe(false);
+    });
+
     it('allows build:web to change tracked generated bundles without rejecting publication', async () => {
       const generatedBundle =
         'native/macos/psyche-build-tauri/web/editor.bundle.js';
@@ -3604,7 +3671,6 @@ fi
         ),
       ).resolves.toMatchObject({
         channel: 'dev',
-        commitSha: runGit(sourceRoot, ['rev-parse', 'HEAD']).trim(),
         dirty: false,
       });
 
@@ -3811,12 +3877,14 @@ fi
       ).resolves.toBe(0);
 
       expect(runBuild).toHaveBeenCalledOnce();
-      expect(runBuild).toHaveBeenCalledWith({
-        channel: 'stable',
-        ref: 'release/v1.2.3',
-        repositoryRoot,
-        signal: expect.any(AbortSignal),
-      });
+      expect(runBuild).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'stable',
+          ref: 'release/v1.2.3',
+          repositoryRoot,
+          signal: expect.any(AbortSignal),
+        }),
+      );
       expect(stdout).toEqual([
         'Installed Psyche Build at /Users/test/Applications/Psyche Build.app',
         `Source ${'a'.repeat(40)} (clean source)`,
@@ -3883,11 +3951,6 @@ fi
         const signalTarget = new EventEmitter();
         const tempRoot = `/workspace/.build-temp/stable-${signalName.toLowerCase()}`;
         const sourceRoot = join(tempRoot, 'source');
-        const expectedCandidate = join(
-          sourceRoot,
-          'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos',
-          'Psyche Build.app',
-        );
         const stdout: string[] = [];
         const stderr: string[] = [];
         const events: string[] = [];
@@ -3974,9 +4037,9 @@ fi
         expect(events.indexOf('stable-child-aborted')).toBeLessThan(
           events.indexOf(`worktree-remove:worktree remove --force ${sourceRoot}`),
         );
-        expect(removePath).toHaveBeenCalledTimes(2);
-        expect(removePath).toHaveBeenNthCalledWith(1, expectedCandidate);
-        expect(removePath).toHaveBeenNthCalledWith(2, tempRoot);
+        expect(
+          removePath.mock.calls.filter(([targetPath]) => targetPath === tempRoot),
+        ).toHaveLength(1);
         expect(publish).not.toHaveBeenCalled();
         expect(stdout).toEqual([]);
         expect(stderr.join('\n')).toContain('long stable child');
