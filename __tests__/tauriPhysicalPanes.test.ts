@@ -1198,7 +1198,7 @@ describe('Tauri physical terminal panes', () => {
     expect(project.selectedWorktreePath).toBe('/target');
     expect(reopened).toBe(1);
     expect(calls).toEqual([
-      'terminal', `project:${project.id}`, 'panes', 'panel',
+      'terminal', `project:${project.id}`,
       'skills', 'sidebar', 'browser', 'save', 'focus:hidden-thread',
     ]);
   });
@@ -1208,6 +1208,7 @@ describe('Tauri physical terminal panes', () => {
     const thread = { id: 'thread-a' };
     const state = { activeProjectId: project.id, activeThreadId: null as string | null };
     let renders = 0;
+    let gitRenders = 0;
     let refreshes = 0;
     const renderPaneWorkspace = () => { renders += 1; };
     const activatePaneLayoutFocus = compileFunction<(
@@ -1232,7 +1233,7 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject: async () => true,
       activatePaneLayoutFocus,
       renderPaneWorkspace,
-      renderGitSurface: () => false,
+      renderGitSurface: () => { gitRenders += 1; return true; },
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1246,6 +1247,7 @@ describe('Tauri physical terminal panes', () => {
     expect(project.selectedWorktreePath).toBe('/target');
     expect(state.activeThreadId).toBe(thread.id);
     expect(renders).toBe(1);
+    expect(gitRenders).toBe(1);
     expect(refreshes).toBe(1);
   });
 
@@ -1314,6 +1316,8 @@ describe('Tauri physical terminal panes', () => {
     };
     const options = { refreshStatus: true };
     const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    let paneRenders = 0;
+    let gitRenders = 0;
     let refreshes = 0;
     const setActiveProject = compileFunction<(
       id: string,
@@ -1329,10 +1333,11 @@ describe('Tauri physical terminal panes', () => {
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
         focusCalls.push({ id, options: focusOptions });
         state.activeThreadId = id;
+        paneRenders += 1;
         return true;
       },
-      renderPaneWorkspace: () => undefined,
-      renderGitSurface: () => false,
+      renderPaneWorkspace: () => { paneRenders += 1; },
+      renderGitSurface: () => { gitRenders += 1; return true; },
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
@@ -1348,8 +1353,8 @@ describe('Tauri physical terminal panes', () => {
       state,
       setActiveProject,
       activatePaneLayoutFocus: () => undefined,
-      renderPaneWorkspace: () => undefined,
-      renderGitSurface: () => false,
+      renderPaneWorkspace: () => { paneRenders += 1; },
+      renderGitSurface: () => { gitRenders += 1; return true; },
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1366,6 +1371,8 @@ describe('Tauri physical terminal panes', () => {
     expect(focusCalls).toEqual([
       { id: 'thread-a', options: { refreshStatus: false } },
     ]);
+    expect(paneRenders).toBe(1);
+    expect(gitRenders).toBe(1);
     expect(refreshes).toBe(1);
     expect(options).toEqual({ refreshStatus: true });
   });

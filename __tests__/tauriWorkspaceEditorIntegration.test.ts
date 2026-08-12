@@ -386,13 +386,16 @@ describe('native CodeMirror workspace editor surface', () => {
   it('does not render a hidden Git pane and clears stale diff summaries on status errors', async () => {
     const summary = { textContent: '3 changed' };
     const messages: string[] = [];
+    const project = { id: 'p1', root: '/repo' };
     const renderDiffsPanel = compileFunction<() => Promise<void>>(
       extractFunctionSource(mainJs, 'renderDiffsPanel'),
       {
         diffFilesEl: {},
         gitPaneIsVisible: () => true,
-        activeProject: () => ({ id: 'p1', root: '/repo' }),
+        activeProject: () => project,
+        activeWorkspaceRoot: (value: typeof project) => value.root,
         diffPanelRequestGate: { next: () => 1, isCurrent: () => true },
+        diffPanelRequestMatches: () => true,
         diffRequestGate: { next: () => 1 },
         resetDiffDetail: (message: string) => { messages.push(message); },
         diffsSummaryEl: summary,
@@ -683,6 +686,10 @@ describe('native CodeMirror workspace editor surface', () => {
   });
 
   it('reveals the actual failed-save editor without restoring retired dock layout', () => {
+    const previousProject = {
+      id: 'p1',
+      selectedWorktreePath: '/old-repo',
+    };
     const project = {
       id: 'p2',
       lastActiveThreadId: 't2',
@@ -699,13 +706,27 @@ describe('native CodeMirror workspace editor surface', () => {
       }],
     };
     let editorVisible = false;
+    let generation = 1;
+    const activeProject = () => state.activeProjectId === project.id ? project : previousProject;
+    const activeWorkspaceRoot = (value: typeof project | typeof previousProject) =>
+      value.selectedWorktreePath;
+    const requestMatches = compileFunction<(
+      projectId: string,
+      workspaceRoot: string,
+      candidate: number,
+    ) => boolean>(extractFunctionSource(mainJs, 'gitPanelRequestMatches'), {
+      activeProject,
+      activeWorkspaceRoot,
+      gitPanelRequestGate: { isCurrent: (candidate: number) => candidate === generation },
+      gitPaneIsVisible: () => true,
+    });
     const revealFileForDecision = compileFunction<
       (target: typeof file) => boolean
     >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
       findOpenFile: () => file,
       findProject: () => project,
       state,
-      activeWorkspaceRoot: () => '/repo',
+      activeWorkspaceRoot,
       terminalHost: {
         children: [{
           dataset: { threadId: 't2' },
@@ -713,6 +734,7 @@ describe('native CodeMirror workspace editor surface', () => {
         }],
       },
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => { generation += 1; return true; },
       clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       syncProjectBrowser: () => undefined,
@@ -724,6 +746,7 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshSidebar: () => undefined,
     });
 
+    const previousGeneration = generation;
     expect(revealFileForDecision(file)).toBe(true);
     expect(state).toMatchObject({
       activeProjectId: project.id,
@@ -731,6 +754,9 @@ describe('native CodeMirror workspace editor surface', () => {
       activeFileId: file.id,
     });
     expect(editorVisible).toBe(true);
+    expect(generation).toBe(previousGeneration + 1);
+    expect(requestMatches(previousProject.id, '/old-repo', previousGeneration)).toBe(false);
+    expect(requestMatches(project.id, '/repo', generation)).toBe(true);
   });
 
   it('gates explicit save while any guarded file decision is pending', async () => {

@@ -501,6 +501,148 @@ describe('Tauri workspace panels', () => {
       expect(requests).toEqual(['git_status']);
     });
 
+    it('invalidates an in-flight diff list when worktree refresh changes the active root', async () => {
+      const project = {
+        id: 'project-a',
+        root: '/project',
+        selectedWorktreePath: '/worktree-a',
+        worktrees: [{ path: '/worktree-a', is_main: false }],
+      };
+      const state = { activeProjectId: project.id, env: {} };
+      let resolveStatus!: (value: { is_repo: boolean; files: unknown[] }) => void;
+      let panelGeneration = 0;
+      let diffGeneration = 0;
+      const diffPanelRequestGate = {
+        next: () => ++panelGeneration,
+        isCurrent: (candidate: number) => candidate === panelGeneration,
+      };
+      const diffRequestGate = { next: () => ++diffGeneration };
+      const activeProject = () => project;
+      const activeWorkspaceRoot = (value: typeof project) => value.selectedWorktreePath;
+      const gitPaneIsVisible = () => true;
+      const diffPanelRequestMatches = (
+        projectId: string,
+        workspaceRoot: string,
+        candidate: number,
+      ) => diffPanelRequestGate.isCurrent(candidate) &&
+        activeProject().id === projectId &&
+        activeWorkspaceRoot(activeProject()) === workspaceRoot &&
+        gitPaneIsVisible();
+      const diffFilesEl = {
+        textContent: '',
+        innerHTML: '',
+        parentNode: { classList: { remove: () => undefined } },
+      };
+      const panelMessage = (element: typeof diffFilesEl, text: string) => {
+        element.textContent = text;
+      };
+      const invoke = (command: string, args: { root: string }) => {
+        if (command === 'git_status' && args.root === '/worktree-a') {
+          return new Promise((resolve) => { resolveStatus = resolve; });
+        }
+        if (command === 'git_status' && args.root === '/worktree-b') {
+          return Promise.resolve({ is_repo: false, files: [] });
+        }
+        if (command === 'git_worktrees') {
+          return Promise.resolve([{ path: '/worktree-b', is_main: true }]);
+        }
+        throw new Error(`unexpected ${command} for ${args.root}`);
+      };
+      const renderDiffsPanel = Function(
+        'diffFilesEl', 'activeProject', 'gitPaneIsVisible', 'diffPanelRequestGate',
+        'diffRequestGate', 'resetDiffDetail', 'panelMessage', 'diffsSummaryEl',
+        'invoke', 'activeWorkspaceRoot', 'diffPanelRequestMatches',
+        'clearDiffSelection', 'setGitChangesCount', 'diffCacheKey',
+        'stagedDiffFor', 'diffContext', 'selectedDiffKey', 'document',
+        'escapeHtml', 'shortenRelPath', 'showDiff',
+        `"use strict"; return (${functionSource('renderDiffsPanel')});`,
+      )(
+        diffFilesEl,
+        activeProject,
+        gitPaneIsVisible,
+        diffPanelRequestGate,
+        diffRequestGate,
+        () => undefined,
+        panelMessage,
+        { textContent: '' },
+        invoke,
+        activeWorkspaceRoot,
+        diffPanelRequestMatches,
+        () => undefined,
+        () => undefined,
+        () => '',
+        () => false,
+        null,
+        null,
+        {},
+        (value: string) => value,
+        (value: string) => value,
+        () => undefined,
+      ) as () => Promise<void>;
+      const suspendDiffRequests = () => {
+        diffPanelRequestGate.next();
+        diffRequestGate.next();
+      };
+      const refreshProjectWorktrees = Function(
+        'state', 'activeWorkspaceRoot', 'mergeWorktreePresentationState',
+        'selectedWorktree', 'invoke', 'suspendDiffRequests', 'refreshSidebar',
+        'saveWorkspaceSoon', 'refreshStatusController', 'refreshCovenSessions',
+        `"use strict"; return (${functionSource('refreshProjectWorktrees')});`,
+      )(
+        state,
+        activeWorkspaceRoot,
+        (_project: typeof project, worktrees: typeof project.worktrees) => worktrees,
+        (value: typeof project) => value.worktrees[0],
+        invoke,
+        suspendDiffRequests,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+      ) as (value: typeof project) => Promise<unknown>;
+
+      const staleA = renderDiffsPanel();
+      expect(panelGeneration).toBe(1);
+      await refreshProjectWorktrees(project);
+      expect(project.selectedWorktreePath).toBe('/worktree-b');
+      expect(panelGeneration).toBe(2);
+
+      resolveStatus({ is_repo: true, files: [] });
+      await staleA;
+      expect(diffFilesEl.textContent).toBe('Loading changes…');
+
+      await renderDiffsPanel();
+      expect(diffFilesEl.textContent).toBe('Not a git repository.');
+    });
+
+    it('keys diff list and detail continuations to the captured worktree root', () => {
+      const panel = functionSource('renderDiffsPanel');
+      expect(panel).toContain('var workspaceRoot = activeWorkspaceRoot(project);');
+      expect(panel).toContain(
+        'diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)',
+      );
+      expect(panel).toContain('invoke("git_status", { root: workspaceRoot })');
+      expect(panel).toContain(
+        'diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext)',
+      );
+      expect(panel).toContain(
+        'showDiff(project, target, { workspaceRoot: workspaceRoot })',
+      );
+
+      const detail = functionSource('showDiff');
+      expect(detail).toContain('var workspaceRoot = options && options.workspaceRoot');
+      expect(detail.indexOf('var currentProject = activeProject();')).toBeLessThan(
+        detail.indexOf('if (!(options && options.keepContext)) diffContext = null;'),
+      );
+      expect(detail).toContain('root: workspaceRoot');
+      expect(detail).toContain(
+        'currentDiffRequestMatches(project.id, workspaceRoot, key, generation)',
+      );
+
+      const matcher = functionSource('currentDiffRequestMatches');
+      expect(matcher).toContain('activeWorkspaceRoot(project) === workspaceRoot');
+    });
+
     it('deduplicates a Git pane in the active scope before allocation', async () => {
       const source = functionSource('openOrFocusGitPane');
       const calls: string[] = [];

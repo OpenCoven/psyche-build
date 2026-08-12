@@ -259,8 +259,9 @@
     var refreshStatus = !options || options.refreshStatus !== false;
     if (!project || !(await showTerminalView())) return false;
     var previousWorktreePath = project.selectedWorktreePath;
+    var projectChanged = project.id !== state.activeProjectId;
     project.selectedWorktreePath = worktreePath;
-    if (project.id !== state.activeProjectId) {
+    if (projectChanged) {
       var projectOptions = Object.assign({}, options || {}, { refreshStatus: false });
       if (!(await setActiveProject(project.id, projectOptions))) {
         project.selectedWorktreePath = previousWorktreePath;
@@ -269,8 +270,10 @@
     } else {
       activatePaneLayoutFocus(project, worktreePath);
     }
-    renderPaneWorkspace();
-    renderGitSurface();
+    if (!projectChanged) {
+      renderPaneWorkspace();
+      renderGitSurface();
+    }
     loadAgentSkills();
     refreshSidebar();
     syncProjectBrowser();
@@ -534,11 +537,19 @@
   }
   function refreshProjectWorktrees(project) {
     if (!project) return Promise.resolve([]);
+    var previousWorkspaceRoot = activeWorkspaceRoot(project);
+    function invalidateChangedDiffScope() {
+      if (project.id === state.activeProjectId &&
+          activeWorkspaceRoot(project) !== previousWorkspaceRoot) {
+        suspendDiffRequests();
+      }
+    }
     if (state.env && state.env.native_workspace_v2 === false) {
       project.worktrees = mergeWorktreePresentationState(project, [{
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
       project.selectedWorktreePath = project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
@@ -548,6 +559,7 @@
       project.worktrees = mergeWorktreePresentationState(project, worktrees);
       var selected = selectedWorktree(project);
       project.selectedWorktreePath = selected ? selected.path : project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       saveWorkspaceSoon();
       if (typeof refreshStatusController === "function") refreshStatusController();
@@ -558,6 +570,7 @@
         path: project.root, branch: null, is_main: true, dirty: false, missing: false,
       }]);
       project.selectedWorktreePath = project.root;
+      invalidateChangedDiffScope();
       refreshSidebar();
       if (typeof refreshStatusController === "function") refreshStatusController();
       refreshCovenSessions();
@@ -6284,6 +6297,7 @@
       state.activeThreadId = nextThreadId;
       clearPassiveCovenPaneFocus();
       renderPaneWorkspace();
+      renderGitSurface();
       loadAgentSkills();
       syncProjectBrowser();
       saveWorkspaceSoon();
@@ -8059,6 +8073,15 @@
       gitPaneIsVisible(project);
   }
 
+  function diffPanelRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return diffPanelRequestGate.isCurrent(generation) &&
+      !!project &&
+      project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
+  }
+
   // The tree highlights whichever file currently owns the main area.
   function activeFilePath() {
     var f = findOpenFile(state.activeFileId);
@@ -8346,11 +8369,12 @@
     }
   }
 
-  function currentDiffRequestMatches(projectId, key, generation) {
+  function currentDiffRequestMatches(projectId, workspaceRoot, key, generation) {
     var project = activeProject();
     return diffRequestGate.isCurrent(generation) &&
       selectedDiffKey === key &&
       !!project && project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
       gitPaneIsVisible(project);
   }
 
@@ -8358,27 +8382,24 @@
     if (!diffFilesEl) return;
     var project = activeProject();
     if (!gitPaneIsVisible(project)) return;
+    var projectId = project.id;
+    var workspaceRoot = activeWorkspaceRoot(project);
     var panelGeneration = diffPanelRequestGate.next();
     diffRequestGate.next();
     resetDiffDetail("Loading changes…");
     panelMessage(diffFilesEl, "Loading changes…");
     if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
-    var projectId = project.id;
     var status;
     try {
-      status = await invoke("git_status", { root: activeWorkspaceRoot(project) });
+      status = await invoke("git_status", { root: workspaceRoot });
     } catch (err) {
-      if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
-          !activeProject() || activeProject().id !== projectId ||
-          !gitPaneIsVisible(project)) return;
+      if (!diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
       panelMessage(diffFilesEl, String(err), "panel-error");
       clearDiffSelection("");
       if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
       return;
     }
-    if (!diffPanelRequestGate.isCurrent(panelGeneration) ||
-        !activeProject() || activeProject().id !== projectId ||
-        !gitPaneIsVisible(project)) return;
+    if (!diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) {
       panelMessage(diffFilesEl, "Not a git repository.");
       clearDiffSelection("");
@@ -8402,21 +8423,23 @@
       var row = document.createElement("button");
       row.type = "button";
       var kind = f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
-      var key = diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext);
+      var key = diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext);
       row.className = "diff-row " + kind + (selectedDiffKey === key ? " selected" : "");
       row.title = f.path;
       row.innerHTML =
         '<span class="diff-code">' + escapeHtml(f.code) + "</span>" +
         '<span class="diff-path">' + escapeHtml(shortenRelPath(f.path)) + "</span>";
-      row.addEventListener("click", function () { showDiff(project, f); });
+      row.addEventListener("click", function () {
+        showDiff(project, f, { workspaceRoot: workspaceRoot });
+      });
       diffFilesEl.appendChild(row);
     });
 
     // Auto-open the first file so the panel is never a blank list.
     var target = status.files.find(function (f) {
-      return diffCacheKey(project.id, activeWorkspaceRoot(project), f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
+      return diffCacheKey(projectId, workspaceRoot, f.path, stagedDiffFor(f), diffContext) === selectedDiffKey;
     }) || status.files[0];
-    showDiff(project, target);
+    showDiff(project, target, { workspaceRoot: workspaceRoot });
   }
 
   var shownDiffTarget = null;
@@ -8424,18 +8447,31 @@
   /** Re-fetch whatever is on screen, at the current context width. */
   function refreshSelectedDiff() {
     if (!shownDiffTarget) return;
-    showDiff(shownDiffTarget.project, shownDiffTarget.entry, { keepContext: true });
+    showDiff(shownDiffTarget.project, shownDiffTarget.entry, {
+      keepContext: true,
+      workspaceRoot: shownDiffTarget.workspaceRoot,
+    });
   }
 
   async function showDiff(project, entry, options) {
     if (!project || !entry || !diffRowsEl) return;
+    var workspaceRoot = options && options.workspaceRoot
+      ? options.workspaceRoot
+      : activeWorkspaceRoot(project);
+    var currentProject = activeProject();
+    if (!currentProject || currentProject.id !== project.id ||
+        activeWorkspaceRoot(currentProject) !== workspaceRoot ||
+        !gitPaneIsVisible(project)) return;
     // A new file starts narrow again: an expansion belongs to the view you
     // expanded, not to the panel.
     if (!(options && options.keepContext)) diffContext = null;
-    shownDiffTarget = { project: project, entry: entry };
-    if (!activeProject() || activeProject().id !== project.id || !gitPaneIsVisible(project)) return;
+    shownDiffTarget = {
+      project: project,
+      entry: entry,
+      workspaceRoot: workspaceRoot,
+    };
     var staged = stagedDiffFor(entry);
-    var key = diffCacheKey(project.id, activeWorkspaceRoot(project), entry.path, staged, diffContext);
+    var key = diffCacheKey(project.id, workspaceRoot, entry.path, staged, diffContext);
     var generation = diffRequestGate.next();
     selectedDiffKey = key;
     diffFilesEl.parentNode.classList.add("has-detail");
@@ -8444,23 +8480,23 @@
     });
     var cached = diffCache.get(key);
     if (cached !== undefined) {
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       renderDiffResult(cached);
       return;
     }
     resetDiffDetail("Loading diff…");
     try {
       var result = await invoke("git_diff", {
-        root: activeWorkspaceRoot(project),
+        root: workspaceRoot,
         path: entry.path,
         staged: staged,
         context: diffContext,
       });
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       diffCache.set(key, result);
       renderDiffResult(result);
     } catch (err) {
-      if (!currentDiffRequestMatches(project.id, key, generation)) return;
+      if (!currentDiffRequestMatches(project.id, workspaceRoot, key, generation)) return;
       resetDiffDetail("Unable to load diff: " + String(err));
     }
   }
