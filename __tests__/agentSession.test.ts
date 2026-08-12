@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, readFile } from 'fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
@@ -64,12 +64,14 @@ describe('agent session persistence', () => {
   it('persists the Codex agent session reference inside the psyche config pane', async () => {
     const dir = await tempDir();
     try {
-      const configPath = path.join(dir, 'psyche.config.json');
+      const projectRoot = path.join(dir, 'project');
+      const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
+      await mkdir(path.dirname(configPath), { recursive: true });
       await writeFile(
         configPath,
         JSON.stringify({
           projectName: 'repo',
-          projectRoot: dir,
+          projectRoot,
           panes: [
             { id: 'psyche-1', slug: 'feature-a', prompt: 'hi', paneId: '%1', agent: 'codex' },
           ],

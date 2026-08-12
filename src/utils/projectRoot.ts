@@ -129,6 +129,33 @@ export function resolveProjectRootFromPath(
   };
 }
 
+/**
+ * Resolves the checkout that owns a path, rather than the shared Git common
+ * directory. For a linked worktree this is the worktree root itself.
+ */
+export function resolveGitWorktreeRootFromPath(
+  rawPath: string,
+  baseDir: string = process.cwd(),
+): string | undefined {
+  const { absolutePath } = resolveProjectPathInput(rawPath, baseDir);
+  if (!existsSync(absolutePath)) {
+    throw new Error(`Path does not exist: ${absolutePath}`);
+  }
+
+  const stat = statSync(absolutePath);
+  const workingDir = stat.isDirectory() ? absolutePath : path.dirname(absolutePath);
+  try {
+    const worktreeRoot = execSync('git rev-parse --show-toplevel', {
+      cwd: workingDir,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    }).trim();
+    return worktreeRoot ? path.resolve(worktreeRoot) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createEmptyGitProject(
   rawPath: string,
   baseDir: string = process.cwd()

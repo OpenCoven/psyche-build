@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { SIDEBAR_WIDTH } from './layoutManager.js';
-import { atomicWriteJson } from './atomicWrite.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 
 interface RecoveryConfig {
   controlPaneId?: string;
@@ -155,10 +155,16 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   // If psyche already exists in another pane, just update config ownership.
   const existingPsychePane = panes.find((pane) => pane.paneTitle === 'psyche');
   if (existingPsychePane) {
-    config.controlPaneId = existingPsychePane.paneId;
-    config.controlPaneSize = SIDEBAR_WIDTH;
-    config.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(configPath, config);
+    const projectRootFromOption = getSessionOption(sessionName, '@psyche_project_root');
+    const projectRoot = projectRootFromOption
+      || (typeof config.projectRoot === 'string' ? config.projectRoot : '')
+      || path.dirname(path.dirname(configPath));
+    await mutateProjectPaneConfig(projectRoot, (configRecord) => {
+      const freshConfig = configRecord as RecoveryConfig;
+      freshConfig.controlPaneId = existingPsychePane.paneId;
+      freshConfig.controlPaneSize = SIDEBAR_WIDTH;
+      freshConfig.lastUpdated = new Date().toISOString();
+    });
     return;
   }
 
@@ -195,10 +201,12 @@ async function recoverControlPaneIfNeeded(): Promise<void> {
   runTmux(['select-pane', '-t', newControlPaneId, '-T', 'psyche']);
   runTmux(['send-keys', '-t', newControlPaneId, `node "${resolveDistIndexPath()}"`, 'Enter']);
 
-  config.controlPaneId = newControlPaneId;
-  config.controlPaneSize = SIDEBAR_WIDTH;
-  config.lastUpdated = new Date().toISOString();
-  await atomicWriteJson(configPath, config);
+  await mutateProjectPaneConfig(projectRoot, (configRecord) => {
+    const freshConfig = configRecord as RecoveryConfig;
+    freshConfig.controlPaneId = newControlPaneId;
+    freshConfig.controlPaneSize = SIDEBAR_WIDTH;
+    freshConfig.lastUpdated = new Date().toISOString();
+  });
 }
 
 void recoverControlPaneIfNeeded();

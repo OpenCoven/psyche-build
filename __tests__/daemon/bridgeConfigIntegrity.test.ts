@@ -1,4 +1,13 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -67,14 +76,29 @@ function fakeClient(sessions: CovenSessionSummary[]): CovenClient {
 }
 
 /** Spawn deps that create nothing — the config write is what is under test. */
-function fakeDeps(): BridgeSpawnDeps & { commands: string[] } {
+function fakeDeps(): BridgeSpawnDeps & { commands: string[]; killed: string[] } {
   let next = 0;
+  let panePresent = true;
+  const tmuxServerIdentity = {
+    pid: 4242,
+    processStartIdentity: 'mock-tmux-server-start',
+    socketPath: '/mock/tmux.sock',
+    sessionId: '$1',
+  };
   const commands: string[] = [];
+  const killed: string[] = [];
   return {
     commands,
+    killed,
     tmuxSessionExists: () => true,
     createTmuxPane: () => `%${++next}`,
+    getTmuxServerIdentity: () => tmuxServerIdentity,
     sendTmuxCommand: (_paneId, command) => { commands.push(command); },
+    probeTmuxPane: () => panePresent ? 'present' : 'absent',
+    killTmuxPane: (paneId) => {
+      killed.push(paneId);
+      panePresent = false;
+    },
   };
 }
 
@@ -147,6 +171,89 @@ describe('project config write integrity', () => {
     await expect(updatePaneMeta(root, '%404', { title: 'x' })).rejects.toThrow(/not found/);
 
     expect(await readConfigText(root)).toBe(before);
+  });
+});
+
+describe('Coven pane persistence boundaries', () => {
+  it('persists the exact pane record before sending its attach command', async () => {
+    const root = await tempProject({ panes: [] });
+    const deps = fakeDeps();
+    deps.sendTmuxCommand = (paneId, command) => {
+      const config = JSON.parse(readFileSync(path.join(root, CONFIG_REL), 'utf8'));
+      expect(config.panes).toEqual([
+        expect.objectContaining({
+          paneId,
+          covenSession: expect.objectContaining({ id: 's1' }),
+        }),
+      ]);
+      deps.commands.push(command);
+    };
+
+    await openProjectCovenSession(
+      root,
+      'psyche-test',
+      's1',
+      fakeClient([covenSession(root, 's1')]),
+      deps,
+    );
+
+    expect(deps.commands).toEqual(['coven attach s1']);
+    expect(deps.killed).toEqual([]);
+  });
+
+  it('kills the created pane when durable config persistence fails', async () => {
+    const root = await tempProject({ panes: [] });
+    const deps = fakeDeps();
+    const psycheDir = path.join(root, '.psyche');
+    deps.createTmuxPane = () => {
+      // The transaction has already acquired its lease at this point. Make
+      // the atomic registry write fail, then restore permissions from the
+      // in-lease kill callback so lock release can complete.
+      chmodSync(psycheDir, 0o500);
+      return '%persist-failure';
+    };
+    let panePresent = true;
+    deps.probeTmuxPane = () => panePresent ? 'present' : 'absent';
+    deps.killTmuxPane = (paneId) => {
+      deps.killed.push(paneId);
+      panePresent = false;
+      chmodSync(psycheDir, 0o700);
+    };
+
+    await expect(openProjectCovenSession(
+      root,
+      'psyche-test',
+      's1',
+      fakeClient([covenSession(root, 's1')]),
+      deps,
+    )).rejects.toThrow();
+
+    expect(deps.killed).toEqual(['%persist-failure']);
+    expect(deps.commands).toEqual([]);
+    expect(await readConfig(root)).toEqual({ panes: [] });
+  });
+
+  it('removes the exact persisted record and kills the pane when attach fails', async () => {
+    const root = await tempProject({
+      panes: [{ id: 'keep', paneId: '%keep', slug: 'keep' }],
+    });
+    const deps = fakeDeps();
+    deps.sendTmuxCommand = () => {
+      throw new Error('coven attach unavailable');
+    };
+
+    await expect(openProjectCovenSession(
+      root,
+      'psyche-test',
+      's1',
+      fakeClient([covenSession(root, 's1')]),
+      deps,
+    )).rejects.toThrow(/coven attach unavailable/);
+
+    expect(deps.killed).toEqual(['%1']);
+    expect((await readConfig(root)).panes).toEqual([
+      expect.objectContaining({ id: 'keep', paneId: '%keep' }),
+    ]);
   });
 });
 

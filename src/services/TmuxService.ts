@@ -3,6 +3,11 @@ import { LogService } from './LogService.js';
 import { execAsync } from '../utils/execAsync.js';
 import type { PanePosition, WindowDimensions } from '../types.js';
 import { SPACER_PANE_TITLE } from '../constants/layout.js';
+import type { TmuxPanePresence } from '../utils/paneTeardown.js';
+import {
+  parseTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from './TmuxServerIdentity.js';
 
 export type PaneListScope = 'window' | 'session';
 
@@ -140,14 +145,16 @@ export class TmuxService {
       encoding?: BufferEncoding;
       stdio?: 'pipe' | 'inherit';
       silent?: boolean;
+      timeout?: number;
     } = {}
   ): string {
-    const { encoding = 'utf-8', stdio = 'pipe', silent = false } = options;
+    const { encoding = 'utf-8', stdio = 'pipe', silent = false, timeout } = options;
 
     try {
       const result = execSync(command, {
         encoding,
         stdio,
+        ...(timeout !== undefined ? { timeout } : {}),
       });
       return typeof result === 'string' ? result.trim() : '';
     } catch (error) {
@@ -319,6 +326,27 @@ export class TmuxService {
   }
 
   /**
+   * Captures the current tmux server generation for durable resource records.
+   * Callers treat an unavailable identity as unverified rather than using a
+   * pane ID alone for destructive teardown.
+   */
+  getServerIdentity(target?: string): TmuxServerIdentity | undefined {
+    try {
+      const targetArg = target
+        ? ` -t '${target.replace(/'/g, "'\\''")}'`
+        : '';
+      return parseTmuxServerIdentity(
+        this.execute(
+          `tmux display-message${targetArg} -p "#{pid}\t#{socket_path}\t#{session_id}"`,
+          { silent: true, timeout: 1_000 },
+        ),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Get the pane currently selected in the active psyche window.
    *
    * This uses pane_active from list-panes instead of display-message so it
@@ -359,6 +387,20 @@ export class TmuxService {
       },
       RetryStrategy.IDEMPOTENT,
       `getPaneWindowId(${paneId})`
+    );
+  }
+
+  /**
+   * Returns the stable tmux pane ID currently contained by a window. Detached
+   * background windows start with one pane, whose identity survives join-pane.
+   */
+  async getWindowPaneId(windowId: string): Promise<string> {
+    return this.executeWithRetry(
+      () => this.execute(
+        `tmux display-message -t '${windowId}' -p '#{pane_id}'`,
+      ).trim(),
+      RetryStrategy.IDEMPOTENT,
+      `getWindowPaneId(${windowId})`,
     );
   }
 
@@ -503,6 +545,50 @@ export class TmuxService {
     } catch {
       // Expected - pane doesn't exist
       return false;
+    }
+  }
+
+  /**
+   * Probes a pane without treating a failed tmux query as absence. Destructive
+   * lifecycle callers use this tri-state result before removing a durable pane
+   * record or rolling back its worktree.
+   */
+  async probePanePresence(paneId: string): Promise<TmuxPanePresence> {
+    try {
+      const output = this.execute(
+        `tmux list-panes -a -F '#{pane_id}'`,
+        { silent: true, timeout: 5000 },
+      );
+      return output
+        .split('\n')
+        .map((line) => line.trim())
+        .map((line) => line.match(/^%\d+/)?.[0] || line)
+        .includes(paneId)
+        ? 'present'
+        : 'absent';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Window counterpart to probePanePresence. A failed query is unknown, not
+   * absent, because detached test/dev windows can still hold a worktree cwd.
+   */
+  async probeWindowPresence(windowId: string): Promise<TmuxPanePresence> {
+    try {
+      const output = this.execute(
+        `tmux list-windows -a -F '#{window_id}'`,
+        { silent: true, timeout: 5000 },
+      );
+      return output
+        .split('\n')
+        .map((line) => line.trim())
+        .includes(windowId)
+        ? 'present'
+        : 'absent';
+    } catch {
+      return 'unknown';
     }
   }
 
@@ -923,7 +1009,8 @@ export class TmuxService {
   /**
    * Join a pane from a window (pulls pane into current window)
    */
-  async joinPane(sourceWindowId: string, horizontal: boolean = true): Promise<void> {
+  async joinPane(sourceWindowId: string, horizontal: boolean = true): Promise<string> {
+    const sourcePaneId = await this.getWindowPaneId(sourceWindowId);
     await this.executeWithRetry(
       () => {
         const direction = horizontal ? '-h' : '-v';
@@ -932,6 +1019,7 @@ export class TmuxService {
       RetryStrategy.FAST,
       `joinPane(${sourceWindowId})`
     );
+    return sourcePaneId;
   }
 
   /**

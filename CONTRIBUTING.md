@@ -4,10 +4,18 @@ This project is built while running Psyche Build itself. The goal is a fast, rep
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20.10.0+
 - `pnpm`
+- Corepack 0.31.0 (required for release validation)
 - `tmux` 3.0+
 - Git 2.20+
+
+Some supported Node.js distributions omit Corepack. Before running the release
+validation checklist, install the pinned version when `corepack` is unavailable:
+
+```bash
+npm install --global corepack@0.31.0
+```
 
 ## Local Development (Dogfood Loop)
 
@@ -131,16 +139,18 @@ npm pack --dry-run
 
 ## Maintainer Checklist (Before Release)
 
+Run the complete reproducible local validation suite with the pnpm version pinned in `package.json`:
+
 ```bash
-pnpm run clean
-pnpm run build
-pnpm run typecheck
-pnpm run test
-pnpm smoke
-npm pack --dry-run
+corepack pnpm@10.14.0 test
+corepack pnpm@10.14.0 typecheck
+corepack pnpm@10.14.0 clean
+corepack pnpm@10.14.0 build
+corepack pnpm@10.14.0 smoke
+corepack pnpm@10.14.0 smoke:pack
 ```
 
-`pnpm smoke` and `npm pack --dry-run` check different things and both belong
+`pnpm smoke` and `pnpm smoke:pack` check different things and both belong
 here: one proves the built cockpit starts, the other proves the tarball carries
 what it should. A package can pack correctly and still fail to launch.
 

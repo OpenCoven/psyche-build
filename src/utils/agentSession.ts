@@ -1,7 +1,10 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { AgentSessionReference, PsycheConfig } from '../types.js';
-import { atomicWriteJson } from './atomicWrite.js';
+import {
+  mutateProjectPaneConfig,
+  projectRootFromPaneConfigPath,
+} from '../services/ProjectPaneConfig.js';
 
 export interface CodexSessionEventData {
   sessionId?: string;
@@ -87,16 +90,21 @@ export async function persistPaneAgentSessionReference(
 ): Promise<void> {
   if (!panesFile) return;
 
-  const raw = await fs.readFile(panesFile, 'utf8');
-  const parsed = JSON.parse(raw) as PsycheConfig | PsycheConfig['panes'];
-  if (Array.isArray(parsed)) return;
+  const sessionProjectRoot = projectRootFromPaneConfigPath(panesFile);
+  if (!sessionProjectRoot) {
+    throw new Error(
+      `Agent session persistence requires the shared project pane config path: ${panesFile}`,
+    );
+  }
 
-  const panes = Array.isArray(parsed.panes) ? parsed.panes : [];
-  const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
-  if (!pane) return;
+  await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
+    const config = configRecord as unknown as PsycheConfig;
+    const panes = Array.isArray(config.panes) ? config.panes : [];
+    const pane = panes.find((candidate) => candidate.id === paneId || candidate.paneId === paneId);
+    if (!pane) return;
 
-  pane.agentSession = agentSession;
-  parsed.panes = panes;
-  parsed.lastUpdated = new Date().toISOString();
-  await atomicWriteJson(panesFile, parsed);
+    pane.agentSession = agentSession;
+    config.panes = panes;
+    config.lastUpdated = new Date().toISOString();
+  });
 }

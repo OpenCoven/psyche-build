@@ -1,19 +1,42 @@
 import { execSync } from 'child_process';
 import fs from 'fs/promises';
-import type { PsychePane, ProjectSettings } from '../types.js';
+import path from 'path';
+import type { PsychePane, ProjectSettings, SavePanes } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
+import {
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
 import { enforceControlPaneSize } from '../utils/tmux.js';
 import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
+import {
+  tearDownPaneWithVerification,
+  type VerifiedPaneTeardownResult,
+} from '../utils/paneTeardown.js';
+import {
+  joinBackgroundWindowTransaction,
+  startBackgroundWindowTransaction,
+} from '../utils/backgroundWindowTransaction.js';
+import { writeWorktreeRecoveryMarker } from '../services/WorktreeRecoveryMarker.js';
+import { deriveProjectRootFromWorktreePath } from '../utils/paneProject.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
   projectSettings: ProjectSettings;
   setStatusMessage: (msg: string) => void;
   setRunningCommand: (v: boolean) => void;
+  refreshPanes?: () => Promise<void>;
 }
 
-export default function usePaneRunner({ panes, savePanes, projectSettings, setStatusMessage, setRunningCommand }: Params) {
+export default function usePaneRunner({
+  panes,
+  savePanes,
+  projectSettings,
+  setStatusMessage,
+  setRunningCommand,
+  refreshPanes,
+}: Params) {
   const copyNonGitFiles = async (worktreePath: string, sourceProjectRoot?: string) => {
     try {
       setStatusMessage('Copying non-git files from main...');
@@ -50,29 +73,146 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       setStatusMessage(`Starting ${type} in background window...`);
 
       const tmuxService = TmuxService.getInstance();
-
-      const existingWindowId = type === 'test' ? pane.testWindowId : pane.devWindowId;
-      if (existingWindowId) {
-        try { await tmuxService.killWindow(existingWindowId); } catch {}
-      }
+      const projectRoot = pane.projectRoot
+        || deriveProjectRootFromWorktreePath(pane.worktreePath)
+        || process.cwd();
+      const tearDownPaneForGeneration = async (
+        paneId: string,
+        allocationIdentity: TmuxServerIdentity,
+      ): Promise<VerifiedPaneTeardownResult> => {
+        const current = tmuxService.getServerIdentity?.();
+        if (!current) {
+          return {
+            presence: 'unknown',
+            error: 'current tmux server generation could not be verified',
+          };
+        }
+        if (!sameTmuxServerIdentity(allocationIdentity, current)) {
+          return { presence: 'absent' };
+        }
+        return tearDownPaneWithVerification({
+          probe: async () => {
+            const identity = tmuxService.getServerIdentity?.();
+            if (!identity) return 'unknown';
+            if (!sameTmuxServerIdentity(allocationIdentity, identity)) return 'absent';
+            return tmuxService.probePanePresence(paneId);
+          },
+          kill: async () => {
+            const identity = tmuxService.getServerIdentity?.();
+            if (!identity) {
+              throw new Error('current tmux server generation could not be verified');
+            }
+            if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+              return;
+            }
+            await tmuxService.killPane(paneId);
+          },
+        });
+      };
+      const tearDownWindowForGeneration = async (
+        windowId: string,
+        allocationIdentity: TmuxServerIdentity,
+      ): Promise<VerifiedPaneTeardownResult> => {
+        const current = tmuxService.getServerIdentity?.();
+        if (!current) {
+          return {
+            presence: 'unknown',
+            error: 'current tmux server generation could not be verified',
+          };
+        }
+        if (!sameTmuxServerIdentity(allocationIdentity, current)) {
+          return { presence: 'absent' };
+        }
+        return tearDownPaneWithVerification({
+          probe: async () => {
+            const identity = tmuxService.getServerIdentity?.();
+            if (!identity) return 'unknown';
+            if (!sameTmuxServerIdentity(allocationIdentity, identity)) return 'absent';
+            return tmuxService.probeWindowPresence(windowId);
+          },
+          kill: async () => {
+            const identity = tmuxService.getServerIdentity?.();
+            if (!identity) {
+              throw new Error('current tmux server generation could not be verified');
+            }
+            if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+              return;
+            }
+            await tmuxService.killWindow(windowId);
+          },
+        });
+      };
+      const tearDownResource = async (
+        resource: { windowId: string; paneId: string },
+        allocationIdentity: TmuxServerIdentity,
+      ): Promise<VerifiedPaneTeardownResult> => {
+        const backgroundPane = await tearDownPaneForGeneration(
+          resource.paneId,
+          allocationIdentity,
+        );
+        const window = await tearDownWindowForGeneration(
+          resource.windowId,
+          allocationIdentity,
+        );
+        const presence = [backgroundPane, window].some(
+          (result) => result.presence === 'unknown',
+        )
+          ? 'unknown'
+          : [backgroundPane, window].some((result) => result.presence === 'present')
+            ? 'present'
+            : 'absent';
+        return {
+          presence,
+          ...(backgroundPane.error || window.error
+            ? { error: backgroundPane.error || window.error }
+            : {}),
+        };
+      };
+      const retainUncertainRecovery = async (
+        recoveryPane: PsychePane,
+        reason: string,
+      ): Promise<string | undefined> => {
+        try {
+          const marker = await writeWorktreeRecoveryMarker({
+            projectRoot,
+            worktreePath: recoveryPane.worktreePath || projectRoot,
+            pane: {
+              id: recoveryPane.id,
+              paneId: recoveryPane.paneId,
+            },
+            operation: 'background-window-launch',
+            reason,
+          });
+          return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+        } catch {
+          return undefined;
+        }
+      };
 
       const windowName = `${pane.slug}-${type}`;
-      const windowId = await tmuxService.newWindow({ name: windowName, detached: true });
-      const logFile = `/tmp/psyche-${pane.id}-${type}.log`;
+      const runtimeDir = path.join(pane.worktreePath, '.psyche');
+      await fs.mkdir(runtimeDir, { recursive: true });
+      const logFile = path.join(runtimeDir, `${pane.id}-${type}.log`);
       const fullCommand = `cd "${pane.worktreePath}" && ${command} 2>&1 | tee ${logFile}`;
-      await tmuxService.sendKeys(windowId, `'${fullCommand.replace(/'/g, "'\\''")}' Enter`);
+      const transaction = await startBackgroundWindowTransaction({
+        type,
+        projectRoot,
+        pane,
+        allocateWindow: () => tmuxService.newWindow({ name: windowName, detached: true }),
+        getWindowPaneId: (windowId) => tmuxService.getWindowPaneId(windowId),
+        sendCommand: (resource) => tmuxService.sendKeys(
+          resource.paneId,
+          `'${fullCommand.replace(/'/g, "'\\''")}' Enter`,
+        ),
+        tearDownResource,
+        tearDownAllocatedWindow: tearDownWindowForGeneration,
+        getTmuxServerIdentity: () => tmuxService.getServerIdentity?.(),
+        retainUncertainRecovery,
+      });
+      await refreshPanes?.();
 
-      const updatedPane: PsychePane = {
-        ...pane,
-        [type === 'test' ? 'testWindowId' : 'devWindowId']: windowId,
-        [type === 'test' ? 'testStatus' : 'devStatus']: 'running'
-      } as PsychePane;
-
-      const updatedPanes = panes.map(p => p.id === pane.id ? updatedPane : p);
-      await savePanes(updatedPanes);
-
-      if (type === 'test') setTimeout(() => monitorTestOutput(pane.id, logFile), 2000);
-      else setTimeout(() => monitorDevOutput(pane.id, logFile), 2000);
+      if (type === 'test') setTimeout(() => monitorTestOutput(transaction.pane.id, logFile), 2000);
+      else setTimeout(() => monitorDevOutput(transaction.pane.id, logFile), 2000);
 
       setRunningCommand(false);
       setStatusMessage(`${type === 'test' ? 'Test' : 'Dev server'} started in background`);
@@ -95,10 +235,17 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
 
       const pane = panes.find(p => p.id === paneId);
-      if (pane?.testWindowId) {
+      const testTarget = pane?.testPaneId || pane?.testWindowId;
+      if (testTarget) {
         try {
-          execSync(`tmux list-windows -F '#{window_id}' | rg -q '${pane.testWindowId}'`, { stdio: 'pipe' });
-          const paneOutput = execSync(`tmux capture-pane -t '${pane.testWindowId}' -p | tail -5`, { encoding: 'utf-8' });
+          const targetList = pane?.testPaneId
+            ? `tmux list-panes -a -F '#{pane_id}' | rg -q '${testTarget}'`
+            : `tmux list-windows -a -F '#{window_id}' | rg -q '${testTarget}'`;
+          execSync(targetList, { stdio: 'pipe' });
+          const paneOutput = execSync(
+            `tmux capture-pane -t '${testTarget}' -p | tail -5`,
+            { encoding: 'utf-8' },
+          );
           if (paneOutput.includes('$') || paneOutput.includes('#')) {
             if (status === 'running') status = 'passed';
           }
@@ -108,7 +255,7 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
 
       const updatedPanes = panes.map(p => p.id === paneId ? { ...p, testStatus: status, testOutput: content.slice(-5000) } : p);
-      await savePanes(updatedPanes);
+      await savePanes(updatedPanes, panes);
       if (status === 'running') setTimeout(() => monitorTestOutput(paneId, logFile), 2000);
     } catch {}
   };
@@ -124,11 +271,19 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
       }
       const pane = panes.find(p => p.id === paneId);
       let status: 'running' | 'stopped' = 'running';
-      if (pane?.devWindowId) {
-        try { execSync(`tmux list-windows -F '#{window_id}' | rg -q '${pane.devWindowId}'`, { stdio: 'pipe' }); } catch { status = 'stopped'; }
+      const devTarget = pane?.devPaneId || pane?.devWindowId;
+      if (devTarget) {
+        try {
+          const targetList = pane?.devPaneId
+            ? `tmux list-panes -a -F '#{pane_id}' | rg -q '${devTarget}'`
+            : `tmux list-windows -a -F '#{window_id}' | rg -q '${devTarget}'`;
+          execSync(targetList, { stdio: 'pipe' });
+        } catch {
+          status = 'stopped';
+        }
       }
       const updatedPanes = panes.map(p => p.id === paneId ? { ...p, devStatus: status, devUrl: devUrl || p.devUrl } : p);
-      await savePanes(updatedPanes);
+      await savePanes(updatedPanes, panes);
       if (status === 'running') setTimeout(() => monitorDevOutput(paneId, logFile), 2000);
     } catch {}
   };
@@ -142,7 +297,82 @@ export default function usePaneRunner({ panes, savePanes, projectSettings, setSt
     }
     try {
       const tmuxService = TmuxService.getInstance();
-      await tmuxService.joinPane(windowId, true);
+      const projectRoot = pane.projectRoot
+        || (pane.worktreePath
+          ? deriveProjectRootFromWorktreePath(pane.worktreePath)
+          : undefined)
+        || process.cwd();
+      const expectedGeneration = type === 'test'
+        ? pane.testTmuxServerIdentity
+        : pane.devTmuxServerIdentity;
+      if (!expectedGeneration) {
+        throw new Error(`Cannot join an unversioned ${type} background window`);
+      }
+      await joinBackgroundWindowTransaction({
+        type,
+        projectRoot,
+        pane,
+        expectedWindow: {
+          windowId,
+          paneId: type === 'test' ? pane.testPaneId : pane.devPaneId,
+          tmuxServerIdentity: expectedGeneration,
+        },
+        getWindowPaneId: (targetWindowId) => tmuxService.getWindowPaneId(targetWindowId),
+        joinPane: async (targetWindowId) => {
+          await tmuxService.joinPane(targetWindowId, true);
+        },
+        tearDownJoinedPane: async (joinedPaneId, allocationIdentity) => {
+          const current = tmuxService.getServerIdentity?.();
+          if (!current) {
+            return {
+              presence: 'unknown',
+              error: 'current tmux server generation could not be verified',
+            };
+          }
+          if (!sameTmuxServerIdentity(allocationIdentity, current)) {
+            return { presence: 'absent' };
+          }
+          return tearDownPaneWithVerification({
+            probe: async () => {
+              const identity = tmuxService.getServerIdentity?.();
+              if (!identity) return 'unknown';
+              if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+                return 'absent';
+              }
+              return tmuxService.probePanePresence(joinedPaneId);
+            },
+            kill: async () => {
+              const identity = tmuxService.getServerIdentity?.();
+              if (!identity) {
+                throw new Error('current tmux server generation could not be verified');
+              }
+              if (!sameTmuxServerIdentity(allocationIdentity, identity)) {
+                return;
+              }
+              await tmuxService.killPane(joinedPaneId);
+            },
+          });
+        },
+        getTmuxServerIdentity: () => tmuxService.getServerIdentity?.(),
+        retainUncertainRecovery: async (recoveryPane, reason) => {
+          try {
+            const marker = await writeWorktreeRecoveryMarker({
+              projectRoot,
+              worktreePath: recoveryPane.worktreePath || projectRoot,
+              pane: {
+                id: recoveryPane.id,
+                paneId: recoveryPane.paneId,
+              },
+              operation: 'background-window-join',
+              reason,
+            });
+            return `wrote recovery marker ${marker.path}. ${marker.marker.operatorInstructions}`;
+          } catch {
+            return undefined;
+          }
+        },
+      });
+      await refreshPanes?.();
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();

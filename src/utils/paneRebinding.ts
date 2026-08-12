@@ -2,6 +2,10 @@ import type { PsychePane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { getPaneTitleCandidates } from './paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
+import {
+  getCurrentTmuxServerIdentity,
+  sameTmuxServerIdentity,
+} from '../services/TmuxServerIdentity.js';
 
 /**
  * Attempts to rebind a pane whose ID has changed by matching on its stable tmux title.
@@ -19,13 +23,14 @@ export function rebindPaneByTitle(
   titleToIdMap: Map<string, string>,
   allPaneIds: string[]
 ): PsychePane {
-  // If pane ID exists in tmux, keep using it (even if title changed)
-  if (allPaneIds.length > 0 && allPaneIds.includes(pane.paneId)) {
+  const existingIdIsCurrent = paneTmuxIdentityIsCurrent(pane, allPaneIds);
+  // A tmux ID is reusable only within its recorded server generation.
+  if (existingIdIsCurrent) {
     return pane; // Pane still exists, no rebinding needed
   }
 
   // Pane ID missing - try to find it by title match
-  if (allPaneIds.length > 0 && !allPaneIds.includes(pane.paneId)) {
+  if (allPaneIds.length > 0 && !existingIdIsCurrent) {
     const sessionProjectRoot = StateManager.getInstance().getState().projectRoot;
     const titleCandidates = getPaneTitleCandidates(
       pane,
@@ -38,10 +43,58 @@ export function rebindPaneByTitle(
   //           `Rebound pane ${pane.id} from ${pane.paneId} to ${remappedId} (matched by title: ${candidate})`,
   //           'shellDetection'
   //         );
-        return { ...pane, paneId: remappedId };
+        const tmuxServerIdentity = getCurrentTmuxServerIdentity(remappedId);
+        if (!tmuxServerIdentity) {
+          // A title match without a server generation is not an ownership
+          // proof. Keep the old record instead of rebinding it to a reused ID.
+          return pane;
+        }
+        if (
+          remappedId === pane.paneId
+          && pane.tmuxServerIdentity
+          && !sameTmuxServerIdentity(pane.tmuxServerIdentity, tmuxServerIdentity)
+        ) {
+          continue;
+        }
+        const rebound: PsychePane = {
+          ...pane,
+          paneId: remappedId,
+          tmuxServerIdentity,
+        };
+        if (
+          !pane.tmuxServerIdentity
+          || !sameTmuxServerIdentity(pane.tmuxServerIdentity, tmuxServerIdentity)
+        ) {
+          delete rebound.testWindowId;
+          delete rebound.testPaneId;
+          delete rebound.testTmuxServerIdentity;
+          delete rebound.testStatus;
+          delete rebound.testOutput;
+          delete rebound.devWindowId;
+          delete rebound.devPaneId;
+          delete rebound.devTmuxServerIdentity;
+          delete rebound.devStatus;
+          delete rebound.devUrl;
+          delete rebound.backgroundWindowRecoveries;
+        }
+        return rebound;
       }
     }
   }
 
   return pane;
+}
+
+export function paneTmuxIdentityIsCurrent(
+  pane: PsychePane,
+  allPaneIds: readonly string[],
+): boolean {
+  if (!allPaneIds.includes(pane.paneId) || !pane.tmuxServerIdentity) {
+    return false;
+  }
+  const current = getCurrentTmuxServerIdentity(pane.paneId);
+  return Boolean(
+    current
+    && sameTmuxServerIdentity(pane.tmuxServerIdentity, current)
+  );
 }

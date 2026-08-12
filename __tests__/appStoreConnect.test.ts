@@ -26,6 +26,8 @@ const BUILD_NUMBER = '1';
 const RELEASE_SHA = '0123456789abcdef0123456789abcdef01234567';
 const TOKEN = 'header.payload.signature';
 const API_ROOT = 'https://api.appstoreconnect.apple.com';
+const COREPACK_VERSION = '0.31.0';
+const COREPACK_INSTALL_COMMAND = `npm install --global corepack@${COREPACK_VERSION}`;
 const execFileAsync = promisify(execFile);
 const temporaryRoots: string[] = [];
 
@@ -37,6 +39,23 @@ type JsonApiResource = {
 };
 
 type FetchCall = { url: URL; init: RequestInit };
+
+async function execCorepackPnpm(
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {},
+) {
+  try {
+    return await execFileAsync('corepack', args, options);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `Corepack is required for this test but was not found. Install the pinned version with: ${COREPACK_INSTALL_COMMAND}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1399,25 +1418,14 @@ describe('secret redaction and CLI contract', () => {
     expect(diagnostic).not.toContain('SECRET_ISSUER_ID');
   });
 
-  it('accepts the pinned pnpm script delimiter and reaches credential validation without network', async (context) => {
+  it('accepts the pinned pnpm script delimiter and reaches credential validation without network', async () => {
     const packageJson = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')) as {
       packageManager: string;
     };
     const expectedPnpmVersion = packageJson.packageManager.replace(/^pnpm@/, '');
-    const installedPnpm = (await execFileAsync('pnpm', ['--version'])).stdout.trim();
-    // How `--` reaches a script is pnpm-version-specific, which is the whole
-    // point of the pin. Running this against a different pnpm would assert
-    // nothing about the pinned one, so it skips rather than fails: CI installs
-    // the pinned version and does run it. A hard failure here only told every
-    // developer with a newer pnpm that the suite was broken.
-    if (installedPnpm !== expectedPnpmVersion) {
-      console.warn(
-        `[skip] pnpm ${installedPnpm} installed, ${expectedPnpmVersion} pinned — ` +
-          'delimiter behaviour is version-specific, so this proves nothing here',
-      );
-      context.skip();
-      return;
-    }
+    const pinnedPnpm = `pnpm@${expectedPnpmVersion}`;
+    const installedPnpm = await execCorepackPnpm([pinnedPnpm, '--version']);
+    expect(installedPnpm.stdout.trim()).toBe(expectedPnpmVersion);
 
     const env = { ...process.env };
     delete env.APP_STORE_CONNECT_KEY_ID;
@@ -1425,28 +1433,25 @@ describe('secret redaction and CLI contract', () => {
     delete env.APP_STORE_CONNECT_PRIVATE_KEY_PATH;
 
     const result = await capturedError(() =>
-      execFileAsync(
-        'pnpm',
-        [
-          'release:testflight',
-          '--',
-          '--bundle-id',
-          BUNDLE_ID,
-          '--version',
-          VERSION,
-          '--build-number',
-          BUILD_NUMBER,
-          '--locale',
-          'en-US',
-          '--notes-file',
-          'CHANGELOG.md',
-          '--release-sha',
-          RELEASE_SHA,
-          '--timeout-seconds',
-          '1',
-        ],
-        { env },
-      ),
+      execCorepackPnpm([
+        pinnedPnpm,
+        'release:testflight',
+        '--',
+        '--bundle-id',
+        BUNDLE_ID,
+        '--version',
+        VERSION,
+        '--build-number',
+        BUILD_NUMBER,
+        '--locale',
+        'en-US',
+        '--notes-file',
+        'CHANGELOG.md',
+        '--release-sha',
+        RELEASE_SHA,
+        '--timeout-seconds',
+        '1',
+      ], { env }),
     );
     const diagnostic = `${result.message}\n${String((result as Error & { stderr?: string }).stderr ?? '')}`;
     expect(diagnostic).toContain(

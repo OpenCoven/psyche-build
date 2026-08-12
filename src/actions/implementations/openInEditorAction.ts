@@ -2,12 +2,26 @@
  * OPEN_IN_EDITOR Action - Open worktree in external editor
  */
 
-import { execSync } from 'child_process';
 import type { PsychePane } from '../../types.js';
 import type { ActionResult, ActionContext } from '../types.js';
+import { runProcess } from '../../utils/runProcess.js';
 
 export function getDefaultEditor(platform: NodeJS.Platform = process.platform): string {
   return platform === 'darwin' ? 'xed' : 'code';
+}
+
+function validateEditorExecutable(editor: string): string {
+  if (
+    !editor
+    || editor.trim() !== editor
+    || /\s/.test(editor)
+    || /[`$;&|<>"']/.test(editor)
+  ) {
+    throw new Error(
+      'Editor must be a single executable path; command strings with whitespace are not supported',
+    );
+  }
+  return editor;
 }
 
 /**
@@ -26,10 +40,11 @@ export async function openInEditor(
     };
   }
 
-  const editor = params?.editor || process.env.EDITOR || getDefaultEditor();
-
   try {
-    execSync(`${editor} "${pane.worktreePath}"`, { stdio: 'pipe' });
+    const editor = validateEditorExecutable(
+      params?.editor || process.env.EDITOR || getDefaultEditor(),
+    );
+    await runProcess(editor, { args: [pane.worktreePath], timeoutMs: 0 });
 
     return {
       type: 'success',
