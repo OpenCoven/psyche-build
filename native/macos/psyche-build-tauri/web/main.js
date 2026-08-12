@@ -721,19 +721,53 @@
   function persistableProject(project) {
     return { id: project.id, name: project.name, root: project.root, collapsed: !!project.collapsed, selectedWorktreePath: project.selectedWorktreePath, worktreePresentation: (project.worktrees || []).map(function (worktree) { return { path: worktree.path, collapsed: !!worktree.collapsed }; }), layout: ensureProjectLayout(project), browsersByWorktree: persistableBrowsers(project) };
   }
+  function workspaceModel() {
+    return window.PsycheWorkspace || null;
+  }
+  function workspaceSnapshotV2() {
+    return { version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) };
+  }
+  var workspaceSaveQueue = Promise.resolve();
   function saveWorkspaceNow() {
-    if (isRestoringWorkspace) return;
+    if (isRestoringWorkspace) return workspaceSaveQueue;
+    var snapshot = workspaceSnapshotV2();
     try {
-      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify({ version: 2, activeProjectId: state.activeProjectId || null, projects: state.projects.map(persistableProject).slice(0, HARD_MAX_PROJECTS) }));
+      localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(snapshot));
     } catch (_) {}
+    // The native store is authoritative on load; localStorage above stays as a
+    // fallback for webviews where the command is unavailable.
+    var model = workspaceModel();
+    if (!model) return workspaceSaveQueue;
+    var workspace = model.importWorkspaceV2(snapshot);
+    workspaceSaveQueue = workspaceSaveQueue.then(function () {
+      return invoke("workspace_save", { workspace: workspace });
+    }).catch(function (error) {
+      setStatus("workspace save failed: " + String(error), "error");
+    });
+    return workspaceSaveQueue;
   }
   function saveWorkspaceSoon() {
     if (isRestoringWorkspace) return;
     if (saveWorkspaceTimer) cancelAnimationFrame(saveWorkspaceTimer);
-    saveWorkspaceTimer = requestAnimationFrame(function () { saveWorkspaceTimer = 0; saveWorkspaceNow(); });
+    saveWorkspaceTimer = requestAnimationFrame(function () {
+      saveWorkspaceTimer = 0;
+      saveWorkspaceNow();
+    });
   }
   function readSavedWorkspace() {
     try { var saved = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null"); return saved && Array.isArray(saved.projects) ? saved : null; } catch (_) { return null; }
+  }
+  async function loadSavedWorkspace() {
+    var model = workspaceModel();
+    if (model) {
+      try {
+        var native = model.sanitizeWorkspaceV3(await invoke("workspace_load"));
+        if (native && native.projects.length) {
+          return { version: 2, activeProjectId: native.activeProjectId, projects: native.projects };
+        }
+      } catch (_) {}
+    }
+    return readSavedWorkspace();
   }
   function sanitizeSavedProject(saved) {
     if (!saved || !saved.root) return null;
@@ -6793,7 +6827,7 @@
     try {
       if (!(await guardDirtyFiles(state.openFiles.slice()))) return;
       destroyingWindow = true;
-      saveWorkspaceNow();
+      await saveWorkspaceNow();
       await currentWindow.destroy();
     } catch (error) {
       destroyingWindow = false;
@@ -9335,7 +9369,7 @@
     state.env = env || {};
     await installTerminalImageDrop();
     if (typeof statusController !== "undefined" && statusController) statusController.start();
-    var saved = readSavedWorkspace();
+    var saved = await loadSavedWorkspace();
     var bootRoot = state.env.repo_root || state.env.home || "/";
     var project = null;
     if (saved && saved.projects.length) {
