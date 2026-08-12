@@ -309,8 +309,17 @@ describe('Tauri workspace panels', () => {
     });
 
     it('files a tool pane as a tool, not an agent', () => {
-      expect(mainJs).toMatch(/var TOOL_KINDS = \["git", "web"\];/);
-      expect(mainJs).toMatch(/\["Tools", function \(t\) \{ return TOOL_KINDS\.indexOf/);
+      const sidebarModel = readFileSync(
+        join(repoRoot, 'native/desktop/psyche-build-tauri/web/sessions/sidebar-model.mjs'),
+        'utf8'
+      );
+      expect(sidebarModel).toMatch(/const TOOL_KINDS = \['git', 'web'\];/);
+      expect(sidebarModel).toMatch(
+        /buildCategory\('Tools', '◍', toolRows, normalizedQuery\)/,
+      );
+      expect(sidebarModel).toMatch(
+        /row\.type === 'agents' && !isToolRow\(row\)/,
+      );
     });
   });
 

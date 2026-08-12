@@ -35,3 +35,4 @@ native/desktop/psyche-build-tauri/pnpm-lock.yaml
 /.superpowers
 /.opencode
 /.copilot/goals.md
+/Library
