@@ -464,7 +464,7 @@ final class ConnectionManagerTests: XCTestCase {
 
         secureStore.blockNextRead()
         await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "stale-token"))))
-        try await secureStore.waitUntilReadBegins()
+        await secureStore.waitUntilReadBegins()
 
         let reconnect = Task {
             await manager.connect(to: secondEndpoint)
@@ -561,7 +561,7 @@ final class ConnectionManagerTests: XCTestCase {
         let storedConnect = Task {
             await manager.connectToStoredHost()
         }
-        try await secureStore.waitUntilReadBegins()
+        await secureStore.waitUntilReadBegins()
 
         let firstManualConnect = Task {
             await manager.connect(to: manualEndpoint)
@@ -625,7 +625,7 @@ final class ConnectionManagerTests: XCTestCase {
             await manager.connectToStoredHost()
             await completionProbe.markComplete()
         }
-        try await secureStore.waitUntilReadBegins()
+        await secureStore.waitUntilReadBegins()
 
         await manager.disconnect()
         secureStore.releaseRead()
@@ -2156,6 +2156,7 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
     private var shouldBlockNextRead = false
     private var readBegan = false
     private var readReleased = false
+    private var readBeganWaiters: [CheckedContinuation<Void, Never>] = []
 
     func blockNextRead() {
         condition.withLock {
@@ -2165,16 +2166,17 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
         }
     }
 
-    func waitUntilReadBegins(
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        for _ in 0..<1_000 {
-            if condition.withLock({ readBegan }) { return }
-            await Task.yield()
+    func waitUntilReadBegins() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = condition.withLock {
+                guard !readBegan else { return true }
+                readBeganWaiters.append(continuation)
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
         }
-        XCTFail("Timed out waiting for paired-host read", file: file, line: line)
-        throw TestError.timedOut
     }
 
     func releaseRead() {
@@ -2189,7 +2191,11 @@ private final class BlockingReadSecureStore: SecureStore, @unchecked Sendable {
         if shouldBlockNextRead {
             shouldBlockNextRead = false
             readBegan = true
-            condition.broadcast()
+            let waiters = readBeganWaiters
+            readBeganWaiters.removeAll()
+            condition.unlock()
+            waiters.forEach { $0.resume() }
+            condition.lock()
             while !readReleased {
                 condition.wait()
             }
