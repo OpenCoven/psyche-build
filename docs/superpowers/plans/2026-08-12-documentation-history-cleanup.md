@@ -258,10 +258,20 @@ describe('documentation history', () => {
 Run:
 
 ```bash
-pnpm exec vitest --run __tests__/documentationHistory.test.ts
+if output="$(pnpm exec vitest --run __tests__/documentationHistory.test.ts 2>&1)"; then
+  printf '%s\n' "$output"
+  printf '%s\n' 'Expected failure: __tests__/documentationHistory.test.ts passed before docs/HISTORY.md exists.' >&2
+  exit 1
+else
+  status=$?
+  printf '%s\n' "$output"
+  printf '%s\n' "Expected failure confirmed (exit $status)." >&2
+  exit 0
+fi
 ```
 
-Expected: FAIL because `docs/HISTORY.md` does not exist.
+Expected: the test output is preserved, and the command exits 0 only when the
+test fails for the missing `docs/HISTORY.md` page.
 
 - [ ] **Step 3: Give CI the history required by the contract**
 
@@ -421,9 +431,10 @@ BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
 RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
 BASELINE="$(cat "$BASELINE_FILE")"
 grep -F "Archive baseline: \`$BASELINE\`" docs/HISTORY.md
-test "$(grep -c '^| .* | `docs/' docs/HISTORY.md)" -eq \
-  "$(wc -l < "$RETIRED_PATHS_FILE" | tr -d ' ')"
-grep -c 'https://github.com/OpenCoven/psyche-build/blob/' docs/HISTORY.md
+RETIRED_COUNT="$(wc -l < "$RETIRED_PATHS_FILE" | tr -d ' ')"
+URL_COUNT="$(grep -c 'https://github.com/OpenCoven/psyche-build/blob/' docs/HISTORY.md)"
+test "$(grep -c '^| .* | `docs/' docs/HISTORY.md)" -eq "$RETIRED_COUNT"
+test "$URL_COUNT" -ge "$RETIRED_COUNT"
 ```
 
 Expected: the first command prints the baseline line; deleted-file row count
@@ -913,15 +924,14 @@ Expected: every command passes.
 Run:
 
 ```bash
-npm pack --dry-run --json > /tmp/psyche-pack.json
-jq -e '
+npm pack --dry-run --json | jq -e '
   [.[0].files[].path] as $paths
   | ($paths | index("docs/HISTORY.md")) != null
   and ($paths | index("docs/RELEASING.md")) != null
   and ($paths | index("docs/RELEASE.md")) == null
   and ($paths | index("docs/BREAKING-CHANGES.md")) == null
   and ($paths | index("docs/PRODUCT-SPEC.md")) == null
-' /tmp/psyche-pack.json
+'
 ```
 
 Expected: `jq` returns `true`.
