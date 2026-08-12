@@ -1,7 +1,7 @@
 # Agent Control of Psyche Surfaces — Design
 
 Date: 2026-08-12
-Status: Approved in design discussion; pending written-spec review
+Status: Approved for implementation
 
 ## Goal
 
