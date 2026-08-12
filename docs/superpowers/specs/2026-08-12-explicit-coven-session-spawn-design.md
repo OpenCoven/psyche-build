@@ -18,8 +18,8 @@ session.
 
 Psyche must create a Coven session only after an explicit user action.
 
-The following lifecycle operations must not create, resume, focus, or attach a
-Coven terminal:
+The following lifecycle operations must not create a new Coven session or
+attach a daemon session that is not already represented by a local pane:
 
 - application boot;
 - opening or restoring a project;
@@ -28,8 +28,9 @@ Coven terminal:
 - restoring a saved workspace layout.
 
 These operations may continue discovering and rendering existing daemon
-sessions. A user may explicitly attach to a discovered session from its rail
-row.
+sessions. They may also preserve the normal workspace layout and focus an
+already-open local pane. A user may explicitly attach to a discovered daemon
+session from its rail row.
 
 The following explicit actions may create or open a Coven terminal:
 
@@ -54,7 +55,8 @@ single Coven creation path. Change only its callers:
 2. Preserve calls made by controls whose labels and intent explicitly request
    a Coven terminal.
 3. Leave daemon discovery, session assignment, rail rendering, attach behavior,
-   and PTY launch validation unchanged.
+   PTY launch validation, and normal restoration of existing local panes
+   unchanged.
 
 No preference or migration flag is added. Explicit-only behavior is the
 default and sole policy.
@@ -108,6 +110,8 @@ Focused tests must prove:
 - project opening performs no Coven launch;
 - project and worktree activation perform no Coven launch;
 - passive lifecycle operations still refresh the expected workspace UI;
+- passive restoration may focus an already-open local pane but does not launch
+  a new Coven PTY;
 - **Open Coven Terminal**, the Coven agent picker entry, and the new-session
   command each retain their explicit launch behavior;
 - an existing visible live Coven pane is focused rather than duplicated;
@@ -121,6 +125,6 @@ Focused tests must prove:
 
 This change does not terminate existing daemon sessions, rewrite daemon
 records, alter session provenance, deduplicate different daemon IDs by title,
-or add automatic resume behavior. Existing duplicate sessions remain visible
-until they complete or the user stops them; the fix prevents passive app
-lifecycle events from creating more.
+or add automatic daemon-session resume behavior. Existing duplicate sessions
+remain visible until they complete or the user stops them; the fix prevents
+passive app lifecycle events from creating more.
