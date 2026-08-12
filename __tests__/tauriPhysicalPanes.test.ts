@@ -478,7 +478,7 @@ describe('Tauri physical terminal panes', () => {
     const renderPaneWorkspace = compileFunction<() => void>(functionSource('renderPaneWorkspace'), {
       terminalHost,
       stageBrowserSurface: () => { calls.push('stage'); },
-      syncGitSurfaceForActiveScope: () => { calls.push('sync-git'); },
+      stageGitSurface: () => { calls.push('stage-git'); },
       activePaneLayout: () => null,
       renderTerminalEmptyState: () => { calls.push('empty'); },
       renderPaneMinimap: (layout: unknown, file: unknown) => {
@@ -495,7 +495,7 @@ describe('Tauri physical terminal panes', () => {
 
     renderPaneWorkspace();
     expect(terminalHost.children).toEqual([]);
-    expect(calls).toEqual(['stage', 'sync-git', 'clear', 'empty', 'minimap']);
+    expect(calls).toEqual(['stage', 'stage-git', 'clear', 'empty', 'minimap']);
   });
 
   it('renders file tabs without depending on terminal thread visibility', () => {
@@ -1131,6 +1131,7 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject: async () => { projectSwitches += 1; return true; },
       activatePaneLayoutFocus: () => undefined,
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1169,6 +1170,7 @@ describe('Tauri physical terminal panes', () => {
       },
       activatePaneLayoutFocus: () => { calls.push('focus'); },
       renderPaneWorkspace: () => { calls.push('panes'); },
+      renderGitSurface: () => { calls.push('panel'); return true; },
       renderPanel: () => { calls.push('panel'); },
       currentPanel: () => 'browser',
       loadAgentSkills: () => { calls.push('skills'); },
@@ -1229,6 +1231,7 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject: async () => true,
       activatePaneLayoutFocus,
       renderPaneWorkspace,
+      renderGitSurface: () => false,
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1273,6 +1276,7 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject: async () => true,
       activatePaneLayoutFocus,
       renderPaneWorkspace,
+      renderGitSurface: () => false,
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1325,6 +1329,7 @@ describe('Tauri physical terminal panes', () => {
         return true;
       },
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
@@ -1341,6 +1346,7 @@ describe('Tauri physical terminal panes', () => {
       setActiveProject,
       activatePaneLayoutFocus: () => undefined,
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
       renderPanel: () => undefined,
       currentPanel: () => 'browser',
       loadAgentSkills: () => undefined,
@@ -1408,6 +1414,7 @@ describe('Tauri physical terminal panes', () => {
         return true;
       },
       renderPaneWorkspace: () => { renderCalls += 1; },
+      renderGitSurface: () => false,
       refreshSidebar: () => { sidebarCalls += 1; },
       refreshTabs: () => { tabCalls += 1; },
       syncProjectBrowser: () => { syncCalls += 1; },
@@ -1454,6 +1461,7 @@ describe('Tauri physical terminal panes', () => {
       paneLayoutFor: () => null,
       PsychePanes,
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       requestAnimationFrame: (callback: () => void) => callback(),
       scheduleVisiblePaneFit: () => undefined,
@@ -1501,6 +1509,7 @@ describe('Tauri physical terminal panes', () => {
         return true;
       },
       renderPaneWorkspace: () => undefined,
+      renderGitSurface: () => false,
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,

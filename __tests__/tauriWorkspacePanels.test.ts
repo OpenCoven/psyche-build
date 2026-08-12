@@ -105,12 +105,21 @@ describe('Tauri workspace panels', () => {
     expect(tauriLib).not.toMatch(/text\.lines\(\)\.take\(2000\)/);
   });
 
-  it('keeps a Git-only dock with Changes and Commit', () => {
+  it('keeps Git pane-only with Changes and Commit', () => {
     expect(indexHtml).not.toContain('class="dock-tab"');
     expect(stylesCss).not.toMatch(/\.dock-tab\s*\{/);
     expect(stylesCss).not.toContain('--dock-tabs-h');
     expect(indexHtml).not.toContain('data-browser-column-toggle');
-    expect(indexHtml).toContain('class="panel panel-git"');
+    expect(indexHtml).not.toContain('class="git-dock dock"');
+    expect(indexHtml).not.toContain('id="splitter"');
+    expect(indexHtml).not.toContain('id="rail-right"');
+    expect(indexHtml).not.toContain('id="dock-collapse"');
+    expect(indexHtml).not.toContain('id="git-pop-out"');
+    expect(indexHtml).not.toContain('id="git-dock-back"');
+    expect(indexHtml).not.toContain('data-dock=');
+    expect(indexHtml).not.toContain('data-panel=');
+    expect(indexHtml).toMatch(/id="git-surface-staging"[\s\S]*id="git-surface"/);
+    expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
     expect(indexHtml).toContain('data-git-tab="changes"');
     expect(indexHtml).toContain('data-git-tab="commit"');
     // Diffs is no longer a tab of its own...
@@ -129,7 +138,7 @@ describe('Tauri workspace panels', () => {
     expect(fileView.slice(0, fileView.indexOf('</div>') + 6)).toContain('id="tab-strip"');
     // ...but its markup still exists, inside the git panel, with the element
     // ids the diff renderer writes into.
-    const gitPanel = indexHtml.slice(indexHtml.indexOf('class="panel panel-git"'));
+    const gitPanel = indexHtml.slice(indexHtml.indexOf('id="git-surface"'));
     for (const id of ['git-view', 'diffs-summary', 'diffs-refresh', 'diff-files', 'diff-rows']) {
       expect(gitPanel).toContain(`id="${id}"`);
     }
@@ -241,7 +250,7 @@ describe('Tauri workspace panels', () => {
 
     it('mirrors the changed-file count onto the Changes tab', () => {
       expect(indexHtml).toContain('id="git-changes-count"');
-      expect(mainJs).toMatch(/function setDockGitCount\(count\)[\s\S]*gitChangesCountEl\.textContent/);
+      expect(mainJs).toMatch(/function setGitChangesCount\(count\)[\s\S]*gitChangesCountEl\.textContent/);
     });
   });
 
@@ -288,12 +297,12 @@ describe('Tauri workspace panels', () => {
     });
   });
 
-  describe('dock to canvas', () => {
+  describe('staged Git canvas surface', () => {
     it('moves one live surface rather than rendering it twice', () => {
       // Two renderings of the git panel could diverge; one element with two
       // possible homes cannot.
       expect(indexHtml).toContain('id="git-surface"');
-      expect(mainJs).toMatch(/function dockGitSurface\(\)[\s\S]*gitPanelEl\.appendChild\(gitSurfaceEl\)/);
+      expect(mainJs).toMatch(/function stageGitSurface\(\)[\s\S]*gitSurfaceStagingEl\.appendChild\(gitSurfaceEl\)/);
       expect(mainJs).toMatch(/thread\.kind === "git" && thread\.toolBody && gitSurfaceEl/);
       // Only one git surface exists in the markup.
       expect(indexHtml.match(/id="git-surface"/g)).toHaveLength(1);
@@ -309,17 +318,6 @@ describe('Tauri workspace panels', () => {
       );
     });
 
-    it('offers pop-out and drag from the same control', () => {
-      expect(indexHtml).toMatch(/id="git-pop-out"[\s\S]*draggable="true"/);
-      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("click"[\s\S]*popOutGitPane\(\)/);
-      expect(mainJs).toMatch(/gitPopOutBtn\.addEventListener\("dragstart"[\s\S]*text\/x-psyche-tool/);
-    });
-
-    it('lands a dropped tool where it was dropped', () => {
-      expect(mainJs).toMatch(/terminalHost\.addEventListener\("drop"[\s\S]*popOutGitPane\(target\)/);
-      expect(mainJs).toMatch(/movePaneTo\(id, dropTarget\.threadId, dropTarget\.position\)/);
-    });
-
     it('shares one drop indicator with the pane drag', () => {
       // A second visual language for the same gesture would be noise.
       expect(mainJs).toMatch(/function showPaneDropIndicator\(rect, position\)/);
@@ -330,7 +328,7 @@ describe('Tauri workspace panels', () => {
     it('hands the surface back before the pane is torn down', () => {
       // Removing the pane first would take the surface out of the document
       // with it.
-      expect(mainJs).toMatch(/function closeToolPane\(thread\)[\s\S]*dockGitSurface\(\)[\s\S]*detachThreadPane\(thread\)/);
+      expect(mainJs).toMatch(/function closeToolPane\(thread\)[\s\S]*stageGitSurface\(\)[\s\S]*detachThreadPane\(thread\)/);
     });
 
     it('files a tool pane as a tool, not an agent', () => {
@@ -367,50 +365,11 @@ describe('Tauri workspace panels', () => {
       expect(source).toContain('preparePanePlacement(id, project.id, workspaceRoot)');
     });
 
-    it('keeps the current dock pop-out as a compatibility caller', () => {
-      expect(mainJs).toMatch(
-        /function popOutGitPane\(dropTarget\)[\s\S]*return openOrFocusGitPane\(dropTarget\)/,
-      );
-    });
-
-    it('returns the shared surface to the dock when the newly active scope has no owner', () => {
-      const source = functionSource('syncGitSurfaceForActiveScope');
-      expect(source).toMatch(
-        /var project = activeProject\(\);[\s\S]*gitPaneThread\(project\.id, activeWorkspaceRoot\(project\)\)/,
-      );
-      expect(source).toMatch(/if \(!thread\) dockGitSurface\(\);/);
-      expect(source).toMatch(/else syncGitDockChrome\(\);/);
-      expect(functionSource('dockGitSurface')).toContain('syncGitDockChrome();');
-      expect(functionSource('renderPaneWorkspace')).toMatch(
-        /stageBrowserSurface\(\);[\s\S]*syncGitSurfaceForActiveScope\(\);[\s\S]*terminalHost\.replaceChildren\(\);/,
-      );
-
-      function runForActiveScope(owner: unknown) {
-        const calls: string[] = [];
-        const syncActiveScope = Function(
-          'activeProject', 'activeWorkspaceRoot', 'gitPaneThread',
-          'dockGitSurface', 'syncGitDockChrome',
-          `"use strict"; return (${source});`,
-        )(
-          () => ({ id: 'next-project' }),
-          () => '/next-worktree',
-          (projectId: string, workspaceRoot: string) => {
-            calls.push(`lookup:${projectId}:${workspaceRoot}`);
-            return owner;
-          },
-          () => { calls.push('dock'); },
-          () => { calls.push('chrome'); },
-        ) as () => void;
-        syncActiveScope();
-        return calls;
-      }
-
-      expect(runForActiveScope(null)).toEqual([
-        'lookup:next-project:/next-worktree', 'dock',
-      ]);
-      expect(runForActiveScope({ id: 'git-next' })).toEqual([
-        'lookup:next-project:/next-worktree', 'chrome',
-      ]);
+    it('uses pane membership as the only Git visibility contract', () => {
+      const visible = functionSource('gitPaneIsVisible');
+      expect(visible).toContain('gitPaneThread(project.id, workspaceRoot)');
+      expect(visible).toContain('canvasThreadIds().indexOf(thread.id) !== -1');
+      expect(functionSource('currentDiffRequestMatches')).toContain('gitPaneIsVisible(project)');
     });
 
     it('keeps the shared surface mounted in a Git pane owned by the newly active scope', () => {
@@ -431,12 +390,13 @@ describe('Tauri workspace panels', () => {
       let active = { id: 'project-a', root: '/worktree-a' };
       let generation = 1;
       const matches = Function(
-        'activeProject', 'activeWorkspaceRoot', 'gitPanelRequestGate',
+        'activeProject', 'activeWorkspaceRoot', 'gitPanelRequestGate', 'gitPaneIsVisible',
         `"use strict"; return (${source});`,
       )(
         () => active,
         (project: typeof active) => project.root,
         { isCurrent: (candidate: number) => candidate === generation },
+        () => true,
       ) as (projectId: string, workspaceRoot: string, candidate: number) => boolean;
 
       expect(matches('project-a', '/worktree-a', 1)).toBe(true);
@@ -460,7 +420,7 @@ describe('Tauri workspace panels', () => {
       const renderGitPanel = Function(
         'gitViewEl', 'gitPanelRequestGate', 'activeProject', 'panelMessage',
         'activeWorkspaceRoot', 'gitBranchEl', 'gitRemoteWebUrl',
-        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setDockGitCount',
+        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setGitChangesCount',
         'document', 'escapeHtml', 'shortenRelPath', 'openUrl',
         `"use strict"; return (${source});`,
       )(
@@ -508,7 +468,7 @@ describe('Tauri workspace panels', () => {
       const renderGitPanel = Function(
         'gitViewEl', 'gitPanelRequestGate', 'activeProject', 'panelMessage',
         'activeWorkspaceRoot', 'gitBranchEl', 'gitRemoteWebUrl',
-        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setDockGitCount',
+        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setGitChangesCount',
         'document', 'escapeHtml', 'shortenRelPath', 'openUrl',
         `"use strict"; return (${source});`,
       )(
@@ -548,8 +508,8 @@ describe('Tauri workspace panels', () => {
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
-        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
       )(
         () => ({ id: 'project-a' }),
@@ -565,14 +525,13 @@ describe('Tauri workspace panels', () => {
         { threads: [] },
         () => undefined,
         () => undefined,
-        () => undefined,
-        () => undefined,
+        () => { calls.push('render'); },
         () => undefined,
         () => undefined,
       ) as () => Promise<typeof existing>;
 
       await expect(openOrFocusGitPane()).resolves.toBe(existing);
-      expect(calls).toEqual(['focus:git-existing']);
+      expect(calls).toEqual(['focus:git-existing', 'render']);
     });
 
     it('cancels before allocating Git state when leaving a dirty file is declined', async () => {
@@ -582,8 +541,8 @@ describe('Tauri workspace panels', () => {
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
-        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
       )(
         () => ({ id: 'project-a' }),
@@ -599,8 +558,7 @@ describe('Tauri workspace panels', () => {
         state,
         () => { calls.push('activity'); },
         () => { calls.push('mount'); },
-        () => { calls.push('move'); },
-        () => { calls.push('chrome'); },
+        () => { calls.push('render'); },
         () => { calls.push('sidebar'); },
         () => { calls.push('save'); },
       ) as () => Promise<null>;
@@ -618,8 +576,8 @@ describe('Tauri workspace panels', () => {
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
-        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
       )(
         () => project,
@@ -638,15 +596,14 @@ describe('Tauri workspace panels', () => {
         { threads: [] },
         () => undefined,
         () => undefined,
-        () => undefined,
-        () => undefined,
+        () => { calls.push('render'); },
         () => undefined,
         () => undefined,
       ) as () => Promise<typeof existing>;
 
       await expect(openOrFocusGitPane()).resolves.toBe(existing);
       expect(calls).toEqual([
-        'lookup:project-b:/worktree-b', 'reveal', 'focus:git-project-b',
+        'lookup:project-b:/worktree-b', 'reveal', 'focus:git-project-b', 'render',
       ]);
     });
 
@@ -722,8 +679,8 @@ describe('Tauri workspace panels', () => {
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
-        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
       )(
         () => ({ id: 'project-b' }),
@@ -745,8 +702,7 @@ describe('Tauri workspace panels', () => {
         state,
         () => { calls.push('activity'); },
         () => { calls.push('mount'); },
-        () => undefined,
-        () => { calls.push('chrome'); },
+        () => { calls.push('render'); },
         () => { calls.push('sidebar'); },
         () => { calls.push('save'); },
       ) as () => Promise<{ id: string; projectId: string; worktreePath: string }>;
@@ -757,7 +713,7 @@ describe('Tauri workspace panels', () => {
       expect(state.threads).toHaveLength(1);
       expect(calls).toEqual([
         'lookup:project-b:/worktree-b', 'place:git-new:project-b:/worktree-b',
-        'commit', 'activity', 'mount', 'focus:git-new', 'chrome', 'sidebar', 'save',
+        'commit', 'activity', 'mount', 'focus:git-new', 'render', 'sidebar', 'save',
       ]);
     });
 
@@ -768,8 +724,8 @@ describe('Tauri workspace panels', () => {
       const openOrFocusGitPane = Function(
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
-        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
-        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
         `"use strict"; return (${source});`,
       )(
         () => ({ id: 'project-a' }),
@@ -785,8 +741,7 @@ describe('Tauri workspace panels', () => {
         state,
         () => { calls.push('activity'); },
         () => { calls.push('mount'); },
-        () => undefined,
-        () => { calls.push('chrome'); },
+        () => { calls.push('render'); },
         () => { calls.push('sidebar'); },
         () => { calls.push('save'); },
       ) as () => Promise<null>;
@@ -795,6 +750,20 @@ describe('Tauri workspace panels', () => {
       expect(state.threads).toEqual([]);
       expect(calls).toEqual(['status:Not enough space for another pane']);
     });
+  });
+
+  it('removes dock layout persistence, chrome, and shortcuts atomically', () => {
+    for (const token of ['.git-dock', '.dock-mini', '.dock-collapse', '--split-frac', '--terminal-col']) {
+      expect(stylesCss).not.toContain(token);
+    }
+    expect(functionSource('persistableProject')).not.toContain('layout:');
+    expect(functionSource('sanitizeSavedProject')).not.toContain('saved.layout');
+    expect(mainJs).not.toContain('applyLayout');
+    expect(mainJs).not.toContain('toggleDock');
+    expect(mainJs).not.toContain('panelIsVisible');
+    expect(mainJs).not.toContain('cmd: "/split"');
+    expect(mainJs).not.toMatch(/e\.key === "\\\\"/);
+    expect(mainJs).not.toMatch(/e\.code === "KeyB" && e\.altKey/);
   });
 
   describe('voice call bar', () => {

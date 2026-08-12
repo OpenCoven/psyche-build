@@ -84,9 +84,6 @@
   --pane-min-h: 137px;
   --browser-bar-h: 30px;
   --browser-tab-h: 22px;
-  --splitter-w: 10px;
-  --splitter-grip-h: 42px;
-
   /* Pane canvas split fractions, driven by the canvas splitters. */
   --pane-col-frac: 0.5;
   --pane-row-frac: 0.52;
@@ -96,7 +93,6 @@
   --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
   --transition-fast: 120ms cubic-bezier(0.32, 0.72, 0, 1);
   --transition-med:  200ms cubic-bezier(0.32, 0.72, 0, 1);
-  --transition-layout: 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 * { box-sizing: border-box; }
@@ -126,7 +122,7 @@ kbd {
 /* -------- App grid -------- */
 
 /* Three stacked bands: titlebar, workbench, composer. The workbench splits
-   into sidebar | canvas | dock. The titlebar and composer span the full
+   into sidebar | canvas. The titlebar and composer span the full
    window so the shell reads as one frame rather than three columns. */
 .app {
   display: grid;
@@ -139,15 +135,11 @@ kbd {
 .workbench {
   position: relative;
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) 0px;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
-.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) 0px; }
-.app[data-dock="collapsed"] .workbench { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--mini-rail-w); }
-.app[data-sidebar="collapsed"][data-dock="collapsed"] .workbench {
-  grid-template-columns: var(--mini-rail-w) minmax(0, 1fr) var(--mini-rail-w);
-}
+.app[data-sidebar="collapsed"] .workbench { grid-template-columns: var(--mini-rail-w) minmax(0, 1fr); }
 .app[data-sidebar="collapsed"] .sidebar { display: none; }
 .app[data-sidebar="open"] .sidebar-mini { display: none; }
 
@@ -188,7 +180,6 @@ kbd {
 }
 .mini-rail[hidden] { display: none; }
 .sidebar-mini { border-right: 1px solid var(--border); justify-content: flex-end; }
-.dock-mini { border-left: 1px solid var(--border); }
 .mini-rail-btn {
   position: relative;
   width: 32px;
@@ -957,133 +948,18 @@ kbd {
 /* -------- Detail -------- */
 
 .detail {
-  display: grid;
+  display: block;
   min-width: 0;
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  /* Pane mins are relaxed so a narrow window can still hold the canvas beside
-     the Git dock. Browser surfaces now tile inside the canvas itself. */
-  --terminal-min:   220px;
-  --browser-min:    72px;
-  --split-frac: 0.6;
-  --terminal-col: calc(var(--split-frac, 0.6) * 100%);
-  transition: grid-template-columns var(--transition-layout),
-              grid-template-rows    var(--transition-layout);
-  will-change: grid-template-columns, grid-template-rows;
 }
-.detail.resizing { transition: none; }
 .boot-error {
   color: #ff6b6b;
   padding: 24px;
   font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
   white-space: pre-wrap;
 }
-
-/* The canvas is always present; the Git dock is the only optional side. */
-.detail[data-layout="terminal"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="terminal"] .git-dock,
-.detail[data-layout="terminal"] .splitter { display: none; }
-
-/* split — canvas, resize seam, Git dock */
-.detail[data-layout="split"] {
-  grid-template-columns: minmax(var(--terminal-min), var(--terminal-col))
-                         var(--splitter-w)
-                         minmax(var(--browser-min), 1fr);
-  grid-template-rows: 1fr;
-}
-.detail[data-layout="split"] .terminal-area  { grid-column: 1; grid-row: 1; }
-.detail[data-layout="split"] .splitter       { grid-column: 2; grid-row: 1; }
-.detail[data-layout="split"] .git-dock       { grid-column: 3; grid-row: 1; }
-
-.splitter {
-  background: transparent;
-  position: relative;
-  z-index: 5;
-  touch-action: none;
-  outline: none;
-  transition: background var(--transition-fast);
-}
-.splitter { cursor: col-resize; }
-
-.splitter::before {
-  content: '';
-  position: absolute;
-  background: var(--border);
-  opacity: 0.45;
-  transition: width var(--transition-fast), height var(--transition-fast),
-              background var(--transition-fast),
-              opacity var(--transition-fast), box-shadow var(--transition-fast);
-}
-/* Hairline orientation tracks browser side */
-.splitter::before {
-  inset: 10px auto 10px 50%;
-  width: 1px;
-  transform: translateX(-50%);
-}
-
-/* Animated grip — only on col-resize where the design fits */
-.splitter::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 5px;
-  height: var(--splitter-grip-h);
-  border-radius: 999px;
-  transform: translate(-50%, -50%) scaleY(0.82);
-  background:
-    linear-gradient(var(--accent), var(--accent)) center 10px / 1px 4px no-repeat,
-    linear-gradient(var(--accent), var(--accent)) center 19px / 1px 4px no-repeat,
-    linear-gradient(var(--accent), var(--accent)) center 28px / 1px 4px no-repeat,
-    rgba(var(--rgb-accent), 0.12);
-  border: 1px solid rgba(var(--rgb-accent), 0.22);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
-  opacity: 0;
-  transition: opacity var(--transition-fast), transform var(--transition-fast),
-              background var(--transition-fast), border-color var(--transition-fast),
-              box-shadow var(--transition-fast);
-}
-
-.splitter:hover,
-.splitter:focus-visible,
-.splitter.dragging {
-  background: linear-gradient(90deg, transparent, rgba(var(--rgb-accent), 0.05), transparent);
-}
-.splitter:hover::before,
-.splitter:focus-visible::before,
-.splitter.dragging::before {
-  background: var(--accent);
-  opacity: 0.9;
-}
-/* hover/drag thickening — by axis */
-.splitter:hover::before,
-.splitter:focus-visible::before,
-.splitter.dragging::before { width: 2px; }
-
-.splitter:hover::after,
-.splitter:focus-visible::after,
-.splitter.dragging::after {
-  opacity: 1;
-  transform: translate(-50%, -50%) scaleY(1);
-}
-.splitter.dragging::before { box-shadow: 0 0 10px var(--accent-glow); }
-.splitter.dragging::after {
-  background:
-    linear-gradient(var(--text), var(--text)) center 10px / 1px 4px no-repeat,
-    linear-gradient(var(--text), var(--text)) center 19px / 1px 4px no-repeat,
-    linear-gradient(var(--text), var(--text)) center 28px / 1px 4px no-repeat,
-    rgba(var(--rgb-accent), 0.20);
-  border-color: var(--accent-line);
-  box-shadow: 0 0 18px rgba(var(--rgb-accent), 0.22), 0 10px 28px rgba(0, 0, 0, 0.34);
-}
-
-body.split-resizing { user-select: none; }
-body.split-resizing[data-axis="x"] { cursor: col-resize; }
-body.split-resizing[data-axis="y"] { cursor: row-resize; }
 
 /* -------- Terminal area -------- */
 
@@ -1093,10 +969,13 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
   grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
+  width: 100%;
+  height: 100%;
   background: rgba(var(--rgb-term), calc(var(--bg-opacity) * 0.55));
   position: relative;
   border-radius: 0;
 }
+#git-surface-staging[hidden] { display: none; }
 /* The file-tab strip only earns its row once a file is open. Explicit
    grid-row assignments live with the file view, further down. */
 .tab-strip:empty { display: none; }
@@ -2820,40 +2699,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Browser pane -------- */
 
-/* Git is the only fixed tools dock. */
-.git-dock {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
-  grid-template-columns: 1fr;
-  min-width: 0;
-  min-height: 0;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-left: 1px solid var(--border);
-}
-/* Density pass: chrome rows keep their hit targets and lose their inset. The
-   canvas already speaks in 2px seams, and every extra pixel of panel padding
-   read as a gap the layout did not intend. */
-.panel-bar .dock-collapse { width: 28px; height: 28px; border-radius: 7px; border-color: var(--border); background: var(--surface-2); flex: none; }
-.dock-tab-count {
-  font-size: 8.5px;
-  font-weight: 700;
-  color: var(--warn);
-  transform: translateY(-3px);
-}
-.dock-tab-count[hidden] { display: none; }
-.panel {
-  grid-area: 1 / 1;
-  display: none;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-.panel-files,
-.panel-diffs,
-.panel-git { grid-template-rows: var(--browser-bar-h) 1fr; }
-.detail[data-panel="git"] .panel-git { display: grid; }
 .browser-surface {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -2891,25 +2736,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   color: var(--muted);
 }
 
-.pane-header.panel-bar,
-.panel-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 3px 0 6px;
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.86));
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--border);
-}
-.panel-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-soft);
-  flex: none;
-}
 .panel-crumb {
   flex: 1 1 auto;
   min-width: 0;
@@ -3660,9 +3486,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: rgba(255,255,255,0.10);
   box-shadow: 0 -1px 0 rgba(255,255,255,0.06) inset;
 }
-.detail[data-layout="split"] .git-dock {
-  animation: browser-pane-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
 @keyframes browser-pane-in {
   from { opacity: 0; transform: translateY(4px) scale(0.992); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -3721,17 +3544,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 8px;
 }
 
-.git-dock {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  background: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.62));
-}
-.panel-files,
-.panel-diffs,
-.panel-git {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--browser-bar-h) minmax(0, 1fr);
-}
 .browser-bar {
   grid-area: bar;
   min-width: 0;
@@ -4043,9 +3855,7 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 :root[data-surface="solid"] .mini-rail,
 :root[data-surface="solid"] .tab-strip,
 :root[data-surface="solid"] .composer,
-:root[data-surface="solid"] .git-dock,
 :root[data-surface="solid"] .browser-bar,
-:root[data-surface="solid"] .panel-bar,
 :root[data-surface="solid"] .palette {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -4567,31 +4377,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   padding: 0;
 }
 .tool-pane-body > .panel-git-body { flex: 1 1 auto; min-height: 0; }
-
-/* While a tool is being dragged out of the dock the canvas is the target, so
-   panes recede the same way they do when one is being repositioned. */
-body.is-tool-dragging .terminal-pane { transition: opacity var(--transition-fast); opacity: 0.65; }
-
-.dock-popped-note {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 8px 10px;
-  color: var(--muted);
-  font-size: 11.5px;
-}
-.dock-popped-note[hidden] { display: none; }
-.dock-popped-note button {
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: 11px;
-  padding: 2px 8px;
-}
-.dock-popped-note button:hover { background: var(--surface-2); color: var(--text); }
-.dock-popped-note button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* -------- Voice call bar --------
    Green because a call is a live, benign state -- the same green the running

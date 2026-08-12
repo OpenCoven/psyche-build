@@ -12,7 +12,7 @@
     <script src="./xterm-addon-webgl.js"></script>
   </head>
   <body>
-    <div class="app" id="app" data-sidebar="open" data-dock="open">
+    <div class="app" id="app" data-sidebar="open">
       <header class="titlebar" data-tauri-drag-region>
         <span class="traffic-gutter" data-tauri-drag-region aria-hidden="true"></span>
         <span class="brand" data-tauri-drag-region>psyche</span>
@@ -206,7 +206,7 @@
           <button id="sidebar-expand" class="mini-rail-btn" type="button" title="Expand sidebar (⌘B)" aria-label="Expand sidebar">»</button>
         </aside>
 
-        <main class="detail" id="detail" data-layout="terminal" data-panel="git">
+        <main class="detail" id="detail">
           <section class="terminal-area">
             <div class="terminal-host" id="terminal-host"></div>
             <div class="file-view" id="file-view" hidden>
@@ -247,42 +247,11 @@
             </div>
           </section>
 
-          <div
-            class="splitter"
-            id="splitter"
-            role="separator"
-            aria-orientation="vertical"
-            aria-valuemin="25"
-            aria-valuemax="85"
-            aria-valuenow="60"
-            tabindex="0"
-            title="Resize the canvas and the tools dock"
-          ></div>
+        </main>
+      </div>
 
-
-          <section class="git-dock dock" aria-label="Git tools">
-            <div class="panel panel-git">
-              <header class="pane-header panel-bar">
-                <button id="dock-collapse" class="rail-btn dock-collapse" type="button" title="Collapse Git dock (⌘⌥B)" aria-label="Collapse Git dock">
-                  <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                    <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                    <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" stroke-width="1.3"/>
-                    <path d="M5.5 6 7.5 8l-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-                <span class="panel-title">Git</span>
-                <span class="dock-tab-count" id="dock-git-count" hidden></span>
-                <button id="git-pop-out" class="icon-btn ghost-btn" type="button"
-                        draggable="true"
-                        title="Open Git as a pane — or drag it onto the canvas"
-                        aria-label="Open Git as a pane">
-                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6.25 3.5H3.9c-.9 0-1.6.7-1.6 1.6v6c0 .9.7 1.6 1.6 1.6h6c.9 0 1.6-.7 1.6-1.6V8.75" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M9.25 2.75h4v4M13.25 2.75 7.75 8.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </button>
-              </header>
-              <div class="dock-popped-note" id="git-popped-note" hidden>
-                Git is open as a pane. <button id="git-dock-back" type="button">Return it to the dock</button>
-              </div>
-              <div class="panel-body panel-git-body" id="git-surface">
+      <div id="git-surface-staging" hidden>
+        <div class="panel-body panel-git-body" id="git-surface">
                 <div class="git-pane-toolbar" role="toolbar" aria-label="Git actions">
                   <span class="panel-crumb" id="git-branch"></span>
                   <button id="git-open-remote" class="icon-btn ghost-btn" title="Open repository on GitHub" aria-label="Open repository on GitHub" disabled>
@@ -329,25 +298,7 @@
                 <div class="git-tab-panel" id="git-tab-commit" hidden>
                   <div class="git-view" id="git-view"></div>
                 </div>
-              </div>
-            </div>
-          </section>
-        </main>
-
-        <nav class="mini-rail dock-mini" id="rail-right" hidden
-             role="toolbar" aria-orientation="vertical" aria-label="Panels">
-          <button class="mini-rail-btn" data-panel-btn="git" type="button" aria-pressed="false"
-                  title="Git / GitHub" aria-label="Git panel">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-              <circle cx="4.8" cy="3.9" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <circle cx="4.8" cy="12.1" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <circle cx="11.2" cy="6.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.35"/>
-              <path d="M4.8 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
-              <path d="M11.2 7.9c0 2.1-1.9 2.9-4.6 3.2" fill="none" stroke="currentColor"
-                    stroke-width="1.35" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </nav>
+        </div>
       </div>
 
       <div id="browser-surface-staging" hidden>

@@ -432,7 +432,6 @@ describe('Tauri agent picker', () => {
         removeProject: () => Promise.resolve(),
         commandInput: { focus: () => undefined },
         openPalette: () => undefined,
-        toggleDock: () => undefined,
         toggleSidebar: () => undefined,
         canvasThreadIds: () => [],
         focusThread: () => Promise.resolve(),
@@ -916,7 +915,7 @@ describe('Tauri agent picker', () => {
     expect(mainJs).toMatch(/\["Choose an agent", "⌘P"\]/);
     expect(mainJs).toMatch(/\["New browser tab", "Web pane \+"\]/);
     expect(mainJs).toMatch(/\["Open or focus Git", "⌘G"\]/);
-    expect(mainJs).toMatch(/\["Toggle the tools dock", "⌘⌥B"\]/);
+    expect(mainJs).not.toMatch(/\["Toggle the tools dock", "⌘⌥B"\]/);
     expect(mainJs).not.toMatch(/\["New agent pane \(coven chat\)", "⌘T"\]/);
     expect(mainJs).not.toMatch(/\["New browser tab", "focus Web, then ⌘T"\]/);
   });

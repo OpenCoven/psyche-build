@@ -129,7 +129,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(selection).toBeGreaterThan(-1);
     for (const sync of [
       'renderPaneWorkspace();',
-      'renderPanel(currentPanel());',
+      'renderGitSurface();',
       'refreshSidebar();',
       'syncProjectBrowser();',
       'saveWorkspaceSoon();',
