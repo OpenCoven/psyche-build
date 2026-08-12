@@ -32,7 +32,8 @@ function customProperties(block: string) {
 }
 
 function customProperty(block: string, name: string) {
-  const found = block.match(new RegExp(`${name}:\\s*([^;]+);`));
+  const activeCss = block.replace(/\/\*[\s\S]*?\*\//g, '');
+  const found = activeCss.match(new RegExp(`${name}:\\s*([^;]+);`));
   return found ? found[1].replace(/\s+/g, ' ').trim() : null;
 }
 
@@ -135,5 +136,12 @@ describe('theme tokens', () => {
     const term = block.match(/--rgb-term:\s*([0-9,\s]+);/);
     expect(term).not.toBeNull();
     expect(chroma(term![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_CHROMA);
+  });
+
+  it('ignores commented declarations when matching custom properties', () => {
+    expect(customProperty('/* --accent: #111111; */', '--accent')).toBeNull();
+    expect(
+      customProperty('/* --accent: #111111; */ --accent: #222222;', '--accent'),
+    ).toBe('#222222');
   });
 });
