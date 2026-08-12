@@ -18,6 +18,8 @@ export type {
   EditorSearchState,
   EditorSelection,
   EditorTransaction,
+  EditorTextInput,
+  EditorPasteInput,
 } from './editor-machine.js';
 export type {
   KeyboardEventLike,

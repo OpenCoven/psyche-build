@@ -1,7 +1,9 @@
 import { normalizeKeyboardEvent } from './normalize.js';
 import { EDITOR_LIMITS } from './editor/limits.js';
 import { relocateMark } from './editor/marks.js';
+import { compilePattern, escapePattern } from './editor/patterns.js';
 import { consumeReplayAction, type ReplayBudget } from './editor/replay.js';
+import { findMatch, wordAt } from './editor/search.js';
 import { editorTransaction, positionsAfterChanges } from './editor/transactions.js';
 import type {
   EditorAction,
@@ -18,6 +20,8 @@ import type {
   EditorSearchState,
   EditorSelection,
   EditorTransaction,
+  EditorTextInput,
+  EditorPasteInput,
 } from './editor/types.js';
 
 export { EDITOR_LIMITS } from './editor/limits.js';
@@ -37,6 +41,8 @@ export type {
   EditorSearchState,
   EditorSelection,
   EditorTransaction,
+  EditorTextInput,
+  EditorPasteInput,
 } from './editor/types.js';
 
 type Token = { key: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean };
@@ -50,10 +56,21 @@ interface VisualChange {
 }
 
 function token(input: EditorInput): Token {
-  if (typeof input !== 'string') return normalizeKeyboardEvent(input);
+  if (typeof input !== 'string') {
+    if (isCommittedText(input)) throw new Error('Committed text is not a keyboard token');
+    return normalizeKeyboardEvent(input);
+  }
   const lower = input.toLowerCase();
   const shift = input.length === 1 && lower !== input;
   return { key: shift ? lower : input, ctrl: false, alt: false, shift, meta: false };
+}
+
+function isCommittedText(input: EditorInput): input is Extract<EditorInput, { kind: 'text' | 'paste' }> {
+  return typeof input === 'object' && 'kind' in input && (input.kind === 'text' || input.kind === 'paste');
+}
+
+function inputDisplay(input: EditorInput): string {
+  return isCommittedText(input) ? input.text : displayToken(token(input));
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -671,19 +688,14 @@ export function createEditorMachine(
 
   function search(direction: 'forward' | 'backward'): EditorResult {
     if (!searchState?.pattern) return snapshot([{ type: 'status', level: 'error', message: 'No previous search' }]);
-    let expression: RegExp;
-    try {
-      expression = new RegExp(searchState.pattern, 'gu');
-    } catch {
-      return snapshot([{ type: 'status', level: 'error', message: 'Invalid search pattern' }]);
-    }
-    const matches = [...document.text().matchAll(expression)].map((match) => match.index);
-    if (matches.length === 0) return snapshot([{ type: 'status', level: 'error', message: 'Pattern not found' }]);
-    const position = cursor();
-    const target = direction === 'forward'
-      ? (matches.find((match) => match > position) ?? matches[0]!)
-      : ([...matches].reverse().find((match) => match < position) ?? matches.at(-1)!);
-    select(target);
+    const compiled = compilePattern(searchState.pattern, {
+      ignoreCase: options.ignoreCase ?? false,
+      smartCase: options.smartCase ?? false,
+    });
+    if (!compiled) return snapshot([{ type: 'status', level: 'error', message: 'Unsupported search pattern' }]);
+    const target = findMatch(document.text(), compiled, cursor(), direction, searchState.wholeWord);
+    if (!target) return snapshot([{ type: 'status', level: 'error', message: 'Pattern not found' }]);
+    select(target.from);
     return snapshot([{ type: 'search', query: searchState.pattern, direction, active: true }]);
   }
 
@@ -865,7 +877,62 @@ export function createEditorMachine(
     }
   }
 
+  function appendInputText(text: string): EditorResult {
+    const nextBytes = inputBufferBytes + byteLength(text);
+    const limit = mode === 'search' ? EDITOR_LIMITS.searchPatternBytes : EDITOR_LIMITS.exCommandBytes;
+    if (nextBytes > limit) {
+      const label = mode === 'search' ? 'Search pattern' : 'Ex command';
+      mode = 'normal';
+      inputBuffer = '';
+      inputBufferBytes = 0;
+      resetPending();
+      return snapshot([{
+        type: 'status', level: 'error', message: `${label} exceeds limit (${limit} bytes)`,
+      }]);
+    }
+    inputBuffer += text;
+    inputBufferBytes = nextBytes;
+    return snapshot();
+  }
+
+  async function handleCommittedText(
+    input: Extract<EditorInput, { kind: 'text' | 'paste' }>,
+    replaying: boolean,
+  ): Promise<EditorResult> {
+    if (!input.text) return snapshot();
+    if (recording && !replaying) {
+      recording.inputs.push(input);
+      if (recording.inputs.length > EDITOR_LIMITS.macroActions) {
+        recording = undefined;
+        return snapshot([{ type: 'status', level: 'error', message: 'Macro recording limit reached (10000)' }]);
+      }
+    }
+    if (mode === 'command-line' || mode === 'search') return appendInputText(input.text);
+    if (mode !== 'insert' && mode !== 'replace') return snapshot();
+    if (mode === 'insert' && activeVisualChange?.mode === 'visual-block' && document.selections().length > 1) {
+      if (!insertAtSelections(input.text)) return snapshot();
+      insertFirstEdit = false;
+      activeVisualChange.insert += input.text;
+      insertChange ??= ['i'];
+      insertChange.push(input);
+      return snapshot();
+    }
+    const position = cursor();
+    const to = mode === 'replace'
+      ? advanceGraphemes(document.text(), position, graphemeCount(input.text))
+      : position;
+    if (!apply(position, to, input.text, position + input.text.length, insertFirstEdit ? 'new' : 'join')) {
+      return snapshot();
+    }
+    insertFirstEdit = false;
+    if (activeVisualChange) activeVisualChange.insert += input.text;
+    insertChange ??= [mode === 'replace' ? 'R' : 'i'];
+    insertChange.push(input);
+    return snapshot();
+  }
+
   async function handle(input: EditorInput, replaying = false): Promise<EditorResult> {
+    if (isCommittedText(input)) return handleCommittedText(input, replaying);
     const value = token(input);
     const key = displayToken(value);
 
@@ -873,7 +940,7 @@ export function createEditorMachine(
       if (mode === 'normal' && key === 'q' && !pending) {
         const completed = recording;
         recording = undefined;
-        setRegister(completed.name, completed.inputs.map((item) => displayToken(token(item))).join(''));
+        setRegister(completed.name, completed.inputs.map(inputDisplay).join(''));
         macros.set(completed.name, [...completed.inputs]);
         return snapshot([{ type: 'status', level: 'info', message: `Recorded macro ${completed.name}` }]);
       }
@@ -924,31 +991,29 @@ export function createEditorMachine(
       if (key === 'Enter') {
         if (mode === 'command-line') return executeEx(inputBuffer);
         const direction = searchState?.direction ?? 'forward';
+        if (/\\(?:[1-9]|k<)/u.test(inputBuffer) || /\(\?/u.test(inputBuffer)) {
+          mode = 'normal';
+          return snapshot([{ type: 'status', level: 'error', message: 'Unsupported search pattern' }]);
+        }
         try {
           void new RegExp(inputBuffer, 'u');
         } catch {
           mode = 'normal';
           return snapshot([{ type: 'status', level: 'error', message: 'Invalid search pattern' }]);
         }
+        if (!compilePattern(inputBuffer, {
+          ignoreCase: options.ignoreCase ?? false,
+          smartCase: options.smartCase ?? false,
+        })) {
+          mode = 'normal';
+          return snapshot([{ type: 'status', level: 'error', message: 'Unsupported search pattern' }]);
+        }
         searchState = { pattern: inputBuffer, direction, highlight: true };
         mode = 'normal';
         return search(direction);
       }
       if (!value.ctrl && !value.alt && !value.meta && key.length === 1) {
-        const nextBytes = inputBufferBytes + byteLength(key);
-        const limit = mode === 'search' ? EDITOR_LIMITS.searchPatternBytes : EDITOR_LIMITS.exCommandBytes;
-        if (nextBytes > limit) {
-          const label = mode === 'search' ? 'Search pattern' : 'Ex command';
-          mode = 'normal';
-          inputBuffer = '';
-          inputBufferBytes = 0;
-          resetPending();
-          return snapshot([{
-            type: 'status', level: 'error', message: `${label} exceeds limit (${limit} bytes)`,
-          }]);
-        }
-        inputBuffer += key;
-        inputBufferBytes = nextBytes;
+        return appendInputText(key);
       }
       return snapshot();
     }
@@ -1037,6 +1102,18 @@ export function createEditorMachine(
           if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) break;
         }
         return result;
+      }
+      if (key === '*' || key === '#') {
+        const word = wordAt(document.text(), cursor());
+        if (!word) return snapshot([{ type: 'status', level: 'error', message: 'No word under cursor' }]);
+        const direction = key === '*' ? 'forward' : 'backward';
+        searchState = { pattern: escapePattern(word), direction, highlight: true, wholeWord: true };
+        const result = search(direction);
+        return {
+          ...result,
+          search: result.search ? { ...result.search, pattern: word, wholeWord: true } : result.search,
+          actions: result.actions.map((action) => action.type === 'search' ? { ...action, query: word } : action),
+        };
       }
       if (value.ctrl && value.key === 'v') return enter('visual-block');
       if (key === 'i' || key === 'R') {

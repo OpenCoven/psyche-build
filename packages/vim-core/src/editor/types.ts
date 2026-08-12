@@ -10,7 +10,18 @@ export type EditorMode =
   | 'command-line'
   | 'search';
 
-export type EditorInput = string | KeyboardEventLike;
+export interface EditorTextInput {
+  readonly kind: 'text';
+  readonly text: string;
+  readonly source?: 'composition' | 'beforeinput';
+}
+
+export interface EditorPasteInput {
+  readonly kind: 'paste';
+  readonly text: string;
+}
+
+export type EditorInput = string | KeyboardEventLike | EditorTextInput | EditorPasteInput;
 export type EditorSelection = { anchor: number; head: number };
 
 export interface EditorChange {
@@ -71,6 +82,7 @@ export interface EditorSearchState {
   readonly pattern: string;
   readonly direction: 'forward' | 'backward';
   readonly highlight: boolean;
+  readonly wholeWord?: boolean;
 }
 
 export interface EditorResult {
@@ -96,4 +108,6 @@ export interface EditorMachineOptions {
   readonly clipboardRegisters?: boolean;
   readonly bufferId?: string;
   readonly globalMarks?: EditorGlobalMarkStore;
+  readonly ignoreCase?: boolean;
+  readonly smartCase?: boolean;
 }
