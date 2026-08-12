@@ -109,7 +109,10 @@ or:
 ]
 ```
 
-Required fields for psyche visibility are `id` and `projectRoot`/`project_root`. Everything else is optional and rendered opportunistically.
+For the legacy/CLI adapter described above, required visibility fields are `id`
+and `projectRoot`/`project_root`; everything else is rendered opportunistically.
+The macOS rail additionally requires the exact source label and active normalized
+status described below.
 
 ## Current CLI UI behavior
 
@@ -123,11 +126,16 @@ Required fields for psyche visibility are `id` and `projectRoot`/`project_root`.
 
 ## macOS app behavior
 
-The macOS Tauri rail deliberately renders app-origin local threads only. It
-does not poll for, render, or attach daemon-discovered Coven sessions. The
-bounded native adapter remains available for compatibility and future
-host-authoritative integration, but a daemon session must not appear in the
-macOS rail without a new approved product design and lifecycle contract.
+The macOS Tauri rail renders a daemon session only when its labels contain the
+exact `source:psyche-build` marker and its normalized status is `starting`,
+`running`, or `waiting`. Foreign, unlabeled, inactive, and historical sessions
+stay hidden, and search cannot reveal them. Selecting a visible row opens one
+native physical `coven attach <id>` pane without changing daemon labels; local
+Agents and Shells remain independent. Older Coven or Coven Code versions fail
+closed to no daemon rows while native PTY panes remain functional, and
+historical sessions are not migrated. See
+[Native Coven physical panes](./SMOKE.md#native-coven-physical-panes) for the
+acceptance mechanics.
 
 ## Known gaps
 

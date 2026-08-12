@@ -29,6 +29,34 @@ This rule applies to daemon-backed rows in the `Coven` subsection. Local panes
 in the `Agents` and `Shells` subsections continue to reflect processes that
 Psyche owns directly.
 
+An eligible daemon session renders at most once across the entire rail. Saved
+projects can overlap when a parent repository lists a linked worktree and that
+worktree is also saved as its own project. Overlap must not duplicate the same
+daemon session ID under both project sections.
+
+## Overlapping project ownership
+
+Psyche assigns each eligible daemon session ID to one deterministic saved
+project before rendering:
+
+1. A saved project whose `project.root` exactly equals the session's
+   `projectRoot` wins.
+2. Otherwise, a saved project that explicitly lists the session's
+   `projectRoot` as a worktree owns it.
+3. If more than one project remains at the same rank, the project with the
+   deepest matching root wins; a lexical comparison of stable project IDs is
+   the final tie-breaker.
+
+Project array order never affects ownership. A parent-only workspace still
+shows the eligible session under the matching worktree. Adding that worktree
+as an explicit saved project transfers the one rendered row to the exact-root
+project instead of adding a second row. Removing or reordering projects cannot
+cause more than one row for the same daemon session ID.
+
+This is a rail-model concern. The Rust discovery boundary continues to return
+scoped daemon records without knowing about saved-project presentation
+ownership, and the daemon session record remains unchanged.
+
 ## Provenance contract
 
 ### Psyche Build
@@ -75,7 +103,8 @@ Psyche launch descriptor
   -> Coven daemon validates and persists labels
   -> Psyche scoped discovery receives labels
   -> session model filters by exact label and active status
-  -> rail renders the remaining Coven rows
+  -> rail assigns each remaining session ID to one saved project
+  -> rail renders each owned Coven row once
 ```
 
 ## Compatibility and rollout
@@ -127,6 +156,10 @@ created after the compatible components are installed qualify.
 - Discovery normalization preserves labels.
 - Only exact-label sessions with `starting`, `running`, or `waiting` render.
 - Search cannot reveal completed or foreign sessions.
+- Parent-repository and explicit-worktree project overlap renders one row under
+  the exact-root project, independent of project order.
+- A parent-only saved project still renders the row under its matching
+  worktree, and a session ID never renders globally more than once.
 - Completed rows disappear after refresh; stale eligible rows remain visible
   with the existing global stale status.
 - Native chat/attach remains outside tmux and daemon mutation paths.
