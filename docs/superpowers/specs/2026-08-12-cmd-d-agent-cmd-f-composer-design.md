@@ -146,3 +146,17 @@ Update `__tests__/tauriDesktopTabs.test.ts` to verify:
 
 The targeted agent-picker and desktop-tabs tests, test type-check, native web
 build, Rust formatting check, and Rust check must pass.
+
+## Security Correction Addendum
+
+The embedded-browser event-emission design above is superseded for T, D, and F
+shortcut forwarding. External child webviews cannot emit Tauri events under the
+v2 ACL and must not receive general event-emission permission.
+
+Each shortcut now invokes the dedicated `browser_app_shortcut` command. The
+command accepts only callers whose trusted webview label starts with
+`psyche-browser-`, allowlists the three shortcut actions, derives the payload
+label from that caller, focuses the main webview, and emits the existing
+internal shortcut event only to `main`. A dedicated capability grants remote
+HTTP/HTTPS browser webviews only `allow-browser-app-shortcut`; existing
+title/focus emission code remains unchanged and receives no added permission.

@@ -518,3 +518,14 @@ git -c commit.gpgsign=false commit \
   -m "feat: forward app shortcuts from browser panes" \
   -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
 ```
+
+## Security Correction Addendum
+
+The direct child-webview event emissions in Task 2 are superseded. Forward T,
+D, and F through one dedicated `browser_app_shortcut` Tauri command instead.
+Generate only that command's app permission in `build.rs`, grant it only to
+`psyche-browser-*` webviews through a local plus HTTP/HTTPS capability, validate
+the trusted caller label and shortcut allowlist in Rust, focus `main`, and
+dispatch the existing internal event with `emit_to("main", ...)`. Do not grant
+remote pages general event-emission permission or permission-gate unrelated app
+commands.

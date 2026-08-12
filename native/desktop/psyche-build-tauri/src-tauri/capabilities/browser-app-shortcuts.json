@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "browser-app-shortcuts",
+  "description": "Allows embedded browser webviews to forward approved application shortcuts",
+  "local": true,
+  "webviews": ["psyche-browser-*"],
+  "remote": {
+    "urls": ["http://*", "https://*"]
+  },
+  "permissions": ["allow-browser-app-shortcut"]
+}

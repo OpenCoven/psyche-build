@@ -2644,6 +2644,50 @@ async fn workspace_metrics(
 // Embedded browser pane (Tauri child Webview)
 // ----------------------------------------------------------------------------
 
+#[derive(Clone, Serialize)]
+struct BrowserAppShortcutPayload {
+    label: String,
+    url: String,
+}
+
+fn resolve_browser_app_shortcut(label: &str, shortcut: &str) -> Result<&'static str, String> {
+    if !label.starts_with(BROWSER_LABEL_PREFIX) {
+        return Err("browser app shortcut caller is not an embedded browser webview".to_string());
+    }
+
+    match shortcut {
+        "terminal-pane" => Ok("browser:shortcut-terminal-pane"),
+        "agent-pane" => Ok("browser:shortcut-agent-pane"),
+        "composer" => Ok("browser:shortcut-composer"),
+        _ => Err(format!("unknown browser app shortcut: {shortcut}")),
+    }
+}
+
+#[tauri::command]
+fn browser_app_shortcut(
+    webview: tauri::Webview,
+    shortcut: String,
+    url: String,
+) -> Result<(), String> {
+    let event = resolve_browser_app_shortcut(webview.label(), &shortcut)?;
+    let main = webview
+        .app_handle()
+        .get_webview("main")
+        .ok_or_else(|| "main webview missing".to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+    webview
+        .app_handle()
+        .emit_to(
+            "main",
+            event,
+            BrowserAppShortcutPayload {
+                label: webview.label().to_string(),
+                url,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
 fn ensure_browser(
     app: &AppHandle,
     label: &str,
@@ -2699,15 +2743,15 @@ fn ensure_browser(
                               if ((event.metaKey || event.ctrlKey) && key === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
+                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "terminal-pane", url: location.href }});
                               }} else if (primary && key === "d") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-agent-pane", {{ label: browserLabel, url: location.href }});
+                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "agent-pane", url: location.href }});
                               }} else if (primary && key === "f") {{
                                 event.preventDefault();
                                 event.stopPropagation();
-                                emit("browser:shortcut-composer", {{ label: browserLabel, url: location.href }});
+                                window.__TAURI__.core.invoke("browser_app_shortcut", {{ shortcut: "composer", url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);
@@ -4233,6 +4277,7 @@ pub fn run() {
             pty_resize,
             pty_stop,
             pty_list,
+            browser_app_shortcut,
             browser_navigate,
             browser_set_bounds,
             browser_hide,
@@ -4264,6 +4309,34 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod browser_app_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn browser_app_shortcut_accepts_supported_mappings() {
+        let label = "psyche-browser-project-1";
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "terminal-pane").unwrap(),
+            "browser:shortcut-terminal-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "agent-pane").unwrap(),
+            "browser:shortcut-agent-pane"
+        );
+        assert_eq!(
+            resolve_browser_app_shortcut(label, "composer").unwrap(),
+            "browser:shortcut-composer"
+        );
+    }
+
+    #[test]
+    fn browser_app_shortcut_rejects_untrusted_callers_and_unknown_actions() {
+        assert!(resolve_browser_app_shortcut("main", "terminal-pane").is_err());
+        assert!(resolve_browser_app_shortcut("psyche-browser-project-1", "new-tab").is_err());
+    }
 }
 
 #[cfg(test)]

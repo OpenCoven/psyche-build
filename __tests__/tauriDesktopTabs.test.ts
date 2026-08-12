@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
@@ -9,6 +9,17 @@ const mainJs = readFileSync(
 ).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauriBuild = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/build.rs'),
+  'utf8',
+);
+const browserShortcutCapabilityPath = join(
+  repoRoot,
+  'native/desktop/psyche-build-tauri/src-tauri/capabilities/browser-app-shortcuts.json',
+);
+const browserShortcutCapability = existsSync(browserShortcutCapabilityPath)
+  ? JSON.parse(readFileSync(browserShortcutCapabilityPath, 'utf8'))
+  : null;
 const tauriCargo = readFileSync(
   join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
   'utf8'
@@ -91,9 +102,18 @@ describe('Tauri desktop tab shortcuts', () => {
 
   it('lets embedded browser webviews forward exact T/D/F app shortcuts', () => {
     const injection = browserShortcutInjectionSource();
-    expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
-    expect(tauriLib).toMatch(/browser:shortcut-agent-pane/);
-    expect(tauriLib).toMatch(/browser:shortcut-composer/);
+    expect(injection).toContain('window.__TAURI__.core.invoke("browser_app_shortcut"');
+    expect(injection).toContain('shortcut: "terminal-pane"');
+    expect(injection).toContain('shortcut: "agent-pane"');
+    expect(injection).toContain('shortcut: "composer"');
+    expect(injection).toContain('url: location.href');
+    expect(injection).not.toMatch(/emit\("browser:shortcut-(terminal-pane|agent-pane|composer)"/);
+    expect(tauriLib).toMatch(
+      /emit\("browser:title", \{\{ label: browserLabel, title: title, url: location\.href \}\}\);/,
+    );
+    expect(tauriLib).toMatch(
+      /emit\("browser:focus", \{\{ label: browserLabel, url: location\.href \}\}\);/,
+    );
     expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
     expect(injection).toContain('var key = event.key ? event.key.toLowerCase() : "";');
     expect(injection).toContain('var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;');
@@ -101,11 +121,11 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(injection).not.toContain('if (primary && key === "t") {');
     expect(injection).toContain('else if (primary && key === "d") {');
     expect(injection).toMatch(
-      /emit\("browser:shortcut-agent-pane", \{\{ label: browserLabel, url: location\.href \}\}\);/
+      /core\.invoke\("browser_app_shortcut", \{\{ shortcut: "agent-pane", url: location\.href \}\}\);/,
     );
     expect(injection).toContain('else if (primary && key === "f") {');
     expect(injection).toMatch(
-      /emit\("browser:shortcut-composer", \{\{ label: browserLabel, url: location\.href \}\}\);/
+      /core\.invoke\("browser_app_shortcut", \{\{ shortcut: "composer", url: location\.href \}\}\);/,
     );
     expect(injection).not.toContain('key === "p"');
     expect(injection).not.toContain('key === "k"');
@@ -118,6 +138,59 @@ describe('Tauri desktop tab shortcuts', () => {
     const composerListener = browserShortcutListenerBlock("browser:shortcut-composer");
     expect(composerListener).toContain('commandInput.focus();');
     expect(composerListener).toContain('openPalette("/", true);');
+  });
+
+  it('registers a caller-bound allowlisted browser shortcut command', () => {
+    expect(tauriLib).toMatch(
+      /#\[tauri::command\]\s*fn browser_app_shortcut\(\s*webview:\s*tauri::Webview,\s*shortcut:\s*String,\s*url:\s*String,\s*\)/,
+    );
+    expect(tauriLib).toMatch(
+      /fn resolve_browser_app_shortcut\([^)]*label:\s*&str[^)]*shortcut:\s*&str[^)]*\)[\s\S]*label\.starts_with\(BROWSER_LABEL_PREFIX\)/,
+    );
+    expect(tauriLib).toMatch(/"terminal-pane"\s*=>\s*Ok\("browser:shortcut-terminal-pane"\)/);
+    expect(tauriLib).toMatch(/"agent-pane"\s*=>\s*Ok\("browser:shortcut-agent-pane"\)/);
+    expect(tauriLib).toMatch(/"composer"\s*=>\s*Ok\("browser:shortcut-composer"\)/);
+    expect(tauriLib).toMatch(/unknown browser app shortcut/);
+
+    const commandStart = tauriLib.indexOf('fn browser_app_shortcut(');
+    const commandEnd = tauriLib.indexOf('\n}\n', commandStart);
+    expect(commandStart).toBeGreaterThanOrEqual(0);
+    expect(commandEnd).toBeGreaterThan(commandStart);
+    const command = tauriLib.slice(commandStart, commandEnd);
+    expect(command).toContain('webview.label()');
+    expect(command).toContain('label: webview.label().to_string()');
+    expect(command).not.toMatch(/\blabel:\s*String/);
+    const focusIndex = command.indexOf('.set_focus()');
+    const emitIndex = command.indexOf('.emit_to(');
+    expect(focusIndex).toBeGreaterThanOrEqual(0);
+    expect(emitIndex).toBeGreaterThan(focusIndex);
+    expect(command).toMatch(/\.emit_to\(\s*"main"/);
+    expect(command).not.toMatch(/\.emit\(/);
+
+    expect(tauriLib).toMatch(
+      /tauri::generate_handler!\[[\s\S]*browser_app_shortcut,[\s\S]*\]/,
+    );
+  });
+
+  it('generates and grants only the dedicated browser shortcut permission', () => {
+    expect(tauriBuild).toContain('tauri_build::Attributes');
+    const manifestCommands = tauriBuild.match(
+      /AppManifest::new\(\)\.commands\(\s*&\[(?<commands>[\s\S]*?)\]\s*\)/,
+    );
+    expect(manifestCommands?.groups?.commands).toBe('"browser_app_shortcut"');
+
+    expect(browserShortcutCapability).not.toBeNull();
+    expect(browserShortcutCapability).toMatchObject({
+      identifier: 'browser-app-shortcuts',
+      local: true,
+      webviews: ['psyche-browser-*'],
+      remote: {
+        urls: expect.arrayContaining(['http://*', 'https://*']),
+      },
+      permissions: ['allow-browser-app-shortcut'],
+    });
+    expect(browserShortcutCapability.permissions).toHaveLength(1);
+    expect(JSON.stringify(browserShortcutCapability)).not.toContain('core:event:allow-emit');
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {
