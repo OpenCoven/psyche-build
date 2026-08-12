@@ -49,8 +49,9 @@ historical set. During execution they remain readable from the recorded
 baseline with:
 
 ```bash
-git show "$(cat .git/psyche-doc-history-baseline)":docs/superpowers/plans/2026-08-12-documentation-history-cleanup.md
-git show "$(cat .git/psyche-doc-history-baseline)":docs/superpowers/specs/2026-08-12-documentation-history-cleanup-design.md
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+git show "$(cat "$BASELINE_FILE")":docs/superpowers/plans/2026-08-12-documentation-history-cleanup.md
+git show "$(cat "$BASELINE_FILE")":docs/superpowers/specs/2026-08-12-documentation-history-cleanup-design.md
 ```
 
 ## Atomicity rule
@@ -67,8 +68,8 @@ Checkpoint with tests and `git diff`; do not checkpoint with Git commits.
 - Read: `docs/BREAKING-CHANGES.md`
 - Read: `docs/PRODUCT-SPEC.md`
 - Read: `docs/RELEASE.md`
-- Create outside worktree: `.git/psyche-doc-history-baseline`
-- Create outside worktree: `.git/psyche-retired-doc-paths`
+- Create outside worktree: `$(git rev-parse --git-path psyche-doc-history-baseline)`
+- Create outside worktree: `$(git rev-parse --git-path psyche-retired-doc-paths)`
 
 - [ ] **Step 1: Require a clean implementation starting point**
 
@@ -86,8 +87,9 @@ changes into the archive baseline.
 Run:
 
 ```bash
-git rev-parse HEAD > .git/psyche-doc-history-baseline
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+git rev-parse HEAD > "$BASELINE_FILE"
+BASELINE="$(cat "$BASELINE_FILE")"
 test "${#BASELINE}" -eq 40
 git cat-file -e "$BASELINE^{commit}"
 printf '%s\n' "$BASELINE"
@@ -100,7 +102,9 @@ Expected: one 40-character commit SHA.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 {
   git ls-tree -r --name-only "$BASELINE" -- \
     docs/superpowers/plans \
@@ -109,14 +113,14 @@ BASELINE="$(cat .git/psyche-doc-history-baseline)"
     docs/BREAKING-CHANGES.md \
     docs/PRODUCT-SPEC.md \
     docs/RELEASE.md
-} | LC_ALL=C sort -u > .git/psyche-retired-doc-paths
+} | LC_ALL=C sort -u > "$RETIRED_PATHS_FILE"
 
-test -s .git/psyche-retired-doc-paths
+test -s "$RETIRED_PATHS_FILE"
 while IFS= read -r path; do
   git cat-file -e "$BASELINE:$path"
-done < .git/psyche-retired-doc-paths
+done < "$RETIRED_PATHS_FILE"
 
-wc -l .git/psyche-retired-doc-paths
+wc -l "$RETIRED_PATHS_FILE"
 ```
 
 Expected: every listed path exists at the baseline. The count includes every
@@ -129,7 +133,7 @@ Run:
 ```bash
 grep -Ev \
   '^(docs/superpowers/(plans|specs)/.+\.md|docs/(BREAKING-CHANGES|PRODUCT-SPEC|RELEASE)\.md)$' \
-  .git/psyche-retired-doc-paths
+  "$(git rev-parse --git-path psyche-retired-doc-paths)"
 ```
 
 Expected: no output and exit 1 from `grep`.
@@ -270,7 +274,8 @@ Keep `persist-credentials: false`.
 Run:
 
 ```bash
-test "$(git rev-parse HEAD)" = "$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+test "$(git rev-parse HEAD)" = "$(cat "$BASELINE_FILE")"
 ```
 
 Expected: exit 0. The test remains intentionally red until the manifest and
@@ -280,8 +285,8 @@ retirements are complete.
 
 **Files:**
 - Create: `docs/HISTORY.md`
-- Read: `.git/psyche-doc-history-baseline`
-- Read: `.git/psyche-retired-doc-paths`
+- Read: `$(git rev-parse --git-path psyche-doc-history-baseline)`
+- Read: `$(git rev-parse --git-path psyche-retired-doc-paths)`
 
 - [ ] **Step 1: Generate immutable rows from Git instead of hand-copying SHAs**
 
@@ -293,8 +298,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const repositoryUrl = 'https://github.com/OpenCoven/psyche-build';
-const baseline = readFileSync('.git/psyche-doc-history-baseline', 'utf8').trim();
-const paths = readFileSync('.git/psyche-retired-doc-paths', 'utf8')
+const baselineFile = execFileSync('git', ['rev-parse', '--git-path', 'psyche-doc-history-baseline'], { encoding: 'utf8' }).trim();
+const retiredPathsFile = execFileSync('git', ['rev-parse', '--git-path', 'psyche-retired-doc-paths'], { encoding: 'utf8' }).trim();
+const baseline = readFileSync(baselineFile, 'utf8').trim();
+const paths = readFileSync(retiredPathsFile, 'utf8')
   .split(/\r?\n/)
   .filter(Boolean);
 
@@ -399,17 +406,19 @@ NODE
 ```
 
 Expected: `docs/HISTORY.md` contains one row for every path in
-`.git/psyche-retired-doc-paths`, sorted by former path.
+`$(git rev-parse --git-path psyche-retired-doc-paths)`, sorted by former path.
 
 - [ ] **Step 2: Verify the manifest format before deleting anything**
 
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 grep -F "Archive baseline: \`$BASELINE\`" docs/HISTORY.md
 test "$(grep -c '^| .* | `docs/' docs/HISTORY.md)" -eq \
-  "$(wc -l < .git/psyche-retired-doc-paths | tr -d ' ')"
+  "$(wc -l < "$RETIRED_PATHS_FILE" | tr -d ' ')"
 grep -c 'https://github.com/OpenCoven/psyche-build/blob/' docs/HISTORY.md
 ```
 
@@ -808,7 +817,7 @@ Run:
 ```bash
 while IFS= read -r path; do
   git rm -- "$path"
-done < .git/psyche-retired-doc-paths
+done < "$(git rev-parse --git-path psyche-retired-doc-paths)"
 ```
 
 Expected: Git stages deletion of every manifest path and nothing else.
@@ -818,10 +827,13 @@ Expected: Git stages deletion of every manifest path and nothing else.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-retired-doc-paths)"
+ACTUAL_RETIRED_PATHS_FILE="$(git rev-parse --git-path psyche-actual-retired-doc-paths)"
+BASELINE="$(cat "$BASELINE_FILE")"
 git diff --name-only --diff-filter=D "$BASELINE" -- | LC_ALL=C sort \
-  > .git/psyche-actual-retired-doc-paths
-diff -u .git/psyche-retired-doc-paths .git/psyche-actual-retired-doc-paths
+  > "$ACTUAL_RETIRED_PATHS_FILE"
+diff -u "$RETIRED_PATHS_FILE" "$ACTUAL_RETIRED_PATHS_FILE"
 ```
 
 Expected: no diff.
@@ -915,7 +927,8 @@ Expected: `jq` returns `true`.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+BASELINE="$(cat "$BASELINE_FILE")"
 git diff --name-only "$BASELINE" -- | grep -Ev \
   '^(\.github/workflows/ci\.yml|README\.md|CHANGELOG\.md|CONTRIBUTING\.md|package\.json|__tests__/(documentationHistory|releaseDocs|releaseVersion)\.test\.ts|docs/|native/ios/README\.md)$'
 ```
@@ -933,7 +946,8 @@ unchanged.
 Run:
 
 ```bash
-BASELINE="$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+BASELINE="$(cat "$BASELINE_FILE")"
 git status --short
 git diff --stat "$BASELINE"
 git diff --summary "$BASELINE"
@@ -960,7 +974,8 @@ Expected: one cleanup commit.
 Run:
 
 ```bash
-test "$(git rev-parse HEAD^)" = "$(cat .git/psyche-doc-history-baseline)"
+BASELINE_FILE="$(git rev-parse --git-path psyche-doc-history-baseline)"
+test "$(git rev-parse HEAD^)" = "$(cat "$BASELINE_FILE")"
 git status --short
 ```
 
