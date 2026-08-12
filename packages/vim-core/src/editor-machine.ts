@@ -89,9 +89,10 @@ function token(input: EditorInput): Token {
   return { key: shift ? lower : input, ctrl: false, alt: false, shift, meta: false };
 }
 
+const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
 function starts(text: string): number[] {
-  const result = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
-    .map((part) => part.index);
+  const result = [...segmenter.segment(text)].map((part) => part.index);
   result.push(text.length);
   return result;
 }
@@ -154,8 +155,7 @@ function kind(character: string, big: boolean): 'space' | 'word' | 'punctuation'
 }
 
 function graphemes(text: string): { value: string; index: number }[] {
-  return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
-    .map((part) => ({ value: part.segment, index: part.index }));
+  return [...segmenter.segment(text)].map((part) => ({ value: part.segment, index: part.index }));
 }
 
 function wordForward(text: string, position: number, count: number, big: boolean): number {
@@ -187,7 +187,9 @@ function wordBackward(text: string, position: number, count: number, big: boolea
 
 function wordEnd(text: string, position: number, count: number, big: boolean): number {
   const parts = graphemes(text);
-  let index = Math.max(0, parts.findIndex((part) => part.index >= position));
+  const found = parts.findIndex((part) => part.index >= position);
+  if (found < 0) return text.length;
+  let index = found;
   for (let step = 0; step < count; step += 1) {
     if (step > 0) index += 1;
     while (index < parts.length && kind(parts[index]!.value, big) === 'space') index += 1;
@@ -394,7 +396,7 @@ export function createEditorMachine(
   }
 
   function setRegister(name: string, text: string, linewise = false): boolean {
-    const target = /^[A-Z]$/u.test(name) ? name.toLocaleLowerCase() : name;
+    const target = /^[A-Z]$/u.test(name) ? name.toLowerCase() : name;
     const previous = registers.get(target);
     const next: EditorRegister = /^[A-Z]$/u.test(name) && previous
       ? { text: previous.text + text, linewise: previous.linewise || linewise }
@@ -561,9 +563,9 @@ export function createEditorMachine(
       ['q', 'close'], ['quit', 'close'], ['q!', 'force-close'], ['force-quit', 'force-close'],
       ['bn', 'next-buffer'], ['next', 'next-buffer'], ['bp', 'previous-buffer'], ['previous', 'previous-buffer'],
     ]);
-    const mapped = single.get(command.toLocaleLowerCase());
+    const mapped = single.get(command.toLowerCase());
     if (mapped) return snapshot([await invoke(mapped)]);
-    if (['wq', 'write-quit', 'x'].includes(command.toLocaleLowerCase())) {
+    if (['wq', 'write-quit', 'x'].includes(command.toLowerCase())) {
       const save = await invoke('save');
       const actions: EditorAction[] = [save];
       if (save.type === 'command' && save.success) actions.push(await invoke('close'));
@@ -710,12 +712,12 @@ export function createEditorMachine(
     if (pending === 'q') {
       pending = '';
       if (!/^[A-Za-z]$/u.test(key)) return snapshot([{ type: 'status', level: 'error', message: 'Invalid macro register' }]);
-      recording = { name: key.toLocaleLowerCase(), inputs: [] };
+      recording = { name: key.toLowerCase(), inputs: [] };
       return snapshot([{ type: 'status', level: 'info', message: `Recording macro ${key}` }]);
     }
     if (pending === '@') {
       pending = '';
-      const register = key.toLocaleLowerCase();
+      const register = key.toLowerCase();
       const macro = macros.get(register)
         ?? (registers.has(register) ? [...registers.get(register)!.text] : undefined);
       if (!macro) return snapshot([{ type: 'status', level: 'error', message: `Macro ${key} is not set` }]);
