@@ -2694,10 +2694,20 @@ fn ensure_browser(
                           window.__PSYCHE_BROWSER_SHORTCUTS_INSTALLED__ = true;
                           window.addEventListener("keydown", function(event) {{
                             try {{
-                              if ((event.metaKey || event.ctrlKey) && event.key && event.key.toLowerCase() === "t") {{
+                              var key = event.key ? event.key.toLowerCase() : "";
+                              var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+                              if ((event.metaKey || event.ctrlKey) && key === "t") {{
                                 event.preventDefault();
                                 event.stopPropagation();
                                 emit("browser:shortcut-terminal-pane", {{ label: browserLabel, url: location.href }});
+                              }} else if (primary && key === "d") {{
+                                event.preventDefault();
+                                event.stopPropagation();
+                                emit("browser:shortcut-agent-pane", {{ label: browserLabel, url: location.href }});
+                              }} else if (primary && key === "f") {{
+                                event.preventDefault();
+                                event.stopPropagation();
+                                emit("browser:shortcut-composer", {{ label: browserLabel, url: location.href }});
                               }}
                             }} catch (_) {{}}
                           }}, true);

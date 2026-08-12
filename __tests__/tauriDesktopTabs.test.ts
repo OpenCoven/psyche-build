@@ -28,6 +28,22 @@ const tauriConfig = JSON.parse(
 const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
 const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
 
+function browserShortcutInjectionSource() {
+  const start = tauriLib.indexOf('window.addEventListener("keydown", function(event) {');
+  const end = tauriLib.indexOf('window.addEventListener("pointerdown"', start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return tauriLib.slice(start, end);
+}
+
+function browserShortcutListenerBlock(name: string) {
+  const start = mainJs.indexOf(`listen("${name}", function () {`);
+  const end = mainJs.indexOf('}).catch(function () {});', start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return mainJs.slice(start, end + '}).catch(function () {});'.length);
+}
+
 describe('Tauri desktop tab shortcuts', () => {
   it('routes Command+T to terminal panes globally', () => {
     expect(mainJs).toMatch(/async function createTerminalPane\(\)/);
@@ -73,15 +89,35 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(stylesCss).not.toMatch(/\.tab-strip \{[^}]*[^.]mask-image/);
   });
 
-  it('lets embedded browser webviews request a terminal pane with Command+T', () => {
+  it('lets embedded browser webviews forward exact T/D/F app shortcuts', () => {
+    const injection = browserShortcutInjectionSource();
     expect(tauriLib).toMatch(/browser:shortcut-terminal-pane/);
+    expect(tauriLib).toMatch(/browser:shortcut-agent-pane/);
+    expect(tauriLib).toMatch(/browser:shortcut-composer/);
     expect(tauriLib).not.toMatch(forbiddenBrowserNewTabShortcut);
-    expect(tauriLib).toMatch(/event\.key\.toLowerCase\(\)\s*===\s*"t"/);
+    expect(injection).toContain('var key = event.key ? event.key.toLowerCase() : "";');
+    expect(injection).toContain('var primary = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;');
+    expect(injection).toContain('if ((event.metaKey || event.ctrlKey) && key === "t") {');
+    expect(injection).not.toContain('if (primary && key === "t") {');
+    expect(injection).toContain('else if (primary && key === "d") {');
+    expect(injection).toMatch(
+      /emit\("browser:shortcut-agent-pane", \{\{ label: browserLabel, url: location\.href \}\}\);/
+    );
+    expect(injection).toContain('else if (primary && key === "f") {');
+    expect(injection).toMatch(
+      /emit\("browser:shortcut-composer", \{\{ label: browserLabel, url: location\.href \}\}\);/
+    );
+    expect(injection).not.toContain('key === "p"');
+    expect(injection).not.toContain('key === "k"');
+    expect(injection.match(/event\.preventDefault\(\);/g)).toHaveLength(3);
+    expect(injection.match(/event\.stopPropagation\(\);/g)).toHaveLength(3);
     expect(tauriLib).toMatch(/function\(browserLabel\)/);
     expect(tauriLib).not.toMatch(/label_json,\s*label_json/);
-    expect(mainJs).toMatch(
-      /listen\(\s*"browser:shortcut-terminal-pane",\s*function\s*\(\)\s*\{[\s\S]*createTerminalPane\(\);[\s\S]*\}\s*\)\.catch/
-    );
+    expect(browserShortcutListenerBlock("browser:shortcut-terminal-pane")).toContain('createTerminalPane();');
+    expect(browserShortcutListenerBlock("browser:shortcut-agent-pane")).toContain('openAgentPicker();');
+    const composerListener = browserShortcutListenerBlock("browser:shortcut-composer");
+    expect(composerListener).toContain('commandInput.focus();');
+    expect(composerListener).toContain('openPalette("/", true);');
   });
 
   it('keeps browser navigation single-shot for newly created webviews', () => {

@@ -7954,6 +7954,13 @@
   listen("browser:shortcut-terminal-pane", function () {
     createTerminalPane();
   }).catch(function () {});
+  listen("browser:shortcut-agent-pane", function () {
+    openAgentPicker();
+  }).catch(function () {});
+  listen("browser:shortcut-composer", function () {
+    commandInput.focus();
+    openPalette("/", true);
+  }).catch(function () {});
   function appendBrowserTabAddButton() {
     if (!browserTabStrip) return;
     var add = document.createElement("button"); add.className = "browser-tab-add"; add.textContent = "+"; add.title = "New browser tab for this project"; add.addEventListener("click", openBlankBrowserTab); browserTabStrip.appendChild(add);
