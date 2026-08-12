@@ -6319,6 +6319,23 @@
     syncPaneMetricsVisibility();
   }
 
+  function clearPassiveCovenFileReturnState() {
+    var activeThread = findThread(state.activeThreadId);
+    if (activeThread &&
+      (activeThread.kind === "coven-chat" || activeThread.kind === "coven-attach")) {
+      state.activeThreadId = null;
+    }
+    var layout = activePaneLayout();
+    if (!layout || !layout.root) return;
+    ["focusedLeafId", "maximizedLeafId"].forEach(function (key) {
+      var leaf = layout[key] ? PsychePanes.findLeafById(layout.root, layout[key]) : null;
+      var thread = leaf ? findThread(leaf.threadId) : null;
+      if (thread && (thread.kind === "coven-chat" || thread.kind === "coven-attach")) {
+        layout[key] = null;
+      }
+    });
+  }
+
   async function returnFromFileFocus(explicitThreadId, maximizeDestination) {
     if (!state.activeFileId) return false;
     var activeFile = findOpenFile(state.activeFileId);
@@ -6346,6 +6363,7 @@
       return focused;
     }
     if (!(await showTerminalView())) return false;
+    clearPassiveCovenFileReturnState();
     renderPaneWorkspace();
     refreshSidebar();
     return true;
