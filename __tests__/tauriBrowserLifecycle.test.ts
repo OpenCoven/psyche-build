@@ -152,15 +152,14 @@ function tauriHandlerNames(source: string) {
 describe('Tauri native browser lifecycle', () => {
   it('documents the browser lifecycle source contract', () => {
     const destroyBrowserWebview = rustFunctionSource(nativeLib, 'destroy_browser_webview');
-    expect(destroyBrowserWebview).toContain('let label = safe_browser_label(label);');
-    expect(destroyBrowserWebview).toContain('if let Some(webview) = app.get_webview(&label) {');
-    expect(destroyBrowserWebview).toContain(
-      'webview.close().map_err(|error| error.to_string())?;',
+    expect(destroyBrowserWebview).toMatch(
+      /^fn destroy_browser_webview\(app: &AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*let label = safe_browser_label\(label\);\n\s*if let Some\(webview\) = app\.get_webview\(&label\) \{\n\s*webview\.close\(\)\.map_err\(\|error\| error\.to_string\(\)\)\?;\n\s*\}\n\s*Ok\(\(\)\)\n\}$/s,
     );
 
     const browserDestroy = rustFunctionSource(nativeLib, 'browser_destroy');
-    expect(browserDestroy).toContain('#[tauri::command]\nfn browser_destroy(');
-    expect(browserDestroy).toContain('destroy_browser_webview(&app, label)');
+    expect(browserDestroy).toMatch(
+      /^#\[tauri::command\]\nfn browser_destroy\(app: AppHandle, label: Option<String>\) -> Result<\(\), String> \{\n\s*destroy_browser_webview\(&app, label\)\n\}$/s,
+    );
 
     const browserDestroyMany = rustFunctionSource(nativeLib, 'browser_destroy_many');
     expect(browserDestroyMany).toContain('#[tauri::command]\nfn browser_destroy_many(');
