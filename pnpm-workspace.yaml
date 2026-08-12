@@ -4,4 +4,4 @@
 packages:
   - frontend
   - docs
-  - native/macos/psyche-build-tauri
+  - native/desktop/psyche-build-tauri

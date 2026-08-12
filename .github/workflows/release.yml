@@ -170,11 +170,11 @@ jobs:
       - name: Verify Rust and Tauri surfaces
         run: |
           set -euo pipefail
-          MANIFEST="native/macos/psyche-build-tauri/src-tauri/Cargo.toml"
+          MANIFEST="native/desktop/psyche-build-tauri/src-tauri/Cargo.toml"
           cargo fmt --manifest-path "$MANIFEST" --check
           cargo test --manifest-path "$MANIFEST" --locked
           cargo check --manifest-path "$MANIFEST" --locked
-          pnpm --dir native/macos/psyche-build-tauri build:web
+          pnpm --dir native/desktop/psyche-build-tauri build:web
 
       - name: Require iOS 26.2 iPhone 16 Pro simulator
         shell: bash
@@ -351,8 +351,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pnpm --dir native/macos/psyche-build-tauri build:web
-          pnpm --dir native/macos/psyche-build-tauri exec tauri build \
+          pnpm --dir native/desktop/psyche-build-tauri build:web
+          pnpm --dir native/desktop/psyche-build-tauri exec tauri build \
             --target "$RUST_TARGET" \
             --bundles dmg
 
@@ -360,7 +360,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BUNDLE_DIR="native/macos/psyche-build-tauri/src-tauri/target/$RUST_TARGET/release/bundle/dmg"
+          BUNDLE_DIR="native/desktop/psyche-build-tauri/src-tauri/target/$RUST_TARGET/release/bundle/dmg"
           DMG_PATH="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           if [ -z "$DMG_PATH" ]; then
             echo "::error::No DMG found in $BUNDLE_DIR"

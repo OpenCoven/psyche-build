@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 const repoRoot = process.cwd();
-const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
+const tauriRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const webRoot = join(tauriRoot, 'web');
 const workspaceRoot = join(webRoot, 'workspace');
 const packageJson = JSON.parse(

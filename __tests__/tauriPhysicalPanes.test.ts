@@ -5,16 +5,16 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const stylesCss = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
 const PsychePanes = await import(pathToFileURL(join(
   repoRoot,
-  'native/macos/psyche-build-tauri/web/panes/pane-tree.mjs',
+  'native/desktop/psyche-build-tauri/web/panes/pane-tree.mjs',
 )).href);
 
 function functionSource(name: string) {

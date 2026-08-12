@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
-const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web');
+const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri/web');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 const inputModule = await import(
@@ -682,7 +682,7 @@ describe('native terminal image drop wiring', () => {
 
 describe('terminal input bundle wiring', () => {
   const packageJson = JSON.parse(
-    readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/package.json'), 'utf8')
+    readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/package.json'), 'utf8')
   ) as { scripts: Record<string, string> };
   const indexHtml = readFileSync(join(webRoot, 'index.html'), 'utf8');
 

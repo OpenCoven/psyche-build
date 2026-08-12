@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
-const diffsRoot = join(process.cwd(), 'native/macos/psyche-build-tauri/web/diffs');
+const diffsRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri/web/diffs');
 const model = await import(pathToFileURL(join(diffsRoot, 'diff-model.mjs')).href);
 const entry = await import(pathToFileURL(join(diffsRoot, 'diff-entry.js')).href);
 

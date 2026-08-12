@@ -6,13 +6,13 @@ import { describe, expect, test } from 'vitest';
 
 const panesRoot = join(
   process.cwd(),
-  'native/macos/psyche-build-tauri/web/panes',
+  'native/desktop/psyche-build-tauri/web/panes',
 );
 const panes = await import(pathToFileURL(join(panesRoot, 'pane-tree.mjs')).href);
 const entry = await import(pathToFileURL(join(panesRoot, 'pane-entry.js')).href);
 const panesBundleSource = readFileSync(join(
   process.cwd(),
-  'native/macos/psyche-build-tauri/web/panes.bundle.js',
+  'native/desktop/psyche-build-tauri/web/panes.bundle.js',
 ), 'utf8');
 const bundleContext: Record<string, unknown> = {};
 bundleContext.globalThis = bundleContext;

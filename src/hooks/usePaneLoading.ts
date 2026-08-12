@@ -31,6 +31,7 @@ import { SPACER_PANE_TITLE } from '../constants/layout.js';
 import {
   mutateProjectPaneConfig,
   projectPaneConfigPath,
+  type ProjectPaneConfigPaneIdentity,
   removeProjectPaneConfigPaneIdentities,
   replaceProjectPaneConfigPaneIdentity,
 } from '../services/ProjectPaneConfig.js';
@@ -506,7 +507,7 @@ async function probeRestoredPanePresence(
 
 async function persistRestoredPaneRecovery(
   sessionProjectRoot: string,
-  expected: { id: string; paneId: string },
+  expected: ProjectPaneConfigPaneIdentity,
   pane: PsychePane,
 ): Promise<{ durable: boolean; message: string }> {
   const configPath = projectPaneConfigPath(sessionProjectRoot);

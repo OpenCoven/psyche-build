@@ -3,12 +3,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = process.cwd();
-const indexHtml = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
-const mainJs = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/main.js'), 'utf8');
-const styles = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/styles.css'), 'utf8');
-const tauri = readFileSync(join(root, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const indexHtml = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
+const mainJs = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/main.js'), 'utf8');
+const styles = readFileSync(join(root, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
+const tauri = readFileSync(join(root, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
 const sessionModel = readFileSync(
-  join(root, 'native/macos/psyche-build-tauri/web/sessions/session-model.mjs'),
+  join(root, 'native/desktop/psyche-build-tauri/web/sessions/session-model.mjs'),
   'utf8',
 );
 

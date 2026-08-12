@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 
 const LAUNCHER = path.join(projectRoot, 'script', 'build_and_run.sh');
-const TAURI_DIR = path.join(projectRoot, 'native', 'macos', 'psyche-build-tauri', 'src-tauri');
+const TAURI_DIR = path.join(projectRoot, 'native', 'desktop', 'psyche-build-tauri', 'src-tauri');
 
 function readLauncher(): string {
   return readFileSync(LAUNCHER, 'utf-8');

@@ -11,7 +11,7 @@ import {
   normalizeSidebarFilter,
   sidebarSelectionKey,
   sidebarTailIsWorking,
-} from '../native/macos/psyche-build-tauri/web/sessions/sidebar-model.mjs';
+} from '../native/desktop/psyche-build-tauri/web/sessions/sidebar-model.mjs';
 
 const baseProject = {
   id: 'psyche',
