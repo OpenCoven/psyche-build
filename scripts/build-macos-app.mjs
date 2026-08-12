@@ -1531,6 +1531,9 @@ async function executeFileCommand(command, args, options) {
       let processError;
 
       const collectOutput = (chunks, length, streamName, chunk) => {
+        if (processError?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          return length;
+        }
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
         chunks.push(buffer);
         const nextLength = length + buffer.length;
