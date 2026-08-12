@@ -74,6 +74,10 @@ final class MobileInspectionPresentationTests: XCTestCase {
         XCTAssertEqual(lines[4].accessibilityLabel, "Deleted: old")
         XCTAssertEqual(lines[5].accessibilityLabel, "Added: new")
         XCTAssertEqual(lines[6].accessibilityLabel, "Context: same")
+        XCTAssertEqual(lines[3].displayText, " -1 +1 @@")
+        XCTAssertEqual(lines[4].displayText, "old")
+        XCTAssertEqual(lines[5].displayText, "new")
+        XCTAssertEqual(lines[6].displayText, " same")
     }
 
     private func decodeSnapshot() throws -> BrowserSnapshot {

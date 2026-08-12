@@ -13,6 +13,17 @@ struct DiffLine: Identifiable, Equatable {
     let text: String
     let kind: DiffLineKind
 
+    var displayText: String {
+        switch kind {
+        case .addition, .deletion:
+            return String(text.dropFirst())
+        case .hunk:
+            return String(text.dropFirst(2))
+        case .context:
+            return text
+        }
+    }
+
     var accessibilityLabel: String {
         let content: String
         switch kind {
@@ -126,7 +137,7 @@ private struct DiffLineRow: View {
                 .foregroundStyle(foreground)
                 .frame(width: 28, alignment: .center)
                 .accessibilityHidden(true)
-            Text(line.text.isEmpty ? " " : line.text)
+            Text(line.displayText.isEmpty ? " " : line.displayText)
                 .foregroundStyle(foreground)
                 .padding(.trailing, 12)
         }

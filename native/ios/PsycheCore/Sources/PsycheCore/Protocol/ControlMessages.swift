@@ -365,7 +365,7 @@ public struct MobileActionResult: Codable, Sendable, Equatable {
     public let progress: Double?
     public let targetPaneID: String?
     public let reviewData: MobileActionReviewData?
-    public let data: String?
+    public let data: [String: String]?
     public let relatedFiles: [String]?
     public let dismissable: Bool?
 

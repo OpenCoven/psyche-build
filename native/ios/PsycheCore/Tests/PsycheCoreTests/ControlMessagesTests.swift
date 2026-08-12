@@ -260,6 +260,28 @@ final class ControlMessagesTests: XCTestCase {
         XCTAssertEqual(response.response, .confirm)
     }
 
+    func testActionResultDecodesStringMetadata() throws {
+        let message = try JSONDecoder().decode(MobileServerMessage.self, from: Data("""
+        {
+          "type": "control",
+          "payload": {
+            "type": "actions.result",
+            "requestId": "action-1",
+            "result": {
+              "type": "success",
+              "message": "Created pane",
+              "data": {"action": "create_pane", "agent": "codex"}
+            }
+          }
+        }
+        """.utf8))
+
+        guard case let .control(.actionResult(response)) = message else {
+            return XCTFail("Expected actions.result")
+        }
+        XCTAssertEqual(response.result.data, ["action": "create_pane", "agent": "codex"])
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]
