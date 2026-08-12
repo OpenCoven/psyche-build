@@ -98,6 +98,14 @@ export function isLiveCovenSession(session) {
   return statusPresentation(session?.status).live;
 }
 
+export const PSYCHE_COVEN_SOURCE_LABEL = 'source:psyche-build';
+
+export function isPsycheOwnedActiveCovenSession(session) {
+  return Array.isArray(session?.labels)
+    && session.labels.includes(PSYCHE_COVEN_SOURCE_LABEL)
+    && isLiveCovenSession(session);
+}
+
 export function sortCovenSessions(sessions) {
   return [...(Array.isArray(sessions) ? sessions : [])].sort((left, right) => {
     const liveDifference = Number(statusPresentation(right?.status).live)
@@ -115,9 +123,9 @@ export function groupCovenSessions(sessions) {
   const grouped = new Map();
 
   for (const session of Array.isArray(sessions) ? sessions : []) {
-    if (!session || !isSafeCovenSessionId(session.id)
+    if (!isPsycheOwnedActiveCovenSession(session) || !isSafeCovenSessionId(session.id)
       || typeof session.projectRoot !== 'string' || !session.projectRoot
-      || !isLiveCovenSession(session)) {
+    ) {
       continue;
     }
 
@@ -158,7 +166,8 @@ export function filterProjectSessions(project, psycheSessions, covenSessions, qu
   const normalizedQuery = typeof query === 'string' ? query.trim().toLowerCase() : '';
   const projectMatches = Boolean(normalizedQuery) && contains(project?.name, normalizedQuery);
   const local = Array.isArray(psycheSessions) ? psycheSessions : [];
-  const remote = Array.isArray(covenSessions) ? covenSessions : [];
+  const remote = (Array.isArray(covenSessions) ? covenSessions : [])
+    .filter(isPsycheOwnedActiveCovenSession);
 
   if (!normalizedQuery || projectMatches) {
     return {
