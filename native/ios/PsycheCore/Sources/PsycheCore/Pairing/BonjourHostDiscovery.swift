@@ -136,7 +136,16 @@ public protocol BonjourBrowsing: Sendable {
 public actor BonjourHostDiscovery {
     private let browser: any BonjourBrowsing
     private let resolver: any BonjourServiceResolving
-    private var resolutionTask: Task<Void, Never>?
+    private var observationTask: Task<Void, Never>?
+    private var batchTask: Task<Void, Never>?
+    private var continuation: AsyncStream<[DiscoveredHost]>.Continuation?
+    private var observationID: UInt64 = 0
+    private var batchID: UInt64 = 0
+    private var activeBatchID: UInt64?
+
+    /// Four concurrent resolutions keep a stale peer from serially delaying
+    /// usable hosts while keeping Bonjour work bounded on busy LANs.
+    private static let maximumConcurrentResolutions = 4
 
     public init(
         browser: any BonjourBrowsing = NWBonjourBrowser(),
@@ -147,49 +156,181 @@ public actor BonjourHostDiscovery {
     }
 
     public func start() -> AsyncStream<[DiscoveredHost]> {
+        observationID &+= 1
+        let currentObservationID = observationID
+        observationTask?.cancel()
+        batchTask?.cancel()
+        continuation?.finish()
+        continuation = nil
+        activeBatchID = nil
+
         let records = browser.records()
         browser.start()
-        resolutionTask?.cancel()
 
         let (stream, continuation) = AsyncStream<[DiscoveredHost]>.makeStream()
+        self.continuation = continuation
         let task = Task { [resolver] in
             for await batch in records {
                 guard !Task.isCancelled else { return }
-                continuation.yield(await Self.resolveHosts(from: batch, using: resolver))
+                self.beginBatch(
+                    from: batch,
+                    observationID: currentObservationID,
+                    using: resolver
+                )
             }
-            continuation.finish()
+            self.finishObservation(currentObservationID)
         }
-        resolutionTask = task
-        continuation.onTermination = { _ in task.cancel() }
+        observationTask = task
+        continuation.onTermination = { [weak self] _ in
+            task.cancel()
+            Task {
+                await self?.terminateObservation(currentObservationID)
+            }
+        }
         return stream
     }
 
     public func stop() {
-        resolutionTask?.cancel()
-        resolutionTask = nil
+        observationID &+= 1
+        observationTask?.cancel()
+        observationTask = nil
+        batchTask?.cancel()
+        batchTask = nil
+        activeBatchID = nil
+        continuation?.finish()
+        continuation = nil
         browser.stop()
+    }
+
+    private func beginBatch(
+        from records: [BonjourServiceRecord],
+        observationID: UInt64,
+        using resolver: any BonjourServiceResolving
+    ) {
+        guard observationID == self.observationID else { return }
+
+        batchID &+= 1
+        let currentBatchID = batchID
+        batchTask?.cancel()
+        activeBatchID = currentBatchID
+        let discovery = self
+        batchTask = Task { [resolver, discovery] in
+            await BonjourHostDiscovery.resolveHosts(from: records, using: resolver) { hosts in
+                guard !Task.isCancelled else { return }
+                await discovery.publish(
+                    hosts,
+                    observationID: observationID,
+                    batchID: currentBatchID
+                )
+            }
+            await discovery.finishBatch(observationID: observationID, batchID: currentBatchID)
+        }
+    }
+
+    private func publish(
+        _ hosts: [DiscoveredHost],
+        observationID: UInt64,
+        batchID: UInt64
+    ) {
+        guard observationID == self.observationID,
+              batchID == activeBatchID else {
+            return
+        }
+        continuation?.yield(hosts)
+    }
+
+    private func finishBatch(observationID: UInt64, batchID: UInt64) {
+        guard observationID == self.observationID,
+              batchID == activeBatchID else {
+            return
+        }
+        batchTask = nil
+    }
+
+    private func finishObservation(_ observationID: UInt64) {
+        guard observationID == self.observationID else { return }
+        observationTask = nil
+        batchTask?.cancel()
+        batchTask = nil
+        activeBatchID = nil
+        continuation?.finish()
+        continuation = nil
+    }
+
+    private func terminateObservation(_ observationID: UInt64) {
+        guard observationID == self.observationID else { return }
+        observationTask?.cancel()
+        observationTask = nil
+        batchTask?.cancel()
+        batchTask = nil
+        activeBatchID = nil
+        continuation = nil
     }
 
     private static func resolveHosts(
         from records: [BonjourServiceRecord],
-        using resolver: any BonjourServiceResolving
-    ) async -> [DiscoveredHost] {
+        using resolver: any BonjourServiceResolving,
+        publish: @escaping @Sendable ([DiscoveredHost]) async -> Void
+    ) async {
+        let identities = BonjourHostParser.hosts(from: records)
+        guard !identities.isEmpty else {
+            guard !Task.isCancelled else { return }
+            await publish([])
+            return
+        }
+
         var hosts: [DiscoveredHost] = []
-        for identity in BonjourHostParser.hosts(from: records) {
-            guard !Task.isCancelled else { return [] }
-            do {
-                let resolved = try await resolver.resolve(name: identity.serverName, domain: identity.domain)
-                guard let endpoint = endpoint(from: resolved, fingerprint: identity.certificateFingerprint) else {
-                    continue
+        await withTaskGroup(of: DiscoveredHost?.self) { group in
+            var nextIdentityIndex = 0
+
+            func resolveNextIdentity() {
+                let identity = identities[nextIdentityIndex]
+                nextIdentityIndex += 1
+                group.addTask {
+                    await resolveHost(identity, using: resolver)
                 }
-                hosts.append(DiscoveredHost(identity: identity, endpoint: endpoint))
-            } catch is CancellationError {
-                return []
-            } catch {
-                continue
+            }
+
+            for _ in 0..<min(maximumConcurrentResolutions, identities.count) {
+                resolveNextIdentity()
+            }
+
+            while let host = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+
+                if let host {
+                    hosts.append(host)
+                    await publish(hosts.sorted { $0.serverID < $1.serverID })
+                }
+
+                if nextIdentityIndex < identities.count {
+                    resolveNextIdentity()
+                }
             }
         }
-        return hosts.sorted { $0.serverID < $1.serverID }
+
+        guard !Task.isCancelled, hosts.isEmpty else { return }
+        await publish([])
+    }
+
+    private static func resolveHost(
+        _ identity: BonjourHostIdentity,
+        using resolver: any BonjourServiceResolving
+    ) async -> DiscoveredHost? {
+        guard !Task.isCancelled else { return nil }
+        do {
+            let resolved = try await resolver.resolve(name: identity.serverName, domain: identity.domain)
+            guard !Task.isCancelled,
+                  let endpoint = endpoint(from: resolved, fingerprint: identity.certificateFingerprint) else {
+                return nil
+            }
+            return DiscoveredHost(identity: identity, endpoint: endpoint)
+        } catch {
+            return nil
+        }
     }
 
     private static func endpoint(
