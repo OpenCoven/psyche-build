@@ -429,14 +429,16 @@ describe('typed frontend PTY batch integration', () => {
 });
 
 function commandSource(sourceText: string, name: string): string {
-  let commandStart = sourceText.indexOf('#[tauri::command]');
-  while (commandStart !== -1) {
-    const nextCommand = sourceText.indexOf('#[tauri::command]', commandStart + 1);
-    const command = sourceText.slice(commandStart, nextCommand === -1 ? sourceText.length : nextCommand);
-    if (command.includes(`fn ${name}(`)) {
-      return command;
-    }
-    commandStart = nextCommand;
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const declaration = new RegExp(
+    `#\\[tauri::command\\]\\s*(?:pub\\s+)?(?:async\\s+)?fn\\s+${escapedName}\\s*\\(`,
+    'g',
+  );
+  const match = declaration.exec(sourceText);
+  if (match) {
+    const commandStart = match.index;
+    const nextCommand = sourceText.indexOf('#[tauri::command]', commandStart + match[0].length);
+    return sourceText.slice(commandStart, nextCommand === -1 ? sourceText.length : nextCommand);
   }
 
   throw new Error(`missing Tauri command ${name}`);
@@ -572,6 +574,25 @@ function sourceOutsideBlockingClosure(command: string): string {
   const { start, end } = blockingClosureRange(command);
   return command.slice(0, start) + command.slice(end);
 }
+
+describe('commandSource helper', () => {
+  test('matches the declaration attached to the tauri attribute', () => {
+    const fixture = `#[tauri::command]
+fn earlier() {
+  // Keep this exact declaration text inert: pub async fn later(
+}
+
+#[tauri::command]
+pub async fn later() -> Result<(), String> {
+  Ok(())
+}
+`;
+
+    const command = commandSource(fixture, 'later');
+    expect(command).toMatch(/#\[tauri::command\]\s*pub\s+async\s+fn\s+later\b/);
+    expect(command).not.toContain('fn earlier()');
+  });
+});
 
 describe('Tauri PTY command threading contract', () => {
   test('exposes acknowledgement, visibility, and transport metrics commands', () => {
