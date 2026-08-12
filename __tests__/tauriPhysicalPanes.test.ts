@@ -62,6 +62,11 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+const spawnPtyRuntimeDeps = {
+  attentionTracker: { forget: () => undefined },
+  syncThreadAttentionChrome: () => undefined,
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -889,6 +894,7 @@ describe('Tauri physical terminal panes', () => {
     const spawnPty = compileFunction<(value: typeof thread) => Promise<boolean>>(
       functionSource('spawnPty'),
       {
+        ...spawnPtyRuntimeDeps,
         invoke,
         isLiveThread,
         pendingDataBuffers,
