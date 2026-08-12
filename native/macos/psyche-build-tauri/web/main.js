@@ -117,6 +117,7 @@
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
   var covenSessionCloseFlights = new Set();
+  var covenSessionMutationGeneration = 0;
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
@@ -404,6 +405,9 @@
   }
   async function refreshCovenSessions(options) {
     var force = !!(options && options.force);
+    var requiredGeneration = force
+      ? Number(options && options.requiredGeneration) || covenSessionMutationGeneration
+      : 0;
     if ((!force && document.visibilityState === "hidden") || state.projects.length === 0) {
       return covenDiscovery;
     }
@@ -420,20 +424,28 @@
     }));
     if (covenDiscoveryFlight) {
       if (force) {
-        if (covenDiscoveryFlight.force && covenDiscoveryFlight.key === requestKey) {
+        if (covenDiscoveryFlight.key === requestKey &&
+            covenDiscoveryFlight.startedGeneration >= requiredGeneration) {
           return covenDiscoveryFlight.promise;
         }
         try {
           await covenDiscoveryFlight.promise;
         } catch (_) {}
-        return refreshCovenSessions({ force: true });
+        return refreshCovenSessions({
+          force: true,
+          requiredGeneration: requiredGeneration,
+        });
       }
       if (covenDiscoveryFlight.key === requestKey) return covenDiscoveryFlight.promise;
     }
     var started = PsycheSessions.beginCovenRequest(covenDiscovery);
     covenDiscovery = started.state;
     renderSessionList();
-    var flight = { key: requestKey, promise: null, force: force };
+    var flight = {
+      key: requestKey,
+      promise: null,
+      startedGeneration: covenSessionMutationGeneration,
+    };
     covenDiscoveryFlight = flight;
     flight.promise = (async function () {
       var requestStartedAt = performance.now();
@@ -486,7 +498,11 @@
     covenSessionCloseFlights.add(id);
     try {
       await invoke("coven_session_kill", { sessionId: id, session_id: id });
-      await refreshCovenSessions({ force: true });
+      covenSessionMutationGeneration += 1;
+      await refreshCovenSessions({
+        force: true,
+        requiredGeneration: covenSessionMutationGeneration,
+      });
       return true;
     } catch (error) {
       setStatus("Stop and close failed: " + String(error), "error");

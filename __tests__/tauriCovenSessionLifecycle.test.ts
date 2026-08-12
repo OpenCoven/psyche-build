@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as PsycheSessions from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
 
 const webRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
@@ -170,6 +170,7 @@ function discoveryHarness(
       var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
       var covenDiscoveryFlight = null;
       var covenSessionCloseFlights = new Set();
+      var covenSessionMutationGeneration = 0;
       function renderSessionList() {}
       function setStatus() {}
       ${functionSource(mainJs, 'covenDiscoveryScopes')}
@@ -354,6 +355,50 @@ describe('macOS Coven session lifecycle boundary', () => {
     ]);
     harness.requests[2].resolve({ status: 'ready', sessions: [] });
     await expect(closing).resolves.toBe(true);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
+  });
+
+  it('starts a later discovery after each independently completed kill', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+
+    const closeA = harness.close({ id: 'coven-a' });
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_session_kill']);
+    harness.requests[0].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
+
+    const closeB = harness.close({ id: 'coven-b' });
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_session_kill',
+      'coven_sessions',
+      'coven_session_kill',
+    ]);
+    harness.requests[2].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(3);
+
+    harness.requests[1].resolve({
+      status: 'ready',
+      sessions: [
+        { id: 'coven-a', projectRoot: '/alpha', status: 'running' },
+        { id: 'coven-b', projectRoot: '/alpha', status: 'running' },
+      ],
+    });
+    await vi.waitFor(() => {
+      expect(harness.requests.map((request) => request.command)).toEqual([
+        'coven_session_kill',
+        'coven_sessions',
+        'coven_session_kill',
+        'coven_sessions',
+      ]);
+    });
+
+    harness.requests[3].resolve({ status: 'ready', sessions: [] });
+    await expect(Promise.all([closeA, closeB])).resolves.toEqual([true, true]);
+    expect(harness.requests).toHaveLength(4);
     expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
   });
 

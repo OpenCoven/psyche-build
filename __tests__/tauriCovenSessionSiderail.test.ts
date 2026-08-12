@@ -517,6 +517,7 @@ function createRenderer(options: {
     'var SESSION_CLOSE_SECONDS = 3;',
     'var armedSessionClose = null;',
     'var covenSessionCloseFlights = new Set();',
+    'var covenSessionMutationGeneration = 0;',
     'var focusSets = seedFocusSets;',
     'var setPicking = seedSetPicking;',
     'var sessionTreeFocusKey = "";',
@@ -2812,7 +2813,10 @@ describe('Tauri Coven session project rail', () => {
         expect(renderer.invoke).toHaveBeenCalledTimes(1);
         expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
       });
-      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({ force: true });
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({
+        force: true,
+        requiredGeneration: 1,
+      });
       expect(renderer.invoke).toHaveBeenCalledWith('coven_session_kill', {
         sessionId: 'coven-1',
         session_id: 'coven-1',
@@ -2894,7 +2898,10 @@ describe('Tauri Coven session project rail', () => {
 
       expect(renderer.invoke).toHaveBeenCalledTimes(2);
       expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
-      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({ force: true });
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({
+        force: true,
+        requiredGeneration: 1,
+      });
     });
 
     it('guards Delete on a focused Coven row without activating it', async () => {
