@@ -1172,7 +1172,7 @@ describe('Tauri physical terminal panes', () => {
         hidden: false,
       }],
     };
-    const options = { ensureCoven: false };
+    const options = { refreshStatus: true };
     const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
     let refreshes = 0;
     const setActiveProject = compileFunction<(
@@ -1194,8 +1194,6 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => null,
-      setStatus: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1223,10 +1221,10 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeThreadId).toBe('thread-a');
     expect(project.selectedWorktreePath).toBe('/target');
     expect(focusCalls).toEqual([
-      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+      { id: 'thread-a', options: { refreshStatus: false } },
     ]);
     expect(refreshes).toBe(1);
-    expect(options).toEqual({ ensureCoven: false });
+    expect(options).toEqual({ refreshStatus: true });
   });
 
   it('refreshes direct focusThread by default and allows batched suppression', async () => {
@@ -1307,8 +1305,6 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => null,
-      setStatus: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => { refreshes.count += 1; },
     });
@@ -1329,7 +1325,7 @@ describe('Tauri physical terminal panes', () => {
         hidden: false,
       }],
     };
-    const defaultOptions = { ensureCoven: false };
+    const defaultOptions = { refreshStatus: true };
     const defaultFocusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
     const defaultRefreshes = { count: 0 };
     const setActiveProject = createSetActiveProject(
@@ -1342,10 +1338,10 @@ describe('Tauri physical terminal panes', () => {
     await expect(setActiveProject(directProject.id, defaultOptions)).resolves.toBe(true);
     expect(defaultState.activeProjectId).toBe(directProject.id);
     expect(defaultFocusCalls).toEqual([
-      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+      { id: 'thread-a', options: { refreshStatus: false } },
     ]);
     expect(defaultRefreshes.count).toBe(1);
-    expect(defaultOptions).toEqual({ ensureCoven: false });
+    expect(defaultOptions).toEqual({ refreshStatus: true });
 
     const suppressedState = {
       activeProjectId: 'other',

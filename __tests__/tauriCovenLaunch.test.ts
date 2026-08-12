@@ -919,97 +919,58 @@ describe('native Coven launch routing', () => {
     expect(creates).toBe(0);
   });
 
-  it('does not overwrite picker or activation errors when Coven creation returns null', async () => {
+  it('does not launch Coven when the project picker adds a project', async () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
-    const pickerStatuses: string[] = [];
+    let pickerLaunches = 0;
     const openProjectPicker = compileFunction<() => Promise<void>>(
       functionSource('openProjectPicker'),
       {
         dialogOpen: async () => '/repo',
         state: { env: { home: '/home' } },
         addProject: async () => project,
-        ensureProjectCoven: async () => null,
-        setProjectStatus: () => { pickerStatuses.push('ok'); },
+        ensureProjectCoven: async () => { pickerLaunches += 1; return null; },
+        setProjectStatus: () => { throw new Error('setProjectStatus should not be called'); },
         writeToActive: () => undefined,
       },
     );
     await openProjectPicker();
-    expect(pickerStatuses).toEqual([]);
-
-    const activationStatuses: string[] = [];
-    const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
-      functionSource('setActiveProject'),
-      {
-        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
-        showTerminalView: async () => true,
-        findProject: () => project,
-        restoreProjectLayout: () => undefined,
-        loadAgentSkills: () => undefined,
-        activeWorkspaceRoot: () => '/repo',
-        focusThread: async () => true,
-        renderPaneWorkspace: () => undefined,
-        refreshSidebar: () => undefined,
-        refreshTabs: () => undefined,
-        syncProjectBrowser: () => undefined,
-        ensureProjectCoven: async () => null,
-        setStatus: (text: string) => { activationStatuses.push(text); },
-        saveWorkspaceSoon: () => undefined,
-      },
-    );
-    await setActiveProject(project.id);
-    expect(activationStatuses).toEqual([]);
+    expect(pickerLaunches).toBe(0);
   });
 
-  it('marks picker and activation ready only after Coven creation succeeds', async () => {
+  it('does not launch Coven when activating a project without a visible pane', async () => {
     const project = { id: 'project', root: '/repo', name: 'repo' };
-    const pickerStatuses: string[] = [];
-    const openProjectPicker = compileFunction<() => Promise<void>>(
-      functionSource('openProjectPicker'),
-      {
-        dialogOpen: async () => '/repo',
-        state: { env: { home: '/home' } },
-        addProject: async () => project,
-        ensureProjectCoven: async () => ({ id: 'coven' }),
-        setProjectStatus: (_value: unknown, status: string) => { pickerStatuses.push(status); },
-        writeToActive: () => undefined,
-      },
-    );
-    await openProjectPicker();
-    expect(pickerStatuses).toEqual(['ok']);
-
-    const activationStatuses: string[] = [];
+    const state = { activeProjectId: 'other', threads: [], activeThreadId: 'stale-thread' as string | null };
+    let renderCalls = 0;
+    let sidebarCalls = 0;
+    let tabCalls = 0;
+    let syncCalls = 0;
+    let activationLaunches = 0;
     const setActiveProject = compileFunction<(id: string) => Promise<boolean>>(
       functionSource('setActiveProject'),
       {
-        state: { activeProjectId: 'other', threads: [], activeThreadId: null },
+        state,
         showTerminalView: async () => true,
         findProject: () => project,
         restoreProjectLayout: () => undefined,
         loadAgentSkills: () => undefined,
         activeWorkspaceRoot: () => '/repo',
         focusThread: async () => true,
-        renderPaneWorkspace: () => undefined,
-        refreshSidebar: () => undefined,
-        refreshTabs: () => undefined,
-        syncProjectBrowser: () => undefined,
-        ensureProjectCoven: async () => ({ id: 'coven' }),
-        setStatus: (text: string) => { activationStatuses.push(text); },
+        renderPaneWorkspace: () => { renderCalls += 1; },
+        refreshSidebar: () => { sidebarCalls += 1; },
+        refreshTabs: () => { tabCalls += 1; },
+        syncProjectBrowser: () => { syncCalls += 1; },
+        ensureProjectCoven: async () => { activationLaunches += 1; return null; },
+        setStatus: () => { throw new Error('setStatus should not be called'); },
         saveWorkspaceSoon: () => undefined,
       },
     );
     await setActiveProject(project.id);
-    expect(activationStatuses).toEqual(['no pane — launching Coven…']);
-
-    const ready: string[] = [];
-    const setProjectStatus = compileFunction<(value: typeof project, level: string) => void>(
-      functionSource('setProjectStatus'),
-      {
-        activeProject: () => project,
-        setStatus: (text: string) => { ready.push(text); },
-      },
-    );
-    setProjectStatus(project, 'ok');
-    expect(ready).toEqual(['Coven is ready']);
+    expect(state.activeThreadId).toBeNull();
+    expect(renderCalls).toBe(1);
+    expect(sidebarCalls).toBe(1);
+    expect(tabCalls).toBe(1);
+    expect(syncCalls).toBe(2);
+    expect(activationLaunches).toBe(0);
   });
 
   it('deduplicates only a visible live Coven chat in the exact workspace', async () => {
@@ -1522,7 +1483,7 @@ describe('native Coven launch routing', () => {
     );
   });
 
-  it('routes native defaults to Coven while retaining explicit shell and Psyche commands', () => {
+  it('keeps Coven available only through explicit shell and agent launch surfaces', () => {
     expect(mainJs).toContain('Launch a lane — Coven, a shell, or a browser');
     expect(mainJs).not.toContain('No terminal pane yet — opening Psyche…');
     expect(mainJs).not.toMatch(/canvas-empty-sub[\s\S]{0,200}Psyche TUI/);
@@ -1534,14 +1495,11 @@ describe('native Coven launch routing', () => {
     expect(functionSource('runNewThreadCommand')).toMatch(/spawnCovenThread/);
     expect(functionSource('runNewShellCommand')).toMatch(/return createTerminalPane\(\);/);
     expect(functionSource('runNewPsycheCommand')).toMatch(/spawnPsycheThread/);
-    expect(functionSource('setActiveProject')).toMatch(/await ensureProjectCoven\(project\)/);
-    expect(functionSource('setActiveProject')).toMatch(
-      /var covenThread = await ensureProjectCoven\(project\);[\s\S]*if \(covenThread\) setStatus\("no pane — launching Coven…"/,
-    );
-    expect(functionSource('openProjectPicker')).toMatch(/await ensureProjectCoven\(project\)/);
-    expect(functionSource('boot')).toMatch(/await ensureProjectCoven\(project\)/);
+    expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
+    expect(functionSource('setActiveProject')).not.toContain('ensureCoven');
+    expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
+    expect(functionSource('boot')).not.toContain('ensureProjectCoven');
     expect(mainJs).toContain('label: "Open Coven Terminal"');
-    expect(mainJs).toMatch(/ensureProjectCoven\(project\)/);
     expect(mainJs).toMatch(/\/new-thread[\s\S]*\/new-shell[\s\S]*\/new-psyche/);
   });
 });
