@@ -10,7 +10,8 @@ struct PsycheApp: App {
         let fixture = AppModel.fixtureName(in: arguments)
         _model = StateObject(wrappedValue: AppModel(
             fixture: fixture,
-            fixtureSendFails: AppModel.fixtureSendFails(in: arguments)
+            fixtureSendFails: AppModel.fixtureSendFails(in: arguments),
+            fixtureInspectionFails: AppModel.fixtureInspectionFails(in: arguments)
         ))
     }
 

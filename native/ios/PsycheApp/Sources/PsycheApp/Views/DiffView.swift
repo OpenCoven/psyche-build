@@ -88,6 +88,9 @@ struct DiffView: View {
                     .padding(.vertical, 8)
                 }
                 .background(PsycheTheme.terminal)
+                .accessibilityIdentifier("file-diff")
+            } else {
+                ProgressView("Loading changes…")
             }
         }
         .navigationTitle(file.name)
@@ -99,7 +102,6 @@ struct DiffView: View {
             }
             await load()
         }
-        .accessibilityIdentifier("file-diff")
     }
 
     private func load() async {
@@ -134,6 +136,7 @@ private struct DiffLineRow: View {
         .textSelection(.enabled)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(line.accessibilityLabel)
+        .accessibilityIdentifier("diff-line-\(line.id)")
     }
 
     private var prefix: String {

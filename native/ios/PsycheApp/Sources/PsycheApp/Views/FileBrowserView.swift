@@ -85,6 +85,7 @@ struct FileBrowserView: View {
                     description: errorMessage,
                     retry: load
                 )
+                .accessibilityIdentifier("file-browser-error")
             } else if let snapshot {
                 fileList(snapshot)
             } else {
@@ -228,6 +229,7 @@ private struct FileBrowserRow: View {
         .frame(minHeight: PsycheTheme.minimumTapTarget)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier("file-\(file.path)")
     }
 
     private var accessibilityLabel: String {
@@ -283,6 +285,8 @@ private struct FilePreviewView: View {
                     .padding()
                 }
                 .background(PsycheTheme.terminal)
+            } else {
+                ProgressView("Loading file…")
             }
         }
         .navigationTitle(file.name)

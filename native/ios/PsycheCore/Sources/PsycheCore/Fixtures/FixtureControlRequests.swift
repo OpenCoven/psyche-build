@@ -14,6 +14,7 @@ public actor FixtureControlRequests: ControlRequesting {
     private var workspace: WorkspaceSnapshot
     private var sequence: UInt64
     private var nextID = 0
+    private let inspectionFails: Bool
     private let updates: AsyncStream<WorkspaceUpdate>
     private let continuation: AsyncStream<WorkspaceUpdate>.Continuation
 
@@ -22,9 +23,14 @@ public actor FixtureControlRequests: ControlRequesting {
         public let sequence: UInt64
     }
 
-    public init(workspace: WorkspaceSnapshot, sequence: UInt64 = 1) {
+    public init(
+        workspace: WorkspaceSnapshot,
+        sequence: UInt64 = 1,
+        inspectionFails: Bool = false
+    ) {
         self.workspace = workspace
         self.sequence = sequence
+        self.inspectionFails = inspectionFails
         let stream = AsyncStream<WorkspaceUpdate>.makeStream()
         updates = stream.stream
         continuation = stream.continuation
@@ -46,6 +52,32 @@ public actor FixtureControlRequests: ControlRequesting {
         let requestID = request.requestID ?? ""
 
         switch request {
+        case .listFiles(let list):
+            try requireInspection()
+            return .filesList(MobileFilesListResult(
+                requestID: requestID,
+                paneID: list.paneID,
+                snapshot: Self.inspectionSnapshot
+            ))
+
+        case .readFile(let read):
+            try requireInspection()
+            return .filesRead(MobileFilesReadResult(
+                requestID: requestID,
+                paneID: read.paneID,
+                path: read.path,
+                content: "struct App {}\n"
+            ))
+
+        case .diffFile(let diff):
+            try requireInspection()
+            return .filesDiff(MobileFilesDiffResult(
+                requestID: requestID,
+                paneID: diff.paneID,
+                path: diff.path,
+                diff: "@@ -1 +1 @@\n-old\n+new"
+            ))
+
         case .spawnPane(let spawn):
             let paneID = "pane-\(nextID)"
             apply { workspace in
@@ -86,6 +118,36 @@ public actor FixtureControlRequests: ControlRequesting {
             return .ack(ControlAckResponse(requestID: requestID, ok: true))
         }
     }
+
+    private func requireInspection() throws {
+        guard !inspectionFails else {
+            throw FixtureControlRequestError.inspectionUnavailable
+        }
+    }
+
+    private static let inspectionSnapshot = BrowserSnapshot(
+        rootPath: "/fixture",
+        files: [
+            BrowserFile(
+                path: "Sources/App.swift",
+                name: "App.swift",
+                parentPath: "Sources",
+                exists: true,
+                changed: true,
+                statusCode: " M",
+                statusLabel: "M"
+            ),
+            BrowserFile(
+                path: "Sources/Deleted.swift",
+                name: "Deleted.swift",
+                parentPath: "Sources",
+                exists: false,
+                changed: true,
+                statusCode: " D",
+                statusLabel: "D"
+            ),
+        ]
+    )
 
     private func apply(_ transform: (WorkspaceSnapshot) -> WorkspaceSnapshot) {
         workspace = transform(workspace)
@@ -165,6 +227,14 @@ public actor FixtureControlRequests: ControlRequesting {
                 )
             }
         )
+    }
+}
+
+private enum FixtureControlRequestError: LocalizedError {
+    case inspectionUnavailable
+
+    var errorDescription: String? {
+        "Fixture inspection unavailable."
     }
 }
 

@@ -18,8 +18,7 @@ struct PaneWorkspaceView: View {
     /// every change would let the pushed pane overrule the switcher, so
     /// choosing another pane would snap straight back.
     @State private var didApplyRequestedPane = false
-    @State private var isInspectingFiles = false
-    @State private var inspectionPaneID: String?
+    @State private var inspectionTarget: InspectionTarget?
 
     init(primaryPaneID: String? = nil) {
         requestedPrimaryPaneID = primaryPaneID
@@ -68,8 +67,9 @@ struct PaneWorkspaceView: View {
             if let pane = primaryPane {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        inspectionPaneID = focusedVisiblePane?.id ?? pane.id
-                        isInspectingFiles = true
+                        inspectionTarget = InspectionTarget(
+                            paneID: focusedVisiblePane?.id ?? pane.id
+                        )
                     } label: {
                         Label("Browse files", systemImage: "folder")
                     }
@@ -85,11 +85,9 @@ struct PaneWorkspaceView: View {
                 }
             }
         }
-        .sheet(isPresented: $isInspectingFiles) {
-            if let inspectionPaneID {
-                NavigationStack {
-                    FileBrowserView(paneID: inspectionPaneID)
-                }
+        .sheet(item: $inspectionTarget) { target in
+            NavigationStack {
+                FileBrowserView(paneID: target.paneID)
             }
         }
         // `.contain` matters: an identifier on this container otherwise masks
@@ -223,4 +221,10 @@ struct PaneWorkspaceView: View {
         if horizontalSizeClass == .regular { return size.width >= 700 }
         return size.width > size.height && size.width >= 640
     }
+}
+
+private struct InspectionTarget: Identifiable {
+    let paneID: String
+
+    var id: String { paneID }
 }

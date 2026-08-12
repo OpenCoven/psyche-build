@@ -208,6 +208,44 @@ final class ControlMessagesTests: XCTestCase {
         }
     }
 
+    func testFileInspectionFixturesDecodeEveryBoundedField() throws {
+        let fixtures = try loadMobileControlFixtures()
+
+        guard case let .listFiles(list) = try decodeRequestFixture("listFiles", fixtures: fixtures) else {
+            return XCTFail("Expected files.list")
+        }
+        XCTAssertEqual(list.requestID, "files-list-1")
+        XCTAssertEqual(list.paneID, "%3")
+
+        guard case let .filesList(listResult) = try decodeResponseFixture(
+            "filesListResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.list.result")
+        }
+        XCTAssertEqual(listResult.snapshot.rootPath, "/repo")
+        XCTAssertEqual(listResult.snapshot.files.first?.path, "src/index.ts")
+        XCTAssertEqual(listResult.snapshot.files.first?.statusLabel, "Modified")
+
+        guard case let .filesRead(readResult) = try decodeResponseFixture(
+            "filesReadResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.read.result")
+        }
+        XCTAssertEqual(readResult.path, "src/index.ts")
+        XCTAssertEqual(readResult.content, "export {};\n")
+
+        guard case let .filesDiff(diffResult) = try decodeResponseFixture(
+            "filesDiffResult",
+            fixtures: fixtures
+        ) else {
+            return XCTFail("Expected files.diff.result")
+        }
+        XCTAssertEqual(diffResult.path, "src/index.ts")
+        XCTAssertEqual(diffResult.diff, "@@ -0,0 +1 @@\n+export {};\n")
+    }
+
     private func decodeRequestFixture(
         _ name: String,
         fixtures: [String: Data]
