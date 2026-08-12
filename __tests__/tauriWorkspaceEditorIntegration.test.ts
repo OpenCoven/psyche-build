@@ -885,6 +885,7 @@ describe('native CodeMirror workspace editor surface', () => {
       refreshTabs: () => undefined,
       activateFileTabNow: () => undefined,
       clearFileFocusPresentation: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace: () => undefined,
     });
 
@@ -1264,6 +1265,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const file = { id: 'f1', projectId: 'p1', dirty: false, savePromise: null };
     const state = { activeFileId: file.id as string | null, activeProjectId: 'p1', openFiles: [file] };
     let cleared = 0;
+    let clearedCovenFocus = 0;
     let rendered = 0;
     const closeFileTab = compileFunction<
       (id: string) => Promise<boolean>
@@ -1280,13 +1282,18 @@ describe('native CodeMirror workspace editor surface', () => {
         cleared += 1;
         state.activeFileId = null;
       },
+      clearPassiveCovenPaneFocus: () => { clearedCovenFocus += 1; },
       renderPaneWorkspace: () => { rendered += 1; },
     });
 
     await expect(closeFileTab(file.id)).resolves.toBe(true);
     expect(state.openFiles).toEqual([]);
     expect(state.activeFileId).toBeNull();
-    expect({ cleared, rendered }).toEqual({ cleared: 1, rendered: 1 });
+    expect({ cleared, clearedCovenFocus, rendered }).toEqual({
+      cleared: 1,
+      clearedCovenFocus: 1,
+      rendered: 1,
+    });
   });
 
   it('reserves the focus-mode minimap column for the fullscreen file editor', () => {

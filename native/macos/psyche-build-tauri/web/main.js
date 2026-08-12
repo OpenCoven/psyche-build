@@ -253,6 +253,7 @@
         : null;
     state.activeThreadId = activeThread ? activeThread.id : null;
     if (activeThread) project.lastActiveThreadId = activeThread.id;
+    clearPassiveCovenPaneFocus(layout);
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     var refreshStatus = !options || options.refreshStatus !== false;
@@ -578,6 +579,7 @@
     var project = findProject(id);
     if (!project) return false;
     restoreProjectLayout(project);
+    clearPassiveCovenPaneFocus();
     // Refresh agent skill suggestions for the new project's `.claude` tree.
     loadAgentSkills();
     // Restore the project's last-focused thread, falling back to its first.
@@ -6319,13 +6321,13 @@
     syncPaneMetricsVisibility();
   }
 
-  function clearPassiveCovenFileReturnState() {
+  function clearPassiveCovenPaneFocus(layout) {
     var activeThread = findThread(state.activeThreadId);
     if (activeThread &&
       (activeThread.kind === "coven-chat" || activeThread.kind === "coven-attach")) {
       state.activeThreadId = null;
     }
-    var layout = activePaneLayout();
+    layout = layout || activePaneLayout();
     if (!layout || !layout.root) return;
     ["focusedLeafId", "maximizedLeafId"].forEach(function (key) {
       var leaf = layout[key] ? PsychePanes.findLeafById(layout.root, layout[key]) : null;
@@ -6363,7 +6365,7 @@
       return focused;
     }
     if (!(await showTerminalView())) return false;
-    clearPassiveCovenFileReturnState();
+    clearPassiveCovenPaneFocus();
     renderPaneWorkspace();
     refreshSidebar();
     return true;
@@ -6526,6 +6528,7 @@
     if (next) activateFileTabNow(next.id);
     else {
       clearFileFocusPresentation();
+      clearPassiveCovenPaneFocus();
       refreshTabs();
       renderPaneWorkspace();
     }

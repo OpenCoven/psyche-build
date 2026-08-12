@@ -1258,6 +1258,7 @@ describe('Tauri physical terminal panes', () => {
       PsychePanes,
       findThread: () => thread,
       state,
+      clearPassiveCovenPaneFocus: () => undefined,
       renderPaneWorkspace,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1289,19 +1290,30 @@ describe('Tauri physical terminal panes', () => {
     const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: 'shell-a' };
     const thread = { id: 'thread-coven', kind: 'coven-attach' };
     const state = { activeProjectId: project.id, activeThreadId: 'stale-thread' as string | null };
+    const layout = {
+      root: PsychePanes.createLeaf('leaf-a', thread.id),
+      focusedLeafId: 'leaf-a' as string | null,
+      maximizedLeafId: 'leaf-a' as string | null,
+    };
     let renders = 0;
     let refreshes = 0;
     const renderPaneWorkspace = () => { renders += 1; };
+    const clearPassiveCovenPaneFocus = compileFunction<
+      (value: typeof layout) => void
+    >(functionSource('clearPassiveCovenPaneFocus'), {
+      state,
+      findThread: () => thread,
+      activePaneLayout: () => layout,
+      PsychePanes,
+    });
     const activatePaneLayoutFocus = compileFunction<(
       value: typeof project, path: string,
     ) => void>(functionSource('activatePaneLayoutFocus'), {
-      paneLayoutFor: () => ({
-        root: PsychePanes.createLeaf('leaf-a', thread.id),
-        focusedLeafId: 'leaf-a',
-      }),
+      paneLayoutFor: () => layout,
       PsychePanes,
       findThread: () => thread,
       state,
+      clearPassiveCovenPaneFocus,
       renderPaneWorkspace,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1326,6 +1338,8 @@ describe('Tauri physical terminal panes', () => {
     expect(project.selectedWorktreePath).toBe('/target');
     expect(project.lastActiveThreadId).toBe('shell-a');
     expect(state.activeThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(layout.maximizedLeafId).toBeNull();
     expect(renders).toBe(1);
     expect(refreshes).toBe(1);
   });
@@ -1357,6 +1371,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1401,7 +1416,7 @@ describe('Tauri physical terminal panes', () => {
     expect(options).toEqual({ refreshStatus: true });
   });
 
-  it('restores a visible local Coven pane during passive project activation', async () => {
+  it('does not restore a visible local Coven pane during passive project activation', async () => {
     const project = {
       id: 'project',
       selectedWorktreePath: '/target',
@@ -1428,6 +1443,21 @@ describe('Tauri physical terminal panes', () => {
       ],
     };
     const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    const layout = {
+      root: PsychePanes.createLeaf('coven-leaf', 'thread-chat'),
+      focusedLeafId: 'coven-leaf' as string | null,
+      maximizedLeafId: 'coven-leaf' as string | null,
+    };
+    const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+      functionSource('clearPassiveCovenPaneFocus'),
+      {
+        state,
+        findThread: (id: string | null) =>
+          state.threads.find((thread) => thread.id === id) || null,
+        activePaneLayout: () => layout,
+        PsychePanes,
+      },
+    );
     let renderCalls = 0;
     let sidebarCalls = 0;
     let tabCalls = 0;
@@ -1440,6 +1470,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1458,6 +1489,8 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeProjectId).toBe(project.id);
     expect(state.activeThreadId).toBeNull();
     expect(project.lastActiveThreadId).toBeNull();
+    expect(layout.focusedLeafId).toBeNull();
+    expect(layout.maximizedLeafId).toBeNull();
     expect(focusCalls).toEqual([]);
     expect(renderCalls).toBe(1);
     expect(sidebarCalls).toBe(1);
@@ -1574,6 +1607,7 @@ describe('Tauri physical terminal panes', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
@@ -1886,8 +1920,8 @@ describe('Tauri physical terminal panes', () => {
         focusedLeafId: 'coven-leaf',
         maximizedLeafId: 'coven-leaf',
       };
-      const clearPassiveCovenFileReturnState = compileFunction<() => void>(
-        functionSource('clearPassiveCovenFileReturnState'),
+      const clearPassiveCovenPaneFocus = compileFunction<() => void>(
+        functionSource('clearPassiveCovenPaneFocus'),
         {
           state,
           findThread: (id: string | null) => id === coven.id ? coven : null,
@@ -1907,7 +1941,7 @@ describe('Tauri physical terminal panes', () => {
         focusThread: async () => false,
         renderPaneMinimap: () => undefined,
         showTerminalView: async () => true,
-        clearPassiveCovenFileReturnState,
+        clearPassiveCovenPaneFocus,
         renderPaneWorkspace: () => undefined,
         refreshSidebar: () => undefined,
       });
