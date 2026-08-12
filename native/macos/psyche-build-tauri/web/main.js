@@ -8633,6 +8633,7 @@
     var status, commits;
     try {
       status = await invoke("git_status", { root: workspaceRoot });
+      if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
       commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
       if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;

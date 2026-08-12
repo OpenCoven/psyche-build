@@ -43,7 +43,9 @@ const tauriPackage = JSON.parse(
 };
 
 function functionSource(name: string) {
-  const start = mainJs.indexOf(`function ${name}(`);
+  const asyncStart = mainJs.indexOf(`async function ${name}(`);
+  const syncStart = mainJs.indexOf(`function ${name}(`);
+  const start = asyncStart === -1 ? syncStart : asyncStart;
   if (start === -1) throw new Error(`missing ${name}`);
   const bodyStart = mainJs.indexOf('{', start);
   let depth = 0;
@@ -434,6 +436,208 @@ describe('Tauri workspace panels', () => {
       expect(matches('project-a', '/worktree-a', 1)).toBe(false);
       generation = 2;
       expect(matches('project-b', '/worktree-a', 1)).toBe(false);
+    });
+
+    it('does not paint a late Git response from the previous worktree', async () => {
+      const source = functionSource('renderGitPanel');
+      let active = { id: 'project-a', root: '/worktree-a' };
+      let generation = 0;
+      let resolveA!: (value: { is_repo: boolean; files: unknown[] }) => void;
+      const gitViewEl = {
+        innerHTML: '',
+        appendChild: () => undefined,
+      };
+      const renderGitPanel = Function(
+        'gitViewEl', 'gitPanelRequestGate', 'activeProject', 'panelMessage',
+        'activeWorkspaceRoot', 'gitBranchEl', 'gitRemoteWebUrl',
+        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setDockGitCount',
+        'document', 'escapeHtml', 'shortenRelPath', 'openUrl',
+        `"use strict"; return (${source});`,
+      )(
+        gitViewEl,
+        { next: () => ++generation },
+        () => active,
+        (view: typeof gitViewEl, message: string) => { view.innerHTML = message; },
+        (project: typeof active) => project.root,
+        { textContent: '' },
+        null,
+        { disabled: false },
+        (command: string, args: { root: string }) => {
+          if (command === 'git_status' && args.root === '/worktree-a') {
+            return new Promise((resolve) => { resolveA = resolve; });
+          }
+          if (command === 'git_status' && args.root === '/worktree-b') {
+            return Promise.resolve({ is_repo: false, files: [] });
+          }
+          throw new Error(`unexpected ${command} for ${args.root}`);
+        },
+        (projectId: string, workspaceRoot: string, candidate: number) =>
+          candidate === generation && active.id === projectId && active.root === workspaceRoot,
+        () => undefined,
+        { createElement: () => ({}) },
+        (value: string) => value,
+        (value: string) => value,
+        null,
+      ) as () => Promise<void>;
+
+      const slowA = renderGitPanel();
+      active = { id: 'project-b', root: '/worktree-b' };
+      await renderGitPanel();
+      expect(gitViewEl.innerHTML).toBe('Not a git repository.');
+
+      resolveA({ is_repo: true, files: [] });
+      await slowA;
+      expect(gitViewEl.innerHTML).toBe('Not a git repository.');
+    });
+
+    it('does not start git log after git status becomes stale', async () => {
+      const source = functionSource('renderGitPanel');
+      let active = { id: 'project-a', root: '/worktree-a' };
+      let generation = 0;
+      const requests: string[] = [];
+      const renderGitPanel = Function(
+        'gitViewEl', 'gitPanelRequestGate', 'activeProject', 'panelMessage',
+        'activeWorkspaceRoot', 'gitBranchEl', 'gitRemoteWebUrl',
+        'gitOpenRemoteBtn', 'invoke', 'gitPanelRequestMatches', 'setDockGitCount',
+        'document', 'escapeHtml', 'shortenRelPath', 'openUrl',
+        `"use strict"; return (${source});`,
+      )(
+        { innerHTML: '', appendChild: () => undefined },
+        { next: () => ++generation },
+        () => active,
+        () => undefined,
+        (project: typeof active) => project.root,
+        { textContent: '' },
+        null,
+        { disabled: false },
+        (command: string) => {
+          requests.push(command);
+          if (command === 'git_status') {
+            active = { id: 'project-b', root: '/worktree-b' };
+            return Promise.resolve({ is_repo: true, files: [] });
+          }
+          return Promise.resolve([]);
+        },
+        (projectId: string, workspaceRoot: string, candidate: number) =>
+          candidate === generation && active.id === projectId && active.root === workspaceRoot,
+        () => undefined,
+        { createElement: () => ({}) },
+        (value: string) => value,
+        (value: string) => value,
+        null,
+      ) as () => Promise<void>;
+
+      await renderGitPanel();
+      expect(requests).toEqual(['git_status']);
+    });
+
+    it('deduplicates a Git pane in the active scope before allocation', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const existing = { id: 'git-existing' };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
+        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => existing,
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => undefined,
+        { threads: [] },
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+        () => undefined,
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(calls).toEqual(['focus:git-existing']);
+    });
+
+    it('allocates a separate Git pane for another scope', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const state = { threads: [] as Array<{ id: string; projectId: string; worktreePath: string }> };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
+        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-b' }),
+        () => undefined,
+        () => '/worktree-b',
+        (projectId: string, workspaceRoot: string) => {
+          calls.push(`lookup:${projectId}:${workspaceRoot}`);
+          return null;
+        },
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => 'git-new',
+        (id: string, projectId: string, workspaceRoot: string) => {
+          calls.push(`place:${id}:${projectId}:${workspaceRoot}`);
+          return { id };
+        },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => undefined,
+        () => { calls.push('chrome'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<{ id: string; projectId: string; worktreePath: string }>;
+
+      await expect(openOrFocusGitPane()).resolves.toMatchObject({
+        id: 'git-new', projectId: 'project-b', worktreePath: '/worktree-b',
+      });
+      expect(state.threads).toHaveLength(1);
+      expect(calls).toEqual([
+        'lookup:project-b:/worktree-b', 'place:git-new:project-b:/worktree-b',
+        'commit', 'activity', 'mount', 'focus:git-new', 'chrome', 'sidebar', 'save',
+      ]);
+    });
+
+    it('does not mutate pane state when placement fails', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const state = { threads: [] as unknown[] };
+      const calls: string[] = [];
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane', 'movePaneTo',
+        'syncGitDockChrome', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        (message: string) => { calls.push(`status:${message}`); },
+        () => '/worktree-a',
+        () => null,
+        async () => { calls.push('focus'); },
+        () => 'git-new',
+        () => null,
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => undefined,
+        () => { calls.push('chrome'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<null>;
+
+      await expect(openOrFocusGitPane()).resolves.toBeNull();
+      expect(state.threads).toEqual([]);
+      expect(calls).toEqual(['status:Not enough space for another pane']);
     });
   });
 

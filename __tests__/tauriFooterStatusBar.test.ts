@@ -843,6 +843,9 @@ describe('Tauri footer status bar shell', () => {
     ]) {
       expect(functionSource(mainJs, name)).toContain('noteStatusActivity();');
     }
+    expect(functionSource(mainJs, 'popOutGitPane')).toContain(
+      'return openOrFocusGitPane(dropTarget);',
+    );
 
     expect(functionSource(mainJs, 'boot')).toMatch(
       /state\.env = env \|\| \{\};[\s\S]*statusController[\s\S]*statusController\.start\(\);/s
