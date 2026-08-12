@@ -4,6 +4,7 @@ import { mockTmuxServerIdentity } from './fixtures/mockPanes.js';
 const tmuxService = vi.hoisted(() => ({
   getCurrentPaneIdSync: vi.fn(() => '%0'),
   getServerIdentity: vi.fn(),
+  getAllPaneInfo: vi.fn(async () => []),
   paneExists: vi.fn(async () => true),
   setPaneTitle: vi.fn(async () => {}),
   sendShellCommand: vi.fn(async () => {}),
@@ -13,6 +14,8 @@ const tmuxService = vi.hoisted(() => ({
 }));
 const splitPaneMock = vi.hoisted(() => vi.fn(() => '%9'));
 const beginReservationMock = vi.hoisted(() => vi.fn());
+const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => undefined));
+const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
 const compareAndRemoveProjectPaneConfigPaneIdentitiesMock = vi.hoisted(() => vi.fn());
 const tearDownPaneWithVerificationMock = vi.hoisted(() => vi.fn());
 
@@ -23,6 +26,11 @@ vi.mock('../src/utils/tmux.js', () => ({
   enforceControlPaneSize: vi.fn(async () => {}),
   ensurePaneBorderStatusForCurrentSession: vi.fn(),
   splitPane: splitPaneMock,
+}));
+vi.mock('../src/utils/layoutManager.js', () => ({
+  SIDEBAR_WIDTH: 40,
+  capturePaneInsertion: capturePaneInsertionMock,
+  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
 }));
 vi.mock('../src/utils/settingsManager.js', () => ({
   SettingsManager: vi.fn(() => ({
@@ -67,6 +75,13 @@ vi.mock('../src/services/ProjectPaneConfig.js', () => ({
     compareAndRemoveProjectPaneConfigPaneIdentitiesMock,
   ensureProjectPaneConfigPane: vi.fn(),
   projectPaneConfigPath: (root: string) => `${root}/.psyche/psyche.config.json`,
+  readProjectPaneConfig: vi.fn(async () => ({
+    projectName: 'repo',
+    projectRoot: '/repo',
+    panes: [],
+    settings: {},
+    lastUpdated: '2026-08-12T13:46:56.497Z',
+  })),
 }));
 vi.mock('../src/constants/timing.js', () => ({
   TMUX_LAYOUT_APPLY_DELAY: 0,
@@ -84,6 +99,7 @@ describe('conflictResolutionPane rollback cleanup', () => {
     });
     tmuxService.paneExists.mockResolvedValue(true);
     tmuxService.getServerIdentity.mockReturnValue(mockTmuxServerIdentity);
+    tmuxService.getAllPaneInfo.mockResolvedValue([]);
     tmuxService.setPaneTitle.mockResolvedValue(undefined);
     tmuxService.sendShellCommand.mockResolvedValue(undefined);
     tmuxService.sendTmuxKeys.mockResolvedValue(undefined);
