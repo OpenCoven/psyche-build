@@ -1232,22 +1232,34 @@
   // 5. PTY event plumbing
   // ============================================================
 
-  var pendingDataBuffers = new Map(); // threadId → array of Uint8Array (pre-mount)
+  var pendingDataBuffers = new Map(); // threadId → buffered output + acknowledgement callbacks (pre-mount)
 
-  listen("pty:data", function (event) {
+  function acknowledgePtyBatch(threadId, sequence) {
+    return invoke("pty_ack", {
+      threadId: threadId,
+      thread_id: threadId,
+      sequence: sequence,
+    }).catch(function (error) {
+      console.warn("[pty_ack] failed for " + threadId + ": " + String(error));
+    });
+  }
+
+  listen("pty:data-batch", function (event) {
     var payload = event.payload || {};
-    if (!payload.thread_id || !payload.bytes) return;
+    var threadId = payload.threadId || payload.thread_id;
+    if (!threadId || !payload.bytes) return;
     var bytes = new Uint8Array(payload.bytes);
-    var thread = findThread(payload.thread_id);
-    if (!isLiveThread(thread)) return;
+    var acknowledge = function () { acknowledgePtyBatch(threadId, payload.sequence); };
+    var thread = findThread(threadId);
+    if (!isLiveThread(thread)) { acknowledge(); return; }
     thread.lastOutputAt = Date.now();
-    if (typeof noteStatusPtyData === "function") noteStatusPtyData(payload.thread_id, bytes);
+    if (typeof noteStatusPtyData === "function") noteStatusPtyData(threadId, bytes);
     if (thread.term) {
-      thread.term.write(bytes);
+      thread.term.write(bytes, acknowledge);
     } else {
-      var arr = pendingDataBuffers.get(payload.thread_id) || [];
-      arr.push(bytes);
-      pendingDataBuffers.set(payload.thread_id, arr);
+      var arr = pendingDataBuffers.get(threadId) || [];
+      arr.push({ bytes: bytes, acknowledge: acknowledge });
+      pendingDataBuffers.set(threadId, arr);
     }
     schedulePaneMetricsRefresh(thread, 1200);
   }).catch(function () {});
@@ -1921,7 +1933,9 @@
       // Flush any data that arrived before the xterm was mounted.
       var pending = pendingDataBuffers.get(thread.id);
       if (pending && thread.term) {
-        for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
+        for (var i = 0; i < pending.length; i++) {
+          thread.term.write(pending[i].bytes, pending[i].acknowledge);
+        }
         pendingDataBuffers.delete(thread.id);
       }
       return true;
@@ -1967,7 +1981,9 @@
         if (launch.launchKind === "coven-chat") refreshCovenSessions();
         var pending = pendingDataBuffers.get(thread.id);
         if (pending && thread.term) {
-          for (var i = 0; i < pending.length; i++) thread.term.write(pending[i]);
+          for (var i = 0; i < pending.length; i++) {
+            thread.term.write(pending[i].bytes, pending[i].acknowledge);
+          }
           pendingDataBuffers.delete(thread.id);
         }
       } else {

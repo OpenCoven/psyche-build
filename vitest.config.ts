@@ -2,6 +2,11 @@ import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Vitest 4's fork pool can lose its IPC channel when this suite exercises
+    // real child-process and signal behavior. Threads avoid the EPIPE failure,
+    // while a bounded worker count keeps the process-heavy tests deterministic.
+    pool: 'threads',
+    maxWorkers: 4,
     // The smoke test needs tmux and a production build, so it is not part of
     // the portable unit suite. This exclusion applies even to an explicitly
     // named file, so `pnpm smoke` cannot escape it by passing a path — it runs

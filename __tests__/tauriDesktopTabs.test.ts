@@ -147,6 +147,20 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
   });
 
+  it('delivers batched PTY output to the matching terminal thread', () => {
+    expect(mainJs).toMatch(
+      /listen\("pty:data-batch",\s*function\s*\(event\)[\s\S]*?var\s+threadId\s*=\s*payload\.threadId\s*\|\|\s*payload\.thread_id;[\s\S]*?findThread\(threadId\)[\s\S]*?thread\.term\.write\(bytes,\s*acknowledge\)/,
+    );
+    expect(mainJs).not.toMatch(/listen\("pty:data",/);
+    expect(mainJs).toMatch(
+      /function\s+acknowledgePtyBatch\(threadId,\s*sequence\)[\s\S]*?invoke\("pty_ack",\s*\{[\s\S]*?threadId:\s*threadId,[\s\S]*?sequence:\s*sequence/,
+    );
+    expect(tauriLib).toMatch(
+      /fn\s+pty_ack\(thread_id:\s*String,\s*sequence:\s*u64\)[\s\S]*?session\.pump\.clone\(\)[\s\S]*?pump\.acknowledge\(sequence\)/,
+    );
+    expect(tauriLib).toMatch(/generate_handler!\[[\s\S]*?pty_ack,/);
+  });
+
   it('queries and validates the current Unix PTY foreground group before bounded escalation', () => {
     expect(tauriLib).toMatch(/portable_pty::\{[^}]*ChildKiller/);
     expect(tauriLib).toMatch(/child\.clone_killer\(\)/);

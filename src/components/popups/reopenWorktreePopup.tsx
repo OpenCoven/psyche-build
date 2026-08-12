@@ -5,7 +5,7 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { render, Box, Text, useInput, useApp } from 'ink';
+import { render, Box, Text, useInput, useApp, type Key } from 'ink';
 import * as fs from 'fs';
 import { pathToFileURL } from 'url';
 import { PopupContainer, PopupWrapper, writeSuccessAndExit } from './shared/index.js';
@@ -87,7 +87,7 @@ function loadRemoteResumableBranches(
   }).map((candidate) => toPopupBranch(candidate));
 }
 
-function isFilterTypingInput(input: string, key: Record<string, boolean>): boolean {
+function isFilterTypingInput(input: string, key: Key): boolean {
   if (!input) {
     return false;
   }

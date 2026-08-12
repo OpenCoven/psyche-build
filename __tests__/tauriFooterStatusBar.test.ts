@@ -808,7 +808,7 @@ describe('Tauri footer status bar shell', () => {
     // it is strictly stronger; the assertion tracks the helper rather than the
     // literal it replaced.
     expect(mainJs).toMatch(
-      /listen\("pty:data"[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!isLiveThread\(thread\)\) return;[\s\S]*noteStatusPtyData\(payload\.thread_id,\s*bytes\);/s
+      /listen\("pty:data-batch"[\s\S]*var threadId = payload\.threadId \|\| payload\.thread_id;[\s\S]*var bytes = new Uint8Array\(payload\.bytes\);[\s\S]*if \(!isLiveThread\(thread\)\)[\s\S]*noteStatusPtyData\(threadId,\s*bytes\);/s
     );
     expect(refreshCoven).toMatch(/performance\.now\(\)/);
     expect(refreshCoven).toMatch(

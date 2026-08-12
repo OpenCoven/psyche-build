@@ -2532,6 +2532,20 @@ fn pty_write(thread_id: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn pty_ack(thread_id: String, sequence: u64) -> Result<(), String> {
+    let pump = {
+        let guard = PTY_LIFECYCLES.lock();
+        let session = guard
+            .live(&thread_id)
+            .ok_or_else(|| format!("thread '{}' not found", thread_id))?;
+        session.pump.clone()
+    };
+    pump.acknowledge(sequence)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn pty_resize(thread_id: String, cols: u16, rows: u16) -> Result<(), String> {
     let master = {
         let guard = PTY_LIFECYCLES.lock();
@@ -4205,6 +4219,7 @@ pub fn run() {
             pane_session_metrics,
             canonical_project_path,
             pty_write,
+            pty_ack,
             pty_resize,
             pty_stop,
             pty_list,
