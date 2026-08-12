@@ -137,30 +137,33 @@ describe('Tauri agent picker', () => {
     expect(created.args).not.toBe(registryArgs);
   });
 
-  it('resolves Coven Code through the discovered Coven executable', async () => {
+  it('delegates Coven Code launches to ensureProjectCoven(project)', async () => {
+    const project: PickerProject = { id: 'project', root: '/repo' };
+    const result = { kind: 'coven-chat' };
+    let ensured: PickerProject | null = null;
     const spawnAgentThread = compileFunction<(agentId: string) => Promise<Record<string, unknown> | null>>(
       functionSource('spawnAgentThread'),
       {
-        activeProject: () => ({ id: 'project', root: '/repo' }),
+        activeProject: () => project,
         selectedWorktree: () => ({ path: '/repo' }),
-        showTerminalView: async () => true,
+        showTerminalView: async () => { throw new Error('showTerminalView must not be called'); },
         agentLaunchOptions: () => [
           { id: 'coven-code', label: 'Coven Code', command: null, args: ['chat'], kind: 'coven-chat' },
         ],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
-        createThread: (options: Record<string, unknown>) => options,
+        ensureProjectCoven: async (value: PickerProject | null) => {
+          ensured = value;
+          return result;
+        },
+        createThread: () => { throw new Error('createThread must not be called'); },
       },
     );
 
-    const result = await spawnAgentThread('coven-code');
+    const launched = await spawnAgentThread('coven-code');
 
-    expect(result).toMatchObject({
-      kind: 'coven-chat',
-      command: '/opt/homebrew/bin/coven',
-      args: ['chat'],
-      launchKind: 'coven-chat',
-    });
+    expect(ensured).toBe(project);
+    expect(launched).toBe(result);
   });
 
   it('does not fall back when Coven Code is unavailable', async () => {
@@ -176,6 +179,7 @@ describe('Tauri agent picker', () => {
         ],
         state: { env: {} },
         setStatus: (message: string, level: string) => { status = [message, level]; },
+        ensureProjectCoven: async () => { throw new Error('ensureProjectCoven must not be called'); },
         createThread: () => { throw new Error('createThread must not be called'); },
       },
     );
@@ -814,9 +818,12 @@ describe('Tauri agent picker', () => {
     expect(emptyState).toContain('else openBlankBrowserTab();');
   });
 
-  it('keeps automatic project startup on Coven while the picker handles manual agent choice', () => {
-    expect(functionSource('setActiveProject')).toContain('await ensureProjectCoven(project);');
-    expect(functionSource('openProjectPicker')).toContain('await ensureProjectCoven(project);');
-    expect(functionSource('boot')).toContain('await ensureProjectCoven(project);');
+  it('keeps Coven startup behind explicit launch surfaces', () => {
+    expect(functionSource('setActiveProject')).not.toContain('ensureProjectCoven');
+    expect(functionSource('setActiveProject')).not.toContain('openCovenSession');
+    expect(functionSource('openProjectPicker')).not.toContain('ensureProjectCoven');
+    expect(functionSource('openProjectPicker')).not.toContain('openCovenSession');
+    expect(functionSource('boot')).not.toContain('ensureProjectCoven');
+    expect(functionSource('boot')).not.toContain('openCovenSession');
   });
 });
