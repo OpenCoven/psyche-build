@@ -5138,6 +5138,7 @@ mod pty_runtime_tests {
     #[cfg(not(windows))]
     #[test]
     fn pty_transport_metrics_filters_live_sessions_and_serializes_metadata_only() {
+        let owned_ids = ["metrics-a", "metrics-b"];
         let first = TestLivePtySession::register("metrics-a");
         let second = TestLivePtySession::register("metrics-b");
         first.pump.enqueue(b"secret-metadata".to_vec()).unwrap();
@@ -5151,9 +5152,23 @@ mod pty_runtime_tests {
         assert!(pty_transport_metrics(Some("../unsafe".to_string())).is_empty());
 
         let all = pty_transport_metrics(None);
+        let owned_from_all = all
+            .into_iter()
+            .filter(|snapshot| owned_ids.contains(&snapshot.thread_id.as_str()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            all.iter().map(|snapshot| snapshot.thread_id.as_str()).collect::<Vec<_>>(),
+            owned_from_all
+                .iter()
+                .map(|snapshot| snapshot.thread_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["metrics-a", "metrics-b"]
+        );
+        assert_eq!(
+            owned_from_all
+                .iter()
+                .find(|snapshot| snapshot.thread_id == "metrics-a")
+                .unwrap(),
+            &filtered[0]
         );
 
         let serialized = serde_json::to_value(filtered.pop().unwrap()).unwrap();
@@ -5161,7 +5176,14 @@ mod pty_runtime_tests {
         assert!(!serialized.to_string().contains("secret-metadata"));
 
         drop(second);
+        assert!(pty_transport_metrics(Some("metrics-b".to_string())).is_empty());
         drop(first);
+        assert!(pty_transport_metrics(Some("metrics-a".to_string())).is_empty());
+        assert!(
+            pty_transport_metrics(None)
+                .into_iter()
+                .all(|snapshot| !owned_ids.contains(&snapshot.thread_id.as_str()))
+        );
     }
 
     #[cfg(not(windows))]
