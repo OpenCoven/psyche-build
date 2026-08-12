@@ -170,20 +170,41 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     expect(document.value).toBe(expected);
   });
 
-  it('tracks character, line, and block visual selections', async () => {
+  it('tracks inclusive forward and reverse character and line selections', async () => {
     const characterDocument = new TestDocument('abc\ndef');
     await send(createEditorMachine(characterDocument), 'v', 'l');
-    expect(characterDocument.ranges).toEqual([{ anchor: 0, head: 1 }]);
+    expect(characterDocument.ranges).toEqual([{ anchor: 0, head: 2 }]);
+
+    const reverseCharacterDocument = new TestDocument('abc\ndef', 2);
+    await send(createEditorMachine(reverseCharacterDocument), 'v', 'h');
+    expect(reverseCharacterDocument.ranges).toEqual([{ anchor: 1, head: 3 }]);
 
     const lineDocument = new TestDocument('abc\ndef');
     await send(createEditorMachine(lineDocument), 'V', 'j');
     expect(lineDocument.ranges).toEqual([{ anchor: 0, head: 7 }]);
 
-    const blockDocument = new TestDocument('abc\ndef');
-    await send(createEditorMachine(blockDocument), { key: 'v', ctrlKey: true }, 'j', 'l');
-    expect(blockDocument.ranges).toEqual([
-      { anchor: 0, head: 1 },
-      { anchor: 4, head: 5 },
+    const reverseLineDocument = new TestDocument('one\n\nthree', 4);
+    await send(createEditorMachine(reverseLineDocument), 'V', 'k');
+    expect(reverseLineDocument.ranges).toEqual([{ anchor: 0, head: 5 }]);
+  });
+
+  it('uses inclusive grapheme columns for visual-block selections', async () => {
+    const document = new TestDocument('👩‍💻xy\ne\u0301yz');
+    await send(createEditorMachine(document), { key: 'v', ctrlKey: true }, 'j', 'l');
+
+    expect(document.ranges).toEqual([
+      { anchor: 0, head: 6 },
+      { anchor: 8, head: 11 },
+    ]);
+  });
+
+  it('keeps reverse visual-block endpoints inclusive', async () => {
+    const document = new TestDocument('abc\ndef', 5);
+    await send(createEditorMachine(document), { key: 'v', ctrlKey: true }, 'k', 'h');
+
+    expect(document.ranges).toEqual([
+      { anchor: 0, head: 2 },
+      { anchor: 4, head: 6 },
     ]);
   });
 
@@ -193,10 +214,18 @@ describe('Vim editor operators, text objects, and visual selections', () => {
 
     await send(machine, { key: 'v', ctrlKey: true }, 'j', 'l', 'd');
 
-    expect(document.value).toBe('bc\nef');
+    expect(document.value).toBe('c\nf');
     expect(document.edits.filter((edit) => edit.to > edit.from).map((edit) => edit.history)).toEqual([
       'new', 'join',
     ]);
+  });
+
+  it('deletes inclusive character selections', async () => {
+    const document = new TestDocument('abcd');
+
+    await send(createEditorMachine(document), ...keys('vld'));
+
+    expect(document.value).toBe('cd');
   });
 });
 
@@ -251,18 +280,53 @@ describe('Vim editor registers and marks', () => {
     expect(bytes.setRegister('b', 'x')).toBe(false);
   });
 
-  it('sets and jumps to local and global semantic marks and reports unset marks', async () => {
+  it('keeps lowercase marks local and emits semantic uppercase global references', async () => {
     const document = new TestDocument('one\ntwo\nthree');
-    const machine = createEditorMachine(document);
+    const globals = new Map<string, { buffer: string; position: number }>();
+    const machine = createEditorMachine(document, {
+      bufferId: 'buffer-a',
+      globalMarks: {
+        get: (name) => globals.get(name),
+        set: (name, reference) => globals.set(name, reference),
+      },
+    });
     await send(machine, ...keys('maw`a'));
     expect(document.ranges[0]).toEqual({ anchor: 0, head: 0 });
     expect(machine.mark('a')).toBe(0);
 
-    await send(machine, ...keys('mGw`G'));
-    expect(machine.mark('G')).toBe(0);
+    const setGlobal = await send(machine, ...keys('mG'));
+    expect(setGlobal.actions).toContainEqual({
+      type: 'mark.set-global', mark: 'G', reference: { buffer: 'buffer-a', position: 0 },
+    });
+    expect(machine.mark('G')).toBeUndefined();
+    await send(machine, 'w');
+    const jumpGlobal = await send(machine, '`', 'G');
+    expect(jumpGlobal.actions).toContainEqual({
+      type: 'mark.jump-global', mark: 'G', reference: { buffer: 'buffer-a', position: 0 }, linewise: false,
+    });
+    expect(document.ranges[0]).toEqual({ anchor: 4, head: 4 });
+
+    globals.set('H', { buffer: 'buffer-b', position: 7 });
+    const crossBuffer = await send(machine, '`', 'H');
+    expect(crossBuffer.actions).toContainEqual({
+      type: 'mark.jump-global', mark: 'H', reference: { buffer: 'buffer-b', position: 7 }, linewise: false,
+    });
+    expect(document.ranges[0]).toEqual({ anchor: 4, head: 4 });
 
     const result = await send(machine, '`', 'z');
     expect(result.actions).toContainEqual({ type: 'status', level: 'error', message: 'Mark z is not set' });
+  });
+
+  it('reports unresolved uppercase global marks without treating them as local offsets', async () => {
+    const machine = createEditorMachine(new TestDocument('one'), {
+      bufferId: 'buffer-a',
+      globalMarks: { get: () => undefined, set: () => undefined },
+    });
+
+    const result = await send(machine, '`', 'G');
+
+    expect(result.actions).toContainEqual({ type: 'status', level: 'error', message: 'Global mark G is not set' });
+    expect(machine.mark('G')).toBeUndefined();
   });
 });
 
@@ -296,6 +360,30 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, ...keys('2dw.'));
 
     expect(document.value).toBe('five');
+  });
+
+  it.each([
+    { name: 'character', text: 'abcdef', input: keys('vld.'), expected: 'ef' },
+    { name: 'line', text: 'one\ntwo\nthree\nfour\nfive\n', input: keys('Vjd.'), expected: 'five\n' },
+    { name: 'block', text: 'abc\ndef\nghi', input: [{ key: 'v', ctrlKey: true }, ...keys('jld.')], expected: '\n\nghi' },
+  ])('repeats a visual-$name delete deterministically', async ({ text, input, expected }) => {
+    const document = new TestDocument(text);
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...input);
+
+    expect(document.value).toBe(expected);
+    expect(machine.snapshot().pending).toBe('');
+  });
+
+  it('repeats a visual change including its insert text', async () => {
+    const document = new TestDocument('abcdef');
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('vlcxy'), 'Escape', '.');
+
+    expect(document.value).toBe('xyxyef');
+    expect(machine.snapshot().pending).toBe('');
   });
 
   it('records and replays a named macro as one deterministic undo group', async () => {
@@ -372,6 +460,32 @@ describe('Vim editor search', () => {
     await send(machine, 'N');
     expect(document.ranges[0]?.head).toBe(4);
     expect(machine.snapshot().search).toMatchObject({ pattern: 'two', direction: 'forward', highlight: true });
+  });
+
+  it('applies and clears composed counts for n and N while preserving direction', async () => {
+    const document = new TestDocument('x one x two x three x four');
+    const machine = createEditorMachine(document);
+    await send(machine, '/', 'x', 'Enter');
+
+    const forward = await send(machine, ...keys('3n'));
+    expect(document.ranges[0]?.head).toBe(0);
+    expect(forward.count).toBeUndefined();
+
+    const reverse = await send(machine, ...keys('2N'));
+    expect(document.ranges[0]?.head).toBe(12);
+    expect(reverse.count).toBeUndefined();
+    expect(machine.snapshot().search?.direction).toBe('forward');
+  });
+
+  it('clears search counts when a repeated pattern has no match', async () => {
+    const machine = createEditorMachine(new TestDocument('one two'));
+    await send(machine, '/', 'z', 'Enter');
+
+    const result = await send(machine, ...keys('3n'));
+
+    expect(result.actions).toContainEqual({ type: 'status', level: 'error', message: 'Pattern not found' });
+    expect(result.count).toBeUndefined();
+    expect(result.pending).toBe('');
   });
 
   it('reports malformed patterns inline without throwing', async () => {

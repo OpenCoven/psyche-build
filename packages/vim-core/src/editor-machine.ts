@@ -35,7 +35,19 @@ export type EditorAction =
   | { type: 'status'; level: 'info' | 'error'; message: string }
   | { type: 'search'; query: string; direction: 'forward' | 'backward'; active: boolean }
   | { type: 'option'; name: string; enabled: boolean }
+  | { type: 'mark.set-global'; mark: string; reference: EditorGlobalMarkReference }
+  | { type: 'mark.jump-global'; mark: string; reference: EditorGlobalMarkReference; linewise: boolean }
   | { type: 'command'; command: Parameters<EditorDocumentPort['command']>[0]; success: boolean };
+
+export interface EditorGlobalMarkReference {
+  readonly buffer: string;
+  readonly position: number;
+}
+
+export interface EditorGlobalMarkStore {
+  get(mark: string): EditorGlobalMarkReference | undefined;
+  set(mark: string, reference: EditorGlobalMarkReference): void;
+}
 
 export interface EditorRegister {
   readonly text: string;
@@ -78,9 +90,18 @@ export interface EditorMachine {
 
 export interface EditorMachineOptions {
   readonly clipboardRegisters?: boolean;
+  readonly bufferId?: string;
+  readonly globalMarks?: EditorGlobalMarkStore;
 }
 
 type Token = { key: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean };
+
+interface VisualChange {
+  readonly mode: 'visual-character' | 'visual-line' | 'visual-block';
+  readonly width: number;
+  readonly height: number;
+  insert: string;
+}
 
 function token(input: EditorInput): Token {
   if (typeof input !== 'string') return normalizeKeyboardEvent(input);
@@ -109,6 +130,26 @@ function previousGrapheme(text: string, position: number): number {
 function nextGrapheme(text: string, position: number): number {
   for (const start of starts(text)) if (start > position) return start;
   return text.length;
+}
+
+function graphemeCount(text: string): number {
+  return Math.max(0, starts(text).length - 1);
+}
+
+function graphemeColumn(text: string, line: number, position: number): number {
+  const relative = Math.max(0, Math.min(lineEnd(text, line) - line, position - line));
+  const boundaries = starts(text.slice(line, lineEnd(text, line)));
+  let column = 0;
+  for (let index = 0; index < boundaries.length; index += 1) {
+    if (boundaries[index]! > relative) break;
+    column = index;
+  }
+  return column;
+}
+
+function positionAtGraphemeColumn(text: string, line: number, column: number): number {
+  const boundaries = starts(text.slice(line, lineEnd(text, line)));
+  return line + boundaries[Math.min(Math.max(0, column), boundaries.length - 1)]!;
 }
 
 function lineStart(text: string, position: number): number {
@@ -306,6 +347,8 @@ export function createEditorMachine(
   let insertFirstEdit = true;
   let insertChange: EditorInput[] | undefined;
   let lastChange: EditorInput[] | undefined;
+  let lastVisualChange: VisualChange | undefined;
+  let activeVisualChange: VisualChange | undefined;
   let recording: { name: string; inputs: EditorInput[] } | undefined;
   let macroDepth = 0;
   let macroActions = 0;
@@ -351,26 +394,34 @@ export function createEditorMachine(
     const bounded = Math.max(0, Math.min(text.length, position));
     visualHead = bounded;
     let selections: readonly EditorSelection[] = [{ anchor: bounded, head: bounded }];
-    if (mode === 'visual-character') selections = [{ anchor: visualAnchor, head: bounded }];
+    if (mode === 'visual-character') {
+      const from = Math.min(visualAnchor, bounded);
+      const to = nextGrapheme(text, Math.max(visualAnchor, bounded));
+      selections = [{ anchor: from, head: to }];
+    }
     if (mode === 'visual-line') {
-      const finalEnd = lineEnd(text, bounded);
+      const from = lineStart(text, Math.min(visualAnchor, bounded));
+      const finalEnd = lineEnd(text, Math.max(visualAnchor, bounded));
       selections = [{
-        anchor: lineStart(text, visualAnchor),
+        anchor: from,
         head: finalEnd < text.length ? finalEnd + 1 : finalEnd,
       }];
     }
     if (mode === 'visual-block') {
       const firstLine = lineNumber(text, visualAnchor);
       const lastLine = lineNumber(text, bounded);
-      const anchorColumn = visualAnchor - lineStart(text, visualAnchor);
-      const headColumn = bounded - lineStart(text, bounded);
+      const anchorLineStart = lineStart(text, visualAnchor);
+      const headLineStart = lineStart(text, bounded);
+      const anchorColumn = graphemeColumn(text, anchorLineStart, visualAnchor);
+      const headColumn = graphemeColumn(text, headLineStart, bounded);
+      const fromColumn = Math.min(anchorColumn, headColumn);
+      const toColumn = Math.max(anchorColumn, headColumn) + 1;
       const block: EditorSelection[] = [];
       for (let line = Math.min(firstLine, lastLine); line <= Math.max(firstLine, lastLine); line += 1) {
         const start = lineAt(text, line);
-        const end = lineEnd(text, start);
         block.push({
-          anchor: Math.min(end, start + anchorColumn),
-          head: Math.min(end, start + headColumn),
+          anchor: positionAtGraphemeColumn(text, start, fromColumn),
+          head: positionAtGraphemeColumn(text, start, toColumn),
         });
       }
       selections = block;
@@ -487,11 +538,83 @@ export function createEditorMachine(
     if (operation !== 'y') {
       apply(from, to, '', from, 'new');
       lastChange = changeInputs;
+      lastVisualChange = undefined;
     } else select(from);
     if (operation === 'c') {
       insertFirstEdit = false;
       insertChange = changeInputs;
     }
+    return snapshot([{ type: 'mode', mode }]);
+  }
+
+  function visualChange(
+    visualMode: VisualChange['mode'],
+    selections: readonly EditorSelection[],
+    text: string,
+  ): VisualChange {
+    const from = Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head]));
+    const to = Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head]));
+    if (visualMode === 'visual-block') {
+      return {
+        mode: visualMode,
+        width: Math.max(1, ...selections.map((selection) => graphemeCount(text.slice(
+          Math.min(selection.anchor, selection.head),
+          Math.max(selection.anchor, selection.head),
+        )))),
+        height: selections.length,
+        insert: '',
+      };
+    }
+    if (visualMode === 'visual-line') {
+      return {
+        mode: visualMode,
+        width: 0,
+        height: lineNumber(text, Math.max(from, to - 1)) - lineNumber(text, from) + 1,
+        insert: '',
+      };
+    }
+    return { mode: visualMode, width: graphemeCount(text.slice(from, to)), height: 1, insert: '' };
+  }
+
+  function advanceGraphemes(text: string, position: number, count: number): number {
+    let result = position;
+    for (let index = 0; index < count; index += 1) result = nextGrapheme(text, result);
+    return result;
+  }
+
+  function repeatVisual(change: VisualChange): EditorResult {
+    const text = document.text();
+    const position = cursor();
+    let ranges: { from: number; to: number }[];
+    if (change.mode === 'visual-character') {
+      ranges = [{ from: position, to: advanceGraphemes(text, position, change.width) }];
+    } else if (change.mode === 'visual-line') {
+      const from = lineStart(text, position);
+      const to = lineAt(text, lineNumber(text, from) + change.height);
+      ranges = [{ from, to: to === from ? text.length : to }];
+    } else {
+      const firstLine = lineNumber(text, position);
+      const column = graphemeColumn(text, lineStart(text, position), position);
+      ranges = [];
+      for (let offset = 0; offset < change.height; offset += 1) {
+        const start = lineAt(text, firstLine + offset);
+        if (offset > 0 && start === lineAt(text, firstLine + offset - 1)) break;
+        ranges.push({
+          from: positionAtGraphemeColumn(text, start, column),
+          to: positionAtGraphemeColumn(text, start, column + change.width),
+        });
+      }
+    }
+    const ordered = ranges.sort((left, right) => right.from - left.from);
+    const removed = [...ordered].reverse().map((range) => text.slice(range.from, range.to)).join('\n');
+    writeRegisters('delete', removed, change.mode === 'visual-line');
+    invocationGroup = { used: false };
+    for (const range of ordered) apply(range.from, range.to, change.insert, range.from + change.insert.length, 'new');
+    invocationGroup = undefined;
+    mode = 'normal';
+    lastVisualChange = change;
+    lastChange = undefined;
+    resetPending();
     return snapshot([{ type: 'mode', mode }]);
   }
 
@@ -638,7 +761,14 @@ export function createEditorMachine(
     }
 
     if (value.key === 'Escape') {
-      if ((mode === 'insert' || mode === 'replace') && insertChange) lastChange = [...insertChange, 'Escape'];
+      if ((mode === 'insert' || mode === 'replace') && activeVisualChange) {
+        lastVisualChange = activeVisualChange;
+        lastChange = undefined;
+        activeVisualChange = undefined;
+      } else if ((mode === 'insert' || mode === 'replace') && insertChange) {
+        lastChange = [...insertChange, 'Escape'];
+        lastVisualChange = undefined;
+      }
       insertChange = undefined;
       return enter('normal');
     }
@@ -649,6 +779,7 @@ export function createEditorMachine(
       const to = mode === 'replace' ? nextGrapheme(document.text(), position) : position;
       apply(position, to, key, position + key.length, insertFirstEdit ? 'new' : 'join');
       insertFirstEdit = false;
+      if (activeVisualChange) activeVisualChange.insert += key;
       insertChange ??= [mode === 'replace' ? 'R' : 'i'];
       insertChange.push(input);
       return snapshot();
@@ -698,12 +829,27 @@ export function createEditorMachine(
     if (pending === 'm') {
       pending = '';
       if (!/^[A-Za-z]$/u.test(key)) return snapshot([{ type: 'status', level: 'error', message: `Invalid mark ${key}` }]);
+      if (/^[A-Z]$/u.test(key)) {
+        if (!options.bufferId || !options.globalMarks) {
+          return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} is unavailable` }]);
+        }
+        const reference = { buffer: options.bufferId, position: cursor() };
+        options.globalMarks.set(key, reference);
+        return snapshot([{ type: 'mark.set-global', mark: key, reference }]);
+      }
       marks.set(key, cursor());
       return snapshot();
     }
     if (pending === '`' || pending === "'") {
       const exact = pending === '`';
       pending = '';
+      if (/^[A-Z]$/u.test(key)) {
+        const reference = options.globalMarks?.get(key);
+        if (!reference) {
+          return snapshot([{ type: 'status', level: 'error', message: `Global mark ${key} is not set` }]);
+        }
+        return snapshot([{ type: 'mark.jump-global', mark: key, reference, linewise: !exact }]);
+      }
       const mark = marks.get(key);
       if (mark === undefined) return snapshot([{ type: 'status', level: 'error', message: `Mark ${key} is not set` }]);
       select(exact ? mark : lineStart(document.text(), mark));
@@ -732,12 +878,21 @@ export function createEditorMachine(
         return snapshot();
       }
       if (key === '.') {
+        if (lastVisualChange) return repeatVisual(lastVisualChange);
         if (!lastChange) return snapshot([{ type: 'status', level: 'error', message: 'No change to repeat' }]);
         return replay(lastChange, false);
       }
       if (key === 'n' || key === 'N') {
         const base = searchState?.direction ?? 'forward';
-        return search(key === 'n' ? base : (base === 'forward' ? 'backward' : 'forward'));
+        const direction = key === 'n' ? base : (base === 'forward' ? 'backward' : 'forward');
+        const repetitions = countBuffer ? Number(countBuffer) : 1;
+        resetPending();
+        let result = snapshot();
+        for (let index = 0; index < repetitions; index += 1) {
+          result = search(direction);
+          if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) break;
+        }
+        return result;
       }
       if (value.ctrl && value.key === 'v') return enter('visual-block');
       if (key === 'i' || key === 'R') {
@@ -753,6 +908,7 @@ export function createEditorMachine(
       }
       if (mode.startsWith('visual-') && 'dcy'.includes(key)) {
         const selections = document.selections();
+        const descriptor = visualChange(mode as VisualChange['mode'], selections, document.text());
         if (mode === 'visual-block') {
           const operation = key as 'd' | 'c' | 'y';
           const ranges = selections
@@ -766,20 +922,28 @@ export function createEditorMachine(
           invocationGroup = { used: false };
           if (operation !== 'y') {
             for (const range of ranges) apply(range.from, range.to, '', range.from, 'new');
-            lastChange = [key];
+            lastChange = undefined;
+            lastVisualChange = descriptor;
           }
           invocationGroup = undefined;
           mode = operation === 'c' ? 'insert' : 'normal';
           if (operation === 'c') {
             insertFirstEdit = false;
             insertChange = [key];
+            activeVisualChange = descriptor;
           }
           resetPending();
           return snapshot([{ type: 'mode', mode }]);
         }
         const from = Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head]));
         const to = Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head]));
-        return operate(key as 'd' | 'c' | 'y', { from, to }, mode === 'visual-line', [key]);
+        const result = operate(key as 'd' | 'c' | 'y', { from, to }, mode === 'visual-line', [key]);
+        if (key !== 'y') {
+          lastChange = undefined;
+          lastVisualChange = descriptor;
+        }
+        if (key === 'c') activeVisualChange = descriptor;
+        return result;
       }
       if ('dcy'.includes(key)) {
         operatorCount = countBuffer ? Number(countBuffer) : 1;

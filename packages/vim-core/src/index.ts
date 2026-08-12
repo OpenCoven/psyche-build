@@ -5,6 +5,8 @@ export { createEditorMachine, EDITOR_LIMITS } from './editor-machine.js';
 export type {
   EditorAction,
   EditorDocumentPort,
+  EditorGlobalMarkReference,
+  EditorGlobalMarkStore,
   EditorInput,
   EditorMachine,
   EditorMachineOptions,
