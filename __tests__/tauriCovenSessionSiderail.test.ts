@@ -470,6 +470,7 @@ function createRenderer(options: {
     state.projects.find((project) => project.id === id) ?? null;
   const focusThread = vi.fn().mockResolvedValue(undefined);
   const closeThread = vi.fn();
+  const closeBrowserPane = vi.fn();
   const hideThread = vi.fn();
   const editLabelInline = vi.fn();
   const renameThread = vi.fn((id: string, value: string) => {
@@ -566,8 +567,9 @@ function createRenderer(options: {
   const harness = Function(
     'document', 'sessionListEl', 'sessionSearchEl', 'editingContext', 'sessionFilter', 'state',
     'covenDiscovery', 'PsycheSessions', 'sessionStatusClass', 'shortenRoot',
-    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'hideThread',
-    'renameThread', 'editLabelInline', 'openCovenSession', 'setStatus',
+    'escapeHtml', 'setActiveProject', 'focusThread', 'closeThread', 'closeBrowserPane',
+    'requestThreadClose', 'hideThread', 'renameThread', 'editLabelInline',
+    'openCovenSession', 'setStatus',
     'canvasThreadIds', 'paneGlyphFor', 'setInterval', 'clearInterval',
     'seedFocusSets', 'seedSetPicking', 'refreshSidebar', 'activeFocusSet',
     'removeFromFocusSet', 'applySetScopeForThread', 'activateFocusSet', 'clearFocusSet',
@@ -609,6 +611,12 @@ function createRenderer(options: {
     setActiveProject,
     focusThread,
     closeThread,
+    closeBrowserPane,
+    (thread: { id: string; kind?: string } | null) => {
+      if (!thread) return Promise.resolve(false);
+      if (thread.kind === 'web') return Promise.resolve(closeBrowserPane(thread));
+      return Promise.resolve(closeThread(thread.id));
+    },
     hideThread,
     renameThread,
     editLabelInlineImpl,
@@ -642,7 +650,7 @@ function createRenderer(options: {
     setFilter: (value: string) => void;
     setDiscovery: (value: typeof discovery) => void;
     armSessionClose: (
-      host: FakeElement, close: FakeElement, label: string, onConfirm: () => void,
+      host: FakeElement, close: FakeElement, label: string, onConfirm: () => unknown,
     ) => void;
     disarmSessionClose: (options?: { restoreFocus?: boolean }) => void;
     closeCovenSession: (session: RemoteSession) => Promise<boolean>;
@@ -2600,6 +2608,65 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.closeThread).toHaveBeenCalledWith('local');
       expect(event.propagationStopped).toBe(true);
       expect(wrapper.querySelector('.session-close-confirm')).toBeNull();
+    });
+
+    it('restores focus only when an async close reports failure', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
+      const row = wrapper.querySelector('.session-row')!;
+      const close = wrapper.querySelector('.session-close')!;
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.resolve(false));
+      const failedConfirm = wrapper.querySelector('.session-close-confirm')!;
+      failedConfirm.focus();
+      await failedConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.document.activeElement).toBe(row);
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.resolve(true));
+      const successfulConfirm = wrapper.querySelector('.session-close-confirm')!;
+      successfulConfirm.focus();
+      await successfulConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.document.activeElement).not.toBe(row);
+    });
+
+    it('reports thrown and rejected close failures while restoring focus', async () => {
+      const renderer = createRenderer({
+        threads: [{ id: 'local', projectId: 'alpha', name: 'Local', status: 'running' }],
+      });
+      renderer.render();
+      const wrapper = renderer.sessionListEl.querySelector('.session-row-wrap')!;
+      const row = wrapper.querySelector('.session-row')!;
+      const close = wrapper.querySelector('.session-close')!;
+
+      renderer.armSessionClose(row, close, 'Local', () => {
+        throw new Error('sync failure');
+      });
+      const thrownConfirm = wrapper.querySelector('.session-close-confirm')!;
+      thrownConfirm.focus();
+      await thrownConfirm.emit('click');
+      expect(renderer.setStatus).toHaveBeenLastCalledWith(
+        'Failed to close Local: sync failure',
+        'error',
+      );
+      expect(renderer.document.activeElement).toBe(row);
+
+      renderer.armSessionClose(row, close, 'Local', () => Promise.reject(
+        new Error('async failure'),
+      ));
+      const rejectedConfirm = wrapper.querySelector('.session-close-confirm')!;
+      rejectedConfirm.focus();
+      await rejectedConfirm.emit('click');
+      await Promise.resolve();
+      expect(renderer.setStatus).toHaveBeenLastCalledWith(
+        'Failed to close Local: async failure',
+        'error',
+      );
+      expect(renderer.document.activeElement).toBe(row);
     });
 
     it('rejects an overdue confirmation click without waiting for timer callbacks', async () => {
