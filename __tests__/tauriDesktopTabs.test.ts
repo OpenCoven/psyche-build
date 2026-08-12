@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
-const mainJs = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'), 'utf8');
+const mainJs = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
+  'utf8',
+).replace(/\r\n/g, '\n');
 const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
 const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
 const tauriCargo = readFileSync(

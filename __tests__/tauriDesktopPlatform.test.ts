@@ -20,6 +20,10 @@ function json(name: string) {
   return JSON.parse(readFileSync(join(desktop, 'src-tauri', name), 'utf8'));
 }
 
+function readText(path: string) {
+  return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
 function stalePathReferences(): string[] {
   return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
     .split('\0')
@@ -91,7 +95,7 @@ describe('desktop Tauri layout', () => {
   });
 
   it('checks the desktop runtime on exactly macOS, Windows, and Linux', () => {
-    const workflow = readFileSync(ciWorkflowPath, 'utf8');
+    const workflow = readText(ciWorkflowPath);
     const job = workflowJob(workflow, 'desktop-runtime');
     const bundleFreshnessGate = 'pnpm vitest --run __tests__/tauriDesktopPlatform.test.ts __tests__/tauriWebBundles.test.ts __tests__/tauriPackageScripts.test.ts __tests__/tauriDesktopTabs.test.ts';
     const buildBundles = 'pnpm --dir native/desktop/psyche-build-tauri build:web';
@@ -123,7 +127,7 @@ describe('desktop Tauri layout', () => {
   });
 
   it('installs official Tauri prerequisites only on Linux with a target-safe shell', () => {
-    const workflow = readFileSync(ciWorkflowPath, 'utf8');
+    const workflow = readText(ciWorkflowPath);
     const job = workflowJob(workflow, 'desktop-runtime');
 
     expect(job).toMatch(
