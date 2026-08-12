@@ -309,6 +309,8 @@ type Project = {
     is_main: boolean;
     dirty: boolean;
     missing: boolean;
+    prunable?: boolean;
+    bare?: boolean;
     collapsed?: boolean;
   }>;
 };
@@ -330,6 +332,7 @@ type LocalThread = {
 type RemoteSession = {
   id: string;
   projectRoot: string;
+  labels?: string[];
   title?: string;
   harness?: string;
   status?: string;
@@ -417,6 +420,10 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'isPicked'),
     extractFunctionSource(mainJs, 'toggleSetPick'),
     extractFunctionSource(mainJs, 'isDormantThread'),
+    extractFunctionSource(mainJs, 'covenRootDepth'),
+    extractFunctionSource(mainJs, 'covenProjectCandidate'),
+    extractFunctionSource(mainJs, 'compareCovenProjectCandidates'),
+    extractFunctionSource(mainJs, 'covenSessionAssignments'),
     extractFunctionSource(mainJs, 'covenSessionsForProject'),
     extractFunctionSource(mainJs, 'covenInlineState'),
     extractFunctionSource(mainJs, 'covenToneClass'),
@@ -426,6 +433,7 @@ function createRenderer(options: {
     extractFunctionSource(mainJs, 'disarmSessionClose'),
     extractFunctionSource(mainJs, 'armSessionClose'),
     extractFunctionSource(mainJs, 'threadCovenSessionId'),
+    extractFunctionSource(mainJs, 'isReusableCovenAttachment'),
     extractFunctionSource(mainJs, 'createCovenSessionRow'),
     extractFunctionSource(mainJs, 'renderSessionList'),
   ];
@@ -526,6 +534,38 @@ function textOf(elements: FakeElement[]) {
 }
 
 describe('Tauri Coven session project rail', () => {
+  const ownedWorktreeSession = {
+    id: 'owned-worktree-session',
+    projectRoot: '/repo/.worktrees/task',
+    title: 'Owned worktree session',
+    status: 'running',
+    labels: ['source:psyche-build'],
+  };
+  const parentProject: Project = {
+    id: 'parent',
+    name: 'Parent',
+    root: '/repo',
+    worktrees: [{
+      path: '/repo/.worktrees/task',
+      branch: 'task',
+      is_main: false,
+      dirty: false,
+      missing: false,
+    }],
+  };
+  const taskProject: Project = {
+    id: 'task',
+    name: 'Task',
+    root: '/repo/.worktrees/task',
+    worktrees: [{
+      path: '/repo/.worktrees/task',
+      branch: 'task',
+      is_main: true,
+      dirty: false,
+      missing: false,
+    }],
+  };
+
   it('renders local and daemon sessions as distinct subsections and identities', () => {
     const renderer = createRenderer({
       threads: [{
@@ -542,6 +582,7 @@ describe('Tauri Coven session project rail', () => {
         projectRoot: '/alpha',
         title: 'Durable session',
         status: 'waiting',
+        labels: ['source:psyche-build'],
       }],
     });
 
@@ -558,6 +599,38 @@ describe('Tauri Coven session project rail', () => {
     expect(badges.at(-1)?.title).toBe('Waiting for input');
   });
 
+  it('renders only the one Psyche-owned active Coven row among noisy same-project records', () => {
+    const renderer = createRenderer({
+      threads: [
+        { id: 'local-agent', projectId: 'alpha', name: 'Local agent', status: 'running' },
+        {
+          id: 'local-shell', projectId: 'alpha', name: 'Local shell', status: 'running',
+          kind: 'shell',
+        },
+      ],
+      sessions: [
+        ...['completed', 'failed', 'killed', 'orphaned', 'archived'].map((status) => ({
+          id: `inactive-${status}`, projectRoot: '/alpha', status,
+          labels: ['source:psyche-build'],
+        })),
+        { id: 'foreign', projectRoot: '/alpha', status: 'running', labels: ['source:foreign'] },
+        { id: 'unlabeled', projectRoot: '/alpha', status: 'waiting' },
+        {
+          id: 'visible', projectRoot: '/alpha', title: 'Visible Coven session', status: 'running',
+          labels: ['source:psyche-build'],
+        },
+      ],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-coven-row')?.dataset.sessionId)
+      .toBe('visible');
+    expect(renderer.sessionListEl.querySelectorAll('.session-row').map((row) => row.dataset.threadId))
+      .toEqual(['local-agent', 'local-shell']);
+  });
+
   it('deduplicates the project root from its hydrated main worktree', () => {
     const renderer = createRenderer({
       projects: [{
@@ -566,7 +639,9 @@ describe('Tauri Coven session project rail', () => {
           path: '/alpha', branch: 'main', is_main: true, dirty: false, missing: false,
         }],
       }],
-      sessions: [{ id: 'remote', projectRoot: '/alpha', status: 'waiting' }],
+      sessions: [{
+        id: 'remote', projectRoot: '/alpha', status: 'waiting', labels: ['source:psyche-build'],
+      }],
     });
 
     renderer.render();
@@ -575,10 +650,186 @@ describe('Tauri Coven session project rail', () => {
       .toEqual(['1', '1', '!']);
   });
 
+  it.each([
+    [parentProject, taskProject],
+    [taskProject, parentProject],
+  ])('assigns an overlapping worktree session to its exact saved project regardless of project order',
+    (...projects) => {
+      const renderer = createRenderer({ projects, sessions: [ownedWorktreeSession] });
+
+      renderer.render();
+
+      expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+      expect(renderer.sessionListEl.querySelector('.session-coven-row')?.dataset.sessionId)
+        .toBe('owned-worktree-session');
+      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+        .toEqual(['Task']);
+    });
+
+  it('keeps a worktree session under its parent when only the parent project is saved', () => {
+    const renderer = createRenderer({
+      projects: [parentProject],
+      sessions: [ownedWorktreeSession],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+    expect(renderer.sessionListEl.querySelector('.session-coven-row')?.dataset.sessionId)
+      .toBe('owned-worktree-session');
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+      .toEqual(['Parent']);
+  });
+
+  it.each([
+    [
+      { ...ownedWorktreeSession, projectRoot: '/unowned' },
+      ownedWorktreeSession,
+    ],
+    [
+      ownedWorktreeSession,
+      { ...ownedWorktreeSession, projectRoot: '/unowned' },
+    ],
+  ])('selects an owned occurrence when duplicate session IDs span discovery buckets',
+    (...sessions) => {
+      const renderer = createRenderer({ projects: [taskProject], sessions });
+
+      renderer.render();
+
+      expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+      expect(renderer.sessionListEl.querySelector('.session-coven-row')?.dataset.sessionId)
+        .toBe('owned-worktree-session');
+      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+        .toEqual(['Task']);
+    });
+
+  it.each([
+    [
+      { ...ownedWorktreeSession, projectRoot: '/verylong' },
+      { ...ownedWorktreeSession, projectRoot: '/a/b' },
+    ],
+    [
+      { ...ownedWorktreeSession, projectRoot: '/a/b' },
+      { ...ownedWorktreeSession, projectRoot: '/verylong' },
+    ],
+  ])('selects the deeper exact-root owner for duplicate session IDs regardless of bucket order',
+    (...sessions) => {
+      const renderer = createRenderer({
+        projects: [
+          { id: 'long', name: 'Long', root: '/verylong' },
+          { id: 'deep', name: 'Deep', root: '/a/b' },
+        ],
+        sessions,
+      });
+
+      renderer.render();
+
+      expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+        .toEqual(['Deep']);
+    });
+
+  it.each(['missing', 'prunable', 'bare'] as const)(
+    'does not assign a session to a parent through a %s worktree',
+    (flag) => {
+      const renderer = createRenderer({
+        projects: [{
+          ...parentProject,
+          worktrees: [{ ...parentProject.worktrees![0], [flag]: true }],
+        }],
+        sessions: [ownedWorktreeSession],
+      });
+
+      renderer.render();
+
+      expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(0);
+      expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    { id: 'empty-root', name: 'Empty root', root: '' },
+    { id: 'missing-root', name: 'Missing root' } as Project,
+  ])('does not assign a listed worktree to a project without a usable root', (project) => {
+    const renderer = createRenderer({
+      projects: [{ ...project, worktrees: parentProject.worktrees }],
+      sessions: [ownedWorktreeSession],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(0);
+    expect(renderer.sessionListEl.querySelectorAll('.session-group-head')).toHaveLength(0);
+  });
+
+  it('keeps exact-root ownership even when the matching project worktree is flagged', () => {
+    const renderer = createRenderer({
+      projects: [{
+        ...taskProject,
+        worktrees: [{ ...taskProject.worktrees![0], missing: true, prunable: true, bare: true }],
+      }],
+      sessions: [ownedWorktreeSession],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+      .toEqual(['Task']);
+  });
+
+  it('uses path-component depth when same-rank parents list one worktree', () => {
+    const renderer = createRenderer({
+      projects: [
+        { ...parentProject, id: 'long', name: 'Long', root: '/verylong' },
+        { ...parentProject, id: 'deep', name: 'Deep', root: '/a/b' },
+      ],
+      sessions: [ownedWorktreeSession],
+    });
+
+    renderer.render();
+
+    expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+    expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+      .toEqual(['Deep']);
+  });
+
+  it.each([
+    [
+      { ...parentProject, id: 'shallow', name: 'Shallow' },
+      {
+        ...parentProject,
+        id: 'deep',
+        name: 'Deep',
+        root: '/repo/nested',
+      },
+      'Deep',
+    ],
+    [
+      { ...parentProject, id: 'z-parent', name: 'Lexical Z', root: '/same/a' },
+      { ...parentProject, id: 'a-parent', name: 'Lexical A', root: '/same/b' },
+      'Lexical A',
+    ],
+  ])('breaks same-rank ownership ties deterministically', (first, second, expectedOwner) => {
+    [
+      [first, second],
+      [second, first],
+    ].forEach((projects) => {
+      const renderer = createRenderer({ projects, sessions: [ownedWorktreeSession] });
+
+      renderer.render();
+
+      expect(renderer.sessionListEl.querySelectorAll('.session-coven-row')).toHaveLength(1);
+      expect(textOf(renderer.sessionListEl.querySelectorAll('.session-group-head')))
+        .toEqual([expectedOwner]);
+    });
+  });
+
   it('labels unattached daemon rows and opens their distinct Coven identity', async () => {
     const renderer = createRenderer({
       sessions: [{
         id: 'remote', projectRoot: '/alpha', title: 'Durable session', status: 'running',
+        labels: ['source:psyche-build'],
       }],
     });
 
@@ -596,7 +847,10 @@ describe('Tauri Coven session project rail', () => {
 
   it('keeps stale rows visible with one discovery status line', () => {
     const renderer = createRenderer({
-      sessions: [{ id: 'remote', projectRoot: '/alpha', title: 'Remote', status: 'running' }],
+      sessions: [{
+        id: 'remote', projectRoot: '/alpha', title: 'Remote', status: 'running',
+        labels: ['source:psyche-build'],
+      }],
       phase: 'unavailable',
       message: 'Daemon offline',
       stale: true,
@@ -734,6 +988,7 @@ describe('Tauri Coven session project rail', () => {
       }],
       sessions: [{
         id: 'daemon-feature', projectRoot: '/alpha-feature', title: 'Daemon feature', status: 'waiting',
+        labels: ['source:psyche-build'],
       }],
     });
 
@@ -815,6 +1070,7 @@ describe('Tauri Coven session project rail', () => {
       threads: [{ id: 'local', projectId: 'alpha', name: 'Review locally', status: 'running' }],
       sessions: [{
         id: 'daemon', projectRoot: '/alpha', title: 'Ship release', status: 'waiting',
+        labels: ['source:psyche-build'],
       }],
     });
 
