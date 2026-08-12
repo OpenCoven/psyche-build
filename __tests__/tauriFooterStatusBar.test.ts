@@ -128,6 +128,9 @@ function footerSection(source: string) {
 
 describe('Tauri footer status bar shell', () => {
   it('wraps the composer, detail panel, and status rail in one footer stack', () => {
+    expect(indexHtml.match(/<footer class="composer" id="composer">/g)).toHaveLength(1);
+    expect(indexHtml.match(/<\/footer>/g)).toHaveLength(1);
+
     const order = [
       'id="footer-stack"',
       'id="composer"',

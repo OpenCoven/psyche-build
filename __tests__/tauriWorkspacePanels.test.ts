@@ -11,6 +11,11 @@ const indexHtml = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
   'utf8'
 );
+
+function idCount(id: string): number {
+  return indexHtml.match(new RegExp(`id="${id}"`, 'g'))?.length ?? 0;
+}
+
 const sessionsBundle = readFileSync(
   join(repoRoot, 'native/macos/psyche-build-tauri/web/sessions.bundle.js'),
   'utf8'
@@ -43,6 +48,43 @@ const tauriPackage = JSON.parse(
 };
 
 describe('Tauri workspace panels', () => {
+  it('keeps every composer control inside one canonical footer', () => {
+    for (const id of [
+      'composer',
+      'composer-mic',
+      'composer-call',
+      'composer-send',
+      'scope-menu',
+      'scope-desc-pane',
+      'scope-desc-project',
+      'scope-desc-agents',
+      'call-bar',
+      'call-target',
+      'call-note',
+      'call-timer',
+      'call-mute',
+      'call-end',
+      'palette',
+    ]) {
+      expect(idCount(id), `${id} should occur exactly once`).toBe(1);
+    }
+
+    const composerStart = indexHtml.indexOf('<footer class="composer" id="composer">');
+    const composerEnd = indexHtml.indexOf('</footer>', composerStart);
+    const composer = indexHtml.slice(composerStart, composerEnd + '</footer>'.length);
+
+    for (const id of [
+      'composer-mic',
+      'composer-call',
+      'composer-send',
+      'scope-menu',
+      'call-bar',
+      'palette',
+    ]) {
+      expect(composer).toContain(`id="${id}"`);
+    }
+  });
+
   it('registers a scoped pane-session metrics command', () => {
     expect(tauriLib).toContain('mod pane_metrics;');
     expect(tauriLib).toMatch(
