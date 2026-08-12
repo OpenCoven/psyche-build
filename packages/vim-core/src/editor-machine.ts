@@ -159,8 +159,9 @@ function graphemes(text: string): { value: string; index: number }[] {
 
 function wordForward(text: string, position: number, count: number, big: boolean): number {
   const parts = graphemes(text);
-  let index = Math.max(0, parts.findIndex((part) => part.index >= position));
-  if (index < 0) return text.length;
+  const found = parts.findIndex((part) => part.index >= position);
+  if (found < 0) return text.length;
+  let index = found;
   for (let step = 0; step < count; step += 1) {
     const current = kind(parts[index]?.value ?? ' ', big);
     while (index < parts.length && kind(parts[index]!.value, big) === current) index += 1;
