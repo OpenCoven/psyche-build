@@ -38,15 +38,21 @@ public final class NetServiceBonjourResolver: BonjourServiceResolving, @unchecke
 
 struct NetServiceResolutionLifecycle: @unchecked Sendable {
     let beforeContinuationRegistration: @Sendable () -> Void
+    let afterContinuationRegistration: @Sendable () -> Void
+    let didAttemptTimerRetention: @Sendable () -> Void
     let didCreateTimeoutTask: @Sendable () -> Void
     let didStartService: @Sendable () -> Void
 
     init(
         beforeContinuationRegistration: @escaping @Sendable () -> Void = {},
+        afterContinuationRegistration: @escaping @Sendable () -> Void = {},
+        didAttemptTimerRetention: @escaping @Sendable () -> Void = {},
         didCreateTimeoutTask: @escaping @Sendable () -> Void = {},
         didStartService: @escaping @Sendable () -> Void = {}
     ) {
         self.beforeContinuationRegistration = beforeContinuationRegistration
+        self.afterContinuationRegistration = afterContinuationRegistration
+        self.didAttemptTimerRetention = didAttemptTimerRetention
         self.didCreateTimeoutTask = didCreateTimeoutTask
         self.didStartService = didStartService
     }
@@ -133,6 +139,7 @@ final class NetServiceResolution: NSObject, NetServiceDelegate, @unchecked Senda
             }
             return
         }
+        lifecycle.afterContinuationRegistration()
 
         let timeoutTask = Task { [weak self] in
             guard let self else { return }
@@ -144,10 +151,11 @@ final class NetServiceResolution: NSObject, NetServiceDelegate, @unchecked Senda
             }
         }
         let retainedTimer = lock.withLock { () -> Bool in
-            guard continuation != nil else { return false }
+            guard self.continuation != nil else { return false }
             self.timeoutTask = timeoutTask
             return true
         }
+        lifecycle.didAttemptTimerRetention()
         guard retainedTimer else {
             timeoutTask.cancel()
             return

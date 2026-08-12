@@ -295,6 +295,49 @@ final class BonjourHostDiscoveryTests: XCTestCase {
         XCTAssertFalse(resolution.hasPendingResolution)
     }
 
+    func testResolverCancellationAfterRegistrationBeforeTimerRetentionDoesNotRetainWork() async throws {
+        let boundary = ResolverPostRegistrationBoundary()
+        let lifecycle = NetServiceResolutionLifecycle(
+            afterContinuationRegistration: {
+                boundary.arriveAndWait()
+            },
+            didAttemptTimerRetention: {
+                boundary.timerRetentionAttempted.fulfill()
+            },
+            didCreateTimeoutTask: {
+                boundary.recordTimeoutTask()
+            },
+            didStartService: {
+                boundary.recordServiceStart()
+            }
+        )
+        let resolution = NetServiceResolution(
+            name: "Studio",
+            domain: "local.",
+            timeout: 60,
+            lifecycle: lifecycle
+        )
+        let task = Task {
+            try await resolution.resolve()
+        }
+
+        await fulfillment(of: [boundary.registrationReached], timeout: 1)
+        task.cancel()
+        boundary.allowTimerRetention()
+        await fulfillment(of: [boundary.timerRetentionAttempted], timeout: 1)
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(boundary.timeoutTaskCount, 0)
+        XCTAssertEqual(boundary.serviceStartCount, 0)
+        XCTAssertFalse(resolution.hasPendingResolution)
+    }
+
     private func makeRecord(
         name: String = "Studio",
         domain: String = "local.",
@@ -389,6 +432,35 @@ private final class ResolverRegistrationBoundary: @unchecked Sendable {
 
     func allowRegistration() {
         registrationGate.signal()
+    }
+
+    func recordTimeoutTask() {
+        lock.withLock { storedTimeoutTaskCount += 1 }
+    }
+
+    func recordServiceStart() {
+        lock.withLock { storedServiceStartCount += 1 }
+    }
+}
+
+private final class ResolverPostRegistrationBoundary: @unchecked Sendable {
+    let registrationReached = XCTestExpectation(description: "resolver registered continuation")
+    let timerRetentionAttempted = XCTestExpectation(description: "resolver attempted timer retention")
+    private let lock = NSLock()
+    private let timerRetentionGate = DispatchSemaphore(value: 0)
+    private var storedTimeoutTaskCount = 0
+    private var storedServiceStartCount = 0
+
+    var timeoutTaskCount: Int { lock.withLock { storedTimeoutTaskCount } }
+    var serviceStartCount: Int { lock.withLock { storedServiceStartCount } }
+
+    func arriveAndWait() {
+        registrationReached.fulfill()
+        timerRetentionGate.wait()
+    }
+
+    func allowTimerRetention() {
+        timerRetentionGate.signal()
     }
 
     func recordTimeoutTask() {
