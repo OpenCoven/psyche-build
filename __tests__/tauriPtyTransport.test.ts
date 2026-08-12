@@ -663,6 +663,64 @@ describe('typed frontend PTY batch consumer', () => {
     expect(invoke).toHaveBeenCalledTimes(3);
   });
 
+  test('restarts queued latest visibility after an in-flight rejection without busy retrying', async () => {
+    const firstHide = deferred<undefined>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => firstHide.promise)
+      .mockResolvedValueOnce(undefined);
+    runtimeThreadIds.add('thread-e-restart');
+    const client = createPtyClient({
+      threadId: 'thread-e-restart',
+      invoke,
+      write() {},
+      visible: true,
+    });
+
+    try {
+      await client.markPtyStarted();
+
+      const hide = client.setVisible(false);
+      const show = client.setVisible(true).catch((error) => error);
+      const finalHide = client.setVisible(false).catch((error) => error);
+
+      expect(invoke).toHaveBeenCalledTimes(2);
+      expect(invoke).toHaveBeenNthCalledWith(2, 'pty_set_visibility', {
+        threadId: 'thread-e-restart',
+        thread_id: 'thread-e-restart',
+        visible: false,
+      });
+
+      firstHide.reject(new Error('visibility sync failed'));
+
+      await expect(hide).rejects.toThrow('visibility sync failed');
+      await expect(show).resolves.toBeInstanceOf(Error);
+      await expect(finalHide).resolves.toBeInstanceOf(Error);
+      await flushAsyncWork();
+
+      expect(invoke).toHaveBeenCalledTimes(3);
+      expect(invoke).toHaveBeenNthCalledWith(3, 'pty_set_visibility', {
+        threadId: 'thread-e-restart',
+        thread_id: 'thread-e-restart',
+        visible: false,
+      });
+
+      await flushAsyncWork();
+      await expect(client.setVisible(false)).resolves.toBe(false);
+      expect(invoke).toHaveBeenCalledTimes(3);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   test('disposal removes pane routing and suppresses later acknowledgements from stale callbacks', async () => {
     const writes: Array<{ callback: () => void }> = [];
     const invoke = vi.fn(async () => undefined);

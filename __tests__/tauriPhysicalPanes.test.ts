@@ -68,7 +68,9 @@ const spawnPtyRuntimeDeps = {
   ensureThreadPtyController(thread: Record<string, unknown>) {
     if (thread.terminalController) return thread.terminalController;
     const controller = {
-      prepareForPtyStart: () => undefined,
+      prepareForPtyStart: () => 1,
+      restoreAfterFailedPtyStart: () => undefined,
+      adoptRunningPty: () => Promise.resolve(false),
       markPtyStarted: () => Promise.resolve(false),
       stopPtyDelivery: () => undefined,
       dispose: () => undefined,
@@ -890,7 +892,9 @@ describe('Tauri physical terminal panes', () => {
       closing: false, closeStarted: false, startInFlight: false,
       stopRequested: false, ptyStarted: false, term: null, fit: null,
       terminalController: {
-        prepareForPtyStart: () => undefined,
+        prepareForPtyStart: () => 1,
+        restoreAfterFailedPtyStart: () => undefined,
+        adoptRunningPty: () => Promise.resolve(false),
         markPtyStarted: () => Promise.resolve(false),
         stopPtyDelivery: () => undefined,
         dispose: () => { controllerDisposals += 1; },

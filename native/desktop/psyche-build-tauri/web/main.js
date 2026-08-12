@@ -2039,8 +2039,9 @@
     }
     var launch = thread.launch;
     var terminalController = ensureThreadPtyController(thread);
+    var ptyStartAttempt = null;
     if (terminalController && typeof terminalController.prepareForPtyStart === "function") {
-      terminalController.prepareForPtyStart();
+      ptyStartAttempt = terminalController.prepareForPtyStart();
     }
     thread.lastOutputAt = 0;
     thread.isWorking = false;
@@ -2080,6 +2081,10 @@
     }).then(function () {
       thread.startInFlight = false;
       if (!isLiveThread(thread)) {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         return stopThreadPty(thread).then(function () { return false; });
       }
       if (thread.exitDuringStart) {
@@ -2087,6 +2092,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -2097,7 +2106,7 @@
       thread.spawning = false;
       if (thread.terminalController &&
           typeof thread.terminalController.markPtyStarted === "function") {
-        thread.terminalController.markPtyStarted().catch(function () {});
+        thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
       }
       syncThreadPaneMetadata(thread);
       refreshSidebar();
@@ -2111,6 +2120,10 @@
       thread.startInFlight = false;
       var msg = String(err);
       if (!isLiveThread(thread)) {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         if (msg.indexOf("already running") !== -1) {
           thread.ptyStarted = true;
           return stopThreadPty(thread).then(function () { return false; });
@@ -2122,6 +2135,10 @@
         thread.ptyStarted = false;
         thread.spawning = false;
         thread.isWorking = false;
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         syncThreadPaneMetadata(thread);
         refreshSidebar();
         refreshTabs();
@@ -2129,6 +2146,10 @@
       }
       thread.spawning = false;
       if (msg.indexOf("cleanup in progress") !== -1) {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         if (thread.terminalController) thread.terminalController.stopPtyDelivery();
         thread.status = "exited";
@@ -2142,14 +2163,21 @@
         thread.status = "running";
         thread.stopRequested = false;
         if (thread.terminalController &&
+            typeof thread.terminalController.adoptRunningPty === "function") {
+          thread.terminalController.adoptRunningPty(ptyStartAttempt).catch(function () {});
+        } else if (thread.terminalController &&
             typeof thread.terminalController.markPtyStarted === "function") {
-          thread.terminalController.markPtyStarted().catch(function () {});
+          thread.terminalController.markPtyStarted(ptyStartAttempt).catch(function () {});
         }
         if (state.activeThreadId === thread.id) {
           setProjectStatus(findProject(thread.projectId), "ok");
         }
         if (launch.launchKind === "coven-chat") refreshCovenSessions();
       } else {
+        if (terminalController &&
+            typeof terminalController.restoreAfterFailedPtyStart === "function") {
+          terminalController.restoreAfterFailedPtyStart(ptyStartAttempt);
+        }
         thread.ptyStarted = false;
         thread.status = "failed";
         thread.isWorking = false;
