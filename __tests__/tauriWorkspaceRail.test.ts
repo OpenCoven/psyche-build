@@ -88,6 +88,10 @@ describe('Tauri project/worktree/pane rail', () => {
     const sidebarHead = sidebarHeadHtml(indexHtml);
 
     expect(indexHtml).toContain('class="sidebar-controls"');
+    expect(indexHtml).toContain('class="sidebar-tabs" role="tablist" aria-label="Sidebar sections"');
+    expect(indexHtml).toContain('class="sidebar-settings" id="sidebar-settings"');
+    expect(indexHtml).toContain('class="sidebar-resize"');
+    expect(indexHtml).toContain('id="sidebar-resize" role="separator" aria-orientation="vertical"');
     expect(titlebar).toContain('class="titlebar-sidebar"');
     expect(titlebar).toContain('class="titlebar-workspace"');
     expect(titlebar).toContain('src="./assets/psyche-mark.png"');
