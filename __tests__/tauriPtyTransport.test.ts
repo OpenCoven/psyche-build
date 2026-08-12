@@ -317,16 +317,32 @@ function batch(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsyncWork() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 const runtimeThreadIds = new Set<string>();
 
 afterEach(() => {
   runtimeThreadIds.forEach((threadId) => disposePtyClient(threadId));
   runtimeThreadIds.clear();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('typed frontend PTY batch consumer', () => {
-  test('accepts only the exact next sequence for the owning thread', () => {
+  test('accepts only the exact next sequence for the owning thread', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
     const invoke = vi.fn(async () => undefined);
     runtimeThreadIds.add('thread-a');
@@ -348,6 +364,7 @@ describe('typed frontend PTY batch consumer', () => {
     expect(Array.from(writes[0].bytes)).toEqual([1, 2]);
 
     writes[0].callback();
+    await flushAsyncWork();
 
     expect(writes).toHaveLength(2);
     expect(Array.from(writes[1].bytes)).toEqual([4]);
@@ -359,7 +376,7 @@ describe('typed frontend PTY batch consumer', () => {
     });
   });
 
-  test('keeps at most one xterm write active and bounds pending delivery to native two-in-flight', () => {
+  test('keeps at most one xterm write active and bounds pending delivery to native two-in-flight', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
     runtimeThreadIds.add('thread-b');
     createPtyClient({
@@ -376,6 +393,7 @@ describe('typed frontend PTY batch consumer', () => {
     expect(writes).toHaveLength(1);
 
     writes[0].callback();
+    await flushAsyncWork();
 
     expect(writes).toHaveLength(2);
     expect(Array.from(writes[1].bytes)).toEqual([2]);
@@ -399,7 +417,7 @@ describe('typed frontend PTY batch consumer', () => {
     expect(invoke).not.toHaveBeenCalled();
 
     writes[0].callback();
-    await Promise.resolve();
+    await flushAsyncWork();
 
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledWith('pty_ack', {
@@ -409,7 +427,60 @@ describe('typed frontend PTY batch consumer', () => {
     });
   });
 
-  test('ignores stale write callbacks from an earlier PTY generation', async () => {
+  test('retries the current acknowledgement before writing later batches', async () => {
+    vi.useFakeTimers();
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error('ack failed once'))
+      .mockResolvedValue(undefined);
+    runtimeThreadIds.add('thread-c-ack-retry');
+    createPtyClient({
+      threadId: 'thread-c-ack-retry',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c-ack-retry', 1, [1]))).toBe(true);
+    expect(routePtyBatch(batch('thread-c-ack-retry', 2, [2]))).toBe(true);
+    expect(writes).toHaveLength(1);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'pty_ack', {
+      threadId: 'thread-c-ack-retry',
+      thread_id: 'thread-c-ack-retry',
+      sequence: 1,
+    });
+    expect(writes).toHaveLength(1);
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(2, 'pty_ack', {
+      threadId: 'thread-c-ack-retry',
+      thread_id: 'thread-c-ack-retry',
+      sequence: 1,
+    });
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+
+    writes[1].callback();
+    await flushAsyncWork();
+
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(invoke).toHaveBeenNthCalledWith(3, 'pty_ack', {
+      threadId: 'thread-c-ack-retry',
+      thread_id: 'thread-c-ack-retry',
+      sequence: 2,
+    });
+  });
+
+  test('preserves one active xterm write across PTY generation reset', async () => {
     const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
     const invoke = vi.fn(async () => undefined);
     runtimeThreadIds.add('thread-c-generation');
@@ -426,17 +497,21 @@ describe('typed frontend PTY batch consumer', () => {
     client.prepareForPtyStart();
 
     expect(routePtyBatch(batch('thread-c-generation', 1, [2]))).toBe(true);
-    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
-    expect(writes).toHaveLength(2);
+    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(false);
+    expect(writes).toHaveLength(1);
 
     writes[0].callback();
-    await Promise.resolve();
+    await flushAsyncWork();
 
     expect(invoke).not.toHaveBeenCalled();
     expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+
+    expect(routePtyBatch(batch('thread-c-generation', 2, [3]))).toBe(true);
+    expect(writes).toHaveLength(2);
 
     writes[1].callback();
-    await Promise.resolve();
+    await flushAsyncWork();
 
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledWith('pty_ack', {
@@ -446,6 +521,47 @@ describe('typed frontend PTY batch consumer', () => {
     });
     expect(writes).toHaveLength(3);
     expect(Array.from(writes[2].bytes)).toEqual([3]);
+  });
+
+  test('cancels stale acknowledgement retries across PTY generation reset', async () => {
+    vi.useFakeTimers();
+    const writes: Array<{ bytes: Uint8Array; callback: () => void }> = [];
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error('stale ack failed'))
+      .mockResolvedValue(undefined);
+    runtimeThreadIds.add('thread-c-generation-ack');
+    const client = createPtyClient({
+      threadId: 'thread-c-generation-ack',
+      invoke,
+      write(bytes, callback) {
+        writes.push({ bytes, callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-c-generation-ack', 1, [1]))).toBe(true);
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    client.prepareForPtyStart();
+    expect(routePtyBatch(batch('thread-c-generation-ack', 1, [2]))).toBe(true);
+    expect(writes).toHaveLength(2);
+    expect(Array.from(writes[1].bytes)).toEqual([2]);
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    writes[1].callback();
+    await flushAsyncWork();
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(2, 'pty_ack', {
+      threadId: 'thread-c-generation-ack',
+      thread_id: 'thread-c-generation-ack',
+      sequence: 1,
+    });
   });
 
   test('does not acknowledge when xterm write throws', async () => {
@@ -460,12 +576,16 @@ describe('typed frontend PTY batch consumer', () => {
     });
 
     expect(routePtyBatch(batch('thread-d', 1, [8]))).toBe(false);
-    await Promise.resolve();
+    await flushAsyncWork();
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  test('syncs visibility only on actual changes and resynchronizes after PTY start', async () => {
-    const invoke = vi.fn(async () => undefined);
+  test('retries same-value visibility sync after a failed invoke and deduplicates after success', async () => {
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('visibility sync failed'))
+      .mockResolvedValueOnce(undefined);
     runtimeThreadIds.add('thread-e');
     const client = createPtyClient({
       threadId: 'thread-e',
@@ -474,28 +594,73 @@ describe('typed frontend PTY batch consumer', () => {
       visible: true,
     });
 
-    await client.setVisible(true);
-    await client.setVisible(false);
-    expect(invoke).not.toHaveBeenCalled();
-
     await client.markPtyStarted();
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenNthCalledWith(1, 'pty_set_visibility', {
       threadId: 'thread-e',
       thread_id: 'thread-e',
-      visible: false,
+      visible: true,
     });
 
-    await client.setVisible(false);
-    expect(invoke).toHaveBeenCalledTimes(1);
-
-    await client.setVisible(true);
+    await expect(client.setVisible(false)).rejects.toThrow('visibility sync failed');
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke).toHaveBeenNthCalledWith(2, 'pty_set_visibility', {
       threadId: 'thread-e',
       thread_id: 'thread-e',
+      visible: false,
+    });
+
+    await expect(client.setVisible(false)).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(invoke).toHaveBeenNthCalledWith(3, 'pty_set_visibility', {
+      threadId: 'thread-e',
+      thread_id: 'thread-e',
+      visible: false,
+    });
+
+    await expect(client.setVisible(false)).resolves.toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(3);
+  });
+
+  test('serializes visibility sync while applying the latest desired state', async () => {
+    const firstSync = deferred<undefined>();
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => firstSync.promise)
+      .mockResolvedValueOnce(undefined);
+    runtimeThreadIds.add('thread-e-in-flight');
+    const client = createPtyClient({
+      threadId: 'thread-e-in-flight',
+      invoke,
+      write() {},
       visible: true,
     });
+
+    await client.markPtyStarted();
+
+    const hide = client.setVisible(false);
+    const show = client.setVisible(true);
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenNthCalledWith(2, 'pty_set_visibility', {
+      threadId: 'thread-e-in-flight',
+      thread_id: 'thread-e-in-flight',
+      visible: false,
+    });
+
+    firstSync.resolve(undefined);
+    await Promise.all([hide, show]);
+
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(invoke).toHaveBeenNthCalledWith(3, 'pty_set_visibility', {
+      threadId: 'thread-e-in-flight',
+      thread_id: 'thread-e-in-flight',
+      visible: true,
+    });
+
+    await expect(client.setVisible(true)).resolves.toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(3);
   });
 
   test('disposal removes pane routing and suppresses later acknowledgements from stale callbacks', async () => {
@@ -515,8 +680,36 @@ describe('typed frontend PTY batch consumer', () => {
     expect(routePtyBatch(batch('thread-f', 2, [2]))).toBe(false);
 
     writes[0].callback();
-    await Promise.resolve();
+    await flushAsyncWork();
 
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test('disposal cancels stale acknowledgement retries', async () => {
+    vi.useFakeTimers();
+    const writes: Array<{ callback: () => void }> = [];
+    const invoke = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error('ack failed once'))
+      .mockResolvedValue(undefined);
+    runtimeThreadIds.add('thread-f-ack-retry');
+    createPtyClient({
+      threadId: 'thread-f-ack-retry',
+      invoke,
+      write(_bytes, callback) {
+        writes.push({ callback });
+      },
+    });
+
+    expect(routePtyBatch(batch('thread-f-ack-retry', 1, [1]))).toBe(true);
+
+    writes[0].callback();
+    await flushAsyncWork();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(disposePtyClient('thread-f-ack-retry')).toBe(true);
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });
