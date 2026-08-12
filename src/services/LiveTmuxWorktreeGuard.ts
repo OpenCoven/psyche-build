@@ -36,6 +36,13 @@ export function inspectLiveTmuxWorktreeConsumers(
     );
     output = typeof result === 'string' ? result : String(result);
   } catch (error) {
+    // A tmux client reports an absent server with exit status 1. That is a
+    // positive absence result: without a server there cannot be a pane using
+    // the worktree. Other client failures remain conservative and block
+    // destructive cleanup.
+    if (isTmuxServerAbsent(error)) {
+      return { state: 'safe' };
+    }
     return {
       state: 'unknown',
       error: `could not query live tmux pane paths: ${errorMessage(error)}`,
@@ -95,4 +102,26 @@ function isPathInsideOrEqual(parent: string, candidate: string): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isTmuxServerAbsent(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+  const commandError = error as {
+    status?: unknown;
+    stderr?: unknown;
+  };
+  if (commandError.status !== 1) {
+    return false;
+  }
+  const stderr = typeof commandError.stderr === 'string'
+    ? commandError.stderr
+    : Buffer.isBuffer(commandError.stderr)
+      ? commandError.stderr.toString('utf8')
+      : '';
+  return (
+    /^no server running on\b/m.test(stderr)
+    || /^error connecting to .+ \(No such file or directory\)$/m.test(stderr)
+  );
 }

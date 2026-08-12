@@ -1128,6 +1128,34 @@ describe('WorktreeCleanupService', () => {
     expect(branchOids.has('/test/project')).toBe(false);
   });
 
+  it.each([
+    'no server running on /private/tmp/tmux-501/default',
+    'error connecting to /private/tmp/tmux-501/default (No such file or directory)',
+  ])('treats "%s" as confirmation that no tmux pane can block rollback', async (stderr) => {
+    configureCleanupIdentity();
+    liveTmuxQueryError = Object.assign(new Error('tmux exited'), {
+      status: 1,
+      stderr,
+    });
+
+    const { WorktreeCleanupService } = await import('../src/services/WorktreeCleanupService.js');
+    (WorktreeCleanupService as any).instance = undefined;
+    const result = await WorktreeCleanupService.getInstance().rollbackCreatedWorktree({
+      worktreePath: '/test/project/.psyche/worktrees/react',
+      branchName: 'react',
+      branchOid: 'abc123',
+      mainRepoPath: '/test/project',
+      deleteBranch: true,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(
+      worktreeMappings.get('/test/project')?.has(
+        resolve('/test/project/.psyche/worktrees/react'),
+      ),
+    ).toBe(false);
+  });
+
   it('preserves a rollback branch that advances after validation but before deletion', async () => {
     configureCleanupIdentity();
     branchAdvanceBeforeDelete = 'advanced-oid';
