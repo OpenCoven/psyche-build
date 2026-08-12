@@ -1458,6 +1458,7 @@ describe('Tauri physical terminal panes', () => {
       markActiveSurface: () => undefined,
       state,
       findProject: () => project,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
       paneLayoutFor: () => null,
       PsychePanes,
       renderPaneWorkspace: () => undefined,
@@ -1477,6 +1478,79 @@ describe('Tauri physical terminal panes', () => {
     expect(project.lastActiveThreadId).toBe(thread.id);
     expect(project.selectedWorktreePath).toBe('/repo');
     expect(refreshes).toBe(1);
+  });
+
+  it('refreshes the Git owner once when direct focus changes project and worktree scope', async () => {
+    const oldProject = {
+      id: 'project-a',
+      selectedWorktreePath: '/worktree-a',
+      lastActiveThreadId: null as string | null,
+    };
+    const nextProject = {
+      id: 'project-b',
+      selectedWorktreePath: '/worktree-b-old',
+      lastActiveThreadId: null as string | null,
+    };
+    const state = {
+      activeProjectId: oldProject.id,
+      activeThreadId: 'thread-a' as string | null,
+    };
+    const thread = {
+      id: 'thread-b',
+      kind: 'shell',
+      projectId: nextProject.id,
+      worktreePath: '/worktree-b',
+      status: 'running',
+      term: null,
+    };
+    let generation = 1;
+    const renderedScopes: string[] = [];
+    const activeProject = () => state.activeProjectId === nextProject.id ? nextProject : oldProject;
+    const activeWorkspaceRoot = (project: typeof oldProject) => project.selectedWorktreePath;
+    const requestMatches = compileFunction<(
+      projectId: string,
+      workspaceRoot: string,
+      candidate: number,
+    ) => boolean>(functionSource('gitPanelRequestMatches'), {
+      activeProject,
+      activeWorkspaceRoot,
+      gitPanelRequestGate: { isCurrent: (candidate: number) => candidate === generation },
+      gitPaneIsVisible: () => true,
+    });
+    const focusThread = compileFunction<(id: string) => Promise<boolean>>(
+      functionSource('focusThread'), {
+        findThread: (id: string) => id === thread.id ? thread : null,
+        showTerminalView: async () => true,
+        markActiveSurface: () => undefined,
+        state,
+        findProject: (id: string) => id === nextProject.id ? nextProject : null,
+        activeWorkspaceRoot,
+        paneLayoutFor: () => null,
+        PsychePanes,
+        renderPaneWorkspace: () => undefined,
+        renderGitSurface: () => {
+          generation += 1;
+          renderedScopes.push(`${state.activeProjectId}:${nextProject.selectedWorktreePath}`);
+          return true;
+        },
+        refreshSidebar: () => undefined,
+        requestAnimationFrame: (callback: () => void) => callback(),
+        scheduleVisiblePaneFit: () => undefined,
+        syncBrowserBounds: () => undefined,
+        setProjectStatus: () => undefined,
+        statusLevel: () => 'ok',
+        refreshStatusController: () => undefined,
+      },
+    );
+
+    const oldGeneration = generation;
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(renderedScopes).toEqual(['project-b:/worktree-b']);
+    expect(requestMatches('project-a', '/worktree-a', oldGeneration)).toBe(false);
+    expect(requestMatches('project-b', '/worktree-b', generation)).toBe(true);
+
+    await expect(focusThread(thread.id)).resolves.toBe(true);
+    expect(renderedScopes).toEqual(['project-b:/worktree-b']);
   });
 
   it('refreshes direct setActiveProject once while honoring suppressed outer refresh', async () => {

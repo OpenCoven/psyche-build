@@ -534,6 +534,50 @@ describe('Tauri workspace panels', () => {
       expect(calls).toEqual(['focus:git-existing', 'render']);
     });
 
+    it('reopens a hidden Git owner before revealing and focusing without allocating a duplicate', async () => {
+      const source = functionSource('openOrFocusGitPane');
+      const calls: string[] = [];
+      const existing = { id: 'git-existing', hidden: true };
+      const state = { threads: [existing] };
+      const openOrFocusGitPane = Function(
+        'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+        'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
+        'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+        'state', 'noteStatusActivity', 'mountToolPane',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        `"use strict"; return (${source});`,
+      )(
+        () => ({ id: 'project-a' }),
+        () => undefined,
+        () => '/worktree-a',
+        () => existing,
+        async () => true,
+        (id: string) => {
+          calls.push(`reopen:${id}`);
+          existing.hidden = false;
+          return true;
+        },
+        () => { calls.push('reveal'); },
+        async (id: string) => { calls.push(`focus:${id}`); },
+        () => { calls.push('allocate'); return 'git-new'; },
+        () => { calls.push('place'); return null; },
+        () => { calls.push('commit'); },
+        state,
+        () => { calls.push('activity'); },
+        () => { calls.push('mount'); },
+        () => { calls.push('render'); },
+        () => { calls.push('sidebar'); },
+        () => { calls.push('save'); },
+      ) as () => Promise<typeof existing>;
+
+      await expect(openOrFocusGitPane()).resolves.toBe(existing);
+      expect(existing.hidden).toBe(false);
+      expect(state.threads).toEqual([existing]);
+      expect(calls).toEqual([
+        'reopen:git-existing', 'reveal', 'focus:git-existing', 'render',
+      ]);
+    });
+
     it('cancels before allocating Git state when leaving a dirty file is declined', async () => {
       const source = functionSource('openOrFocusGitPane');
       const calls: string[] = [];
@@ -764,6 +808,85 @@ describe('Tauri workspace panels', () => {
     expect(mainJs).not.toContain('cmd: "/split"');
     expect(mainJs).not.toMatch(/e\.key === "\\\\"/);
     expect(mainJs).not.toMatch(/e\.code === "KeyB" && e\.altKey/);
+    expect(stylesCss).not.toContain('@keyframes browser-pane-in');
+  });
+
+  it('stages Git before every shared close path and preserves the Git close label', () => {
+    const calls: string[] = [];
+    const attributes = new Map<string, string>();
+    const thread = {
+      id: 'git',
+      projectId: 'project',
+      worktreePath: '/repo',
+      name: 'Git',
+      kind: 'git',
+      status: '',
+      closing: false,
+      closeStarted: false,
+      metricsGeneration: 0,
+      metricsRefreshTimer: 0,
+      startInFlight: false,
+      term: null,
+      pane: null,
+      paneTitle: null,
+      paneMeta: null,
+      paneClose: {
+        title: 'stale',
+        setAttribute: (name: string, value: string) => attributes.set(name, value),
+      },
+    };
+    const state = { threads: [thread], activeThreadId: thread.id };
+    const closeThread = Function(
+      'findThread', 'markActiveSurface', 'stageGitSurface', 'clearTimeout',
+      'noteStatusActivity', 'pendingDataBuffers', 'forgetThreadInSets',
+      'detachThreadPane', 'stopThreadPty', 'state',
+      'retainFileFocusAfterThreadRemoval', 'renderPaneWorkspace',
+      'setProjectStatus', 'findProject', 'focusThread', 'refreshSidebar', 'refreshTabs',
+      `"use strict"; return (${functionSource('closeThread')});`,
+    )(
+      () => thread,
+      () => undefined,
+      () => { calls.push('stage'); },
+      () => undefined,
+      () => undefined,
+      new Map(),
+      () => undefined,
+      () => { calls.push('detach'); return null; },
+      () => { calls.push('stop'); return Promise.resolve(true); },
+      state,
+      () => false,
+      () => undefined,
+      () => undefined,
+      () => ({ id: 'project' }),
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    ) as (id: string) => boolean;
+
+    expect(closeThread(thread.id)).toBe(true);
+    expect(calls.slice(0, 2)).toEqual(['stage', 'detach']);
+    expect(calls).not.toContain('stop');
+
+    const syncThreadPaneMetadata = Function(
+      'applyPaneStatus', 'syncPaneBranchStatusChrome', 'syncPaneFooter',
+      'paneLayoutForThread', 'PsychePanes', 'syncPaneSpanControl', 'syncPaneMaxControl',
+      `"use strict"; return (${functionSource('syncThreadPaneMetadata')});`,
+    )(
+      () => '',
+      () => undefined,
+      () => undefined,
+      () => null,
+      {},
+      () => undefined,
+      () => undefined,
+    ) as (value: typeof thread) => void;
+    syncThreadPaneMetadata(thread);
+    expect(thread.paneClose.title).toBe('Close Git pane');
+    expect(attributes.get('aria-label')).toBe('Close Git pane');
+
+    expect(functionSource('closeToolPane')).toContain('closeThread(thread.id)');
+    expect(functionSource('renderSessionList')).toContain('closeThread(thread.id);');
+    expect(mainJs).toMatch(/cmd: "\/close"[\s\S]{0,180}closeThread\(state\.activeThreadId\)/);
   });
 
   describe('voice call bar', () => {

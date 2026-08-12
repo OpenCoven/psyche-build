@@ -835,7 +835,6 @@ describe('Tauri footer status bar shell', () => {
       'createThread',
       'createBrowserPane',
       'openOrFocusGitPane',
-      'closeToolPane',
       'closeThread',
       'hideThread',
       'reopenThread',

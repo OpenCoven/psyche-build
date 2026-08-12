@@ -3486,10 +3486,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-color: rgba(255,255,255,0.10);
   box-shadow: 0 -1px 0 rgba(255,255,255,0.06) inset;
 }
-@keyframes browser-pane-in {
-  from { opacity: 0; transform: translateY(4px) scale(0.992); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 .preview-placeholder.loading::before {
   content: "";
   position: absolute;

@@ -2209,6 +2209,7 @@
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = gitPaneThread(project.id, workspaceRoot);
     if (existing) {
+      if (existing.hidden && !reopenThread(existing.id)) return null;
       revealGitPane(existing);
       await focusThread(existing.id);
       renderGitSurface();
@@ -2252,21 +2253,7 @@
 
   /** Close the pane after returning its shared surface to neutral staging. */
   function closeToolPane(thread) {
-    if (!thread || thread.closeStarted) return;
-    thread.closeStarted = true;
-    thread.closing = true;
-    if (typeof noteStatusActivity === "function") noteStatusActivity();
-    // Stage the surface before the pane is torn down, or it would be
-    // removed from the document along with its container.
-    stageGitSurface();
-    forgetThreadInSets(thread.id);
-    var nextThreadId = detachThreadPane(thread);
-    state.threads = state.threads.filter(function (t) { return t.id !== thread.id; });
-    if (thread.pane && thread.pane.parentNode) thread.pane.parentNode.removeChild(thread.pane);
-    if (state.activeThreadId === thread.id) state.activeThreadId = nextThreadId;
-    renderPaneWorkspace();
-    refreshSidebar();
-    saveWorkspaceSoon();
+    return thread ? closeThread(thread.id) : false;
   }
 
   function mountBrowserPane(thread) {
@@ -3392,6 +3379,9 @@
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    var project = findProject(thread.projectId);
+    var scopeChanged = state.activeProjectId !== thread.projectId ||
+      !project || activeWorkspaceRoot(project) !== thread.worktreePath;
     markActiveSurface(thread.kind === "web" ? "browser" : "terminal");
     state.activeThreadId = id;
     // Make the thread's project the active one so the sidebar/tabs
@@ -3399,7 +3389,6 @@
     if (thread.projectId && state.activeProjectId !== thread.projectId) {
       state.activeProjectId = thread.projectId;
     }
-    var project = findProject(thread.projectId);
     if (project) {
       project.lastActiveThreadId = id;
       project.selectedWorktreePath = thread.worktreePath;
@@ -3408,6 +3397,7 @@
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
     renderPaneWorkspace();
+    if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();
@@ -3454,10 +3444,11 @@
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
-      thread.paneClose.setAttribute(
-        "aria-label",
-        thread.kind === "web" ? "Close Web pane" : "Stop and close " + thread.name
-      );
+      var closeLabel = thread.kind === "web"
+        ? "Close Web pane"
+        : (thread.kind === "git" ? "Close Git pane" : "Stop and close " + thread.name);
+      thread.paneClose.title = closeLabel;
+      thread.paneClose.setAttribute("aria-label", closeLabel);
     }
   }
 
@@ -3524,6 +3515,7 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    if (thread.kind === "git") stageGitSurface();
     if (thread.kind === "web" && state.activeThreadId === id) {
       markActiveSurface("terminal");
     }
@@ -3540,7 +3532,9 @@
     // canvas to it would silently show fewer panes than it claims.
     forgetThreadInSets(id);
     var nextThreadId = detachThreadPane(thread);
-    if (thread.kind !== "web" && !thread.startInFlight) stopThreadPty(thread);
+    if (thread.kind !== "web" && thread.kind !== "git" && !thread.startInFlight) {
+      stopThreadPty(thread);
+    }
     if (thread.term && thread.term.dispose) {
       try { thread.term.dispose(); } catch (_) {}
     }
