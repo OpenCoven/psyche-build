@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
-const webRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
+const webRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
 
