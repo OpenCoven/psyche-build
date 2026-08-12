@@ -1,7 +1,7 @@
 import path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import type { PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
+import type { PaneLayout, PsychePane, PsycheConfig, MergeTargetReference } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
 import {
   assertTmuxGenerationUnchanged,
@@ -14,7 +14,15 @@ import {
   getTerminalDimensions,
   splitPane,
 } from './tmux.js';
-import { SIDEBAR_WIDTH, recalculateAndApplyLayout } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
+import {
+  insertPane,
+  reconcilePaneLayout,
+  seedPaneLayout,
+} from '../layout/PaneLayoutTree.js';
 import { generateSlug } from './slug.js';
 import { capturePaneContent } from './paneCapture.js';
 import { triggerHook, triggerHookSync, initializeHooksDirectory } from './hooks.js';
@@ -84,6 +92,8 @@ export interface CreatePaneOptions {
   skipAgentSelection?: boolean; // Explicitly allow creating pane with no agent
   sessionConfigPath?: string; // Shared psyche config file for the current session
   sessionProjectRoot?: string; // Session root that owns sidebar/welcome pane state
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
   /**
    * A caller that already owns the project lifecycle lease (for example
    * resumeBranches) passes it through so reuse does not try to re-acquire the
@@ -122,7 +132,37 @@ async function persistPaneBeforeAgentLaunch(
   options: CreatePaneOptions,
   sessionProjectRoot: string,
   pane: PsychePane,
+  insertion: Awaited<ReturnType<typeof capturePaneInsertion>>,
 ): Promise<void> {
+  await mutateProjectPaneConfig(sessionProjectRoot, (configRecord) => {
+    const config = configRecord as unknown as PsycheConfig;
+    const currentPanes = Array.isArray(config.panes) ? config.panes : [];
+    const panes = currentPanes.some((candidate) => candidate.id === pane.id)
+      ? currentPanes
+      : [...currentPanes, pane];
+    const paneIds = panes.map((candidate) => candidate.id);
+    const currentLayout = config.paneLayout;
+    let paneLayout: PaneLayout;
+    if (!currentLayout) {
+      paneLayout = seedPaneLayout(paneIds);
+    } else if (insertion && !paneIds.includes(pane.id)) {
+      // The expected pane must be part of this transaction's fresh registry.
+      throw new Error(`Pane layout insertion is missing pane ${pane.id}`);
+    } else if (insertion) {
+      paneLayout = insertPane(
+        currentLayout,
+        insertion.targetPaneId,
+        pane.id,
+        insertion.direction,
+      );
+    } else {
+      paneLayout = reconcilePaneLayout(currentLayout, paneIds);
+    }
+    config.panes = panes;
+    config.paneLayout = paneLayout;
+    config.lastUpdated = new Date().toISOString();
+  });
+
   const persist = options.existingWorktree
     ? options.persistReusedPane
     : options.persistCreatedPane;
@@ -271,6 +311,8 @@ async function createPaneWithReuseReservation(
     skipAgentSelection = false,
     sessionConfigPath: optionsSessionConfigPath,
     sessionProjectRoot: optionsSessionProjectRoot,
+    focusedTmuxPaneId,
+    selectedPaneId,
   } = options;
   let { agent, projectRoot: optionsProjectRoot } = options;
 
@@ -422,6 +464,16 @@ async function createPaneWithReuseReservation(
   // Determine if this is the first content pane
   // Check existingPanes instead of contentPaneIds, because contentPaneIds includes the welcome pane
   const isFirstContentPane = existingPanes.length === 0;
+  const panesFile = optionsSessionConfigPath
+    || path.join(sessionProjectRoot, '.psyche', 'psyche.config.json');
+  const insertion = isFirstContentPane
+    ? undefined
+    : await capturePaneInsertion({
+      panesFile,
+      panes: existingPanes,
+      focusedTmuxPaneId,
+      selectedPaneId,
+    });
 
   let paneInfo: string;
   let creationReservation: WorktreeCreationReservation | undefined;
@@ -442,11 +494,11 @@ async function createPaneWithReuseReservation(
     } else {
       // Subsequent panes - always split horizontally, let layout manager organize
       // Get actual psyche pane IDs (not welcome pane) from existingPanes
-      const psychePaneIds = existingPanes.map(p => p.paneId);
-      const targetPane = psychePaneIds[psychePaneIds.length - 1]; // Split from the most recent psyche pane
-
-      // Always split horizontally - the layout manager will organize panes optimally
-      paneInfo = splitPane({ targetPane, cwd: projectRoot });
+      paneInfo = splitPane(
+        insertion
+          ? { targetPane: insertion.targetTmuxPaneId, cwd: projectRoot }
+          : { cwd: projectRoot }
+      );
     }
   } catch (error) {
     // Check if error is due to stale pane ID (can't find pane)
@@ -481,9 +533,11 @@ async function createPaneWithReuseReservation(
       if (isFirstContentPane) {
         paneInfo = setupSidebarLayout(controlPaneId, projectRoot);
       } else {
-        const psychePaneIds = existingPanes.map(p => p.paneId);
-        const targetPane = psychePaneIds[psychePaneIds.length - 1];
-        paneInfo = splitPane({ targetPane, cwd: projectRoot });
+        paneInfo = splitPane(
+          insertion
+            ? { targetPane: insertion.targetTmuxPaneId, cwd: projectRoot }
+            : { cwd: projectRoot }
+        );
       }
     } else {
       // Different error, re-throw
@@ -561,17 +615,6 @@ async function createPaneWithReuseReservation(
       : buildWorktreePaneTitle(slug, projectRoot, paneProjectName);
     await tmuxService.setPaneTitle(paneInfo, paneTitle);
 
-    if (controlPaneId) {
-      const dimensions = getTerminalDimensions();
-      const allContentPaneIds = [...existingPanes.map(p => p.paneId), paneInfo];
-      await recalculateAndApplyLayout(
-        controlPaneId,
-        allContentPaneIds,
-        dimensions.width,
-        dimensions.height,
-      );
-      await tmuxService.refreshClient();
-    }
   } catch (error) {
     const teardown = await terminatePaneForRollback(
       tmuxService,
@@ -1057,7 +1100,12 @@ async function createPaneWithReuseReservation(
   // points at it. Keep the creation/reuse lease through this mutation so
   // queued cleanup cannot observe an unreferenced active worktree.
   try {
-    await persistPaneBeforeAgentLaunch(options, sessionProjectRoot, newPane);
+    await persistPaneBeforeAgentLaunch(
+      options,
+      sessionProjectRoot,
+      newPane,
+      insertion,
+    );
   } catch (error) {
     const persistenceError = error instanceof Error ? error.message : String(error);
     const teardown = await terminatePaneForRollback(

@@ -10,6 +10,8 @@ import {
 import path from 'node:path';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import type { PsychePane } from '../types.js';
+import type { PaneLayout } from '../types.js';
+import { reconcilePaneLayout, seedPaneLayout } from '../layout/PaneLayoutTree.js';
 import {
   getProcessStartIdentity,
   isProcessAlive,
@@ -266,12 +268,41 @@ export async function transactProjectPaneConfig<T>(
     let persisted = false;
     const persist = async (): Promise<void> => {
       assertUniquePaneIds(config.panes, projectPaneConfigPath(lock.canonicalProjectRoot));
+      reconcileProjectPaneLayout(config);
       await writeProjectPaneConfig(lock.canonicalProjectRoot, config);
       persisted = true;
     };
     const result = await operation({ config, persist });
     if (!persisted) {
       await persist();
+    }
+
+    /**
+     * The pane registry is the source of truth for ownership. Every durable
+     * registry transaction therefore also prunes removed leaves and adopts
+     * generation-bound records created by callers that predate an explicit
+     * placement mutation. Explicit layout insertion still supplies the preferred
+     * target and direction before this invariant runs.
+     */
+    function reconcileProjectPaneLayout(config: ProjectPaneConfig): void {
+      const paneIds = (Array.isArray(config.panes) ? config.panes : [])
+        .map(paneRecordId)
+        .filter((id): id is string => Boolean(id));
+      const paneLayout = config.paneLayout;
+      if (paneLayout === undefined) {
+        if (paneIds.length > 0) {
+          config.paneLayout = seedPaneLayout(paneIds);
+        }
+        return;
+      }
+      if (!paneLayout || typeof paneLayout !== 'object' || Array.isArray(paneLayout)) {
+        return;
+      }
+      const candidate = paneLayout as PaneLayout;
+      if (candidate.version !== 1 || !('root' in candidate)) {
+        return;
+      }
+      config.paneLayout = reconcilePaneLayout(candidate, paneIds);
     }
     return { config, result };
   } finally {

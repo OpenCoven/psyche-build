@@ -34,6 +34,8 @@ interface CreateNewPaneOptions {
   skipAgentSelection?: boolean;
   startPointBranch?: string;
   mergeTargetChain?: MergeTargetReference[];
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
 }
 
 const MAX_PARALLEL_PANE_CREATIONS = 4;
@@ -188,6 +190,8 @@ export default function usePaneCreation({
         skipAgentSelection: options.skipAgentSelection,
         startPointBranch: options.startPointBranch,
         mergeTargetChain: options.mergeTargetChain,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
         sessionProjectRoot,
         sessionConfigPath: panesFile,
         persistCreatedPane: async (pane) => {
@@ -256,7 +260,12 @@ export default function usePaneCreation({
     selectedAgents: AgentName[],
     options: Pick<
       CreateNewPaneOptions,
-      'existingPanes' | 'targetProjectRoot' | 'startPointBranch' | 'mergeTargetChain'
+      | 'existingPanes'
+      | 'targetProjectRoot'
+      | 'startPointBranch'
+      | 'mergeTargetChain'
+      | 'focusedTmuxPaneId'
+      | 'selectedPaneId'
     > = {}
   ): Promise<PsychePane[]> => {
     const panesForCreation = options.existingPanes ?? panes;
@@ -292,6 +301,8 @@ export default function usePaneCreation({
         basePanes: panesForCreation,
         availableAgents,
         slugBase,
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
         persistReusedPane: async (_pane, previousPanes, panesToPersist) => {
           await savePanes(panesToPersist, previousPanes);
         },

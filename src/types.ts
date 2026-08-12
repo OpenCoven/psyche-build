@@ -230,10 +230,33 @@ export interface PsycheAppProps {
   bridgeDaemon?: any; // BridgeDaemon instance (optional, macOS-only progressive enhancement)
 }
 
+export type PaneSplitDirection = 'horizontal' | 'vertical';
+
+export interface PaneLayoutLeaf {
+  kind: 'leaf';
+  paneId: string;
+}
+
+export interface PaneLayoutSplit {
+  kind: 'split';
+  direction: PaneSplitDirection;
+  ratio: number;
+  first: PaneLayoutNode;
+  second: PaneLayoutNode;
+}
+
+export type PaneLayoutNode = PaneLayoutLeaf | PaneLayoutSplit;
+
+export interface PaneLayout {
+  version: 1;
+  root: PaneLayoutNode | null;
+}
+
 export interface PsycheConfig {
   projectName: string;
   projectRoot: string;
   panes: PsychePane[];
+  paneLayout?: PaneLayout;
   sidebarProjects?: SidebarProject[];
   settings: PsycheSettings;
   lastUpdated: string;
