@@ -404,4 +404,76 @@ describe('killBridgePane', () => {
       expect.objectContaining({ id: 'psyche-1', paneId: '%4', slug: 'replacement' }),
     ]);
   });
+
+  it('does not kill a same-pane replacement from another tmux generation', async () => {
+    writeConfig([pane({ tmuxServerIdentity: oldServerGeneration })]);
+    let releaseProbePause!: () => void;
+    let signalProbePause!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      releaseProbePause = resolve;
+    });
+    const probePaused = new Promise<void>((resolve) => {
+      signalProbePause = resolve;
+    });
+    const d = {
+      tmuxPaneExists: vi.fn(() => true),
+      killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => oldServerGeneration,
+      afterInitialProbe: async () => {
+        signalProbePause();
+        await paused;
+      },
+    };
+
+    const killing = killBridgePane(projectRoot, 'psyche-1', d);
+    await probePaused;
+    writeConfig([pane({ tmuxServerIdentity: currentServerGeneration })]);
+    releaseProbePause();
+
+    await expect(killing).rejects.toMatchObject({ code: 'pane_rebound' });
+    expect(d.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toEqual([
+      expect.objectContaining({
+        id: 'psyche-1',
+        paneId: '%3',
+        tmuxServerIdentity: currentServerGeneration,
+      }),
+    ]);
+  });
+
+  it('does not kill a generation-tagged replacement when the expected identity is legacy', async () => {
+    writeConfig([pane({ tmuxServerIdentity: undefined })]);
+    let releaseProbePause!: () => void;
+    let signalProbePause!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      releaseProbePause = resolve;
+    });
+    const probePaused = new Promise<void>((resolve) => {
+      signalProbePause = resolve;
+    });
+    const d = {
+      tmuxPaneExists: vi.fn(() => false),
+      killTmuxPane: vi.fn(),
+      getTmuxServerIdentity: () => currentServerGeneration,
+      afterInitialProbe: async () => {
+        signalProbePause();
+        await paused;
+      },
+    };
+
+    const killing = killBridgePane(projectRoot, 'psyche-1', d);
+    await probePaused;
+    writeConfig([pane({ tmuxServerIdentity: currentServerGeneration })]);
+    releaseProbePause();
+
+    await expect(killing).rejects.toMatchObject({ code: 'pane_rebound' });
+    expect(d.killTmuxPane).not.toHaveBeenCalled();
+    expect(readConfig().panes).toEqual([
+      expect.objectContaining({
+        id: 'psyche-1',
+        paneId: '%3',
+        tmuxServerIdentity: currentServerGeneration,
+      }),
+    ]);
+  });
 });
