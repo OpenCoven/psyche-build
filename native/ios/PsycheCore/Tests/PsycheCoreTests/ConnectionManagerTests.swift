@@ -794,6 +794,70 @@ final class ConnectionManagerTests: XCTestCase {
         await connectTask.value
     }
 
+    func testPairOverridePersistsAndReconnectsWithRequestIdentityAndToken() async throws {
+        let fake = FakeTransport()
+        let composition = makeComposition(
+            transport: fake,
+            clientID: "default-client-b",
+            clientName: "Default Device B"
+        )
+        let manager = composition.manager
+
+        let initialConnect = Task { await manager.connect(to: testEndpoint()) }
+        try await waitForHello(on: fake)
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await initialConnect.value
+
+        let pairing = pairingResult(
+            code: "123456",
+            clientID: "override-client-a",
+            clientName: "Override Device A",
+            on: manager
+        )
+        try await waitForPairRequest(on: fake)
+        let firstPairRequest = await fake.sentMessages.compactMap { message -> PairRequestPayload? in
+            guard case let .legacy(.pair(payload)) = message else { return nil }
+            return payload
+        }.last
+        XCTAssertEqual(
+            firstPairRequest,
+            PairRequestPayload(
+                code: "123456",
+                clientID: "override-client-a",
+                clientName: "Override Device A"
+            )
+        )
+
+        await fake.emit(.legacy(.pairAccepted(PairAcceptedPayload(token: "issued-token"))))
+        let paired = try await pairing.value.get()
+        XCTAssertEqual(paired.clientID, "override-client-a")
+        XCTAssertEqual(paired.token, "issued-token")
+        let persistedHosts = try await composition.pairedHostStore.hosts()
+        XCTAssertEqual(persistedHosts, [paired])
+
+        let followUpPairing = pairingResult(code: "654321", on: manager)
+        try await waitForPairRequest(on: fake, occurrence: 2)
+        let followUpRequest = await fake.sentMessages.compactMap { message -> PairRequestPayload? in
+            guard case let .legacy(.pair(payload)) = message else { return nil }
+            return payload
+        }.last
+        XCTAssertEqual(followUpRequest?.clientID, "override-client-a")
+        await fake.emit(.legacy(.pairRejected(PairRejectedPayload(reason: "not needed"))))
+        _ = await followUpPairing.value
+
+        await manager.disconnect()
+        let storedReconnect = Task { await manager.connectToStoredHost() }
+        try await waitForHello(on: fake, occurrence: 2)
+        let reconnectHello = await fake.sentMessages.compactMap { message -> HelloPayload? in
+            guard case let .legacy(.hello(payload)) = message else { return nil }
+            return payload
+        }.last
+        XCTAssertEqual(reconnectHello?.clientID, "override-client-a")
+        XCTAssertEqual(reconnectHello?.token, "issued-token")
+        await fake.emit(.legacy(.welcome(makeWelcome())))
+        await storedReconnect.value
+    }
+
     func testStoredHostLookupCannotOverrideManualConnectCredentials() async throws {
         let fake = FakeTransport()
         let secureStore = BlockingReadSecureStore()
@@ -2120,11 +2184,19 @@ final class ConnectionManagerTests: XCTestCase {
 
     private func pairingResult(
         code: String,
+        clientID: String? = nil,
+        clientName: String? = nil,
         on manager: ConnectionManager
     ) -> Task<Result<PairedHost, any Error>, Never> {
         Task {
             do {
-                return .success(try await manager.pair(code: code))
+                return .success(
+                    try await manager.pair(
+                        code: code,
+                        clientID: clientID,
+                        clientName: clientName
+                    )
+                )
             } catch {
                 return .failure(error)
             }

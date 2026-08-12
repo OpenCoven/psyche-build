@@ -411,6 +411,7 @@ public actor ConnectionManager {
                 pairingWaiter = PairingWaiter(
                     id: pairingID,
                     generation: generation,
+                    request: request,
                     authorization: authorization,
                     continuation: continuation
                 )
@@ -621,7 +622,7 @@ public actor ConnectionManager {
                 serverID: welcomeIdentity.serverID,
                 serverName: welcomeIdentity.serverName,
                 endpoint: activeConnection.endpoint,
-                clientID: activeConnection.credentials.clientID,
+                clientID: pairingWaiter.request.clientID,
                 token: payload.token
             )
             do {
@@ -664,7 +665,10 @@ public actor ConnectionManager {
                   !Task.isCancelled else {
                 return .ignored
             }
-            self.activeConnection = activeConnection.withToken(payload.token)
+            self.activeConnection = activeConnection.withPairingCredentials(
+                clientID: pairingWaiter.request.clientID,
+                token: payload.token
+            )
             completePairing(
                 id: pairingWaiter.id,
                 generation: generation,
@@ -1098,6 +1102,7 @@ public actor ConnectionManager {
     private struct PairingWaiter {
         let id: UUID
         let generation: ConnectionGeneration
+        let request: PairRequestPayload
         let authorization: PairingPersistenceAuthorization
         let continuation: CheckedContinuation<PairedHost, any Error>
     }
@@ -1123,11 +1128,14 @@ public actor ConnectionManager {
         let endpoint: HostEndpoint
         let credentials: ConnectionCredentials
 
-        func withToken(_ token: String?) -> ConnectionConfiguration {
+        func withPairingCredentials(
+            clientID: String,
+            token: String?
+        ) -> ConnectionConfiguration {
             ConnectionConfiguration(
                 endpoint: endpoint,
                 credentials: ConnectionCredentials(
-                    clientID: credentials.clientID,
+                    clientID: clientID,
                     token: token
                 )
             )
