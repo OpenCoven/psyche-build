@@ -775,9 +775,6 @@
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
-  var scopeBtnEl = document.getElementById("scope-btn");
-  var scopeLabelEl = document.getElementById("scope-label");
-  var scopeMenuEl = document.getElementById("scope-menu");
   var composerSendEl = document.getElementById("composer-send");
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
@@ -6953,7 +6950,7 @@
     });
   }
 
-  /** `!line` runs in the nearest shell pane regardless of composer scope. */
+  /** `!line` runs in the focused shell pane, or the first open shell in the active project. */
   function runShellSigil(line) {
     if (!line) return;
     var focused = findThread(state.activeThreadId);
@@ -6988,8 +6985,17 @@
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
-      // Not a slash command — pipe it to whatever the composer scope names.
-      sendToScope(trimmed + "\n");
+      // Not a slash command — it goes to the focused pane.
+      var focused = findThread(state.activeThreadId);
+      if (!focused) {
+        toast("No focused pane to send to");
+        return;
+      }
+      if (focused.kind === "web" || focused.status === "exited" || focused.status === "failed") {
+        toast("Focused pane cannot receive text");
+        return;
+      }
+      sendToThread(focused, trimmed + "\n");
       return;
     }
     commandHistory.push(trimmed);
@@ -7028,62 +7034,11 @@
     sendToThread(thread, text);
   }
 
-  // ---- Composer scope ----
+  // ---- Composer chrome ----
   //
-  // Plain text needs an explicit destination once several panes are visible at
-  // once, so the composer carries a scope chip: the focused pane, every pane in
-  // the project, or only the agent panes.
-  var composerScope = "pane";
-  var SCOPE_LABELS = { pane: "Pane", project: "Project", agents: "All agents" };
-
-  function scopeTargets() {
-    var project = activeProject();
-    if (composerScope === "pane") {
-      var focused = findThread(state.activeThreadId);
-      return focused ? [focused] : [];
-    }
-    return state.threads.filter(function (thread) {
-      if (!project || thread.projectId !== project.id) return false;
-      if (thread.hidden || thread.status === "exited") return false;
-      if (composerScope === "agents") return (thread.kind || "shell") !== "shell";
-      return true;
-    });
-  }
-
-  function sendToScope(text) {
-    var targets = scopeTargets();
-    if (!targets.length) {
-      toast(composerScope === "pane" ? "No focused pane to send to" : "No pane matches this scope");
-      return;
-    }
-    targets.forEach(function (thread) { sendToThread(thread, text); });
-    if (targets.length > 1) toast("Sent to " + targets.length + " panes");
-  }
-
+  // Plain text always lands in the focused pane, so the composer only has to
+  // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var project = activeProject();
-    var focused = findThread(state.activeThreadId);
-    if (scopeBtnEl) scopeBtnEl.dataset.scope = composerScope;
-    if (scopeLabelEl) {
-      scopeLabelEl.textContent = composerScope === "pane"
-        ? "Pane · " + (focused ? focused.name : "—")
-        : composerScope === "project"
-          ? "Project · " + (project ? project.name : "—")
-          : "All agents · " + scopeTargets().length;
-    }
-    var paneDesc = document.getElementById("scope-desc-pane");
-    if (paneDesc) {
-      paneDesc.textContent = focused
-        ? "Typed into " + focused.name
-        : "Typed into the focused pane";
-    }
-    var projectDesc = document.getElementById("scope-desc-project");
-    if (projectDesc && project) projectDesc.textContent = "Every pane in " + project.name;
-    if (scopeMenuEl) {
-      Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-        item.setAttribute("aria-checked", item.dataset.scope === composerScope ? "true" : "false");
-      });
-    }
     var value = commandInput ? commandInput.value.trim() : "";
     if (composerSendEl) {
       composerSendEl.hidden = value.length === 0;
@@ -7096,29 +7051,10 @@
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
-        : "→ " + (SCOPE_LABELS[composerScope] || "pane").toLowerCase();
+        : "→ focused pane";
     }
   }
 
-  function closeScopeMenu() {
-    if (scopeMenuEl) scopeMenuEl.hidden = true;
-    if (scopeBtnEl) scopeBtnEl.setAttribute("aria-expanded", "false");
-  }
-  if (scopeBtnEl && scopeMenuEl) {
-    scopeBtnEl.addEventListener("click", function () {
-      var open = scopeMenuEl.hidden;
-      if (open) { closeNewPaneMenu(); hidePalette(); syncComposerChrome(); }
-      scopeMenuEl.hidden = !open;
-      scopeBtnEl.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-      item.addEventListener("click", function () {
-        composerScope = item.dataset.scope;
-        closeScopeMenu();
-        syncComposerChrome();
-      });
-    });
-  }
   if (composerSendEl) {
     composerSendEl.addEventListener("click", function () {
       var line = commandInput.value;
@@ -7866,7 +7802,6 @@
           ? "New pane on " + worktree.branch
           : project ? "New pane in " + project.name : "New pane";
       }
-      closeScopeMenu();
     }
     newPaneMenuEl.hidden = !open;
     var trigger = document.getElementById("rail-new-tab");
@@ -7981,11 +7916,6 @@
         !event.target.closest("#rail-new-tab")) {
       closeNewPaneMenu();
     }
-    if (scopeMenuEl && !scopeMenuEl.hidden &&
-        !scopeMenuEl.contains(event.target) &&
-        !event.target.closest("#scope-btn")) {
-      closeScopeMenu();
-    }
   });
 
   // ---- Keyboard shortcuts overlay ----
@@ -8039,10 +7969,8 @@
     if (event.key === "Escape") {
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
-      var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
-        (scopeMenuEl && !scopeMenuEl.hidden);
+      var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
       closeNewPaneMenu();
-      closeScopeMenu();
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
@@ -8915,7 +8843,6 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeScopeMenu();
     closeSessionContextMenu();
     agentPickerIndex = 0;
     renderAgentPicker();
