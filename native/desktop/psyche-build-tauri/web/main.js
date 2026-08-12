@@ -1132,6 +1132,11 @@
     }, 2600);
   }
 
+  function showPanePlacementWarning(message) {
+    setStatus(message, "warn");
+    toast(message);
+  }
+
   async function copyPaneFooterValue(label, value) {
     if (!value) {
       toast(label + " is not reported");
@@ -2287,7 +2292,10 @@
     var existing = gitPaneThread(project.id, workspaceRoot);
     if (existing) {
       var reopened = existing.hidden;
-      if (reopened && !reopenThread(existing.id)) return null;
+      if (reopened && !reopenThread(existing.id)) {
+        showPanePlacementWarning("Not enough space for another pane");
+        return null;
+      }
       revealGitPane(existing);
       await focusThread(existing.id);
       if (!reopened) renderGitSurface();
@@ -2296,7 +2304,7 @@
     var id = makeThreadId();
     var placement = preparePanePlacement(id, project.id, workspaceRoot);
     if (!placement) {
-      setStatus("Not enough space for another pane", "warn");
+      showPanePlacementWarning("Not enough space for another pane");
       return null;
     }
     var thread = {

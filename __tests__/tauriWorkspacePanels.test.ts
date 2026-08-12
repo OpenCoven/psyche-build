@@ -1013,7 +1013,7 @@ describe('Tauri workspace panels', () => {
         'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
         'showTerminalView', 'revealGitPane', 'focusThread', 'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
         'state', 'noteStatusActivity', 'mountToolPane',
-        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon',
+        'renderGitSurface', 'refreshSidebar', 'saveWorkspaceSoon', 'showPanePlacementWarning',
         `"use strict"; return (${source});`,
       )(
         () => ({ id: 'project-a' }),
@@ -1032,11 +1032,81 @@ describe('Tauri workspace panels', () => {
         () => { calls.push('render'); },
         () => { calls.push('sidebar'); },
         () => { calls.push('save'); },
+        (message: string) => { calls.push(`status:${message}`); },
       ) as () => Promise<null>;
 
       await expect(openOrFocusGitPane()).resolves.toBeNull();
       expect(state.threads).toEqual([]);
       expect(calls).toEqual(['status:Not enough space for another pane']);
+    });
+
+    it('announces every Git placement failure through the visible accessibility status', async () => {
+      expect(indexHtml).toMatch(
+        /id="toast"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/,
+      );
+      const warning = 'Not enough space for another pane';
+      async function exercise(existing: { id: string; hidden: boolean } | null) {
+        const liveStatus = {
+          hidden: true,
+          textContent: '',
+          role: 'status',
+          ariaLive: 'polite',
+        };
+        const state = { threads: [] as unknown[] };
+        const calls: string[] = [];
+        const showPanePlacementWarning = Function(
+          'setStatus', 'toast',
+          `"use strict"; return (${functionSource('showPanePlacementWarning')});`,
+        )(
+          (message: string) => { calls.push(`hidden-status:${message}`); },
+          (message: string) => {
+            liveStatus.textContent = message;
+            liveStatus.hidden = false;
+          },
+        ) as (message: string) => void;
+        const openOrFocusGitPane = Function(
+          'activeProject', 'setStatus', 'activeWorkspaceRoot', 'gitPaneThread',
+          'showTerminalView', 'reopenThread', 'revealGitPane', 'focusThread',
+          'makeThreadId', 'preparePanePlacement', 'commitPanePlacement',
+          'state', 'noteStatusActivity', 'mountToolPane', 'renderGitSurface',
+          'refreshSidebar', 'saveWorkspaceSoon', 'showPanePlacementWarning',
+          `"use strict"; return (${functionSource('openOrFocusGitPane')});`,
+        )(
+          () => ({ id: 'project-a' }),
+          () => undefined,
+          () => '/worktree-a',
+          () => existing,
+          async () => true,
+          () => false,
+          () => { calls.push('reveal'); },
+          async () => { calls.push('focus'); },
+          () => 'git-new',
+          () => null,
+          () => { calls.push('commit'); },
+          state,
+          () => { calls.push('activity'); },
+          () => { calls.push('mount'); },
+          () => { calls.push('render'); },
+          () => { calls.push('sidebar'); },
+          () => { calls.push('save'); },
+          showPanePlacementWarning,
+        ) as () => Promise<null>;
+
+        await expect(openOrFocusGitPane()).resolves.toBeNull();
+        expect(liveStatus).toEqual({
+          hidden: false,
+          textContent: warning,
+          role: 'status',
+          ariaLive: 'polite',
+        });
+        expect(state.threads).toEqual([]);
+        expect(calls).not.toContain('commit');
+        expect(calls).not.toContain('mount');
+        return calls;
+      }
+
+      await exercise(null);
+      await exercise({ id: 'git-hidden', hidden: true });
     });
   });
 
