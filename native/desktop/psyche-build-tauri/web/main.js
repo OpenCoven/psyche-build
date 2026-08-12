@@ -273,7 +273,7 @@
       activatePaneLayoutFocus(project, worktreePath);
     }
     if (!projectChanged) {
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       renderGitSurface();
     }
     loadAgentSkills();
@@ -624,7 +624,7 @@
       await focusThread(nextId, focusOptions);
     } else {
       state.activeThreadId = null;
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
@@ -1787,10 +1787,10 @@
     commitPanePlacement(placement);
     state.threads.push(thread);
     if (typeof noteStatusActivity === "function") noteStatusActivity();
-    refreshSidebar();
-    refreshTabs();
     mountTerminal(thread);
     focusThread(id);
+    refreshSidebar();
+    refreshTabs();
     // Run fit() now so the PTY starts at the actual visible size, not at
     // xterm.js's default 80x24. Otherwise psyche/Ink draw the first frame at
     // the wrong size and leave artifacts.
@@ -2294,7 +2294,7 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
   }
 
   /**
@@ -2448,7 +2448,70 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
+  }
+
+  function isTerminalFocusReport(data) {
+    return data === "\x1b[I" || data === "\x1b[O";
+  }
+
+  function beginTerminalFocusReportToken(thread, report, policy) {
+    if (
+      !thread ||
+      !isTerminalFocusReport(report) ||
+      (policy !== "suppress" && policy !== "allow")
+    ) {
+      return null;
+    }
+    var token = { report: report, policy: policy };
+    if (!thread.internalFocusReportTokens) {
+      thread.internalFocusReportTokens = [];
+    }
+    thread.internalFocusReportTokens.push(token);
+    return token;
+  }
+
+  function clearTerminalFocusReportToken(thread, token) {
+    var tokens = thread && thread.internalFocusReportTokens;
+    if (!tokens || !token) return;
+    var index = tokens.indexOf(token);
+    if (index !== -1) tokens.splice(index, 1);
+    if (tokens.length === 0) {
+      delete thread.internalFocusReportTokens;
+    }
+  }
+
+  function consumeTerminalFocusReportToken(thread, report) {
+    var tokens = thread && thread.internalFocusReportTokens;
+    if (!tokens) return null;
+    for (var i = tokens.length - 1; i >= 0; i--) {
+      if (tokens[i].report !== report) continue;
+      var token = tokens[i];
+      clearTerminalFocusReportToken(thread, token);
+      return token;
+    }
+    return null;
+  }
+
+  function withTerminalFocusReportToken(thread, report, policy, action) {
+    var token = beginTerminalFocusReportToken(thread, report, policy);
+    try {
+      return action();
+    } finally {
+      clearTerminalFocusReportToken(thread, token);
+    }
+  }
+
+  function consumeTerminalDataSuppression(thread, data) {
+    if (!thread || !isTerminalFocusReport(data)) return false;
+    var token = consumeTerminalFocusReportToken(thread, data);
+    return !!token && token.policy === "suppress";
+  }
+
+  function routeTerminalData(thread, data) {
+    if (consumeTerminalDataSuppression(thread, data)) return false;
+    sendToThread(thread, data);
+    return true;
   }
 
   function mountTerminal(thread) {
@@ -2562,7 +2625,7 @@
     thread.paneMax = maximize;
     thread.paneClose = close;
     syncThreadPaneMetadata(thread);
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
 
     var term = new window.Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
@@ -2606,7 +2669,9 @@
       }
     } catch (_) { /* canvas fallback is fine */ }
 
-    term.onData(function (data) { sendToThread(thread, data); });
+    term.onData(function (data) {
+      routeTerminalData(thread, data);
+    });
     // Agents ring the bell for exactly one reason -- they want the user back --
     // so it is trusted immediately instead of waiting for the tail to settle.
     if (typeof term.onBell === "function") {
@@ -3219,6 +3284,37 @@
     thread.paneMax.setAttribute("aria-pressed", maxed ? "true" : "false");
   }
 
+  function focusedTerminalThreadForRender() {
+    var activeElement = document.activeElement;
+    if (!activeElement) return null;
+    for (var i = 0; i < state.threads.length; i++) {
+      var thread = state.threads[i];
+      if (thread.term && thread.host && thread.host.contains(activeElement)) {
+        return thread;
+      }
+    }
+    return null;
+  }
+
+  function restoreRenderedTerminalFocus(thread) {
+    if (!thread) return;
+    requestAnimationFrame(function () {
+      if (
+        !isLiveThread(thread) ||
+        state.activeThreadId !== thread.id ||
+        !thread.term ||
+        !thread.pane ||
+        terminalHost.hidden ||
+        !terminalHost.contains(thread.pane)
+      ) {
+        return;
+      }
+      withTerminalFocusReportToken(thread, "\x1b[I", "suppress", function () {
+        thread.term.focus();
+      });
+    });
+  }
+
   function renderPaneNode(node, splitRatios) {
     if (node.type === "leaf") {
       var thread = findThread(node.threadId);
@@ -3252,42 +3348,60 @@
     return split;
   }
 
-  function renderPaneWorkspace() {
+  function renderPaneWorkspace(options) {
     if (!terminalHost) return;
-    stageBrowserSurface();
-    stageGitSurface();
-    terminalHost.replaceChildren();
-    var layout = activePaneLayout();
-    if (!layout || !layout.root) {
-      renderTerminalEmptyState();
+    var focusTargetThread = options && options.focusTargetThread || null;
+    var preserveTerminalFocus = !focusTargetThread &&
+      (!options || options.preserveTerminalFocus !== false);
+    var focusedThread = focusedTerminalThreadForRender();
+    try {
+      if (focusedThread && focusedThread.term) {
+        withTerminalFocusReportToken(
+          focusedThread,
+          "\x1b[O",
+          preserveTerminalFocus ? "suppress" : "allow",
+          function () {
+            focusedThread.term.blur();
+          }
+        );
+      }
+      stageBrowserSurface();
+      stageGitSurface();
+      terminalHost.replaceChildren();
+      var layout = activePaneLayout();
+      if (!layout || !layout.root) {
+        renderTerminalEmptyState();
+        renderPaneMinimap(layout, findOpenFile(state.activeFileId));
+        return;
+      }
+      var root = effectivePaneRoot(layout);
+      var projected = PsychePanes.layoutRects(
+        root,
+        measuredTerminalHost(),
+        PANE_MINIMUMS
+      );
+      var splitRatios = new Map();
+      projected.splits.forEach(function (split) {
+        splitRatios.set(split.splitId, split.ratio);
+      });
+      terminalHost.appendChild(renderPaneNode(root, splitRatios));
+      // Span and maximise change what every *other* pane's controls should say,
+      // so the whole tiled tree is synced, not just the panes on screen.
+      PsychePanes.leafIds(layout.root).forEach(function (leafId) {
+        var leaf = PsychePanes.findLeafById(layout.root, leafId);
+        var thread = leaf && findThread(leaf.threadId);
+        if (!thread || !thread.pane) return;
+        thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
+        syncPanePicking(thread);
+        syncThreadPaneMetadata(thread);
+      });
+      renderSetPickBar();
       renderPaneMinimap(layout, findOpenFile(state.activeFileId));
-      return;
+      scheduleVisiblePaneFit();
+      requestAnimationFrame(syncBrowserBounds);
+    } finally {
+      if (preserveTerminalFocus) restoreRenderedTerminalFocus(focusedThread);
     }
-    var root = effectivePaneRoot(layout);
-    var projected = PsychePanes.layoutRects(
-      root,
-      measuredTerminalHost(),
-      PANE_MINIMUMS
-    );
-    var splitRatios = new Map();
-    projected.splits.forEach(function (split) {
-      splitRatios.set(split.splitId, split.ratio);
-    });
-    terminalHost.appendChild(renderPaneNode(root, splitRatios));
-    // Span and maximise change what every *other* pane's controls should say,
-    // so the whole tiled tree is synced, not just the panes on screen.
-    PsychePanes.leafIds(layout.root).forEach(function (leafId) {
-      var leaf = PsychePanes.findLeafById(layout.root, leafId);
-      var thread = leaf && findThread(leaf.threadId);
-      if (!thread || !thread.pane) return;
-      thread.pane.classList.toggle("focused", thread.id === state.activeThreadId);
-      syncPanePicking(thread);
-      syncThreadPaneMetadata(thread);
-    });
-    renderSetPickBar();
-    renderPaneMinimap(layout, findOpenFile(state.activeFileId));
-    scheduleVisiblePaneFit();
-    requestAnimationFrame(syncBrowserBounds);
   }
 
   /**
@@ -3485,6 +3599,17 @@
     var thread = findThread(id);
     if (!thread) return false;
     if (!(await showTerminalView())) return false;
+    var focusedSourceThread = focusedTerminalThreadForRender();
+    if (focusedSourceThread) {
+      withTerminalFocusReportToken(
+        focusedSourceThread,
+        "\x1b[O",
+        "allow",
+        function () {
+          focusedSourceThread.term.blur();
+        }
+      );
+    }
     var project = findProject(thread.projectId);
     var scopeChanged = state.activeProjectId !== thread.projectId ||
       !project || activeWorkspaceRoot(project) !== thread.worktreePath;
@@ -3504,12 +3629,24 @@
     var layout = paneLayoutFor(thread.projectId, thread.worktreePath);
     var leaf = layout && PsychePanes.findLeafByThreadId(layout.root, id);
     if (layout && leaf) layout.focusedLeafId = leaf.id;
-    renderPaneWorkspace();
+    renderPaneWorkspace({ focusTargetThread: thread });
     if (scopeChanged) renderGitSurface();
     refreshSidebar();
     requestAnimationFrame(function () {
+      if (
+        !isLiveThread(thread) ||
+        state.activeThreadId !== thread.id ||
+        !thread.term ||
+        !thread.pane ||
+        terminalHost.hidden ||
+        !terminalHost.contains(thread.pane)
+      ) {
+        return;
+      }
       scheduleVisiblePaneFit();
-      if (thread.term) thread.term.focus();
+      withTerminalFocusReportToken(thread, "\x1b[I", "allow", function () {
+        thread.term.focus();
+      });
       syncBrowserBounds();
     });
 
@@ -3560,6 +3697,14 @@
 
   function detachThreadPane(thread) {
     if (!thread) return null;
+    if (thread.term) {
+      var focusedThread = focusedTerminalThreadForRender();
+      if (focusedThread === thread) {
+        withTerminalFocusReportToken(thread, "\x1b[O", "allow", function () {
+          thread.term.blur();
+        });
+      }
+    }
     if (typeof paneFooterPopoverThreadId !== "undefined" &&
         paneFooterPopoverThreadId === thread.id &&
         typeof closePaneFooterPopovers === "function") {
@@ -3805,11 +3950,12 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
+    var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") {
       suspendGitRequests();
       stageGitSurface();
     }
-    if (thread.kind === "web" && state.activeThreadId === id) {
+    if (thread.kind === "web" && wasActive) {
       markActiveSurface("terminal");
     }
     thread.closeStarted = true;
@@ -3833,19 +3979,21 @@
     }
     var closingProjectId = thread.projectId;
     state.threads = state.threads.filter(function (t) { return t.id !== id; });
-    if (state.activeThreadId === id) {
+    if (wasActive) {
       // Prefer the next thread in the same project so closing a tab doesn't
       // teleport the user into a different project.
       state.activeThreadId = null;
       if (retainFileFocusAfterThreadRemoval(id, nextThreadId, closingProjectId)) {
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         if (!nextThreadId) setProjectStatus(findProject(closingProjectId), "");
       } else if (nextThreadId && (!options || options.focus !== false)) {
         focusThread(nextThreadId);
       } else {
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         setProjectStatus(findProject(closingProjectId), "");
       }
+    } else if (options && options.preserveTerminalFocus === false) {
+      renderPaneWorkspace({ preserveTerminalFocus: false });
     } else {
       renderPaneWorkspace();
     }
@@ -3857,6 +4005,7 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    var wasActive = state.activeThreadId === id;
     if (thread.kind === "git") suspendGitRequests();
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
@@ -3866,13 +4015,21 @@
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     var nextThreadId = detachThreadPane(thread);
     thread.hidden = true;
-    if (state.activeThreadId === id) {
+    var focusingNext = false;
+    if (wasActive) {
       state.activeThreadId = null;
       if (!retainFileFocusAfterThreadRemoval(id, nextThreadId, thread.projectId) && nextThreadId) {
+        focusingNext = true;
         focusThread(nextThreadId);
       }
     }
-    renderPaneWorkspace();
+    if (!focusingNext) {
+      if (wasActive) {
+        renderPaneWorkspace({ preserveTerminalFocus: false });
+      } else {
+        renderPaneWorkspace();
+      }
+    }
     if (thread.kind === "git") stageGitSurface();
     refreshSidebar();
     refreshTabs();
@@ -3902,8 +4059,8 @@
       project.lastActiveThreadId = thread.id;
     }
     state.activeThreadId = thread.id;
+    renderPaneWorkspace({ preserveTerminalFocus: false });
     if (thread.kind === "git") revealGitPane(thread);
-    renderPaneWorkspace();
     if (thread.kind === "git") renderGitSurface();
     refreshSidebar();
     return true;
@@ -6234,7 +6391,13 @@
     var threadIds = state.threads
       .filter(function (t) { return t.projectId === id; })
       .map(function (t) { return t.id; });
-    threadIds.forEach(function (tid) { closeThread(tid, { focus: false }); });
+    var preserveTerminalFocus = state.activeProjectId !== id;
+    threadIds.forEach(function (tid) {
+      closeThread(tid, {
+        focus: false,
+        preserveTerminalFocus: preserveTerminalFocus,
+      });
+    });
     // Its file tabs go with it — they are scoped to the project.
     var dropped = state.openFiles.filter(function (f) { return f.projectId === id; });
     state.openFiles = state.openFiles.filter(function (f) { return f.projectId !== id; });
@@ -6257,7 +6420,7 @@
         await setActiveProject(next.id);
       } else {
         state.activeThreadId = null;
-        renderPaneWorkspace();
+        renderPaneWorkspace({ preserveTerminalFocus: false });
         setStatus("no project — click + to open one", "");
       }
     }
@@ -6519,7 +6682,7 @@
     }
     if (!(await showTerminalView())) return false;
     clearPassiveCovenPaneFocus();
-    renderPaneWorkspace();
+    renderPaneWorkspace({ preserveTerminalFocus: false });
     refreshSidebar();
     return true;
   }
@@ -6610,7 +6773,7 @@
           : (threads[0] ? threads[0].id : null);
       state.activeThreadId = nextThreadId;
       clearPassiveCovenPaneFocus();
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
       renderGitSurface();
       loadAgentSkills();
       syncProjectBrowser();
@@ -6684,7 +6847,7 @@
       clearFileFocusPresentation();
       clearPassiveCovenPaneFocus();
       refreshTabs();
-      renderPaneWorkspace();
+      renderPaneWorkspace({ preserveTerminalFocus: false });
     }
     return true;
   }

@@ -125,7 +125,7 @@ describe('Tauri project/worktree/pane rail', () => {
     const selection = activateWorktree.indexOf('project.selectedWorktreePath = worktreePath;');
     expect(selection).toBeGreaterThan(-1);
     for (const sync of [
-      'renderPaneWorkspace();',
+      'renderPaneWorkspace({ preserveTerminalFocus: false });',
       'renderGitSurface();',
       'refreshSidebar();',
       'syncProjectBrowser();',
