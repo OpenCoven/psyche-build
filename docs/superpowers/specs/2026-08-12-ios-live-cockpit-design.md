@@ -1,7 +1,7 @@
 # iOS Live Cockpit Activation Design
 
 **Date:** 2026-08-12
-**Status:** Approved direction; written-spec review pending
+**Status:** Approved
 **Scope:** Internal TestFlight, same-LAN host discovery and control
 
 ## Objective
