@@ -77,7 +77,9 @@ it('uses a branded sidebar cap and keeps sidebar controls below it', () => {
   expect(indexHtml).not.toContain('id="sidebar-collapse" class="sidebar-head-action');
   expect(styles).not.toMatch(/\.session-search(?:-wrap|-key)?\b/);
   expect(indexHtml).toMatch(/role="tablist" aria-label="Sidebar sections"/);
-  expect(indexHtml).toContain('onerror="this.remove()"');
+  expect(indexHtml).toContain('id="titlebar-brand-mark"');
+  expect(indexHtml).not.toMatch(/\sonerror=/);
+  expect(mainJs).toContain('initializeTitlebarBrandMark();');
   expect(indexHtml).toContain('data-sidebar-tab="sessions"');
   expect(indexHtml).toContain('data-sidebar-tab="files"');
   expect(indexHtml).toContain('id="rail-new-tab"');
@@ -191,10 +193,10 @@ Replace the current `<header class="titlebar">` in `index.html` with:
       <span class="titlebar-brand-icon" aria-hidden="true">
         <span class="titlebar-brand-fallback">P</span>
         <img
+          id="titlebar-brand-mark"
           class="titlebar-brand-mark"
           src="./assets/psyche-mark.png"
           alt=""
-          onerror="this.remove()"
         />
       </span>
       <span class="titlebar-brand-name">Psyche</span>
@@ -217,6 +219,11 @@ Replace the current `<header class="titlebar">` in `index.html` with:
   </div>
 </header>
 ```
+
+In `main.js`, attach a normal `error` listener to `#titlebar-brand-mark` that
+removes the failed decorative image, and run the same removal during boot when
+`mark.complete && mark.naturalWidth === 0`. Do not use inline event handlers;
+the visible fallback `P` remains behind the image.
 
 Remove the `session-search-wrap` block and the old `#sidebar-collapse` button from `.sidebar-head`. Keep this exact sidebar hierarchy:
 

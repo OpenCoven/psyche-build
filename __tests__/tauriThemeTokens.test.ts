@@ -108,4 +108,19 @@ describe('theme tokens', () => {
     expect(detail).not.toMatch(/border-bottom-right-radius\s*:/);
     expect(detail).not.toMatch(/border-top-right-radius\s*:/);
   });
+
+  it('keeps the titlebar workspace square and the detail as the only curved shell surface', () => {
+    for (const selector of [
+      '.titlebar',
+      '.titlebar-sidebar',
+      '.titlebar-workspace',
+      '.workbench',
+      '.sidebar',
+    ]) {
+      expect(ruleBlock(selector)).not.toMatch(/border-(?:top-left-)?radius\s*:/);
+    }
+    expect(ruleBlock('.detail')).toMatch(
+      /border-radius:\s*var\(--workspace-radius\)\s+0\s+0\s+0;/,
+    );
+  });
 });

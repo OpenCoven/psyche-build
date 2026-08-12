@@ -91,13 +91,17 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).toContain('class="sidebar-tabs" role="tablist" aria-label="Sidebar sections"');
     expect(indexHtml).toContain('class="sidebar-settings" id="sidebar-settings"');
     expect(indexHtml).toContain('class="sidebar-resize"');
-    expect(indexHtml).toContain('id="sidebar-resize" role="separator" aria-orientation="vertical"');
+    expect(indexHtml).toMatch(
+      /id="sidebar-resize"[^>]*role="separator"[^>]*aria-orientation="vertical"/,
+    );
     expect(titlebar).toContain('class="titlebar-sidebar"');
     expect(titlebar).toContain('class="titlebar-workspace"');
     expect(titlebar).toContain('src="./assets/psyche-mark.png"');
+    expect(titlebar).toContain('id="titlebar-brand-mark"');
+    expect(titlebar).toMatch(/id="titlebar-brand-mark"[^>]*alt=""/);
     expect(titlebar).toContain('class="titlebar-brand-name">Psyche</span>');
     expect(titlebar).toContain('id="sidebar-collapse"');
-    expect(titlebar).toContain('onerror="this.remove()"');
+    expect(indexHtml).not.toMatch(/\sonerror=/);
     for (const removedId of [
       'daemon-status',
       'shell-status',
@@ -151,6 +155,74 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).toMatch(/data-sidebar-tab="files"/);
   });
 
+  it('removes a failed decorative titlebar mark through CSP-safe boot wiring', () => {
+    expect(mainJs).toContain('initializeTitlebarBrandMark();');
+    const initializeTitlebarBrandMark = compileFunction<() => void>(
+      mainJs,
+      'initializeTitlebarBrandMark',
+      {
+        document: {
+          getElementById() {
+            return failedAfterLoad;
+          },
+        },
+      },
+    );
+    const errorListeners: Array<() => void> = [];
+    const failedAfterLoad = {
+      complete: false,
+      naturalWidth: 18,
+      remove: vi.fn(),
+      addEventListener(
+        event: string,
+        listener: () => void,
+        options?: { once?: boolean },
+      ) {
+        expect(event).toBe('error');
+        expect(options).toEqual({ once: true });
+        errorListeners.push(listener);
+      },
+    };
+
+    initializeTitlebarBrandMark();
+    expect(failedAfterLoad.remove).not.toHaveBeenCalled();
+    expect(errorListeners).toHaveLength(1);
+    errorListeners[0]();
+    expect(failedAfterLoad.remove).toHaveBeenCalledTimes(1);
+
+    const failedBeforeBoot = {
+      complete: true,
+      naturalWidth: 0,
+      remove: vi.fn(),
+      addEventListener: vi.fn(),
+    };
+    compileFunction<() => void>(mainJs, 'initializeTitlebarBrandMark', {
+      document: {
+        getElementById() {
+          return failedBeforeBoot;
+        },
+      },
+    })();
+    expect(failedBeforeBoot.addEventListener).toHaveBeenCalledWith(
+      'error',
+      expect.any(Function),
+      { once: true },
+    );
+    expect(failedBeforeBoot.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains browser controls under the browser surface but not in the native titlebar', () => {
+    const titlebar = titlebarHtml(indexHtml);
+    const browserSurface = indexHtml.match(
+      /<div class="browser-surface" id="browser-surface">[\s\S]*?<div id="preview"/,
+    )?.[0] ?? '';
+
+    for (const id of ['back', 'forward', 'reload', 'url', 'open-external']) {
+      expect(browserSurface).toContain(`id="${id}"`);
+      expect(titlebar).not.toContain(`id="${id}"`);
+    }
+  });
+
   it('ships a byte-identical browser-loadable Psyche titlebar icon asset', () => {
     expect(packagedTitlebarMark.equals(sourceTitlebarMark)).toBe(true);
   });
@@ -164,6 +236,15 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(titlebar).toContain('<div class="titlebar-workspace" data-tauri-drag-region>');
     expect(sidebarShell).toContain('<span class="traffic-gutter" aria-hidden="true"></span>');
     expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/-webkit-app-region:\s*no-drag;/);
+  });
+
+  it('keeps the open toggle on the sidebar boundary and clears the traffic-light gutter when collapsed', () => {
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/left:\s*0;/);
+    expect(
+      ruleBlock(styles, '.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle'),
+    ).toMatch(
+      /left:\s*calc\(var\(--titlebar-pad-l\)\s*-\s*var\(--mini-rail-w\)\);/,
+    );
   });
 
   it('syncs both sidebar toggle controls with the collapsed state', () => {
@@ -196,7 +277,7 @@ describe('Tauri project/worktree/pane rail', () => {
     const closeNewPaneMenu = vi.fn();
     const scheduleVisiblePaneFit = vi.fn();
     const syncBrowserBounds = vi.fn();
-    const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+    const requestAnimationFrame = vi.fn((callback: (timestamp: number) => void) => {
       callback(0);
       return 1;
     });

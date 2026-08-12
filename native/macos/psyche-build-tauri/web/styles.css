@@ -875,6 +875,9 @@ kbd {
   transform: translate(-50%, -50%);
   -webkit-app-region: no-drag;
 }
+.app[data-sidebar="collapsed"] .titlebar-sidebar-toggle {
+  left: calc(var(--titlebar-pad-l) - var(--mini-rail-w));
+}
 .titlebar-sidebar-toggle:hover,
 .titlebar-sidebar-toggle:focus-visible {
   color: var(--text);

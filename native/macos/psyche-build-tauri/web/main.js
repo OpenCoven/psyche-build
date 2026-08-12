@@ -26,6 +26,17 @@
     showBootError("Unhandled promise rejection:\n" + String(e.reason));
   });
 
+  function initializeTitlebarBrandMark() {
+    var mark = document.getElementById("titlebar-brand-mark");
+    if (!mark) return;
+    function removeFailedMark() {
+      mark.remove();
+    }
+    mark.addEventListener("error", removeFailedMark, { once: true });
+    if (mark.complete && mark.naturalWidth === 0) removeFailedMark();
+  }
+  initializeTitlebarBrandMark();
+
   if (typeof window.Terminal !== "function") {
     showBootError("xterm.js did not register a global Terminal constructor.");
     return;
