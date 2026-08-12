@@ -118,7 +118,6 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(indexHtml).not.toContain('id="session-search"');
     expect(styles).not.toMatch(/\.session-search(?:\s|\{|\.)/);
     expect(styles).not.toMatch(/\.session-search-wrap(?:\s|\{|\.)/);
-    expect(styles).not.toMatch(/\.session-search-key(?:\s|\{|\.)/);
 
     expect(sidebarHead).toContain('id="rail-new-tab"');
     expect(sidebarHead).not.toContain('id="sidebar-collapse"');
@@ -438,7 +437,6 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('event.key === "ArrowRight"');
     expect(mainJs).toContain('event.key === "Enter"');
     expect(mainJs).toContain('event.key === " "');
-    expect(mainJs).toContain('event.key === "/"');
     expect(mainJs).toContain('event.key === "Escape"');
     expect(mainJs).toContain('"[data-tree-item]"');
     expect(mainJs).not.toContain('"[data-tree-item], .session-close"');
@@ -470,7 +468,15 @@ describe('Tauri project/worktree/pane rail', () => {
   });
 
   it('wires persisted sidebar filters and summaries without the removed search chrome', () => {
+    const renderSessionList = functionSource(mainJs, 'renderSessionList');
+
     expect(indexHtml).not.toContain('session-search');
+    expect(mainJs).not.toContain('var sessionSearchEl');
+    expect(mainJs).not.toContain('var sessionFilter');
+    expect(mainJs).not.toContain('var sessionSearchRestoreKey');
+    expect(mainJs).not.toContain('sessionSearchEl.addEventListener');
+    expect(mainJs).not.toContain('sessionSearchEl.focus()');
+    expect(mainJs).not.toContain('sessionSearchEl.select()');
     expect(mainJs).toContain('var sidebarTab = settings.sidebarTab;');
     expect(mainJs).toContain('var sessionTypeFilter = settings.sessionFilter;');
     expect(mainJs).toContain('function setSessionTypeFilter(value, options)');
@@ -478,7 +484,12 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('setSidebarTab(settings.sidebarTab, { persist: false });');
     expect(mainJs).toContain('setSessionTypeFilter(settings.sessionFilter, { persist: false });');
     expect(mainJs).toContain('Reset filter');
+    expect(mainJs).not.toContain('Clear search');
     expect(mainJs).not.toContain('settings.sessionSearch');
+    expect(renderSessionList).toContain('var currentSearchQuery = "";');
+    expect(renderSessionList).not.toContain('var needle =');
+    expect(renderSessionList).toContain('sessionTypeFilter !== "all"');
+    expect(renderSessionList).toContain('"No sessions match the " + sessionTypeFilter + " filter."');
     expect(styles).toMatch(/\.session-filter\.is-active\s*\{/);
   });
 

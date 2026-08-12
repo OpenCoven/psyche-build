@@ -4131,11 +4131,8 @@
       btn.addEventListener("click", function () { setGitTab(btn.dataset.gitTab); });
     }
   );
-  var sessionSearchEl = document.getElementById("session-search");
-  var sessionFilter = "";
   var sessionTypeFilter = settings.sessionFilter;
   var sessionTreeFocusKey = "";
-  var sessionSearchRestoreKey = "";
 
   function setSessionTypeFilter(value, options) {
     sessionTypeFilter = PsycheSessions.normalizeSidebarFilter(value);
@@ -5503,16 +5500,6 @@
     }
   }
 
-  function restoreSessionTreeFocus(key) {
-    var items = visibleSessionTreeItems();
-    var target = items.find(function (item) {
-      return key && item.dataset.treeKey === key;
-    }) || items.find(function (item) {
-      return item.getAttribute("tabindex") === "0";
-    }) || items[0];
-    return focusSessionTreeItem(target);
-  }
-
   function renderSessionList() {
     if (!sessionListEl) return;
     if (editingContext && editingContext.surface === "sidebar") return;
@@ -5547,8 +5534,7 @@
     else sessionListEl.removeAttribute("aria-multiselectable");
     sessionListEl.replaceChildren();
 
-    var currentSearchQuery = sessionFilter;
-    var needle = currentSearchQuery.trim().toLowerCase();
+    var currentSearchQuery = "";
     var matched = 0;
     var inlineState = covenInlineState(covenDiscovery);
     // Walked once per render: every row tests membership against this list.
@@ -5615,7 +5601,7 @@
       projectModels.push({ project: project, model: projectModel });
     });
 
-    if (needle || sessionTypeFilter !== "all") {
+    if (sessionTypeFilter !== "all") {
       var summary = document.createElement("div");
       summary.className = "session-result-summary";
       summary.setAttribute("role", "status");
@@ -5625,22 +5611,12 @@
       var reset = document.createElement("button");
       reset.type = "button";
       reset.className = "session-result-reset";
-      if (needle) {
-        reset.textContent = "Clear search";
-        reset.addEventListener("click", function () {
-          sessionSearchEl.value = "";
-          sessionFilter = "";
-          renderSessionList();
-          sessionSearchEl.focus();
-        });
-      } else {
-        reset.textContent = "Reset filter";
-        reset.addEventListener("click", function () {
-          setSessionTypeFilter("all");
-          var allFilter = document.querySelector('[data-session-filter="all"]');
-          if (allFilter) allFilter.focus();
-        });
-      }
+      reset.textContent = "Reset filter";
+      reset.addEventListener("click", function () {
+        setSessionTypeFilter("all");
+        var allFilter = document.querySelector('[data-session-filter="all"]');
+        if (allFilter) allFilter.focus();
+      });
       summary.appendChild(summaryText);
       summary.appendChild(reset);
       sessionListEl.appendChild(summary);
@@ -5927,13 +5903,11 @@
     if (matched === 0 && !inlineState) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
-      empty.textContent = needle
-        ? "No sessions match “" + sessionFilter.trim() + "”"
-        : sessionTypeFilter !== "all"
-          ? "No sessions match the " + sessionTypeFilter + " filter."
-          : state.projects.length
-            ? "No sessions yet."
-            : "No project open — ⌘O to add one.";
+      empty.textContent = sessionTypeFilter !== "all"
+        ? "No sessions match the " + sessionTypeFilter + " filter."
+        : state.projects.length
+          ? "No sessions yet."
+          : "No project open — ⌘O to add one.";
       sessionListEl.appendChild(empty);
     }
 
@@ -5979,26 +5953,6 @@
   applySolidBg(settings.solidBg, { persist: false });
   applyBgOpacity(settings.bgOpacity, { persist: false });
 
-  if (sessionSearchEl) {
-    sessionSearchEl.addEventListener("focus", function () {
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-    });
-    sessionSearchEl.addEventListener("input", function () {
-      sessionFilter = sessionSearchEl.value || "";
-      renderSessionList();
-    });
-    // Escape clears the filter rather than bubbling to the terminal.
-    sessionSearchEl.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        sessionSearchEl.value = "";
-        sessionFilter = "";
-        renderSessionList();
-        restoreSessionTreeFocus(sessionSearchRestoreKey);
-      }
-    });
-  }
   if (sessionListEl) {
     sessionListEl.addEventListener("focusin", function (event) {
       if (event.target && event.target.matches &&
@@ -6016,19 +5970,6 @@
       });
     }
   );
-  document.addEventListener("keydown", function (event) {
-    var target = event.target;
-    var editing = target && (
-      target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
-      target.tagName === "SELECT" || target.isContentEditable
-    );
-    if (event.key === "/" && !editing && sidebarTab === "sessions" && sessionSearchEl) {
-      event.preventDefault();
-      sessionSearchRestoreKey = sessionTreeFocusKey;
-      sessionSearchEl.focus();
-      sessionSearchEl.select();
-    }
-  });
   setSidebarTab(settings.sidebarTab, { persist: false });
   setSessionTypeFilter(settings.sessionFilter, { persist: false });
 
@@ -7141,6 +7082,12 @@
   function runCommand(line) {
     var trimmed = line.trim();
     if (!trimmed) return;
+    if (trimmed.charAt(0) === "?") {
+      commandInput.value = trimmed;
+      openPalette(trimmed, true);
+      syncComposerChrome();
+      return;
+    }
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
@@ -7198,19 +7145,30 @@
   // Plain text always lands in the focused pane, so the composer only has to
   // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var value = commandInput ? commandInput.value.trim() : "";
+    var rawValue = commandInput ? commandInput.value : "";
+    var value = rawValue.trim();
+    var sessionSearchOpen = rawValue.charAt(0) === "?";
     if (composerSendEl) {
-      composerSendEl.hidden = value.length === 0;
+      composerSendEl.hidden = sessionSearchOpen || value.length === 0;
       composerSendEl.firstChild.textContent = value[0] === "/" ? "Run " : "Send ";
     }
-    if (composerMicEl) composerMicEl.hidden = value.length > 0;
+    if (composerMicEl) composerMicEl.hidden = rawValue.length > 0;
     if (composerSendHintEl) {
-      composerSendHintEl.textContent = !value
+      composerSendHintEl.textContent = sessionSearchOpen || !value
         ? ""
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
         : "→ focused pane";
+    }
+    if (commandInput) {
+      commandInput.setAttribute(
+        "aria-label",
+        sessionSearchOpen
+          ? "Search sessions, " + paletteFiltered.length +
+            (paletteFiltered.length === 1 ? " result" : " results")
+          : "Command composer"
+      );
     }
   }
 
@@ -7295,7 +7253,7 @@
     });
   }
 
-  var PALETTE_SIGILS = "/!%";
+  var PALETTE_SIGILS = "/!%?";
 
   /** `%` lists the project's panes so the composer can jump between them. */
   function panePaletteEntries() {
@@ -7334,6 +7292,48 @@
     return entries;
   }
 
+  function buildSessionSearchEntries(query) {
+    var now = Date.now();
+    var selectedThread = findThread(state.activeThreadId);
+    var selectedProject = selectedThread && findProject(selectedThread.projectId);
+    var selectedKey = selectedThread && selectedProject
+      ? PsycheSessions.localSidebarSelectionKey(selectedProject, selectedThread)
+      : settings.selectedSessionKey;
+    var assignments = covenSessionAssignments();
+    var projectModels = state.projects.map(function (project) {
+      var projectModel = PsycheSessions.buildSidebarProjectModel({
+        project: project,
+        localSessions: state.threads.filter(function (thread) {
+          return thread.projectId === project.id &&
+            !thread.hidden && !isDormantThread(thread);
+        }),
+        covenSessions: covenSessionsForProject(project, assignments),
+        query: query,
+        filter: sessionTypeFilter,
+        selectedKey: selectedKey,
+        now: now,
+      });
+      return projectModel.visibleCount === 0 ? null : projectModel;
+    }).filter(Boolean);
+
+    return PsycheSessions.flattenSidebarSearchResults(projectModels).map(function (result) {
+      return {
+        cmd: result.title,
+        desc: [result.projectTitle, result.branchTitle, result.meta]
+          .filter(Boolean).join(" · "),
+        badge: result.status.label,
+        hint: "↵",
+        kind: "session",
+        group: "Sessions",
+        key: result.key,
+        sessionSource: result.source,
+        sessionId: result.id,
+        selectionKey: result.selectionKey,
+        projectId: result.projectId,
+      };
+    });
+  }
+
   function paletteCorpus(sigil, rest) {
     if (sigil === "%") return panePaletteEntries();
     if (sigil === "!") return shellPaletteEntries(rest);
@@ -7341,25 +7341,31 @@
   }
 
   function openPalette(query, force) {
-    var raw = (query || commandInput.value).trim();
-    var sigil = raw[0] || "/";
-    if (!force && PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) === -1) {
+    var raw = String(query == null ? commandInput.value : query).trim();
+    var typedSigil = commandInput.value.charAt(0);
+    var sigil = force ? (raw.charAt(0) || "/") : typedSigil;
+    if (!force && PALETTE_SIGILS.indexOf(typedSigil) === -1) {
       hidePalette();
       return;
     }
     if (PALETTE_SIGILS.indexOf(sigil) === -1) sigil = "/";
     var rest = raw.slice(1).trim();
     var q = sigil === "/" ? raw.toLowerCase() : rest.toLowerCase();
-    paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
-      if (c.pinned) return true;
-      var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
-      return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
-    });
-    if (paletteFiltered.length === 0) {
+    if (sigil === "?") {
+      paletteFiltered = buildSessionSearchEntries(rest);
+    } else {
+      paletteFiltered = paletteCorpus(sigil, rest).filter(function (c) {
+        if (c.pinned) return true;
+        var hay = (c.cmd + " " + (c.desc || "") + " " + (c.badge || "")).toLowerCase();
+        return c.cmd.toLowerCase().indexOf(q) === 0 || hay.indexOf(q) !== -1;
+      });
+    }
+    if (paletteFiltered.length === 0 && sigil !== "?") {
       hidePalette();
       return;
     }
-    paletteIndex = Math.min(paletteIndex, paletteFiltered.length - 1);
+    paletteIndex = Math.min(paletteIndex, Math.max(0, paletteFiltered.length - 1));
+    commandInput.setAttribute("aria-expanded", "true");
     renderPalette();
     paletteEl.hidden = false;
     paletteVisible = true;
@@ -7368,9 +7374,49 @@
     paletteEl.hidden = true;
     paletteVisible = false;
     paletteIndex = 0;
+    commandInput.setAttribute("aria-expanded", "false");
+    commandInput.removeAttribute("aria-activedescendant");
   }
-  function runPalettePick(pick, mode) {
+  async function runSessionSearchPick(pick) {
+    var project = findProject(pick.projectId);
+    if (!project) { toast("Session is no longer available"); return false; }
+    if (pick.sessionSource === "psyche") {
+      var thread = findThread(pick.sessionId);
+      if (!thread || thread.projectId !== project.id || thread.hidden ||
+          isDormantThread(thread)) {
+        toast("Session is no longer available"); return false;
+      }
+      if (project.id !== state.activeProjectId &&
+          !(await setActiveProject(project.id))) return false;
+      settings.selectedSessionKey = pick.selectionKey;
+      saveSettings();
+      applySetScopeForThread(thread);
+      return !!(await focusThread(thread.id));
+    }
+    var session = covenSessionsForProject(project).find(function (candidate) {
+      return candidate.id === pick.sessionId;
+    });
+    if (!session) { toast("Session is no longer available"); return false; }
+    settings.selectedSessionKey = pick.selectionKey;
+    saveSettings();
+    return !!(await openCovenSession(project, session));
+  }
+  async function runPalettePick(pick, mode) {
     if (!pick) return;
+    if (pick.kind === "session") {
+      var selected = false;
+      try {
+        selected = await runSessionSearchPick(pick);
+      } finally {
+        if (selected) {
+          commandInput.value = "";
+          hidePalette();
+        }
+        syncComposerChrome();
+        commandInput.focus();
+      }
+      return;
+    }
     var runsImmediately = pick.kind === "agent" || pick.kind === "recent" ||
       pick.kind === "pane" || pick.kind === "shell" || mode === "run";
     if (runsImmediately) {
@@ -7394,7 +7440,17 @@
   }
 
   function renderPalette() {
-    paletteEl.innerHTML = "";
+    paletteEl.replaceChildren();
+    commandInput.removeAttribute("aria-activedescendant");
+    if (paletteFiltered.length === 0 && commandInput.value.charAt(0) === "?") {
+      var empty = document.createElement("div");
+      empty.className = "palette-empty";
+      empty.textContent = "No matching sessions";
+      paletteEl.appendChild(empty);
+      paletteEl.hidden = false;
+      paletteVisible = true;
+      return;
+    }
     var lastGroup = "";
     paletteFiltered.forEach(function (c, idx) {
       if (c.group !== lastGroup) {
@@ -7405,8 +7461,11 @@
         paletteEl.appendChild(heading);
       }
       var div = document.createElement("div");
-      div.className =
-        "palette-item palette-" + c.kind + (idx === paletteIndex ? " active" : "");
+      var kindClass = c.kind === "session" ? " palette-session" : " palette-" + c.kind;
+      div.className = "palette-item" + kindClass + (idx === paletteIndex ? " active" : "");
+      div.id = "palette-option-" + idx;
+      div.setAttribute("role", "option");
+      div.setAttribute("aria-selected", idx === paletteIndex ? "true" : "false");
       div.innerHTML =
         '<span class="cmd">' + escapeHtml(c.cmd) + "</span>" +
         '<span class="desc">' +
@@ -7416,26 +7475,47 @@
         '<span class="hint-key">' + escapeHtml(c.hint || "↵") + "</span>";
       div.addEventListener("click", function () { runPalettePick(c); });
       paletteEl.appendChild(div);
+      if (idx === paletteIndex) {
+        commandInput.setAttribute("aria-activedescendant", div.id);
+      }
     });
     ensurePaletteActiveVisible();
   }
 
   commandInput.addEventListener("input", function () {
-    if (PALETTE_SIGILS.indexOf(commandInput.value.trim()[0]) !== -1) openPalette();
+    if (PALETTE_SIGILS.indexOf(commandInput.value.charAt(0)) !== -1) openPalette();
     else hidePalette();
     syncComposerChrome();
   });
   commandInput.addEventListener("keydown", function (e) {
     if (paletteVisible) {
       if (e.key === "ArrowDown") {
-        paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex + 1) % paletteFiltered.length;
+          renderPalette();
+        }
+        e.preventDefault();
+        return;
       }
       if (e.key === "ArrowUp") {
-        paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
-        renderPalette(); e.preventDefault(); return;
+        if (paletteFiltered.length > 0) {
+          paletteIndex = (paletteIndex - 1 + paletteFiltered.length) % paletteFiltered.length;
+          renderPalette();
+        }
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && commandInput.value.charAt(0) === "?") {
+        e.preventDefault();
+        var sessionPick = paletteFiltered[paletteIndex];
+        if (sessionPick) runPalettePick(sessionPick);
+        return;
       }
       if (e.key === "Tab") {
+        if (commandInput.value.charAt(0) === "?") {
+          e.preventDefault();
+          return;
+        }
         var pick = paletteFiltered[paletteIndex];
         if (pick.kind === "recent") commandInput.value = pick.cmd;
         else commandInput.value = pick.cmd + (pick.kind === "agent" ? "" : " ");
@@ -7443,7 +7523,14 @@
         e.preventDefault();
         return;
       }
-      if (e.key === "Escape") { hidePalette(); e.preventDefault(); return; }
+      if (e.key === "Escape") {
+        if (commandInput.value.charAt(0) === "?") commandInput.value = "";
+        hidePalette();
+        syncComposerChrome();
+        commandInput.focus();
+        e.preventDefault();
+        return;
+      }
     }
     if (e.key === "Enter") {
       var line = commandInput.value;

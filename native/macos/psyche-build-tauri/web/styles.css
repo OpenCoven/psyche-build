@@ -2759,10 +2759,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 .palette {
   position: absolute;
-  left: 12px;
-  width: calc(100% - 24px);
-  max-width: 780px;
-  bottom: calc(var(--composer-h) - 4px);
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
   background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.92));
   backdrop-filter: blur(28px) saturate(1.2);
   -webkit-backdrop-filter: blur(28px) saturate(1.2);
@@ -2770,8 +2769,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-radius: 10px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
   padding: 6px;
-  max-height: 260px;
-  overflow-y: auto;
+  max-height: min(360px, 45vh);
+  overflow: auto;
   z-index: 10;
 }
 .palette[hidden] { display: none; }
@@ -2785,6 +2784,9 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   font-size: 12px;
   color: var(--text-soft);
   transition: background var(--transition-fast);
+}
+.palette-item.palette-session {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
 }
 .palette-item .cmd { font-family: var(--font-mono); color: var(--accent); font-weight: 500; }
 .palette-item .desc {
@@ -2818,6 +2820,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .palette-item:hover, .palette-item.active {
   background: var(--accent-soft);
   color: var(--text);
+}
+.palette-empty {
+  padding: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
 }
 
 /* -------- Browser pane -------- */

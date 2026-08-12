@@ -355,6 +355,9 @@
               autocomplete="off"
               placeholder="/ command · ! shell · % pane — or plain text to the focused pane"
               aria-label="Command composer"
+              aria-controls="palette"
+              aria-autocomplete="list"
+              aria-expanded="false"
             />
             <span class="composer-send-hint" id="composer-send-hint" aria-hidden="true"></span>
           </div>
@@ -382,7 +385,7 @@
             <button id="call-end" class="call-btn call-end" type="button">End call</button>
           </div>
 
-          <div class="palette" id="palette" hidden></div>
+          <div class="palette" id="palette" role="listbox" aria-label="Composer suggestions" hidden></div>
         </footer>
 
         <section class="status-detail" id="status-detail" aria-label="Workspace metrics" hidden>
