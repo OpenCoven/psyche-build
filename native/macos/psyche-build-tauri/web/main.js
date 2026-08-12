@@ -7889,18 +7889,18 @@
     );
   }
 
-  async function routeGitPaneShortcut(event) {
+  function routeGitPaneShortcut(event) {
     if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
         String(event.key).toLowerCase() !== "g" ||
         isTextEntryTarget(event.target) || gitPaneShortcutBlocked()) return false;
     event.preventDefault();
-    await openOrFocusGitPane();
+    openOrFocusGitPane().catch(function () {});
     return true;
   }
 
-  document.addEventListener("keydown", async function (e) {
+  async function routeGlobalShortcut(e) {
     if (routeAgentPickerModalKeydown(e)) return;
-    if (await routeGitPaneShortcut(e)) return;
+    if (routeGitPaneShortcut(e)) return;
     var meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     if (String(e.key).toLowerCase() === "s") {
@@ -7956,6 +7956,10 @@
       var p = state.projects[n - 1];
       if (p) { e.preventDefault(); await setActiveProject(p.id); }
     }
+  }
+
+  document.addEventListener("keydown", function (e) {
+    routeGlobalShortcut(e);
   }, true);
   // ---- Side rails ----
   // Each rail button is a click affordance for a shortcut that already exists;
@@ -8105,6 +8109,24 @@
     if (!el) return;
     el.addEventListener("click", function () { closeNewPaneMenu(); handler(); });
   }
+
+  function focusGitPaneEntry() {
+    var surface = document.getElementById("git-surface");
+    if (!surface || !surface.isConnected) return false;
+    var entry = surface.querySelector("[data-git-tab].is-active") ||
+      surface.querySelector("[data-git-tab]") ||
+      surface.querySelector("#git-refresh");
+    if (!entry || typeof entry.focus !== "function") return false;
+    entry.focus();
+    return true;
+  }
+
+  async function openGitPaneFromNewPaneMenu() {
+    var thread = await openOrFocusGitPane();
+    if (thread) focusGitPaneEntry();
+    return thread;
+  }
+
   onMenuClick("new-pane-term", async function () {
     var thread = await createTerminalPane();
     if (thread) toast("Terminal pane opened");
@@ -8116,10 +8138,7 @@
     await openBlankBrowserTab();
     toast("Web pane opened");
   });
-  onMenuClick("new-pane-git", async function () {
-    closeNewPaneMenu();
-    await openOrFocusGitPane();
-  });
+  onMenuClick("new-pane-git", openGitPaneFromNewPaneMenu);
   onMenuClick("new-pane-set", function () { beginSetPicking(); });
   onMenuClick("new-pane-project", function () { openProjectPicker(); });
   if (newPaneMenuEl) newPaneMenuEl.addEventListener("keydown", handleNewPaneMenuKeydown);

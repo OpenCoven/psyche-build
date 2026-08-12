@@ -323,8 +323,8 @@ describe('Tauri agent picker', () => {
   });
 
   it('uses Command-P and list keyboard controls to drive the picker', () => {
-    const documentShortcutIndex = mainJs.indexOf('document.addEventListener("keydown", async function (e) {');
-    const modalRouteIndex = mainJs.indexOf('if (routeAgentPickerModalKeydown(e)) return;', documentShortcutIndex);
+    const documentShortcutIndex = mainJs.indexOf('async function routeGlobalShortcut(e) {');
+    const modalRouteIndex = mainJs.indexOf('if (routeAgentPickerModalKeydown(e)) return;');
     const commandPIndex = mainJs.indexOf('String(e.key).toLowerCase() === "p"');
     const commandOIndex = mainJs.indexOf('if (e.key === "o")');
     expect(modalRouteIndex).toBeGreaterThan(documentShortcutIndex);
@@ -345,7 +345,7 @@ describe('Tauri agent picker', () => {
     expect(listKeydownSource).toContain('event.key === "Escape"');
   });
 
-  it('routes Git only from an unmodified Command-G outside text and modal contexts', async () => {
+  it('routes Git only from an unmodified Command-G outside text and modal contexts', () => {
     const source = [
       'isTextEntryTarget', 'gitPaneShortcutBlocked', 'routeGitPaneShortcut',
     ].map(functionSource).join('\n');
@@ -367,7 +367,7 @@ describe('Tauri agent picker', () => {
       shiftKey?: boolean;
       target?: { tagName?: string; isContentEditable?: boolean };
       preventDefault: () => void;
-    }) => Promise<boolean>;
+    }) => boolean;
     const event = (overrides: Record<string, unknown> = {}) => {
       let prevented = 0;
       return {
@@ -382,7 +382,7 @@ describe('Tauri agent picker', () => {
     };
 
     const commandG = event();
-    await expect(routeGitPaneShortcut(commandG.value)).resolves.toBe(true);
+    expect(routeGitPaneShortcut(commandG.value)).toBe(true);
     expect(opened).toBe(1);
     expect(commandG.prevented()).toBe(1);
 
@@ -394,14 +394,77 @@ describe('Tauri agent picker', () => {
       { target: { tagName: 'DIV', isContentEditable: true } },
     ]) {
       const ignored = event(overrides);
-      await expect(routeGitPaneShortcut(ignored.value)).resolves.toBe(false);
+      expect(routeGitPaneShortcut(ignored.value)).toBe(false);
       expect(ignored.prevented()).toBe(0);
     }
     dirtyDialog.open = true;
     const modal = event();
-    await expect(routeGitPaneShortcut(modal.value)).resolves.toBe(false);
+    expect(routeGitPaneShortcut(modal.value)).toBe(false);
     expect(modal.prevented()).toBe(0);
     expect(opened).toBe(1);
+  });
+
+  it('prevents existing Command shortcuts before later keydown listeners observe the event', async () => {
+    const routeGlobalShortcut = compileFunction<(
+      event: {
+        key: string;
+        metaKey?: boolean;
+        ctrlKey?: boolean;
+        altKey?: boolean;
+        shiftKey?: boolean;
+        code?: string;
+        preventDefault: () => void;
+      },
+    ) => Promise<unknown>>(
+      functionSource('routeGlobalShortcut'),
+      {
+        routeAgentPickerModalKeydown: () => false,
+        routeGitPaneShortcut: () => false,
+        handleExplicitFileSave: (event: { preventDefault: () => void }) => {
+          event.preventDefault();
+          return Promise.resolve();
+        },
+        createTerminalPane: () => Promise.resolve(),
+        openAgentPicker: () => false,
+        openProjectPicker: () => undefined,
+        state: { activeFileId: null, activeProjectId: 'project', projects: [] },
+        closeFileTab: () => Promise.resolve(),
+        removeProject: () => Promise.resolve(),
+        commandInput: { focus: () => undefined },
+        openPalette: () => undefined,
+        toggleDock: () => undefined,
+        toggleSidebar: () => undefined,
+        canvasThreadIds: () => [],
+        focusThread: () => Promise.resolve(),
+        switchTab: () => Promise.resolve(),
+        projectFiles: () => [],
+        activateFileTab: () => Promise.resolve(),
+        setActiveProject: () => Promise.resolve(),
+      },
+    );
+    const observed: Array<{ key: string; prevented: boolean }> = [];
+    async function dispatch(key: string, extra: Record<string, unknown> = {}) {
+      let prevented = false;
+      const event = {
+        key, metaKey: true, ctrlKey: false, altKey: false, shiftKey: false,
+        preventDefault: () => { prevented = true; },
+        ...extra,
+      };
+      const inFlight = routeGlobalShortcut(event);
+      // This is the next document listener in the same dispatch, before the
+      // promise continuation/microtask gets a chance to run.
+      observed.push({ key, prevented });
+      await inFlight;
+    }
+
+    await dispatch('s');
+    await dispatch('t');
+    await dispatch('w');
+    expect(observed).toEqual([
+      { key: 's', prevented: true },
+      { key: 't', prevented: true },
+      { key: 'w', prevented: true },
+    ]);
   });
 
   it('stops propagation for picker-owned keys, especially Escape', () => {
@@ -874,9 +937,8 @@ describe('Tauri agent picker', () => {
     expect(mainJs).not.toMatch(
       /onMenuClick\("new-pane-agent", async function \(\) \{[\s\S]*?runNewThreadCommand\(\)/,
     );
-    expect(mainJs).toMatch(
-      /onMenuClick\("new-pane-git", async function \(\)[\s\S]*openOrFocusGitPane\(\)/,
-    );
+    expect(mainJs).toMatch(/onMenuClick\("new-pane-git", openGitPaneFromNewPaneMenu\)/);
+    expect(functionSource('openGitPaneFromNewPaneMenu')).toContain('openOrFocusGitPane()');
     expect(mainJs).toMatch(
       /cmd: "\/git",[\s\S]*desc: "Open or focus the Git pane"[\s\S]*openOrFocusGitPane\(\)/,
     );
@@ -969,6 +1031,77 @@ describe('Tauri agent picker', () => {
     expect(api.handleNewPaneMenuKeydown(tab.event)).toBe(false);
     expect(menu.hidden).toBe(true);
     expect(tab.prevented()).toBe(0);
+  });
+
+  it('moves keyboard New Pane Git activation into a visible Git control after it opens', async () => {
+    let activation: Promise<unknown> | null = null;
+    const trigger = {
+      setAttribute: () => undefined,
+      focus: () => undefined,
+    };
+    const document = {
+      activeElement: null as unknown,
+      getElementById: (id: string) => {
+        if (id === 'rail-new-tab') return trigger;
+        if (id === 'new-pane-git') return gitItem;
+        if (id === 'git-surface') return gitSurface;
+        return null;
+      },
+    };
+    const gitTab = {
+      focus: () => { document.activeElement = gitTab; },
+    };
+    const gitSurface = {
+      isConnected: true,
+      querySelector: () => gitTab,
+    };
+    let clickHandler: (() => unknown) | null = null;
+    const gitItem = {
+      disabled: false,
+      focus: () => { document.activeElement = gitItem; },
+      click: () => { activation = Promise.resolve(clickHandler && clickHandler()); },
+      addEventListener: (type: string, handler: () => unknown) => {
+        if (type === 'click') clickHandler = handler;
+      },
+    };
+    const menu = {
+      hidden: true,
+      querySelectorAll: () => [gitItem],
+    };
+    const source = [
+      'newPaneMenuItems', 'focusNewPaneMenuItem', 'closeNewPaneMenu',
+      'toggleNewPaneMenu', 'handleNewPaneMenuKeydown', 'onMenuClick',
+      'focusGitPaneEntry', 'openGitPaneFromNewPaneMenu',
+    ].map(functionSource).join('\n');
+    const api = Function(
+      'document', 'menu', 'openOrFocusGitPane',
+      `"use strict";
+       var newPaneMenuEl = menu;
+       var newPaneMenuHeadEl = { textContent: '' };
+       var activeProject = function () { return null; };
+       var selectedWorktree = function () { return null; };
+       var createTerminalPane = function () { throw new Error('menu is present'); };
+       ${source}
+       onMenuClick('new-pane-git', openGitPaneFromNewPaneMenu);
+       return { toggleNewPaneMenu, handleNewPaneMenuKeydown };`,
+    )(
+      document,
+      menu,
+      async () => ({ id: 'git' }),
+    ) as {
+      toggleNewPaneMenu: () => void;
+      handleNewPaneMenuKeydown: (event: {
+        key: string;
+        preventDefault: () => void;
+      }) => boolean;
+    };
+
+    api.toggleNewPaneMenu();
+    expect(document.activeElement).toBe(gitItem);
+    api.handleNewPaneMenuKeydown({ key: 'Enter', preventDefault: () => undefined });
+    await activation;
+    expect(menu.hidden).toBe(true);
+    expect(document.activeElement).toBe(gitTab);
   });
 
   it('keeps Coven startup behind explicit launch surfaces', () => {
