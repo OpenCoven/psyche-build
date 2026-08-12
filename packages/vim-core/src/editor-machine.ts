@@ -1,6 +1,8 @@
 import { normalizeKeyboardEvent } from './normalize.js';
 import { EDITOR_LIMITS } from './editor/limits.js';
-import { relocateMark } from './editor/marks.js';
+import { substituteText } from './editor/ex-executor.js';
+import { parseExCommand } from './editor/ex-parser.js';
+import { mapPosition, relocateMark } from './editor/marks.js';
 import { compilePattern, escapePattern } from './editor/patterns.js';
 import { consumeReplayAction, type ReplayBudget } from './editor/replay.js';
 import { findMatch, wordAt } from './editor/search.js';
@@ -241,6 +243,25 @@ function objectRange(
   object: string,
   around: boolean,
 ): { from: number; to: number } | undefined {
+  if (object === 'p') {
+    let from = lineStart(text, position);
+    let to = lineEnd(text, position);
+    while (from > 0) {
+      const previous = lineStart(text, Math.max(0, from - 1));
+      if (!text.slice(previous, lineEnd(text, previous)).trim()) break;
+      from = previous;
+    }
+    while (to < text.length) {
+      const next = to + 1;
+      if (!text.slice(next, lineEnd(text, next)).trim()) {
+        if (around) to = Math.min(text.length, lineEnd(text, next) + 1);
+        break;
+      }
+      to = lineEnd(text, next);
+    }
+    if (to < text.length && text[to] === '\n') to += 1;
+    return { from, to };
+  }
   if (object === 'w' || object === 'W') {
     const parts = graphemes(text);
     let index = parts.findIndex((part, partIndex) => {
@@ -320,6 +341,8 @@ export function createEditorMachine(
   let visualHead = 0;
   let inputBuffer = '';
   let inputBufferBytes = 0;
+  let ignoreCase = options.ignoreCase ?? false;
+  let smartCase = options.smartCase ?? false;
   let searchState: EditorSearchState | undefined;
   let insertFirstEdit = true;
   let insertChange: EditorInput[] | undefined;
@@ -330,6 +353,8 @@ export function createEditorMachine(
   let macroDepth = 0;
   const macroBudget: ReplayBudget = { actions: 0 };
   let invocationGroup: { used: boolean } | undefined;
+  const backJumps: number[] = [];
+  const forwardJumps: number[] = [];
   let queuedActions: EditorAction[] = [];
   const registers = new Map<string, EditorRegister>();
   const marks = new Map<string, number>();
@@ -372,6 +397,15 @@ export function createEditorMachine(
     if (invocationGroup) invocationGroup.used = true;
     const nextText = document.text();
     for (const [name, position] of marks) marks.set(name, relocateMark(nextText, position, transaction.changes));
+    const firstChange = transaction.changes[0];
+    const lastChangeInTransaction = transaction.changes.at(-1);
+    if (firstChange && lastChangeInTransaction) {
+      const start = mapPosition(firstChange.from, transaction.changes, 'before');
+      const end = mapPosition(lastChangeInTransaction.to, transaction.changes, 'after');
+      marks.set('[', start);
+      marks.set(']', end);
+      marks.set('.', start);
+    }
     if (options.bufferId && options.globalMarks) {
       for (const name of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
         try {
@@ -405,9 +439,10 @@ export function createEditorMachine(
     return commit(changes, next.map((position) => ({ anchor: position, head: position })), 'join');
   }
 
-  function select(position: number): void {
+  function select(position: number, recordJump = true): void {
     const text = document.text();
     const bounded = Math.max(0, Math.min(text.length, position));
+    const previous = document.selections()[0]?.head ?? 0;
     let selections: readonly EditorSelection[] = [{ anchor: bounded, head: bounded }];
     if (mode === 'visual-character') {
       selections = bounded >= visualAnchor
@@ -449,7 +484,14 @@ export function createEditorMachine(
       }
       selections = block;
     }
-    if (setSelections(selections)) visualHead = bounded;
+    if (setSelections(selections)) {
+      visualHead = bounded;
+      if (recordJump && previous !== bounded && !mode.startsWith('visual-')) {
+        backJumps.push(previous);
+        if (backJumps.length > 100) backJumps.shift();
+        forwardJumps.length = 0;
+      }
+    }
   }
 
   function resetPending(): void {
@@ -496,6 +538,9 @@ export function createEditorMachine(
     bytes += byteLength(next.text);
     if (entries > EDITOR_LIMITS.registerEntries || bytes > EDITOR_LIMITS.registerBytes) return false;
     registers.set(target, next);
+    if ((target === '+' || target === '*') && options.clipboardRegisters) {
+      options.clipboard?.write(target, next);
+    }
     if (/^[a-z]$/u.test(target)) macros.set(target, [...next.text]);
     return true;
   }
@@ -689,8 +734,8 @@ export function createEditorMachine(
   function search(direction: 'forward' | 'backward'): EditorResult {
     if (!searchState?.pattern) return snapshot([{ type: 'status', level: 'error', message: 'No previous search' }]);
     const compiled = compilePattern(searchState.pattern, {
-      ignoreCase: options.ignoreCase ?? false,
-      smartCase: options.smartCase ?? false,
+      ignoreCase,
+      smartCase,
     });
     if (!compiled) return snapshot([{ type: 'status', level: 'error', message: 'Unsupported search pattern' }]);
     const target = findMatch(document.text(), compiled, cursor(), direction, searchState.wholeWord);
@@ -705,9 +750,100 @@ export function createEditorMachine(
       || byteLength(commands.join('')) > EDITOR_LIMITS.exHistoryBytes) commands.shift();
   }
 
-  async function invoke(command: Parameters<EditorDocumentPort['command']>[0]): Promise<EditorAction> {
+  function selectedRegister(): EditorRegister | undefined {
+    const name = activeRegister ?? '"';
+    activeRegister = undefined;
+    if ((name === '+' || name === '*') && options.clipboardRegisters) {
+      const value = options.clipboard?.read(name);
+      return value === undefined ? registers.get(name) : { text: value, linewise: false };
+    }
+    if (name === '=') return options.expressionResult === undefined
+      ? undefined : { text: options.expressionResult, linewise: false };
+    if (name === '%') return options.currentFilename === undefined
+      ? undefined : { text: options.currentFilename, linewise: false };
+    return registers.get(name.toLocaleLowerCase()) ?? registers.get(name);
+  }
+
+  function transformRange(
+    range: { from: number; to: number },
+    transform: (value: string) => string,
+  ): EditorResult {
+    const value = document.text().slice(range.from, range.to);
+    const insert = transform(value);
+    if (!commit([{ ...range, insert }], [{ anchor: range.from, head: range.from }], 'new')) return snapshot();
+    resetPending();
+    lastChange = undefined;
+    lastVisualChange = undefined;
+    return snapshot();
+  }
+
+  function transformLines(from: number, to: number, direction: 'indent' | 'outdent'): EditorResult {
+    const text = document.text();
+    const start = lineStart(text, from);
+    const end = to >= text.length ? text.length : lineEnd(text, Math.max(start, to));
+    const original = text.slice(start, end);
+    const indent = options.indentText ?? '  ';
+    const insert = original.split('\n').map((line) => direction === 'indent'
+      ? `${indent}${line}`
+      : line.startsWith(indent) ? line.slice(indent.length) : line.replace(/^\s/u, '')).join('\n');
+    if (!commit([{ from: start, to: end, insert }], [{ anchor: start, head: start }], 'new')) return snapshot();
+    resetPending();
+    return snapshot();
+  }
+
+  function paste(before: boolean): EditorResult {
+    const value = selectedRegister();
+    if (!value) return snapshot([{ type: 'status', level: 'error', message: 'Register is empty' }]);
+    const text = document.text();
+    let position: number;
+    let insert = value.text;
+    if (value.linewise) {
+      position = before ? lineStart(text, cursor()) : Math.min(text.length, lineEnd(text, cursor()) + 1);
+      if (!insert.endsWith('\n')) insert += '\n';
+    } else position = before ? cursor() : nextGrapheme(text, cursor());
+    const head = position + Math.max(0, insert.length - (value.linewise ? 1 : 0));
+    if (!apply(position, position, insert, head, 'new')) return snapshot();
+    lastChange = [before ? 'P' : 'p'];
+    return snapshot();
+  }
+
+  function joinLines(): EditorResult {
+    const text = document.text();
+    const end = lineEnd(text, cursor());
+    if (end >= text.length) return snapshot([{ type: 'status', level: 'error', message: 'No next line to join' }]);
+    let from = end;
+    while (from > lineStart(text, cursor()) && /\s/u.test(text[from - 1]!)) from -= 1;
+    let to = end + 1;
+    while (to < text.length && /[\t ]/u.test(text[to]!)) to += 1;
+    if (!commit([{ from, to, insert: ' ' }], [{ anchor: from, head: from }], 'new')) return snapshot();
+    lastChange = ['J'];
+    return snapshot();
+  }
+
+  function changeNumber(delta: 1 | -1): EditorResult {
+    const text = document.text();
+    const tail = text.slice(cursor());
+    const match = /[-+]?\d+/u.exec(tail);
+    if (!match) return snapshot([{ type: 'status', level: 'error', message: 'No number under cursor' }]);
+    const from = cursor() + match.index;
+    const original = match[0];
+    const value = Number(original);
+    if (!Number.isSafeInteger(value)) return snapshot([{ type: 'status', level: 'error', message: 'Number is out of range' }]);
+    const nextValue = value + delta;
+    const sign = nextValue < 0 ? '-' : original.startsWith('+') ? '+' : '';
+    const digits = String(Math.abs(nextValue)).padStart(original.replace(/^[-+]/u, '').length, '0');
+    const insert = `${sign}${digits}`;
+    if (!commit([{ from, to: from + original.length, insert }], [{ anchor: from, head: from }], 'new')) return snapshot();
+    lastChange = [{ key: delta > 0 ? 'a' : 'x', ctrlKey: true }];
+    return snapshot();
+  }
+
+  async function invoke(
+    command: Parameters<EditorDocumentPort['command']>[0],
+    argument?: string,
+  ): Promise<EditorAction> {
     try {
-      return { type: 'command', command, success: await document.command(command) };
+      return { type: 'command', command, success: await document.command(command, argument) };
     } catch {
       return { type: 'status', level: 'error', message: `Document command failed: ${command}` };
     }
@@ -732,11 +868,61 @@ export function createEditorMachine(
     if (/^source(?:\s|$)/iu.test(command)) {
       return snapshot([{ type: 'status', level: 'error', message: 'Source commands are not allowed' }]);
     }
-    if (/^(?:(?:%|\d+(?:,\d+)?)\s*)?(?:s(?:ubstitute)?|g(?:lobal)?)(?:\/|\s|$)/iu.test(command)) {
-      return snapshot([{ type: 'status', level: 'error', message: 'Substitute and global commands are not supported' }]);
+    if (/^(?:(?:%|\d+(?:,\d+)?)\s*)?g(?:lobal)?(?:\/|\s|$)/iu.test(command)) {
+      return snapshot([{ type: 'status', level: 'error', message: 'Global commands are not supported' }]);
     }
     if (/^(?:w|write|save|e|edit)\s+\S/iu.test(command)) {
       return snapshot([{ type: 'status', level: 'error', message: 'Filesystem arguments are not allowed' }]);
+    }
+    const parsed = parseExCommand(command);
+    if (parsed.type === 'capability') return snapshot([await invoke(parsed.command)]);
+    if (parsed.type === 'buffer') return snapshot([await invoke('select-buffer', parsed.name)]);
+    if (parsed.type === 'option') {
+      if (parsed.name === 'ignore-case') ignoreCase = parsed.enabled;
+      if (parsed.name === 'smart-case') smartCase = parsed.enabled;
+      const action = await invoke('set-option', `${parsed.name}=${parsed.enabled}`);
+      return snapshot([{ type: 'option', name: parsed.name, enabled: parsed.enabled }, action]);
+    }
+    if (parsed.type === 'substitute') {
+      if (!parsed.pattern) return snapshot([{ type: 'status', level: 'error', message: 'Empty substitute pattern' }]);
+      const compiled = compilePattern(parsed.pattern, { ignoreCase, smartCase });
+      if (!compiled) return snapshot([{
+        type: 'status', level: 'error', message: 'Unsupported substitute pattern',
+      }]);
+      const text = document.text();
+      let from = lineStart(text, cursor());
+      let to = lineEnd(text, cursor());
+      if (parsed.range === '%') {
+        from = 0;
+        to = text.length;
+      } else if (parsed.range) {
+        from = lineAt(text, Math.max(0, parsed.range.from - 1));
+        const last = lineAt(text, Math.max(0, parsed.range.to - 1));
+        to = lineEnd(text, last);
+      }
+      const original = text.slice(from, to);
+      const substitution = substituteText(
+        original,
+        compiled,
+        parsed.replacement,
+        parsed.global,
+        EDITOR_LIMITS.macroActions,
+      );
+      if (!substitution) return snapshot([{
+        type: 'status', level: 'error',
+        message: `Substitute exceeds replacement limit (${EDITOR_LIMITS.macroActions})`,
+      }]);
+      if (parsed.confirm) {
+        const confirmation = await invoke('confirm-substitute', JSON.stringify({
+          pattern: parsed.pattern,
+          replacement: parsed.replacement,
+          replacements: substitution.replacements,
+        }));
+        if (confirmation.type !== 'command' || !confirmation.success) return snapshot([confirmation]);
+      }
+      if (substitution.replacements > 0
+        && !commit([{ from, to, insert: substitution.text }], [{ anchor: from, head: from }], 'new')) return snapshot();
+      return snapshot();
     }
     const single = new Map<string, Parameters<EditorDocumentPort['command']>[0]>([
       ['w', 'save'], ['write', 'save'], ['save', 'save'],
@@ -952,6 +1138,11 @@ export function createEditorMachine(
     }
 
     if (value.key === 'Escape') {
+      if (mode.startsWith('visual-')) {
+        const selections = document.selections();
+        marks.set('<', Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head])));
+        marks.set('>', Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head])));
+      }
       if ((mode === 'insert' || mode === 'replace') && activeVisualChange) {
         lastVisualChange = activeVisualChange;
         lastChange = undefined;
@@ -959,6 +1150,11 @@ export function createEditorMachine(
       } else if ((mode === 'insert' || mode === 'replace') && insertChange) {
         lastChange = [...insertChange, 'Escape'];
         lastVisualChange = undefined;
+      }
+      if (mode === 'insert' || mode === 'replace') {
+        marks.set('^', cursor());
+        const inserted = insertChange?.slice(1).map(inputDisplay).join('') ?? activeVisualChange?.insert ?? '';
+        if (inserted) setRegister('.', inserted);
       }
       insertChange = undefined;
       return enter('normal');
@@ -1080,8 +1276,60 @@ export function createEditorMachine(
       resetPending();
       return replay(macro, true, repetitions);
     }
+    if ((pending === '>' || pending === '<') && key === pending) {
+      const count = countBuffer ? Number(countBuffer) : 1;
+      const text = document.text();
+      const from = lineStart(text, cursor());
+      const last = lineAt(text, lineNumber(text, from) + count - 1);
+      return transformLines(from, lineEnd(text, last), pending === '>' ? 'indent' : 'outdent');
+    }
+    if (pending === 'g' && (key === 'u' || key === 'U' || key === '~')) {
+      pending = `g${key}`;
+      return snapshot();
+    }
+    if (pending === 'g' && key === 'q') {
+      pending = 'gq';
+      return snapshot();
+    }
+    if (pending === 'gq' && key === 'q') {
+      resetPending();
+      return snapshot([await invoke('format')]);
+    }
+    if (/^g[uU~]$/u.test(pending)) {
+      const target = motion(key, value.shift, countBuffer ? Number(countBuffer) : 1);
+      if (target === undefined) {
+        resetPending();
+        return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
+      }
+      const range = rangeForMotion(key, target);
+      const operation = pending[1]!;
+      return transformRange(range, (text) => operation === 'u'
+        ? text.toLocaleLowerCase()
+        : operation === 'U'
+          ? text.toLocaleUpperCase()
+          : [...text].map((character) => character === character.toLocaleUpperCase()
+            ? character.toLocaleLowerCase() : character.toLocaleUpperCase()).join(''));
+    }
 
     if (!pending) {
+      if (mode.startsWith('visual-') && (key === '>' || key === '<' || key === '~' || key === 'u' || key === 'U')) {
+        const selections = document.selections();
+        const from = Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head]));
+        const to = Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head]));
+        marks.set('<', from);
+        marks.set('>', to);
+        mode = 'normal';
+        activeVisualChange = undefined;
+        if (key === '>' || key === '<') {
+          return transformLines(from, Math.max(from, to - 1), key === '>' ? 'indent' : 'outdent');
+        }
+        return transformRange({ from, to }, (text) => key === 'u'
+          ? text.toLocaleLowerCase()
+          : key === 'U'
+            ? text.toLocaleUpperCase()
+            : [...text].map((character) => character === character.toLocaleUpperCase()
+              ? character.toLocaleLowerCase() : character.toLocaleUpperCase()).join(''));
+      }
       if (key === '"' || key === 'm' || key === '`' || key === "'" || key === 'q' || key === '@') {
         pending = key;
         return snapshot();
@@ -1091,6 +1339,23 @@ export function createEditorMachine(
         if (!lastChange) return snapshot([{ type: 'status', level: 'error', message: 'No change to repeat' }]);
         return replay(lastChange, false);
       }
+      if (value.ctrl && value.key === 'o') {
+        const target = backJumps.pop();
+        if (target === undefined) return snapshot([{ type: 'status', level: 'error', message: 'Jump list is empty' }]);
+        forwardJumps.push(cursor());
+        select(target, false);
+        return snapshot();
+      }
+      if (value.ctrl && value.key === 'i') {
+        const target = forwardJumps.pop();
+        if (target === undefined) return snapshot([{ type: 'status', level: 'error', message: 'Jump list is empty' }]);
+        backJumps.push(cursor());
+        select(target, false);
+        return snapshot();
+      }
+      if (value.ctrl && (value.key === 'a' || value.key === 'x')) return changeNumber(value.key === 'a' ? 1 : -1);
+      if (value.ctrl && value.key === 'r') return snapshot([await invoke('redo')]);
+      if (key === 'u') return snapshot([await invoke('undo')]);
       if (key === 'n' || key === 'N') {
         const base = searchState?.direction ?? 'forward';
         const direction = key === 'n' ? base : (base === 'forward' ? 'backward' : 'forward');
@@ -1116,9 +1381,34 @@ export function createEditorMachine(
         };
       }
       if (value.ctrl && value.key === 'v') return enter('visual-block');
-      if (key === 'i' || key === 'R') {
+      if (key === 'i' || key === 'R' || key === 'a' || key === 'A') {
+        if (key === 'a') select(nextGrapheme(document.text(), cursor()));
+        if (key === 'A') select(lineEnd(document.text(), cursor()));
         insertChange = [key];
-        return enter(key === 'i' ? 'insert' : 'replace');
+        return enter(key === 'R' ? 'replace' : 'insert');
+      }
+      if (key === 'o' || key === 'O') {
+        const position = key === 'o' ? lineEnd(document.text(), cursor()) : lineStart(document.text(), cursor());
+        if (!apply(position, position, '\n', key === 'o' ? position + 1 : position, 'new')) return snapshot();
+        insertChange = [key];
+        const result = enter('insert');
+        insertFirstEdit = false;
+        return result;
+      }
+      if (key === 's' || key === 'S') {
+        const from = key === 'S' ? lineStart(document.text(), cursor()) : cursor();
+        const to = key === 'S' ? lineEnd(document.text(), cursor()) : nextGrapheme(document.text(), cursor());
+        if (!apply(from, to, '', from, 'new')) return snapshot();
+        insertChange = [key];
+        const result = enter('insert');
+        insertFirstEdit = false;
+        return result;
+      }
+      if (key === 'p' || key === 'P') return paste(key === 'P');
+      if (key === 'J') return joinLines();
+      if (key === '>' || key === '<') {
+        pending = key;
+        return snapshot();
       }
       if (key === 'v') return enter('visual-character');
       if (key === 'V') return enter('visual-line');
@@ -1227,7 +1517,9 @@ export function createEditorMachine(
     }
     if (/^[dcy][ia]$/u.test(pending)) {
       const operation = pending[0] as 'd' | 'c' | 'y';
-      const range = objectRange(document.text(), cursor(), key, pending[1] === 'a');
+      const range = key === 't'
+        ? options.syntaxTagObject?.(document.text(), cursor(), pending[1] === 'a')
+        : objectRange(document.text(), cursor(), key, pending[1] === 'a');
       if (!range) {
         resetPending();
         return snapshot([{ type: 'status', level: 'error', message: `Text object ${key} not found` }]);
@@ -1282,6 +1574,16 @@ export function createEditorMachine(
     executeEx,
     snapshot: () => snapshot(),
     register: (name) => {
+      if (name === '=' && options.expressionResult !== undefined) {
+        return { text: options.expressionResult, linewise: false };
+      }
+      if (name === '%' && options.currentFilename !== undefined) {
+        return { text: options.currentFilename, linewise: false };
+      }
+      if ((name === '+' || name === '*') && options.clipboardRegisters) {
+        const text = options.clipboard?.read(name);
+        if (text !== undefined) return { text, linewise: false };
+      }
       const value = registers.get(name.toLocaleLowerCase()) ?? registers.get(name);
       return value ? { ...value } : undefined;
     },

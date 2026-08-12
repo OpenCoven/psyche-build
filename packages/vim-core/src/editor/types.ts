@@ -43,8 +43,21 @@ export type EditorCapabilityCommand =
   | 'save-all'
   | 'close'
   | 'force-close'
+  | 'close-all'
+  | 'force-close-all'
+  | 'reload-buffer'
   | 'next-buffer'
-  | 'previous-buffer';
+  | 'previous-buffer'
+  | 'select-buffer'
+  | 'undo'
+  | 'redo'
+  | 'format'
+  | 'set-option'
+  | 'confirm-substitute'
+  | 'clipboard-read'
+  | 'clipboard-write'
+  | 'current-filename'
+  | 'expression-result';
 
 export interface EditorDocumentPort {
   text(): string;
@@ -110,4 +123,16 @@ export interface EditorMachineOptions {
   readonly globalMarks?: EditorGlobalMarkStore;
   readonly ignoreCase?: boolean;
   readonly smartCase?: boolean;
+  readonly indentText?: string;
+  readonly syntaxTagObject?: (
+    text: string,
+    position: number,
+    around: boolean,
+  ) => { from: number; to: number } | undefined;
+  readonly expressionResult?: string;
+  readonly currentFilename?: string;
+  readonly clipboard?: {
+    read(register: '+' | '*'): string | undefined;
+    write(register: '+' | '*', value: EditorRegister): void;
+  };
 }
