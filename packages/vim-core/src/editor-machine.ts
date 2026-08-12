@@ -717,7 +717,9 @@ export function createEditorMachine(
       const macro = macros.get(register)
         ?? (registers.has(register) ? [...registers.get(register)!.text] : undefined);
       if (!macro) return snapshot([{ type: 'status', level: 'error', message: `Macro ${key} is not set` }]);
-      return replay(macro, true);
+      const repetitions = countBuffer ? Number(countBuffer) : 1;
+      resetPending();
+      return replay(Array.from({ length: repetitions }, () => macro).flat(), true);
     }
 
     if (!pending) {
@@ -747,6 +749,30 @@ export function createEditorMachine(
       }
       if (mode.startsWith('visual-') && 'dcy'.includes(key)) {
         const selections = document.selections();
+        if (mode === 'visual-block') {
+          const operation = key as 'd' | 'c' | 'y';
+          const ranges = selections
+            .map((selection) => ({
+              from: Math.min(selection.anchor, selection.head),
+              to: Math.max(selection.anchor, selection.head),
+            }))
+            .sort((left, right) => right.from - left.from);
+          const removed = [...ranges].reverse().map((range) => document.text().slice(range.from, range.to)).join('\n');
+          writeRegisters(operation === 'y' ? 'yank' : 'delete', removed, false);
+          invocationGroup = { used: false };
+          if (operation !== 'y') {
+            for (const range of ranges) apply(range.from, range.to, '', range.from, 'new');
+            lastChange = [key];
+          }
+          invocationGroup = undefined;
+          mode = operation === 'c' ? 'insert' : 'normal';
+          if (operation === 'c') {
+            insertFirstEdit = false;
+            insertChange = [key];
+          }
+          resetPending();
+          return snapshot([{ type: 'mode', mode }]);
+        }
         const from = Math.min(...selections.flatMap((selection) => [selection.anchor, selection.head]));
         const to = Math.max(...selections.flatMap((selection) => [selection.anchor, selection.head]));
         return operate(key as 'd' | 'c' | 'y', { from, to }, mode === 'visual-line', [key]);
@@ -768,10 +794,13 @@ export function createEditorMachine(
       const motionCount = countBuffer ? Number(countBuffer) : 1;
       if (key === operation) {
         const text = document.text();
+        const total = operatorCount * motionCount;
         const from = lineStart(text, cursor());
-        const target = lineAt(text, lineNumber(text, cursor()) + operatorCount * motionCount);
+        const target = lineAt(text, lineNumber(text, cursor()) + total);
         const to = target === from ? text.length : target;
-        return operate(operation, { from, to }, true, [operation, operation]);
+        return operate(operation, { from, to }, true, [
+          ...(total > 1 ? [...String(total)] : []), operation, operation,
+        ]);
       }
       if (key === 'i' || key === 'a') {
         pending += key;
@@ -788,7 +817,9 @@ export function createEditorMachine(
         return snapshot([{ type: 'status', level: 'error', message: `Motion ${key} found no target` }]);
       }
       const range = rangeForMotion(key, target);
-      return operate(operation, range, range.linewise, [operation, key]);
+      return operate(operation, range, range.linewise, [
+        ...(total > 1 ? [...String(total)] : []), operation, key,
+      ]);
     }
     if (/^[dcy][ia]$/u.test(pending)) {
       const operation = pending[0] as 'd' | 'c' | 'y';

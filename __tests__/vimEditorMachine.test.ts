@@ -124,6 +124,10 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     { name: 'count before operator', text: 'one two three', cursor: 0, input: keys('2dw'), expected: 'three', mode: 'normal' },
     { name: 'operator and motion counts compose', text: 'one two three four five', cursor: 0, input: keys('2d2w'), expected: 'five', mode: 'normal' },
     { name: 'delete line', text: 'one\ntwo\n', cursor: 0, input: keys('dd'), expected: 'two\n', mode: 'normal' },
+    { name: 'change line', text: 'one\ntwo\n', cursor: 0, input: keys('cc'), expected: 'two\n', mode: 'insert' },
+    { name: 'operator with document motion', text: 'one\ntwo\nthree', cursor: 4, input: keys('dgg'), expected: 'three', mode: 'normal' },
+    { name: 'operator with find motion', text: 'one two', cursor: 0, input: keys('dft'), expected: 'wo', mode: 'normal' },
+    { name: 'operator with till motion', text: 'one two', cursor: 0, input: keys('dtt'), expected: 'two', mode: 'normal' },
     { name: 'change inner word', text: 'one two', cursor: 1, input: keys('ciw'), expected: ' two', mode: 'insert' },
     { name: 'delete inner WORD', text: 'a.b c', cursor: 1, input: keys('diW'), expected: ' c', mode: 'normal' },
     { name: 'delete inner double quotes', text: 'say "hello" now', cursor: 6, input: keys('di"'), expected: 'say "" now', mode: 'normal' },
@@ -180,6 +184,18 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     expect(blockDocument.ranges).toEqual([
       { anchor: 0, head: 1 },
       { anchor: 4, head: 5 },
+    ]);
+  });
+
+  it('applies visual-block deletes bottom-up as one undo group', async () => {
+    const document = new TestDocument('abc\ndef');
+    const machine = createEditorMachine(document);
+
+    await send(machine, { key: 'v', ctrlKey: true }, 'j', 'l', 'd');
+
+    expect(document.value).toBe('bc\nef');
+    expect(document.edits.filter((edit) => edit.to > edit.from).map((edit) => edit.history)).toEqual([
+      'new', 'join',
     ]);
   });
 });
@@ -273,6 +289,15 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     expect(document.edits.filter((edit) => edit.to > edit.from).map((edit) => edit.history)).toEqual(['new', 'new']);
   });
 
+  it('retains composed operator counts when repeating a change', async () => {
+    const document = new TestDocument('one two three four five');
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('2dw.'));
+
+    expect(document.value).toBe('five');
+  });
+
   it('records and replays a named macro as one deterministic undo group', async () => {
     const document = new TestDocument('abc');
     const machine = createEditorMachine(document);
@@ -282,6 +307,15 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     expect(document.value).toBe('xxabc');
     const inserts = document.edits.filter((edit) => edit.insert === 'x');
     expect(inserts.map((edit) => edit.history)).toEqual(['new', 'new']);
+  });
+
+  it('applies counts to macro playback', async () => {
+    const document = new TestDocument('abc');
+    const machine = createEditorMachine(document);
+
+    await send(machine, ...keys('qaix'), 'Escape', 'q', ...keys('2@a'));
+
+    expect(document.value).toBe('xxxabc');
   });
 
   it('stops recursive macros at depth 16 and exposes the 10,000 action cap', async () => {
