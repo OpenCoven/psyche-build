@@ -2031,9 +2031,8 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 .canvas-empty-action .key { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
 
 /* -------- Command composer --------
-   Window-wide footer: a scope chip that says where text lands, the input
-   itself, and the voice/send affordances. The palette and scope menu open
-   upward from here. */
+   Window-wide footer: the input itself plus the voice/send affordances. Text
+   goes to the focused pane. The palette opens upward from here. */
 
 .composer {
   position: relative;
@@ -2047,43 +2046,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   border-top: 1px solid var(--border);
   height: var(--composer-h);
 }
-.scope-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 11px;
-  border-radius: 8px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text-soft);
-  font-size: 11.5px;
-  white-space: nowrap;
-  flex: none;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-}
-.scope-btn:hover { border-color: var(--accent-line); color: var(--text); }
-.scope-kicker {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.scope-label { font-weight: 600; color: var(--text); }
-.scope-caret { color: var(--muted); font-size: 9px; }
-.scope-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  flex: none;
-  background: var(--accent);
-}
-.scope-dot-project { background: var(--ok); }
-.scope-dot-agents { background: var(--warn); }
-.scope-btn[data-scope="project"] .scope-dot { background: var(--ok); }
-.scope-btn[data-scope="agents"] .scope-dot { background: var(--warn); }
-
 .composer-field {
   position: relative;
   flex: 1 1 auto;
@@ -2776,23 +2738,6 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
 
 /* -------- Menus that open upward from the composer -------- */
 
-.scope-menu {
-  position: absolute;
-  left: 12px;
-  bottom: calc(var(--composer-h) - 4px);
-  z-index: 60;
-  min-width: 262px;
-  padding: 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 9px;
-  background: rgba(var(--rgb-s1), calc(var(--bg-opacity) * 0.97));
-  backdrop-filter: blur(28px) saturate(1.2);
-  -webkit-backdrop-filter: blur(28px) saturate(1.2);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
-  animation: menu-rise 140ms ease-out;
-}
-.scope-menu[hidden] { display: none; }
-.scope-menu-head,
 .new-pane-menu-head {
   padding: 6px 9px 4px;
   color: var(--muted);
@@ -2801,30 +2746,12 @@ body.is-pane-dragging .terminal-pane { transition: opacity var(--transition-fast
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
-.scope-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12px;
-  text-align: left;
-}
-.scope-item:hover { background: var(--accent-soft); }
-.scope-item[aria-checked="true"] { background: var(--accent-soft); }
-.scope-item-text { flex: 1; min-width: 0; }
-.scope-item-desc { display: block; font-size: 10.5px; color: var(--muted); }
-.scope-item-key { font-size: 10px; color: var(--muted); }
 @keyframes menu-rise {
   from { opacity: 0; transform: translateY(5px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .scope-menu, .new-pane-menu, .toast, .help-overlay { animation: none; }
+  .new-pane-menu, .toast, .help-overlay { animation: none; }
 }
 
 .palette {
