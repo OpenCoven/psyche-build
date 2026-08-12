@@ -91,6 +91,28 @@ final class PairedHostStoreTests: XCTestCase {
         XCTAssertEqual(all.count, 1)
     }
 
+    func testGenerationBoundRePairingCannotReplaceTrustAfterSupersession() async throws {
+        let secureStore = SaveBoundarySecureStore()
+        let store = PairedHostStore(secureStore: secureStore)
+        try await store.save(makeHost())
+        let generation = ConnectionGeneration(id: 1)
+        let replacementHost = makeHost(fingerprint: otherFingerprint, token: "token-2")
+
+        secureStore.blockNextRead()
+        let replacement = Task {
+            try await store.replace(replacementHost, for: generation)
+        }
+        await secureStore.waitUntilReadBegins()
+        generation.invalidate()
+        secureStore.releaseRead()
+
+        let replaced = try await replacement.value
+        XCTAssertFalse(replaced)
+        let loaded = try await store.host(withServerID: "server-1")
+        XCTAssertEqual(loaded?.certificateFingerprint, fingerprint)
+        XCTAssertEqual(loaded?.token, "token-1")
+    }
+
     func testSaveUpdatesEverythingElseAboutAKnownHost() async throws {
         let store = PairedHostStore(secureStore: InMemorySecureStore())
         try await store.save(makeHost())

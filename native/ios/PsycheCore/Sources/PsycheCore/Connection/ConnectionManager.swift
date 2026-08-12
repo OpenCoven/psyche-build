@@ -47,6 +47,29 @@ public enum ConnectionManagerError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+public enum PairingError: Error, Sendable, Equatable, LocalizedError {
+    case notConnected
+    case alreadyInProgress
+    case rejected(reason: String)
+    case connectionChanged
+    case cancelled
+
+    public var errorDescription: String? {
+        switch self {
+        case .notConnected:
+            "Connect to a host before pairing."
+        case .alreadyInProgress:
+            "A pairing request is already in progress."
+        case .rejected(let reason):
+            "The host rejected pairing: \(reason)"
+        case .connectionChanged:
+            "The connection changed before pairing completed."
+        case .cancelled:
+            "Pairing was cancelled."
+        }
+    }
+}
+
 public actor ConnectionManager {
     public private(set) var state: ConnectionState = .disconnected
     public private(set) var stateHistory: [ConnectionState] = [.disconnected]
@@ -64,6 +87,7 @@ public actor ConnectionManager {
     private var activeConnection: ConnectionConfiguration?
     private let clientName: String
     private var welcomeIdentity: WelcomeIdentity?
+    private var pairingWaiter: PairingWaiter?
     private var messageTask: Task<Void, Never>?
     private var snapshotRequestTask: Task<Void, Never>?
     private var nextConnectionGeneration: UInt64 = 0
@@ -127,6 +151,7 @@ public actor ConnectionManager {
                 throwing: ConnectionManagerError.messageProcessorEndedBeforeReady
             )
         }
+        pairingWaiter?.continuation.resume(throwing: PairingError.connectionChanged)
         for continuation in teardownWaiters.values {
             continuation.resume()
         }
@@ -325,24 +350,58 @@ public actor ConnectionManager {
         code: String,
         clientID: String? = nil,
         clientName: String? = nil
-    ) async {
+    ) async throws -> PairedHost {
         guard hasActiveTransport,
               let generation = activeGeneration,
-              let activeConnection else {
-            return
+              let activeConnection,
+              welcomeIdentity != nil,
+              hasNegotiatedV3 else {
+            throw PairingError.notConnected
         }
+        guard pairingWaiter == nil else { throw PairingError.alreadyInProgress }
 
-        do {
-            try await transport.send(.legacy(.pair(PairRequestPayload(
-                code: code,
-                clientID: clientID ?? activeConnection.credentials.clientID,
-                clientName: clientName ?? self.clientName
-            ))))
-        } catch {
-            await tearDownActiveConnection(
-                generation: generation,
-                finalState: .failed(error.localizedDescription)
-            )
+        let pairingID = UUID()
+        let attempt = PairingAttempt()
+        let request = PairRequestPayload(
+            code: code,
+            clientID: clientID ?? activeConnection.credentials.clientID,
+            clientName: clientName ?? self.clientName
+        )
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard isActive(generation: generation), pairingWaiter == nil else {
+                    continuation.resume(throwing: PairingError.connectionChanged)
+                    return
+                }
+                pairingWaiter = PairingWaiter(
+                    id: pairingID,
+                    generation: generation,
+                    attempt: attempt,
+                    continuation: continuation
+                )
+                let transport = self.transport
+                Task { [weak self, transport] in
+                    do {
+                        guard attempt.isValid else { return }
+                        try await transport.send(.legacy(.pair(request)))
+                    } catch {
+                        await self?.pairRequestSendFailed(
+                            pairingID: pairingID,
+                            generation: generation,
+                            error: error
+                        )
+                    }
+                }
+            }
+        } onCancel: {
+            attempt.invalidate()
+            Task { [weak self] in
+                await self?.cancelPairing(
+                    pairingID: pairingID,
+                    generation: generation
+                )
+            }
         }
     }
 
@@ -515,35 +574,72 @@ public actor ConnectionManager {
         case .error(let error):
             return .failed(error.message)
         case .pairAccepted(let payload):
-            guard let welcomeIdentity, let activeConnection else {
-                return .failed(ConnectionManagerError.missingWelcomeIdentity.localizedDescription)
-            }
-            guard isActive(session: session, generation: generation),
+            guard let pairingWaiter,
+                  pairingWaiter.generation === generation,
+                  pairingWaiter.attempt.isValid,
+                  let welcomeIdentity,
+                  let activeConnection,
+                  isActive(session: session, generation: generation),
                   !Task.isCancelled else {
                 return .ignored
             }
+            let host = PairedHost(
+                serverID: welcomeIdentity.serverID,
+                serverName: welcomeIdentity.serverName,
+                endpoint: activeConnection.endpoint,
+                clientID: activeConnection.credentials.clientID,
+                token: payload.token
+            )
             do {
-                let committed = try await pairedHostStore.save(PairedHost(
-                    serverID: welcomeIdentity.serverID,
-                    serverName: welcomeIdentity.serverName,
-                    endpoint: activeConnection.endpoint,
-                    clientID: activeConnection.credentials.clientID,
-                    token: payload.token
-                ), for: generation)
-                guard committed else { return .ignored }
+                let committed = try await pairedHostStore.replace(host, for: generation)
+                guard committed else {
+                    completePairing(
+                        id: pairingWaiter.id,
+                        generation: generation,
+                        with: .failure(PairingError.connectionChanged)
+                    )
+                    return .ignored
+                }
             } catch is CancellationError {
+                completePairing(
+                    id: pairingWaiter.id,
+                    generation: generation,
+                    with: .failure(PairingError.cancelled)
+                )
                 return .ignored
             } catch {
-                return .failed(error.localizedDescription)
+                completePairing(
+                    id: pairingWaiter.id,
+                    generation: generation,
+                    with: .failure(error)
+                )
+                return .processed
             }
             guard isActive(session: session, generation: generation),
+                  pairingWaiter.id == self.pairingWaiter?.id,
+                  pairingWaiter.attempt.isValid,
                   !Task.isCancelled else {
                 return .ignored
             }
             self.activeConnection = activeConnection.withToken(payload.token)
+            completePairing(
+                id: pairingWaiter.id,
+                generation: generation,
+                with: .success(host)
+            )
             await requestInitialSnapshotIfAuthorized(
                 for: session,
                 generation: generation
+            )
+        case .pairRejected(let payload):
+            guard let pairingWaiter,
+                  pairingWaiter.generation === generation else {
+                return .ignored
+            }
+            completePairing(
+                id: pairingWaiter.id,
+                generation: generation,
+                with: .failure(PairingError.rejected(reason: payload.reason))
             )
         default:
             break
@@ -711,6 +807,7 @@ public actor ConnectionManager {
         activeTeardown = teardown
         let session = activeMessageSession
         let attempt = activeConnectAttempt
+        completePairing(for: generation, with: .failure(PairingError.connectionChanged))
         generation.invalidate()
         activeGeneration = nil
         activeConnectAttempt = nil
@@ -819,6 +916,58 @@ public actor ConnectionManager {
         )
     }
 
+    private func pairRequestSendFailed(
+        pairingID: UUID,
+        generation: ConnectionGeneration,
+        error: any Error
+    ) async {
+        guard completePairing(
+            id: pairingID,
+            generation: generation,
+            with: .failure(error)
+        ) else { return }
+        await tearDownActiveConnection(
+            generation: generation,
+            finalState: .failed(error.localizedDescription)
+        )
+    }
+
+    private func cancelPairing(
+        pairingID: UUID,
+        generation: ConnectionGeneration
+    ) {
+        completePairing(
+            id: pairingID,
+            generation: generation,
+            with: .failure(PairingError.cancelled)
+        )
+    }
+
+    @discardableResult
+    private func completePairing(
+        id: UUID,
+        generation: ConnectionGeneration,
+        with result: Result<PairedHost, any Error>
+    ) -> Bool {
+        guard let pairingWaiter,
+              pairingWaiter.id == id,
+              pairingWaiter.generation === generation else {
+            return false
+        }
+        self.pairingWaiter = nil
+        pairingWaiter.attempt.invalidate()
+        pairingWaiter.continuation.resume(with: result)
+        return true
+    }
+
+    private func completePairing(
+        for generation: ConnectionGeneration,
+        with result: Result<PairedHost, any Error>
+    ) {
+        guard let pairingWaiter, pairingWaiter.generation === generation else { return }
+        _ = completePairing(id: pairingWaiter.id, generation: generation, with: result)
+    }
+
     private func completeMessageProcessorReadiness(
         for session: UUID?,
         with result: Result<Void, any Error>
@@ -887,6 +1036,26 @@ public actor ConnectionManager {
     private struct WelcomeIdentity {
         let serverID: String
         let serverName: String
+    }
+
+    private final class PairingAttempt: @unchecked Sendable {
+        private let lock = NSLock()
+        private var valid = true
+
+        var isValid: Bool {
+            lock.withLock { valid }
+        }
+
+        func invalidate() {
+            lock.withLock { valid = false }
+        }
+    }
+
+    private struct PairingWaiter {
+        let id: UUID
+        let generation: ConnectionGeneration
+        let attempt: PairingAttempt
+        let continuation: CheckedContinuation<PairedHost, any Error>
     }
 
     private struct ConnectionCredentials {
