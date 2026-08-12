@@ -718,6 +718,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const project = {
       id: 'p2',
       lastActiveThreadId: 't2',
+      selectedWorktreePath: '/repo',
       layout: { mode: 'browser', side: 'right' },
     };
     const file = { id: 'inactive', projectId: project.id, dirty: true };
@@ -725,7 +726,10 @@ describe('native CodeMirror workspace editor surface', () => {
       activeProjectId: 'p1',
       activeThreadId: 't1',
       activeFileId: 'active',
-      threads: [{ id: 't2', projectId: project.id }],
+      threads: [{
+        id: 't2', kind: 'shell', projectId: project.id,
+        worktreePath: '/repo', hidden: false,
+      }],
     };
     let visibleLayout = 'terminal';
     let editorVisible = false;
@@ -736,6 +740,7 @@ describe('native CodeMirror workspace editor surface', () => {
       findOpenFile: () => file,
       findProject: () => project,
       state,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
       terminalHost: {
         children: [{
           dataset: { threadId: 't2' },
@@ -777,6 +782,7 @@ describe('native CodeMirror workspace editor surface', () => {
     const project = {
       id: 'p2',
       lastActiveThreadId: 'coven',
+      selectedWorktreePath: '/repo',
       layout: { mode: 'browser', side: 'right' },
     };
     const file = { id: 'inactive', projectId: project.id, dirty: true };
@@ -785,8 +791,22 @@ describe('native CodeMirror workspace editor surface', () => {
       activeThreadId: 'previous',
       activeFileId: 'active',
       threads: [
-        { id: 'coven', kind: 'coven-chat', projectId: project.id },
-        { id: 'shell', kind: 'shell', projectId: project.id },
+        {
+          id: 'coven', kind: 'coven-chat', projectId: project.id,
+          worktreePath: '/repo', hidden: false,
+        },
+        {
+          id: 'hidden-shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/repo', hidden: true,
+        },
+        {
+          id: 'other-shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/other', hidden: false,
+        },
+        {
+          id: 'shell', kind: 'shell', projectId: project.id,
+          worktreePath: '/repo', hidden: false,
+        },
       ],
     };
     const revealFileForDecision = compileFunction<
@@ -795,6 +815,7 @@ describe('native CodeMirror workspace editor surface', () => {
       findOpenFile: () => file,
       findProject: () => project,
       state,
+      activeWorkspaceRoot: () => project.selectedWorktreePath,
       renderPaneWorkspace: () => undefined,
       restoreProjectLayout: () => undefined,
       applyLayout: () => undefined,
