@@ -29,7 +29,9 @@ class BoundsDocument implements EditorDocumentPort {
       this.failNextApply = false;
       throw new Error('adapter apply failed');
     }
-    this.value = `${this.value.slice(0, edit.from)}${edit.insert}${this.value.slice(edit.to)}`;
+    for (const change of [...edit.changes].reverse()) {
+      this.value = `${this.value.slice(0, change.from)}${change.insert}${this.value.slice(change.to)}`;
+    }
     this.ranges = edit.selections.map((selection) => ({ ...selection }));
     this.edits.push(edit);
   }
@@ -133,7 +135,7 @@ describe('Vim editor count and replay bounds', () => {
 
     const failure = await send(machine, '@', 'a');
     expect(failure).toMatchObject({ mode: 'normal', pending: '', count: undefined });
-    expect(failure.actions.at(-1)).toMatchObject({ level: 'error', message: 'Editor replay failed' });
+    expect(failure.actions.at(-1)).toMatchObject({ level: 'error', message: 'Editor transaction failed' });
 
     await send(machine, 'i', 'Y');
     expect(document.edits.at(-1)?.history).toBe('new');

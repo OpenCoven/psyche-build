@@ -1,102 +1,43 @@
 import { normalizeKeyboardEvent } from './normalize.js';
-import type { KeyboardEventLike } from './types.js';
+import { EDITOR_LIMITS } from './editor/limits.js';
+import { relocateMark } from './editor/marks.js';
+import { consumeReplayAction, type ReplayBudget } from './editor/replay.js';
+import { editorTransaction, positionsAfterChanges } from './editor/transactions.js';
+import type {
+  EditorAction,
+  EditorChange,
+  EditorDocumentPort,
+  EditorGlobalMarkReference,
+  EditorGlobalMarkStore,
+  EditorInput,
+  EditorMachine,
+  EditorMachineOptions,
+  EditorMode,
+  EditorRegister,
+  EditorResult,
+  EditorSearchState,
+  EditorSelection,
+  EditorTransaction,
+} from './editor/types.js';
 
-export type EditorMode =
-  | 'normal'
-  | 'insert'
-  | 'replace'
-  | 'visual-character'
-  | 'visual-line'
-  | 'visual-block'
-  | 'command-line'
-  | 'search';
-
-export type EditorInput = string | KeyboardEventLike;
-export type EditorSelection = { anchor: number; head: number };
-
-export interface EditorDocumentPort {
-  text(): string;
-  selections(): readonly EditorSelection[];
-  apply(edit: {
-    from: number;
-    to: number;
-    insert: string;
-    selections: readonly EditorSelection[];
-    history: 'join' | 'new';
-  }): void;
-  command(
-    action: 'save' | 'save-all' | 'close' | 'force-close' | 'next-buffer' | 'previous-buffer',
-    argument?: string,
-  ): Promise<boolean>;
-}
-
-export type EditorAction =
-  | { type: 'mode'; mode: EditorMode }
-  | { type: 'status'; level: 'info' | 'error'; message: string }
-  | { type: 'search'; query: string; direction: 'forward' | 'backward'; active: boolean }
-  | { type: 'option'; name: string; enabled: boolean }
-  | { type: 'mark.set-global'; mark: string; reference: EditorGlobalMarkReference }
-  | { type: 'mark.jump-global'; mark: string; reference: EditorGlobalMarkReference; linewise: boolean }
-  | { type: 'command'; command: Parameters<EditorDocumentPort['command']>[0]; success: boolean };
-
-export interface EditorGlobalMarkReference {
-  readonly buffer: string;
-  readonly position: number;
-}
-
-export interface EditorGlobalMarkStore {
-  get(mark: string): EditorGlobalMarkReference | undefined;
-  set(mark: string, reference: EditorGlobalMarkReference): void;
-}
-
-export interface EditorRegister {
-  readonly text: string;
-  readonly linewise: boolean;
-}
-
-export interface EditorSearchState {
-  readonly pattern: string;
-  readonly direction: 'forward' | 'backward';
-  readonly highlight: boolean;
-}
-
-export const EDITOR_LIMITS = Object.freeze({
-  count: 10_000,
-  countDigits: 5,
-  registerEntries: 64,
-  registerBytes: 1024 * 1024,
-  macroDepth: 16,
-  macroActions: 10_000,
-  searchPatternBytes: 4 * 1024,
-  exCommandBytes: 64 * 1024,
-  exHistoryEntries: 100,
-  exHistoryBytes: 64 * 1024,
-});
-
-export interface EditorResult {
-  readonly mode: EditorMode;
-  readonly pending: string;
-  readonly count: number | undefined;
-  readonly actions: readonly EditorAction[];
-  readonly search?: EditorSearchState;
-}
-
-export interface EditorMachine {
-  readonly limits: typeof EDITOR_LIMITS;
-  handle(input: EditorInput): Promise<EditorResult>;
-  executeEx(command: string): Promise<EditorResult>;
-  snapshot(): EditorResult;
-  register(name: string): EditorRegister | undefined;
-  setRegister(name: string, text: string, linewise?: boolean): boolean;
-  mark(name: string): number | undefined;
-  exHistory(): readonly string[];
-}
-
-export interface EditorMachineOptions {
-  readonly clipboardRegisters?: boolean;
-  readonly bufferId?: string;
-  readonly globalMarks?: EditorGlobalMarkStore;
-}
+export { EDITOR_LIMITS } from './editor/limits.js';
+export type {
+  EditorAction,
+  EditorCapabilityCommand,
+  EditorChange,
+  EditorDocumentPort,
+  EditorGlobalMarkReference,
+  EditorGlobalMarkStore,
+  EditorInput,
+  EditorMachine,
+  EditorMachineOptions,
+  EditorMode,
+  EditorRegister,
+  EditorResult,
+  EditorSearchState,
+  EditorSelection,
+  EditorTransaction,
+} from './editor/types.js';
 
 type Token = { key: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean };
 
@@ -370,19 +311,22 @@ export function createEditorMachine(
   let activeVisualChange: VisualChange | undefined;
   let recording: { name: string; inputs: EditorInput[] } | undefined;
   let macroDepth = 0;
-  let macroActions = 0;
+  const macroBudget: ReplayBudget = { actions: 0 };
   let invocationGroup: { used: boolean } | undefined;
+  let queuedActions: EditorAction[] = [];
   const registers = new Map<string, EditorRegister>();
   const marks = new Map<string, number>();
   const macros = new Map<string, readonly EditorInput[]>();
   const commands: string[] = [];
 
   function snapshot(actions: readonly EditorAction[] = []): EditorResult {
+    const allActions = queuedActions.length > 0 ? [...queuedActions, ...actions] : actions;
+    queuedActions = [];
     return {
       mode,
       pending,
       count: countBuffer ? Number(countBuffer) : undefined,
-      actions,
+      actions: allActions,
       ...(searchState ? { search: { ...searchState } } : {}),
     };
   }
@@ -391,52 +335,62 @@ export function createEditorMachine(
     return mode.startsWith('visual-') ? visualHead : (document.selections()[0]?.head ?? 0);
   }
 
-  function history(defaultHistory: 'join' | 'new'): 'join' | 'new' {
-    if (!invocationGroup) return defaultHistory;
-    const result = invocationGroup.used ? 'join' : 'new';
-    invocationGroup.used = true;
-    return result;
+  function commit(
+    changes: readonly EditorChange[],
+    selections: readonly EditorSelection[],
+    defaultHistory: EditorTransaction['history'],
+  ): boolean {
+    const grouped = changes.length > 0 && invocationGroup
+      ? (invocationGroup.used ? 'join' : 'new')
+      : defaultHistory;
+    let transaction: EditorTransaction;
+    try {
+      transaction = editorTransaction(changes, selections, grouped);
+      document.apply(transaction);
+    } catch {
+      queuedActions.push({ type: 'status', level: 'error', message: 'Editor transaction failed' });
+      return false;
+    }
+    if (changes.length === 0) return true;
+    if (invocationGroup) invocationGroup.used = true;
+    const nextText = document.text();
+    for (const [name, position] of marks) marks.set(name, relocateMark(nextText, position, transaction.changes));
+    if (options.bufferId && options.globalMarks) {
+      for (const name of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+        try {
+          const reference = options.globalMarks.get(name);
+          if (!reference || reference.buffer !== options.bufferId) continue;
+          const position = relocateMark(nextText, reference.position, transaction.changes);
+          if (position === reference.position) continue;
+          const relocated = { ...reference, position };
+          options.globalMarks.set(name, relocated);
+          queuedActions.push({ type: 'mark.set-global', mark: name, reference: relocated });
+        } catch {
+          queuedActions.push({ type: 'status', level: 'error', message: 'Global mark relocation failed' });
+        }
+      }
+    }
+    return true;
   }
 
-  function apply(from: number, to: number, insert: string, position: number, group: 'join' | 'new'): void {
-    document.apply({
-      from,
-      to,
-      insert,
-      selections: [{ anchor: position, head: position }],
-      history: history(group),
-    });
+  function apply(from: number, to: number, insert: string, position: number, group: 'join' | 'new'): boolean {
+    return commit([{ from, to, insert }], [{ anchor: position, head: position }], group);
   }
 
-  function setSelections(selections: readonly EditorSelection[]): void {
-    const current = document.selections()[0]?.head ?? 0;
-    document.apply({ from: current, to: current, insert: '', selections, history: 'join' });
+  function setSelections(selections: readonly EditorSelection[]): boolean {
+    return commit([], selections, 'join');
   }
 
-  function positionsAfterDeletes(ranges: readonly { from: number; to: number }[]): number[] {
-    let removedBefore = 0;
-    return [...ranges]
-      .sort((left, right) => left.from - right.from)
-      .map((range) => {
-        const position = range.from - removedBefore;
-        removedBefore += range.to - range.from;
-        return position;
-      });
-  }
-
-  function insertAtSelections(insert: string): void {
+  function insertAtSelections(insert: string): boolean {
     const positions = document.selections().map((selection) => selection.head).sort((left, right) => left - right);
-    for (const position of [...positions].reverse()) apply(position, position, insert, position + insert.length, 'join');
-    setSelections(positions.map((position, index) => {
-      const next = position + insert.length * (index + 1);
-      return { anchor: next, head: next };
-    }));
+    const changes = positions.map((position) => ({ from: position, to: position, insert }));
+    const next = positionsAfterChanges(changes);
+    return commit(changes, next.map((position) => ({ anchor: position, head: position })), 'join');
   }
 
   function select(position: number): void {
     const text = document.text();
     const bounded = Math.max(0, Math.min(text.length, position));
-    visualHead = bounded;
     let selections: readonly EditorSelection[] = [{ anchor: bounded, head: bounded }];
     if (mode === 'visual-character') {
       selections = bounded >= visualAnchor
@@ -478,8 +432,7 @@ export function createEditorMachine(
       }
       selections = block;
     }
-    const current = document.selections()[0]?.head ?? 0;
-    document.apply({ from: current, to: current, insert: '', selections, history: 'join' });
+    if (setSelections(selections)) visualHead = bounded;
   }
 
   function resetPending(): void {
@@ -601,14 +554,16 @@ export function createEditorMachine(
     const from = Math.max(0, Math.min(range.from, range.to));
     const to = Math.min(document.text().length, Math.max(range.from, range.to));
     const removed = registerText ?? document.text().slice(from, to);
+    if (operation !== 'y') {
+      if (!apply(from, to, '', from, 'new')) return snapshot();
+    } else if (!setSelections([{ anchor: from, head: from }])) return snapshot();
     writeRegisters(operation === 'y' ? 'yank' : 'delete', removed, linewise);
     mode = operation === 'c' ? 'insert' : 'normal';
     resetPending();
     if (operation !== 'y') {
-      apply(from, to, '', from, 'new');
       lastChange = changeInputs;
       lastVisualChange = undefined;
-    } else select(from);
+    }
     if (operation === 'c') {
       insertFirstEdit = false;
       insertChange = changeInputs;
@@ -684,15 +639,15 @@ export function createEditorMachine(
     }
     const ordered = ranges.sort((left, right) => right.from - left.from);
     const removed = [...ordered].reverse().map((range) => text.slice(range.from, range.to)).join('\n');
-    writeRegisters('delete', removed, change.mode === 'visual-line');
-    invocationGroup = { used: false };
     const targetHasLineBreak = change.mode === 'visual-line'
       && ordered.some((range) => text[range.to - 1] === '\n');
     const insert = change.linewiseChange && targetHasLineBreak
       ? `${change.insert}\n`
       : change.insert;
-    for (const range of ordered) apply(range.from, range.to, insert, range.from + change.insert.length, 'new');
-    invocationGroup = undefined;
+    const changes = ordered.map((range) => ({ from: range.from, to: range.to, insert }));
+    const positions = positionsAfterChanges(changes);
+    if (!commit(changes, [{ anchor: positions[0] ?? 0, head: positions[0] ?? 0 }], 'new')) return snapshot();
+    writeRegisters('delete', removed, change.mode === 'visual-line');
     mode = 'normal';
     lastVisualChange = change;
     lastChange = undefined;
@@ -827,7 +782,7 @@ export function createEditorMachine(
       lastVisualChange,
       activeVisualChange,
       macroDepth,
-      macroActions,
+      macroActions: macroBudget.actions,
       invocationGroup,
     };
     if (macro) {
@@ -837,7 +792,7 @@ export function createEditorMachine(
         }]);
       }
       if (macroDepth === 0) {
-        macroActions = 0;
+        macroBudget.actions = 0;
         invocationGroup = { used: false };
       }
       macroDepth += 1;
@@ -847,38 +802,60 @@ export function createEditorMachine(
       let result = snapshot();
       for (let repetition = 0; repetition < repetitions; repetition += 1) {
         for (const input of inputs) {
-          if (macro && ++macroActions > EDITOR_LIMITS.macroActions) {
+          if (macro && !consumeReplayAction(macroBudget, EDITOR_LIMITS.macroActions)) {
             return snapshot([{
               type: 'status', level: 'error', message: `Macro action limit reached (${EDITOR_LIMITS.macroActions})`,
             }]);
           }
           result = await handle(input, true);
+          const transactionFailure = result.actions.some((action) => action.type === 'status'
+            && action.level === 'error' && action.message === 'Editor transaction failed');
+          if (transactionFailure) {
+            failed = true;
+            mode = recovery.mode;
+            pending = recovery.pending;
+            countBuffer = recovery.countBuffer;
+            operatorCount = recovery.operatorCount;
+            activeRegister = recovery.activeRegister;
+            visualAnchor = recovery.visualAnchor;
+            visualHead = recovery.visualHead;
+            inputBuffer = recovery.inputBuffer;
+            inputBufferBytes = recovery.inputBufferBytes;
+            searchState = recovery.searchState;
+            insertFirstEdit = recovery.insertFirstEdit;
+            insertChange = recovery.insertChange;
+            lastChange = recovery.lastChange;
+            lastVisualChange = recovery.lastVisualChange;
+            activeVisualChange = recovery.activeVisualChange;
+            macroDepth = recovery.macroDepth;
+            macroBudget.actions = recovery.macroActions;
+            invocationGroup = recovery.invocationGroup;
+            return snapshot(result.actions);
+          }
           if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) return result;
         }
       }
       return result;
     } catch {
       failed = true;
-      ({
-        mode,
-        pending,
-        countBuffer,
-        operatorCount,
-        activeRegister,
-        visualAnchor,
-        visualHead,
-        inputBuffer,
-        inputBufferBytes,
-        searchState,
-        insertFirstEdit,
-        insertChange,
-        lastChange,
-        lastVisualChange,
-        activeVisualChange,
-        macroDepth,
-        macroActions,
-        invocationGroup,
-      } = recovery);
+      mode = recovery.mode;
+      pending = recovery.pending;
+      countBuffer = recovery.countBuffer;
+      operatorCount = recovery.operatorCount;
+      activeRegister = recovery.activeRegister;
+      visualAnchor = recovery.visualAnchor;
+      visualHead = recovery.visualHead;
+      inputBuffer = recovery.inputBuffer;
+      inputBufferBytes = recovery.inputBufferBytes;
+      searchState = recovery.searchState;
+      insertFirstEdit = recovery.insertFirstEdit;
+      insertChange = recovery.insertChange;
+      lastChange = recovery.lastChange;
+      lastVisualChange = recovery.lastVisualChange;
+      activeVisualChange = recovery.activeVisualChange;
+      macroDepth = recovery.macroDepth;
+      macroBudget.actions = recovery.macroActions;
+      invocationGroup = recovery.invocationGroup;
       return snapshot([{ type: 'status', level: 'error', message: 'Editor replay failed' }]);
     } finally {
       if (!failed) {
@@ -923,14 +900,14 @@ export function createEditorMachine(
     if (mode === 'insert' || mode === 'replace') {
       if (value.ctrl || value.alt || value.meta || key.length !== 1) return snapshot();
       if (mode === 'insert' && activeVisualChange?.mode === 'visual-block' && document.selections().length > 1) {
-        insertAtSelections(key);
+        if (!insertAtSelections(key)) return snapshot();
         insertFirstEdit = false;
         activeVisualChange.insert += key;
         return snapshot();
       }
       const position = cursor();
       const to = mode === 'replace' ? nextGrapheme(document.text(), position) : position;
-      apply(position, to, key, position + key.length, insertFirstEdit ? 'new' : 'join');
+      if (!apply(position, to, key, position + key.length, insertFirstEdit ? 'new' : 'join')) return snapshot();
       insertFirstEdit = false;
       if (activeVisualChange) activeVisualChange.insert += key;
       insertChange ??= [mode === 'replace' ? 'R' : 'i'];
@@ -1083,25 +1060,24 @@ export function createEditorMachine(
               from: Math.min(selection.anchor, selection.head),
               to: Math.max(selection.anchor, selection.head),
             }));
-          const insertionPositions = positionsAfterDeletes(ranges);
-          const descending = [...ranges].sort((left, right) => right.from - left.from);
+          const changes = ranges.map((range) => ({ from: range.from, to: range.to, insert: '' }));
+          const insertionPositions = positionsAfterChanges(changes);
           const removed = [...ranges].sort((left, right) => left.from - right.from)
             .map((range) => document.text().slice(range.from, range.to)).join('\n');
-          writeRegisters(operation === 'y' ? 'yank' : 'delete', removed, false);
-          invocationGroup = { used: false };
           if (operation !== 'y') {
-            for (const range of descending) apply(range.from, range.to, '', range.from, 'new');
+            const selections = operation === 'c'
+              ? insertionPositions.map((position) => ({ anchor: position, head: position }))
+              : [{ anchor: insertionPositions[0] ?? 0, head: insertionPositions[0] ?? 0 }];
+            if (!commit(changes, selections, 'new')) return snapshot();
             lastChange = undefined;
             lastVisualChange = descriptor;
-          }
-          invocationGroup = undefined;
-          mode = operation === 'c' ? 'insert' : 'normal';
-          if (operation === 'y') {
+          } else {
             const origin = Math.min(...ranges.map((range) => range.from));
-            setSelections([{ anchor: origin, head: origin }]);
+            if (!setSelections([{ anchor: origin, head: origin }])) return snapshot();
           }
+          writeRegisters(operation === 'y' ? 'yank' : 'delete', removed, false);
+          mode = operation === 'c' ? 'insert' : 'normal';
           if (operation === 'c') {
-            setSelections(insertionPositions.map((position) => ({ anchor: position, head: position })));
             insertFirstEdit = false;
             insertChange = [key];
             activeVisualChange = descriptor;

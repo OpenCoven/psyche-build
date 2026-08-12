@@ -4,6 +4,8 @@ export { normalizeKeyboardEvent } from './normalize.js';
 export { createEditorMachine, EDITOR_LIMITS } from './editor-machine.js';
 export type {
   EditorAction,
+  EditorCapabilityCommand,
+  EditorChange,
   EditorDocumentPort,
   EditorGlobalMarkReference,
   EditorGlobalMarkStore,
@@ -15,6 +17,7 @@ export type {
   EditorResult,
   EditorSearchState,
   EditorSelection,
+  EditorTransaction,
 } from './editor-machine.js';
 export type {
   KeyboardEventLike,

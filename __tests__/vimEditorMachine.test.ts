@@ -25,7 +25,9 @@ class TestDocument implements EditorDocumentPort {
   }
 
   apply(edit: Parameters<EditorDocumentPort['apply']>[0]): void {
-    this.value = `${this.value.slice(0, edit.from)}${edit.insert}${this.value.slice(edit.to)}`;
+    for (const change of [...edit.changes].reverse()) {
+      this.value = `${this.value.slice(0, change.from)}${change.insert}${this.value.slice(change.to)}`;
+    }
     this.ranges = edit.selections.map((selection) => ({ ...selection }));
     this.edits.push(edit);
   }
@@ -227,8 +229,9 @@ describe('Vim editor operators, text objects, and visual selections', () => {
     await send(machine, { key: 'v', ctrlKey: true }, 'j', 'l', 'd');
 
     expect(document.value).toBe('c\nf');
-    expect(document.edits.filter((edit) => edit.to > edit.from).map((edit) => edit.history)).toEqual([
-      'new', 'join',
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.to > change.from))
+      .map((edit) => edit.history)).toEqual([
+      'new',
     ]);
   });
 
@@ -408,7 +411,8 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, 'i', 'x', 'y', 'Escape', 'R', 'z', 'Escape');
 
     expect(document.value).toBe('xyzbc');
-    expect(document.edits.filter((edit) => edit.insert).map((edit) => edit.history)).toEqual([
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.insert))
+      .map((edit) => edit.history)).toEqual([
       'new', 'join', 'new',
     ]);
   });
@@ -420,7 +424,8 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, ...keys('dw.'));
 
     expect(document.value).toBe('three');
-    expect(document.edits.filter((edit) => edit.to > edit.from).map((edit) => edit.history)).toEqual(['new', 'new']);
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.to > change.from))
+      .map((edit) => edit.history)).toEqual(['new', 'new']);
   });
 
   it('retains composed operator counts when repeating a change', async () => {
@@ -467,15 +472,15 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, 'X', 'Y');
     expect(document.value).toBe('XYcd\nXYgh\nijkl\nmnop');
     expect(document.ranges).toEqual([{ anchor: 2, head: 2 }, { anchor: 7, head: 7 }]);
-    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).map((edit) => edit.history)).toEqual([
-      'new', 'join', 'join', 'join', 'join', 'join',
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.to > change.from || change.insert))
+      .map((edit) => edit.history)).toEqual([
+      'new', 'join', 'join',
     ]);
 
     await send(machine, 'Escape', 'j', 'j', '0', '.');
     expect(document.value).toBe('XYcd\nXYgh\nXYkl\nXYop');
-    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).slice(-2).map((edit) => edit.history)).toEqual([
-      'new', 'join',
-    ]);
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.to > change.from || change.insert))
+      .at(-1)?.history).toBe('new');
   });
 
   it('preserves line separators for visual-line change and dot replay', async () => {
@@ -488,7 +493,8 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, 'j', '.');
 
     expect(document.value).toBe('X\nX\nfive\n');
-    expect(document.edits.filter((edit) => edit.to > edit.from || edit.insert).map((edit) => edit.history)).toEqual([
+    expect(document.edits.filter((edit) => edit.changes.some((change) => change.to > change.from || change.insert))
+      .map((edit) => edit.history)).toEqual([
       'new', 'join', 'new',
     ]);
   });
@@ -518,7 +524,7 @@ describe('Vim editor editing, repeat, macros, Unicode, and undo grouping', () =>
     await send(machine, ...keys('qaix'), 'Escape', 'q', ...keys('@a'));
 
     expect(document.value).toBe('xxabc');
-    const inserts = document.edits.filter((edit) => edit.insert === 'x');
+    const inserts = document.edits.filter((edit) => edit.changes.some((change) => change.insert === 'x'));
     expect(inserts.map((edit) => edit.history)).toEqual(['new', 'new']);
   });
 
