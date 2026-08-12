@@ -200,7 +200,7 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(renderSessionList).toContain(
       'armSessionClose(row, close, thread.name, function () {',
     );
-    expect(renderSessionList).toContain('closeThread(thread.id);');
+    expect(renderSessionList).toContain('return requestThreadClose(thread);');
     expect(renderSessionList).toContain('localSessionContextActions(');
     expect(renderSessionList).toContain('hide: function () { hideThread(thread.id); }');
   });

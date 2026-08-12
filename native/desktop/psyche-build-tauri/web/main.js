@@ -130,6 +130,8 @@
   var paneFooterPopoverOwner = null;
   var paneFooterPopoverTrigger = null;
   var paneFooterPopoverThreadId = null;
+  var browserTabLifecycleStates = new WeakMap();
+  var browserPaneLifecycleStates = new WeakMap();
   // Matches --pane-min-w / --pane-min-h: the tree's arithmetic and the pane's
   // own CSS floor have to agree, or a layout the tree calls valid renders
   // overflowing. 200x137 includes the fixed 27px footer rail.
@@ -833,7 +835,7 @@
       browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
         var url = tab.url || "about:blank";
         var history = Array.isArray(tab.history) ? tab.history.filter(Boolean).slice(-50) : [];
-        return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: !!tab.created && url !== "about:blank", loading: false };
+        return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: false, loading: false };
       });
     }
     browser.activeTabId = savedBrowser.activeTabId || (browser.tabs[0] && browser.tabs[0].id) || null;
@@ -1795,8 +1797,9 @@
     var worktreePath = activeWorkspaceRoot(project);
     var existing = findBrowserPane(project.id, worktreePath);
     if (existing) {
+      if (browserPaneIsClosing(existing)) return null;
       await focusThread(existing.id);
-      return existing;
+      return browserPaneIsClosing(existing) ? null : existing;
     }
     await new Promise(function (resolve) { requestAnimationFrame(resolve); });
     var id = makeThreadId();
@@ -1828,6 +1831,7 @@
     if (typeof noteStatusActivity === "function") noteStatusActivity();
     mountBrowserPane(pane);
     await focusThread(id);
+    if (browserPaneIsClosing(pane)) return null;
     refreshSidebar();
     refreshTabs();
     return pane;
@@ -3572,13 +3576,197 @@
     return nextLeaf ? nextLeaf.threadId : null;
   }
 
-  function closeBrowserPane(thread) {
+  async function closeBrowserPane(thread) {
     if (!thread || thread.kind !== "web") return false;
+    var paneLifecycle = browserPaneLifecycle(thread);
+    if (paneLifecycle.tearingDown) return false;
+    paneLifecycle.tearingDown = true;
+    try {
+    var project = findProject(thread.projectId);
+    if (!project) return false;
+    var browser = ensureBrowserModel(project, thread.worktreePath);
+    if (!browser) return false;
+    var originalActiveTabId = browser.activeTabId;
+    var tabMetadataByLabel = new Map(browser.tabs.map(function (tab) {
+      var navigationSnapshot = browserTabLifecycle(tab).navigationSnapshot;
+      return [browserLabelForTab(project, tab), {
+        id: tab.id,
+        label: browserLabelForTab(project, tab),
+        url: navigationSnapshot ? navigationSnapshot.url : (tab.url || "about:blank"),
+        title: navigationSnapshot ? navigationSnapshot.title : tab.title,
+        history: navigationSnapshot
+          ? navigationSnapshot.history.slice()
+          : (Array.isArray(tab.history) ? tab.history.slice() : []),
+        historyIndex: navigationSnapshot ? navigationSnapshot.historyIndex : tab.historyIndex,
+        wasLive: tab.created,
+      }];
+    }));
+    var liveTabs = Array.from(tabMetadataByLabel.values()).filter(function (tab) {
+      return tab.wasLive;
+    });
+    var liveTabsByLabel = new Map(liveTabs.map(function (tab) {
+      return [tab.label, tab];
+    }));
+    var labels = browser.tabs.map(function (tab) {
+      return browserLabelForTab(project, tab);
+    });
+    async function recoverAffectedLiveTabs(recoverLabels, skippedLabels) {
+      var recreated = 0;
+      var affectedLiveTabs = 0;
+      var recoveryErrors = [];
+      for (var index = 0; index < labels.length; index += 1) {
+        var label = labels[index];
+        if (!recoverLabels.has(label)) continue;
+        var savedTab = skippedLabels.has(label) ? null : liveTabsByLabel.get(label);
+        if (savedTab) affectedLiveTabs += 1;
+        var currentTab = browser.tabs.find(function (tab) {
+          return browserLabelForTab(project, tab) === label;
+        });
+        if (!currentTab) {
+          recoveryErrors.push(label + ": tab state missing");
+          continue;
+        }
+        var tabLifecycle = browserTabLifecycle(currentTab);
+        currentTab.created = false;
+        currentTab.loading = false;
+        tabLifecycle.nativeLabel = null;
+        tabLifecycle.pendingGeneration = 0;
+        tabLifecycle.pendingUrl = null;
+        tabLifecycle.liveGeneration = 0;
+        tabLifecycle.liveUrl = null;
+        tabLifecycle.eventUrl = null;
+        tabLifecycle.viewLive = false;
+        tabLifecycle.navigationSnapshot = null;
+        if (skippedLabels.has(label)) continue;
+        if (!savedTab) continue;
+        try {
+          await invoke("browser_navigate", {
+            label: savedTab.label,
+            url: savedTab.url,
+            x: -10000,
+            y: -10000,
+            w: 1,
+            h: 1,
+          });
+          currentTab.created = true;
+          currentTab.loading = false;
+          tabLifecycle.generation += 1;
+          tabLifecycle.nativeLabel = nativeBrowserLabel(savedTab.label);
+          tabLifecycle.liveGeneration = tabLifecycle.generation;
+          tabLifecycle.liveUrl = savedTab.url;
+          tabLifecycle.viewLive = true;
+          recreated += 1;
+        } catch (recoveryError) {
+          currentTab.created = false;
+          currentTab.loading = false;
+          recoveryErrors.push(savedTab.id + ": " + String(recoveryError));
+        }
+      }
+      if (browser.tabs.some(function (tab) { return tab.id === originalActiveTabId; })) {
+        browser.activeTabId = originalActiveTabId;
+      }
+      browser.tabs.forEach(function (tab) {
+        var metadata = tabMetadataByLabel.get(browserLabelForTab(project, tab));
+        if (!metadata) return;
+        tab.url = metadata.url;
+        tab.title = metadata.title;
+        tab.history = metadata.history.slice();
+        tab.historyIndex = metadata.historyIndex;
+      });
+      syncProjectBrowser();
+      saveWorkspaceSoon();
+      return {
+        recreated: recreated,
+        affectedLiveTabs: affectedLiveTabs,
+        recoveryErrors: recoveryErrors,
+      };
+    }
+    browser.tabs.forEach(function (tab) {
+      invalidateBrowserNavigation(tab);
+    });
+    var navigationTails = browser.tabs.map(function (tab) {
+      return browserTabLifecycle(tab).navigationTail;
+    }).filter(function (tail) {
+      return !!tail;
+    });
+    if (navigationTails.length) await Promise.all(navigationTails);
+    var outcome;
+    try {
+      outcome = labels.length
+        ? await invoke("browser_destroy_many", { labels: labels })
+        : { destroyed: [], failures: [] };
+    } catch (error) {
+      var missingLiveLabels = new Set();
+      liveTabs.forEach(function (savedTab) {
+        var currentTab = browser.tabs.find(function (tab) {
+          return browserLabelForTab(project, tab) === savedTab.label;
+        });
+        if (!currentTab || !currentTab.created ||
+            !browserTabLifecycle(currentTab).viewLive) {
+          missingLiveLabels.add(savedTab.label);
+        }
+      });
+      var transportStatus = "browser pane close failed before structured teardown outcome: " + String(error);
+      if (missingLiveLabels.size) {
+        var transportRecovery = await recoverAffectedLiveTabs(missingLiveLabels, new Set());
+        transportStatus += "; recreated " + transportRecovery.recreated + "/" +
+          transportRecovery.affectedLiveTabs + " missing live tabs";
+        if (transportRecovery.recoveryErrors.length) {
+          transportStatus += "; recreation failures: " + transportRecovery.recoveryErrors.join(", ");
+        }
+      }
+      setStatus(transportStatus, "error");
+      return false;
+    }
+    var destroyed = new Set(Array.isArray(outcome && outcome.destroyed) ? outcome.destroyed : []);
+    var failures = Array.isArray(outcome && outcome.failures)
+      ? outcome.failures.map(function (failure) {
+          return {
+            label: failure && typeof failure.label === "string" ? failure.label : "",
+            error: failure && failure.error != null ? String(failure.error) : "unknown close error",
+          };
+        })
+      : [];
+    var failedLabels = new Set(failures.map(function (failure) { return failure.label; }));
+    labels.forEach(function (label) {
+      if (!destroyed.has(label) && !failedLabels.has(label)) {
+        failures.push({ label: label, error: "missing teardown outcome" });
+        failedLabels.add(label);
+      }
+    });
+    if (failures.length) {
+      var recovery = await recoverAffectedLiveTabs(destroyed, failedLabels);
+      var closeErrors = failures.map(function (failure) {
+        return failure.label + ": " + failure.error;
+      });
+      var recoveryStatus = "browser pane close failed; native close failures: " + closeErrors.join(", ");
+      recoveryStatus += "; recreated " + recovery.recreated + "/" + recovery.affectedLiveTabs + " confirmed-destroyed live tabs";
+      if (recovery.recoveryErrors.length) recoveryStatus += "; recreation failures: " + recovery.recoveryErrors.join(", ");
+      setStatus(recoveryStatus, "error");
+      return false;
+    }
     var wasActive = state.activeThreadId === thread.id;
+    browser.tabs.forEach(function (tab) {
+      tab.created = false;
+      tab.loading = false;
+      var lifecycle = browserTabLifecycle(tab);
+      lifecycle.nativeLabel = null;
+      lifecycle.pendingGeneration = 0;
+      lifecycle.pendingUrl = null;
+      lifecycle.liveGeneration = 0;
+      lifecycle.liveUrl = null;
+      lifecycle.eventUrl = null;
+      lifecycle.viewLive = false;
+      lifecycle.navigationSnapshot = null;
+    });
+    saveWorkspaceSoon();
     stageBrowserSurface();
     var closed = closeThread(thread.id);
     if (closed && wasActive) markActiveSurface("terminal");
     return closed;
+    } finally {
+      paneLifecycle.tearingDown = false;
+    }
   }
 
   function retainFileFocusAfterThreadRemoval(removedThreadId, nextThreadId, projectId) {
@@ -4792,6 +4980,12 @@
    * itself when the timer runs out — the guard costs nothing if you meant it
    * and everything if you didn't.
    */
+  function requestThreadClose(thread) {
+    if (!thread) return Promise.resolve(false);
+    if (thread.kind === "web") return closeBrowserPane(thread);
+    return Promise.resolve(closeThread(thread.id));
+  }
+
   function armSessionClose(host, close, label, onConfirm) {
     disarmSessionClose();
     var expiresAt = Date.now() + SESSION_CLOSE_SECONDS * 1000;
@@ -4805,7 +4999,7 @@
       confirm.setAttribute("aria-label", "Confirm closing " + label);
     }
     paint();
-    confirm.addEventListener("click", function (event) {
+    confirm.addEventListener("click", async function (event) {
       event.stopPropagation();
       if (Date.now() >= expiresAt) {
         disarmSessionClose();
@@ -4814,10 +5008,7 @@
       var confirmOwnedFocus = document.activeElement === confirm;
       var treeKey = host.dataset.treeKey || "";
       disarmSessionClose({ restoreFocus: false });
-      var result = onConfirm();
-      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
-      Promise.resolve(result).then(function (succeeded) {
-        if (succeeded !== false) return;
+      function restoreFocusIfNeeded() {
         var active = document.activeElement;
         if (active && active !== document.body) return;
         var items = sessionListEl.querySelectorAll("[data-tree-item]");
@@ -4827,6 +5018,25 @@
             return;
           }
         }
+      }
+      function reportCloseFailure(error) {
+        var detail = error && error.message ? ": " + error.message : "";
+        setStatus("Failed to close " + label + detail, "error");
+      }
+      var result;
+      try {
+        result = onConfirm();
+      } catch (err) {
+        reportCloseFailure(err);
+        if (confirmOwnedFocus) restoreFocusIfNeeded();
+        return;
+      }
+      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
+      Promise.resolve(result).then(function (succeeded) {
+        if (succeeded === false) restoreFocusIfNeeded();
+      }, function (error) {
+        reportCloseFailure(error);
+        restoreFocusIfNeeded();
       });
     });
     close.hidden = true;
@@ -5811,7 +6021,7 @@
               close.textContent = "×";
               function armLocalClose() {
                 armSessionClose(row, close, thread.name, function () {
-                  closeThread(thread.id);
+                  return requestThreadClose(thread);
                 });
               }
               close.addEventListener("click", function (event) {
@@ -6882,7 +7092,7 @@
     {
       cmd: "/close",
       desc: "Close the active thread",
-      run: function () { if (state.activeThreadId) closeThread(state.activeThreadId); },
+      run: function () { return requestThreadClose(findThread(state.activeThreadId)); },
     },
     {
       cmd: "/preview",
@@ -7422,6 +7632,89 @@
     var tabId = tab ? tab.id : "default";
     return projectId + "__" + tabId;
   }
+  function browserTabLifecycle(tab) {
+    if (!tab) return { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: false, navigationSnapshot: null };
+    var lifecycle = browserTabLifecycleStates.get(tab);
+    if (!lifecycle) {
+      lifecycle = { closing: false, generation: 0, invalidationGeneration: 0, navigationTail: null, nativeLabel: null, pendingGeneration: 0, pendingUrl: null, liveGeneration: 0, liveUrl: null, eventUrl: null, viewLive: tab.created === true, navigationSnapshot: null };
+      browserTabLifecycleStates.set(tab, lifecycle);
+    }
+    return lifecycle;
+  }
+  function browserPaneLifecycle(thread) {
+    if (!thread) return { tearingDown: false };
+    var lifecycle = browserPaneLifecycleStates.get(thread);
+    if (!lifecycle) {
+      lifecycle = { tearingDown: false };
+      browserPaneLifecycleStates.set(thread, lifecycle);
+    }
+    return lifecycle;
+  }
+  function browserTabIsClosing(tab) {
+    return !!tab && browserTabLifecycle(tab).closing;
+  }
+  function browserPaneIsClosing(thread) {
+    return !!thread && (
+      thread.closing ||
+      thread.closeStarted ||
+      browserPaneLifecycle(thread).tearingDown
+    );
+  }
+  function beginBrowserNavigation(tab) {
+    var lifecycle = browserTabLifecycle(tab);
+    lifecycle.generation += 1;
+    return lifecycle.generation;
+  }
+  function invalidateBrowserNavigation(tab) {
+    var lifecycle = browserTabLifecycle(tab);
+    lifecycle.generation += 1;
+    lifecycle.invalidationGeneration += 1;
+    lifecycle.pendingGeneration = 0;
+    lifecycle.pendingUrl = null;
+    lifecycle.eventUrl = null;
+    lifecycle.navigationSnapshot = null;
+    return lifecycle.generation;
+  }
+  function browserNavigationIsCurrent(context) {
+    if (!context || browserTabIsClosing(context.tab) || browserPaneIsClosing(context.pane)) return false;
+    if (browserTabLifecycle(context.tab).generation !== context.generation) return false;
+    if (context.browser.tabs.indexOf(context.tab) === -1) return false;
+    if (ensureBrowserModel(context.project, context.worktreePath) !== context.browser) return false;
+    if (findThread(context.pane.id) !== context.pane) return false;
+    return findBrowserPane(context.project.id, context.worktreePath) === context.pane;
+  }
+  function browserNavigationOwnsVisiblePane(context) {
+    if (!context || !context.project || state.activeProjectId !== context.project.id) return false;
+    var project = activeProject();
+    if (!project || project !== context.project || project.id !== context.project.id ||
+        activeWorkspaceRoot(project) !== context.worktreePath) return false;
+    if (findThread(context.pane.id) !== context.pane ||
+        findBrowserPane(context.project.id, context.worktreePath) !== context.pane ||
+        browserPaneIsClosing(context.pane) || context.pane.hidden) return false;
+    return !!visibleBrowserBounds();
+  }
+  async function discardObsoleteBrowserNavigation(context) {
+    invalidateBrowserNavigation(context.tab);
+    var lifecycle = browserTabLifecycle(context.tab);
+    lifecycle.nativeLabel = null;
+    lifecycle.liveGeneration = 0;
+    lifecycle.liveUrl = null;
+    lifecycle.viewLive = false;
+    try {
+      await invoke("browser_destroy", { label: context.label });
+    } catch (error) {
+      setStatus("obsolete browser navigation cleanup failed for " + context.label + ": " + String(error), "error");
+      return false;
+    }
+    if (context.browser.tabs.indexOf(context.tab) !== -1) {
+      context.tab.created = false;
+      context.tab.loading = false;
+      context.tab.title = context.previousTitle;
+      syncProjectBrowser();
+      saveWorkspaceSoon();
+    }
+    return true;
+  }
   function nativeBrowserLabel(raw) {
     var safe = String(raw || "default").split("").filter(function (c) {
       return /[A-Za-z0-9_-]/.test(c);
@@ -7431,10 +7724,10 @@
   function browserTabForNativeLabel(nativeLabel) {
     for (var i = 0; i < state.projects.length; i++) {
       var project = state.projects[i];
-      ensureBrowserModel(project);
-      var workspaceRoots = Object.keys(project.browsersByWorktree);
+      var browsersByWorktree = project.browsersByWorktree || {};
+      var workspaceRoots = Object.keys(browsersByWorktree);
       for (var w = 0; w < workspaceRoots.length; w++) {
-        var browser = project.browsersByWorktree[workspaceRoots[w]];
+        var browser = browsersByWorktree[workspaceRoots[w]];
         for (var j = 0; j < browser.tabs.length; j++) {
           var tab = browser.tabs[j];
           if (nativeBrowserLabel(browserLabelForTab(project, tab)) === nativeLabel) {
@@ -7445,35 +7738,71 @@
     }
     return null;
   }
-  function markBrowserTabLoaded(nativeLabel, url, title) {
+  function browserUrlsMatch(left, right) {
+    if (!left || !right) return left === right;
+    try { return new URL(String(left)).href === new URL(String(right)).href; }
+    catch (_) { return String(left) === String(right); }
+  }
+  function browserNativeEventContext(nativeLabel, url) {
     var pair = browserTabForNativeLabel(nativeLabel);
-    if (!pair) return;
+    if (!pair || findProject(pair.project.id) !== pair.project) return null;
+    if (!pair.project.browsersByWorktree ||
+        pair.project.browsersByWorktree[pair.worktreePath] !== pair.browser ||
+        pair.browser.tabs.indexOf(pair.tab) === -1 ||
+        browserTabIsClosing(pair.tab)) return null;
+    var pane = findBrowserPane(pair.project.id, pair.worktreePath);
+    if (!pane || pane.projectId !== pair.project.id ||
+        pane.worktreePath !== pair.worktreePath ||
+        findThread(pane.id) !== pane || browserPaneIsClosing(pane)) return null;
+    var lifecycle = browserTabLifecycle(pair.tab);
+    var hasPendingNavigation = lifecycle.pendingGeneration > 0;
+    var expectedUrl = hasPendingNavigation ? lifecycle.pendingUrl : lifecycle.liveUrl;
+    if (!lifecycle.viewLive || lifecycle.nativeLabel !== nativeLabel ||
+        (hasPendingNavigation && lifecycle.pendingGeneration !== lifecycle.generation) ||
+        (!pair.tab.created && !hasPendingNavigation) ||
+        !(hasPendingNavigation ? lifecycle.pendingGeneration : lifecycle.liveGeneration)) return null;
+    if (url && expectedUrl && !browserUrlsMatch(url, expectedUrl) &&
+        (!lifecycle.eventUrl || !browserUrlsMatch(url, lifecycle.eventUrl))) return null;
+    if (url) lifecycle.eventUrl = url;
+    return pair;
+  }
+  function markBrowserTabLoaded(nativeLabel, url, title) {
+    var pair = browserNativeEventContext(nativeLabel, url);
+    if (!pair) return false;
     pair.tab.loading = false;
     if (url) pair.tab.url = url;
     if (title && String(title).trim()) pair.tab.title = String(title).trim();
     else pair.tab.title = tabTitle(pair.tab.url);
-    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+    if (pair.project.id === state.activeProjectId &&
+        activeWorkspaceRoot(pair.project) === pair.worktreePath) {
       renderBrowserTabs(); syncUrlInput();
     }
     saveWorkspaceSoon();
+    return true;
   }
-  listen("browser:page-load", function (event) {
+  function handleBrowserPageLoad(event) {
     var payload = event.payload || {};
-    var pair = browserTabForNativeLabel(payload.label);
-    if (!pair) return;
+    var pair = browserNativeEventContext(payload.label, payload.url);
+    if (!pair) return false;
     if (payload.phase === "started") {
       pair.tab.loading = true;
     } else if (payload.phase === "finished") {
-      markBrowserTabLoaded(payload.label, payload.url, "");
+      return markBrowserTabLoaded(payload.label, payload.url, "");
+    } else {
+      return false;
     }
-    if (pair.project.id === state.activeProjectId && pair.browser === ensureBrowserModel(pair.project)) {
+    if (pair.project.id === state.activeProjectId &&
+        activeWorkspaceRoot(pair.project) === pair.worktreePath) {
       renderBrowserTabs(); updateBrowserControls();
     }
-  }).catch(function () {});
-  listen("browser:title", function (event) {
+    return true;
+  }
+  function handleBrowserTitle(event) {
     var payload = event.payload || {};
-    markBrowserTabLoaded(payload.label, payload.url, payload.title);
-  }).catch(function () {});
+    return markBrowserTabLoaded(payload.label, payload.url, payload.title);
+  }
+  listen("browser:page-load", handleBrowserPageLoad).catch(function () {});
+  listen("browser:title", handleBrowserTitle).catch(function () {});
   listen("browser:focus", function (event) {
     markActiveSurface("browser");
     var payload = event.payload || {};
@@ -7505,7 +7834,10 @@
   }
   function createBrowserTab(project, url, activate) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project);
+    var worktreePath = activeWorkspaceRoot(project);
+    var pane = project && findBrowserPane(project.id, worktreePath);
+    if (browserPaneIsClosing(pane)) return null;
+    var browser = ensureBrowserModel(project, worktreePath);
     if (!browser) return null;
     var maxTabs = Math.min(settings.maxBrowserTabsPerProject, HARD_MAX_BROWSER_TABS_PER_PROJECT);
     if (browser.tabs.length >= maxTabs) { setStatus("browser tab limit reached (" + maxTabs + "/project)", "warn"); return null; }
@@ -7515,21 +7847,59 @@
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
   }
-  function closeBrowserTab(project, tabId) {
+  async function closeBrowserTab(project, tabId) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project); if (!browser) return;
-    var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return;
+    var browser = ensureBrowserModel(project); if (!browser) return false;
+    var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
+    var tab = browser.tabs[idx];
+    var lifecycle = browserTabLifecycle(tab);
+    if (lifecycle.closing) return false;
+    lifecycle.closing = true;
+    invalidateBrowserNavigation(tab);
+    try {
+      await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
+    } catch (error) {
+      lifecycle.closing = false;
+      setStatus("browser tab close failed: " + String(error), "error");
+      return false;
+    }
+    idx = browser.tabs.findIndex(function (t) { return t === tab; });
+    if (idx < 0) {
+      lifecycle.closing = false;
+      return false;
+    }
+    var next = null;
     browser.tabs.splice(idx, 1);
-    if (browser.activeTabId === tabId) { var next = browser.tabs[Math.min(idx, browser.tabs.length - 1)] || null; browser.activeTabId = next ? next.id : null; }
+    if (browser.activeTabId === tabId) { next = browser.tabs[Math.min(idx, browser.tabs.length - 1)] || null; browser.activeTabId = next ? next.id : null; }
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    if (next && !next.created) await restoreDormantBrowserTab(project, next);
+    lifecycle.closing = false;
+    return true;
   }
-  function activateBrowserTab(project, tabId) {
+  async function restoreDormantBrowserTab(project, tab) {
+    var worktreePath = activeWorkspaceRoot(project);
+    var pane = project && findBrowserPane(project.id, worktreePath);
+    if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane) ||
+        tab.created || !tab.url || tab.url === "about:blank") return false;
+    var navigated = await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
+    pane = project && findBrowserPane(project.id, worktreePath);
+    return navigated && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane) &&
+      tab.created === true;
+  }
+  async function activateBrowserTab(project, tabId) {
     project = project || activeProject();
     var browser = ensureBrowserModel(project);
-    if (!browser || !browser.tabs.some(function (t) { return t.id === tabId; })) return;
+    if (!browser) return false;
+    var tab = browser.tabs.find(function (t) { return t.id === tabId; });
+    var pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
+    if (!tab || browserTabIsClosing(tab) || browserPaneIsClosing(pane)) return false;
     markActiveSurface("browser");
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    if (!tab.created) await restoreDormantBrowserTab(project, tab);
+    pane = findBrowserPane(project.id, activeWorkspaceRoot(project));
+    return browser.tabs.indexOf(tab) !== -1 && !browserTabIsClosing(tab) &&
+      !browserPaneIsClosing(pane);
   }
   async function openBlankBrowserTab(options) {
     options = options || {};
@@ -7537,8 +7907,9 @@
     if (!project) return null;
     var worktreePath = activeWorkspaceRoot(project);
     var existing = findBrowserPane(project.id, worktreePath);
+    if (browserPaneIsClosing(existing)) return null;
     var pane = await createBrowserPane(project);
-    if (!pane) return null;
+    if (!pane || browserPaneIsClosing(pane)) return null;
     markActiveSurface("browser");
     var browser = ensureBrowserModel(project, worktreePath);
     var tab = null;
@@ -7548,6 +7919,11 @@
       renderBrowserTabs();
     }
     syncProjectBrowser();
+    if (!options.requireNew && !tab) {
+      var activeTab = currentBrowserTab(project);
+      if (activeTab && !activeTab.created) await restoreDormantBrowserTab(project, activeTab);
+    }
+    if (browserPaneIsClosing(pane)) return null;
     if (urlInput) urlInput.focus();
     return tab || (options.requireNew ? null : currentBrowserTab(project));
   }
@@ -7557,7 +7933,6 @@
     await navigateBrowser(DICE_BROWSER_URL, { tabId: tab.id });
   }
   listen("browser:shortcut-new-tab", function () {
-    markActiveSurface("browser");
     openBlankBrowserTab();
   }).catch(function () {});
   listen("browser:shortcut-terminal-pane", function () {
@@ -7578,7 +7953,7 @@
       btn.className = "browser-tab" + (tab.id === browser.activeTabId ? " active" : "") + (tab.loading ? " loading" : "");
       btn.title = tab.url || "New tab";
       btn.innerHTML = '<span class="browser-tab-favicon" aria-hidden="true"></span><span class="browser-tab-title">' + escapeHtml(tab.title || "New tab") + '</span><span class="browser-tab-close">×</span>';
-      btn.addEventListener("click", function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) closeBrowserTab(project, tab.id); else activateBrowserTab(project, tab.id); });
+      btn.addEventListener("click", async function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) await closeBrowserTab(project, tab.id); else await activateBrowserTab(project, tab.id); });
       browserTabStrip.appendChild(btn);
     });
     appendBrowserTabAddButton(); syncUrlInput();
@@ -7614,24 +7989,135 @@
     invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
   }
   async function navigateBrowser(rawUrl, opts) {
-    opts = opts || {}; var project = activeProject(); if (!project) return;
-    var pane = await createBrowserPane(project); if (!pane) return;
-    var browser = ensureBrowserModel(project); var tab = opts.tabId ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
-    if (!tab) tab = createBrowserTab(project, rawUrl || "about:blank", true); if (!tab) return;
-    browser.activeTabId = tab.id;
-    var b = visibleBrowserBounds(); if (!b) return;
-    var normalised = normaliseUrl(rawUrl); if (!normalised) return;
-    tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
-    var label = browserLabelForTab(project, tab);
-    invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h }).then(function () {
-      tab.created = true; tab.url = normalised;
-      if (!opts.fromHistory && !opts.preserveHistory) { tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1); tab.history.push(normalised); tab.historyIndex = tab.history.length - 1; }
-      if (previewEmpty) previewEmpty.hidden = true;
-      renderBrowserTabs(); syncUrlInput(); saveWorkspaceSoon(); invoke("browser_hide_all_except", { label: label }).catch(function () {});
-      setTimeout(function () {
-        if (tab.loading && tab.url === normalised) markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
-      }, 4500);
-    }).catch(function (err) { tab.loading = false; renderBrowserTabs(); updateBrowserControls(); writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n"); });
+    opts = opts || {}; var project = activeProject(); if (!project) return false;
+    var projectId = project.id;
+    var worktreePath = activeWorkspaceRoot(project) || project.root;
+    var browser = ensureBrowserModel(project, worktreePath); var hasRequestedTab = opts.tabId != null; var tab = hasRequestedTab ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
+    var browsersByWorktree = project.browsersByWorktree || null;
+    if ((hasRequestedTab && !tab) || browserTabIsClosing(tab)) return false;
+    var pane = findBrowserPane(projectId, worktreePath);
+    var requestIsCurrent = function () {
+      if (project.id !== projectId || state.activeProjectId !== projectId ||
+          activeProject() !== project || activeWorkspaceRoot(project) !== worktreePath ||
+          (browsersByWorktree
+            ? (project.browsersByWorktree !== browsersByWorktree ||
+              browsersByWorktree[worktreePath] !== browser)
+            : ensureBrowserModel(project, worktreePath) !== browser) ||
+          (tab && (browser.tabs.indexOf(tab) === -1 || browserTabIsClosing(tab)))) return false;
+      if (!pane) return findBrowserPane(projectId, worktreePath) === null;
+      return pane.projectId === projectId && pane.worktreePath === worktreePath &&
+        findThread(pane.id) === pane && findBrowserPane(projectId, worktreePath) === pane &&
+        !browserPaneIsClosing(pane);
+    };
+    if (!requestIsCurrent()) return false;
+    if (!pane) {
+      pane = await createBrowserPane(project);
+      if (!pane || !requestIsCurrent()) return false;
+    }
+    if (!tab) {
+      if (!requestIsCurrent()) return false;
+      tab = createBrowserTab(project, rawUrl || "about:blank", true);
+      if (!tab || !requestIsCurrent()) return false;
+    }
+    var normalised = normaliseUrl(rawUrl); if (!normalised) return false;
+    var lifecycle = browserTabLifecycle(tab);
+    var invalidationGeneration = lifecycle.invalidationGeneration;
+    var runNavigation = async function () {
+      if (lifecycle.invalidationGeneration !== invalidationGeneration ||
+          !requestIsCurrent()) return false;
+      var b = visibleBrowserBounds(); if (!b) return false;
+      var previousTitle = tab.title;
+      var previousUrl = tab.url;
+      var previousView = {
+        nativeLabel: lifecycle.nativeLabel,
+        liveGeneration: lifecycle.liveGeneration,
+        liveUrl: lifecycle.liveUrl,
+        eventUrl: lifecycle.eventUrl,
+        viewLive: lifecycle.viewLive,
+      };
+      var generation = beginBrowserNavigation(tab);
+      var label = browserLabelForTab(project, tab);
+      var nativeLabel = nativeBrowserLabel(label);
+      lifecycle.nativeLabel = nativeLabel;
+      lifecycle.pendingGeneration = generation;
+      lifecycle.pendingUrl = normalised;
+      lifecycle.eventUrl = null;
+      lifecycle.viewLive = true;
+      lifecycle.navigationSnapshot = {
+        url: previousUrl,
+        title: previousTitle,
+        history: Array.isArray(tab.history) ? tab.history.slice() : [],
+        historyIndex: tab.historyIndex,
+      };
+      var context = {
+        project: project,
+        worktreePath: worktreePath,
+        browser: browser,
+        pane: pane,
+        tab: tab,
+        generation: generation,
+        label: label,
+        previousTitle: previousTitle,
+      };
+      tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
+      try {
+        await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
+        if (!browserNavigationIsCurrent(context)) {
+          await discardObsoleteBrowserNavigation(context);
+          return false;
+        }
+        var committedUrl = lifecycle.eventUrl || normalised;
+        tab.created = true; tab.url = committedUrl;
+        lifecycle.pendingGeneration = 0;
+        lifecycle.pendingUrl = null;
+        lifecycle.liveGeneration = generation;
+        lifecycle.liveUrl = committedUrl;
+        lifecycle.viewLive = true;
+        lifecycle.navigationSnapshot = null;
+        if (opts.fromHistory && typeof opts.historyIndex === "number") {
+          tab.historyIndex = opts.historyIndex;
+        } else if (!opts.fromHistory && !opts.preserveHistory) {
+          tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1);
+          tab.history.push(normalised);
+          tab.historyIndex = tab.history.length - 1;
+        }
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else syncBrowserBounds();
+        saveWorkspaceSoon();
+        setTimeout(function () {
+          if (browserNavigationIsCurrent(context) && tab.loading &&
+              browserUrlsMatch(tab.url, normalised)) {
+            markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
+          }
+        }, 4500);
+        return true;
+      } catch (err) {
+        if (!browserNavigationIsCurrent(context)) {
+          await discardObsoleteBrowserNavigation(context);
+          return false;
+        }
+        lifecycle.nativeLabel = previousView.nativeLabel;
+        lifecycle.pendingGeneration = 0;
+        lifecycle.pendingUrl = null;
+        lifecycle.liveGeneration = previousView.liveGeneration;
+        lifecycle.liveUrl = previousView.liveUrl;
+        lifecycle.eventUrl = previousView.eventUrl;
+        lifecycle.viewLive = previousView.viewLive;
+        lifecycle.navigationSnapshot = null;
+        tab.loading = false;
+        tab.title = previousTitle;
+        tab.url = previousUrl;
+        if (browserNavigationOwnsVisiblePane(context)) syncProjectBrowser();
+        else syncBrowserBounds();
+        writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+        return false;
+      }
+    };
+    var navigation = lifecycle.navigationTail
+      ? lifecycle.navigationTail.then(runNavigation, runNavigation)
+      : runNavigation();
+    lifecycle.navigationTail = navigation.then(function () {}, function () {});
+    return navigation;
   }
   function normaliseUrl(value) {
     if (!value) return ""; var trimmed = String(value).trim(); if (!trimmed) return ""; if (trimmed === "about:blank") return trimmed;
@@ -7640,11 +8126,11 @@
   }
   urlInput.addEventListener("keydown", function (e) { if (e.key === "Enter") navigateBrowser(urlInput.value); });
   document.getElementById("reload").addEventListener("click", function () {
-    var project = activeProject(); var tab = currentBrowserTab(project);
-    if (tab && tab.created) { tab.loading = true; renderBrowserTabs(); updateBrowserControls(); invoke("browser_reload", { label: browserLabelForTab(project, tab) }).catch(function () {}).finally(function () { setTimeout(function () { tab.loading = false; renderBrowserTabs(); updateBrowserControls(); }, 350); }); }
+    var project = activeProject(); var tab = currentBrowserTab(project); var pane = project && findBrowserPane(project.id, activeWorkspaceRoot(project));
+    if (tab && tab.created && !browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) { tab.loading = true; renderBrowserTabs(); updateBrowserControls(); invoke("browser_reload", { label: browserLabelForTab(project, tab) }).catch(function () {}).finally(function () { setTimeout(function () { if (!browserTabIsClosing(tab) && !browserPaneIsClosing(pane)) tab.loading = false; renderBrowserTabs(); updateBrowserControls(); }, 350); }); }
   });
-  document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex > 0) { tab.historyIndex -= 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
-  document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.historyIndex < tab.history.length - 1) { tab.historyIndex += 1; navigateBrowser(tab.history[tab.historyIndex], { fromHistory: true }); saveWorkspaceSoon(); } });
+  document.getElementById("back").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex > 0) { var index = tab.historyIndex - 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
+  document.getElementById("forward").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && !browserTabIsClosing(tab) && tab.historyIndex < tab.history.length - 1) { var index = tab.historyIndex + 1; navigateBrowser(tab.history[index], { fromHistory: true, historyIndex: index }); } });
   document.getElementById("open-surprise").addEventListener("click", openDiceBrowserTab);
   document.getElementById("open-external").addEventListener("click", function () { var tab = currentBrowserTab(); if (tab && tab.url && tab.url !== "about:blank" && openUrl) openUrl(tab.url).catch(function () {}); });
   if (typeof ResizeObserver === "function") { var ro = new ResizeObserver(function () { syncBrowserBounds(); }); ro.observe(preview); ro.observe(detail); }

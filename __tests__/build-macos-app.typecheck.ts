@@ -1,5 +1,6 @@
 import {
   buildDevAppSnapshot,
+  captureDevSourceFingerprint,
   channelConfig,
   installBundleTransactional,
   publishBuildChannel,
@@ -88,8 +89,10 @@ void devWithRequestedRef;
 const commandOptions: CommandOptions = {
   cwd: '/workspace/psyche-build',
   stage: 'resolve current commit',
+  signal: new AbortController().signal,
 };
 void runCommand('git', ['rev-parse', 'HEAD'], commandOptions);
+void captureDevSourceFingerprint('/workspace/psyche-build');
 
 const devSnapshotRequest: DevBuildSnapshotRequest = {
   sourceRoot: '/workspace/psyche-build',
@@ -135,6 +138,10 @@ const buildDependencies: RunMacosBuildDependencies = {
   },
 };
 void runMacosBuild({ channel: 'dev' }, buildDependencies);
+void runMacosBuild(
+  { channel: 'dev', signal: new AbortController().signal },
+  buildDependencies,
+);
 
 // @ts-expect-error stable builds require a ref
 void runMacosBuild({ channel: 'stable' }, buildDependencies);

@@ -62,7 +62,7 @@
     "dev:watch": "pnpm run generate:hooks-docs && tsc && pnpm run dev:watch:run",
     "dev:watch:run": "node scripts/dev-watch-run.js",
     "dev:doctor": "pnpm run generate:hooks-docs && tsc && node ./psyche doctor",
-    "typecheck": "pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
+    "typecheck": "pnpm --filter @opencoven/psyche-vim-core typecheck && pnpm run generate:hooks-docs && tsc --noEmit && pnpm run typecheck:tests",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "fixtures:generate": "tsx scripts/generate-protocol-fixtures.ts",
     "ios:project:generate": "xcodegen generate --spec native/ios/project.yml --project native/ios",
@@ -94,6 +94,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@opencoven/psyche-vim-core": "workspace:*",
     "@playwright/test": "^1.62.1",
     "@types/node": "^20.19.43",
     "@types/react": "^18.3.31",

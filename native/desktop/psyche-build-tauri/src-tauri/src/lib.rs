@@ -2793,6 +2793,50 @@ fn browser_hide_all_except(app: AppHandle, label: Option<String>) -> Result<(), 
     Ok(())
 }
 
+fn destroy_browser_webview(app: &AppHandle, label: Option<String>) -> Result<(), String> {
+    let label = safe_browser_label(label);
+    if let Some(webview) = app.get_webview(&label) {
+        webview.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn browser_destroy(app: AppHandle, label: Option<String>) -> Result<(), String> {
+    destroy_browser_webview(&app, label)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyFailure {
+    label: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserDestroyManyOutcome {
+    destroyed: Vec<String>,
+    failures: Vec<BrowserDestroyFailure>,
+}
+
+#[tauri::command]
+fn browser_destroy_many(app: AppHandle, labels: Vec<String>) -> BrowserDestroyManyOutcome {
+    let mut outcome = BrowserDestroyManyOutcome {
+        destroyed: Vec::new(),
+        failures: Vec::new(),
+    };
+    for label in labels {
+        match destroy_browser_webview(&app, Some(label.clone())) {
+            Ok(()) => outcome.destroyed.push(label),
+            Err(error) => outcome
+                .failures
+                .push(BrowserDestroyFailure { label, error }),
+        }
+    }
+    outcome
+}
+
 #[tauri::command]
 fn browser_reload(app: AppHandle, label: Option<String>) -> Result<(), String> {
     let label = safe_browser_label(label);
@@ -4168,6 +4212,8 @@ pub fn run() {
             browser_set_bounds,
             browser_hide,
             browser_hide_all_except,
+            browser_destroy,
+            browser_destroy_many,
             browser_reload,
             browser_eval,
             app_environment,
