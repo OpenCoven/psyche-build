@@ -5,8 +5,10 @@ export type {
   KeyboardEventLike,
   NormalizedKey,
   VimAction,
+  VimConsumedResult,
   VimContext,
   VimDisposition,
   VimInputResult,
+  VimPassthroughResult,
   VimResult,
 } from './types.js';

@@ -3,6 +3,7 @@ import type {
   KeyboardEventLike,
   NormalizedKey,
   VimAction,
+  VimConsumedResult,
   VimContext,
   VimInputResult,
   VimResult,
@@ -28,21 +29,46 @@ export interface ChromeMachine {
 }
 
 function parseTrigger(trigger: string | NormalizedKey | undefined): NormalizedKey {
+  if (trigger === undefined) return { key: 'F6', ctrl: false, alt: false, shift: false, meta: false };
+
   if (typeof trigger !== 'string') {
-    return trigger ?? { key: 'F6', ctrl: false, alt: false, shift: false, meta: false };
+    const candidate = trigger as unknown as Record<string, unknown>;
+    if (typeof candidate.key !== 'string' || candidate.key.length === 0
+      || typeof candidate.ctrl !== 'boolean' || typeof candidate.alt !== 'boolean'
+      || typeof candidate.shift !== 'boolean' || typeof candidate.meta !== 'boolean') {
+      throw new TypeError('Chrome trigger object must contain a key and boolean modifiers');
+    }
+    return normalizeKeyboardEvent({
+      key: candidate.key,
+      ctrlKey: candidate.ctrl,
+      altKey: candidate.alt,
+      shiftKey: candidate.shift,
+      metaKey: candidate.meta,
+    });
   }
 
   const parts = trigger.split('-');
-  const key = parts.pop();
-  if (!key) throw new TypeError('Chrome trigger must include a key');
+  const key = parts.at(-1);
+  const modifiers = parts.slice(0, -1);
+  if (!key || new Set(['Ctrl', 'Alt', 'Shift', 'Meta']).has(key)) {
+    throw new TypeError('Chrome trigger must include a non-modifier key');
+  }
 
-  return {
-    key: key.length === 1 ? key.toLowerCase() : key,
-    ctrl: parts.includes('Ctrl'),
-    alt: parts.includes('Alt'),
-    shift: parts.includes('Shift'),
-    meta: parts.includes('Meta'),
-  };
+  const allowedModifiers = new Set(['Ctrl', 'Alt', 'Shift', 'Meta']);
+  const seenModifiers = new Set<string>();
+  for (const modifier of modifiers) {
+    if (!allowedModifiers.has(modifier)) throw new TypeError(`Chrome trigger has unknown modifier ${modifier}`);
+    if (seenModifiers.has(modifier)) throw new TypeError(`Chrome trigger has duplicate modifier ${modifier}`);
+    seenModifiers.add(modifier);
+  }
+
+  return normalizeKeyboardEvent({
+    key,
+    ctrlKey: seenModifiers.has('Ctrl'),
+    altKey: seenModifiers.has('Alt'),
+    shiftKey: seenModifiers.has('Shift'),
+    metaKey: seenModifiers.has('Meta'),
+  });
 }
 
 function keysEqual(left: NormalizedKey, right: NormalizedKey): boolean {
@@ -53,27 +79,30 @@ function keysEqual(left: NormalizedKey, right: NormalizedKey): boolean {
     && left.meta === right.meta;
 }
 
-function actionResult(context: VimContext, action: VimAction): VimResult {
+function actionResult(context: VimContext, action: VimAction): VimConsumedResult {
   return { disposition: 'action', context, pending: '', actions: [action] };
 }
 
-function result(context: VimContext, pending = ''): VimResult {
+function result(context: VimContext, pending = ''): VimConsumedResult {
   return { disposition: pending ? 'pending' : 'unsupported', context, pending, actions: [] };
 }
 
-const focusDirections: Readonly<Record<string, 'left' | 'down' | 'up' | 'right'>> = {
-  h: 'left',
-  j: 'down',
-  k: 'up',
-  l: 'right',
-};
+const focusDirections = new Map<string, 'left' | 'down' | 'up' | 'right'>([
+  ['h', 'left'], ['j', 'down'], ['k', 'up'], ['l', 'right'],
+]);
 
-const paneResize: Readonly<Record<string, 'grow' | 'shrink' | 'narrow' | 'widen'>> = {
-  '+': 'grow',
-  '-': 'shrink',
-  '<': 'narrow',
-  '>': 'widen',
-};
+const paneResize = new Map<string, 'grow' | 'shrink' | 'narrow' | 'widen'>([
+  ['+', 'grow'], ['-', 'shrink'], ['<', 'narrow'], ['>', 'widen'],
+]);
+
+function hasExactModifiers(input: NormalizedKey, expected: Pick<NormalizedKey, 'ctrl' | 'alt' | 'shift' | 'meta'>): boolean {
+  return input.ctrl === expected.ctrl && input.alt === expected.alt
+    && input.shift === expected.shift && input.meta === expected.meta;
+}
+
+const plain = { ctrl: false, alt: false, shift: false, meta: false } as const;
+const shiftOnly = { ctrl: false, alt: false, shift: true, meta: false } as const;
+const ctrlOnly = { ctrl: true, alt: false, shift: false, meta: false } as const;
 
 /**
  * Pure reference state machine for opt-in application chrome navigation.
@@ -96,7 +125,7 @@ export function createChromeMachine(options: ChromeMachineOptions): ChromeMachin
     pendingStartedAt = undefined;
   }
 
-  function snapshot(): VimResult {
+  function snapshot(): VimConsumedResult {
     return {
       disposition: pending ? 'pending' : 'unsupported',
       context,
@@ -105,26 +134,26 @@ export function createChromeMachine(options: ChromeMachineOptions): ChromeMachin
     };
   }
 
-  function setPending(nextPending: string): VimResult {
+  function setPending(nextPending: string): VimConsumedResult {
     pending = nextPending;
     pendingStartedAt = now();
     return { disposition: 'pending', context, pending, actions: [] };
   }
 
-  function unsupported(): VimResult {
+  function unsupported(): VimConsumedResult {
     clearPending();
     return result(context);
   }
 
-  function handleChromeNormal(input: NormalizedKey): VimResult {
-    if (input.key === 'Escape') {
+  function handleChromeNormal(input: NormalizedKey): VimConsumedResult {
+    if (input.key === 'Escape' && hasExactModifiers(input, plain)) {
       clearPending();
       context = 'passthrough';
       return actionResult(context, { type: 'chrome.exit' });
     }
 
     if (pending === 'g') {
-      if (input.key === 'g' && !input.ctrl && !input.alt && !input.meta) {
+      if (input.key === 'g' && hasExactModifiers(input, plain)) {
         clearPending();
         return actionResult(context, { type: 'focus.first' });
       }
@@ -132,64 +161,67 @@ export function createChromeMachine(options: ChromeMachineOptions): ChromeMachin
     }
 
     if (pending === 'Ctrl-w') {
-      if (!input.ctrl && !input.alt && !input.meta && input.key in focusDirections) {
+      const direction = focusDirections.get(input.key);
+      if (hasExactModifiers(input, plain) && direction) {
         clearPending();
-        return actionResult(context, { type: 'pane.focus', direction: focusDirections[input.key]! });
+        return actionResult(context, { type: 'pane.focus', direction });
       }
-      if (!input.ctrl && !input.alt && !input.meta && input.key === 'w') {
+      if (hasExactModifiers(input, plain) && input.key === 'w') {
         clearPending();
         return actionResult(context, { type: 'pane.cycle' });
       }
-      if (!input.ctrl && !input.alt && !input.meta && input.key in paneResize) {
+      const resize = paneResize.get(input.key);
+      if ((hasExactModifiers(input, plain) || hasExactModifiers(input, shiftOnly)) && resize) {
         clearPending();
-        return actionResult(context, { type: 'pane.resize', direction: paneResize[input.key]! });
+        return actionResult(context, { type: 'pane.resize', direction: resize });
       }
-      if (!input.ctrl && !input.alt && !input.meta && input.key === '=') {
+      if (hasExactModifiers(input, plain) && input.key === '=') {
         clearPending();
         return actionResult(context, { type: 'pane.equalize' });
       }
-      if (!input.ctrl && !input.alt && !input.meta && input.key === 's') {
+      if (hasExactModifiers(input, plain) && input.key === 's') {
         clearPending();
         return actionResult(context, { type: 'pane.split-horizontal' });
       }
-      if (!input.ctrl && !input.alt && !input.meta && input.key === 'v') {
+      if (hasExactModifiers(input, plain) && input.key === 'v') {
         clearPending();
         return actionResult(context, { type: 'pane.split-vertical' });
       }
       return unsupported();
     }
 
-    if (input.ctrl && !input.alt && !input.meta && input.key === 'w') return setPending('Ctrl-w');
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'g' && input.shift) {
+    if (hasExactModifiers(input, ctrlOnly) && input.key === 'w') return setPending('Ctrl-w');
+    if (hasExactModifiers(input, shiftOnly) && input.key === 'g') {
       return actionResult(context, { type: 'focus.last' });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'g') return setPending('g');
-    if (!input.ctrl && !input.alt && !input.meta && input.key in focusDirections) {
-      return actionResult(context, { type: 'focus.move', direction: focusDirections[input.key]! });
+    if (hasExactModifiers(input, plain) && input.key === 'g') return setPending('g');
+    const direction = focusDirections.get(input.key);
+    if (hasExactModifiers(input, plain) && direction) {
+      return actionResult(context, { type: 'focus.move', direction });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'Enter') {
+    if (hasExactModifiers(input, plain) && input.key === 'Enter') {
       return actionResult(context, { type: 'focus.activate' });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === '/') {
+    if (hasExactModifiers(input, plain) && input.key === '/') {
       context = 'chrome-search';
       return actionResult(context, { type: 'search.open' });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'x') return actionResult(context, { type: 'target.close' });
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'r') return actionResult(context, { type: 'target.refresh' });
-    if (!input.ctrl && !input.alt && !input.meta && input.key === '?') return actionResult(context, { type: 'help.open' });
+    if (hasExactModifiers(input, plain) && input.key === 'x') return actionResult(context, { type: 'target.close' });
+    if (hasExactModifiers(input, plain) && input.key === 'r') return actionResult(context, { type: 'target.refresh' });
+    if (hasExactModifiers(input, shiftOnly) && input.key === '?') return actionResult(context, { type: 'help.open' });
     return unsupported();
   }
 
-  function handleChromeSearch(input: NormalizedKey): VimResult {
-    if (input.key === 'Escape') {
+  function handleChromeSearch(input: NormalizedKey): VimConsumedResult {
+    if (input.key === 'Escape' && hasExactModifiers(input, plain)) {
       clearPending();
       context = 'passthrough';
       return actionResult(context, { type: 'chrome.exit' });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'n' && !input.shift) {
+    if (hasExactModifiers(input, plain) && input.key === 'n') {
       return actionResult(context, { type: 'search.next' });
     }
-    if (!input.ctrl && !input.alt && !input.meta && input.key === 'n' && input.shift) {
+    if (hasExactModifiers(input, shiftOnly) && input.key === 'n') {
       return actionResult(context, { type: 'search.previous' });
     }
     return unsupported();
