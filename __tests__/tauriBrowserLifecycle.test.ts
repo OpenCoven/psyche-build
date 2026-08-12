@@ -178,6 +178,286 @@ describe('Tauri native browser lifecycle', () => {
       'browser_destroy',
       'browser_destroy_many',
       'browser_reload',
+    ]    );
+  });
+
+  it('destroys a browser view before removing its tab state', async () => {
+    const calls: string[] = [];
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {
+        '/workspace': {
+          activeTabId: 'tab-a',
+          tabs: [
+            { id: 'tab-a', created: true },
+            { id: 'tab-b', created: true },
+          ],
+        },
+      },
+    };
+    const closeBrowserTab = compileFunction<
+      (project: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      activeProject: () => project,
+      ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
+      invoke: async (command: string, args: { label: string }) => {
+        calls.push(`${command}:${args.label}:${project.browsersByWorktree['/workspace'].tabs.length}`);
+      },
+      browserLabelForTab: (value: typeof project, tab: { id: string }) => `${value.id}:${tab.id}`,
+      setStatus: () => {},
+      renderBrowserTabs: () => calls.push('render'),
+      syncProjectBrowser: () => calls.push('sync'),
+      saveWorkspaceSoon: () => calls.push('save'),
+    });
+
+    await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(true);
+    expect(calls).toEqual([
+      'browser_destroy:project-a:tab-a:2',
+      'render',
+      'sync',
+      'save',
     ]);
+    expect(project.browsersByWorktree['/workspace']).toMatchObject({
+      activeTabId: 'tab-b',
+      tabs: [{ id: 'tab-b' }],
+    });
+  });
+
+  it('retains tab state and reports native browser destruction failures', async () => {
+    const statuses: Array<[string, string]> = [];
+    const project = {
+      id: 'project-a',
+      browsersByWorktree: {
+        '/workspace': {
+          activeTabId: 'tab-a',
+          tabs: [{ id: 'tab-a', created: true }],
+        },
+      },
+    };
+    const closeBrowserTab = compileFunction<
+      (project: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserTab'), {
+      activeProject: () => project,
+      ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
+      invoke: async () => { throw new Error('native unavailable'); },
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: (text: string, level: string) => statuses.push([text, level]),
+      renderBrowserTabs: () => { throw new Error('must not render'); },
+      syncProjectBrowser: () => { throw new Error('must not sync'); },
+      saveWorkspaceSoon: () => { throw new Error('must not save'); },
+    });
+
+    await expect(closeBrowserTab(project, 'tab-a')).resolves.toBe(false);
+    expect(project.browsersByWorktree['/workspace']).toMatchObject({
+      activeTabId: 'tab-a',
+      tabs: [{ id: 'tab-a', created: true }],
+    });
+    expect(statuses).toEqual([[
+      'browser tab close failed: Error: native unavailable',
+      'error',
+    ]]);
+  });
+
+  it('restores saved dormant URLs without changing their browser history', async () => {
+    const navigations: Array<[string, Record<string, unknown>]> = [];
+    const tab = {
+      id: 'tab-a',
+      url: 'https://example.com',
+      created: false,
+      history: ['https://example.com', 'https://example.org'],
+      historyIndex: 1,
+    };
+    const restoreDormantBrowserTab = compileFunction<
+      (project: unknown, tab: typeof tab) => Promise<boolean>
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      navigateBrowser: async (url: string, options: Record<string, unknown>) => {
+        navigations.push([url, options]);
+        tab.created = true;
+      },
+    });
+
+    await expect(restoreDormantBrowserTab({}, tab)).resolves.toBe(true);
+    expect(navigations).toEqual([[
+      'https://example.com',
+      { tabId: 'tab-a', preserveHistory: true },
+    ]]);
+    expect(tab.history).toEqual(['https://example.com', 'https://example.org']);
+    expect(tab.historyIndex).toBe(1);
+  });
+
+  it('does not restore missing, blank, or already-created browser tabs', async () => {
+    const restoreDormantBrowserTab = compileFunction<
+      (project: unknown, tab: { created?: boolean; url?: string; id?: string } | null) => Promise<boolean>
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
+      navigateBrowser: async () => { throw new Error('must not navigate'); },
+    });
+
+    await expect(restoreDormantBrowserTab({}, null)).resolves.toBe(false);
+    await expect(restoreDormantBrowserTab({}, { id: 'created', url: 'https://example.com', created: true })).resolves.toBe(false);
+    await expect(restoreDormantBrowserTab({}, { id: 'blank', url: 'about:blank', created: false })).resolves.toBe(false);
+    await expect(restoreDormantBrowserTab({}, { id: 'missing-url', created: false })).resolves.toBe(false);
+  });
+
+  it('activates valid tabs and lazily restores dormant ones', async () => {
+    const calls: string[] = [];
+    const project = {
+      browsersByWorktree: {
+        '/workspace': {
+          activeTabId: 'old',
+          tabs: [{ id: 'old', created: true }, { id: 'dormant', created: false }],
+        },
+      },
+    };
+    const activateBrowserTab = compileFunction<
+      (project: typeof project, tabId: string) => Promise<boolean>
+    >(functionSource(mainJs, 'activateBrowserTab'), {
+      activeProject: () => project,
+      ensureBrowserModel: (value: typeof project) => value.browsersByWorktree['/workspace'],
+      markActiveSurface: () => calls.push('surface'),
+      renderBrowserTabs: () => calls.push('render'),
+      syncProjectBrowser: () => calls.push('sync'),
+      saveWorkspaceSoon: () => calls.push('save'),
+      restoreDormantBrowserTab: async (_: typeof project, tab: { id: string }) => {
+        calls.push(`restore:${tab.id}`);
+      },
+    });
+
+    await expect(activateBrowserTab(project, 'dormant')).resolves.toBe(true);
+    await expect(activateBrowserTab(project, 'missing')).resolves.toBe(false);
+    expect(project.browsersByWorktree['/workspace'].activeTabId).toBe('dormant');
+    expect(calls).toEqual(['surface', 'render', 'sync', 'save', 'restore:dormant']);
+  });
+
+  it('restores an existing active dormant tab when reopening a browser pane', async () => {
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const activeTab = { id: 'tab-a', created: false, url: 'https://example.com' };
+    const browser = { tabs: [activeTab], activeTabId: activeTab.id };
+    const openBlankBrowserTab = compileFunction<
+      (options?: { requireNew?: boolean }) => Promise<typeof activeTab | null>
+    >(functionSource(mainJs, 'openBlankBrowserTab'), {
+      activeProject: () => project,
+      activeWorkspaceRoot: () => '/workspace',
+      findBrowserPane: () => null,
+      createBrowserPane: async () => ({ id: 'web-pane' }),
+      markActiveSurface: () => calls.push('surface'),
+      ensureBrowserModel: () => browser,
+      createBrowserTab: () => { throw new Error('must not create'); },
+      renderBrowserTabs: () => calls.push('render'),
+      syncProjectBrowser: () => calls.push('sync'),
+      restoreDormantBrowserTab: async (_: typeof project, tab: typeof activeTab) => {
+        calls.push(`restore:${tab.id}`);
+        tab.created = true;
+      },
+      currentBrowserTab: () => activeTab,
+      urlInput: { focus: () => calls.push('focus') },
+    });
+
+    await expect(openBlankBrowserTab()).resolves.toBe(activeTab);
+    expect(calls).toEqual(['surface', 'render', 'sync', 'restore:tab-a', 'focus']);
+  });
+
+  it('destroys pane views before staging and preserves tabs as dormant', async () => {
+    const calls: string[] = [];
+    const thread = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
+    const project = { id: 'project-a' };
+    const tabs = [
+      { id: 'tab-a', created: true, loading: true },
+      { id: 'tab-b', created: true, loading: false },
+    ];
+    const closeBrowserPane = compileFunction<
+      (thread: typeof thread) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      findProject: () => project,
+      ensureBrowserModel: () => ({ tabs, activeTabId: 'tab-a' }),
+      invoke: async (command: string, args: { labels: string[] }) => {
+        calls.push(`${command}:${args.labels.join(',')}`);
+      },
+      browserLabelForTab: (_: typeof project, tab: { id: string }) => `${project.id}:${tab.id}`,
+      setStatus: () => {},
+      saveWorkspaceSoon: () => calls.push('save'),
+      stageBrowserSurface: () => calls.push('stage'),
+      closeThread: () => { calls.push('close'); return true; },
+      state: { activeThreadId: 'web-pane' },
+      markActiveSurface: (surface: string) => calls.push(`surface:${surface}`),
+    });
+
+    await expect(closeBrowserPane(thread)).resolves.toBe(true);
+    expect(calls).toEqual([
+      'browser_destroy_many:project-a:tab-a,project-a:tab-b',
+      'save',
+      'stage',
+      'close',
+      'surface:terminal',
+    ]);
+    expect(tabs).toEqual([
+      { id: 'tab-a', created: false, loading: false },
+      { id: 'tab-b', created: false, loading: false },
+    ]);
+  });
+
+  it('skips native pane destruction for zero tabs and retains state on failure', async () => {
+    const thread = { id: 'web-pane', kind: 'web', projectId: 'project-a', worktreePath: '/workspace' };
+    const project = { id: 'project-a' };
+    const emptyCalls: string[] = [];
+    const emptyCloseBrowserPane = compileFunction<
+      (thread: typeof thread) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      findProject: () => project,
+      ensureBrowserModel: () => ({ tabs: [] }),
+      invoke: async () => emptyCalls.push('invoke'),
+      browserLabelForTab: () => 'unused',
+      setStatus: () => {},
+      saveWorkspaceSoon: () => emptyCalls.push('save'),
+      stageBrowserSurface: () => emptyCalls.push('stage'),
+      closeThread: () => { emptyCalls.push('close'); return true; },
+      state: { activeThreadId: null },
+      markActiveSurface: () => {},
+    });
+    await expect(emptyCloseBrowserPane(thread)).resolves.toBe(true);
+    expect(emptyCalls).toEqual(['save', 'stage', 'close']);
+
+    const tabs = [{ id: 'tab-a', created: true, loading: true }];
+    const statuses: Array<[string, string]> = [];
+    const failureCalls: string[] = [];
+    const failedCloseBrowserPane = compileFunction<
+      (thread: typeof thread) => Promise<boolean>
+    >(functionSource(mainJs, 'closeBrowserPane'), {
+      findProject: () => project,
+      ensureBrowserModel: () => ({ tabs }),
+      invoke: async () => { throw new Error('native unavailable'); },
+      browserLabelForTab: () => 'project-a:tab-a',
+      setStatus: (text: string, level: string) => statuses.push([text, level]),
+      saveWorkspaceSoon: () => failureCalls.push('save'),
+      stageBrowserSurface: () => failureCalls.push('stage'),
+      closeThread: () => { failureCalls.push('close'); return true; },
+      state: { activeThreadId: 'web-pane' },
+      markActiveSurface: () => failureCalls.push('surface'),
+    });
+    await expect(failedCloseBrowserPane(thread)).resolves.toBe(false);
+    expect(tabs).toEqual([{ id: 'tab-a', created: true, loading: true }]);
+    expect(failureCalls).toEqual([]);
+    expect(statuses).toEqual([[
+      'browser pane close failed: Error: native unavailable',
+      'error',
+    ]]);
+  });
+
+  it('routes every thread close entry point through native-aware teardown', async () => {
+    const requestThreadClose = compileFunction<
+      (thread: { id: string; kind: string } | null) => Promise<boolean>
+    >(functionSource(mainJs, 'requestThreadClose'), {
+      closeBrowserPane: async () => true,
+      closeThread: () => true,
+    });
+    await expect(requestThreadClose(null)).resolves.toBe(false);
+    await expect(requestThreadClose({ id: 'web', kind: 'web' })).resolves.toBe(true);
+    await expect(requestThreadClose({ id: 'shell', kind: 'shell' })).resolves.toBe(true);
+
+    expect(functionSource(mainJs, 'armSessionClose')).toContain('requestThreadClose(thread)');
+    expect(mainJs).toContain('requestThreadClose(findThread(state.activeThreadId))');
+    expect(mainJs).toMatch(
+      /btn\.addEventListener\("click", async function \(event\) \{ if \(event\.target.*await closeBrowserTab\(project, tab\.id\); else await activateBrowserTab\(project, tab\.id\); \}\)/,
+    );
   });
 });

@@ -3532,9 +3532,27 @@
     return nextLeaf ? nextLeaf.threadId : null;
   }
 
-  function closeBrowserPane(thread) {
+  async function closeBrowserPane(thread) {
     if (!thread || thread.kind !== "web") return false;
+    var project = findProject(thread.projectId);
+    if (!project) return false;
+    var browser = ensureBrowserModel(project, thread.worktreePath);
+    if (!browser) return false;
+    var labels = browser.tabs.map(function (tab) {
+      return browserLabelForTab(project, tab);
+    });
+    try {
+      if (labels.length) await invoke("browser_destroy_many", { labels: labels });
+    } catch (error) {
+      setStatus("browser pane close failed: " + String(error), "error");
+      return false;
+    }
     var wasActive = state.activeThreadId === thread.id;
+    browser.tabs.forEach(function (tab) {
+      tab.created = false;
+      tab.loading = false;
+    });
+    saveWorkspaceSoon();
     stageBrowserSurface();
     var closed = closeThread(thread.id);
     if (closed && wasActive) markActiveSurface("terminal");
@@ -4685,6 +4703,12 @@
    * itself when the timer runs out — the guard costs nothing if you meant it
    * and everything if you didn't.
    */
+  function requestThreadClose(thread) {
+    if (!thread) return Promise.resolve(false);
+    if (thread.kind === "web") return closeBrowserPane(thread);
+    return Promise.resolve(closeThread(thread.id));
+  }
+
   function armSessionClose(wrapper, close, thread) {
     disarmSessionClose();
     var left = SESSION_CLOSE_SECONDS;
@@ -4697,10 +4721,10 @@
       confirm.setAttribute("aria-label", "Confirm closing " + thread.name);
     }
     paint();
-    confirm.addEventListener("click", function (event) {
+    confirm.addEventListener("click", async function (event) {
       event.stopPropagation();
       disarmSessionClose();
-      closeThread(thread.id);
+      await requestThreadClose(thread);
     });
     close.hidden = true;
     wrapper.appendChild(confirm);
@@ -6199,7 +6223,7 @@
     {
       cmd: "/close",
       desc: "Close the active thread",
-      run: function () { if (state.activeThreadId) closeThread(state.activeThreadId); },
+      run: function () { requestThreadClose(findThread(state.activeThreadId)); },
     },
     {
       cmd: "/preview",
@@ -6897,21 +6921,38 @@
     if (activate || !browser.activeTabId) { browser.activeTabId = tab.id; markActiveSurface("browser"); }
     renderBrowserTabs(); saveWorkspaceSoon(); return tab;
   }
-  function closeBrowserTab(project, tabId) {
+  async function closeBrowserTab(project, tabId) {
     project = project || activeProject();
-    var browser = ensureBrowserModel(project); if (!browser) return;
-    var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return;
+    var browser = ensureBrowserModel(project); if (!browser) return false;
+    var idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
+    var tab = browser.tabs[idx];
+    try {
+      await invoke("browser_destroy", { label: browserLabelForTab(project, tab) });
+    } catch (error) {
+      setStatus("browser tab close failed: " + String(error), "error");
+      return false;
+    }
     browser.tabs.splice(idx, 1);
     if (browser.activeTabId === tabId) { var next = browser.tabs[Math.min(idx, browser.tabs.length - 1)] || null; browser.activeTabId = next ? next.id : null; }
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    return true;
   }
-  function activateBrowserTab(project, tabId) {
+  async function restoreDormantBrowserTab(project, tab) {
+    if (!tab || tab.created || !tab.url || tab.url === "about:blank") return false;
+    await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
+    return tab.created === true;
+  }
+  async function activateBrowserTab(project, tabId) {
     project = project || activeProject();
     var browser = ensureBrowserModel(project);
-    if (!browser || !browser.tabs.some(function (t) { return t.id === tabId; })) return;
+    if (!browser) return false;
+    var tab = browser.tabs.find(function (t) { return t.id === tabId; });
+    if (!tab) return false;
     markActiveSurface("browser");
     browser.activeTabId = tabId;
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    if (!tab.created) await restoreDormantBrowserTab(project, tab);
+    return true;
   }
   async function openBlankBrowserTab(options) {
     options = options || {};
@@ -6930,6 +6971,10 @@
       renderBrowserTabs();
     }
     syncProjectBrowser();
+    if (!options.requireNew && !tab) {
+      var activeTab = currentBrowserTab(project);
+      if (activeTab && !activeTab.created) await restoreDormantBrowserTab(project, activeTab);
+    }
     if (urlInput) urlInput.focus();
     return tab || (options.requireNew ? null : currentBrowserTab(project));
   }
@@ -6960,7 +7005,7 @@
       btn.className = "browser-tab" + (tab.id === browser.activeTabId ? " active" : "") + (tab.loading ? " loading" : "");
       btn.title = tab.url || "New tab";
       btn.innerHTML = '<span class="browser-tab-favicon" aria-hidden="true"></span><span class="browser-tab-title">' + escapeHtml(tab.title || "New tab") + '</span><span class="browser-tab-close">×</span>';
-      btn.addEventListener("click", function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) closeBrowserTab(project, tab.id); else activateBrowserTab(project, tab.id); });
+      btn.addEventListener("click", async function (event) { if (event.target && event.target.classList.contains("browser-tab-close")) await closeBrowserTab(project, tab.id); else await activateBrowserTab(project, tab.id); });
       browserTabStrip.appendChild(btn);
     });
     appendBrowserTabAddButton(); syncUrlInput();
