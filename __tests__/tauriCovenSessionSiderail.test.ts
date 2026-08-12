@@ -9,15 +9,15 @@ afterEach(() => {
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const styles = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
 const indexHtml = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'),
   'utf8',
 );
 /**
@@ -29,15 +29,15 @@ const indexHtml = readFileSync(
 const PsycheSessions = {
   ...(await import(pathToFileURL(join(
     repoRoot,
-    'native/macos/psyche-build-tauri/web/sessions/session-model.mjs',
+    'native/desktop/psyche-build-tauri/web/sessions/session-model.mjs',
   )).href)),
   ...(await import(pathToFileURL(join(
     repoRoot,
-    'native/macos/psyche-build-tauri/web/sessions/attention.mjs',
+    'native/desktop/psyche-build-tauri/web/sessions/attention.mjs',
   )).href)),
   ...(await import(pathToFileURL(join(
     repoRoot,
-    'native/macos/psyche-build-tauri/web/sessions/sidebar-model.mjs',
+    'native/desktop/psyche-build-tauri/web/sessions/sidebar-model.mjs',
   )).href)),
 };
 

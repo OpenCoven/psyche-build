@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 
 const sourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/native_workspace.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/native_workspace.rs',
 );
 
 function functionBody(source: string, name: string): string {

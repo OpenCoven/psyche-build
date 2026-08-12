@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const webRoot = join(process.cwd(), 'native/macos/psyche-build-tauri/web');
+const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri/web');
 const mainJs = readFileSync(join(webRoot, 'main.js'), 'utf8');
 const stylesCss = readFileSync(join(webRoot, 'styles.css'), 'utf8');
 

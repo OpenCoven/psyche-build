@@ -4,8 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
-const tauriRoot = join(repoRoot, 'native/macos/psyche-build-tauri');
-const panesRoot = join(repoRoot, 'native/macos/psyche-build-tauri/web/panes');
+const tauriRoot = join(repoRoot, 'native/desktop/psyche-build-tauri');
+const panesRoot = join(repoRoot, 'native/desktop/psyche-build-tauri/web/panes');
 const footerModule = await import(pathToFileURL(join(panesRoot, 'pane-footer.mjs')).href);
 const paneTreeModule = await import(pathToFileURL(join(panesRoot, 'pane-tree.mjs')).href);
 const tauriPackage = JSON.parse(readFileSync(join(tauriRoot, 'package.json'), 'utf8')) as {
@@ -320,11 +320,11 @@ describe('pane footer model', () => {
 });
 
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const stylesCss = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
 

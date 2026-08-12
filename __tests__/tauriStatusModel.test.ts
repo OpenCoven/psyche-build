@@ -17,7 +17,7 @@ import {
   samplingDelay,
   sparklinePath,
   summarizeWorkspace,
-} from '../native/macos/psyche-build-tauri/web/status/status-model.mjs';
+} from '../native/desktop/psyche-build-tauri/web/status/status-model.mjs';
 
 describe('tauri footer status model', () => {
   test('sanitizes preferences and restores the required connection metric', () => {
