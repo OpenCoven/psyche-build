@@ -403,7 +403,8 @@
     }, []);
   }
   async function refreshCovenSessions(options) {
-    if (document.visibilityState === "hidden" || state.projects.length === 0) {
+    var force = !!(options && options.force);
+    if ((!force && document.visibilityState === "hidden") || state.projects.length === 0) {
       return covenDiscovery;
     }
     var roots = covenDiscoveryRoots();
@@ -418,18 +419,21 @@
         (left.projectRoot > right.projectRoot ? 1 : 0);
     }));
     if (covenDiscoveryFlight) {
-      if (options && options.force) {
+      if (force) {
+        if (covenDiscoveryFlight.force && covenDiscoveryFlight.key === requestKey) {
+          return covenDiscoveryFlight.promise;
+        }
         try {
           await covenDiscoveryFlight.promise;
         } catch (_) {}
-        return refreshCovenSessions();
+        return refreshCovenSessions({ force: true });
       }
       if (covenDiscoveryFlight.key === requestKey) return covenDiscoveryFlight.promise;
     }
     var started = PsycheSessions.beginCovenRequest(covenDiscovery);
     covenDiscovery = started.state;
     renderSessionList();
-    var flight = { key: requestKey, promise: null };
+    var flight = { key: requestKey, promise: null, force: force };
     covenDiscoveryFlight = flight;
     flight.promise = (async function () {
       var requestStartedAt = performance.now();

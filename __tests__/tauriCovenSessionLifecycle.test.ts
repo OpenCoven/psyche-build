@@ -252,6 +252,29 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(empty.requests).toHaveLength(0);
   });
 
+  it('allows an explicit forced refresh while hidden', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }], 'hidden');
+
+    const forced = harness.refresh({ force: true });
+
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_sessions']);
+    harness.requests[0].resolve({ status: 'ready', sessions: [] });
+    await forced;
+  });
+
+  it('coalesces concurrent forced refreshes for the same owned roots', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }], 'hidden');
+
+    const first = harness.refresh({ force: true });
+    const second = harness.refresh({ force: true });
+    expect(harness.requests).toHaveLength(1);
+
+    harness.requests[0].resolve({ status: 'ready', sessions: [] });
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(1);
+    await Promise.all([first, second]);
+  });
+
   it('coalesces concurrent refreshes for the same owned root set', async () => {
     const harness = discoveryHarness([{
       root: '/alpha',
@@ -301,6 +324,34 @@ describe('macOS Coven session lifecycle boundary', () => {
       'coven_sessions',
     ]);
 
+    harness.requests[2].resolve({ status: 'ready', sessions: [] });
+    await expect(closing).resolves.toBe(true);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
+  });
+
+  it('preserves a forced post-kill refresh when visibility changes while awaiting discovery', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+    const preKill = harness.refresh();
+    const closing = harness.close({ id: 'coven-1' });
+    harness.requests[1].resolve(null);
+    await Promise.resolve();
+
+    harness.setVisibility('hidden');
+    harness.requests[0].resolve({
+      status: 'ready',
+      sessions: [{
+        id: 'coven-1', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build'],
+      }],
+    });
+    await preKill;
+    await Promise.resolve();
+
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
     harness.requests[2].resolve({ status: 'ready', sessions: [] });
     await expect(closing).resolves.toBe(true);
     expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
