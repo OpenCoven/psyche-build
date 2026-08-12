@@ -2010,7 +2010,17 @@
         return false;
       }
       thread.spawning = false;
-      if (msg.indexOf("already running") !== -1) {
+      if (msg.indexOf("cleanup in progress") !== -1) {
+        thread.ptyStarted = false;
+        if (thread.terminalController) thread.terminalController.stopPtyDelivery();
+        thread.ptyClient = null;
+        thread.status = "exited";
+        thread.finishedAt = Date.now();
+        thread.exitCode = null;
+        if (state.activeThreadId === thread.id) {
+          setStatus(thread.name + " is still cleaning up; retry shortly", "warn");
+        }
+      } else if (msg.indexOf("already running") !== -1) {
         thread.ptyStarted = true;
         thread.status = "running";
         thread.stopRequested = false;

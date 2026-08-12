@@ -48,7 +48,7 @@ use pane_metrics::PaneSessionMetrics;
 use pty_transport::{
     coordinate_exit_shutdown, CompletionOutcome, DrainOutcome, EnqueueError, ExitShutdownHooks,
     ExitShutdownOutcome, FinalOutputPumpSnapshot, OutputPump, RecentOutputSnapshots,
-    TransportSessionKey, EXIT_DRAIN_TIMEOUT,
+    TransportSessionKey, EXIT_DRAIN_TIMEOUT, EXIT_TERMINATION_CLEANUP_TIMEOUT,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "psyche-browser-";
@@ -121,6 +121,7 @@ impl<T> Default for PtyLifecycleRegistry<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PtyLifecycleError {
     AlreadyRunning { thread_id: String },
+    CleanupInProgress { thread_id: String },
     GenerationExhausted,
     StaleStart { thread_id: String, generation: u64 },
     NotFound { thread_id: String },
@@ -132,6 +133,9 @@ impl std::fmt::Display for PtyLifecycleError {
         match self {
             Self::AlreadyRunning { thread_id } => {
                 write!(formatter, "thread '{thread_id}' already running")
+            }
+            Self::CleanupInProgress { thread_id } => {
+                write!(formatter, "thread '{thread_id}' cleanup in progress")
             }
             Self::GenerationExhausted => formatter.write_str("PTY session generation exhausted"),
             Self::StaleStart {
@@ -173,9 +177,14 @@ enum BeginExitOutcome<T> {
 
 impl<T> PtyLifecycleRegistry<T> {
     fn reserve(&mut self, thread_id: &str) -> Result<PtySessionToken, PtyLifecycleError> {
-        if self.entries.contains_key(thread_id) {
-            return Err(PtyLifecycleError::AlreadyRunning {
-                thread_id: thread_id.to_string(),
+        if let Some(entry) = self.entries.get(thread_id) {
+            return Err(match entry.state {
+                PtyLifecycleState::Exiting => PtyLifecycleError::CleanupInProgress {
+                    thread_id: thread_id.to_string(),
+                },
+                _ => PtyLifecycleError::AlreadyRunning {
+                    thread_id: thread_id.to_string(),
+                },
             });
         }
         let generation = self.next_generation;
@@ -2240,6 +2249,24 @@ impl PtyExitShutdown {
             );
         }
     }
+
+    fn finish_terminated_threads_to_completion(&mut self) {
+        if !self.reader_completion_known {
+            match self.reader_done_rx.recv() {
+                Ok(result) => {
+                    self.reader_result = Some(result);
+                    self.reader_completion_known = true;
+                }
+                Err(_) => {
+                    self.reader_completion_known = true;
+                }
+            }
+        }
+        self.join_reader_after_completion();
+        if self.pump.cancel_and_join().is_err() {
+            log::warn!("PTY output worker panicked for '{}'", self.token.thread_id);
+        }
+    }
 }
 
 impl ExitShutdownHooks for PtyExitShutdown {
@@ -2293,10 +2320,6 @@ impl ExitShutdownHooks for PtyExitShutdown {
 
     fn remove_session(&mut self) {
         self.begin_matching_exit();
-    }
-
-    fn finish_terminated_cleanup(&mut self, timeout: std::time::Duration) {
-        self.finish_terminated_threads(timeout);
     }
 }
 
@@ -2467,6 +2490,15 @@ fn pty_start(app: AppHandle, options: StartOptions) -> Result<(), String> {
                     code,
                 },
             );
+        }
+        // Timeout cleanup has its own bounded budget, so it must happen only after
+        // observers receive the exit. Keep the generation reserved until the old
+        // reader and worker can no longer collide with a replacement session.
+        if outcome == ExitShutdownOutcome::TimedOut {
+            shutdown.finish_terminated_threads(EXIT_TERMINATION_CLEANUP_TIMEOUT);
+            shutdown.finish_terminated_threads_to_completion();
+        }
+        if shutdown.exit_event_allowed {
             PTY_LIFECYCLES.lock().finish_exit(&exit_token);
         }
     });
@@ -4625,6 +4657,49 @@ mod pty_runtime_tests {
             InstallSessionOutcome::Running
         );
         assert!(registry.is_live("same-id"));
+    }
+
+    #[test]
+    fn timed_out_exit_blocks_same_id_restart_until_old_emitter_cleanup_finishes() {
+        let registry = Arc::new(Mutex::new(PtyLifecycleRegistry::default()));
+        let old = {
+            let mut registry = registry.lock();
+            let old = registry.reserve("timed-out-pane").unwrap();
+            assert_eq!(
+                registry.install(&old, "old-output-pump").unwrap(),
+                InstallSessionOutcome::Running
+            );
+            assert_eq!(
+                registry.reserve("timed-out-pane").unwrap_err().to_string(),
+                "thread 'timed-out-pane' already running"
+            );
+            assert!(matches!(
+                registry.begin_exit(&old),
+                BeginExitOutcome::Emit {
+                    session: Some("old-output-pump")
+                }
+            ));
+            old
+        };
+        let (old_emit_done_tx, old_emit_done_rx) = mpsc::channel();
+        let cleanup_registry = Arc::clone(&registry);
+        let cleanup_token = old.clone();
+        let cleanup = std::thread::spawn(move || {
+            old_emit_done_rx.recv().unwrap();
+            cleanup_registry.lock().finish_exit(&cleanup_token)
+        });
+        assert_eq!(
+            registry
+                .lock()
+                .reserve("timed-out-pane")
+                .unwrap_err()
+                .to_string(),
+            "thread 'timed-out-pane' cleanup in progress"
+        );
+        old_emit_done_tx.send(()).unwrap();
+        assert!(cleanup.join().unwrap());
+        let replacement = registry.lock().reserve("timed-out-pane").unwrap();
+        assert_ne!(replacement.generation, old.generation);
     }
 
     #[cfg(not(windows))]

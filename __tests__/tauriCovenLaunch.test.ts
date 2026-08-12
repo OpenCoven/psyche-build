@@ -1065,10 +1065,12 @@ describe('native Coven launch routing', () => {
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     const pendingDataBuffers = new Map<string, Uint8Array[]>();
-    const starts: Array<'fail' | 'run'> = ['fail', 'run', 'run'];
+    const starts: Array<'fail' | 'run' | 'cleanup'> = ['fail', 'run', 'cleanup', 'run'];
     const invoke = async (command: string) => {
       if (command !== 'pty_start') return undefined;
-      if (starts.shift() === 'fail') throw new Error('coven unavailable');
+      const outcome = starts.shift();
+      if (outcome === 'fail') throw new Error('coven unavailable');
+      if (outcome === 'cleanup') throw new Error("thread 'thread-1' cleanup in progress");
       return undefined;
     };
     const dependencies = {
@@ -1117,6 +1119,9 @@ describe('native Coven launch routing', () => {
     expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
+    await expect(retryThread(thread.id)).resolves.toBe(false);
+    expect(thread.status).toBe('exited');
+    expect(thread.ptyStarted).toBe(false);
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.status).toBe('running');
     expect(state.threads).toEqual([thread]);
