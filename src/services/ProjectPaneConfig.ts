@@ -909,19 +909,24 @@ function hasPaneRecordIdentity(
   expected: ProjectPaneConfigPaneIdentity,
 ): boolean {
   const identity = paneRecordIdentity(value);
-  return (
-    identity?.id === expected.id
-    && identity.paneId === expected.paneId
-    && (
-      !expected.tmuxServerIdentity
-      || Boolean(
-        identity.tmuxServerIdentity
-        && sameTmuxServerIdentity(
-          identity.tmuxServerIdentity,
-          expected.tmuxServerIdentity,
-        )
-      )
-    )
+  if (
+    !identity
+    || identity.id !== expected.id
+    || identity.paneId !== expected.paneId
+  ) {
+    return false;
+  }
+
+  if (!identity.tmuxServerIdentity || !expected.tmuxServerIdentity) {
+    return (
+      identity.tmuxServerIdentity === undefined
+      && expected.tmuxServerIdentity === undefined
+    );
+  }
+
+  return sameTmuxServerIdentity(
+    identity.tmuxServerIdentity,
+    expected.tmuxServerIdentity,
   );
 }
 

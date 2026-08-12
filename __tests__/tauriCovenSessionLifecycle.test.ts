@@ -130,6 +130,7 @@ function attachedThread(overrides: Record<string, any> = {}) {
     projectId: 'alpha',
     hidden: false,
     closeStarted: false,
+    status: 'running',
     worktreePath: '/alpha',
     launch: {
       launchKind: 'coven-attach',
@@ -707,7 +708,9 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(state.threads).toHaveLength(1);
   });
 
-  it('creates a new attachment when the canonical prior attachment has exited', async () => {
+  it.each(['exited', 'failed'])(
+    'creates a new attachment when the canonical prior attachment is %s',
+    async (status) => {
     const project = {
       id: 'alpha', root: '/alpha', selectedWorktreePath: '/alpha',
       worktrees: [{ path: '/alpha', is_main: true }],
@@ -715,9 +718,9 @@ describe('macOS Coven session lifecycle boundary', () => {
     const session = {
       id: 'remote', projectRoot: '/alpha', cwd: '/alpha', title: 'Durable session',
     };
-    const exited = attachedThread({ id: 'exited-attachment', status: 'exited' });
+    const stale = attachedThread({ id: 'stale-attachment', status });
     const state = {
-      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [exited],
+      env: { coven_path: '/bin/coven' }, activeProjectId: 'alpha', threads: [stale],
     };
     let creates = 0;
     let focuses = 0;
@@ -739,7 +742,8 @@ describe('macOS Coven session lifecycle boundary', () => {
 
     await expect(openCovenSession(project, session)).resolves.toEqual({ id: 'replacement' });
     expect({ creates, focuses }).toEqual({ creates: 1, focuses: 0 });
-  });
+    },
+  );
 
   it('selects the most-specific owned worktree for an overlapping session cwd', async () => {
     const project = {
@@ -788,10 +792,9 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(covenRowAttached({ threads: [attachedThread({ closeStarted: true })] }, 'alpha', 'remote'))
       .toBe(false);
     expect(covenRowAttached({ threads: [attachedThread()] }, 'beta', 'remote')).toBe(false);
-    // An exited pane cannot be focused, so it must not read as attached. main
-    // added this guard to isReusableCovenAttachment; this branch replaced that
-    // render path, so the guard lives in covenRowAttached and is asserted here.
     expect(covenRowAttached({ threads: [attachedThread({ status: 'exited' })] }, 'alpha', 'remote'))
+      .toBe(false);
+    expect(covenRowAttached({ threads: [attachedThread({ status: 'failed' })] }, 'alpha', 'remote'))
       .toBe(false);
   });
 
@@ -918,6 +921,7 @@ describe('macOS Coven session lifecycle boundary', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: () => project.selectedWorktreePath,
       focusThread: async () => true,
@@ -960,6 +964,7 @@ describe('macOS Coven session lifecycle boundary', () => {
       showTerminalView: async () => true,
       findProject: () => project,
       restoreProjectLayout: () => undefined,
+      clearPassiveCovenPaneFocus: () => undefined,
       loadAgentSkills: () => undefined,
       activeWorkspaceRoot: () => project.selectedWorktreePath,
       focusThread: async () => true,
