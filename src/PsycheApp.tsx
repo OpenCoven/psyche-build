@@ -1041,6 +1041,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         skipAgentSelection: true,
         startPointBranch: createOptions?.startPointBranch,
         mergeTargetChain: createOptions?.mergeTargetChain,
+        focusedTmuxPaneId: focusedPaneId,
+        selectedPaneId: selectedPane?.id,
       })
       return pane ? 1 : 0
     }
@@ -1050,6 +1052,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       targetProjectRoot,
       startPointBranch: createOptions?.startPointBranch,
       mergeTargetChain: createOptions?.mergeTargetChain,
+      focusedTmuxPaneId: focusedPaneId,
+      selectedPaneId: selectedPane?.id,
     })
     return createdPanes.length
   }

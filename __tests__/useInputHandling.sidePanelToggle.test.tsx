@@ -29,11 +29,13 @@ function pane(overrides: Partial<PsychePane> = {}): PsychePane {
 function Harness({
   onToggleSidePanel,
   sidePanelCollapsed = false,
+  sidePanelWidth = 40,
   setStatusMessage = vi.fn(),
   covenSessionsState,
 }: {
   onToggleSidePanel: (...args: any[]) => any;
   sidePanelCollapsed?: boolean;
+  sidePanelWidth?: number;
   setStatusMessage?: (...args: any[]) => any;
   covenSessionsState?: CovenSessionsLoadState;
 }) {
@@ -98,9 +100,11 @@ function Harness({
     findCardInDirection: vi.fn(() => null),
     onToggleSidePanel,
     sidePanelCollapsed,
+    sidePanelWidth,
   } as Parameters<typeof useInputHandling>[0] & {
     onToggleSidePanel: () => void;
     sidePanelCollapsed: boolean;
+    sidePanelWidth: number;
   };
 
   useInputHandling(params as Parameters<typeof useInputHandling>[0]);
@@ -161,6 +165,36 @@ describe('useInputHandling side panel toggle', () => {
     unmount();
   });
 
+  it('toggles the expanded side panel from the collapse chevron only', async () => {
+    const onToggleSidePanel = vi.fn();
+    const { stdin, unmount } = render(
+      <Harness onToggleSidePanel={onToggleSidePanel} sidePanelWidth={40} />
+    );
+
+    await sleep(20);
+    stdin.write('\x1b[<0;40;1M');
+    await sleep(40);
+
+    expect(onToggleSidePanel).toHaveBeenCalledTimes(1);
+
+    unmount();
+  });
+
+  it('does not toggle the expanded panel when clicking a different top-row cell', async () => {
+    const onToggleSidePanel = vi.fn();
+    const { stdin, unmount } = render(
+      <Harness onToggleSidePanel={onToggleSidePanel} sidePanelWidth={40} />
+    );
+
+    await sleep(20);
+    stdin.write('\x1b[<0;1;1M');
+    await sleep(40);
+
+    expect(onToggleSidePanel).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
   it('toggles open and closed freely with repeated shortcut presses', async () => {
     const onStateChange = vi.fn();
     const { stdin, unmount } = render(
@@ -182,7 +216,7 @@ describe('useInputHandling side panel toggle', () => {
     unmount();
   });
 
-  it('toggles open and closed freely with repeated compact rail clicks', async () => {
+  it('does not keep toggling from compact rail coordinates once expanded', async () => {
     const onStateChange = vi.fn();
     const { stdin, unmount } = render(
       <StatefulHarness initialCollapsed onStateChange={onStateChange} />
@@ -196,9 +230,8 @@ describe('useInputHandling side panel toggle', () => {
     stdin.write('\x1b[<0;1;5M');
     await sleep(40);
 
+    expect(onStateChange).toHaveBeenCalledTimes(1);
     expect(onStateChange).toHaveBeenNthCalledWith(1, false);
-    expect(onStateChange).toHaveBeenNthCalledWith(2, true);
-    expect(onStateChange).toHaveBeenNthCalledWith(3, false);
 
     unmount();
   });

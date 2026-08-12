@@ -17,7 +17,11 @@ import {
   splitPane,
 } from './tmux.js';
 import { capturePaneContent } from './paneCapture.js';
-import { SIDEBAR_WIDTH } from './layoutManager.js';
+import {
+  capturePaneInsertion,
+  insertPaneIntoStoredLayout,
+  SIDEBAR_WIDTH,
+} from './layoutManager.js';
 import { TMUX_LAYOUT_APPLY_DELAY, TMUX_SPLIT_DELAY } from '../constants/timing.js';
 import {
   buildPromptReadAndDeleteSnippet,
@@ -47,6 +51,7 @@ import {
   compareAndRemoveProjectPaneConfigPaneIdentities,
   ensureProjectPaneConfigPane,
   projectPaneConfigPath,
+  readProjectPaneConfig,
 } from '../services/ProjectPaneConfig.js';
 import {
   paneRecoveryInstructions,
@@ -121,6 +126,16 @@ async function createConflictResolutionPaneWithReservation(
 
   // Get current pane info
   const originalPaneId = tmuxService.getCurrentPaneIdSync();
+  const panesFile = projectPaneConfigPath(options.sessionProjectRoot);
+  const config = await readProjectPaneConfig(options.sessionProjectRoot);
+  const controlPaneId = typeof config.controlPaneId === 'string'
+    ? config.controlPaneId
+    : originalPaneId;
+  const insertion = await capturePaneInsertion({
+    panesFile,
+    panes: existingPanes,
+    focusedTmuxPaneId: originalPaneId,
+  });
 
   // Enable pane borders to show titles
   try {
@@ -135,7 +150,9 @@ async function createConflictResolutionPaneWithReservation(
     tmuxService,
     'conflict pane allocation',
   );
-  const paneInfo = splitPane();
+  const paneInfo = splitPane(
+    insertion ? { targetPane: insertion.targetTmuxPaneId, cwd: targetRepoPath } : {}
+  );
   const prompt = `There are conflicts merging ${targetBranch} into ${sourceBranch}. Both are valid changes, so please keep both feature sets and merge them intelligently. Check git status to see the conflicting files, then resolve each conflict to preserve both sets of changes. Once all conflicts are resolved, commit the merge.`;
   const tmuxServerIdentity = allocationGeneration;
   const newPane: PsychePane = {
@@ -162,8 +179,15 @@ async function createConflictResolutionPaneWithReservation(
       throw new Error(`newly split conflict pane ${paneInfo} is not present`);
     }
     await tmuxService.setPaneTitle(paneInfo, slug);
-    const controlPaneId = tmuxService.getCurrentPaneIdSync();
     await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
+    await insertPaneIntoStoredLayout({
+      panesFile,
+      panes: existingPanes,
+      pane: newPane,
+      controlPaneId,
+      insertion,
+      sidebarWidth: SIDEBAR_WIDTH,
+    });
     await options.persistConflictPane(newPane);
   } catch (error) {
     const teardown = await tearDownGenerationBoundPane(
