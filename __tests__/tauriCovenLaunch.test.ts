@@ -1407,7 +1407,12 @@ describe('native Coven launch routing', () => {
     expect(state.threads).toEqual([thread]);
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.status).toBe('running');
+    const markPtyExited = vi.fn();
+    (thread as typeof thread & {
+      terminalController: { markPtyExited: () => void };
+    }).terminalController.markPtyExited = markPtyExited;
     expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
+    expect(markPtyExited).toHaveBeenCalledTimes(1);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
     await expect(retryThread(thread.id)).resolves.toBe(false);

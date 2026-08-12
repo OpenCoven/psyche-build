@@ -1438,6 +1438,10 @@
     var thread = findThread(payload.thread_id);
     if (!thread || thread.closing || thread.closeStarted) return false;
     var stoppedByUser = thread.stopRequested;
+    if (thread.terminalController &&
+        typeof thread.terminalController.markPtyExited === "function") {
+      thread.terminalController.markPtyExited();
+    }
     thread.ptyStarted = false;
     if (thread.startInFlight) {
       thread.exitDuringStart = true;

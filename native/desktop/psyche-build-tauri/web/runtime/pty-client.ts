@@ -23,6 +23,7 @@ export interface PtyClientController {
   adoptRunningPty(startAttemptId?: number): Promise<boolean>;
   setVisible(visible: boolean): Promise<boolean>;
   markPtyStarted(startAttemptId?: number): Promise<boolean>;
+  markPtyExited(): void;
   stopPtyDelivery(): void;
   dispose(): void;
 }
@@ -33,8 +34,11 @@ type QueuedBatch = {
   generation: number;
 };
 
-type ActiveBatch = QueuedBatch & {
-  phase: 'writing' | 'ack';
+type Acknowledgement = {
+  lane: DeliveryLane;
+  sequence: number;
+  generation: number;
+  inFlight: boolean;
 };
 
 type QuarantinedBatch = {
@@ -52,7 +56,7 @@ type WriteGate = object;
 type DeliveryLane = {
   generation: number;
   nextSequence: number;
-  activeBatch: ActiveBatch | null;
+  writingBatch: QueuedBatch | null;
   queuedBatches: QueuedBatch[];
   ackRetryTimer: ReturnType<typeof setTimeout> | null;
   ackRetryAttempt: number;
@@ -63,10 +67,12 @@ type DeliveryLane = {
 type PtyClientState = PtyClientController & {
   disposed: boolean;
   deliveryStopped: boolean;
+  ptyExited: boolean;
   invoke(command: string, args: Record<string, unknown>): Promise<unknown>;
   write(bytes: Uint8Array, callback: () => void): void;
   delivery: DeliveryLane;
   checkpointDelivery: DeliveryLane | null;
+  acknowledgement: Acknowledgement | null;
   writeGate: WriteGate | null;
   startQuarantine: StartQuarantine | null;
   visible: boolean;
@@ -81,6 +87,7 @@ type PtyClientState = PtyClientController & {
   pendingStartAttempt: number | null;
   pendingStartPtyStarted: boolean | null;
   pendingStartLastVisibilitySent: boolean | null;
+  pendingStartPtyExited: boolean | null;
 };
 
 const MAX_ACCEPTED_IN_FLIGHT = 2;
@@ -112,7 +119,7 @@ function createDeliveryLane(generation: number): DeliveryLane {
   return {
     generation,
     nextSequence: 1,
-    activeBatch: null,
+    writingBatch: null,
     queuedBatches: [],
     ackRetryTimer: null,
     ackRetryAttempt: 0,
@@ -121,8 +128,8 @@ function createDeliveryLane(generation: number): DeliveryLane {
   };
 }
 
-function totalAcceptedInFlight(lane: DeliveryLane): number {
-  return (lane.activeBatch ? 1 : 0) + lane.queuedBatches.length;
+function retainedPayloadCount(lane: DeliveryLane): number {
+  return (lane.writingBatch ? 1 : 0) + lane.queuedBatches.length;
 }
 
 function clearStartQuarantine(state: PtyClientState): void {
@@ -161,12 +168,15 @@ function hasWritingBatch(state: PtyClientState): boolean {
   return state.writeGate != null;
 }
 
-function closeDeliveryLane(lane: DeliveryLane): void {
+function closeDeliveryLane(state: PtyClientState, lane: DeliveryLane): void {
   lane.routable = false;
   lane.closed = true;
   clearAckRetry(lane);
   lane.queuedBatches = [];
-  lane.activeBatch = null;
+  lane.writingBatch = null;
+  if (state.acknowledgement?.lane === lane) {
+    state.acknowledgement = null;
+  }
 }
 
 function drainQueuedBatch(state: PtyClientState, lane: DeliveryLane): void {
@@ -174,7 +184,8 @@ function drainQueuedBatch(state: PtyClientState, lane: DeliveryLane): void {
     state.disposed ||
     state.deliveryStopped ||
     lane.closed ||
-    lane.activeBatch ||
+    lane.writingBatch ||
+    state.acknowledgement ||
     lane.queuedBatches.length === 0 ||
     hasWritingBatch(state)
   ) {
@@ -186,20 +197,30 @@ function drainQueuedBatch(state: PtyClientState, lane: DeliveryLane): void {
 }
 
 function drainAnyQueuedBatch(state: PtyClientState): void {
-  if (state.disposed || state.deliveryStopped || hasWritingBatch(state)) return;
+  if (
+    state.disposed ||
+    state.deliveryStopped ||
+    state.acknowledgement ||
+    hasWritingBatch(state)
+  ) {
+    return;
+  }
   drainQueuedBatch(state, state.delivery);
   if (!hasWritingBatch(state) && state.checkpointDelivery) {
     drainQueuedBatch(state, state.checkpointDelivery);
   }
 }
 
-function scheduleActiveBatchRetry(state: PtyClientState, lane: DeliveryLane): void {
+function scheduleAcknowledgementRetry(state: PtyClientState, lane: DeliveryLane): void {
+  const acknowledgement = state.acknowledgement;
   if (
     state.disposed ||
     state.deliveryStopped ||
     lane.closed ||
     lane.ackRetryTimer ||
-    !lane.activeBatch ||
+    !acknowledgement ||
+    acknowledgement.lane !== lane ||
+    acknowledgement.inFlight ||
     (lane === state.checkpointDelivery && state.pendingStartAttempt != null)
   ) {
     return;
@@ -208,62 +229,68 @@ function scheduleActiveBatchRetry(state: PtyClientState, lane: DeliveryLane): vo
   lane.ackRetryAttempt += 1;
   lane.ackRetryTimer = setTimeout(() => {
     lane.ackRetryTimer = null;
-    acknowledgeActiveBatch(state, lane);
+    acknowledgeCurrentSequence(state, lane);
   }, delay);
 }
 
-function acknowledgeActiveBatch(state: PtyClientState, lane: DeliveryLane): void {
-  if (state.disposed || state.deliveryStopped || lane.closed || !lane.activeBatch) return;
-  if (lane.activeBatch.phase !== 'ack') return;
+function acknowledgeCurrentSequence(state: PtyClientState, lane: DeliveryLane): void {
+  const acknowledgement = state.acknowledgement;
+  if (
+    state.disposed ||
+    state.deliveryStopped ||
+    lane.closed ||
+    !acknowledgement ||
+    acknowledgement.lane !== lane ||
+    acknowledgement.inFlight
+  ) {
+    return;
+  }
 
-  const { sequence, generation } = lane.activeBatch;
+  const { sequence, generation } = acknowledgement;
   if (generation !== lane.generation) {
     clearAckRetry(lane);
-    lane.activeBatch = null;
+    state.acknowledgement = null;
     drainAnyQueuedBatch(state);
     return;
   }
 
+  acknowledgement.inFlight = true;
   void state
     .invoke('pty_ack', acknowledgementArgs(state.threadId, sequence))
     .then(() => {
-      if (!lane.activeBatch) return;
       if (
         state.disposed ||
         state.deliveryStopped ||
         lane.closed ||
-        lane.activeBatch.phase !== 'ack' ||
-        lane.activeBatch.sequence !== sequence ||
-        lane.activeBatch.generation !== generation
+        state.acknowledgement !== acknowledgement
       ) {
         return;
       }
+      acknowledgement.inFlight = false;
       clearAckRetry(lane);
-      lane.activeBatch = null;
+      state.acknowledgement = null;
       drainAnyQueuedBatch(state);
     })
     .catch(() => {
-      if (!lane.activeBatch) return;
       if (
         state.disposed ||
         state.deliveryStopped ||
         lane.closed ||
-        lane.activeBatch.phase !== 'ack' ||
-        lane.activeBatch.sequence !== sequence ||
-        lane.activeBatch.generation !== generation
+        state.acknowledgement !== acknowledgement
       ) {
         return;
       }
 
+      acknowledgement.inFlight = false;
       if (lane === state.checkpointDelivery && state.pendingStartAttempt != null) {
         return;
       }
 
-      scheduleActiveBatchRetry(state, lane);
+      scheduleAcknowledgementRetry(state, lane);
     });
 }
 
-function completeActiveBatch(
+function completeWritingBatch(
   state: PtyClientState,
   lane: DeliveryLane,
   sequence: number,
@@ -274,27 +301,32 @@ function completeActiveBatch(
   state.writeGate = null;
   if (state.disposed) return;
   if (
-    !lane.activeBatch ||
-    lane.activeBatch.sequence !== sequence ||
-    lane.activeBatch.generation !== generation
+    !lane.writingBatch ||
+    lane.writingBatch.sequence !== sequence ||
+    lane.writingBatch.generation !== generation
   ) {
     drainAnyQueuedBatch(state);
     return;
   }
 
+  lane.writingBatch = null;
   clearAckRetry(lane);
   if (state.deliveryStopped || lane.closed || generation !== lane.generation) {
-    lane.activeBatch = null;
     drainAnyQueuedBatch(state);
     return;
   }
 
-  lane.activeBatch.phase = 'ack';
+  state.acknowledgement = {
+    lane,
+    sequence,
+    generation,
+    inFlight: false,
+  };
   if (lane === state.checkpointDelivery && state.pendingStartAttempt != null) {
     drainAnyQueuedBatch(state);
     return;
   }
-  acknowledgeActiveBatch(state, lane);
+  acknowledgeCurrentSequence(state, lane);
 }
 
 function clearAllQueuedBatches(state: PtyClientState): void {
@@ -304,23 +336,20 @@ function clearAllQueuedBatches(state: PtyClientState): void {
 }
 
 function startWrite(state: PtyClientState, lane: DeliveryLane, batch: QueuedBatch): boolean {
-  if (state.writeGate) return false;
-  lane.activeBatch = {
-    ...batch,
-    phase: 'writing',
-  };
+  if (state.writeGate || state.acknowledgement) return false;
+  lane.writingBatch = batch;
   const writeGate: WriteGate = {};
   const { sequence, generation } = batch;
   state.writeGate = writeGate;
   try {
     state.write(batch.bytes, () => {
-      completeActiveBatch(state, lane, sequence, generation, writeGate);
+      completeWritingBatch(state, lane, sequence, generation, writeGate);
     });
     return true;
   } catch {
     if (state.writeGate === writeGate) state.writeGate = null;
     clearAckRetry(lane);
-    lane.activeBatch = null;
+    lane.writingBatch = null;
     state.deliveryStopped = true;
     clearAllQueuedBatches(state);
     return false;
@@ -338,7 +367,7 @@ function acceptBatchForLane(
     lane.closed ||
     !lane.routable ||
     batch.sequence !== lane.nextSequence ||
-    totalAcceptedInFlight(lane) >= MAX_ACCEPTED_IN_FLIGHT
+    retainedPayloadCount(lane) >= MAX_ACCEPTED_IN_FLIGHT
   ) {
     return false;
   }
@@ -351,7 +380,7 @@ function acceptBatchForLane(
   lane.nextSequence = reservedNextSequence;
 
   let accepted = false;
-  if (lane.activeBatch || hasWritingBatch(state)) {
+  if (lane.writingBatch || state.acknowledgement || hasWritingBatch(state)) {
     lane.queuedBatches.push(queued);
     accepted = true;
   } else {
@@ -372,9 +401,7 @@ function quarantinePendingStartBatch(
   const checkpoint = state.checkpointDelivery;
   if (
     state.pendingStartAttempt == null ||
-    !checkpoint ||
-    checkpoint.closed ||
-    !checkpoint.routable
+    !checkpoint
   ) {
     return null;
   }
@@ -396,12 +423,12 @@ function quarantinePendingStartBatch(
 
   if (batch.sequence !== quarantine.nextSequence) return false;
   if (quarantine.batches.length >= MAX_ACCEPTED_IN_FLIGHT) return false;
-  // Each possible generation shares one native two-batch retention budget
-  // across its active write/ack, bounded lane queue, and start quarantine.
+  // Each possible generation shares one native two-payload retention budget
+  // across its active write, bounded lane queue, and start quarantine.
   if (
-    totalAcceptedInFlight(state.delivery) + quarantine.batches.length >=
+    retainedPayloadCount(state.delivery) + quarantine.batches.length >=
       MAX_ACCEPTED_IN_FLIGHT ||
-    totalAcceptedInFlight(checkpoint) + quarantine.batches.length >=
+    retainedPayloadCount(checkpoint) + quarantine.batches.length >=
       MAX_ACCEPTED_IN_FLIGHT
   ) {
     return false;
@@ -480,15 +507,22 @@ function requestVisibilitySync(state: PtyClientState, force: boolean): Promise<b
   return promise;
 }
 
-function restorePreparedPtyStart(state: PtyClientState, startAttemptId?: number): boolean {
-  if (state.pendingStartAttempt == null) return false;
-  if (startAttemptId != null && startAttemptId !== state.pendingStartAttempt) return false;
+type RestoredPtyStart = {
+  quarantine: QuarantinedBatch[];
+  ptyExited: boolean;
+};
+
+function restorePreparedPtyStart(
+  state: PtyClientState,
+  startAttemptId?: number,
+): RestoredPtyStart | null {
+  if (state.pendingStartAttempt == null) return null;
+  if (startAttemptId != null && startAttemptId !== state.pendingStartAttempt) return null;
   const quarantine = takeStartQuarantine(state);
-  closeDeliveryLane(state.delivery);
+  const ptyExited = Boolean(state.pendingStartPtyExited);
+  closeDeliveryLane(state, state.delivery);
   if (state.checkpointDelivery) {
     state.delivery = state.checkpointDelivery;
-    state.delivery.closed = false;
-    state.delivery.routable = true;
   }
   state.checkpointDelivery = null;
 
@@ -497,16 +531,26 @@ function restorePreparedPtyStart(state: PtyClientState, startAttemptId?: number)
     Boolean(state.pendingStartPtyStarted),
     state.pendingStartLastVisibilitySent ?? null,
   );
+  state.ptyExited = ptyExited;
+  state.deliveryStopped = ptyExited;
   state.pendingStartAttempt = null;
   state.pendingStartPtyStarted = null;
   state.pendingStartLastVisibilitySent = null;
+  state.pendingStartPtyExited = null;
+  return { quarantine, ptyExited };
+}
+
+function resumeDelivery(
+  state: PtyClientState,
+  quarantine: QuarantinedBatch[],
+): void {
+  if (state.deliveryStopped || state.delivery.closed) return;
   feedQuarantinedBatches(state, state.delivery, quarantine);
-  if (state.delivery.activeBatch?.phase === 'ack') {
-    acknowledgeActiveBatch(state, state.delivery);
+  if (state.acknowledgement?.lane === state.delivery) {
+    acknowledgeCurrentSequence(state, state.delivery);
   } else {
     drainAnyQueuedBatch(state);
   }
-  return true;
 }
 
 function commitPreparedPtyStart(
@@ -518,13 +562,37 @@ function commitPreparedPtyStart(
 
   const quarantine = takeStartQuarantine(state);
   if (state.checkpointDelivery) {
-    closeDeliveryLane(state.checkpointDelivery);
+    closeDeliveryLane(state, state.checkpointDelivery);
     state.checkpointDelivery = null;
   }
   state.pendingStartAttempt = null;
   state.pendingStartPtyStarted = null;
   state.pendingStartLastVisibilitySent = null;
+  state.pendingStartPtyExited = null;
   return quarantine;
+}
+
+function markPtyExitedState(state: PtyClientState): void {
+  state.deliveryStopped = true;
+  state.ptyExited = true;
+  clearStartQuarantine(state);
+  const nextGeneration =
+    Math.max(
+      state.delivery.generation,
+      state.checkpointDelivery?.generation ?? state.delivery.generation,
+    ) + 1;
+  closeDeliveryLane(state, state.delivery);
+  if (state.checkpointDelivery) {
+    closeDeliveryLane(state, state.checkpointDelivery);
+    state.checkpointDelivery = null;
+  }
+  state.delivery = createDeliveryLane(nextGeneration);
+  closeDeliveryLane(state, state.delivery);
+  state.pendingStartAttempt = null;
+  state.pendingStartPtyStarted = null;
+  state.pendingStartLastVisibilitySent = null;
+  state.pendingStartPtyExited = null;
+  resetVisibilitySyncState(state, false, null);
 }
 
 function createClientState(options: PtyClientOptions): PtyClientState {
@@ -532,10 +600,12 @@ function createClientState(options: PtyClientOptions): PtyClientState {
     threadId: options.threadId,
     disposed: false,
     deliveryStopped: false,
+    ptyExited: false,
     invoke: options.invoke,
     write: options.write,
     delivery: createDeliveryLane(0),
     checkpointDelivery: null,
+    acknowledgement: null,
     writeGate: null,
     startQuarantine: null,
     visible: options.visible !== false,
@@ -550,16 +620,16 @@ function createClientState(options: PtyClientOptions): PtyClientState {
     pendingStartAttempt: null,
     pendingStartPtyStarted: null,
     pendingStartLastVisibilitySent: null,
+    pendingStartPtyExited: null,
     prepareForPtyStart() {
       clearStartQuarantine(state);
       state.nextStartAttempt += 1;
       state.pendingStartAttempt = state.nextStartAttempt;
       state.pendingStartPtyStarted = state.ptyStarted;
       state.pendingStartLastVisibilitySent = state.lastVisibilitySent;
-      if (state.checkpointDelivery) closeDeliveryLane(state.checkpointDelivery);
+      state.pendingStartPtyExited = state.ptyExited;
+      if (state.checkpointDelivery) closeDeliveryLane(state, state.checkpointDelivery);
       state.checkpointDelivery = state.delivery;
-      state.checkpointDelivery.closed = false;
-      state.checkpointDelivery.routable = true;
       clearAckRetry(state.checkpointDelivery);
       state.delivery = createDeliveryLane(state.checkpointDelivery.generation + 1);
       state.deliveryStopped = false;
@@ -567,13 +637,20 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       return state.pendingStartAttempt;
     },
     restoreAfterFailedPtyStart(startAttemptId) {
-      restorePreparedPtyStart(state, startAttemptId);
+      const restored = restorePreparedPtyStart(state, startAttemptId);
+      if (!restored || restored.ptyExited) return;
+      resumeDelivery(state, restored.quarantine);
     },
     async adoptRunningPty(startAttemptId) {
       if (state.disposed) return false;
-      if (!restorePreparedPtyStart(state, startAttemptId)) return false;
+      const restored = restorePreparedPtyStart(state, startAttemptId);
+      if (!restored) return false;
       state.deliveryStopped = false;
+      state.ptyExited = false;
+      state.delivery.closed = false;
+      state.delivery.routable = true;
       state.ptyStarted = true;
+      resumeDelivery(state, restored.quarantine);
       return requestVisibilitySync(state, true);
     },
     async setVisible(visible: boolean) {
@@ -586,27 +663,27 @@ function createClientState(options: PtyClientOptions): PtyClientState {
       const quarantine = commitPreparedPtyStart(state, startAttemptId);
       if (!quarantine) return false;
       state.deliveryStopped = false;
+      state.ptyExited = false;
       state.ptyStarted = true;
       feedQuarantinedBatches(state, state.delivery, quarantine);
+      drainAnyQueuedBatch(state);
       return requestVisibilitySync(state, true);
     },
+    markPtyExited() {
+      if (state.disposed) return;
+      markPtyExitedState(state);
+    },
     stopPtyDelivery() {
-      state.deliveryStopped = true;
-      clearStartQuarantine(state);
-      clearAckRetry(state.delivery);
-      state.delivery.queuedBatches = [];
-      if (state.checkpointDelivery) {
-        clearAckRetry(state.checkpointDelivery);
-        state.checkpointDelivery.queuedBatches = [];
-      }
+      if (state.disposed) return;
+      markPtyExitedState(state);
     },
     dispose() {
       state.disposed = true;
       state.deliveryStopped = true;
       clearStartQuarantine(state);
-      closeDeliveryLane(state.delivery);
+      closeDeliveryLane(state, state.delivery);
       if (state.checkpointDelivery) {
-        closeDeliveryLane(state.checkpointDelivery);
+        closeDeliveryLane(state, state.checkpointDelivery);
       }
       if (clients.get(state.threadId) === state) clients.delete(state.threadId);
     },

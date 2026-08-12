@@ -611,7 +611,10 @@ describe('desktop shell wiring', () => {
   it('clears attention on the bell and on exit', () => {
     expect(mainJs).toMatch(/term\.onBell\(function \(\)[\s\S]{0,200}attentionTracker\.bell\(thread\.id\)/);
     expect(mainJs).toMatch(
-      /function handlePtyExit\(payload\)[\s\S]{0,500}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+      /function handlePtyExit\(payload\)[\s\S]{0,750}thread\.status = "exited";[\s\S]{0,120}thread\.isWorking = false;[\s\S]{0,300}clearThreadAttention\(thread\)/,
+    );
+    expect(mainJs).toMatch(
+      /function handlePtyExit\(payload\)[\s\S]{0,450}thread\.terminalController\.markPtyExited\(\)/,
     );
   });
 
