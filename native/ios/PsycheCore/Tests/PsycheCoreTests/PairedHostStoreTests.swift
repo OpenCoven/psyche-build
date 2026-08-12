@@ -124,7 +124,7 @@ final class PairedHostStoreTests: XCTestCase {
         let saveTask = Task {
             try await store.save(host, for: generation)
         }
-        try await secureStore.waitUntilReadBegins()
+        await secureStore.waitUntilReadBegins()
 
         generation.invalidate()
         secureStore.releaseRead()
@@ -250,16 +250,13 @@ final class PairedHostStoreTests: XCTestCase {
     }
 }
 
-private enum SaveBoundaryTestError: Error {
-    case timedOut
-}
-
 private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
     private let condition = NSCondition()
     private var storage: [String: Data] = [:]
     private var shouldBlockNextRead = false
     private var readBegan = false
     private var readReleased = false
+    private var readBeganWaiters: [CheckedContinuation<Void, Never>] = []
 
     func blockNextRead() {
         condition.withLock {
@@ -269,16 +266,17 @@ private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
         }
     }
 
-    func waitUntilReadBegins(
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        for _ in 0..<1_000 {
-            if condition.withLock({ readBegan }) { return }
-            await Task.yield()
+    func waitUntilReadBegins() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = condition.withLock {
+                guard !readBegan else { return true }
+                readBeganWaiters.append(continuation)
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
         }
-        XCTFail("Timed out waiting for paired-host read", file: file, line: line)
-        throw SaveBoundaryTestError.timedOut
     }
 
     func releaseRead() {
@@ -293,7 +291,11 @@ private final class SaveBoundarySecureStore: SecureStore, @unchecked Sendable {
         if shouldBlockNextRead {
             shouldBlockNextRead = false
             readBegan = true
-            condition.broadcast()
+            let waiters = readBeganWaiters
+            readBeganWaiters.removeAll()
+            condition.unlock()
+            waiters.forEach { $0.resume() }
+            condition.lock()
             while !readReleased {
                 condition.wait()
             }
