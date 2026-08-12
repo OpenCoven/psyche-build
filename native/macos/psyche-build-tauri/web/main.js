@@ -245,8 +245,12 @@
     var layout = paneLayoutFor(project.id, worktreePath);
     var leaf = layout && PsychePanes.findLeafById(layout.root, layout.focusedLeafId);
     var thread = leaf && findThread(leaf.threadId);
-    state.activeThreadId = thread ? thread.id : null;
-    if (thread) project.lastActiveThreadId = thread.id;
+    var activeThread = thread &&
+      thread.kind !== "coven-chat" && thread.kind !== "coven-attach"
+        ? thread
+        : null;
+    state.activeThreadId = activeThread ? activeThread.id : null;
+    if (activeThread) project.lastActiveThreadId = activeThread.id;
   }
   async function activateProjectWorktree(project, worktreePath, options) {
     var refreshStatus = !options || options.refreshStatus !== false;
@@ -537,7 +541,8 @@
     // Restore the project's last-focused thread, falling back to its first.
     var workspaceRoot = activeWorkspaceRoot(project);
     var threads = state.threads.filter(function (t) {
-      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden;
+      return t.projectId === id && t.worktreePath === workspaceRoot && !t.hidden &&
+        t.kind !== "coven-chat" && t.kind !== "coven-attach";
     });
     var nextId = project.lastActiveThreadId &&
       threads.some(function (t) { return t.id === project.lastActiveThreadId; })
@@ -9029,7 +9034,9 @@
     if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
-        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+        t.kind === "coven-chat" &&
+        (t.status === "starting" || t.status === "running") &&
+        !t.closing && !t.hidden;
     });
     if (existing) {
       return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
