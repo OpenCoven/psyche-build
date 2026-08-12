@@ -7106,7 +7106,7 @@
     {
       cmd: "/close",
       desc: "Close the active thread",
-      run: function () { requestThreadClose(findThread(state.activeThreadId)); },
+      run: function () { return requestThreadClose(findThread(state.activeThreadId)); },
     },
     {
       cmd: "/preview",
