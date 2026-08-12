@@ -905,8 +905,6 @@ fn verified_unix_process_groups(
     // a changed terminal session while their foreground and original groups
     // still independently prove they belong to this spawned session.
     if observation.current_pid <= 1
-        || observation.current_process_group <= 1
-        || observation.current_session <= 1
         || observation.tty_session <= 1
         || identity.session_id <= 1
         || identity.original_process_group != identity.session_id
@@ -4451,7 +4449,7 @@ mod pty_runtime_tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_termination_uses_independently_verified_groups_when_tty_session_changes() {
+    fn unix_termination_uses_independently_verified_groups_when_ambient_ids_change() {
         let groups = verified_unix_process_groups(
             UnixPtyIdentity {
                 session_id: 4_100,
@@ -4459,8 +4457,8 @@ mod pty_runtime_tests {
             },
             UnixTerminationObservation {
                 current_pid: 100,
-                current_process_group: 100,
-                current_session: 100,
+                current_process_group: 1,
+                current_session: 1,
                 tty_session: 4_200,
                 foreground_process_group: 4_200,
                 foreground_session: Some(4_100),
@@ -5854,8 +5852,16 @@ mod workspace_panel_tests {
             "secret\n".to_string(),
         )
         .unwrap_err();
-        assert!(relative_error.contains("outside project root"));
-        assert!(absolute_error.contains("outside project root"));
+        #[cfg(unix)]
+        {
+            assert!(relative_error.contains("outside project root"));
+            assert!(absolute_error.contains("outside project root"));
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(relative_error.contains("require POSIX descriptor-relative operations"));
+            assert!(absolute_error.contains("require POSIX descriptor-relative operations"));
+        }
         assert_eq!(std::fs::read(&sibling_file).unwrap(), b"secret\n");
     }
 
@@ -5884,6 +5890,7 @@ mod workspace_panel_tests {
         assert_eq!(std::fs::read(&outside).unwrap(), b"secret\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn saves_contained_text_atomically_and_preserves_permissions() {
         let tree = TempTree::new("save");
@@ -5926,6 +5933,7 @@ mod workspace_panel_tests {
         assert!(save_temp_paths(&target).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_stale_saves_without_mutation_or_temp_files() {
         let tree = TempTree::new("stale-save");
@@ -6076,7 +6084,10 @@ mod workspace_panel_tests {
             String::new(),
         )
         .unwrap_err();
+        #[cfg(unix)]
         assert!(error.contains("file is not valid UTF-8"));
+        #[cfg(not(unix))]
+        assert!(error.contains("require POSIX descriptor-relative operations"));
         assert_eq!(std::fs::read(&target).unwrap(), original);
         assert!(save_temp_paths(&target).is_empty());
     }
