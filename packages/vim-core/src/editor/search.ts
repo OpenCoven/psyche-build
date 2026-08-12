@@ -1,4 +1,4 @@
-import { snapToGrapheme } from './marks.js';
+import { starts } from './motions.js';
 import type { CompiledPattern } from './patterns.js';
 
 export interface SearchMatch {
@@ -18,46 +18,82 @@ function isWholeWord(text: string, from: number, to: number): boolean {
 
 function collectCandidate(
   text: string,
-  rawFrom: number,
-  rawTo: number,
+  from: number,
+  to: number,
   wholeWord: boolean,
 ): SearchMatch | undefined {
-  const from = snapToGrapheme(text, rawFrom, 'before');
-  const to = snapToGrapheme(text, rawTo, 'after');
   if (wholeWord && !isWholeWord(text, from, to)) return undefined;
   return { from, to };
 }
 
-/** Streams a single pass and retains only the requested and wrap candidates. */
+function scanMatches(
+  text: string,
+  compiled: CompiledPattern,
+  boundaries: readonly number[],
+  wholeWord: boolean,
+  visit: (candidate: SearchMatch, ordinal: number) => boolean | void,
+): number {
+  const expression = new RegExp(compiled.source, compiled.flags);
+  let ordinal = 0;
+  let previousFrom = -1;
+  let fromBoundary = 0;
+  let toBoundary = 0;
+  for (;;) {
+    const match = expression.exec(text);
+    if (!match) break;
+    const rawFrom = match.index;
+    const rawTo = rawFrom + match[0].length;
+    while (fromBoundary + 1 < boundaries.length && boundaries[fromBoundary + 1]! <= rawFrom) {
+      fromBoundary += 1;
+    }
+    while (toBoundary < boundaries.length && boundaries[toBoundary]! < rawTo) toBoundary += 1;
+    const candidate = collectCandidate(
+      text,
+      boundaries[fromBoundary] ?? 0,
+      boundaries[Math.min(toBoundary, boundaries.length - 1)] ?? text.length,
+      wholeWord,
+    );
+    if (candidate && candidate.from !== previousFrom) {
+      previousFrom = candidate.from;
+      if (visit(candidate, ordinal) === false) return ordinal + 1;
+      ordinal += 1;
+    }
+    if (match[0].length === 0) {
+      const next = boundaries[fromBoundary + 1] ?? rawFrom + 1;
+      expression.lastIndex = next > rawFrom ? next : rawFrom + 1;
+    }
+  }
+  return ordinal;
+}
+
+/** Uses bounded-memory streaming passes to select the requested cyclic match. */
 export function findMatch(
   text: string,
   compiled: CompiledPattern,
   position: number,
   direction: 'forward' | 'backward',
   wholeWord = false,
+  repeatCount = 1,
 ): SearchMatch | undefined {
-  const expression = new RegExp(compiled.source, compiled.flags);
-  let first: SearchMatch | undefined;
-  let lastBefore: SearchMatch | undefined;
-  let last: SearchMatch | undefined;
-  for (;;) {
-    const match = expression.exec(text);
-    if (!match) break;
-    const rawFrom = match.index;
-    const rawTo = rawFrom + match[0].length;
-    const candidate = collectCandidate(text, rawFrom, rawTo, wholeWord);
-    if (candidate) {
-      first ??= candidate;
-      last = candidate;
-      if (direction === 'forward' && candidate.from > position) return candidate;
-      if (direction === 'backward' && candidate.from < position) lastBefore = candidate;
-    }
-    if (match[0].length === 0) {
-      const next = snapToGrapheme(text, rawFrom + 1, 'after');
-      expression.lastIndex = next > rawFrom ? next : rawFrom + 1;
-    }
-  }
-  return direction === 'forward' ? first : (lastBefore ?? last);
+  const boundaries = starts(text);
+  let before = 0;
+  let after = 0;
+  const total = scanMatches(text, compiled, boundaries, wholeWord, (candidate) => {
+    if (candidate.from < position) before += 1;
+    if (candidate.from > position) after += 1;
+  });
+  if (total === 0) return undefined;
+  const offset = (Math.max(1, repeatCount) - 1) % total;
+  const targetOrdinal = direction === 'forward'
+    ? (offset < after ? total - after + offset : offset - after)
+    : (offset < before ? before - 1 - offset : total - 1 - (offset - before));
+  let target: SearchMatch | undefined;
+  scanMatches(text, compiled, boundaries, wholeWord, (candidate, ordinal) => {
+    if (ordinal !== targetOrdinal) return;
+    target = candidate;
+    return false;
+  });
+  return target;
 }
 
 export function wordAt(text: string, position: number): string | undefined {

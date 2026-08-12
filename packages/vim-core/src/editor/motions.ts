@@ -1,10 +1,55 @@
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
+function lowerBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (values[middle]! < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (values[middle]! <= target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
 export function starts(text: string): number[] {
   const result = [...segmenter.segment(text)]
     .map((part) => part.index);
   result.push(text.length);
   return result;
+}
+
+export interface GraphemeNavigator {
+  move(text: string, position: number, delta: number): number;
+}
+
+/** Reuses one immutable-text grapheme index and invalidates it whenever the document text changes. */
+export function createGraphemeNavigator(): GraphemeNavigator {
+  let indexedText: string | undefined;
+  let boundaries: readonly number[] = [];
+  return {
+    move(text, position, delta) {
+      if (text !== indexedText) {
+        indexedText = text;
+        boundaries = starts(text);
+      }
+      if (delta === 0) return Math.max(0, Math.min(text.length, position));
+      const target = delta > 0
+        ? upperBound(boundaries, position) + delta - 1
+        : lowerBound(boundaries, position) + delta;
+      return boundaries[Math.max(0, Math.min(boundaries.length - 1, target))] ?? 0;
+    },
+  };
 }
 
 export function previousGrapheme(text: string, position: number): number {

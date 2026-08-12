@@ -3,7 +3,7 @@ import {
   type EditorDocumentPort,
   type EditorInput,
 } from '@opencoven/psyche-vim-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 class BoundsDocument implements EditorDocumentPort {
   value: string;
@@ -98,6 +98,40 @@ describe('Vim editor count and replay bounds', () => {
     expect(result.actions).not.toContainEqual(expect.objectContaining({ level: 'error' }));
   });
 
+  it('reuses grapheme segmentation across exact-edge counted motion and macro work', async () => {
+    const originalSegment = Intl.Segmenter.prototype.segment;
+    let segmentationPasses = 0;
+    const segment = vi.spyOn(Intl.Segmenter.prototype, 'segment').mockImplementation(function boundedSegment(
+      this: Intl.Segmenter,
+      text: string,
+    ) {
+      segmentationPasses += 1;
+      if (segmentationPasses > 4) throw new Error('full-document segmentation budget exceeded');
+      return originalSegment.call(this, text);
+    });
+    try {
+      const motionDocument = new BoundsDocument('x'.repeat(10_001));
+      await send(createEditorMachine(motionDocument), ...keys('10000l'));
+
+      const macroDocument = new BoundsDocument('x'.repeat(10_001));
+      const macro = createEditorMachine(macroDocument);
+      macro.setRegister('a', 'l');
+      await send(macro, ...keys('10000@a'));
+
+      expect(motionDocument.ranges[0]?.head).toBe(10_000);
+      expect(macroDocument.ranges[0]?.head).toBe(10_000);
+
+      const changedDocument = new BoundsDocument('ab');
+      const changed = createEditorMachine(changedDocument);
+      await send(changed, 'l', 'i', 'X', 'Escape', '0', 'l');
+      expect(changedDocument.value).toBe('aXb');
+      expect(changedDocument.ranges[0]?.head).toBe(1);
+      expect(segmentationPasses).toBeLessThanOrEqual(4);
+    } finally {
+      segment.mockRestore();
+    }
+  });
+
   it('shares one 10,000-action budget across counted and nested macros', async () => {
     const document = new BoundsDocument('x'.repeat(10_001));
     const machine = createEditorMachine(document);
@@ -120,8 +154,10 @@ describe('Vim editor count and replay bounds', () => {
     await send(machine, '/', 'x', 'Enter');
 
     const exact = await send(machine, ...keys('10000n'));
+    const selectionTransactions = document.edits.length;
     expect(exact.count).toBeUndefined();
     expect(document.ranges[0]).toEqual({ anchor: 0, head: 0 });
+    expect(selectionTransactions).toBe(2);
 
     const overflow = await send(machine, ...keys('10001'));
     expect(overflow.actions.at(-1)).toMatchObject({ level: 'error', message: 'Count exceeds limit (10000)' });

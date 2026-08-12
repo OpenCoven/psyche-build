@@ -4,6 +4,7 @@ import { substituteText } from './editor/ex-executor.js';
 import { parseExCommand } from './editor/ex-parser.js';
 import { mapPosition, relocateMark } from './editor/marks.js';
 import {
+  createGraphemeNavigator,
   graphemeColumn,
   graphemeCount,
   lastLineStart,
@@ -120,6 +121,7 @@ export function createEditorMachine(
   document: EditorDocumentPort,
   options: EditorMachineOptions = {},
 ): EditorMachine {
+  const graphemeNavigator = createGraphemeNavigator();
   let mode: EditorMode = 'normal';
   let pending = '';
   let countBuffer = '';
@@ -353,11 +355,7 @@ export function createEditorMachine(
     const text = document.text();
     const position = cursor();
     if (key === 'h' || key === 'l') {
-      let result = position;
-      for (let index = 0; index < count; index += 1) {
-        result = key === 'h' ? previousGrapheme(text, result) : nextGrapheme(text, result);
-      }
-      return result;
+      return graphemeNavigator.move(text, position, key === 'h' ? -count : count);
     }
     if (key === 'j' || key === 'k') return vertical(text, position, (key === 'j' ? 1 : -1) * count);
     if (key === '0') return lineStart(text, position);
@@ -519,14 +517,14 @@ export function createEditorMachine(
       : { from: target, to: inclusive ? nextGrapheme(text, position) : position, linewise: false };
   }
 
-  function search(direction: 'forward' | 'backward'): EditorResult {
+  function search(direction: 'forward' | 'backward', repetitions = 1): EditorResult {
     if (!searchState?.pattern) return snapshot([{ type: 'status', level: 'error', message: 'No previous search' }]);
     const compiled = compilePattern(searchState.pattern, {
       ignoreCase,
       smartCase,
     });
     if (!compiled) return snapshot([{ type: 'status', level: 'error', message: 'Unsupported search pattern' }]);
-    const target = findMatch(document.text(), compiled, cursor(), direction, searchState.wholeWord);
+    const target = findMatch(document.text(), compiled, cursor(), direction, searchState.wholeWord, repetitions);
     if (!target) return snapshot([{ type: 'status', level: 'error', message: 'Pattern not found' }]);
     select(target.from);
     return snapshot([{ type: 'search', query: searchState.pattern, direction, active: true }]);
@@ -1149,12 +1147,7 @@ export function createEditorMachine(
         const direction = key === 'n' ? base : (base === 'forward' ? 'backward' : 'forward');
         const repetitions = countBuffer ? Number(countBuffer) : 1;
         resetPending();
-        let result = snapshot();
-        for (let index = 0; index < repetitions; index += 1) {
-          result = search(direction);
-          if (result.actions.some((action) => action.type === 'status' && action.level === 'error')) break;
-        }
-        return result;
+        return search(direction, repetitions);
       }
       if (key === '*' || key === '#') {
         const word = wordAt(document.text(), cursor());
