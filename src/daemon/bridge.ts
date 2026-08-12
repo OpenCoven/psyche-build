@@ -1680,12 +1680,9 @@ export async function killBridgePane(
     throw bridgeError('pane_not_found', 'pane is not registered in this psyche project');
   }
 
-  const tmuxPaneId = String(found.paneId ?? found.id ?? paneId);
-  const psychePaneId = String(found.id ?? tmuxPaneId);
-  const expectedIdentity = {
-    id: psychePaneId,
-    paneId: tmuxPaneId,
-  };
+  const expectedIdentity = rawPaneIdentity(found);
+  const tmuxPaneId = expectedIdentity.paneId;
+  const psychePaneId = expectedIdentity.id;
 
   const initialPresence = probeBridgeTmuxPane(deps, tmuxPaneId);
   if (initialPresence === 'unknown') {
@@ -2081,21 +2078,42 @@ function findRawPaneForKill(
   );
 }
 
-function rawPaneIdentity(pane: RawConfigPane): { id: string; paneId: string } {
+function rawPaneIdentity(
+  pane: RawConfigPane,
+): { id: string; paneId: string; tmuxServerIdentity?: TmuxServerIdentity } {
   const id = typeof pane.id === 'string' && pane.id
     ? pane.id
     : String(pane.paneId ?? '');
   const paneId = typeof pane.paneId === 'string' && pane.paneId
     ? pane.paneId
     : id;
-  return { id, paneId };
+  const tmuxServerIdentity = isTmuxServerIdentity(pane.tmuxServerIdentity)
+    ? pane.tmuxServerIdentity
+    : undefined;
+  return {
+    id,
+    paneId,
+    ...(tmuxServerIdentity ? { tmuxServerIdentity } : {}),
+  };
 }
 
 function sameRawPaneIdentity(
-  left: { id: string; paneId: string },
-  right: { id: string; paneId: string },
+  left: { id: string; paneId: string; tmuxServerIdentity?: TmuxServerIdentity },
+  right: { id: string; paneId: string; tmuxServerIdentity?: TmuxServerIdentity },
 ): boolean {
-  return left.id === right.id && left.paneId === right.paneId;
+  if (left.id !== right.id || left.paneId !== right.paneId) {
+    return false;
+  }
+  if (!left.tmuxServerIdentity || !right.tmuxServerIdentity) {
+    return (
+      left.tmuxServerIdentity === undefined
+      && right.tmuxServerIdentity === undefined
+    );
+  }
+  return sameTmuxServerIdentity(
+    left.tmuxServerIdentity,
+    right.tmuxServerIdentity,
+  );
 }
 
 function rawPaneToSummary(pane: RawConfigPane, projectRoot: string): PaneSummary {

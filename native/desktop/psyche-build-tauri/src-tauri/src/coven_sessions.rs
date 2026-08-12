@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+#[cfg(unix)]
+use std::net::{Shutdown, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
@@ -9,12 +12,14 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::Url;
 
+#[cfg(unix)]
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const STABLE_API_VERSION: &str = "coven.daemon.v1";
@@ -104,6 +109,21 @@ pub(crate) struct CovenSessionsResponse {
     sessions: Vec<CovenSessionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct CovenSessionsUnavailableResponse {
+    status: &'static str,
+    reason: &'static str,
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn windows_transport_unavailable_response() -> CovenSessionsUnavailableResponse {
+    CovenSessionsUnavailableResponse {
+        status: "unavailable",
+        reason: "local Coven Unix socket transport is unsupported on Windows",
+    }
 }
 
 fn error_response() -> CovenSessionsResponse {
@@ -231,7 +251,7 @@ pub(crate) fn is_safe_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -240,6 +260,7 @@ fn load_coven_sessions(
     load_coven_sessions_with_scopes(endpoint, project_roots, &project_scopes)
 }
 
+#[cfg(unix)]
 fn load_coven_sessions_with_scopes(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -265,6 +286,7 @@ fn load_coven_sessions_with_scopes(
     }
 }
 
+#[cfg(unix)]
 fn discover(
     env: &HashMap<String, String>,
     home: &Path,
@@ -284,6 +306,7 @@ fn discover(
     load_coven_sessions_with_scopes(&endpoint, &project_roots, &project_scopes)
 }
 
+#[cfg(unix)]
 #[tauri::command]
 pub(crate) async fn coven_sessions(
     project_roots: Vec<String>,
@@ -310,6 +333,16 @@ pub(crate) async fn coven_sessions(
     }
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_sessions(
+    _project_roots: Vec<String>,
+    _project_scopes: Option<Vec<CovenProjectScope>>,
+) -> CovenSessionsUnavailableResponse {
+    windows_transport_unavailable_response()
+}
+
+#[cfg(unix)]
 #[tauri::command]
 pub(crate) async fn coven_session_kill(session_id: String) -> Result<(), String> {
     match tauri::async_runtime::spawn_blocking(move || {
@@ -337,6 +370,13 @@ pub(crate) async fn coven_session_kill(session_id: String) -> Result<(), String>
     }
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub(crate) async fn coven_session_kill(_session_id: String) -> Result<(), String> {
+    Err("Local Coven session control is unsupported on Windows".to_string())
+}
+
+#[cfg(unix)]
 fn try_load_coven_sessions(
     endpoint: &CovenEndpoint,
     project_roots: &[PathBuf],
@@ -357,6 +397,7 @@ fn try_load_coven_sessions(
         .map_err(|_| CovenAdapterError::Failed)
 }
 
+#[cfg(unix)]
 fn try_kill_coven_session(
     endpoint: &CovenEndpoint,
     session_id: &str,
@@ -378,6 +419,7 @@ fn try_kill_coven_session(
     Ok(())
 }
 
+#[cfg(unix)]
 fn adapter_error_message(error: CovenAdapterError) -> &'static str {
     match error {
         CovenAdapterError::Unavailable => UNAVAILABLE_MESSAGE,
@@ -386,6 +428,7 @@ fn adapter_error_message(error: CovenAdapterError) -> &'static str {
     }
 }
 
+#[cfg(unix)]
 fn request_endpoint(
     endpoint: &CovenEndpoint,
     method: HttpMethod,
@@ -410,8 +453,6 @@ fn request_endpoint(
                 .map_err(|error| categorize_io_error(&error, true))?;
             exchange_http(&mut stream, method, path, deadline)
         }
-        #[cfg(not(unix))]
-        CovenEndpoint::Unix(_) => Err(CovenAdapterError::Failed),
         CovenEndpoint::Http(address) => {
             if !address.ip().is_loopback() {
                 return Err(CovenAdapterError::Failed);
@@ -428,10 +469,12 @@ fn request_endpoint(
     }
 }
 
+#[cfg(unix)]
 trait LocalHttpStream: Read + Write + AsRawFd {
     fn shutdown_write(&self) -> io::Result<()>;
 }
 
+#[cfg(unix)]
 impl LocalHttpStream for TcpStream {
     fn shutdown_write(&self) -> io::Result<()> {
         self.shutdown(Shutdown::Write)
@@ -445,6 +488,7 @@ impl LocalHttpStream for UnixStream {
     }
 }
 
+#[cfg(unix)]
 fn exchange_http<S: LocalHttpStream>(
     stream: &mut S,
     method: HttpMethod,
@@ -468,6 +512,7 @@ fn exchange_http<S: LocalHttpStream>(
     parse_http_response(&response).map_err(|_| CovenAdapterError::Failed)
 }
 
+#[cfg(unix)]
 fn remaining_before(deadline: Instant) -> io::Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -475,6 +520,7 @@ fn remaining_before(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "Coven exchange deadline elapsed"))
 }
 
+#[cfg(unix)]
 fn write_all_before<S: LocalHttpStream>(
     stream: &mut S,
     mut bytes: &[u8],
@@ -495,6 +541,7 @@ fn write_all_before<S: LocalHttpStream>(
     Ok(())
 }
 
+#[cfg(unix)]
 fn flush_before<S: LocalHttpStream>(stream: &mut S, deadline: Instant) -> io::Result<()> {
     loop {
         remaining_before(deadline)?;
@@ -509,6 +556,7 @@ fn flush_before<S: LocalHttpStream>(stream: &mut S, deadline: Instant) -> io::Re
     }
 }
 
+#[cfg(unix)]
 fn read_to_end_before<S: LocalHttpStream>(
     stream: &mut S,
     deadline: Instant,
@@ -657,6 +705,7 @@ fn wait_for_io(raw_fd: RawFd, events: libc::c_short, deadline: Instant) -> io::R
     }
 }
 
+#[cfg(unix)]
 fn categorize_io_error(error: &io::Error, missing_is_unavailable: bool) -> CovenAdapterError {
     if matches!(
         error.kind(),
@@ -1164,6 +1213,7 @@ fn optional_javascript_safe_u64(
 }
 
 #[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -1539,6 +1589,17 @@ mod tests {
         assert_eq!(response.status, status);
         assert!(response.sessions.is_empty());
         assert_eq!(response.message.as_deref(), message);
+    }
+
+    #[test]
+    fn windows_unavailable_response_has_only_status_and_reason() {
+        assert_eq!(
+            serde_json::to_value(windows_transport_unavailable_response()).unwrap(),
+            json!({
+                "status": "unavailable",
+                "reason": "local Coven Unix socket transport is unsupported on Windows"
+            })
+        );
     }
 
     #[test]

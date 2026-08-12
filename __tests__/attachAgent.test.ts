@@ -385,7 +385,11 @@ describe('attachAgentToWorktree', () => {
     ).find((pane) => pane.id !== 'psyche-source')!;
     expect(compareAndRemoveProjectPaneConfigPaneIdentitiesMock).toHaveBeenCalledWith(
       '/session',
-      [{ id: persistedPane.id, paneId: persistedPane.paneId }],
+      [{
+        id: persistedPane.id,
+        paneId: persistedPane.paneId,
+        tmuxServerIdentity: persistedPane.tmuxServerIdentity,
+      }],
       expect.any(Function),
     );
     expect(order.indexOf('pane-killed')).toBeLessThan(order.indexOf('record-removed'));

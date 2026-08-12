@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import * as PsycheSessions from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
+import * as PsycheSessions from '../native/desktop/psyche-build-tauri/web/sessions/session-model.mjs';
 
-const webRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
+const webRoot = join(process.cwd(), 'native/desktop/psyche-build-tauri');
 const mainJs = readFileSync(join(webRoot, 'web/main.js'), 'utf8');
 const nativeLib = readFileSync(join(webRoot, 'src-tauri/src/lib.rs'), 'utf8');
 const sessionModel = readFileSync(join(webRoot, 'web/sessions/session-model.mjs'), 'utf8');

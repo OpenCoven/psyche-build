@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import * as model from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
+import * as model from '../native/desktop/psyche-build-tauri/web/sessions/session-model.mjs';
 
 describe('Tauri Coven session model', () => {
   test('accepts only safe Coven session identifiers', () => {
@@ -397,6 +397,22 @@ describe('Tauri Coven session model', () => {
         'recovered', 'beta-done',
       ]);
     }
+  });
+
+  test('surfaces an unavailable Coven reason when the response has no message', () => {
+    const requested = model.beginCovenRequest(model.createCovenDiscoveryState());
+    const unavailable = model.applyCovenResponse(
+      requested.state,
+      requested.requestId,
+      {
+        status: 'unavailable',
+        reason: ' local Coven Unix socket transport is unsupported on Windows ',
+      },
+      102,
+    );
+
+    expect(unavailable.message)
+      .toBe('local Coven Unix socket transport is unsupported on Windows');
   });
 
   test('treats a healthy empty response as ready with no sessions', () => {

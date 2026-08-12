@@ -55,8 +55,7 @@ import {
 } from '../services/ProjectPaneConfig.js';
 import {
   paneRecoveryInstructions,
-  tearDownPaneWithVerification,
-  type TmuxPanePresence,
+  type VerifiedPaneTeardownResult,
 } from './paneTeardown.js';
 import {
   isPaneLifecycleReservationRetainedError,
@@ -332,11 +331,17 @@ async function createConflictResolutionPaneWithReservation(
     }
     return newPane;
   } catch (error) {
-    let teardown: Awaited<ReturnType<typeof tearDownConflictPane>> | undefined;
+    let teardown: VerifiedPaneTeardownResult | undefined;
     try {
       await compareAndRemoveProjectPaneConfigPaneIdentities(
         options.sessionProjectRoot,
-        [{ id: newPane.id, paneId: newPane.paneId }],
+        [{
+          id: newPane.id,
+          paneId: newPane.paneId,
+          ...(newPane.tmuxServerIdentity
+            ? { tmuxServerIdentity: newPane.tmuxServerIdentity }
+            : {}),
+        }],
         async () => {
           teardown = await tearDownGenerationBoundPane(
             tmuxService,
@@ -366,27 +371,6 @@ async function createConflictResolutionPaneWithReservation(
     }
     await options.refreshPanes?.();
     throw error;
-  }
-}
-
-async function tearDownConflictPane(
-  tmuxService: TmuxService,
-  paneId: string,
-) {
-  return tearDownPaneWithVerification({
-    probe: () => probeConflictPanePresence(tmuxService, paneId),
-    kill: () => tmuxService.killPane(paneId),
-  });
-}
-
-async function probeConflictPanePresence(
-  tmuxService: TmuxService,
-  paneId: string,
-): Promise<TmuxPanePresence> {
-  try {
-    return await tmuxService.paneExists(paneId) ? 'present' : 'absent';
-  } catch {
-    return 'unknown';
   }
 }
 

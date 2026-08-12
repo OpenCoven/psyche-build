@@ -6,7 +6,7 @@ const model = await import(
   pathToFileURL(
     join(
       process.cwd(),
-      'native/macos/psyche-build-tauri/web/editor/workspace-model.mjs',
+      'native/desktop/psyche-build-tauri/web/editor/workspace-model.mjs',
     ),
   ).href,
 );

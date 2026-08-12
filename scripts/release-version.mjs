@@ -9,10 +9,10 @@ const STABLE_VERSION = /^(\d+)\.(\d+)\.(\d+)$/;
 
 const relativePaths = {
   packageJson: 'package.json',
-  nativePackageJson: 'native/macos/psyche-build-tauri/package.json',
-  cargoToml: 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
-  cargoLock: 'native/macos/psyche-build-tauri/src-tauri/Cargo.lock',
-  tauriConfig: 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+  nativePackageJson: 'native/desktop/psyche-build-tauri/package.json',
+  cargoToml: 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml',
+  cargoLock: 'native/desktop/psyche-build-tauri/src-tauri/Cargo.lock',
+  tauriConfig: 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
   iosProjectYml: 'native/ios/project.yml',
   iosXcodeProject: 'native/ios/Psyche.xcodeproj/project.pbxproj',
 };

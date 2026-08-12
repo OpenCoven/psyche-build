@@ -25,7 +25,7 @@ async function writeFixture(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), 'psyche-release-version-'));
   temporaryRoots.push(root);
 
-  const nativeRoot = path.join(root, 'native/macos/psyche-build-tauri');
+  const nativeRoot = path.join(root, 'native/desktop/psyche-build-tauri');
   const tauriRoot = path.join(nativeRoot, 'src-tauri');
   const iosRoot = path.join(root, 'native/ios');
   const xcodeProjectRoot = path.join(iosRoot, 'Psyche.xcodeproj');
@@ -92,7 +92,7 @@ describe('release version contract', () => {
     const root = await writeFixture();
 
     expect(() => assertReleaseVersion(root, 'v0.0.1')).toThrow(
-      /package\.json \(0\.0\.11\)[\s\S]*native\/macos\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)/,
+      /package\.json \(0\.0\.11\)[\s\S]*native\/desktop\/psyche-build-tauri\/package\.json \(0\.0\.7\)[\s\S]*Cargo\.toml \(0\.0\.7\)[\s\S]*Cargo\.lock \(0\.0\.7\)[\s\S]*tauri\.conf\.json \(0\.0\.7\)[\s\S]*native\/ios\/project\.yml \(0\.0\.5\)[\s\S]*native\/ios\/Psyche\.xcodeproj\/project\.pbxproj \(0\.0\.3\)/,
     );
   });
 
@@ -126,11 +126,11 @@ describe('release version contract', () => {
       await Promise.all([
       readFile(path.join(root, 'package.json'), 'utf8'),
       readFile(
-        path.join(root, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'),
+        path.join(root, 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json'),
         'utf8',
       ),
-      readFile(path.join(root, 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml'), 'utf8'),
-      readFile(path.join(root, 'native/macos/psyche-build-tauri/src-tauri/Cargo.lock'), 'utf8'),
+      readFile(path.join(root, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'), 'utf8'),
+      readFile(path.join(root, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.lock'), 'utf8'),
       readFile(path.join(root, 'native/ios/project.yml'), 'utf8'),
       readFile(path.join(root, 'native/ios/Psyche.xcodeproj/project.pbxproj'), 'utf8'),
     ]);
@@ -178,10 +178,10 @@ describe('release version contract', () => {
     const root = await writeFixture();
     const releaseFiles = [
       'package.json',
-      'native/macos/psyche-build-tauri/package.json',
-      'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
-      'native/macos/psyche-build-tauri/src-tauri/Cargo.lock',
-      'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json',
+      'native/desktop/psyche-build-tauri/package.json',
+      'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml',
+      'native/desktop/psyche-build-tauri/src-tauri/Cargo.lock',
+      'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json',
       'native/ios/project.yml',
       'native/ios/Psyche.xcodeproj/project.pbxproj',
     ].map((relativePath) => path.join(root, relativePath));

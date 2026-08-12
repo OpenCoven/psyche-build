@@ -4,15 +4,15 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const indexHtml = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'),
   'utf8',
 );
 const stylesCss = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
 void indexHtml;

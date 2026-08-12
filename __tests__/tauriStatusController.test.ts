@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { createStatusController } from '../native/macos/psyche-build-tauri/web/status/status-controller.mjs';
-import type { StatusControllerSample } from '../native/macos/psyche-build-tauri/web/status/status-controller.mjs';
+import { createStatusController } from '../native/desktop/psyche-build-tauri/web/status/status-controller.mjs';
+import type { StatusControllerSample } from '../native/desktop/psyche-build-tauri/web/status/status-controller.mjs';
 
 type Listener = (event: FakeEvent) => void;
 

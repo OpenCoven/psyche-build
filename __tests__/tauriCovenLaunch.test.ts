@@ -4,11 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const libRs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8',
 );
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
@@ -1356,10 +1356,12 @@ describe('native Coven launch routing', () => {
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     const pendingDataBuffers = new Map<string, Uint8Array[]>();
-    const starts: Array<'fail' | 'run'> = ['fail', 'run', 'run'];
+    const starts: Array<'fail' | 'run' | 'cleanup'> = ['fail', 'run', 'cleanup', 'run'];
     const invoke = async (command: string) => {
       if (command !== 'pty_start') return undefined;
-      if (starts.shift() === 'fail') throw new Error('coven unavailable');
+      const outcome = starts.shift();
+      if (outcome === 'fail') throw new Error('coven unavailable');
+      if (outcome === 'cleanup') throw new Error("thread 'thread-1' cleanup in progress");
       return undefined;
     };
     const dependencies = {
@@ -1408,6 +1410,9 @@ describe('native Coven launch routing', () => {
     expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
+    await expect(retryThread(thread.id)).resolves.toBe(false);
+    expect(thread.status).toBe('exited');
+    expect(thread.ptyStarted).toBe(false);
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.status).toBe('running');
     expect(state.threads).toEqual([thread]);
