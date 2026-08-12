@@ -1123,20 +1123,21 @@
   // Short-lived confirmation for actions whose effect happens off-screen
   // (for example, a pane spawned behind a maximised pane).
   var toastTimer = 0;
-  function toast(message) {
+  function toast(message, duration) {
     if (!toastEl) return;
     toastEl.textContent = message;
-    toastEl.hidden = false;
+    toastEl.classList.add("is-visible");
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
-      toastEl.hidden = true;
+      toastEl.classList.remove("is-visible");
+      toastEl.textContent = "";
       toastTimer = 0;
-    }, 2600);
+    }, duration || 2600);
   }
 
   function showPanePlacementWarning(message) {
     setStatus(message, "warn");
-    toast(message);
+    toast(message, 6000);
   }
 
   async function copyPaneFooterValue(label, value) {
