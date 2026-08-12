@@ -1588,6 +1588,7 @@ async function executeFileCommand(command, args, options) {
           stdout: Buffer.concat(stdoutChunks).toString('utf8'),
           stderr: Buffer.concat(stderrChunks).toString('utf8'),
         });
+      });
     } catch (error) {
       resolve({
         error,
