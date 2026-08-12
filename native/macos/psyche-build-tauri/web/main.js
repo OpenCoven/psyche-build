@@ -116,6 +116,8 @@
   var covenEnsureFlights = new Map();
   var covenAttachInFlight = new Map();
   var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
+  var covenSessionCloseFlights = new Set();
+  var covenSessionMutationGeneration = 0;
   var covenDiscoveryFlight = null;
   var covenPollTimer = null;
   var COVEN_POLL_MS = 5000;
@@ -401,8 +403,12 @@
       return sessions.concat(covenDiscovery.allSessionsByProject.get(root) || []);
     }, []);
   }
-  async function refreshCovenSessions() {
-    if (document.visibilityState === "hidden" || state.projects.length === 0) {
+  async function refreshCovenSessions(options) {
+    var force = !!(options && options.force);
+    var requiredGeneration = force
+      ? Number(options && options.requiredGeneration) || covenSessionMutationGeneration
+      : 0;
+    if ((!force && document.visibilityState === "hidden") || state.projects.length === 0) {
       return covenDiscovery;
     }
     var roots = covenDiscoveryRoots();
@@ -416,13 +422,30 @@
       return left.projectRoot < right.projectRoot ? -1 :
         (left.projectRoot > right.projectRoot ? 1 : 0);
     }));
-    if (covenDiscoveryFlight && covenDiscoveryFlight.key === requestKey) {
-      return covenDiscoveryFlight.promise;
+    if (covenDiscoveryFlight) {
+      if (force) {
+        if (covenDiscoveryFlight.key === requestKey &&
+            covenDiscoveryFlight.startedGeneration >= requiredGeneration) {
+          return covenDiscoveryFlight.promise;
+        }
+        try {
+          await covenDiscoveryFlight.promise;
+        } catch (_) {}
+        return refreshCovenSessions({
+          force: true,
+          requiredGeneration: requiredGeneration,
+        });
+      }
+      if (covenDiscoveryFlight.key === requestKey) return covenDiscoveryFlight.promise;
     }
     var started = PsycheSessions.beginCovenRequest(covenDiscovery);
     covenDiscovery = started.state;
     renderSessionList();
-    var flight = { key: requestKey, promise: null };
+    var flight = {
+      key: requestKey,
+      promise: null,
+      startedGeneration: covenSessionMutationGeneration,
+    };
     covenDiscoveryFlight = flight;
     flight.promise = (async function () {
       var requestStartedAt = performance.now();
@@ -468,6 +491,25 @@
       return covenDiscovery;
     })();
     return flight.promise;
+  }
+  async function closeCovenSession(session) {
+    if (!session || !session.id || covenSessionCloseFlights.has(session.id)) return false;
+    var id = session.id;
+    covenSessionCloseFlights.add(id);
+    try {
+      await invoke("coven_session_kill", { sessionId: id, session_id: id });
+      covenSessionMutationGeneration += 1;
+      await refreshCovenSessions({
+        force: true,
+        requiredGeneration: covenSessionMutationGeneration,
+      });
+      return true;
+    } catch (error) {
+      setStatus("Stop and close failed: " + String(error), "error");
+      return false;
+    } finally {
+      covenSessionCloseFlights.delete(id);
+    }
   }
   function stopCovenPolling() {
     if (covenPollTimer) clearInterval(covenPollTimer);
@@ -552,10 +594,6 @@
       refreshSidebar();
       refreshTabs();
       syncProjectBrowser();
-      if (!options || options.ensureCoven !== false) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setStatus("no pane — launching Coven…", "");
-      }
     }
     syncProjectBrowser();
     saveWorkspaceSoon();
@@ -775,9 +813,6 @@
   var helpGridEl = document.getElementById("help-grid");
   var daemonStatusEl = document.getElementById("daemon-status");
   var daemonLabelEl = document.getElementById("daemon-label");
-  var scopeBtnEl = document.getElementById("scope-btn");
-  var scopeLabelEl = document.getElementById("scope-label");
-  var scopeMenuEl = document.getElementById("scope-menu");
   var composerSendEl = document.getElementById("composer-send");
   var composerSendHintEl = document.getElementById("composer-send-hint");
   var composerMicEl = document.getElementById("composer-mic");
@@ -1644,6 +1679,7 @@
     if (!thread) return;
     if (thread.pane) {
       thread.pane.classList.toggle("needs-attention", !!thread.needsAttention);
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (thread.paneAttention) {
       var label = PsycheSessions.attentionLabel(thread.attentionReason);
@@ -2225,13 +2261,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2267,7 +2300,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2284,7 +2316,6 @@
     thread.toolBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2434,14 +2465,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2485,7 +2512,6 @@
     });
     header.appendChild(glyph);
     header.appendChild(label);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2505,7 +2531,6 @@
     thread.browserBody = body;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2533,14 +2558,10 @@
     title.className = "terminal-pane-title";
     title.id = "terminal-pane-title-" + thread.id;
     title.textContent = thread.name;
-    pane.setAttribute("aria-labelledby", title.id);
     var meta = document.createElement("span");
     meta.className = "terminal-pane-meta";
     label.appendChild(title);
     label.appendChild(meta);
-    var status = document.createElement("span");
-    status.className = "terminal-pane-status";
-    applyPaneStatus(status, thread.status);
     var span = document.createElement("button");
     span.type = "button";
     span.className = "terminal-pane-span";
@@ -2581,7 +2602,6 @@
     header.appendChild(glyph);
     header.appendChild(label);
     header.appendChild(attention);
-    header.appendChild(status);
     header.appendChild(span);
     header.appendChild(maximize);
     header.appendChild(close);
@@ -2625,7 +2645,6 @@
     thread.host = container;
     thread.paneTitle = title;
     thread.paneMeta = meta;
-    thread.paneStatus = status;
     thread.paneSpan = span;
     thread.paneMax = maximize;
     thread.paneClose = close;
@@ -2696,17 +2715,37 @@
     thread.fit = fit;
   }
 
-  // Status never travels as colour alone: starting, exited and failed are
-  // worded chips. Running is the one exception, and only because it is the
-  // steady state of nearly every pane — it gets a static green dot, and the
-  // word stays in the title and aria-label so nothing is lost without colour.
-  function applyPaneStatus(element, status) {
-    if (!element) return;
+  function applyPaneStatus(pane, status) {
+    if (!pane) return "";
     var label = status || "";
-    element.className = "terminal-pane-status " + label;
-    element.textContent = label === "running" ? "" : label;
-    element.title = label;
-    element.setAttribute("aria-label", label);
+    var supported = label === "running" || label === "starting" ||
+      label === "failed" || label === "exited";
+    if (!supported) {
+      if (pane.dataset) delete pane.dataset.status;
+      pane.removeAttribute("aria-description");
+      return "";
+    }
+    pane.dataset.status = label;
+    pane.setAttribute("aria-description", "Status: " + label);
+    return label;
+  }
+
+  function syncPaneBranchStatusChrome(branch) {
+    if (!branch || !branch.classList ||
+        !branch.classList.contains("terminal-pane-branch")) return;
+    var pane = branch.firstElementChild;
+    var status = pane && pane.classList &&
+      pane.classList.contains("terminal-pane") && pane.dataset
+      ? pane.dataset.status || ""
+      : "";
+    var glows = status === "starting" || status === "failed" || status === "exited";
+    var needsAttention = pane && pane.classList &&
+      pane.classList.contains("needs-attention");
+    if (glows && !needsAttention) {
+      branch.dataset.status = status;
+    } else if (branch.dataset) {
+      delete branch.dataset.status;
+    }
   }
 
   function handlePanePointerDown(thread, body, close, event) {
@@ -3266,10 +3305,12 @@
     first.className = "terminal-pane-branch";
     first.style.flexGrow = String(ratio);
     first.appendChild(renderPaneNode(node.first, splitRatios));
+    syncPaneBranchStatusChrome(first);
     var second = document.createElement("div");
     second.className = "terminal-pane-branch";
     second.style.flexGrow = String(1 - ratio);
     second.appendChild(renderPaneNode(node.second, splitRatios));
+    syncPaneBranchStatusChrome(second);
     split.appendChild(first);
     split.appendChild(createPaneDivider(node, ratio));
     split.appendChild(second);
@@ -3552,8 +3593,13 @@
       thread.paneMeta.textContent = (thread.kind || "shell") + " · " +
         threadLaneLabel(thread);
     }
-    if (thread.paneStatus) {
-      applyPaneStatus(thread.paneStatus, thread.status);
+    if (thread.pane) {
+      var normalizedStatus = applyPaneStatus(thread.pane, thread.status);
+      thread.pane.setAttribute(
+        "aria-label",
+        thread.name + (normalizedStatus ? ", status " + normalizedStatus : "")
+      );
+      syncPaneBranchStatusChrome(thread.pane.parentElement);
     }
     if (typeof syncPaneFooter === "function") syncPaneFooter(thread);
     var layout = paneLayoutForThread(thread);
@@ -4750,13 +4796,22 @@
   /** The armed row's teardown, so a second row disarms the first. */
   var armedSessionClose = null;
 
-  function disarmSessionClose() {
+  function disarmSessionClose(options) {
     if (!armedSessionClose) return;
     var armed = armedSessionClose;
+    var confirmOwnedFocus = document.activeElement === armed.confirm;
     armedSessionClose = null;
     clearInterval(armed.timer);
     armed.confirm.remove();
     if (armed.close.isConnected) armed.close.hidden = false;
+    if ((!options || options.restoreFocus !== false) && confirmOwnedFocus &&
+        armed.host.isConnected) {
+      if (armed.host.dataset && armed.host.dataset.treeItem) {
+        focusSessionTreeItem(armed.host);
+      } else {
+        armed.host.focus();
+      }
+    }
   }
 
   /**
@@ -4765,31 +4820,57 @@
    * itself when the timer runs out — the guard costs nothing if you meant it
    * and everything if you didn't.
    */
-  function armSessionClose(host, close, thread) {
+  function armSessionClose(host, close, label, onConfirm) {
     disarmSessionClose();
-    var left = SESSION_CLOSE_SECONDS;
+    var expiresAt = Date.now() + SESSION_CLOSE_SECONDS * 1000;
     var confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "session-close-confirm";
     confirm.title = "Click to confirm — auto-cancels when the timer runs out";
     function paint() {
+      var left = Math.ceil(Math.max(0, expiresAt - Date.now()) / 1000);
       confirm.textContent = "Close · " + left;
-      confirm.setAttribute("aria-label", "Confirm closing " + thread.name);
+      confirm.setAttribute("aria-label", "Confirm closing " + label);
     }
     paint();
     confirm.addEventListener("click", function (event) {
       event.stopPropagation();
-      disarmSessionClose();
-      closeThread(thread.id);
+      if (Date.now() >= expiresAt) {
+        disarmSessionClose();
+        return;
+      }
+      var confirmOwnedFocus = document.activeElement === confirm;
+      var treeKey = host.dataset.treeKey || "";
+      disarmSessionClose({ restoreFocus: false });
+      var result = onConfirm();
+      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
+      Promise.resolve(result).then(function (succeeded) {
+        if (succeeded !== false) return;
+        var active = document.activeElement;
+        if (active && active !== document.body) return;
+        var items = sessionListEl.querySelectorAll("[data-tree-item]");
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].dataset.treeKey === treeKey && items[i].isConnected) {
+            focusSessionTreeItem(items[i]);
+            return;
+          }
+        }
+      });
     });
     close.hidden = true;
     host.appendChild(confirm);
     var timer = setInterval(function () {
-      left -= 1;
-      if (left <= 0) { disarmSessionClose(); return; }
+      if (Date.now() >= expiresAt) { disarmSessionClose(); return; }
       paint();
     }, 1000);
-    armedSessionClose = { timer: timer, confirm: confirm, close: close };
+    armedSessionClose = {
+      timer: timer,
+      confirm: confirm,
+      close: close,
+      host: host,
+      treeKey: host.dataset.treeKey || "",
+      expiresAt: expiresAt,
+    };
     confirm.focus();
   }
 
@@ -4855,7 +4936,7 @@
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
         if (!(await activateProjectWorktree(
-          project, existing.worktreePath, { ensureCoven: false }
+          project, existing.worktreePath
         ))) return null;
         existing = findCovenAttachment(project, session, existingId);
         if (!existing) return null;
@@ -4875,7 +4956,7 @@
     var opening = Promise.resolve().then(async function () {
       var worktree = covenWorktreeForSession(project, session);
       if (!worktree || !worktree.path) return null;
-      if (!(await activateProjectWorktree(project, worktree.path, { ensureCoven: false }))) return null;
+      if (!(await activateProjectWorktree(project, worktree.path))) return null;
       await waitForTerminalLayout();
       return createThread({
         project: project,
@@ -5390,18 +5471,23 @@
     if (editingContext && editingContext.surface === "sidebar") return;
     var now = Date.now();
     syncLocalSidebarStatusKeys(now);
-    // A re-render would strand an armed confirm on a row that no longer exists,
-    // and an armed confirm is a question the user has not answered — drop it.
-    disarmSessionClose();
+    // A re-render would strand an armed confirm on a row that no longer exists.
+    // Carry its tree identity through the rebuild so focus lands on the
+    // replacement row instead of the soon-to-be-detached host.
+    var armedCloseTreeKey = armedSessionClose &&
+      armedSessionClose.confirm.contains(document.activeElement)
+      ? armedSessionClose.treeKey
+      : "";
+    disarmSessionClose({ restoreFocus: false });
     function targetWithin(event, element) {
       for (var node = event && event.target; node; node = node.parentNode) {
         if (node === element) return true;
       }
       return false;
     }
-    var activeTreeKey = document.activeElement && document.activeElement.dataset
+    var activeTreeKey = (document.activeElement && document.activeElement.dataset
       ? document.activeElement.dataset.treeKey
-      : "";
+      : "") || armedCloseTreeKey;
     var shouldRestoreTreeFocus = Boolean(activeTreeKey);
     if (activeTreeKey) sessionTreeFocusKey = activeTreeKey;
     var focusedKey = sessionTreeFocusKey;
@@ -5621,6 +5707,7 @@
               if (rowModel.source === "coven") {
                 var attached = covenRowAttached(state, project.id, rowModel.id);
                 row.dataset.sessionId = rowModel.id;
+                row.setAttribute("aria-keyshortcuts", "Delete");
                 row.title = (attached ? "Focus attachment — " : "Attach — ") + row.title;
                 function activateCovenRow() {
                   settings.selectedSessionKey = rowModel.selectionKey;
@@ -5628,12 +5715,40 @@
                   openCovenSession(project, rowModel.value);
                 }
                 row.addEventListener("click", activateCovenRow);
+                var covenClose = document.createElement("button");
+                covenClose.type = "button";
+                covenClose.className = "session-close";
+                covenClose.title = "Stop and close " + rowModel.title;
+                covenClose.setAttribute("aria-label", covenClose.title);
+                covenClose.setAttribute("tabindex", "-1");
+                covenClose.textContent = "×";
+                function armCovenClose() {
+                  armSessionClose(row, covenClose, rowModel.title, function () {
+                    return closeCovenSession(rowModel.value);
+                  });
+                }
+                covenClose.addEventListener("click", function (event) {
+                  event.stopPropagation();
+                  armCovenClose();
+                });
+                row.addEventListener("keydown", function (event) {
+                  if (event.target !== row || document.activeElement !== row) return;
+                  if (event.key !== "Delete") return;
+                  event.preventDefault();
+                  armCovenClose();
+                });
+                row.addEventListener("contextmenu", function (event) {
+                  openSessionContextMenu(event, [
+                    { label: attached ? "Focus attachment" : "Attach", run: activateCovenRow },
+                    { label: "Stop and close", danger: true, run: armCovenClose },
+                  ]);
+                });
+                row.appendChild(covenClose);
                 categoryGroup.appendChild(wrapper);
                 return;
               }
 
               var thread = rowModel.value;
-              var onCanvas = onCanvasIds.indexOf(thread.id) !== -1;
               var picking = Boolean(setPicking);
               var picked = picking && isPicked(thread.id);
               row.dataset.threadId = thread.id;
@@ -5658,7 +5773,7 @@
                 if (event.target !== row || document.activeElement !== row) return;
                 if (event.key !== "Delete") return;
                 event.preventDefault();
-                dismissLocalRow();
+                armLocalClose();
               });
               function beginSessionRename(event) {
                 event.stopPropagation();
@@ -5720,7 +5835,7 @@
                     : null,
                   { label: "Hide", run: function () { hideThread(thread.id); } },
                   { label: "Stop and close", danger: true, run: function () {
-                      armSessionClose(row, close, thread);
+                      armLocalClose();
                     } },
                 ]);
               });
@@ -5728,24 +5843,18 @@
               var close = document.createElement("button");
               close.type = "button";
               close.className = "session-close";
-              var scopingSet = activeFocusSet();
-              var inScopingSet = Boolean(scopingSet) &&
-                scopingSet.threadIds.indexOf(thread.id) !== -1;
-              close.title = inScopingSet
-                ? "Remove from " + scopingSet.name + " — the pane stays open"
-                : onCanvas
-                  ? "Hide the pane — the session keeps running"
-                  : "Hide session";
+              close.title = "Stop and close " + thread.name;
               close.setAttribute("aria-label", close.title);
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
-              function dismissLocalRow() {
-                if (inScopingSet) removeFromFocusSet(scopingSet.id, thread.id);
-                else hideThread(thread.id);
+              function armLocalClose() {
+                armSessionClose(row, close, thread.name, function () {
+                  closeThread(thread.id);
+                });
               }
               close.addEventListener("click", function (event) {
                 event.stopPropagation();
-                dismissLocalRow();
+                armLocalClose();
               });
               row.appendChild(close);
               categoryGroup.appendChild(wrapper);
@@ -6738,7 +6847,7 @@
   }
 
   async function runNewThreadCommand() {
-    return spawnCovenThread();
+    return ensureProjectCoven(activeProject());
   }
 
   async function runNewShellCommand() {
@@ -6953,7 +7062,7 @@
     });
   }
 
-  /** `!line` runs in the nearest shell pane regardless of composer scope. */
+  /** `!line` runs in the focused shell pane, or the first open shell in the active project. */
   function runShellSigil(line) {
     if (!line) return;
     var focused = findThread(state.activeThreadId);
@@ -6988,8 +7097,17 @@
     if (trimmed[0] === "!") { runShellSigil(trimmed.slice(1).trim()); return; }
     if (trimmed[0] === "%") { runPaneSigil(trimmed.slice(1)); return; }
     if (trimmed[0] !== "/") {
-      // Not a slash command — pipe it to whatever the composer scope names.
-      sendToScope(trimmed + "\n");
+      // Not a slash command — it goes to the focused pane.
+      var focused = findThread(state.activeThreadId);
+      if (!focused) {
+        toast("No focused pane to send to");
+        return;
+      }
+      if (focused.kind === "web" || focused.status === "exited" || focused.status === "failed") {
+        toast("Focused pane cannot receive text");
+        return;
+      }
+      sendToThread(focused, trimmed + "\n");
       return;
     }
     commandHistory.push(trimmed);
@@ -7028,62 +7146,11 @@
     sendToThread(thread, text);
   }
 
-  // ---- Composer scope ----
+  // ---- Composer chrome ----
   //
-  // Plain text needs an explicit destination once several panes are visible at
-  // once, so the composer carries a scope chip: the focused pane, every pane in
-  // the project, or only the agent panes.
-  var composerScope = "pane";
-  var SCOPE_LABELS = { pane: "Pane", project: "Project", agents: "All agents" };
-
-  function scopeTargets() {
-    var project = activeProject();
-    if (composerScope === "pane") {
-      var focused = findThread(state.activeThreadId);
-      return focused ? [focused] : [];
-    }
-    return state.threads.filter(function (thread) {
-      if (!project || thread.projectId !== project.id) return false;
-      if (thread.hidden || thread.status === "exited") return false;
-      if (composerScope === "agents") return (thread.kind || "shell") !== "shell";
-      return true;
-    });
-  }
-
-  function sendToScope(text) {
-    var targets = scopeTargets();
-    if (!targets.length) {
-      toast(composerScope === "pane" ? "No focused pane to send to" : "No pane matches this scope");
-      return;
-    }
-    targets.forEach(function (thread) { sendToThread(thread, text); });
-    if (targets.length > 1) toast("Sent to " + targets.length + " panes");
-  }
-
+  // Plain text always lands in the focused pane, so the composer only has to
+  // keep the send button and its hint in step with what has been typed.
   function syncComposerChrome() {
-    var project = activeProject();
-    var focused = findThread(state.activeThreadId);
-    if (scopeBtnEl) scopeBtnEl.dataset.scope = composerScope;
-    if (scopeLabelEl) {
-      scopeLabelEl.textContent = composerScope === "pane"
-        ? "Pane · " + (focused ? focused.name : "—")
-        : composerScope === "project"
-          ? "Project · " + (project ? project.name : "—")
-          : "All agents · " + scopeTargets().length;
-    }
-    var paneDesc = document.getElementById("scope-desc-pane");
-    if (paneDesc) {
-      paneDesc.textContent = focused
-        ? "Typed into " + focused.name
-        : "Typed into the focused pane";
-    }
-    var projectDesc = document.getElementById("scope-desc-project");
-    if (projectDesc && project) projectDesc.textContent = "Every pane in " + project.name;
-    if (scopeMenuEl) {
-      Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-        item.setAttribute("aria-checked", item.dataset.scope === composerScope ? "true" : "false");
-      });
-    }
     var value = commandInput ? commandInput.value.trim() : "";
     if (composerSendEl) {
       composerSendEl.hidden = value.length === 0;
@@ -7096,29 +7163,10 @@
         : value[0] === "/" ? "runs command"
         : value[0] === "!" ? "runs in the focused terminal"
         : value[0] === "%" ? "jumps to a pane"
-        : "→ " + (SCOPE_LABELS[composerScope] || "pane").toLowerCase();
+        : "→ focused pane";
     }
   }
 
-  function closeScopeMenu() {
-    if (scopeMenuEl) scopeMenuEl.hidden = true;
-    if (scopeBtnEl) scopeBtnEl.setAttribute("aria-expanded", "false");
-  }
-  if (scopeBtnEl && scopeMenuEl) {
-    scopeBtnEl.addEventListener("click", function () {
-      var open = scopeMenuEl.hidden;
-      if (open) { closeNewPaneMenu(); hidePalette(); syncComposerChrome(); }
-      scopeMenuEl.hidden = !open;
-      scopeBtnEl.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    Array.prototype.forEach.call(scopeMenuEl.querySelectorAll("[data-scope]"), function (item) {
-      item.addEventListener("click", function () {
-        composerScope = item.dataset.scope;
-        closeScopeMenu();
-        syncComposerChrome();
-      });
-    });
-  }
   if (composerSendEl) {
     composerSendEl.addEventListener("click", function () {
       var line = commandInput.value;
@@ -7866,7 +7914,6 @@
           ? "New pane on " + worktree.branch
           : project ? "New pane in " + project.name : "New pane";
       }
-      closeScopeMenu();
     }
     newPaneMenuEl.hidden = !open;
     var trigger = document.getElementById("rail-new-tab");
@@ -7981,11 +8028,6 @@
         !event.target.closest("#rail-new-tab")) {
       closeNewPaneMenu();
     }
-    if (scopeMenuEl && !scopeMenuEl.hidden &&
-        !scopeMenuEl.contains(event.target) &&
-        !event.target.closest("#scope-btn")) {
-      closeScopeMenu();
-    }
   });
 
   // ---- Keyboard shortcuts overlay ----
@@ -8039,10 +8081,8 @@
     if (event.key === "Escape") {
       if (agentPickerOpen()) { closeAgentPicker(); return; }
       if (helpOverlayEl && !helpOverlayEl.hidden) { setHelpOpen(false); return; }
-      var menuWasOpen = (newPaneMenuEl && !newPaneMenuEl.hidden) ||
-        (scopeMenuEl && !scopeMenuEl.hidden);
+      var menuWasOpen = newPaneMenuEl && !newPaneMenuEl.hidden;
       closeNewPaneMenu();
-      closeScopeMenu();
       if (menuWasOpen) return;
       if (cancelSetPicking()) return;
       if (armedSessionClose) { disarmSessionClose(); return; }
@@ -8840,11 +8880,7 @@
         defaultPath: defaultPath,
       });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      var project = await addProject(selected);
-      if (project) {
-        var covenThread = await ensureProjectCoven(project);
-        if (covenThread) setProjectStatus(project, "ok");
-      }
+      await addProject(selected);
     } catch (err) {
       writeToActive("\r\n\x1b[31m[open-project]\x1b[0m " + err + "\r\n");
     }
@@ -8915,7 +8951,6 @@
     if (!agentPickerOpen()) agentPickerPreviousFocus = document.activeElement;
     setHelpOpen(false);
     closeNewPaneMenu();
-    closeScopeMenu();
     closeSessionContextMenu();
     agentPickerIndex = 0;
     renderAgentPicker();
@@ -8962,13 +8997,12 @@
       setStatus("Unknown agent: " + agentId, "error");
       return null;
     }
-    var command = entry.command;
     if (entry.id === "coven-code") {
-      command = state.env && state.env.coven_path;
-      if (!command) {
+      if (!state.env || !state.env.coven_path) {
         setStatus("Coven CLI not found — install @opencoven/cli and restart Psyche", "error");
         return null;
       }
+      return ensureProjectCoven(project);
     }
     if (!(await showTerminalView())) return null;
     return createThread({
@@ -8976,9 +9010,9 @@
       worktreePath: worktree.path,
       name: entry.label,
       kind: entry.kind,
-      command: command,
+      command: entry.command,
       args: entry.args.slice(),
-      launchKind: entry.kind === "coven-chat" ? entry.kind : null,
+      launchKind: null,
       projectRoot: project.root,
       cwd: worktree.path,
     });
@@ -9036,7 +9070,9 @@
     if (!worktree || !worktree.path) return Promise.resolve(null);
     var existing = state.threads.find(function (t) {
       return t.projectId === project.id && t.worktreePath === worktree.path &&
-        t.kind === "coven-chat" && t.status !== "exited" && !t.hidden;
+        t.kind === "coven-chat" &&
+        (t.status === "starting" || t.status === "running") &&
+        !t.closing && !t.hidden;
     });
     if (existing) {
       return Promise.resolve(focusThread(existing.id)).then(function () { return existing; });
@@ -9153,7 +9189,6 @@
     }
     if (!project) project = await addProject(bootRoot);
     if (project) {
-      await ensureProjectCoven(project);
       var activeTab = currentBrowserTab(project);
       if (activeTab && activeTab.created && activeTab.url && activeTab.url !== "about:blank") navigateBrowser(activeTab.url, { tabId: activeTab.id, preserveHistory: true });
       restoreProjectLayout(project);

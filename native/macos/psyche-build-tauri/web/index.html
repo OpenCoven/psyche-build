@@ -378,20 +378,6 @@
 
       <div class="footer-stack" id="footer-stack">
         <footer class="composer" id="composer">
-          <button
-            id="scope-btn"
-            class="scope-btn"
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded="false"
-            title="Choose where the composer sends text: this pane, the whole project, or every agent pane"
-          >
-            <span class="scope-kicker">To</span>
-            <span class="scope-dot" id="scope-dot"></span>
-            <span class="scope-label" id="scope-label">Pane</span>
-            <span class="scope-caret" aria-hidden="true">▾</span>
-          </button>
-
           <div class="composer-field">
             <span class="command-prompt" aria-hidden="true">›</span>
             <input
@@ -411,25 +397,21 @@
               <path d="M3.6 7.8a4.4 4.4 0 0 0 8.8 0M8 12.4V14.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
             </svg>
           </button>
+          <button id="composer-call" class="composer-btn composer-call-btn" type="button"
+                  title="Start a voice call with the focused agent" aria-label="Start a voice call">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.9c.5-.5 1.3-.5 1.8 0l.9.9c.5.5.5 1.2.1 1.7l-.5.7a.7.7 0 0 0 0 .9 12 12 0 0 0 2.6 2.6c.3.2.6.2.9 0l.7-.5c.5-.4 1.2-.4 1.7.1l.9.9c.5.5.5 1.3 0 1.8l-.6.6c-.5.5-1.2.7-1.9.4-2-.8-3.8-2-5.3-3.5S3.3 7.1 2.5 5.1c-.3-.7-.1-1.4.4-1.9z" fill="currentColor"/></svg>
+          </button>
           <button id="composer-send" class="composer-send" type="button" hidden>Send <span class="composer-send-key mono">↵</span></button>
 
-          <div class="scope-menu" id="scope-menu" role="menu" aria-label="Commands go to" hidden>
-            <div class="scope-menu-head">Commands go to</div>
-            <button class="scope-item" type="button" role="menuitem" data-scope="pane">
-              <span class="scope-dot scope-dot-pane"></span>
-              <span class="scope-item-text">Focused pane<span class="scope-item-desc" id="scope-desc-pane">Text is typed into the focused pane</span></span>
-              <span class="scope-item-key mono">⌥1</span>
-            </button>
-            <button class="scope-item" type="button" role="menuitem" data-scope="project">
-              <span class="scope-dot scope-dot-project"></span>
-              <span class="scope-item-text">Project<span class="scope-item-desc" id="scope-desc-project">Every pane in the active project</span></span>
-              <span class="scope-item-key mono">⌥2</span>
-            </button>
-            <button class="scope-item" type="button" role="menuitem" data-scope="agents">
-              <span class="scope-dot scope-dot-agents"></span>
-              <span class="scope-item-text">All agents<span class="scope-item-desc" id="scope-desc-agents">Broadcast to every agent pane</span></span>
-              <span class="scope-item-key mono">⌥3</span>
-            </button>
+          <div class="call-bar" id="call-bar" role="status" aria-live="polite" hidden>
+            <span class="call-dot" aria-hidden="true"></span>
+            <span class="call-title">Voice call — <span class="call-target" id="call-target"></span></span>
+            <span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="call-note" id="call-note"></span>
+            <span class="call-spacer"></span>
+            <span class="call-timer mono" id="call-timer">0:00</span>
+            <button id="call-mute" class="call-btn" type="button">Mute</button>
+            <button id="call-end" class="call-btn call-end" type="button">End call</button>
           </div>
 
           <div class="palette" id="palette" hidden></div>
@@ -527,51 +509,6 @@
         >
           <div class="status-more-head" id="status-more-title">Status options</div>
         </div>
-
-        <button id="composer-mic" class="composer-btn" type="button" title="Dictate a prompt (voice input)" aria-label="Start voice input">
-          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-            <rect x="6" y="1.8" width="4" height="7.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/>
-            <path d="M3.6 7.8a4.4 4.4 0 0 0 8.8 0M8 12.4V14.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button id="composer-call" class="composer-btn composer-call-btn" type="button"
-                title="Start a voice call with the focused agent" aria-label="Start a voice call">
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.9c.5-.5 1.3-.5 1.8 0l.9.9c.5.5.5 1.2.1 1.7l-.5.7a.7.7 0 0 0 0 .9 12 12 0 0 0 2.6 2.6c.3.2.6.2.9 0l.7-.5c.5-.4 1.2-.4 1.7.1l.9.9c.5.5.5 1.3 0 1.8l-.6.6c-.5.5-1.2.7-1.9.4-2-.8-3.8-2-5.3-3.5S3.3 7.1 2.5 5.1c-.3-.7-.1-1.4.4-1.9z" fill="currentColor"/></svg>
-        </button>
-        <button id="composer-send" class="composer-send" type="button" hidden>Send <span class="composer-send-key mono">↵</span></button>
-
-        <div class="scope-menu" id="scope-menu" role="menu" aria-label="Commands go to" hidden>
-          <div class="scope-menu-head">Commands go to</div>
-          <button class="scope-item" type="button" role="menuitem" data-scope="pane">
-            <span class="scope-dot scope-dot-pane"></span>
-            <span class="scope-item-text">Focused pane<span class="scope-item-desc" id="scope-desc-pane">Text is typed into the focused pane</span></span>
-            <span class="scope-item-key mono">⌥1</span>
-          </button>
-          <button class="scope-item" type="button" role="menuitem" data-scope="project">
-            <span class="scope-dot scope-dot-project"></span>
-            <span class="scope-item-text">Project<span class="scope-item-desc" id="scope-desc-project">Every pane in the active project</span></span>
-            <span class="scope-item-key mono">⌥2</span>
-          </button>
-          <button class="scope-item" type="button" role="menuitem" data-scope="agents">
-            <span class="scope-dot scope-dot-agents"></span>
-            <span class="scope-item-text">All agents<span class="scope-item-desc" id="scope-desc-agents">Broadcast to every agent pane</span></span>
-            <span class="scope-item-key mono">⌥3</span>
-          </button>
-        </div>
-
-        <div class="call-bar" id="call-bar" role="status" aria-live="polite" hidden>
-          <span class="call-dot" aria-hidden="true"></span>
-          <span class="call-title">Voice call — <span class="call-target" id="call-target"></span></span>
-          <span class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-          <span class="call-note" id="call-note"></span>
-          <span class="call-spacer"></span>
-          <span class="call-timer mono" id="call-timer">0:00</span>
-          <button id="call-mute" class="call-btn" type="button">Mute</button>
-          <button id="call-end" class="call-btn call-end" type="button">End call</button>
-        </div>
-
-        <div class="palette" id="palette" hidden></div>
-      </footer>
         <div class="status-live" id="status-live" aria-live="polite" aria-atomic="true"></div>
         <div class="status-alert" id="status-alert" role="alert"></div>
       </div>

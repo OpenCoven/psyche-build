@@ -2,9 +2,9 @@
  * COPY_PATH Action - Copy worktree path to clipboard
  */
 
-import { execSync } from 'child_process';
 import type { PsychePane } from '../../types.js';
 import type { ActionResult, ActionContext } from '../types.js';
+import { runProcess } from '../../utils/runProcess.js';
 
 /**
  * Copy worktree path to clipboard
@@ -23,7 +23,7 @@ export async function copyPath(
 
   try {
     // Try to copy to clipboard (works on macOS)
-    execSync(`echo "${pane.worktreePath}" | pbcopy`, { stdio: 'pipe' });
+    await runProcess('pbcopy', { input: pane.worktreePath });
 
     return {
       type: 'success',

@@ -3,6 +3,7 @@ import {
   insertPane,
   listLeafPaneIds,
   prunePaneLayout,
+  reconcilePaneLayout,
   removePane,
   seedPaneLayout,
   visiblePaneLayout,
@@ -77,6 +78,20 @@ describe('PaneLayoutTree', () => {
         first: { kind: 'leaf', paneId: 'psyche-1' },
         second: { kind: 'leaf', paneId: 'psyche-3' },
       },
+    });
+  });
+
+  it('adopts records added by an ownership transaction without flattening survivors', () => {
+    const layout = seedPaneLayout(['psyche-1', 'stale-pane']);
+    const reconciled = reconcilePaneLayout(layout, ['psyche-1', 'psyche-2']);
+
+    expect(listLeafPaneIds(reconciled.root)).toEqual(['psyche-1', 'psyche-2']);
+    expect(reconciled.root).toEqual({
+      kind: 'split',
+      direction: 'horizontal',
+      ratio: 0.5,
+      first: { kind: 'leaf', paneId: 'psyche-1' },
+      second: { kind: 'leaf', paneId: 'psyche-2' },
     });
   });
 });

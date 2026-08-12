@@ -5,15 +5,24 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   spawnBridgePane,
+  type BridgeSpawnDeps,
   type BridgeSpawnPromptKeysRequest,
 } from '../../src/daemon/bridge.js';
 
 let root: string;
+let nextMockPaneId = 9;
+const mockTmuxServerIdentity = {
+  pid: 4242,
+  processStartIdentity: 'mock-tmux-server-start',
+  socketPath: '/mock/tmux.sock',
+  sessionId: '$1',
+};
 
 beforeEach(() => {
+  nextMockPaneId = 9;
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psyche-spawn-transport-')));
   execSync('git init', { cwd: root, stdio: 'ignore' });
-  execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', {
+  execSync('git -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', {
     cwd: root,
     stdio: 'ignore',
   });
@@ -26,17 +35,19 @@ afterEach(() => {
 function harness() {
   const commands: string[] = [];
   const sendPromptKeys = vi.fn(async (_request: BridgeSpawnPromptKeysRequest) => {});
+  const deps: BridgeSpawnDeps = {
+    tmuxSessionExists: () => true,
+    createTmuxPane: () => `%${nextMockPaneId++}`,
+    getTmuxServerIdentity: () => mockTmuxServerIdentity,
+    sendTmuxCommand: (_paneId: string, command: string) => {
+      commands.push(command);
+    },
+    sendPromptKeys,
+  };
   return {
     commands,
     sendPromptKeys,
-    deps: {
-      tmuxSessionExists: () => true,
-      createTmuxPane: () => '%9',
-      sendTmuxCommand: (_paneId: string, command: string) => {
-        commands.push(command);
-      },
-      sendPromptKeys,
-    },
+    deps,
   };
 }
 
@@ -210,6 +221,58 @@ describe('failed lane cleanup', () => {
     expect(path.basename(result.worktreePath)).toBe('fix-auth');
     expect(result.branch).toBe('psyche/fix-auth');
   });
+
+  it('rolls back provisional ownership when post-create Git verification fails', async () => {
+    // `git worktree add` creates and registers the directory before Psyche
+    // performs its fallible branch verification. Make only that later check
+    // fail while retaining a real, removable worktree.
+    const h = harness();
+    h.deps.readCreatedWorktreeBranch = () => null;
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'verify-failure', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      h.deps,
+    )).rejects.toThrow(/failed to create scoped worktree/);
+
+    const worktreesDir = path.join(root, '.psyche', 'worktrees');
+    expect(fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir) : []).toEqual([]);
+    const branches = execSync("git for-each-ref --format='%(refname:short)' refs/heads", { cwd: root })
+      .toString().split('\n').filter(Boolean);
+    expect(branches.filter((branch) => branch.startsWith('psyche/'))).toEqual([]);
+  });
+
+  it('surfaces a guarded rollback failure to daemon callers', async () => {
+    const h = harness();
+    h.deps.createTmuxPane = (_sessionName, worktreePath) => {
+      // A concurrent owner registering the path makes rollback deliberately
+      // refuse deletion. The daemon must expose that critical condition.
+      fs.writeFileSync(
+        path.join(root, '.psyche', 'psyche.config.json'),
+        JSON.stringify({
+          panes: [{
+            id: 'concurrent-owner',
+            paneId: '%concurrent',
+            slug: 'concurrent-owner',
+            prompt: '',
+            worktreePath,
+          }],
+        }),
+        'utf8',
+      );
+      throw new Error('no space for a new pane');
+    };
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      { requestId: 'rollback-failure', cwd: root, agent: 'coven-code', prompt: 'Fix auth' },
+      h.deps,
+    )).rejects.toThrow(
+      /no space for a new pane; rollback failed: newly created worktree is referenced by current pane config/,
+    );
+  });
 });
 
 describe('shared-worktree attach', () => {
@@ -327,6 +390,34 @@ describe('shared-worktree attach', () => {
     );
     const record = config.panes.find((p: any) => p.paneId === attached.id);
     expect(record.branchName).toBe(first.branch);
+  });
+
+  it('aborts an attach when the verified worktree OID changes before persistence', async () => {
+    const first = await seedWorktree();
+    const h = harness();
+    h.deps.beforeExistingWorktreePersist = () => {
+      execSync(
+        'git -c user.email=t@t -c user.name=t commit -q --allow-empty -m changed-under-lease',
+        { cwd: first.worktreePath },
+      );
+    };
+
+    await expect(spawnBridgePane(
+      root,
+      'psyche-test',
+      {
+        requestId: 'identity-race',
+        cwd: root,
+        agent: 'claude',
+        prompt: 'Review',
+        existingWorktree: {
+          slug: path.basename(first.worktreePath),
+          worktreePath: first.worktreePath,
+          branchName: first.branch,
+        },
+      },
+      h.deps,
+    )).rejects.toMatchObject({ code: 'worktree_identity_changed' });
   });
 
   it('rejects a worktree outside the project root', async () => {

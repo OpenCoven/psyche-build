@@ -195,3 +195,40 @@ export function prunePaneLayout(
     root: pruneNode(layout.root, (paneId) => knownPaneIds.has(paneId)),
   };
 }
+
+/**
+ * Reconciliation removes records that no longer exist and adopts records
+ * added by a generation-bound lifecycle transaction that predated this
+ * layout feature. Existing topology is never flattened; adopted leaves use a
+ * deterministic trailing split until a later explicit insertion refines it.
+ */
+export function reconcilePaneLayout(
+  layout: PaneLayout,
+  knownPaneIds: readonly string[]
+): PaneLayout {
+  let reconciled = prunePaneLayout(layout, new Set(knownPaneIds));
+  const present = new Set(listLeafPaneIds(reconciled.root));
+
+  for (const paneId of knownPaneIds) {
+    if (present.has(paneId)) {
+      continue;
+    }
+    if (!reconciled.root) {
+      reconciled = {
+        version: reconciled.version,
+        root: { kind: 'leaf', paneId },
+      };
+    } else {
+      const leafIds = listLeafPaneIds(reconciled.root);
+      reconciled = insertPane(
+        reconciled,
+        leafIds[leafIds.length - 1]!,
+        paneId,
+        'horizontal'
+      );
+    }
+    present.add(paneId);
+  }
+
+  return reconciled;
+}

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   buildLaneIdsForAgents,
   buildMultiAgentTaskRequest,
@@ -8,6 +10,7 @@ import {
 import { createLocalPaneBackend } from '../src/orchestration/localPaneBackend.js';
 import { planOrchestrationTask } from '../src/orchestration/planner.js';
 import type { PsychePane } from '../src/types.js';
+import { mutateProjectPaneConfig } from '../src/services/ProjectPaneConfig.js';
 
 const ROOT = process.cwd();
 
@@ -158,6 +161,7 @@ describe('createLocalPaneBackend', () => {
       basePanes,
       availableAgents: ['codex', 'claude'],
       createPaneFn: createPaneFn as never,
+      persistOrchestrationMetadata: async (_originatingPane, nextPane) => nextPane,
     });
   }
 
@@ -173,6 +177,65 @@ describe('createLocalPaneBackend', () => {
       traceId: 'trace-1',
       mode: 'isolated-worktree',
     });
+  });
+
+  it('persists metadata as a fresh-pane delta without erasing a concurrent agent session', async () => {
+    const projectRoot = mkdtempSync(join(process.cwd(), '.psyche-orchestration-delta-'));
+    try {
+      const created = pane('psyche-1');
+      await mutateProjectPaneConfig(projectRoot, (config) => {
+        config.panes = [created];
+      });
+
+      const createPaneFn = vi.fn(async () => {
+        // Simulate StatusDetector writing after createPane persisted the pane
+        // but before the orchestrator adds lane metadata.
+        await mutateProjectPaneConfig(projectRoot, (config) => {
+          config.panes = [{
+            ...created,
+            agentSession: {
+              agent: 'codex',
+              id: 'session-42',
+              updatedAt: '2026-08-07T20:00:00.000Z',
+            },
+            daemonOnlyField: 'preserve-me',
+          } as PsychePane];
+        });
+        return {
+          pane: created,
+          needsAgentChoice: false,
+          persistedDuringLifecycle: true,
+        };
+      });
+      const backend = createLocalPaneBackend({
+        projectName: 'repo',
+        sessionProjectRoot: projectRoot,
+        basePanes: [],
+        availableAgents: ['codex'],
+        createPaneFn: createPaneFn as never,
+      });
+
+      await backend.execute(lane({ projectRoot }));
+
+      const config = JSON.parse(
+        readFileSync(join(projectRoot, '.psyche', 'psyche.config.json'), 'utf8'),
+      );
+      expect(config.panes).toEqual([
+        expect.objectContaining({
+          id: 'psyche-1',
+          agentSession: expect.objectContaining({ id: 'session-42' }),
+          daemonOnlyField: 'preserve-me',
+          orchestration: {
+            taskId: 'task-1',
+            laneId: 'codex',
+            traceId: 'trace-1',
+            mode: 'isolated-worktree',
+          },
+        }),
+      ]);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it('passes the agent slug suffix so sibling lanes get distinct slugs', async () => {

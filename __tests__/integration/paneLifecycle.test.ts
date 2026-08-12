@@ -26,19 +26,30 @@ const fsMock = vi.hoisted(() => ({
   mkdirSync: vi.fn(),
 }));
 const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
-const capturePaneInsertionMock = vi.hoisted(() => vi.fn(async () => ({
-  targetPaneId: 'psyche-existing',
-  targetTmuxPaneId: '%1',
-  direction: 'vertical' as const,
-})));
-const insertPaneIntoStoredLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
-const applyStoredPaneLayoutMock = vi.hoisted(() => vi.fn(async () => ({})));
+const runGitProcessMock = vi.hoisted(() => vi.fn());
 
 // Mock child_process
 const mockExecSync = createMockExecSync({});
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
 }));
+
+vi.mock('../../src/utils/gitProcess.js', () => ({
+  runGitProcess: runGitProcessMock,
+}));
+
+vi.mock('../../src/services/TmuxServerIdentity.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/services/TmuxServerIdentity.js')>();
+  return {
+    ...actual,
+    parseTmuxServerIdentity: vi.fn(() => ({
+      pid: 4242,
+      processStartIdentity: 'test-tmux-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$test',
+    })),
+  };
+});
 
 // Mock StateManager
 const mockGetPanes = vi.fn((): PsychePane[] => []);
@@ -59,9 +70,19 @@ vi.mock('../../src/shared/StateManager.js', () => ({
 }));
 
 // Mock hooks
+const mockTriggerHook = vi.hoisted(() => vi.fn((_eventName?: string) => Promise.resolve()));
+const mockTriggerHookSync = vi.hoisted(() => vi.fn(() => Promise.resolve({ success: true })));
+const mockAtomicWriteJsonSync = vi.hoisted(() => vi.fn());
+const writeWorktreeRecoveryMarkerMock = vi.hoisted(() => vi.fn(async () => ({
+  path: '/test/.psyche/runtime/worktree-recovery/hook-owned.json',
+  marker: {
+    operatorInstructions: 'Recover the preserved worktree before cleanup.',
+  },
+})));
+
 vi.mock('../../src/utils/hooks.js', () => ({
-  triggerHook: vi.fn(() => Promise.resolve()),
-  triggerHookSync: vi.fn(() => Promise.resolve({ success: true })),
+  triggerHook: mockTriggerHook,
+  triggerHookSync: mockTriggerHookSync,
   initializeHooksDirectory: vi.fn(),
 }));
 
@@ -78,23 +99,39 @@ vi.mock('../../src/services/LogService.js', () => ({
 }));
 
 const mockEnqueueCleanup = vi.fn();
+const mockBeginWorktreeReuseReservation = vi.fn();
+const mockRollbackCreatedWorktree = vi.fn(() => ({ success: true }));
+const mockBeginWorktreeCreation = vi.fn();
+const mockPersistReusedPane = vi.fn(async () => {});
+const mutateProjectPaneConfigMock = vi.hoisted(() => vi.fn());
+const ensureProjectPaneConfigPaneMock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   WorktreeCleanupService: {
     getInstance: vi.fn(() => ({
       enqueueCleanup: mockEnqueueCleanup,
+      beginWorktreeReuseReservation: mockBeginWorktreeReuseReservation,
+      rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+      beginWorktreeCreation: mockBeginWorktreeCreation,
     })),
   },
+}));
+
+vi.mock('../../src/services/ProjectPaneConfig.js', () => ({
+  mutateProjectPaneConfig: mutateProjectPaneConfigMock,
+  projectPaneConfigPath: (projectRoot: string) => `${projectRoot}/.psyche/psyche.config.json`,
+  ensureProjectPaneConfigPane: ensureProjectPaneConfigPaneMock,
 }));
 
 vi.mock('../../src/utils/welcomePaneManager.js', () => ({
   destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
 }));
 
-vi.mock('../../src/utils/layoutManager.js', () => ({
-  SIDEBAR_WIDTH: 40,
-  capturePaneInsertion: capturePaneInsertionMock,
-  insertPaneIntoStoredLayout: insertPaneIntoStoredLayoutMock,
-  applyStoredPaneLayout: applyStoredPaneLayoutMock,
+vi.mock('../../src/utils/atomicWrite.js', () => ({
+  atomicWriteJsonSync: mockAtomicWriteJsonSync,
+}));
+
+vi.mock('../../src/services/WorktreeRecoveryMarker.js', () => ({
+  writeWorktreeRecoveryMarker: writeWorktreeRecoveryMarkerMock,
 }));
 
 // Mock fs for reading config
@@ -113,12 +150,56 @@ describe('Pane Lifecycle Integration Tests', () => {
     // Reset all mocks
     vi.clearAllMocks();
     mockEnqueueCleanup.mockReset();
+    mockBeginWorktreeReuseReservation.mockImplementation(async (worktreePath: string) => ({
+      canonicalWorktreePath: worktreePath,
+      retain: () => {},
+      complete: async () => {},
+      cancel: async () => {},
+    }));
+    mockRollbackCreatedWorktree.mockReturnValue({ success: true });
+    mockBeginWorktreeCreation.mockImplementation(async (worktreePath: string, projectRoot: string) => ({
+      canonicalWorktreePath: worktreePath,
+      creatorNonce: 'creation-test-nonce',
+      recordCreatedWorktree: (input: any) => ({
+        canonicalWorktreePath: worktreePath,
+        creatorNonce: 'creation-test-nonce',
+        mainRepoPath: projectRoot,
+        ...input,
+      }),
+      rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+      retain: () => {},
+      complete: async () => {},
+      cancel: async () => {},
+    }));
+    mutateProjectPaneConfigMock.mockImplementation(async (
+      _projectRoot: string,
+      mutation: (config: Record<string, unknown>) => unknown | Promise<unknown>,
+    ) => {
+      const config = JSON.parse(fsMock.readFileSync()) as Record<string, unknown>;
+      const result = await mutation(config);
+      return { config, result };
+    });
+    ensureProjectPaneConfigPaneMock.mockResolvedValue(undefined);
+    mockTriggerHook.mockImplementation(() => Promise.resolve());
+    mockTriggerHookSync.mockImplementation(() => Promise.resolve({ success: true }));
+    writeWorktreeRecoveryMarkerMock.mockClear();
 
     // Create fresh test environment
     tmuxSession = createMockTmuxSession('psyche-test', 1);
     gitRepo = createMockGitRepo('main');
     createdWorktreePaths = new Set<string>();
     killedPaneIds = new Set<string>();
+    runGitProcessMock.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        const worktreePath = args[2];
+        const branchIndex = args.indexOf('-b');
+        const branchName = branchIndex >= 0 ? args[branchIndex + 1] : args[3];
+        createdWorktreePaths.add(worktreePath);
+        createdWorktreePaths.add(`${worktreePath}/.git`);
+        gitRepo = addWorktree(gitRepo, worktreePath, branchName);
+      }
+      return { exitCode: 0, stderr: '' };
+    });
 
     fsMock.existsSync.mockImplementation((target) => {
       const value = String(target);
@@ -214,6 +295,11 @@ describe('Pane Lifecycle Integration Tests', () => {
         return returnValue('/test');
       }
 
+      if (cmd.includes('rev-parse --abbrev-ref HEAD')) {
+        const worktreeName = cmd.match(/\/worktrees\/([^"]+)"/)?.[1];
+        return returnValue(worktreeName || 'main');
+      }
+
       if (cmd.includes('rev-parse')) {
         return returnValue('main');
       }
@@ -254,6 +340,45 @@ describe('Pane Lifecycle Integration Tests', () => {
       }
     });
 
+    it('uses distinct pane IDs for parallel lanes when Date.now is frozen', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      const originalExec = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (
+          command.includes('tmux display-message')
+          && command.includes('#{pane_id}')
+        ) {
+          return options?.encoding === 'utf-8' ? '%1' : Buffer.from('%1');
+        }
+        return originalExec ? originalExec(command, options) : '';
+      });
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+
+      try {
+        const [first, second] = await Promise.all([
+          createPane({
+            prompt: 'parallel first lane',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            slugBase: 'parallel-first',
+          }, ['claude']),
+          createPane({
+            prompt: 'parallel second lane',
+            agent: 'codex',
+            projectName: 'test-project',
+            existingPanes: [],
+            slugBase: 'parallel-second',
+          }, ['codex']),
+        ]);
+
+        expect(new Set([first.pane.id, second.pane.id]).size).toBe(2);
+      } finally {
+        now.mockRestore();
+        mockExecSync.mockImplementation(originalExec!);
+      }
+    });
+
     it('should scope pane border status to the current tmux session', async () => {
       const { createPane } = await import('../../src/utils/paneCreation.js');
 
@@ -291,10 +416,35 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      // Verify git worktree add was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git worktree add'),
-        expect.any(Object)
+      // TUI creation runs Git directly with an argument array rather than
+      // injecting a shell command into the new tmux pane.
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining(['worktree', 'add']),
+        '/test',
+      );
+    });
+
+    it('does not claim or roll back an external creator after direct git add fails', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      runGitProcessMock.mockImplementationOnce(async (args: string[]) => {
+        // Another process creates the planned directory after Psyche's
+        // preflight but before this child reports its exact non-zero status.
+        createdWorktreePaths.add(args[2]);
+        createdWorktreePaths.add(`${args[2]}/.git`);
+        return { exitCode: 128, stderr: 'already exists' };
+      });
+
+      await expect(createPane({
+        prompt: 'external creator race',
+        agent: 'claude',
+        projectName: 'test-project',
+        existingPanes: [],
+      }, ['claude'])).rejects.toThrow(/exit code 128/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining(['worktree', 'add']),
+        '/test',
       );
     });
 
@@ -351,6 +501,7 @@ describe('Pane Lifecycle Integration Tests', () => {
             worktreePath: existingWorktreePath,
             branchName: 'feature/resume-me',
           },
+          persistReusedPane: mockPersistReusedPane,
         },
         ['claude']
       );
@@ -364,6 +515,84 @@ describe('Pane Lifecycle Integration Tests', () => {
         expect(result.pane.branchName).toBe('feature/resume-me');
         expect(result.pane.worktreePath).toBe(existingWorktreePath);
         expect(result.pane.prompt).toBe('No initial prompt');
+      }
+    });
+
+    it('cancels blocked cleanup before awaited existing-worktree setup can persist the pane', async () => {
+      vi.useFakeTimers();
+      const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
+      let worktreeExists = true;
+      let cleanupCanceled = false;
+      let releaseCleanup!: () => void;
+      let releasePaneCreation!: () => void;
+      let signalPaneCreationStarted!: () => void;
+      const paneCreationStarted = new Promise<void>((resolve) => {
+        signalPaneCreationStarted = resolve;
+      });
+      const paneCreation = new Promise<void>((resolve) => {
+        releasePaneCreation = resolve;
+      });
+      const queuedCleanup = new Promise<void>((resolve) => {
+        releaseCleanup = () => {
+          if (!cleanupCanceled) {
+            worktreeExists = false;
+          }
+          resolve();
+        };
+      });
+
+      createdWorktreePaths.add(existingWorktreePath);
+      createdWorktreePaths.add(`${existingWorktreePath}/.git`);
+      mockBeginWorktreeReuseReservation.mockImplementation(async (
+        worktreePath: string,
+      ) => {
+        cleanupCanceled = true;
+        return {
+          canonicalWorktreePath: worktreePath,
+          retain: () => {},
+          complete: async () => {},
+          cancel: async () => {},
+        };
+      });
+      mockTriggerHook.mockImplementation((eventName) => {
+        if (eventName === 'before_pane_create') {
+          signalPaneCreationStarted();
+          return paneCreation;
+        }
+        return Promise.resolve();
+      });
+
+      try {
+        const { createPane } = await import('../../src/utils/paneCreation.js');
+        const createPromise = createPane(
+          {
+            prompt: '',
+            projectName: 'test-project',
+            existingPanes: [],
+            skipAgentSelection: true,
+            existingWorktree: {
+              slug: 'resume-me',
+              worktreePath: existingWorktreePath,
+              branchName: 'feature/resume-me',
+            },
+            persistReusedPane: mockPersistReusedPane,
+          },
+          []
+        );
+
+        await paneCreationStarted;
+        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+
+        releaseCleanup();
+        await queuedCleanup;
+        expect(worktreeExists).toBe(true);
+        expect(mockAtomicWriteJsonSync).not.toHaveBeenCalled();
+
+        releasePaneCreation();
+        await vi.runAllTimersAsync();
+        await createPromise;
+      } finally {
+        vi.useRealTimers();
       }
     });
 
@@ -416,16 +645,14 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      const splitCall = mockExecSync.mock.calls.find(([cmd]) =>
-        typeof cmd === 'string' && cmd.includes('tmux split-window')
+      expect(runGitProcessMock).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          'worktree',
+          'add',
+          '/target/repo/.psyche/worktrees/target-slug',
+        ]),
+        '/target/repo',
       );
-      expect(splitCall?.[0]).toContain('-c "/target/repo"');
-
-      const worktreeCall = mockExecSync.mock.calls.find(([cmd]) =>
-        typeof cmd === 'string' && cmd.includes('git worktree add')
-      );
-      expect(worktreeCall?.[0]).toContain('git worktree add "/target/repo/.psyche/worktrees/target-slug"');
-      expect(worktreeCall?.[1]).toMatchObject({ cwd: '/target/repo' });
     });
 
     it('should destroy the welcome pane when tracked shell panes make the pane list non-empty', async () => {
@@ -549,6 +776,7 @@ describe('Pane Lifecycle Integration Tests', () => {
               worktreePath: missingWorktreePath,
               branchName: 'does-not-exist',
             },
+            persistReusedPane: mockPersistReusedPane,
           },
           ['claude']
         )
@@ -570,6 +798,13 @@ describe('Pane Lifecycle Integration Tests', () => {
       vi.mocked(triggerHookSync).mockResolvedValueOnce({
         success: false,
         error: 'dependency install failed',
+      });
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('git show-ref --verify --quiet')) {
+          throw new Error('branch does not exist');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
       });
 
       const { createPane } = await import('../../src/utils/paneCreation.js');
@@ -595,6 +830,87 @@ describe('Pane Lifecycle Integration Tests', () => {
       // Agent launch command must never reach the pane.
       const sendKeys = getSendKeysCommands();
       expect(sendKeys.some((cmd) => cmd.includes('claude'))).toBe(false);
+
+      expect(mockRollbackCreatedWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mainRepoPath: '/test',
+          deleteBranch: true,
+        })
+      );
+    });
+
+    it('preserves a post-checkout hook commit instead of claiming rollback ownership', async () => {
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('git show-ref --verify --quiet')) {
+          throw new Error('branch does not exist');
+        }
+        if (command.includes('rev-parse --verify --end-of-options "HEAD"')) {
+          return options?.encoding === 'utf-8' ? 'before-hook\n' : Buffer.from('before-hook\n');
+        }
+        if (command.includes('rev-parse --verify --end-of-options "hook-owned"')) {
+          return options?.encoding === 'utf-8' ? 'after-hook\n' : Buffer.from('after-hook\n');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
+      });
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+        success: false,
+        error: 'later lifecycle failure',
+      });
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'post checkout hook regression',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'hook-owned',
+        },
+        ['claude'],
+      )).rejects.toThrow(/preserved hook-modified worktree and branch/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(writeWorktreeRecoveryMarkerMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          worktreePath: '/test/.psyche/worktrees/hook-owned',
+          reason: expect.stringContaining('changed from before-hook to after-hook'),
+        }),
+      );
+    });
+
+    it('does not roll back a reused worktree when the worktree_created hook fails', async () => {
+      const existingWorktreePath = '/test/.psyche/worktrees/resume-me';
+      createdWorktreePaths.add(existingWorktreePath);
+      createdWorktreePaths.add(`${existingWorktreePath}/.git`);
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+        success: false,
+        error: 'dependency install failed',
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(
+        createPane(
+          {
+            prompt: 'resume work',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            existingWorktree: {
+              slug: 'resume-me',
+              worktreePath: existingWorktreePath,
+              branchName: 'feature/resume-me',
+            },
+            persistReusedPane: mockPersistReusedPane,
+          },
+          ['claude']
+        )
+      ).rejects.toThrow(/worktree_created hook failed/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
     });
 
     it('runs worktree_created hook before launching the agent', async () => {
@@ -639,6 +955,151 @@ describe('Pane Lifecycle Integration Tests', () => {
       expect(agentIdx).toBeGreaterThanOrEqual(0);
       expect(hookIdx).toBeLessThan(agentIdx);
     });
+
+    it('kills and rolls back a created pane when persistence fails before launch', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'persist before launch',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          persistCreatedPane: async () => {
+            throw new Error('config disk unavailable');
+          },
+        },
+        ['claude']
+      )).rejects.toThrow(/Failed to persist pane/);
+
+      expect(mockRollbackCreatedWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mainRepoPath: '/test',
+          creatorNonce: 'creation-test-nonce',
+        })
+      );
+      expect(
+        getKillPaneCommands().some((cmd) => cmd.includes('%1'))
+      ).toBe(true);
+      expect(
+        getSendKeysCommands().some((cmd) => cmd.includes('claude'))
+      ).toBe(false);
+    });
+
+    it('persists a recovery record and blocks rollback when tmux absence is unknown', async () => {
+      const originalImpl = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        if (command.includes('tmux list-panes -a -F')) {
+          throw new Error('tmux list-panes timed out');
+        }
+        return originalImpl ? originalImpl(command, options) : '';
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(createPane(
+        {
+          prompt: 'persist recovery record',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          persistCreatedPane: async () => {
+            throw new Error('config disk unavailable');
+          },
+        },
+        ['claude'],
+      )).rejects.toThrow(/retained recovery record.*Recovery required/);
+
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(ensureProjectPaneConfigPaneMock).toHaveBeenCalledWith(
+        '/test',
+        expect.objectContaining({
+          paneId: '%1',
+          worktreePath: expect.stringContaining('/.psyche/worktrees/'),
+        }),
+      );
+    });
+
+    it('does not let a second creator roll back the winner for the same planned worktree', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      let allowWinnerPersistence!: () => void;
+      let signalWinnerPersistence!: () => void;
+      let releaseWinnerLease!: () => void;
+      const winnerPersistence = new Promise<void>((resolve) => {
+        allowWinnerPersistence = resolve;
+      });
+      const winnerPersisting = new Promise<void>((resolve) => {
+        signalWinnerPersistence = resolve;
+      });
+      const winnerLeaseReleased = new Promise<void>((resolve) => {
+        releaseWinnerLease = resolve;
+      });
+      const reservation = (nonce: string, waitForWinner = false) => ({
+        canonicalWorktreePath: '/test/.psyche/worktrees/racing-creator',
+        creatorNonce: nonce,
+        recordCreatedWorktree: (input: any) => ({
+          canonicalWorktreePath: '/test/.psyche/worktrees/racing-creator',
+          creatorNonce: nonce,
+          mainRepoPath: '/test',
+          ...input,
+        }),
+        rollbackCreatedWorktree: mockRollbackCreatedWorktree,
+        complete: async () => {
+          if (!waitForWinner) {
+            releaseWinnerLease();
+          }
+        },
+        cancel: async () => {
+          if (!waitForWinner) {
+            releaseWinnerLease();
+          }
+        },
+      });
+
+      mockRollbackCreatedWorktree.mockClear();
+      mockBeginWorktreeCreation
+        .mockImplementationOnce(async () => reservation('winner-nonce'))
+        .mockImplementationOnce(async () => {
+          await winnerLeaseReleased;
+          return reservation('loser-nonce', true);
+        });
+
+      const winner = createPane(
+        {
+          prompt: 'winner',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'racing-creator',
+          persistCreatedPane: async () => {
+            signalWinnerPersistence();
+            await winnerPersistence;
+          },
+        },
+        ['claude']
+      );
+      await winnerPersisting;
+
+      const loser = createPane(
+        {
+          prompt: 'loser',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'racing-creator',
+          persistCreatedPane: async () => {},
+        },
+        ['claude']
+      );
+
+      allowWinnerPersistence();
+      await winner;
+      await expect(loser).rejects.toThrow(/Planned worktree path already exists/);
+      expect(mockRollbackCreatedWorktree).not.toHaveBeenCalled();
+      expect(
+        createdWorktreePaths.has('/test/.psyche/worktrees/racing-creator')
+      ).toBe(true);
+    });
   });
 
   describe('Pane Closure Flow', () => {
@@ -658,6 +1119,11 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
       };
 
       const result = await closePane(testPane, mockContext);
@@ -676,12 +1142,19 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should kill tmux pane when closing', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       const testPane: PsychePane = {
         id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -690,6 +1163,12 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -710,12 +1189,19 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should queue worktree cleanup with kill_and_clean option', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       const testPane: PsychePane = {
         id: 'psyche-1',
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -724,6 +1210,12 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -744,6 +1236,12 @@ describe('Pane Lifecycle Integration Tests', () => {
 
     it('should handle background cleanup enqueue failure gracefully', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
+      const tmuxServerIdentity = {
+        pid: 4242,
+        processStartIdentity: 'test-tmux-server-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$test',
+      };
 
       mockEnqueueCleanup.mockImplementation(() => {
         throw new Error('enqueue failed');
@@ -754,6 +1252,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         slug: 'test-branch',
         prompt: 'test',
         paneId: '%1',
+        tmuxServerIdentity,
         worktreePath: '/test/.psyche/worktrees/test-branch',
       };
 
@@ -762,6 +1261,12 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
+        removePaneIdentitiesFromConfig: vi.fn(async (_identities, beforeRemove) => {
+          await beforeRemove?.();
+          return [];
+        }),
+        getTmuxServerIdentity: () => tmuxServerIdentity,
       };
 
       mockGetPanes.mockReturnValue([testPane]);
@@ -794,6 +1299,7 @@ describe('Pane Lifecycle Integration Tests', () => {
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
+        removePaneFromConfig: vi.fn(async () => []),
       };
 
       mockGetPanes.mockReturnValue([testPane]);

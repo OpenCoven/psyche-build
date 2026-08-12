@@ -1,10 +1,13 @@
 import { execSync } from 'child_process';
-import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { LogService } from './LogService.js';
-import { atomicWriteJson } from '../utils/atomicWrite.js';
+import {
+  mutateProjectPaneUpdateSettings,
+  projectRootFromPaneConfigPath,
+  readProjectPaneConfig,
+} from './ProjectPaneConfig.js';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +47,16 @@ interface UpdateSettings {
   cachedHasUpdate?: boolean;
 }
 
+const UPDATE_SETTING_KEYS: ReadonlySet<keyof UpdateSettings> = new Set([
+  'lastCheckTime',
+  'checkIntervalHours',
+  'skipVersion',
+  'autoUpdateEnabled',
+  'cachedCurrentVersion',
+  'cachedLatestVersion',
+  'cachedHasUpdate',
+]);
+
 export class AutoUpdater {
   private configFile: string;
   private checkIntervalMs: number = 24 * 60 * 60 * 1000; // 24 hours
@@ -55,9 +68,12 @@ export class AutoUpdater {
 
   async loadSettings(): Promise<UpdateSettings> {
     try {
-      const content = await fs.readFile(this.configFile, 'utf-8');
-      const config = JSON.parse(content);
-      return config.updateSettings || {
+      const config = await readProjectPaneConfig(this.projectRoot());
+      const settings = config.updateSettings;
+      if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+        return settings as UpdateSettings;
+      }
+      return {
         checkIntervalHours: 24,
         autoUpdateEnabled: true
       };
@@ -71,17 +87,14 @@ export class AutoUpdater {
   }
 
   async saveSettings(settings: UpdateSettings): Promise<void> {
-    let config: any = {};
-    try {
-      const content = await fs.readFile(this.configFile, 'utf-8');
-      config = JSON.parse(content);
-    } catch {
-      // Expected - config file may not exist yet
-    }
-    
-    config.updateSettings = settings;
-    config.lastUpdated = new Date().toISOString();
-    await atomicWriteJson(this.configFile, config);
+    await mutateProjectPaneUpdateSettings(this.projectRoot(), (currentSettings) => {
+      for (const key of UPDATE_SETTING_KEYS) {
+        if (!(key in settings)) {
+          delete currentSettings[key];
+        }
+      }
+      Object.assign(currentSettings, settings);
+    });
   }
 
   async shouldCheckForUpdates(): Promise<boolean> {
@@ -342,5 +355,15 @@ export class AutoUpdater {
     const settings = await this.loadSettings();
     settings.autoUpdateEnabled = enabled;
     await this.saveSettings(settings);
+  }
+
+  private projectRoot(): string {
+    const projectRoot = projectRootFromPaneConfigPath(this.configFile);
+    if (!projectRoot) {
+      throw new Error(
+        `AutoUpdater requires the shared project pane config path: ${this.configFile}`,
+      );
+    }
+    return projectRoot;
   }
 }

@@ -75,7 +75,7 @@ export async function renamePane(
         );
 
         persistWorktreeDisplayName(pane, nextDisplayName);
-        await context.savePanes(updatedPanes);
+        await context.savePanes(updatedPanes, context.panes);
         try {
           const sessionProjectRoot = StateManager.getInstance().getState().projectRoot;
           await TmuxService.getInstance().setPaneTitle(

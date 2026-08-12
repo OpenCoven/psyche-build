@@ -1,10 +1,7 @@
-import fs from 'fs';
-import path from 'path';
 import type { PsycheConfig, PsycheThemeName } from '../types.js';
 import { createWelcomePane, welcomePaneExists, destroyWelcomePane } from './welcomePane.js';
 import { LogService } from '../services/LogService.js';
-import { atomicWriteJsonSync } from './atomicWrite.js';
-import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
+import { mutateProjectPaneConfig } from '../services/ProjectPaneConfig.js';
 import { SIDEBAR_WIDTH } from './layoutManager.js';
 
 // Global lock to prevent concurrent welcome pane operations
@@ -41,99 +38,33 @@ function releaseCreationLock(): void {
   lastCreationTime = Date.now();
 }
 
-async function destroyWelcomePaneWithConfigLockHeld(
-  projectRoot: string
-): Promise<boolean> {
-  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
-
-  if (!fs.existsSync(configPath)) {
-    return true; // No config, nothing to destroy
-  }
-
-  const configContent = fs.readFileSync(configPath, 'utf-8');
-  const config: PsycheConfig = JSON.parse(configContent);
-
-  if (config.welcomePaneId) {
-    await destroyWelcomePane(config.welcomePaneId);
-
-    // Clear from config (use atomic write to prevent race conditions)
-    delete config.welcomePaneId;
-    config.lastUpdated = new Date().toISOString();
-    atomicWriteJsonSync(configPath, config);
-
-    // DO NOT recalculate layout here - layout was already calculated in paneCreation.ts
-    // before this function was called. Recalculating now would cause a mismatch because
-    // tmux still has 3 panes (sidebar, welcome being destroyed, new content) but we'd
-    // calculate for 2 panes (sidebar, new content).
-    // The layout application in paneCreation.ts already accounts for the correct final state.
-  }
-
-  return true;
-}
-
 /**
  * Destroy the welcome pane if it exists
  * This should be called when creating the first content pane
+ * NO LOCK - destruction is always allowed and takes priority
  *
  * @param projectRoot - The project root directory
  * @returns true if destroyed successfully or no pane to destroy
  */
 export async function destroyWelcomePaneCoordinated(projectRoot: string): Promise<boolean> {
   const logService = LogService.getInstance();
-  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
 
   try {
-    return await withPanesConfigFileWriteLock(configPath, () =>
-      destroyWelcomePaneWithConfigLockHeld(projectRoot)
-    );
+    await mutateProjectPaneConfig(projectRoot, async (configRecord) => {
+      const config = configRecord as unknown as PsycheConfig;
+      if (!config.welcomePaneId) {
+        return;
+      }
+
+      await destroyWelcomePane(config.welcomePaneId);
+      delete config.welcomePaneId;
+      config.lastUpdated = new Date().toISOString();
+    });
+    return true;
   } catch (error) {
     logService.error('Failed to destroy welcome pane', 'WelcomePaneManager', undefined, error instanceof Error ? error : undefined);
     return false;
   }
-}
-
-async function createWelcomePaneWithConfigLockHeld(
-  projectRoot: string,
-  controlPaneId: string,
-  themeName?: PsycheThemeName,
-  sidebarWidth?: number
-): Promise<boolean> {
-  const logService = LogService.getInstance();
-  const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
-
-  if (!fs.existsSync(configPath)) {
-    logService.debug('Config file not found', 'WelcomePaneManager');
-    return false;
-  }
-
-  const configContent = fs.readFileSync(configPath, 'utf-8');
-  const config: PsycheConfig = JSON.parse(configContent);
-
-  // Check if we already have a valid welcome pane
-  if (config.welcomePaneId && await welcomePaneExists(config.welcomePaneId)) {
-    return true; // Already exists, that's fine
-  }
-
-  // Create the welcome pane
-  const effectiveSidebarWidth = sidebarWidth ?? (typeof config.controlPaneSize === 'number'
-    ? config.controlPaneSize
-    : SIDEBAR_WIDTH);
-  const welcomePaneId = await createWelcomePane(
-    controlPaneId,
-    projectRoot,
-    themeName,
-    effectiveSidebarWidth
-  );
-
-  if (welcomePaneId) {
-    // Update config with new welcome pane ID (use atomic write)
-    config.welcomePaneId = welcomePaneId;
-    config.lastUpdated = new Date().toISOString();
-    atomicWriteJsonSync(configPath, config);
-    return true;
-  }
-
-  return false;
 }
 
 /**
@@ -149,7 +80,7 @@ export async function createWelcomePaneCoordinated(
   projectRoot: string,
   controlPaneId: string,
   themeName?: PsycheThemeName,
-  sidebarWidth?: number
+  sidebarWidth?: number,
 ): Promise<boolean> {
   const logService = LogService.getInstance();
 
@@ -160,15 +91,33 @@ export async function createWelcomePaneCoordinated(
   }
 
   try {
-    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
-    return await withPanesConfigFileWriteLock(configPath, () =>
-      createWelcomePaneWithConfigLockHeld(
-        projectRoot,
+    let created = false;
+    await mutateProjectPaneConfig(projectRoot, async (configRecord) => {
+      const config = configRecord as unknown as PsycheConfig;
+      if (config.welcomePaneId && await welcomePaneExists(config.welcomePaneId)) {
+        created = true;
+        return;
+      }
+
+      const effectiveSidebarWidth = sidebarWidth
+        ?? (typeof config.controlPaneSize === 'number'
+          ? config.controlPaneSize
+          : SIDEBAR_WIDTH);
+      const welcomePaneId = await createWelcomePane(
         controlPaneId,
+        projectRoot,
         themeName,
-        sidebarWidth
-      )
-    );
+        effectiveSidebarWidth,
+      );
+      if (!welcomePaneId) {
+        return;
+      }
+
+      config.welcomePaneId = welcomePaneId;
+      config.lastUpdated = new Date().toISOString();
+      created = true;
+    });
+    return created;
   } catch (error) {
     logService.error('Failed to create welcome pane', 'WelcomePaneManager', undefined, error instanceof Error ? error : undefined);
     return false;
@@ -190,35 +139,46 @@ export async function syncWelcomePaneVisibility(
   const logService = LogService.getInstance();
 
   try {
-    const configPath = path.join(projectRoot, '.psyche', 'psyche.config.json');
-    return await withPanesConfigFileWriteLock(configPath, async () => {
-      if (!fs.existsSync(configPath)) {
-        return false;
-      }
-
-      const configContent = fs.readFileSync(configPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configContent);
-      const hasLiveWelcomePane = config.welcomePaneId
-        ? await welcomePaneExists(config.welcomePaneId)
+    let synchronized = false;
+    await mutateProjectPaneConfig(projectRoot, async (configRecord) => {
+      const config = configRecord as unknown as PsycheConfig;
+      const welcomePaneId = config.welcomePaneId;
+      const hasLiveWelcomePane = welcomePaneId
+        ? await welcomePaneExists(welcomePaneId)
         : false;
 
-      if (!shouldShowWelcome) {
-        return destroyWelcomePaneWithConfigLockHeld(projectRoot);
-      }
-      if (hasLiveWelcomePane) {
-        return true;
-      }
-      if (!tryAcquireCreationLock()) {
-        logService.debug('Could not acquire creation lock (debounce active)', 'WelcomePaneManager');
-        return false;
+      if (shouldShowWelcome) {
+        if (hasLiveWelcomePane) {
+          synchronized = true;
+          return;
+        }
+
+        const sidebarWidth = typeof config.controlPaneSize === 'number'
+          ? config.controlPaneSize
+          : SIDEBAR_WIDTH;
+        const createdPaneId = await createWelcomePane(
+          controlPaneId,
+          projectRoot,
+          themeName,
+          sidebarWidth,
+        );
+        if (!createdPaneId) {
+          return;
+        }
+        config.welcomePaneId = createdPaneId;
+        config.lastUpdated = new Date().toISOString();
+        synchronized = true;
+        return;
       }
 
-      try {
-        return await createWelcomePaneWithConfigLockHeld(projectRoot, controlPaneId, themeName);
-      } finally {
-        releaseCreationLock();
+      if (hasLiveWelcomePane && welcomePaneId) {
+        await destroyWelcomePane(welcomePaneId);
       }
+      delete config.welcomePaneId;
+      config.lastUpdated = new Date().toISOString();
+      synchronized = true;
     });
+    return synchronized;
   } catch (error) {
     logService.error(
       'Failed to sync welcome pane visibility',

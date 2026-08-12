@@ -185,10 +185,28 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(mainJs).toContain('row.setAttribute("aria-keyshortcuts", "Delete")');
     expect(mainJs).toContain('close.setAttribute("tabindex", "-1")');
     expect(mainJs).toContain('if (event.key !== "Delete") return;');
-    expect(mainJs).toContain('dismissLocalRow();');
+    expect(mainJs).toContain('armLocalClose();');
+    expect(mainJs).not.toContain('dismissLocalRow');
     expect(mainJs).toContain('if (index === -1) return;');
     expect(mainJs).toContain('session-attention-badge');
     expect(styles).toMatch(/\.session-attention-badge\s*\{/);
+
+    const closeRule = styles.match(/\.session-close\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(closeRule).toMatch(/opacity:\s*1;/);
+    expect(styles).not.toMatch(
+      /\.session-row-wrap:(?:hover|focus-within)\s+\.session-close[^}]*opacity:/,
+    );
+    expect(styles).not.toMatch(/\.session-close:focus-visible\s*\{[^}]*opacity:/);
+
+    const renderSessionList = functionSource(mainJs, 'renderSessionList');
+    expect(renderSessionList).toContain('function armLocalClose()');
+    expect(renderSessionList).toContain(
+      'armSessionClose(row, close, thread.name, function () {',
+    );
+    expect(renderSessionList).toContain('closeThread(thread.id);');
+    expect(renderSessionList).toContain(
+      '{ label: "Hide", run: function () { hideThread(thread.id); } },',
+    );
   });
 
   it('wires visit-local search, persisted filters, summaries, and shortcut guidance', () => {

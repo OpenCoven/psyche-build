@@ -2,12 +2,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { acquireProjectWorktreeLifecycleLease } from '../src/services/WorktreeOperationLease.js';
 
 const execMock = vi.hoisted(() => vi.fn());
 const execSyncMock = vi.hoisted(() => vi.fn());
 const createPaneMock = vi.hoisted(() => vi.fn());
 const triggerHookMock = vi.hoisted(() => vi.fn(async () => {}));
 const writeWorktreeMetadataMock = vi.hoisted(() => vi.fn());
+const runGitMutationWithSupervisorMock = vi.hoisted(() => vi.fn());
 
 vi.mock('child_process', () => ({
   exec: execMock,
@@ -32,6 +34,12 @@ vi.mock('../src/utils/settingsManager.js', () => ({
       permissionMode: 'plan',
     })),
   })),
+}));
+
+vi.mock('../src/services/GitMutationSupervisor.js', () => ({
+  runGitMutationWithSupervisor: (...args: unknown[]) => (
+    runGitMutationWithSupervisorMock(...args)
+  ),
 }));
 
 function createTempRepoDir(prefix: string): string {
@@ -75,6 +83,27 @@ function installGitCommandMock(
 
     return {} as any;
   });
+
+  runGitMutationWithSupervisorMock.mockImplementation(async ({
+    cwd,
+    args,
+  }: {
+    cwd: string;
+    args: string[];
+  }) => new Promise((resolve, reject) => {
+    const command = `git ${args.map((arg) => `'${arg.replace(/'/g, "'\\''")}'`).join(' ')}`;
+    execMock(
+      command,
+      { cwd, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 },
+      (error: Error | null, _stdout?: string, stderr?: string) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ exitCode: 0, stderr: stderr || '' });
+      },
+    );
+  }));
 }
 
 describe('resumeBranches', () => {
@@ -381,6 +410,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     const rootWorktreePath = path.join(rootRepo, '.psyche', 'worktrees', 'remote-shared');
@@ -440,6 +470,9 @@ describe('resumeBranches', () => {
           worktreePath: rootWorktreePath,
           branchName: 'feature/remote-shared',
         },
+        projectLifecycleLease: expect.objectContaining({
+          canonicalProjectRoot: fs.realpathSync(rootRepo),
+        }),
       }),
       ['codex']
     );
@@ -536,6 +569,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     const rootWorktreePath = path.join(rootRepo, '.psyche', 'worktrees', 'react');
@@ -660,6 +694,7 @@ describe('resumeBranches', () => {
       existingPanes: [],
       sessionConfigPath: path.join(rootRepo, '.psyche', 'psyche.config.json'),
       sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
     });
 
     expect(createdPaths).toEqual([]);
@@ -682,5 +717,82 @@ describe('resumeBranches', () => {
         PSYCHE_WORKTREE_PATH: childWorktreePath,
       })
     );
+  });
+
+  it('waits for cleanup before creating either root or child resume worktrees', async () => {
+    const createdPaths: string[] = [];
+    createPaneMock.mockResolvedValue({
+      pane: {
+        id: 'psyche-1',
+        slug: 'resume-safe',
+        branchName: 'resume-safe',
+        prompt: 'No initial prompt',
+        paneId: '%1',
+        projectRoot: rootRepo,
+        projectName: path.basename(rootRepo),
+        worktreePath: path.join(rootRepo, '.psyche', 'worktrees', 'resume-safe'),
+      },
+      needsAgentChoice: false,
+    });
+    installGitCommandMock((command: string, options?: { cwd?: string; encoding?: string }) => {
+      const output = (value: string) => options?.encoding ? value : Buffer.from(value);
+      if (command.includes("'rev-parse' '--abbrev-ref' '--symbolic-full-name'")) {
+        return output('');
+      }
+      if (command.includes("'branch' '--show-current'")) {
+        return output('main');
+      }
+      if (command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/heads'")) {
+        return output('main');
+      }
+      if (command.includes("'for-each-ref' '--format=%(refname:short)' 'refs/remotes/origin'")) {
+        return output('');
+      }
+      if (command.includes("'fetch' '--prune' 'origin'")) {
+        return output('');
+      }
+      if (command.includes("'symbolic-ref' 'refs/remotes/origin/HEAD'")) {
+        return output('refs/remotes/origin/main');
+      }
+      if (command.includes("'worktree' 'prune'") || command.includes("'branch' 'resume-safe' 'main'")) {
+        return output('');
+      }
+      if (command.includes("'worktree' 'add'")) {
+        const match = command.match(/'worktree' 'add' '([^']+)' 'resume-safe'/);
+        if (match) {
+          const worktreePath = match[1]!;
+          createdPaths.push(worktreePath);
+          fs.mkdirSync(worktreePath, { recursive: true });
+          fs.writeFileSync(path.join(worktreePath, '.git'), 'gitdir: /tmp/resume-safe\n');
+        }
+        return output('');
+      }
+      return output('');
+    });
+
+    const cleanupLease = await acquireProjectWorktreeLifecycleLease({
+      projectRoot: rootRepo,
+      operation: 'cleanup',
+    });
+    const { resumeBranchWorkspace } = await import('../src/utils/resumeBranches.js');
+    const resuming = resumeBranchWorkspace({
+      agent: 'codex',
+      branchName: 'resume-safe',
+      projectRoot: rootRepo,
+      existingPanes: [],
+      sessionProjectRoot: rootRepo,
+      persistReusedPane: vi.fn(async () => {}),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(createdPaths).toEqual([]);
+
+    await cleanupLease.release();
+    await resuming;
+
+    expect(createdPaths).toEqual([
+      path.join(rootRepo, '.psyche', 'worktrees', 'resume-safe'),
+      path.join(rootRepo, '.psyche', 'worktrees', 'resume-safe', 'child-repo'),
+    ]);
   });
 });

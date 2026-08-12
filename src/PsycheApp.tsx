@@ -23,12 +23,7 @@ import useCovenSessions from "./hooks/useCovenSessions.js"
 import useCovenDesktopUse from "./hooks/useCovenDesktopUse.js"
 
 // Utils
-import {
-  capturePaneInsertion,
-  insertPaneIntoStoredLayout,
-  SIDEBAR_WIDTH,
-} from "./utils/layoutManager.js"
-import { rollbackLocalPaneCreation } from "./utils/localPaneCreationRollback.js"
+import { SIDEBAR_WIDTH } from "./utils/layoutManager.js"
 import { ensureMouseMode, supportsPopups } from "./utils/popup.js"
 import {
   StateManager,
@@ -37,7 +32,6 @@ import {
 } from "./shared/StateManager.js"
 import { normalizeCovenSessionsForPublication } from "./workspace/tuiSnapshot.js"
 import {
-  ANIMATION_DELAY,
   STATUS_MESSAGE_DURATION_SHORT,
 } from "./constants/timing.js"
 import {
@@ -83,7 +77,6 @@ import {
   getSidePanelWidth,
   shouldAutoCollapseSidePanel,
   shouldUseCompactSidePanel,
-  SIDE_PANEL_EXPAND_GLYPH,
 } from "./utils/sidePanel.js"
 
 const __filename = fileURLToPath(import.meta.url)
@@ -146,13 +139,14 @@ import {
   getNextPsycheId,
 } from "./utils/shellPaneDetection.js"
 import type { InlineRenameState } from "./utils/inlineRename.js"
+import { createTransactionalPane } from "./utils/transactionalPaneCreation.js"
 
 const SidePanelRail: React.FC = () => (
   <Box flexDirection="column" width={4} alignItems="center">
     <Text color={COLORS.accent} bold>≡</Text>
     <Text color={COLORS.border}>│</Text>
     <Text color={COLORS.border}>│</Text>
-    <Text color={COLORS.accent}>{SIDE_PANEL_EXPAND_GLYPH}</Text>
+    <Text color={COLORS.accent}>›</Text>
   </Box>
 )
 
@@ -174,7 +168,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   /* panes state moved to usePanes */
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null)
-  const selectedPaneIdRef = useRef<string | undefined>(undefined)
   const { statusMessage, setStatusMessage } = useStatusMessages()
   const [isCreatingPane, setIsCreatingPane] = useState(false)
   const {
@@ -374,7 +367,9 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     isLoading,
     loadPanes,
     savePanes,
-    appendPanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
     saveSidebarProjects,
     eventMode,
   } = usePanes(
@@ -382,10 +377,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     false,
     sessionName,
     controlPaneId,
-    useHooks,
-    sidePanelWidth,
-    focusedPaneId,
-    selectedPaneIdRef
+    useHooks
   )
   const covenSessionsState = useCovenSessions(
     sessionProjectRoot,
@@ -506,7 +498,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     projectSettings,
     setStatusMessage,
     setRunningCommand,
-    sidebarWidth: sidePanelWidth,
+    refreshPanes: loadPanes,
   })
 
   // Spinner animation and branch detection now handled in hooks
@@ -518,7 +510,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   } = usePaneCreation({
     panes,
     savePanes,
-    appendPanes,
     projectName,
     sessionProjectRoot: projectRoot || process.cwd(),
     panesFile,
@@ -526,7 +517,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     setStatusMessage,
     loadPanes,
     availableAgents,
-    sidebarWidth: sidePanelWidth,
   })
 
   // Initialize services
@@ -705,7 +695,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
 
     return undefined
   }, [projectActionLayout.groups, selectedIndex])
-  selectedPaneIdRef.current = selectedPane?.id
   const selectedProjectRoot = useMemo(() => {
     if (selectedPane) {
       return getPaneProjectRoot(selectedPane, sessionProjectRoot)
@@ -961,17 +950,14 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         return
       }
 
-      const focusedIndex = panes.findIndex((pane) => pane.paneId === focusedPaneId)
-      if (focusedIndex === -1) {
-        // An externally-created shell becomes active before detection can
-        // assign Psyche metadata. Keep the last known content focus so the
-        // detector inserts that shell beside it.
-        return
-      }
-
       setFocusedPaneId((currentPaneId) =>
         currentPaneId === focusedPaneId ? currentPaneId : focusedPaneId
       )
+
+      const focusedIndex = panes.findIndex((pane) => pane.paneId === focusedPaneId)
+      if (focusedIndex === -1) {
+        return
+      }
 
       setSelectedIndex((currentIndex) =>
         currentIndex === focusedIndex ? currentIndex : focusedIndex
@@ -1013,6 +999,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   }, [eventMode, panes.length, syncSelectedIndexToFocusedPane])
 
   // savePanes moved to usePanes
+
+  // applySmartLayout moved to utils/tmux
 
   // Helper function to handle agent choice and pane creation
   const selectAgentsForPaneCreation = async (
@@ -1101,63 +1089,41 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setStatusMessage("Creating ritual terminal pane...")
 
       const tmuxService = TmuxService.getInstance()
-      const insertion = controlPaneId
-        ? await capturePaneInsertion({
-            panesFile,
-            panes: existingPanes,
-            focusedTmuxPaneId: focusedPaneId,
-            selectedPaneId: selectedPane?.id,
-          })
-        : undefined
-      if (!insertion && existingPanes.some((pane) => !pane.hidden)) {
-        throw new Error("Pane layout has no visible insertion target")
-      }
-      const newPaneId = await tmuxService.splitPane({
-        ...(insertion ? { targetPane: insertion.targetTmuxPaneId } : {}),
-        cwd: targetProjectRoot,
+      const shellPane = await createTransactionalPane({
+        projectRoot: targetProjectRoot,
+        sessionProjectRoot,
+        operation: "ritual-terminal-pane",
+        tmuxService,
+        allocate: () => tmuxService.splitPane({ cwd: targetProjectRoot }),
+        createPane: async ({ paneId, tmuxServerIdentity }) => {
+          const pane = await createShellPane(
+            paneId,
+            getNextPsycheId(existingPanes),
+            undefined,
+            { tmuxServerIdentity, setPaneTitle: false },
+          )
+          if (ritualPane?.name?.trim()) {
+            pane.displayName = ritualPane.name.trim()
+          }
+          pane.projectRoot = targetProjectRoot
+          pane.projectName = basename(targetProjectRoot)
+          pane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
+          return pane
+        },
+        persist: (pane) => savePanes([...existingPanes, pane], existingPanes),
+        activate: async (pane) => {
+          await tmuxService.setPaneTitle(
+            pane.paneId,
+            pane.displayName
+              ? getPaneTmuxTitle(pane, targetProjectRoot, pane.projectName)
+              : pane.slug,
+          )
+          if (ritualPane?.command?.trim()) {
+            await tmuxService.sendShellCommand(pane.paneId, ritualPane.command.trim())
+            await tmuxService.sendTmuxKeys(pane.paneId, "Enter")
+          }
+        },
       })
-      await new Promise((resolve) => setTimeout(resolve, ANIMATION_DELAY))
-
-      const shellPane = await createShellPane(
-        newPaneId,
-        getNextPsycheId(existingPanes)
-      )
-      if (ritualPane?.name?.trim()) {
-        shellPane.displayName = ritualPane.name.trim()
-      }
-      shellPane.projectRoot = targetProjectRoot
-      shellPane.projectName = basename(targetProjectRoot)
-      shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
-
-      if (shellPane.displayName) {
-        await tmuxService.setPaneTitle(
-          newPaneId,
-          getPaneTmuxTitle(shellPane, targetProjectRoot, shellPane.projectName)
-        )
-      }
-
-      if (ritualPane?.command?.trim()) {
-        await tmuxService.sendShellCommand(newPaneId, ritualPane.command.trim())
-        await tmuxService.sendTmuxKeys(newPaneId, "Enter")
-      }
-
-      if (!controlPaneId) {
-        throw new Error("Pane layout cannot be updated without a control pane")
-      }
-      try {
-        await insertPaneIntoStoredLayout({
-          panesFile,
-          panes: existingPanes,
-          pane: shellPane,
-          controlPaneId,
-          insertion,
-          sidebarWidth: sidePanelWidth,
-        })
-      } catch (error) {
-        await rollbackLocalPaneCreation({ tmuxService, paneId: newPaneId })
-        throw error
-      }
-      await appendPanes([shellPane])
       await loadPanes()
       return shellPane
     } catch (error: any) {
@@ -1214,8 +1180,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             targetProjectRoot,
             skipAgentSelection: true,
             existingPanes: workingPanes,
-            focusedTmuxPaneId: focusedPaneId,
-            selectedPaneId: selectedPane?.id,
           })
           if (pane) {
             workingPanes = [...workingPanes, pane]
@@ -1227,8 +1191,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
         const createdPanes = await createPanesForAgentsHook(prompt, selectedAgents, {
           existingPanes: workingPanes,
           targetProjectRoot,
-          focusedTmuxPaneId: focusedPaneId,
-          selectedPaneId: selectedPane?.id,
         })
         if (createdPanes.length > 0) {
           workingPanes = [...workingPanes, ...createdPanes]
@@ -1419,6 +1381,9 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       setIsCreatingPane(true)
       const label = candidate.path ? (candidate.slug || candidate.branchName) : candidate.branchName
       setStatusMessage(`${candidate.path ? "Reopening" : "Opening"} ${label}...`)
+      const persistReusedPane = async (pane: PsychePane) => {
+        await savePanes([...panes, pane], panes)
+      }
 
       const result = candidate.path
         ? await reopenWorktree({
@@ -1428,9 +1393,7 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
-            sidebarWidth: sidePanelWidth,
-            focusedTmuxPaneId: focusedPaneId,
-            selectedPaneId: selectedPane?.id,
+            persistReopenedPane: persistReusedPane,
           })
         : await resumeBranchWorkspace({
             agent: selectedAgent!,
@@ -1439,13 +1402,8 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
             sessionProjectRoot: projectRoot || process.cwd(),
             sessionConfigPath: panesFile,
             existingPanes: panes,
-            sidebarWidth: sidePanelWidth,
-            focusedTmuxPaneId: focusedPaneId,
-            selectedPaneId: selectedPane?.id,
+            persistReusedPane,
           })
-
-      // Save the pane
-      await appendPanes([result.pane])
 
       await loadPanes()
 
@@ -1647,11 +1605,13 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
   const actionSystem = useActionSystem({
     panes,
     savePanes,
-    appendPanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
+    refreshPanes: loadPanes,
     sessionName,
     projectName,
     defaultProjectRoot: sessionProjectRoot,
-    sidebarWidth: sidePanelWidth,
     onPaneRemove: async (paneId) => {
       const nextSelection = resolveSelectionAfterPaneClose(
         panes,
@@ -1755,11 +1715,16 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
       }
 
       // Pane was removed unexpectedly (e.g., user killed tmux pane manually)
-      // Remove it from our tracking
-      const updatedPanes = panes.filter((p) => p.id !== paneId)
-      savePanes(updatedPanes)
-
+      // Remove this exact record from a fresh locked registry. A stale UI
+      // snapshot must never imply that a concurrently added daemon pane died.
       const removedPane = panes.find((p) => p.id === paneId)
+      if (removedPane) {
+        void removePaneIdentitiesFromConfig([{
+          id: removedPane.id,
+          paneId: removedPane.paneId,
+          tmuxServerIdentity: removedPane.tmuxServerIdentity,
+        }]).catch(() => undefined)
+      }
       if (
         isDevMode &&
         removedPane?.worktreePath &&
@@ -1887,7 +1852,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     handleReopenWorktree,
     setDevSourceFromPane: handleSetDevSourceFromPane,
     savePanes,
-    appendPanes,
     sidebarProjects,
     saveSidebarProjects,
     loadPanes,
@@ -1907,8 +1871,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
     sidePanelCollapsed,
     sidePanelWidth,
     onToggleSidePanel: toggleSidePanel,
-    focusedTmuxPaneId: focusedPaneId,
-    selectedPaneId: selectedPane?.id,
   })
 
   // Calculate available height for content (terminal height - footer lines - active status messages)
@@ -1986,7 +1948,6 @@ const PsycheApp: React.FC<PsycheAppProps> = ({
           <SidePanelRail />
         ) : (
           <PanesGrid
-            showCollapseControl
             panes={panes}
             selectedIndex={selectedIndex}
             activeProjectRoot={activeProjectRoot}

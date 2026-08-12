@@ -9,52 +9,95 @@ import { getCurrentBranch, getPaneBranchName } from '../utils/git.js';
 import { cleanupPromptFilesForSlug } from '../utils/promptStore.js';
 import { deriveProjectRootFromWorktreePath } from '../utils/paneProject.js';
 import { useTemporaryStatus } from './useTemporaryStatus.js';
+import {
+  describeLiveTmuxWorktreeGuard,
+  inspectLiveTmuxWorktreeConsumers,
+} from '../services/LiveTmuxWorktreeGuard.js';
+import {
+  tearDownFullPaneWithVerification,
+  verifyFullPaneAbsent,
+} from '../utils/paneTeardown.js';
+import { getCurrentTmuxServerIdentity } from '../services/TmuxServerIdentity.js';
+import { assessTmuxTeardownOwnership } from '../services/TmuxResourceOwnership.js';
 
 interface Params {
   panes: PsychePane[];
-  savePanes: (p: PsychePane[]) => Promise<void>;
+  removePaneFromConfig: (paneId: string) => Promise<PsychePane[]>;
   setStatusMessage: (msg: string) => void;
   setShowMergeConfirmation: (v: boolean) => void;
   setMergedPane: (pane: PsychePane | null) => void;
-  sidebarWidth?: number;
 }
 
 export default function useWorktreeActions({
   panes,
-  savePanes,
+  removePaneFromConfig,
   setStatusMessage,
   setShowMergeConfirmation,
   setMergedPane,
-  sidebarWidth = SIDEBAR_WIDTH,
 }: Params) {
   const showTemporary = useTemporaryStatus(setStatusMessage);
+
+  const assertNoLiveTmuxWorktreeConsumer = (worktreePath: string) => {
+    const guard = inspectLiveTmuxWorktreeConsumers(worktreePath);
+    if (guard.state !== 'safe') {
+      throw new Error(
+        `Refusing worktree removal while ${describeLiveTmuxWorktreeGuard(guard)}`,
+      );
+    }
+  };
 
   const closePane = useCallback(async (pane: PsychePane) => {
     try {
       const tmuxService = TmuxService.getInstance();
-
-      if (pane.testWindowId) {
-        try { await tmuxService.killWindow(pane.testWindowId); } catch {}
+      const assessment = assessTmuxTeardownOwnership(
+        pane as PsychePane & Record<string, unknown>,
+        panes as Array<PsychePane & Record<string, unknown>>,
+        tmuxService.getServerIdentity?.() ?? getCurrentTmuxServerIdentity(),
+      );
+      const { ownership } = assessment;
+      const teardown = ownership === 'legacy'
+        ? await verifyFullPaneAbsent({
+          target: assessment.target,
+          probePane: (paneId) => tmuxService.probePanePresence(paneId),
+          probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        })
+        : ownership === 'stale-generation'
+          ? {
+            presence: 'absent' as const,
+            pane: { presence: 'absent' as const },
+            backgroundPanes: new Map(),
+            windows: new Map(),
+          }
+          : ownership === 'unverified-generation' || ownership === 'ambiguous'
+            ? {
+              presence: 'unknown' as const,
+              pane: { presence: 'unknown' as const },
+              backgroundPanes: new Map(),
+              windows: new Map(),
+            }
+            : await tearDownFullPaneWithVerification({
+        target: assessment.target,
+        probePane: (paneId) => tmuxService.probePanePresence(paneId),
+        killPane: (paneId) => tmuxService.killPane(paneId),
+        probeWindow: (windowId) => tmuxService.probeWindowPresence(windowId),
+        killWindow: (windowId) => tmuxService.killWindow(windowId),
+            });
+      if (teardown.presence !== 'absent') {
+        throw new Error(`Could not confirm pane teardown (${teardown.presence})`);
       }
-      if (pane.devWindowId) {
-        try { await tmuxService.killWindow(pane.devWindowId); } catch {}
-      }
-
-      await tmuxService.killPane(pane.paneId);
       // Don't apply global layouts - just enforce sidebar width
       try {
         const controlPaneId = await tmuxService.getCurrentPaneId();
-        enforceControlPaneSize(controlPaneId, sidebarWidth);
+        enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
       } catch {}
 
-      const updatedPanes = panes.filter(p => p.id !== pane.id);
-      await savePanes(updatedPanes);
+      await removePaneFromConfig(pane.id);
 
       showTemporary(`Closed pane: ${pane.slug}`);
     } catch {
       showTemporary('Failed to close pane', 2000);
     }
-  }, [panes, savePanes, showTemporary, sidebarWidth]);
+  }, [panes, removePaneFromConfig, showTemporary]);
 
   const mergeWorktree = useCallback(async (pane: PsychePane) => {
     if (!pane.worktreePath) {
@@ -103,6 +146,7 @@ export default function useWorktreeActions({
       }
 
       // Only remove worktree if merge succeeded
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);
@@ -164,6 +208,7 @@ export default function useWorktreeActions({
       }
 
       // Only remove worktree if merge succeeded
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);
@@ -185,6 +230,7 @@ export default function useWorktreeActions({
 
     try {
       setStatusMessage('Removing worktree with unsaved changes...');
+      assertNoLiveTmuxWorktreeConsumer(pane.worktreePath);
       execSync(`git worktree remove --force "${pane.worktreePath}"`, { stdio: 'pipe' });
       const mainRepoPath = deriveProjectRootFromWorktreePath(pane.worktreePath) || process.cwd();
       await cleanupPromptFilesForSlug(mainRepoPath, pane.slug);

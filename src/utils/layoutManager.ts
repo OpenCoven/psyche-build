@@ -1,4 +1,4 @@
-import fs from 'fs/promises';
+import path from 'node:path';
 import type { PaneLayout, PaneSplitDirection, PsycheConfig, PsychePane } from '../types.js';
 import {
   applyPaneLayoutMutation,
@@ -10,9 +10,12 @@ import {
   resolvePaneInsertionTarget,
 } from '../layout/PanePlacement.js';
 import { seedPaneLayout } from '../layout/PaneLayoutTree.js';
+import {
+  projectRootFromPaneConfigPath,
+  readProjectPaneConfig,
+  transactProjectPaneConfig,
+} from '../services/ProjectPaneConfig.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { atomicWriteJson } from './atomicWrite.js';
-import { withPanesConfigFileWriteLock } from './panesConfigQueue.js';
 
 export const SIDEBAR_WIDTH = DEFAULT_SIDEBAR_WIDTH;
 
@@ -36,7 +39,6 @@ interface InsertPaneIntoStoredLayoutOptions {
   controlPaneId: string;
   insertion?: PaneInsertion;
   sidebarWidth?: number;
-  /** Resolve the width from the config reread while the layout lock is held. */
   resolveSidebarWidthFromConfig?: boolean;
 }
 
@@ -49,32 +51,28 @@ interface InsertPanesIntoStoredLayoutOptions {
   }>;
   controlPaneId: string;
   sidebarWidth?: number;
-  /** Resolve the width from the config reread while the layout lock is held. */
   resolveSidebarWidthFromConfig?: boolean;
 }
 
-function paneBindingSignature(panes: PsychePane[]): string {
-  return panes
-    .map((pane) => `${pane.id}:${pane.paneId}:${pane.hidden === true}`)
-    .sort()
-    .join('|');
-}
-
-type ApplyStoredPaneLayoutOptions = {
+export interface ApplyStoredPaneLayoutOptions {
   panesFile: string;
   panes: PsychePane[];
-  /** Pane metadata that should be persisted only after tmux accepts the layout. */
+  /** New records that become durable with the accepted topology. */
   persistPanes?: PsychePane[];
-  /** Pane metadata that should be removed only after tmux accepts the layout. */
+  /** Records that become absent with the accepted topology. */
   removePersistedPaneIds?: string[];
   controlPaneId: string;
   terminalWidth: number;
   terminalHeight: number;
   sidebarWidth?: number;
-  /** Resolve the width from the config reread while the layout lock is held. */
   resolveSidebarWidthFromConfig?: boolean;
   mutation: PaneLayoutMutation;
-};
+}
+
+function sessionProjectRoot(panesFile: string): string {
+  return projectRootFromPaneConfigPath(panesFile)
+    ?? path.dirname(path.dirname(panesFile));
+}
 
 function appendMissingPanes(
   currentPanes: PsychePane[],
@@ -95,115 +93,84 @@ function removePersistedPanes(
   return currentPanes.filter((pane) => !paneIds.has(pane.id));
 }
 
-async function applyStoredPaneLayoutWithConfigLockHeld(
-  options: ApplyStoredPaneLayoutOptions
-): Promise<PaneLayout> {
-  const rawConfig = JSON.parse(await fs.readFile(options.panesFile, 'utf-8')) as PsycheConfig;
-  if (Array.isArray(rawConfig)) {
-    throw new Error('Pane layout requires an object-form config');
-  }
-
-  const tmuxService = TmuxService.getInstance();
-  const persistedPanes = Array.isArray(rawConfig.panes) ? rawConfig.panes : [];
-  const panesAfterRemoval = options.removePersistedPaneIds
-    ? removePersistedPanes(persistedPanes, options.removePersistedPaneIds)
-    : persistedPanes;
-  const panes = options.persistPanes
-    ? appendMissingPanes(panesAfterRemoval, options.persistPanes)
-    : options.removePersistedPaneIds
-      ? panesAfterRemoval
-      : options.panes;
-  const hasVisibleContentPanes = panes.some((pane) => !pane.hidden);
-  const sidebarWidth = options.resolveSidebarWidthFromConfig
-    && typeof rawConfig.controlPaneSize === 'number'
-    ? rawConfig.controlPaneSize
-    : options.sidebarWidth ?? SIDEBAR_WIDTH;
-
-  await tmuxService.resizePane(options.controlPaneId, { width: sidebarWidth });
-
-  const { layout } = await applyPaneLayoutMutation({
-    paneLayout: rawConfig.paneLayout,
-    panes,
-    controlPaneId: options.controlPaneId,
-    terminalWidth: options.terminalWidth,
-    terminalHeight: options.terminalHeight,
-    sidebarWidth,
-    mutation: options.mutation,
-    selectLayout: async (compiledLayout) => {
-      if (!hasVisibleContentPanes) {
-        return true;
-      }
-
-      await tmuxService.selectLayout(compiledLayout);
-      return true;
-    },
-  });
-
-  await tmuxService.refreshClient();
-
-  const latestConfig = JSON.parse(await fs.readFile(options.panesFile, 'utf-8')) as PsycheConfig;
-  if (Array.isArray(latestConfig)) {
-    throw new Error('Pane layout requires an object-form config');
-  }
-  const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
-  if (paneBindingSignature(latestPanes) !== paneBindingSignature(persistedPanes)) {
-    throw new Error('Pane metadata changed while applying pane layout');
-  }
-  const latestPanesAfterRemoval = options.removePersistedPaneIds
-    ? removePersistedPanes(latestPanes, options.removePersistedPaneIds)
-    : latestPanes;
-  const nextPanes = options.persistPanes
-    ? appendMissingPanes(latestPanesAfterRemoval, options.persistPanes)
-    : latestPanesAfterRemoval;
-
-  await atomicWriteJson(options.panesFile, {
-    ...latestConfig,
-    ...(options.persistPanes || options.removePersistedPaneIds
-      ? {
-          panes: nextPanes,
-          lastUpdated: new Date().toISOString(),
-        }
-      : {}),
-    paneLayout: layout,
-  });
-
-  return layout;
-}
-
+/**
+ * Projects a logical tree into tmux and persists that exact accepted tree
+ * under ProjectPaneConfig's cross-process lease. Pane ownership and topology
+ * are therefore one registry mutation, rather than independent file locks.
+ */
 export async function applyStoredPaneLayout(
   options: ApplyStoredPaneLayoutOptions
 ): Promise<PaneLayout> {
-  return withPanesConfigFileWriteLock(
-    options.panesFile,
-    () => applyStoredPaneLayoutWithConfigLockHeld(options)
-  );
-}
+  const projectRoot = sessionProjectRoot(options.panesFile);
+  const tmuxService = TmuxService.getInstance();
+  const mutation = await transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
+    const rawConfig = config as unknown as PsycheConfig;
+    const persistedPanes = Array.isArray(rawConfig.panes) ? rawConfig.panes : [];
+    const panesAfterRemoval = options.removePersistedPaneIds
+      ? removePersistedPanes(persistedPanes, options.removePersistedPaneIds)
+      : persistedPanes;
+    const panes = options.persistPanes
+      ? appendMissingPanes(panesAfterRemoval, options.persistPanes)
+      : options.removePersistedPaneIds
+        ? panesAfterRemoval
+        : options.panes;
+    const sidebarWidth = options.resolveSidebarWidthFromConfig
+      && typeof rawConfig.controlPaneSize === 'number'
+      ? rawConfig.controlPaneSize
+      : options.sidebarWidth ?? SIDEBAR_WIDTH;
+    const hasVisibleContentPanes = panes.some((pane) => !pane.hidden);
 
-export async function applyStoredPaneLayoutWithinConfigWriteLock(
-  options: ApplyStoredPaneLayoutOptions
-): Promise<PaneLayout> {
-  return applyStoredPaneLayoutWithConfigLockHeld(options);
+    await tmuxService.resizePane(options.controlPaneId, { width: sidebarWidth });
+    const { layout } = await applyPaneLayoutMutation({
+      paneLayout: rawConfig.paneLayout,
+      panes,
+      controlPaneId: options.controlPaneId,
+      terminalWidth: options.terminalWidth,
+      terminalHeight: options.terminalHeight,
+      sidebarWidth,
+      mutation: options.mutation,
+      selectLayout: async (compiledLayout) => {
+        if (!hasVisibleContentPanes) {
+          return true;
+        }
+        await tmuxService.selectLayout(compiledLayout);
+        return true;
+      },
+    });
+    await tmuxService.refreshClient();
+
+    rawConfig.panes = panes;
+    rawConfig.paneLayout = layout;
+    rawConfig.lastUpdated = new Date().toISOString();
+    await persist();
+    return layout;
+  });
+
+  return mutation.result;
 }
 
 /**
- * Captures the logical leaf and physical pane dimensions before tmux creates
- * another pane. If focus became stale while the panes were being inspected,
- * fall back through the selected and stored visible leaves that still exist.
+ * Captures a placement target from the current logical topology. Reading is
+ * intentionally non-destructive; the later mutation revalidates under the
+ * ProjectPaneConfig lease.
  */
 export async function capturePaneInsertion(
   options: CapturePaneInsertionOptions
 ): Promise<PaneInsertion | undefined> {
   let paneLayout: PsycheConfig['paneLayout'];
   try {
-    const config = JSON.parse(await fs.readFile(options.panesFile, 'utf-8')) as PsycheConfig;
-    if (!Array.isArray(config)) {
-      paneLayout = config.paneLayout;
-    }
+    const config = await readProjectPaneConfig(sessionProjectRoot(options.panesFile));
+    paneLayout = (config as PsycheConfig).paneLayout;
   } catch {
-    // The current in-memory panes still provide focus and selected targets.
+    // The in-memory records provide a conservative fallback.
   }
 
-  const paneInfo = await TmuxService.getInstance().getAllPaneInfo('window');
+  let paneInfo: Awaited<ReturnType<TmuxService['getAllPaneInfo']>>;
+  try {
+    paneInfo = await TmuxService.getInstance().getAllPaneInfo('window');
+  } catch {
+    return undefined;
+  }
   const unavailablePaneIds = new Set<string>();
   const targetLayout = paneLayout ?? seedPaneLayout(options.panes.map((pane) => pane.id));
 
@@ -217,7 +184,6 @@ export async function capturePaneInsertion(
     if (!targetPane) {
       return undefined;
     }
-
     const physicalTarget = paneInfo.find((pane) => pane.paneId === targetPane.paneId);
     if (physicalTarget) {
       return {
@@ -226,7 +192,6 @@ export async function capturePaneInsertion(
         direction: adaptiveSplitDirection(physicalTarget),
       };
     }
-
     unavailablePaneIds.add(targetPane.id);
   }
 
@@ -249,8 +214,7 @@ export async function insertPaneIntoStoredLayout(
 export async function insertPanesIntoStoredLayout(
   options: InsertPanesIntoStoredLayoutOptions
 ): Promise<PaneLayout> {
-  const tmuxService = TmuxService.getInstance();
-  const dimensions = await tmuxService.getTerminalDimensions();
+  const dimensions = await TmuxService.getInstance().getTerminalDimensions();
   const insertedPanes = options.insertions.map(({ pane }) => pane);
   return applyStoredPaneLayout({
     panesFile: options.panesFile,
@@ -265,13 +229,12 @@ export async function insertPanesIntoStoredLayout(
       kind: 'batch',
       mutations: options.insertions.map(({ pane, insertion }) => insertion
         ? {
-            kind: 'insert',
-            paneId: pane.id,
-            targetPaneId: insertion.targetPaneId,
-            direction: insertion.direction,
-          }
-        : { kind: 'reconcile' }
-      ),
+          kind: 'insert',
+          paneId: pane.id,
+          targetPaneId: insertion.targetPaneId,
+          direction: insertion.direction,
+        }
+        : { kind: 'reconcile' }),
     },
   });
 }
@@ -281,11 +244,9 @@ export async function removePaneFromStoredLayout(options: {
   paneId: string;
   controlPaneId: string;
   sidebarWidth?: number;
-  /** Resolve the width from the config reread while the layout lock is held. */
   resolveSidebarWidthFromConfig?: boolean;
 }): Promise<PaneLayout> {
-  const tmuxService = TmuxService.getInstance();
-  const dimensions = await tmuxService.getTerminalDimensions();
+  const dimensions = await TmuxService.getInstance().getTerminalDimensions();
   return applyStoredPaneLayout({
     panesFile: options.panesFile,
     panes: [],
@@ -295,6 +256,34 @@ export async function removePaneFromStoredLayout(options: {
     terminalHeight: dimensions.height,
     sidebarWidth: options.sidebarWidth,
     resolveSidebarWidthFromConfig: options.resolveSidebarWidthFromConfig,
+    mutation: { kind: 'remove', paneId: options.paneId },
+  });
+}
+
+/**
+ * Compatibility entry point for lifecycle paths that need to re-project the
+ * currently persisted records. It never writes an independent grid layout.
+ */
+export async function recalculateAndApplyLayout(
+  controlPaneId: string,
+  contentPaneIds: string[],
+  terminalWidth: number,
+  terminalHeight: number,
+  panesFile = path.join(process.cwd(), '.psyche', 'psyche.config.json'),
+): Promise<PaneLayout> {
+  const projectRoot = sessionProjectRoot(panesFile);
+  const config = await readProjectPaneConfig(projectRoot) as PsycheConfig;
+  const visible = (Array.isArray(config.panes) ? config.panes : [])
+    .filter((pane) => contentPaneIds.includes(pane.paneId));
+  return applyStoredPaneLayout({
+    panesFile,
+    panes: visible,
+    controlPaneId,
+    terminalWidth,
+    terminalHeight,
+    sidebarWidth: typeof config.controlPaneSize === 'number'
+      ? config.controlPaneSize
+      : SIDEBAR_WIDTH,
     mutation: { kind: 'reconcile' },
   });
 }

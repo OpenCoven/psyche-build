@@ -6,7 +6,8 @@
  * responses, we ensure consistent behavior and UI patterns across all interfaces.
  */
 
-import type { PsychePane } from '../types.js';
+import type { PsychePane, SavePanes } from '../types.js';
+import type { TmuxServerIdentity } from '../services/TmuxServerIdentity.js';
 import {
   getBulkVisibilityAction,
   getProjectVisibilityAction,
@@ -84,20 +85,51 @@ export interface ActionResult {
   dismissable?: boolean;  // Can user dismiss without action?
 }
 
+export interface PaneLifecycleIdentity {
+  id: string;
+  paneId: string;
+  tmuxServerIdentity?: TmuxServerIdentity;
+}
+
 /**
  * Context provided to action functions
  */
 export interface ActionContext {
   panes: PsychePane[];
   currentPaneId?: string;
+  /** Optional lifecycle seam; production captures the live tmux generation. */
+  getTmuxServerIdentity?: () => TmuxServerIdentity | undefined;
   sessionName: string;
   projectName: string;
-  savePanes: (
-    panes: PsychePane[],
-    options?: { observedPanes?: PsychePane[] }
-  ) => Promise<void>;
-  appendPanes?: (panes: PsychePane[]) => Promise<PsychePane[]>;
-  sidebarWidth?: number;
+  savePanes: SavePanes;
+  /**
+   * Removes exactly one pane from a freshly locked project config and returns
+   * the persisted pane list. Close uses this instead of replacing config with
+   * an in-memory snapshot that may be stale across processes.
+   */
+  removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
+  /**
+   * Removes explicitly named psyche pane records from the fresh locked
+   * registry. Merge flows use this instead of replacing a stale pane array.
+   */
+  removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
+  /**
+   * Removes only records whose durable pane identity still exactly matches.
+   * Merge uses this after teardown so a concurrent rebind cannot be removed.
+   */
+  removePaneIdentitiesFromConfig?: (
+    identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: (
+      panes?: readonly PsychePane[],
+      exactPanes?: readonly PsychePane[],
+    ) => Promise<void> | void,
+  ) => Promise<PsychePane[]>;
+  /**
+   * Reloads fresh config after a rejected exact-identity lifecycle action.
+   * The caller may otherwise still render a pane that a concurrent writer
+   * rebound while this action was waiting.
+   */
+  refreshPanes?: () => Promise<void>;
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: PsychePane) => void;

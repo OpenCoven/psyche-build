@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as PsycheSessions from '../native/macos/psyche-build-tauri/web/sessions/session-model.mjs';
 
 const webRoot = join(process.cwd(), 'native/macos/psyche-build-tauri');
@@ -169,12 +169,17 @@ function discoveryHarness(
       var document = { visibilityState: initialVisibilityState };
       var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
       var covenDiscoveryFlight = null;
+      var covenSessionCloseFlights = new Set();
+      var covenSessionMutationGeneration = 0;
       function renderSessionList() {}
+      function setStatus() {}
       ${functionSource(mainJs, 'covenDiscoveryScopes')}
       ${functionSource(mainJs, 'covenDiscoveryRoots')}
       ${functionSource(mainJs, 'refreshCovenSessions')}
+      ${functionSource(mainJs, 'closeCovenSession')}
       return {
         refresh: refreshCovenSessions,
+        close: closeCovenSession,
         setProjects: function (projects) { state.projects = projects; },
         setVisibility: function (value) { document.visibilityState = value; },
         discovery: function () { return covenDiscovery; },
@@ -191,7 +196,8 @@ function discoveryHarness(
     performance,
   );
   return { ...harness, requests, statusSamples, statusRefreshes: () => statusRefreshes } as {
-    refresh: () => Promise<unknown>;
+    refresh: (options?: { force?: boolean }) => Promise<unknown>;
+    close: (session: { id: string }) => Promise<boolean>;
     setProjects: (projects: Array<Record<string, unknown>>) => void;
     setVisibility: (value: string) => void;
     discovery: () => ReturnType<typeof PsycheSessions.createCovenDiscoveryState>;
@@ -247,6 +253,29 @@ describe('macOS Coven session lifecycle boundary', () => {
     expect(empty.requests).toHaveLength(0);
   });
 
+  it('allows an explicit forced refresh while hidden', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }], 'hidden');
+
+    const forced = harness.refresh({ force: true });
+
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_sessions']);
+    harness.requests[0].resolve({ status: 'ready', sessions: [] });
+    await forced;
+  });
+
+  it('coalesces concurrent forced refreshes for the same owned roots', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }], 'hidden');
+
+    const first = harness.refresh({ force: true });
+    const second = harness.refresh({ force: true });
+    expect(harness.requests).toHaveLength(1);
+
+    harness.requests[0].resolve({ status: 'ready', sessions: [] });
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(1);
+    await Promise.all([first, second]);
+  });
+
   it('coalesces concurrent refreshes for the same owned root set', async () => {
     const harness = discoveryHarness([{
       root: '/alpha',
@@ -265,6 +294,112 @@ describe('macOS Coven session lifecycle boundary', () => {
     });
     harness.requests[0].resolve({ status: 'ready', sessions: [] });
     await Promise.all([first, second]);
+  });
+
+  it('waits for a pre-kill discovery flight before forcing an authoritative refresh', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+    const preKill = harness.refresh();
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_sessions']);
+
+    const closing = harness.close({ id: 'coven-1' });
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+    ]);
+    harness.requests[1].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(2);
+
+    harness.requests[0].resolve({
+      status: 'ready',
+      sessions: [{
+        id: 'coven-1', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build'],
+      }],
+    });
+    await preKill;
+    await Promise.resolve();
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
+
+    harness.requests[2].resolve({ status: 'ready', sessions: [] });
+    await expect(closing).resolves.toBe(true);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
+  });
+
+  it('preserves a forced post-kill refresh when visibility changes while awaiting discovery', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+    const preKill = harness.refresh();
+    const closing = harness.close({ id: 'coven-1' });
+    harness.requests[1].resolve(null);
+    await Promise.resolve();
+
+    harness.setVisibility('hidden');
+    harness.requests[0].resolve({
+      status: 'ready',
+      sessions: [{
+        id: 'coven-1', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build'],
+      }],
+    });
+    await preKill;
+    await Promise.resolve();
+
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
+    harness.requests[2].resolve({ status: 'ready', sessions: [] });
+    await expect(closing).resolves.toBe(true);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
+  });
+
+  it('starts a later discovery after each independently completed kill', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+
+    const closeA = harness.close({ id: 'coven-a' });
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_session_kill']);
+    harness.requests[0].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
+
+    const closeB = harness.close({ id: 'coven-b' });
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_session_kill',
+      'coven_sessions',
+      'coven_session_kill',
+    ]);
+    harness.requests[2].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(3);
+
+    harness.requests[1].resolve({
+      status: 'ready',
+      sessions: [
+        { id: 'coven-a', projectRoot: '/alpha', status: 'running' },
+        { id: 'coven-b', projectRoot: '/alpha', status: 'running' },
+      ],
+    });
+    await vi.waitFor(() => {
+      expect(harness.requests.map((request) => request.command)).toEqual([
+        'coven_session_kill',
+        'coven_sessions',
+        'coven_session_kill',
+        'coven_sessions',
+      ]);
+    });
+
+    harness.requests[3].resolve({ status: 'ready', sessions: [] });
+    await expect(Promise.all([closeA, closeB])).resolves.toEqual([true, true]);
+    expect(harness.requests).toHaveLength(4);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
   });
 
   it('coalesces an in-flight ownership set after project and worktree reordering', async () => {
@@ -774,7 +909,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
       threads: [existing],
     };
-    let defaultLaunches = 0;
     const openCovenSession = compileOpenWithProjectActivation<(
       p: typeof project, s: typeof session,
     ) => Promise<unknown>>({
@@ -791,7 +925,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
       saveWorkspaceSoon: () => undefined,
       activatePaneLayoutFocus: () => undefined,
       renderPanel: () => undefined,
@@ -801,10 +934,8 @@ describe('macOS Coven session lifecycle boundary', () => {
       covenAttachKey: () => 'unused',
       covenAttachInFlight: new Map(),
     });
-
     await expect(openCovenSession(project, session)).resolves.toBe(existing);
     expect(project.selectedWorktreePath).toBe('/alpha-feature');
-    expect(defaultLaunches).toBe(0);
   });
 
   it('does not launch default Coven while creating an attachment in an inactive project', async () => {
@@ -819,7 +950,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       env: { coven_path: '/bin/coven' }, activeProjectId: 'other', activeThreadId: null,
       threads: [],
     };
-    let defaultLaunches = 0;
     let createdOptions: Record<string, unknown> | null = null;
     const openCovenSession = compileOpenWithProjectActivation<(
       p: typeof project, s: typeof session,
@@ -837,7 +967,6 @@ describe('macOS Coven session lifecycle boundary', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => { defaultLaunches += 1; return { id: 'chat' }; },
       saveWorkspaceSoon: () => undefined,
       activatePaneLayoutFocus: () => undefined,
       renderPanel: () => undefined,
@@ -852,11 +981,9 @@ describe('macOS Coven session lifecycle boundary', () => {
         return { id: 'attached' };
       },
     });
-
     await expect(openCovenSession(project, session)).resolves.toEqual({ id: 'attached' });
     expect(project.selectedWorktreePath).toBe('/repo/feature');
     expect(createdOptions).toMatchObject({ worktreePath: '/repo/feature' });
-    expect(defaultLaunches).toBe(0);
   });
 
   it('rejects invalid or unavailable attach targets before reservation', async () => {

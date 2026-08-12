@@ -8,6 +8,7 @@ import {
 import { laneSlugSuffix } from './adapters.js';
 import type { LaneBackend, LaneExecutionOutput } from './orchestrator.js';
 import { OrchestrationError, type OrchestrationLanePlan } from './types.js';
+import { persistProjectPaneConfigPaneDelta } from '../services/ProjectPaneConfig.js';
 
 export interface LocalPaneBackendOptions {
   projectName: string;
@@ -17,18 +18,42 @@ export interface LocalPaneBackendOptions {
   basePanes: readonly PsychePane[];
   availableAgents: AgentName[];
   /**
+   * Persists a reused worktree pane while its cleanup reservation remains active.
+   */
+  persistReusedPane?: (
+    pane: PsychePane,
+    previousPanes: PsychePane[],
+    nextPanes: PsychePane[],
+  ) => Promise<void>;
+  /**
+   * Persists a newly-created pane while its creation lease remains active.
+   */
+  persistCreatedPane?: (
+    pane: PsychePane,
+    previousPanes: PsychePane[],
+    nextPanes: PsychePane[],
+  ) => Promise<void>;
+  /**
    * Shared slug stem for multi-lane tasks, so sibling lanes read as variants
    * of one task (fix-auth-codex, fix-auth-claude) rather than unrelated names.
    */
   slugBase?: string;
+  focusedTmuxPaneId?: string | null;
+  selectedPaneId?: string;
   /** Injectable for tests. */
   createPaneFn?: (
     options: CreatePaneOptions,
     availableAgents: AgentName[],
   ) => Promise<CreatePaneResult>;
-  sidebarWidth?: number;
-  focusedTmuxPaneId?: string | null;
-  selectedPaneId?: string;
+  /**
+   * Injectable for tests and alternate persistence surfaces. The originating
+   * pane is the exact record createPane made durable before launching its
+   * agent, never the task's stale pre-lane pane array.
+   */
+  persistOrchestrationMetadata?: (
+    originatingPane: PsychePane,
+    nextPane: PsychePane,
+  ) => Promise<PsychePane>;
 }
 
 export interface LocalPaneBackend {
@@ -48,6 +73,15 @@ export interface LocalPaneBackend {
  */
 export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalPaneBackend {
   const createPaneFn = options.createPaneFn ?? defaultCreatePane;
+  const persistOrchestrationMetadata = options.persistOrchestrationMetadata
+    ?? (async (originatingPane: PsychePane, nextPane: PsychePane): Promise<PsychePane> => {
+      const mutation = await persistProjectPaneConfigPaneDelta(
+        options.sessionProjectRoot,
+        originatingPane,
+        nextPane,
+      );
+      return mutation.result as PsychePane;
+    });
   const created: PsychePane[] = [];
 
   // The first createPane call in a session may build the sidebar layout and
@@ -66,6 +100,7 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
     }
 
     const isTerminal = lane.mode === 'terminal';
+    const panesBeforeCurrent = [...options.basePanes, ...created];
     const result = await createPaneFn(
       {
         prompt: lane.prompt,
@@ -78,16 +113,29 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
         ...(lane.mergeTargetChain ? { mergeTargetChain: lane.mergeTargetChain } : {}),
         projectName: options.projectName,
         projectRoot: lane.projectRoot,
-        existingPanes: [...options.basePanes, ...created],
+        existingPanes: panesBeforeCurrent,
         sessionProjectRoot: options.sessionProjectRoot,
-        ...(options.sidebarWidth === undefined ? {} : { sidebarWidth: options.sidebarWidth }),
-        ...(options.focusedTmuxPaneId === undefined
-          ? {}
-          : { focusedTmuxPaneId: options.focusedTmuxPaneId }),
-        ...(options.selectedPaneId === undefined
-          ? {}
-          : { selectedPaneId: options.selectedPaneId }),
+        focusedTmuxPaneId: options.focusedTmuxPaneId,
+        selectedPaneId: options.selectedPaneId,
         ...(options.sessionConfigPath ? { sessionConfigPath: options.sessionConfigPath } : {}),
+        ...(lane.existingWorktree && options.persistReusedPane
+          ? {
+            persistReusedPane: async (pane) => options.persistReusedPane!(
+              pane,
+              panesBeforeCurrent,
+              [...panesBeforeCurrent, pane],
+            ),
+          }
+          : {}),
+        ...(!lane.existingWorktree && options.persistCreatedPane
+          ? {
+            persistCreatedPane: async (pane) => options.persistCreatedPane!(
+              pane,
+              panesBeforeCurrent,
+              [...panesBeforeCurrent, pane],
+            ),
+          }
+          : {}),
       },
       options.availableAgents,
     );
@@ -102,12 +150,26 @@ export function createLocalPaneBackend(options: LocalPaneBackendOptions): LocalP
       );
     }
 
-    result.pane.orchestration = {
-      taskId: lane.taskId,
-      laneId: lane.id,
-      traceId: lane.traceId,
-      mode: lane.mode,
+    // createPane persisted this pane before it launched the agent. Capture
+    // that exact fresh record as the delta origin; using panesBeforeCurrent
+    // would make a concurrent StatusDetector agentSession write look like a
+    // local deletion when this metadata is saved.
+    const persistedPane = {
+      ...result.pane,
     };
+    const paneWithOrchestration: PsychePane = {
+      ...persistedPane,
+      orchestration: {
+        taskId: lane.taskId,
+        laneId: lane.id,
+        traceId: lane.traceId,
+        mode: lane.mode,
+      },
+    };
+    result.pane = await persistOrchestrationMetadata(
+      persistedPane,
+      paneWithOrchestration,
+    );
     created.push(result.pane);
 
     return { pane: result.pane };

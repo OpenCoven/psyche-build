@@ -70,6 +70,12 @@ node /path/to/psyche-build/psyche doctor --fix
 
 `psyche doctor` checks tmux, git, clipboard/navigation support, psyche session styling, and the psyche-managed tmux config block. `--fix` applies safe repairs, backs up an existing `~/.tmux.conf`, and only edits the block between `# >>> psyche` and `# <<< psyche`.
 
+If a pane could not be verified as closed while its config was unavailable,
+Psyche writes a runtime recovery marker and blocks destructive cleanup. Inspect
+the marker with `psyche recover --project /path/to/project`; after reconciling
+the pane and worktree manually, explicitly acknowledge its ID with
+`psyche recover --project /path/to/project --acknowledge <marker-id>`.
+
 The doctor output also calls out supported agent CLIs and the Coven boundary:
 
 - Without an agent CLI, Psyche Build can still open and manage plain terminal panes.
@@ -122,7 +128,7 @@ When focus is inside a work pane, tmux receives your keys instead of Psyche Buil
 ## Requirements
 
 - tmux 3.0+
-- Node.js 18+
+- Node.js 20.10.0+
 - Git 2.20+
 - At least one supported agent CLI for agent panes (for example [Coven Code](https://github.com/OpenCoven/coven), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), [Cline CLI](https://docs.cline.bot/cline-cli/getting-started), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Qwen CLI](https://github.com/QwenLM/qwen-code), [Amp CLI](https://ampcode.com/manual), [pi CLI](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), [Cursor CLI](https://docs.cursor.com/en/cli/overview), [Copilot CLI](https://github.com/github/copilot-cli), [Crush CLI](https://github.com/charmbracelet/crush)). Plain terminal panes work without an agent CLI.
 - [OpenRouter API key](https://openrouter.ai/) (optional, for AI branch names, status analysis, and commit messages)

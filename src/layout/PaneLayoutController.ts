@@ -3,7 +3,7 @@ import { compileSidebarPaneLayout } from './PaneLayoutCompiler.js';
 import {
   insertPane,
   listLeafPaneIds,
-  prunePaneLayout,
+  reconcilePaneLayout,
   removePane,
   seedPaneLayout,
   visiblePaneLayout,
@@ -90,7 +90,7 @@ function applyMutation(
     case 'remove':
       return removePane(layout, mutation.paneId);
     case 'reconcile':
-      return prunePaneLayout(layout, knownPaneIds);
+      return reconcilePaneLayout(layout, Array.from(knownPaneIds));
     case 'batch':
       return mutation.mutations.reduce(
         (nextLayout, nextMutation) => applyMutation(nextLayout, nextMutation, knownPaneIds),

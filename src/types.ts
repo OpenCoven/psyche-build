@@ -1,6 +1,7 @@
 import type { AgentName, PermissionMode } from './utils/agentLaunch.js';
 import type { NotificationSoundId } from './utils/notificationSounds.js';
 import type { OrchestrationLaneMode } from './orchestration/types.js';
+import type { TmuxServerIdentity } from './services/TmuxServerIdentity.js';
 
 export type PsycheThemeName =
   | 'red'
@@ -57,6 +58,11 @@ export interface PsychePane {
   branchName?: string; // Git branch name (may differ from slug when branchPrefix is set)
   prompt: string;
   paneId: string;
+  /**
+   * The tmux server generation that allocated paneId. IDs restart with a new
+   * tmux server, so destructive lifecycle work must compare this first.
+   */
+  tmuxServerIdentity?: TmuxServerIdentity;
   hidden?: boolean; // Pane is detached from the active psyche window but still running
   projectRoot?: string; // Main repository root this pane belongs to
   projectName?: string; // Display name for pane's project
@@ -80,13 +86,34 @@ export interface PsychePane {
     updatedAt?: string;
   };
   worktreePath?: string;
+  /** Effective checkout root for a shell pane's observed cwd. */
+  cwdReference?: string;
   browserPath?: string; // Root path when a shell pane is a psyche file browser
   testWindowId?: string;  // Background window for tests
+  /** Stable tmux pane ID for the test process, including after join-pane. */
+  testPaneId?: string;
+  /** Server generation that allocated the test pane/window pair. */
+  testTmuxServerIdentity?: TmuxServerIdentity;
   testStatus?: 'running' | 'passed' | 'failed';
   testOutput?: string;
   devWindowId?: string;   // Background window for dev server
+  /** Stable tmux pane ID for the dev process, including after join-pane. */
+  devPaneId?: string;
+  /** Server generation that allocated the dev pane/window pair. */
+  devTmuxServerIdentity?: TmuxServerIdentity;
   devStatus?: 'running' | 'stopped';
   devUrl?: string;        // Detected dev server URL
+  /**
+   * A failed background-window teardown must remain durable so automatic
+   * close/cleanup never assumes the worktree is unused.
+   */
+  backgroundWindowRecoveries?: Array<{
+    type: 'test' | 'dev';
+    windowId: string;
+    paneId?: string;
+    tmuxServerIdentity?: TmuxServerIdentity;
+    reason: string;
+  }>;
   agent?: AgentName;
   agentSession?: AgentSessionReference;
   orchestration?: {
@@ -114,6 +141,11 @@ export interface PsychePane {
   // Merge ancestry for sub-worktrees; first entry is the immediate parent target.
   mergeTargetChain?: MergeTargetReference[];
 }
+
+export type SavePanes = (
+  nextPanes: PsychePane[],
+  previousPanes: readonly PsychePane[],
+) => Promise<void>;
 
 export interface PanePosition {
   paneId: string;
