@@ -1293,6 +1293,26 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
     0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
     0 0 12px rgba(var(--pane-status-rgb), 0.24);
 }
+.terminal-host > .terminal-pane[data-status="starting"]:not(.needs-attention) {
+  --pane-status-rgb: 251, 191, 36;
+}
+.terminal-host > .terminal-pane[data-status="failed"]:not(.needs-attention) {
+  --pane-status-rgb: 248, 113, 113;
+}
+.terminal-host > .terminal-pane[data-status="exited"]:not(.needs-attention) {
+  --pane-status-rgb: 138, 132, 153;
+}
+.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  box-shadow:
+    0 0 0 1px rgba(var(--pane-status-rgb), 0.2),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
+.terminal-host > .terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention) {
+  border-color: rgba(var(--rgb-accent), 0.55);
+  box-shadow:
+    0 0 0 1px rgba(var(--rgb-accent), 0.22),
+    0 0 12px rgba(var(--pane-status-rgb), 0.24);
+}
 /* Worded chip, matching how every other pane state is spelled out rather than
    left to colour alone. */
 .terminal-pane-attention {

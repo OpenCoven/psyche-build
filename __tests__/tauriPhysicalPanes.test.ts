@@ -1824,6 +1824,16 @@ describe('Tauri physical terminal panes', () => {
         '.terminal-pane-branch:has(> .terminal-pane[data-status="exited"]:not(.needs-attention))';
       const glowSelector =
         '.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention))';
+      const rootStartingSelector =
+        '.terminal-host > .terminal-pane[data-status="starting"]:not(.needs-attention)';
+      const rootFailedSelector =
+        '.terminal-host > .terminal-pane[data-status="failed"]:not(.needs-attention)';
+      const rootExitedSelector =
+        '.terminal-host > .terminal-pane[data-status="exited"]:not(.needs-attention)';
+      const rootGlowSelector =
+        '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
+      const focusedRootGlowSelector =
+        '.terminal-host > .terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
 
       expect(functionSource('mountTerminal')).not.toContain('terminal-pane-status');
       expect(functionSource('mountBrowserPane')).not.toContain('terminal-pane-status');
@@ -1832,6 +1842,9 @@ describe('Tauri physical terminal panes', () => {
       expect(cssDeclarations(startingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
       expect(cssDeclarations(failedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
       expect(cssDeclarations(exitedSelector).get('--pane-status-rgb')).toBe('138, 132, 153');
+      expect(cssDeclarations(rootStartingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
+      expect(cssDeclarations(rootFailedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
+      expect(cssDeclarations(rootExitedSelector).get('--pane-status-rgb')).toBe('138, 132, 153');
       expect(stylesCss).not.toMatch(/\[data-status="running"\]/);
       expect(cssDeclarations(glowSelector)).toEqual(new Map([
         ['position', 'relative'],
@@ -1840,6 +1853,19 @@ describe('Tauri physical terminal panes', () => {
         [
           'box-shadow',
           '0 0 0 1px rgba(var(--pane-status-rgb), 0.2), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations(rootGlowSelector)).toEqual(new Map([
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--pane-status-rgb), 0.2), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations(focusedRootGlowSelector)).toEqual(new Map([
+        ['border-color', 'rgba(var(--rgb-accent), 0.55)'],
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--rgb-accent), 0.22), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
         ],
       ]));
       expect(cssDeclarations('.terminal-pane.focused')).toEqual(new Map([
@@ -1852,6 +1878,18 @@ describe('Tauri physical terminal panes', () => {
       expect(() => cssDeclarations(
         '.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
       )).toThrow();
+    });
+
+    it('hosts single and maximized root leaves directly on the pane canvas', () => {
+      expect(functionSource('renderPaneNode')).toMatch(
+        /if \(node\.type === "leaf"\)[\s\S]*return thread && thread\.pane \? thread\.pane : document\.createDocumentFragment\(\);/,
+      );
+      expect(functionSource('renderPaneWorkspace')).toMatch(
+        /var root = effectivePaneRoot\(layout\);[\s\S]*terminalHost\.appendChild\(renderPaneNode\(root, splitRatios\)\);/,
+      );
+      expect(functionSource('effectivePaneRoot')).toMatch(
+        /if \(layout\.maximizedLeafId\)[\s\S]*if \(maximized\) return maximized;/,
+      );
     });
 
     it('clips pane subtrees and owns the glow on each direct leaf branch', () => {

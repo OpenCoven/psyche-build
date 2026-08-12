@@ -329,6 +329,8 @@ describe('desktop shell wiring', () => {
   it('states the waiting reason in words, never in colour alone', () => {
     const statusGlowSelector =
       '.terminal-pane-branch:has(> .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention))';
+    const rootStatusGlowSelector =
+      '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
 
     expect(mainJs).toMatch(/PsycheSessions\.attentionLabel\(thread\.attentionReason\)/);
     expect(stylesCss).toContain('.terminal-pane-attention');
@@ -338,6 +340,7 @@ describe('desktop shell wiring', () => {
         ['box-shadow', '0 0 0 1px rgba(251, 191, 36, 0.28)'],
       ]));
     expect(cssDeclarations(statusGlowSelector).has('box-shadow')).toBe(true);
+    expect(cssDeclarations(rootStatusGlowSelector).has('box-shadow')).toBe(true);
     expect(stylesCss).toMatch(/\.minimap-dot\.attention/);
     expect(functionSource('mountTerminal')).toMatch(
       /header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\)/,
