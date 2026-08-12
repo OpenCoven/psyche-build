@@ -6198,7 +6198,7 @@
         '<button type="button" class="canvas-empty-action" data-empty-action="term">' +
           '<span class="glyph mono">❯_</span>Terminal<span class="key">⌘T</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="agent">' +
-          '<span class="glyph">✳</span>Agent<span class="key">⌘P</span></button>' +
+          '<span class="glyph">✳</span>Agent<span class="key">⌘D</span></button>' +
         '<button type="button" class="canvas-empty-action" data-empty-action="web">' +
           '<span class="glyph">◍</span>Browser<span class="key">Web +</span></button>' +
       "</div>";
@@ -8217,7 +8217,7 @@
       await createTerminalPane();
       return;
     }
-    if (String(e.key).toLowerCase() === "p") {
+    if (String(e.key).toLowerCase() === "d" && !e.altKey && !e.shiftKey) {
       if (openAgentPicker()) e.preventDefault();
       return;
     }
@@ -8230,7 +8230,12 @@
       else if (state.activeProjectId) await removeProject(state.activeProjectId);
       return;
     }
-    if (e.key === "k") { commandInput.focus(); openPalette("/", true); e.preventDefault(); return; }
+    if (String(e.key).toLowerCase() === "f" && !e.altKey && !e.shiftKey) {
+      commandInput.focus();
+      openPalette("/", true);
+      e.preventDefault();
+      return;
+    }
     // ⌘B collapses the sessions sidebar.
     if (e.code === "KeyB" && !e.altKey && !e.shiftKey) { toggleSidebar(); e.preventDefault(); return; }
     // ⌃1–9 addresses the panes on the canvas; ⌘1–9 stays on file tabs.
@@ -8504,7 +8509,8 @@
     if (
       (event.metaKey || event.ctrlKey) &&
       !event.altKey &&
-      String(event.key).toLowerCase() === "p"
+      !event.shiftKey &&
+      String(event.key).toLowerCase() === "d"
     ) {
       consumeAgentPickerKey(event);
       openAgentPicker();
@@ -8534,12 +8540,12 @@
 
   // ---- Keyboard shortcuts overlay ----
   var HELP_ROWS = [
-    ["Open the composer", "⌘K"],
+    ["Open the composer", "⌘F"],
     ["Toggle the sessions sidebar", "⌘B"],
     ["Focus a pane on the canvas", "⌃1–9"],
     ["Resize a pane split", "drag the divider"],
     ["New terminal pane", "⌘T"],
-    ["Choose an agent", "⌘P"],
+    ["Choose an agent", "⌘D"],
     ["New browser tab", "Web pane +"],
     ["Open or focus Git", "⌘G"],
     ["Close the focused file / project", "⌘W"],
