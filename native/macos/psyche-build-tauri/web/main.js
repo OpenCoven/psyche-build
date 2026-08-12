@@ -2635,9 +2635,9 @@
     var needsAttention = pane && pane.classList &&
       pane.classList.contains("needs-attention");
     if (glows && !needsAttention) {
-      branch.dataset.paneStatus = status;
+      branch.dataset.status = status;
     } else if (branch.dataset) {
-      delete branch.dataset.paneStatus;
+      delete branch.dataset.status;
     }
   }
 

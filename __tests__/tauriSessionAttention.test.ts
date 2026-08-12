@@ -330,7 +330,7 @@ describe('desktop shell wiring', () => {
     const paneClasses = new Set(['terminal-pane']);
     const branch = {
       classList: { contains: (name: string) => name === 'terminal-pane-branch' },
-      dataset: { paneStatus: 'failed' } as Record<string, string>,
+      dataset: { status: 'failed' } as Record<string, string>,
       firstElementChild: null as null | {
         classList: {
           contains: (name: string) => boolean;
@@ -385,18 +385,18 @@ describe('desktop shell wiring', () => {
 
     syncThreadAttentionChrome(thread);
     expect(paneClasses.has('needs-attention')).toBe(true);
-    expect('paneStatus' in branch.dataset).toBe(false);
+    expect('status' in branch.dataset).toBe(false);
 
     thread.needsAttention = false;
     thread.attentionReason = null;
     syncThreadAttentionChrome(thread);
     expect(paneClasses.has('needs-attention')).toBe(false);
-    expect(branch.dataset.paneStatus).toBe('failed');
+    expect(branch.dataset.status).toBe('failed');
   });
 
   it('states the waiting reason in words, never in colour alone', () => {
     const statusGlowSelector =
-      '.terminal-pane-branch:is([data-pane-status="starting"], [data-pane-status="failed"], [data-pane-status="exited"])';
+      '.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"])';
     const rootStatusGlowSelector =
       '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
 

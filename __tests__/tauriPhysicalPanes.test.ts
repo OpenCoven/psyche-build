@@ -611,31 +611,31 @@ describe('Tauri physical terminal panes', () => {
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('starting');
     expect(paneAttributes.get('aria-description')).toBe('Status: starting');
-    expect(branch.dataset.paneStatus).toBe('starting');
+    expect(branch.dataset.status).toBe('starting');
 
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('running');
     expect(paneAttributes.get('aria-description')).toBe('Status: running');
-    expect('paneStatus' in branch.dataset).toBe(false);
+    expect('status' in branch.dataset).toBe(false);
 
     thread.status = 'failed';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('failed');
     expect(paneAttributes.get('aria-description')).toBe('Status: failed');
-    expect(branch.dataset.paneStatus).toBe('failed');
+    expect(branch.dataset.status).toBe('failed');
 
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
     expect(thread.pane.dataset.status).toBe('exited');
     expect(paneAttributes.get('aria-description')).toBe('Status: exited');
-    expect(branch.dataset.paneStatus).toBe('exited');
+    expect(branch.dataset.status).toBe('exited');
 
     thread.status = 'paused';
     syncThreadPaneMetadata(thread);
     expect('status' in thread.pane.dataset).toBe(false);
     expect(paneAttributes.has('aria-description')).toBe(false);
-    expect('paneStatus' in branch.dataset).toBe(false);
+    expect('status' in branch.dataset).toBe(false);
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
@@ -1848,13 +1848,13 @@ describe('Tauri physical terminal panes', () => {
 
     it('renders exception status as pane glow instead of a header status chip', () => {
       const startingSelector =
-        '.terminal-pane-branch[data-pane-status="starting"]';
+        '.terminal-pane-branch[data-status="starting"]';
       const failedSelector =
-        '.terminal-pane-branch[data-pane-status="failed"]';
+        '.terminal-pane-branch[data-status="failed"]';
       const exitedSelector =
-        '.terminal-pane-branch[data-pane-status="exited"]';
+        '.terminal-pane-branch[data-status="exited"]';
       const glowSelector =
-        '.terminal-pane-branch:is([data-pane-status="starting"], [data-pane-status="failed"], [data-pane-status="exited"])';
+        '.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"])';
       const rootStartingSelector =
         '.terminal-host > .terminal-pane[data-status="starting"]:not(.needs-attention)';
       const rootFailedSelector =
@@ -2010,21 +2010,21 @@ describe('Tauri physical terminal panes', () => {
       };
 
       const initial = renderPaneNode(tree, new Map());
-      expect(initial.children[0].dataset.paneStatus).toBe('starting');
-      expect(initial.children[2].dataset.paneStatus).toBe('failed');
+      expect(initial.children[0].dataset.status).toBe('starting');
+      expect(initial.children[2].dataset.status).toBe('failed');
       expect(startingPane.classList.contains('focused')).toBe(true);
 
       startingPane.dataset.status = 'running';
       failedPane.className = 'terminal-pane needs-attention';
       const replacement = renderPaneNode(tree, new Map());
-      expect('paneStatus' in replacement.children[0].dataset).toBe(false);
-      expect('paneStatus' in replacement.children[2].dataset).toBe(false);
+      expect('status' in replacement.children[0].dataset).toBe(false);
+      expect('status' in replacement.children[2].dataset).toBe(false);
 
       startingPane.dataset.status = 'exited';
       failedPane.className = 'terminal-pane';
       const cleared = renderPaneNode(tree, new Map());
-      expect(cleared.children[0].dataset.paneStatus).toBe('exited');
-      expect(cleared.children[2].dataset.paneStatus).toBe('failed');
+      expect(cleared.children[0].dataset.status).toBe('exited');
+      expect(cleared.children[2].dataset.status).toBe('failed');
     });
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {
