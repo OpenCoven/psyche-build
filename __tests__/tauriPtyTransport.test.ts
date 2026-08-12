@@ -442,6 +442,28 @@ function commandSource(sourceText: string, name: string): string {
   throw new Error(`missing Tauri command ${name}`);
 }
 
+function rustFunctionSource(sourceText: string, name: string, anchor = 0): string {
+  const declaration = new RegExp(`fn\\s+${name}\\s*\\(`, 'g');
+  declaration.lastIndex = anchor;
+  const match = declaration.exec(sourceText);
+  if (!match) throw new Error(`missing Rust function ${name}`);
+  const bodyStart = sourceText.indexOf('{', match.index + match[0].length);
+  if (bodyStart === -1) throw new Error(`missing body for Rust function ${name}`);
+  const bodyEnd = matchingDelimiter(sourceText, bodyStart);
+  if (bodyEnd === -1) throw new Error(`unterminated body for Rust function ${name}`);
+  return sourceText.slice(match.index, bodyEnd + 1);
+}
+
+function implMethodSource(typeName: string, methodName: string): string {
+  const implStart = source.indexOf(`impl ${typeName}`);
+  if (implStart === -1) throw new Error(`missing impl ${typeName}`);
+  const implBodyStart = source.indexOf('{', implStart);
+  if (implBodyStart === -1) throw new Error(`missing body for impl ${typeName}`);
+  const implBodyEnd = matchingDelimiter(source, implBodyStart);
+  if (implBodyEnd === -1) throw new Error(`unterminated body for impl ${typeName}`);
+  return rustFunctionSource(source.slice(implStart, implBodyEnd + 1), methodName);
+}
+
 function structSource(name: string): string {
   const declaration = new RegExp(`struct\\s+${name}\\b`);
   const match = declaration.exec(source);
@@ -640,8 +662,16 @@ describe('Tauri PTY command threading contract', () => {
   });
 
   test('starts PTYs in blocking work without moving reader draining off its OS worker', () => {
+    const prepare = rustFunctionSource(source, 'prepare_pty_start');
+    const install = implMethodSource('PendingPtyStart', 'install');
     const command = commandSource(source, 'pty_start');
 
+    const reserve = prepare.indexOf('PendingPtyStart::reserve(&thread_id)?');
+    const openCwd = prepare.indexOf('open_pty_cwd(project_root, cwd)?');
+    expect(reserve).toBeGreaterThan(-1);
+    expect(openCwd).toBeGreaterThan(reserve);
+    expect(install).toContain('PTY_LIFECYCLES');
+    expect(install).toContain('.install(&self.token, session)');
     expect(command).toMatch(/#\[tauri::command\]\s*async\s+fn\s+pty_start\b/);
     const validation = command.indexOf('validate_pty_thread_id(&options.thread_id)');
     const reservation = command.indexOf('prepare_pty_start(&options)');
@@ -654,6 +684,12 @@ describe('Tauri PTY command threading contract', () => {
     expect(blocking).toContain('.spawn_command(');
     expect(blocking).toContain('prepare_pty_reader(');
     expect(blocking).toContain('.take_writer()');
+    const installCall = blocking.indexOf('pending_start.install(PtySession');
+    expect(installCall).toBeGreaterThan(blocking.indexOf('.openpty('));
+    expect(installCall).toBeGreaterThan(blocking.indexOf('.spawn_command('));
+    expect(installCall).toBeGreaterThan(blocking.indexOf('prepare_pty_reader('));
+    expect(installCall).toBeGreaterThan(blocking.indexOf('.take_writer()'));
+    expect(blocking.slice(0, installCall)).not.toContain('PTY_LIFECYCLES.lock()');
     expect(blocking).toMatch(
       /std::thread::spawn\s*\(\s*move\s*\|\|\s*\{[\s\S]*pump_pty_reader\s*\(/,
     );
