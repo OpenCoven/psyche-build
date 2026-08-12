@@ -17,7 +17,7 @@ public struct BonjourServiceRecord: Sendable, Equatable {
 
 /// A service that carried a usable identity: a server ID, a fingerprint this
 /// client can pin, and at least one protocol version it can speak.
-public struct DiscoveredHost: Sendable, Equatable, Identifiable {
+public struct BonjourHostIdentity: Sendable, Equatable, Identifiable {
     public let serverID: String
     public let serverName: String
     public let domain: String
@@ -41,13 +41,36 @@ public struct DiscoveredHost: Sendable, Equatable, Identifiable {
     }
 }
 
+/// A discovered host with validated identity metadata and a connectable local
+/// network endpoint. The endpoint's certificate fingerprint comes from TXT;
+/// its host and port come only from Bonjour service resolution.
+public struct DiscoveredHost: Sendable, Equatable, Identifiable {
+    public let serverID: String
+    public let serverName: String
+    public let domain: String
+    public let certificateFingerprint: String
+    public let supportedVersions: [Int]
+    public let endpoint: HostEndpoint
+
+    public var id: String { serverID }
+
+    public init(identity: BonjourHostIdentity, endpoint: HostEndpoint) {
+        self.serverID = identity.serverID
+        self.serverName = identity.serverName
+        self.domain = identity.domain
+        self.certificateFingerprint = identity.certificateFingerprint
+        self.supportedVersions = identity.supportedVersions
+        self.endpoint = endpoint
+    }
+}
+
 /// TXT records are attacker-controlled — anyone on the LAN can advertise
 /// `_psyche._tcp`. Nothing here trusts a field it has not validated, and a
 /// record missing any of them is dropped rather than surfaced half-formed.
 public enum BonjourHostParser {
     public static let serviceType = "_psyche._tcp"
 
-    public static func host(from record: BonjourServiceRecord) -> DiscoveredHost? {
+    public static func host(from record: BonjourServiceRecord) -> BonjourHostIdentity? {
         // Bonjour TXT keys are case-insensitive by spec, so fold before lookup.
         let txt = Dictionary(
             record.txt.map { ($0.key.lowercased(), $0.value) },
@@ -67,7 +90,7 @@ public enum BonjourHostParser {
         guard !versions.isEmpty else { return nil }
 
         let serverName = record.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return DiscoveredHost(
+        return BonjourHostIdentity(
             serverID: serverID,
             serverName: serverName.isEmpty ? serverID : serverName,
             domain: record.domain,
@@ -79,8 +102,8 @@ public enum BonjourHostParser {
     /// Deduplicates on server ID — the identity — rather than on service name,
     /// which changes when the host is renamed and collides when two hosts pick
     /// the same one. Sorted so a rendered list holds still between browses.
-    public static func hosts(from records: [BonjourServiceRecord]) -> [DiscoveredHost] {
-        var seen: [String: DiscoveredHost] = [:]
+    public static func hosts(from records: [BonjourServiceRecord]) -> [BonjourHostIdentity] {
+        var seen: [String: BonjourHostIdentity] = [:]
         for record in records {
             guard let host = host(from: record), seen[host.serverID] == nil else { continue }
             seen[host.serverID] = host
@@ -112,27 +135,74 @@ public protocol BonjourBrowsing: Sendable {
 /// Browses the LAN and publishes only the hosts that survived parsing.
 public actor BonjourHostDiscovery {
     private let browser: any BonjourBrowsing
+    private let resolver: any BonjourServiceResolving
+    private var resolutionTask: Task<Void, Never>?
 
-    public init(browser: any BonjourBrowsing = NWBonjourBrowser()) {
+    public init(
+        browser: any BonjourBrowsing = NWBonjourBrowser(),
+        resolver: any BonjourServiceResolving = NetServiceBonjourResolver()
+    ) {
         self.browser = browser
+        self.resolver = resolver
     }
 
     public func start() -> AsyncStream<[DiscoveredHost]> {
         let records = browser.records()
         browser.start()
-        return AsyncStream { continuation in
-            let task = Task {
-                for await batch in records {
-                    continuation.yield(BonjourHostParser.hosts(from: batch))
-                }
-                continuation.finish()
+        resolutionTask?.cancel()
+
+        let (stream, continuation) = AsyncStream<[DiscoveredHost]>.makeStream()
+        let task = Task { [resolver] in
+            for await batch in records {
+                guard !Task.isCancelled else { return }
+                continuation.yield(await Self.resolveHosts(from: batch, using: resolver))
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.finish()
         }
+        resolutionTask = task
+        continuation.onTermination = { _ in task.cancel() }
+        return stream
     }
 
     public func stop() {
+        resolutionTask?.cancel()
+        resolutionTask = nil
         browser.stop()
+    }
+
+    private static func resolveHosts(
+        from records: [BonjourServiceRecord],
+        using resolver: any BonjourServiceResolving
+    ) async -> [DiscoveredHost] {
+        var hosts: [DiscoveredHost] = []
+        for identity in BonjourHostParser.hosts(from: records) {
+            guard !Task.isCancelled else { return [] }
+            do {
+                let resolved = try await resolver.resolve(name: identity.serverName, domain: identity.domain)
+                guard let endpoint = endpoint(from: resolved, fingerprint: identity.certificateFingerprint) else {
+                    continue
+                }
+                hosts.append(DiscoveredHost(identity: identity, endpoint: endpoint))
+            } catch is CancellationError {
+                return []
+            } catch {
+                continue
+            }
+        }
+        return hosts.sorted { $0.serverID < $1.serverID }
+    }
+
+    private static func endpoint(
+        from resolved: ResolvedBonjourEndpoint,
+        fingerprint: String
+    ) -> HostEndpoint? {
+        let host = resolved.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, (1...65_535).contains(resolved.port) else { return nil }
+        return HostEndpoint(
+            host: host,
+            port: resolved.port,
+            certificateFingerprint: fingerprint
+        )
     }
 }
 
