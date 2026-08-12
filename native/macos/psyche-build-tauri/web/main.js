@@ -541,7 +541,7 @@
     function invalidateChangedDiffScope() {
       if (project.id === state.activeProjectId &&
           activeWorkspaceRoot(project) !== previousWorkspaceRoot) {
-        suspendDiffRequests();
+        suspendGitRequests();
       }
     }
     if (state.env && state.env.native_workspace_v2 === false) {
@@ -2110,6 +2110,7 @@
 
   var gitSurfaceEl = document.getElementById("git-surface");
   var gitSurfaceStagingEl = document.getElementById("git-surface-staging");
+  var gitRefreshFlight = null;
 
   function stageGitSurface() {
     if (gitSurfaceEl && gitSurfaceStagingEl &&
@@ -2142,12 +2143,44 @@
   function renderGitSurface() {
     var project = activeProject();
     if (!gitPaneIsVisible(project)) {
-      suspendDiffRequests();
+      suspendGitRequests();
       return false;
     }
-    renderGitPanel();
-    renderDiffsPanel();
-    return true;
+    var projectId = project.id;
+    var workspaceRoot = activeWorkspaceRoot(project);
+    var scopeKey = projectId + "\0" + workspaceRoot;
+    if (gitRefreshFlight && gitRefreshFlight.scopeKey === scopeKey) {
+      return gitRefreshFlight.promise;
+    }
+
+    var refreshGeneration = gitRefreshRequestGate.next();
+    var gitGeneration = gitPanelRequestGate.next();
+    var diffGeneration = diffPanelRequestGate.next();
+    diffRequestGate.next();
+    prepareGitSurfaceRefresh();
+    setGitChangesCount(0);
+
+    var flight = { scopeKey: scopeKey, promise: null };
+    var statusRequest;
+    try {
+      statusRequest = invoke("git_status", { root: workspaceRoot });
+    } catch (err) {
+      statusRequest = Promise.reject(err);
+    }
+    flight.promise = Promise.resolve(statusRequest).then(function (status) {
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration)) return;
+      setGitChangesCount(status && status.is_repo ? (status.files || []).length : 0);
+      renderDiffsPanel(project, workspaceRoot, status, diffGeneration, refreshGeneration);
+      return renderGitPanel(project, workspaceRoot, status, gitGeneration, refreshGeneration);
+    }).catch(function (err) {
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration)) return;
+      setGitChangesCount(0);
+      renderGitSurfaceError(err);
+    }).finally(function () {
+      if (gitRefreshFlight === flight) gitRefreshFlight = null;
+    });
+    gitRefreshFlight = flight;
+    return flight.promise;
   }
 
   function mountToolPane(thread) {
@@ -2242,10 +2275,11 @@
     var workspaceRoot = activeWorkspaceRoot(project);
     var existing = gitPaneThread(project.id, workspaceRoot);
     if (existing) {
-      if (existing.hidden && !reopenThread(existing.id)) return null;
+      var reopened = existing.hidden;
+      if (reopened && !reopenThread(existing.id)) return null;
       revealGitPane(existing);
       await focusThread(existing.id);
-      renderGitSurface();
+      if (!reopened) renderGitSurface();
       return existing;
     }
     var id = makeThreadId();
@@ -3479,9 +3513,7 @@
       syncPaneMaxControl(thread, layout, leaf);
     }
     if (thread.paneClose) {
-      var closeLabel = thread.kind === "web"
-        ? "Close Web pane"
-        : (thread.kind === "git" ? "Close Git pane" : "Stop and close " + thread.name);
+      var closeLabel = sessionCloseLabel(thread);
       thread.paneClose.title = closeLabel;
       thread.paneClose.setAttribute("aria-label", closeLabel);
     }
@@ -3550,7 +3582,10 @@
   function closeThread(id, options) {
     var thread = findThread(id);
     if (!thread || thread.closeStarted) return false;
-    if (thread.kind === "git") stageGitSurface();
+    if (thread.kind === "git") {
+      suspendGitRequests();
+      stageGitSurface();
+    }
     if (thread.kind === "web" && state.activeThreadId === id) {
       markActiveSurface("terminal");
     }
@@ -3599,6 +3634,7 @@
   function hideThread(id) {
     var thread = findThread(id);
     if (!thread || thread.hidden) return false;
+    if (thread.kind === "git") suspendGitRequests();
     thread.metricsGeneration += 1;
     if (thread.metricsRefreshTimer) {
       clearTimeout(thread.metricsRefreshTimer);
@@ -3614,6 +3650,7 @@
       }
     }
     renderPaneWorkspace();
+    if (thread.kind === "git") stageGitSurface();
     refreshSidebar();
     refreshTabs();
     return true;
@@ -3642,7 +3679,9 @@
       project.lastActiveThreadId = thread.id;
     }
     state.activeThreadId = thread.id;
+    if (thread.kind === "git") revealGitPane(thread);
     renderPaneWorkspace();
+    if (thread.kind === "git") renderGitSurface();
     refreshSidebar();
     return true;
   }
@@ -3666,8 +3705,12 @@
     return reopened;
   }
 
+  function threadIsToolPane(thread) {
+    return !!thread && (thread.kind === "git" || thread.kind === "web");
+  }
+
   function duplicateThread(thread) {
-    if (!thread || thread.status === "exited") return null;
+    if (!thread || thread.status === "exited" || threadIsToolPane(thread)) return null;
     var project = findProject(thread.projectId);
     var launch = thread.launch;
     if (launch && launch.launchKind === "coven-chat") {
@@ -3681,6 +3724,42 @@
       worktreePath: thread.worktreePath,
       launch: launch,
     });
+  }
+
+  function sessionCloseLabel(thread) {
+    if (thread && thread.kind === "git") return "Close Git pane";
+    if (thread && thread.kind === "web") return "Close Web pane";
+    return "Stop and close" + (thread && thread.name ? " " + thread.name : "");
+  }
+
+  /** Context actions are capability-based: tool panes never receive PTY actions. */
+  function localSessionContextActions(thread, memberships, callbacks) {
+    var isTool = threadIsToolPane(thread);
+    var actions = [{ label: "Focus", run: callbacks.focus }];
+    if (!isTool && memberships.length) {
+      actions.push({
+        label: "Show only " + memberships[0].name,
+        run: callbacks.showSet,
+      });
+      actions.push({
+        label: "Remove from " + memberships[0].name,
+        run: callbacks.removeSet,
+      });
+    }
+    if (!isTool) {
+      actions.push({ label: "Rename…", run: callbacks.rename });
+      if (thread.status !== "exited") {
+        actions.push({ label: "Duplicate", run: callbacks.duplicate });
+        actions.push({ label: "Interrupt", run: callbacks.interrupt });
+      }
+    }
+    actions.push({ label: "Hide", run: callbacks.hide });
+    actions.push({
+      label: isTool ? sessionCloseLabel(thread) : "Stop and close",
+      danger: true,
+      run: callbacks.close,
+    });
+    return actions;
   }
 
   var sessionContextMenu = null;
@@ -5684,40 +5763,30 @@
               });
               row.addEventListener("contextmenu", function (event) {
                 var memberships = setsForThread(thread);
-                openSessionContextMenu(event, [
-                  { label: "Focus", run: function () { focusThread(thread.id); } },
-                  memberships.length
-                    ? { label: "Show only " + memberships[0].name, run: function () {
-                        activateFocusSet(memberships[0].id);
-                      } }
-                    : null,
-                  memberships.length
-                    ? { label: "Remove from " + memberships[0].name, run: function () {
-                        removeFromFocusSet(memberships[0].id, thread.id);
-                      } }
-                    : null,
-                  { label: "Rename…", run: function () {
+                openSessionContextMenu(event, localSessionContextActions(
+                  thread,
+                  memberships,
+                  {
+                    focus: function () { focusThread(thread.id); },
+                    showSet: function () { activateFocusSet(memberships[0].id); },
+                    removeSet: function () {
+                      removeFromFocusSet(memberships[0].id, thread.id);
+                    },
+                    rename: function () {
                       beginSessionRename({ stopPropagation: function () {} });
-                    } },
-                  thread.status !== "exited"
-                    ? { label: "Duplicate", run: function () { duplicateThread(thread); } }
-                    : null,
-                  thread.status !== "exited"
-                    ? { label: "Interrupt", run: function () {
-                        sendToThread(thread, "\x03");
-                      } }
-                    : null,
-                  { label: "Hide", run: function () { hideThread(thread.id); } },
-                  { label: "Stop and close", danger: true, run: function () {
-                      armLocalClose();
-                    } },
-                ]);
+                    },
+                    duplicate: function () { duplicateThread(thread); },
+                    interrupt: function () { sendToThread(thread, "\x03"); },
+                    hide: function () { hideThread(thread.id); },
+                    close: armLocalClose,
+                  }
+                ));
               });
 
               var close = document.createElement("button");
               close.type = "button";
               close.className = "session-close";
-              close.title = "Stop and close " + thread.name;
+              close.title = sessionCloseLabel(thread);
               close.setAttribute("aria-label", close.title);
               close.setAttribute("tabindex", "-1");
               close.textContent = "×";
@@ -8048,6 +8117,7 @@
   var diffRequestGate = window.PsycheCodeEditor.createRequestGate();
   var diffPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
   var gitPanelRequestGate = window.PsycheCodeEditor.createRequestGate();
+  var gitRefreshRequestGate = window.PsycheCodeEditor.createRequestGate();
 
   function diffCacheKey(projectId, workspaceRoot, path, staged, context) {
     return projectId + "\0" + workspaceRoot + "\0" + path + "\0" +
@@ -8062,6 +8132,22 @@
   function suspendDiffRequests() {
     diffPanelRequestGate.next();
     diffRequestGate.next();
+  }
+
+  function suspendGitRequests() {
+    gitRefreshRequestGate.next();
+    gitPanelRequestGate.next();
+    suspendDiffRequests();
+    gitRefreshFlight = null;
+    setGitChangesCount(0);
+  }
+
+  function gitSurfaceRequestMatches(projectId, workspaceRoot, generation) {
+    var project = activeProject();
+    return gitRefreshRequestGate.isCurrent(generation) &&
+      !!project && project.id === projectId &&
+      activeWorkspaceRoot(project) === workspaceRoot &&
+      gitPaneIsVisible(project);
   }
 
   function gitPanelRequestMatches(projectId, workspaceRoot, generation) {
@@ -8080,6 +8166,23 @@
       project.id === projectId &&
       activeWorkspaceRoot(project) === workspaceRoot &&
       gitPaneIsVisible(project);
+  }
+
+  function prepareGitSurfaceRefresh() {
+    if (gitViewEl) panelMessage(gitViewEl, "Loading repository…");
+    if (gitBranchEl) gitBranchEl.textContent = "";
+    gitRemoteWebUrl = null;
+    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = true;
+    resetDiffDetail("Loading changes…");
+    if (diffFilesEl) panelMessage(diffFilesEl, "Loading changes…");
+    if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
+  }
+
+  function renderGitSurfaceError(error) {
+    if (gitViewEl) panelMessage(gitViewEl, String(error), "panel-error");
+    if (diffFilesEl) panelMessage(diffFilesEl, String(error), "panel-error");
+    clearDiffSelection("");
+    if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
   }
 
   // The tree highlights whichever file currently owns the main area.
@@ -8378,28 +8481,11 @@
       gitPaneIsVisible(project);
   }
 
-  async function renderDiffsPanel() {
+  function renderDiffsPanel(project, workspaceRoot, status, panelGeneration, refreshGeneration) {
     if (!diffFilesEl) return;
-    var project = activeProject();
-    if (!gitPaneIsVisible(project)) return;
     var projectId = project.id;
-    var workspaceRoot = activeWorkspaceRoot(project);
-    var panelGeneration = diffPanelRequestGate.next();
-    diffRequestGate.next();
-    resetDiffDetail("Loading changes…");
-    panelMessage(diffFilesEl, "Loading changes…");
-    if (diffsSummaryEl) diffsSummaryEl.textContent = "loading…";
-    var status;
-    try {
-      status = await invoke("git_status", { root: workspaceRoot });
-    } catch (err) {
-      if (!diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
-      panelMessage(diffFilesEl, String(err), "panel-error");
-      clearDiffSelection("");
-      if (diffsSummaryEl) diffsSummaryEl.textContent = "error";
-      return;
-    }
-    if (!diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !diffPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) {
       panelMessage(diffFilesEl, "Not a git repository.");
       clearDiffSelection("");
@@ -8411,7 +8497,6 @@
         ? status.files.length + " changed"
         : "clean";
     }
-    setGitChangesCount(status.files.length);
     if (status.files.length === 0) {
       panelMessage(diffFilesEl, "No uncommitted changes.");
       clearDiffSelection("");
@@ -8504,43 +8589,36 @@
   function refreshDiffs() {
     var project = activeProject();
     if (project) invalidateProjectDiffs(project.id);
-    renderDiffsPanel();
+    renderGitSurface();
   }
 
   onRailClick("diffs-refresh", refreshDiffs);
 
   // ---- Git / GitHub ----
 
-  async function renderGitPanel() {
+  async function renderGitPanel(project, workspaceRoot, status, panelGeneration, refreshGeneration) {
     if (!gitViewEl) return;
-    var panelGeneration = gitPanelRequestGate.next();
-    var project = activeProject();
-    if (!project) { panelMessage(gitViewEl, "No project open — ⌘O to add one."); return; }
     var projectId = project.id;
-    var workspaceRoot = activeWorkspaceRoot(project);
-    gitViewEl.innerHTML = "";
-    if (gitBranchEl) gitBranchEl.textContent = "";
-    gitRemoteWebUrl = null;
-    if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = true;
-
-    var status, commits;
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+    var commits;
     try {
-      status = await invoke("git_status", { root: workspaceRoot });
-      if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
       commits = status.is_repo ? await invoke("git_log", { root: workspaceRoot, limit: 30 }) : [];
     } catch (err) {
-      if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+      if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+          !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+      setGitChangesCount(0);
       panelMessage(gitViewEl, String(err), "panel-error");
       return;
     }
-    if (!gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
+    if (!gitSurfaceRequestMatches(projectId, workspaceRoot, refreshGeneration) ||
+        !gitPanelRequestMatches(projectId, workspaceRoot, panelGeneration)) return;
     if (!status.is_repo) { panelMessage(gitViewEl, "Not a git repository."); return; }
 
+    gitViewEl.innerHTML = "";
     gitRemoteWebUrl = status.web_url || null;
     if (gitOpenRemoteBtn) gitOpenRemoteBtn.disabled = !gitRemoteWebUrl;
     if (gitBranchEl) gitBranchEl.textContent = status.branch || "(detached)";
-    setGitChangesCount((status.files || []).length);
-
     var head = document.createElement("div");
     head.className = "git-branch-line";
     var track = "";

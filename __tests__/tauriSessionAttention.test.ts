@@ -549,11 +549,12 @@ describe('desktop shell wiring', () => {
     expect(mainJs).toMatch(
       /term\.onData\(function \(data\) \{\s*sendToThread\(thread, data\);\s*\}\);/
     );
-    expect(
-      mainJs.match(
-        /label: "Interrupt", run: function \(\) \{\s*sendToThread\(thread, "\\x03"\);\s*\} \}/g
-      )
-    ).toHaveLength(2);
+    expect(functionSource('localSessionContextActions')).toContain(
+      'actions.push({ label: "Interrupt", run: callbacks.interrupt });',
+    );
+    expect(functionSource('renderSessionList')).toContain(
+      'interrupt: function () { sendToThread(thread, "\\x03"); }',
+    );
   });
 
   it('distinguishes interrupts from answers before applying attention state', () => {

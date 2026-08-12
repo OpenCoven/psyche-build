@@ -625,6 +625,7 @@ describe('Tauri physical terminal panes', () => {
         PsychePanes: { findLeafByThreadId: () => null },
         syncPaneSpanControl: () => undefined,
         syncPaneMaxControl: () => undefined,
+        sessionCloseLabel: (value: typeof thread) => `Stop and close ${value.name}`,
       },
     );
     syncThreadPaneMetadata(thread);

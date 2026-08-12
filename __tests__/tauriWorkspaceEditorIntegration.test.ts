@@ -373,41 +373,18 @@ describe('native CodeMirror workspace editor surface', () => {
       'diffCache.deleteWhere(function (key) { return key.startsWith(projectId + "\\0"); })'
     );
     expect(extractFunctionSource(mainJs, 'refreshDiffs')).toMatch(
-      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderDiffsPanel\(\)/
+      /invalidateProjectDiffs\(project\.id\)[\s\S]*renderGitSurface\(\)/
     );
-    expect(extractFunctionSource(mainJs, 'renderDiffsPanel')).toMatch(
-      /if \(!gitPaneIsVisible\(project\)\) return;/
-    );
+    expect(extractFunctionSource(mainJs, 'renderGitSurface')).toContain('gitPaneIsVisible(project)');
     expect(extractFunctionSource(mainJs, 'performFileSave')).toMatch(
       /invalidateProjectDiffs\(project\.id\);[\s\S]*gitPaneIsVisible\(project\)[\s\S]*renderGitSurface\(\);/
     );
   });
 
-  it('does not render a hidden Git pane and clears stale diff summaries on status errors', async () => {
-    const summary = { textContent: '3 changed' };
-    const messages: string[] = [];
-    const project = { id: 'p1', root: '/repo' };
-    const renderDiffsPanel = compileFunction<() => Promise<void>>(
-      extractFunctionSource(mainJs, 'renderDiffsPanel'),
-      {
-        diffFilesEl: {},
-        gitPaneIsVisible: () => true,
-        activeProject: () => project,
-        activeWorkspaceRoot: (value: typeof project) => value.root,
-        diffPanelRequestGate: { next: () => 1, isCurrent: () => true },
-        diffPanelRequestMatches: () => true,
-        diffRequestGate: { next: () => 1 },
-        resetDiffDetail: (message: string) => { messages.push(message); },
-        diffsSummaryEl: summary,
-        invoke: async () => { throw new Error('status unavailable'); },
-        panelMessage: () => undefined,
-        clearDiffSelection: () => undefined,
-      },
-    );
-
-    await renderDiffsPanel();
-    expect(messages).toEqual(['Loading changes…']);
-    expect(summary.textContent).toBe('error');
+  it('resets stale badges and summaries at refresh start and status errors', () => {
+    expect(extractFunctionSource(mainJs, 'renderGitSurface')).toContain('setGitChangesCount(0)');
+    expect(extractFunctionSource(mainJs, 'renderGitSurfaceError')).toContain('diffsSummaryEl.textContent = "error"');
+    expect(extractFunctionSource(mainJs, 'renderGitSurfaceError')).toContain('clearDiffSelection("")');
   });
 
   it('serves cached diffs without invoking and ignores stale results and errors', async () => {

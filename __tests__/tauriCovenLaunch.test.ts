@@ -675,6 +675,7 @@ describe('native Coven launch routing', () => {
     ) => Record<string, any> | null>(
       functionSource('duplicateThread'),
       {
+        threadIsToolPane: () => false,
         findProject: () => project,
         covenChatLaunch,
         createThread: (options: Record<string, any>) => {
@@ -723,6 +724,26 @@ describe('native Coven launch routing', () => {
     });
   });
 
+  it('rejects duplicate requests for non-PTY tool panes', () => {
+    let creates = 0;
+    const duplicateThread = compileFunction<(
+      value: Record<string, unknown>,
+    ) => Record<string, unknown> | null>(
+      functionSource('duplicateThread'),
+      {
+        threadIsToolPane: (thread: Record<string, unknown>) =>
+          thread.kind === 'git' || thread.kind === 'web',
+        findProject: () => ({ id: 'project' }),
+        covenChatLaunch: () => null,
+        createThread: () => { creates += 1; return {}; },
+      },
+    );
+
+    expect(duplicateThread({ kind: 'git', status: 'running' })).toBeNull();
+    expect(duplicateThread({ kind: 'web', status: 'running' })).toBeNull();
+    expect(creates).toBe(0);
+  });
+
   it('does not create a duplicate Coven chat thread when secure session generation fails', () => {
     const project = { id: 'project', root: '/repo' };
     const statuses: Array<{ text: string; tone: string | undefined }> = [];
@@ -750,6 +771,7 @@ describe('native Coven launch routing', () => {
     ) => Record<string, any> | null>(
       functionSource('duplicateThread'),
       {
+        threadIsToolPane: () => false,
         findProject: () => project,
         covenChatLaunch,
         createThread: () => {
