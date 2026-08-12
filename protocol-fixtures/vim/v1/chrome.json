@@ -6,6 +6,7 @@
       "context": "passthrough",
       "sequence": [{ "key": "F6" }],
       "disposition": "action",
+      "expected": { "context": "chrome-normal", "pending": "" },
       "actions": [{ "type": "chrome.enter" }]
     },
     {
@@ -13,6 +14,7 @@
       "context": "chrome-normal",
       "sequence": [{ "key": "g" }, { "key": "g" }],
       "disposition": "action",
+      "expected": { "context": "chrome-normal", "pending": "" },
       "actions": [{ "type": "focus.first" }]
     },
     {
@@ -20,6 +22,7 @@
       "context": "chrome-normal",
       "sequence": [{ "key": "w", "ctrl": true }, { "key": "h" }],
       "disposition": "action",
+      "expected": { "context": "chrome-normal", "pending": "" },
       "actions": [{ "type": "pane.focus", "direction": "left" }]
     }
   ]

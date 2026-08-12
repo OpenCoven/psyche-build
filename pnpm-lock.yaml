@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@opencoven/psyche-vim-core':
-        specifier: workspace:*
-        version: link:packages/vim-core
       bonjour-service:
         specifier: ^1.4.4
         version: 1.4.4
@@ -51,6 +48,9 @@ importers:
         specifier: ^8.21.3
         version: 8.21.3
     devDependencies:
+      '@opencoven/psyche-vim-core':
+        specifier: workspace:*
+        version: link:packages/vim-core
       '@playwright/test':
         specifier: ^1.62.1
         version: 1.62.1

@@ -33,7 +33,16 @@ export interface KeyboardEventLike {
   readonly metaKey?: boolean;
 }
 
-export interface VimInputResult extends VimResult {
-  /** Present exclusively when the adapter must pass the original event through. */
-  readonly event?: KeyboardEventLike;
-}
+export type VimPassthroughResult = VimResult & {
+  readonly disposition: 'passthrough';
+  /** The exact event that an adapter must deliver to the focused surface. */
+  readonly event: KeyboardEventLike;
+};
+
+export type VimConsumedResult = VimResult & {
+  readonly disposition: Exclude<VimDisposition, 'passthrough'>;
+  /** Consumed events cannot be replayed by an adapter. */
+  readonly event?: never;
+};
+
+export type VimInputResult = VimPassthroughResult | VimConsumedResult;
