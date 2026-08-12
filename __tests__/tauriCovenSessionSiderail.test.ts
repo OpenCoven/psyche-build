@@ -2791,7 +2791,8 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.invoke).not.toHaveBeenCalled();
       expect(row.querySelector('.session-close-confirm')?.textContent).toBe('Close · 3');
 
-      await row.querySelector('.session-close-confirm')!.emit('click');
+      const confirmEvent = await row.querySelector('.session-close-confirm')!.emit('click');
+      expect(confirmEvent.propagationStopped).toBe(true);
       await vi.waitFor(() => {
         expect(renderer.invoke).toHaveBeenCalledTimes(1);
         expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
