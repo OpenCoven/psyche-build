@@ -10,10 +10,17 @@ const tearDownPaneWithVerificationMock = vi.hoisted(() => vi.fn());
 const monitoredConflict = vi.hoisted(() => ({
   onResolved: undefined as undefined | (() => Promise<void> | void),
 }));
+const restartedTmuxServerIdentity = {
+  ...mockTmuxServerIdentity,
+  pid: mockTmuxServerIdentity.pid + 1,
+  processStartIdentity: `${mockTmuxServerIdentity.processStartIdentity}-restarted`,
+  sessionId: '$test-restarted',
+};
 const stateManagerMock = vi.hoisted(() => ({
   getPanes: vi.fn(() => [] as PsychePane[]),
 }));
 const tmuxServiceMock = vi.hoisted(() => ({
+  getServerIdentity: vi.fn(() => mockTmuxServerIdentity),
   killPane: vi.fn(async () => {}),
   probePanePresence: vi.fn(async () => 'present'),
 }));
@@ -65,11 +72,17 @@ describe('createConflictResolutionPaneForMerge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     monitoredConflict.onResolved = undefined;
+    tmuxServiceMock.getServerIdentity.mockReturnValue(mockTmuxServerIdentity);
     tmuxServiceMock.killPane.mockResolvedValue(undefined);
     tmuxServiceMock.probePanePresence.mockResolvedValue('present');
     tearDownPaneWithVerificationMock.mockImplementation(async (options: {
+      probe?: () => Promise<'present' | 'absent' | 'unknown'> | 'present' | 'absent' | 'unknown';
       kill?: () => Promise<void> | void;
     }) => {
+      const presence = await options.probe?.();
+      if (presence && presence !== 'present') {
+        return { presence };
+      }
       await options.kill?.();
       return { presence: 'absent' };
     });
@@ -160,5 +173,72 @@ describe('createConflictResolutionPaneForMerge', () => {
     expect(onActionResult).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Merge Worktree',
     }));
+  });
+
+  it('does not kill or remove a same-pane replacement after tmux restarts', async () => {
+    const pane = createWorktreePane({
+      id: 'psyche-source',
+      slug: 'feature',
+      branchName: 'feature',
+      paneId: '%1',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/feature',
+    });
+    const conflictPane = createWorktreePane({
+      id: 'conflict-pane-id',
+      slug: 'merge-feature-into-main',
+      paneId: '%9',
+      projectRoot: '/repo',
+      projectName: 'Repo',
+      worktreePath: '/repo/.psyche/worktrees/feature',
+      tmuxServerIdentity: mockTmuxServerIdentity,
+    });
+    createConflictResolutionPaneMock.mockResolvedValue(conflictPane);
+    stateManagerMock.getPanes.mockReturnValue([pane, conflictPane]);
+    tmuxServiceMock.getServerIdentity.mockReturnValue(restartedTmuxServerIdentity);
+
+    const removedPaneIds: string[] = [];
+    const onActionResult = vi.fn(async () => {});
+    const removePaneIdentitiesFromConfigImpl:
+      NonNullable<ActionContext['removePaneIdentitiesFromConfig']> = async (
+      _identities,
+      beforeRemove,
+    ) => {
+      await beforeRemove?.([pane, conflictPane], [conflictPane]);
+      removedPaneIds.push(conflictPane.id);
+      return [pane];
+    };
+    const removePaneIdentitiesFromConfig = vi.fn(removePaneIdentitiesFromConfigImpl);
+    const context = createMockContext([pane], {
+      projectName: 'Repo',
+      onActionResult,
+      removePaneIdentitiesFromConfig:
+        removePaneIdentitiesFromConfig as ActionContext['removePaneIdentitiesFromConfig'],
+    });
+    const { createConflictResolutionPaneForMerge } = await import(
+      '../../src/actions/merge/conflictResolution.js'
+    );
+
+    await createConflictResolutionPaneForMerge(
+      pane,
+      context,
+      'main',
+      '/repo',
+    );
+    await monitoredConflict.onResolved?.();
+
+    expect(removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
+      [{
+        id: conflictPane.id,
+        paneId: conflictPane.paneId,
+        tmuxServerIdentity: conflictPane.tmuxServerIdentity,
+      }],
+      expect.any(Function),
+    );
+    expect(removedPaneIds).toEqual([]);
+    expect(tmuxServiceMock.killPane).not.toHaveBeenCalled();
+    expect(executeMergeMock).not.toHaveBeenCalled();
+    expect(onActionResult).not.toHaveBeenCalled();
   });
 });

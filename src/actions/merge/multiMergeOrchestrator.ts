@@ -9,6 +9,7 @@ import type { ActionResult, ActionContext } from '../types.js';
 import type { PsychePane } from '../../types.js';
 import type { WorktreeInfo, MergeQueueItem, MultiMergeResult } from './types.js';
 import type { MergeValidationResult } from '../../utils/mergeValidation.js';
+import { tearDownGenerationBoundPane } from '../../utils/TmuxGenerationGuard.js';
 import { getWorktreeDisplayLabel } from '../../utils/worktreeDiscovery.js';
 import {
   getAgentDescription,
@@ -672,15 +673,29 @@ async function createAndMonitorConflictPane(
                 ? { tmuxServerIdentity: conflictPane.tmuxServerIdentity }
                 : {}),
             }],
-            async () => {
-              const { tearDownPaneWithVerification } = await import('../../utils/paneTeardown.js');
-              const teardown = await tearDownPaneWithVerification({
-                probe: () => tmuxService.probePanePresence(conflictPane.paneId),
-                kill: () => tmuxService.killPane(conflictPane.paneId),
-              });
+            async (_freshPanes, exactPanes) => {
+              const current = exactPanes?.[0];
+              if (!current) {
+                throw new Error(
+                  `Fresh conflict pane record "${conflictPane.id}" is missing or rebound`,
+                );
+              }
+              if (!current.tmuxServerIdentity) {
+                throw new Error(
+                  `Could not verify tmux generation for conflict pane ${current.paneId}`,
+                );
+              }
+              const teardown = await tearDownGenerationBoundPane(
+                tmuxService,
+                current.paneId,
+                current.tmuxServerIdentity,
+                { generationMismatch: 'unknown' },
+              );
               if (teardown.presence !== 'absent') {
                 throw new Error(
-                  `Could not confirm conflict pane ${conflictPane.paneId} closed (${teardown.presence})`,
+                  `Could not confirm conflict pane ${current.paneId} closed (${teardown.presence})${
+                    teardown.error ? `: ${teardown.error}` : ''
+                  }`,
                 );
               }
             },
