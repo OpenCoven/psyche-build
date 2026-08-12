@@ -5089,10 +5089,7 @@
       var confirmOwnedFocus = document.activeElement === confirm;
       var treeKey = host.dataset.treeKey || "";
       disarmSessionClose({ restoreFocus: false });
-      var result = onConfirm();
-      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
-      Promise.resolve(result).then(function (succeeded) {
-        if (succeeded !== false) return;
+      function restoreFocusIfNeeded() {
         var active = document.activeElement;
         if (active && active !== document.body) return;
         var items = sessionListEl.querySelectorAll("[data-tree-item]");
@@ -5102,6 +5099,19 @@
             return;
           }
         }
+      }
+      var result;
+      try {
+        result = onConfirm();
+      } catch (err) {
+        if (confirmOwnedFocus) restoreFocusIfNeeded();
+        return;
+      }
+      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
+      Promise.resolve(result).then(function (succeeded) {
+        if (succeeded !== false) restoreFocusIfNeeded();
+      }, function () {
+        restoreFocusIfNeeded();
       });
     });
     close.hidden = true;
