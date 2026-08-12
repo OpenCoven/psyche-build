@@ -512,7 +512,10 @@ describe('Tauri physical terminal panes', () => {
       'split-2',
     );
     const key = 'project\0worktree';
-    const paneLayouts = new Map([[key, { root, focusedLeafId: 'a' }]]);
+    const paneLayouts = new Map<string, {
+      root: Record<string, unknown>;
+      focusedLeafId: string | null;
+    }>([[key, { root, focusedLeafId: 'a' }]]);
     const paneLayoutKey = () => key;
     const detachThreadPane = compileFunction<(thread: {
       id: string; projectId: string; worktreePath: string;
@@ -551,6 +554,13 @@ describe('Tauri physical terminal panes', () => {
       },
       second: { threadId: 'thread-c' },
     });
+
+    paneLayouts.set(key, { root: leafA, focusedLeafId: null });
+    const fallbackPlacement = preparePanePlacement('thread-e', 'project', 'worktree');
+    expect(PsychePanes.leafIds(fallbackPlacement?.value.root || null)).toEqual([
+      'a',
+      fallbackPlacement?.value.focusedLeafId,
+    ]);
   });
 
   it('does not deduplicate a hidden Coven thread when ensuring a workspace', async () => {

@@ -298,10 +298,16 @@
     var key = paneLayoutKey(projectId, worktreePath);
     var current = paneLayouts.get(key) || null;
     var leaf = PsychePanes.createLeaf(nextPaneId("leaf"), threadId);
+    var anchorLeaf = current && current.root
+      ? PsychePanes.findLeafById(current.root, current.focusedLeafId)
+      : null;
+    var anchorLeafId = anchorLeaf
+      ? anchorLeaf.id
+      : (current && current.root ? PsychePanes.leafIds(current.root)[0] : null);
     var root = current && current.root
       ? PsychePanes.insertBelow(
           current.root,
-          current.focusedLeafId,
+          anchorLeafId,
           leaf,
           nextPaneId("split")
         )
