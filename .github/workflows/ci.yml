@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, feat/native-session-persistence]
+    branches: [main]
 
 permissions:
   contents: read
