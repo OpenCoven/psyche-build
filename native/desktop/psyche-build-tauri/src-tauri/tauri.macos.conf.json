@@ -16,7 +16,8 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
       }
-    ]
+    ],
+    "macOSPrivateApi": true
   },
   "bundle": {
     "targets": ["dmg", "app"],

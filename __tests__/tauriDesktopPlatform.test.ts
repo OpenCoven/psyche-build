@@ -157,9 +157,9 @@ describe('desktop Tauri layout', () => {
     const linux = json('tauri.linux.conf.json');
 
     expect(base.app.windows[0]).toMatchObject({ transparent: false, decorations: true });
-    expect(base.app.macOSPrivateApi).toBe(true);
+    expect(base.app).not.toHaveProperty('macOSPrivateApi');
     expect(mac.app.windows[0]).toMatchObject({ transparent: true, titleBarStyle: 'Overlay' });
-    expect(mac.app).not.toHaveProperty('macOSPrivateApi');
+    expect(mac.app.macOSPrivateApi).toBe(true);
     expect(win.app.windows[0].transparent).toBe(false);
     expect(linux.app.windows[0].transparent).toBe(false);
     expect(base.app.security.csp).toBe(originalBaseCsp);
