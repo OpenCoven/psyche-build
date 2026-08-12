@@ -3,6 +3,7 @@ import Foundation
 
 public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
     case noControlRequests
+    case staleWorkspace
     case unexpectedResponse
     case unknownProject(String)
     case unknownPane(String)
@@ -13,6 +14,8 @@ public enum WorkspaceStoreError: Error, Sendable, Equatable, LocalizedError {
         switch self {
         case .noControlRequests:
             "This workspace is not connected to a host."
+        case .staleWorkspace:
+            "File inspection is unavailable while this workspace is out of date."
         case .unexpectedResponse:
             "The host answered the workspace request with something else."
         case .unknownProject(let projectID):
@@ -236,11 +239,75 @@ public final class WorkspaceStore: ObservableObject {
         ))))
     }
 
+    /// Returns the bounded file index published for a pane's current worktree.
+    /// Inspection never runs against stale workspace state because the pane may
+    /// have moved or disappeared since the last confirmed snapshot.
+    public func listFiles(inPane paneID: String) async throws -> BrowserSnapshot {
+        let requests = try requireInspectionRequests(forPane: paneID)
+        let requestID = await requests.nextRequestID()
+        let response = try await requests.send(.listFiles(MobileFilesListRequest(
+            requestID: requestID,
+            paneID: paneID
+        )))
+        guard case let .filesList(result) = response,
+              result.requestID == requestID,
+              result.paneID == paneID
+        else {
+            throw WorkspaceStoreError.unexpectedResponse
+        }
+        return result.snapshot
+    }
+
+    public func readFile(_ path: String, inPane paneID: String) async throws -> String {
+        let requests = try requireInspectionRequests(forPane: paneID)
+        let requestID = await requests.nextRequestID()
+        let response = try await requests.send(.readFile(MobileFilesReadRequest(
+            requestID: requestID,
+            paneID: paneID,
+            path: path
+        )))
+        guard case let .filesRead(result) = response,
+              result.requestID == requestID,
+              result.paneID == paneID,
+              result.path == path
+        else {
+            throw WorkspaceStoreError.unexpectedResponse
+        }
+        return result.content
+    }
+
+    public func diffFile(_ path: String, inPane paneID: String) async throws -> String {
+        let requests = try requireInspectionRequests(forPane: paneID)
+        let requestID = await requests.nextRequestID()
+        let response = try await requests.send(.diffFile(MobileFilesDiffRequest(
+            requestID: requestID,
+            paneID: paneID,
+            path: path
+        )))
+        guard case let .filesDiff(result) = response,
+              result.requestID == requestID,
+              result.paneID == paneID,
+              result.path == path
+        else {
+            throw WorkspaceStoreError.unexpectedResponse
+        }
+        return result.diff
+    }
+
     // MARK: - Command helpers
 
     private func requireControlRequests() throws -> any ControlRequesting {
         guard let controlRequests else { throw WorkspaceStoreError.noControlRequests }
         return controlRequests
+    }
+
+    private func requireInspectionRequests(
+        forPane paneID: String
+    ) throws -> any ControlRequesting {
+        let requests = try requireControlRequests()
+        guard !isStale else { throw WorkspaceStoreError.staleWorkspace }
+        try requirePublishedPane(paneID)
+        return requests
     }
 
     /// An ack that says it failed is not a success. Accepting any response as

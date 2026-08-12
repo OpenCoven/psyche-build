@@ -119,6 +119,15 @@ final class PsycheAppUITests: XCTestCase {
         XCTAssertFalse(app.otherElements["terminal-pane-bridge-protocol"].exists)
     }
 
+    func testOpenPaneOffersFileInspection() throws {
+        let app = launchApp()
+        openWebHomePane(in: app)
+
+        let files = element("pane-files", in: app)
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        XCTAssertTrue(files.isEnabled)
+    }
+
     /// The switcher previews panes from the workspace snapshot, so every pane
     /// is reachable without any of them owning a terminal.
     func testPaneSwitcherOffersEveryPaneWithoutRenderingThem() throws {

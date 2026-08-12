@@ -18,6 +18,8 @@ struct PaneWorkspaceView: View {
     /// every change would let the pushed pane overrule the switcher, so
     /// choosing another pane would snap straight back.
     @State private var didApplyRequestedPane = false
+    @State private var isInspectingFiles = false
+    @State private var inspectionPaneID: String?
 
     init(primaryPaneID: String? = nil) {
         requestedPrimaryPaneID = primaryPaneID
@@ -65,11 +67,28 @@ struct PaneWorkspaceView: View {
         .toolbar {
             if let pane = primaryPane {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        inspectionPaneID = focusedVisiblePane?.id ?? pane.id
+                        isInspectingFiles = true
+                    } label: {
+                        Label("Browse files", systemImage: "folder")
+                    }
+                    .disabled(store.isStale)
+                    .accessibilityIdentifier("pane-files")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     PaneControlsMenu(
                         paneID: pane.id,
                         paneTitle: pane.title ?? pane.id,
                         projectTitle: projectTitle(forPane: pane.id) ?? "this project"
                     )
+                }
+            }
+        }
+        .sheet(isPresented: $isInspectingFiles) {
+            if let inspectionPaneID {
+                NavigationStack {
+                    FileBrowserView(paneID: inspectionPaneID)
                 }
             }
         }
@@ -175,6 +194,13 @@ struct PaneWorkspaceView: View {
             return nil
         }
         return secondary
+    }
+
+    private var focusedVisiblePane: WorkspacePaneSnapshot? {
+        guard let focusedPaneID = registry.focusedPaneID else { return nil }
+        return [primaryPane, secondaryPane]
+            .compactMap { $0 }
+            .first { $0.id == focusedPaneID }
     }
 
     private func projectTitle(forPane paneID: String) -> String? {
