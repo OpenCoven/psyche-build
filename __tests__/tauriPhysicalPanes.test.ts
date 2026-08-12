@@ -1156,6 +1156,51 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
+  it('does not make a Coven layout leaf active during passive worktree selection', async () => {
+    const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: 'shell-a' };
+    const thread = { id: 'thread-coven', kind: 'coven-attach' };
+    const state = { activeProjectId: project.id, activeThreadId: 'stale-thread' as string | null };
+    let renders = 0;
+    let refreshes = 0;
+    const renderPaneWorkspace = () => { renders += 1; };
+    const activatePaneLayoutFocus = compileFunction<(
+      value: typeof project, path: string,
+    ) => void>(functionSource('activatePaneLayoutFocus'), {
+      paneLayoutFor: () => ({
+        root: PsychePanes.createLeaf('leaf-a', thread.id),
+        focusedLeafId: 'leaf-a',
+      }),
+      PsychePanes,
+      findThread: () => thread,
+      state,
+      renderPaneWorkspace,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => true,
+      state,
+      setActiveProject: async () => true,
+      activatePaneLayoutFocus,
+      renderPaneWorkspace,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+
+    await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
+    expect(project.selectedWorktreePath).toBe('/target');
+    expect(project.lastActiveThreadId).toBe('shell-a');
+    expect(state.activeThreadId).toBeNull();
+    expect(renders).toBe(1);
+    expect(refreshes).toBe(1);
+  });
+
   it('refreshes an inactive-project worktree switch once after nested project activation', async () => {
     const project = {
       id: 'project',
@@ -1225,6 +1270,69 @@ describe('Tauri physical terminal panes', () => {
     ]);
     expect(refreshes).toBe(1);
     expect(options).toEqual({ refreshStatus: true });
+  });
+
+  it('does not focus visible Coven panes during passive project activation', async () => {
+    const project = {
+      id: 'project',
+      selectedWorktreePath: '/target',
+      lastActiveThreadId: 'thread-chat',
+    };
+    const state = {
+      activeProjectId: 'other',
+      activeThreadId: 'stale-thread' as string | null,
+      threads: [
+        {
+          id: 'thread-chat',
+          kind: 'coven-chat',
+          projectId: project.id,
+          worktreePath: '/target',
+          hidden: false,
+        },
+        {
+          id: 'thread-attach',
+          kind: 'coven-attach',
+          projectId: project.id,
+          worktreePath: '/target',
+          hidden: false,
+        },
+      ],
+    };
+    const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    let renderCalls = 0;
+    let sidebarCalls = 0;
+    let tabCalls = 0;
+    let syncCalls = 0;
+    const setActiveProject = compileFunction<(
+      id: string,
+      callOptions?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('setActiveProject'), {
+      state,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+      focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
+        focusCalls.push({ id, options: focusOptions });
+        state.activeThreadId = id;
+        return true;
+      },
+      renderPaneWorkspace: () => { renderCalls += 1; },
+      refreshSidebar: () => { sidebarCalls += 1; },
+      refreshTabs: () => { tabCalls += 1; },
+      syncProjectBrowser: () => { syncCalls += 1; },
+      saveWorkspaceSoon: () => undefined,
+    });
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(focusCalls).toEqual([]);
+    expect(renderCalls).toBe(1);
+    expect(sidebarCalls).toBe(1);
+    expect(tabCalls).toBe(1);
+    expect(syncCalls).toBe(2);
   });
 
   it('refreshes direct focusThread by default and allows batched suppression', async () => {

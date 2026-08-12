@@ -1265,33 +1265,48 @@ describe('native Coven launch routing', () => {
 
   it('deduplicates only a visible live Coven chat in the exact workspace', async () => {
     const project = { id: 'project', root: '/repo' };
-    const matching = {
-      id: 'matching', projectId: project.id, worktreePath: '/repo/wt',
-      kind: 'coven-chat', status: 'running', hidden: false,
+    const running = {
+      id: 'running', projectId: project.id, worktreePath: '/repo/wt',
+      kind: 'coven-chat', status: 'running', hidden: false, closing: false,
+    };
+    const starting = {
+      id: 'starting', projectId: project.id, worktreePath: '/repo/wt',
+      kind: 'coven-chat', status: 'starting', hidden: false, closing: false,
     };
     const state = { threads: [
-      { ...matching, id: 'hidden', hidden: true },
-      { ...matching, id: 'exited', status: 'exited' },
-      { ...matching, id: 'other', worktreePath: '/repo/other' },
-      matching,
+      { ...running, id: 'hidden', hidden: true },
+      { ...running, id: 'failed', status: 'failed' },
+      { ...running, id: 'exited', status: 'exited' },
+      { ...running, id: 'closing', closing: true },
+      { ...running, id: 'other', worktreePath: '/repo/other' },
+      starting,
     ] };
     let focused = '';
     let spawned = 0;
-    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<typeof matching>>(
+    const spawnedThread = { ...running, id: 'spawned' };
+    const ensureProjectCoven = compileFunction<(value: typeof project) => Promise<typeof running>>(
       functionSource('ensureProjectCoven'),
       {
         selectedWorktree: () => ({ path: '/repo/wt' }),
         state,
         focusThread: async (id: string) => { focused = id; },
-        spawnCovenThread: async () => { spawned += 1; return matching; },
+        spawnCovenThread: async () => { spawned += 1; return spawnedThread; },
         covenEnsureFlights: new Map(),
       },
     );
-    await expect(ensureProjectCoven(project)).resolves.toBe(matching);
-    expect({ focused, spawned }).toEqual({ focused: 'matching', spawned: 0 });
+    await expect(ensureProjectCoven(project)).resolves.toBe(starting);
+    expect({ focused, spawned }).toEqual({ focused: 'starting', spawned: 0 });
 
-    state.threads = state.threads.filter((thread) => thread.id !== 'matching');
+    state.threads = state.threads.map((thread) => (
+      thread.id === 'starting' ? running : thread
+    ));
     await ensureProjectCoven(project);
+    expect({ focused, spawned }).toEqual({ focused: 'running', spawned: 0 });
+
+    state.threads = state.threads.filter((thread) => (
+      thread.id !== 'starting' && thread.id !== 'running'
+    ));
+    await expect(ensureProjectCoven(project)).resolves.toBe(spawnedThread);
     expect(spawned).toBe(1);
   });
 
