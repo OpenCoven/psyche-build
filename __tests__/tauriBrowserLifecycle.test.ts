@@ -138,6 +138,46 @@ function compileFunction<T extends (...args: never[]) => unknown>(
   return Function(...names, `"use strict"; return (${source});`)(...values) as T;
 }
 
+type BrowserNavigationTab = {
+  id: string;
+  url: string;
+  created: boolean;
+  loading: boolean;
+  title: string;
+  history: string[];
+  historyIndex: number;
+};
+
+function browserNavigationDependencies(
+  project: { id: string },
+  browser: { activeTabId: string; tabs: BrowserNavigationTab[] },
+  tab: BrowserNavigationTab,
+  invoke: (command: string, args: Record<string, unknown>) => Promise<void>,
+) {
+  return {
+    activeProject: () => project,
+    createBrowserPane: async () => ({ id: 'web-pane' }),
+    ensureBrowserModel: () => browser,
+    currentBrowserTab: () => tab,
+    createBrowserTab: () => null,
+    visibleBrowserBounds: () => ({ x: 1, y: 2, w: 3, h: 4 }),
+    normaliseUrl: (url: string) => url,
+    tabTitle: (url: string) => url,
+    renderBrowserTabs: () => {},
+    updateBrowserControls: () => {},
+    browserLabelForTab: (value: typeof project, browserTab: BrowserNavigationTab) =>
+      `${value.id}:${browserTab.id}`,
+    invoke,
+    previewEmpty: { hidden: false },
+    syncUrlInput: () => {},
+    saveWorkspaceSoon: () => {},
+    nativeBrowserLabel: (label: string) => label,
+    markBrowserTabLoaded: () => {},
+    writeToActive: (_text: string) => {},
+    setTimeout: () => 0,
+  };
+}
+
 function tauriHandlerNames(source: string) {
   const match = /\.invoke_handler\(tauri::generate_handler!\[(?<body>[\s\S]*?)\]\)/.exec(source);
   if (!match?.groups?.body) throw new Error('missing tauri handler list');
@@ -272,7 +312,9 @@ describe('Tauri native browser lifecycle', () => {
     >(functionSource(mainJs, 'restoreDormantBrowserTab'), {
       navigateBrowser: async (url: string, options: Record<string, unknown>) => {
         navigations.push([url, options]);
+        await Promise.resolve();
         tab.created = true;
+        return true;
       },
     });
 
@@ -283,6 +325,132 @@ describe('Tauri native browser lifecycle', () => {
     ]]);
     expect(tab.history).toEqual(['https://example.com', 'https://example.org']);
     expect(tab.historyIndex).toBe(1);
+  });
+
+  it('waits for deferred native browser navigation before resolving successfully', async () => {
+    let resolveNavigation!: () => void;
+    const nativeNavigation = new Promise<void>((resolve) => {
+      resolveNavigation = resolve;
+    });
+    const calls: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old',
+      history: ['https://old.example'],
+      historyIndex: 0,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command) => {
+        calls.push(command);
+        return command === 'browser_navigate' ? nativeNavigation : Promise.resolve();
+      },
+    ));
+
+    const navigation = navigateBrowser('https://example.com', { tabId: tab.id });
+    let settled = false;
+    navigation.then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls).toEqual(['browser_navigate']);
+    expect(settled).toBe(false);
+    expect(tab).toMatchObject({ created: false, url: 'https://old.example' });
+
+    resolveNavigation();
+    await expect(navigation).resolves.toBe(true);
+    expect(tab).toMatchObject({ created: true, url: 'https://example.com' });
+    expect(tab.history).toEqual(['https://old.example', 'https://example.com']);
+  });
+
+  it('keeps dormant restoration pending until native navigation creates the tab', async () => {
+    let resolveNavigation!: () => void;
+    const nativeNavigation = new Promise<void>((resolve) => {
+      resolveNavigation = resolve;
+    });
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://example.com',
+      created: false,
+      loading: false,
+      title: 'Example',
+      history: ['https://example.com', 'https://example.org'],
+      historyIndex: 1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      (command) => command === 'browser_navigate' ? nativeNavigation : Promise.resolve(),
+    ));
+    const restoreDormantBrowserTab = compileFunction<
+      (value: typeof project, valueTab: BrowserNavigationTab) => Promise<boolean>
+    >(functionSource(mainJs, 'restoreDormantBrowserTab'), { navigateBrowser });
+
+    const restoration = restoreDormantBrowserTab(project, tab);
+    let settled = false;
+    restoration.then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(tab.created).toBe(false);
+
+    resolveNavigation();
+    await expect(restoration).resolves.toBe(true);
+    expect(tab.created).toBe(true);
+    expect(tab.history).toEqual(['https://example.com', 'https://example.org']);
+    expect(tab.historyIndex).toBe(1);
+  });
+
+  it('returns false after native navigation failure without changing browser history', async () => {
+    const writes: string[] = [];
+    const project = { id: 'project-a' };
+    const tab: BrowserNavigationTab = {
+      id: 'tab-a',
+      url: 'https://old.example',
+      created: false,
+      loading: false,
+      title: 'Old',
+      history: ['https://old.example', 'https://older.example'],
+      historyIndex: 1,
+    };
+    const browser = { activeTabId: tab.id, tabs: [tab] };
+    const dependencies = browserNavigationDependencies(
+      project,
+      browser,
+      tab,
+      async (command) => {
+        if (command === 'browser_navigate') throw new Error('native unavailable');
+      },
+    );
+    dependencies.writeToActive = (text: string) => writes.push(text);
+    const navigateBrowser = compileFunction<
+      (url: string, options: Record<string, unknown>) => Promise<boolean>
+    >(functionSource(mainJs, 'navigateBrowser'), dependencies);
+
+    await expect(navigateBrowser('https://example.com', { tabId: tab.id })).resolves.toBe(false);
+    expect(tab).toMatchObject({
+      created: false,
+      loading: false,
+      url: 'https://old.example',
+      history: ['https://old.example', 'https://older.example'],
+      historyIndex: 1,
+    });
+    expect(writes).toEqual(['\r\n\x1b[31m[browser_navigate]\x1b[0m Error: native unavailable\r\n']);
   });
 
   it('does not restore missing, blank, or already-created browser tabs', async () => {

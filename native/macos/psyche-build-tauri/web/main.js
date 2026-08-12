@@ -6939,8 +6939,8 @@
   }
   async function restoreDormantBrowserTab(project, tab) {
     if (!tab || tab.created || !tab.url || tab.url === "about:blank") return false;
-    await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
-    return tab.created === true;
+    var navigated = await navigateBrowser(tab.url, { tabId: tab.id, preserveHistory: true });
+    return navigated && tab.created === true;
   }
   async function activateBrowserTab(project, tabId) {
     project = project || activeProject();
@@ -7041,16 +7041,17 @@
     invoke("browser_set_bounds", { label: label, x: b.x, y: b.y, w: b.w, h: b.h }).catch(function () {});
   }
   async function navigateBrowser(rawUrl, opts) {
-    opts = opts || {}; var project = activeProject(); if (!project) return;
-    var pane = await createBrowserPane(project); if (!pane) return;
+    opts = opts || {}; var project = activeProject(); if (!project) return false;
+    var pane = await createBrowserPane(project); if (!pane) return false;
     var browser = ensureBrowserModel(project); var tab = opts.tabId ? browser.tabs.find(function (t) { return t.id === opts.tabId; }) : currentBrowserTab(project);
-    if (!tab) tab = createBrowserTab(project, rawUrl || "about:blank", true); if (!tab) return;
+    if (!tab) tab = createBrowserTab(project, rawUrl || "about:blank", true); if (!tab) return false;
     browser.activeTabId = tab.id;
-    var b = visibleBrowserBounds(); if (!b) return;
-    var normalised = normaliseUrl(rawUrl); if (!normalised) return;
+    var b = visibleBrowserBounds(); if (!b) return false;
+    var normalised = normaliseUrl(rawUrl); if (!normalised) return false;
     tab.loading = true; tab.title = tabTitle(normalised); renderBrowserTabs(); updateBrowserControls();
     var label = browserLabelForTab(project, tab);
-    invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h }).then(function () {
+    try {
+      await invoke("browser_navigate", { label: label, url: normalised, x: b.x, y: b.y, w: b.w, h: b.h });
       tab.created = true; tab.url = normalised;
       if (!opts.fromHistory && !opts.preserveHistory) { tab.history = opts.replace ? [] : tab.history.slice(0, tab.historyIndex + 1); tab.history.push(normalised); tab.historyIndex = tab.history.length - 1; }
       if (previewEmpty) previewEmpty.hidden = true;
@@ -7058,7 +7059,11 @@
       setTimeout(function () {
         if (tab.loading && tab.url === normalised) markBrowserTabLoaded(nativeBrowserLabel(label), normalised, "");
       }, 4500);
-    }).catch(function (err) { tab.loading = false; renderBrowserTabs(); updateBrowserControls(); writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n"); });
+      return true;
+    } catch (err) {
+      tab.loading = false; renderBrowserTabs(); updateBrowserControls(); writeToActive("\r\n\x1b[31m[browser_navigate]\x1b[0m " + err + "\r\n");
+      return false;
+    }
   }
   function normaliseUrl(value) {
     if (!value) return ""; var trimmed = String(value).trim(); if (!trimmed) return ""; if (trimmed === "about:blank") return trimmed;
