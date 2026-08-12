@@ -773,6 +773,42 @@ describe('native CodeMirror workspace editor surface', () => {
     }]);
   });
 
+  it('does not restore a remembered Coven pane while revealing a file decision', () => {
+    const project = {
+      id: 'p2',
+      lastActiveThreadId: 'coven',
+      layout: { mode: 'browser', side: 'right' },
+    };
+    const file = { id: 'inactive', projectId: project.id, dirty: true };
+    const state = {
+      activeProjectId: 'p1',
+      activeThreadId: 'previous',
+      activeFileId: 'active',
+      threads: [
+        { id: 'coven', kind: 'coven-chat', projectId: project.id },
+        { id: 'shell', kind: 'shell', projectId: project.id },
+      ],
+    };
+    const revealFileForDecision = compileFunction<
+      (target: typeof file) => boolean
+    >(extractFunctionSource(mainJs, 'revealFileForDecision'), {
+      findOpenFile: () => file,
+      findProject: () => project,
+      state,
+      renderPaneWorkspace: () => undefined,
+      restoreProjectLayout: () => undefined,
+      applyLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      activateFileTabNow: () => true,
+      refreshSidebar: () => undefined,
+    });
+
+    expect(revealFileForDecision(file)).toBe(true);
+    expect(state.activeThreadId).toBe('shell');
+  });
+
   it('gates explicit save while any guarded file decision is pending', async () => {
     const source = extractFunctionSource(mainJs, 'handleExplicitFileSave');
     for (const blockers of [
