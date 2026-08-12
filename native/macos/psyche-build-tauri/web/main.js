@@ -718,7 +718,7 @@
       browser.tabs = savedBrowser.tabs.slice(0, HARD_MAX_BROWSER_TABS_PER_PROJECT).map(function (tab) {
         var url = tab.url || "about:blank";
         var history = Array.isArray(tab.history) ? tab.history.filter(Boolean).slice(-50) : [];
-        return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: !!tab.created && url !== "about:blank", loading: false };
+        return { id: tab.id || makeBrowserTabId(), url: url, title: tab.title || tabTitle(url), history: history, historyIndex: clampInt(tab.historyIndex, history.length ? history.length - 1 : -1, -1, Math.max(-1, history.length - 1)), created: false, loading: false };
       });
     }
     browser.activeTabId = savedBrowser.activeTabId || (browser.tabs[0] && browser.tabs[0].id) || null;
@@ -3538,13 +3538,68 @@
     if (!project) return false;
     var browser = ensureBrowserModel(project, thread.worktreePath);
     if (!browser) return false;
+    var originalActiveTabId = browser.activeTabId;
+    var liveTabs = browser.tabs.filter(function (tab) {
+      return tab.created;
+    }).map(function (tab) {
+      return {
+        id: tab.id,
+        label: browserLabelForTab(project, tab),
+        url: tab.url || "about:blank",
+      };
+    });
     var labels = browser.tabs.map(function (tab) {
       return browserLabelForTab(project, tab);
     });
     try {
       if (labels.length) await invoke("browser_destroy_many", { labels: labels });
     } catch (error) {
-      setStatus("browser pane close failed: " + String(error), "error");
+      browser.tabs.forEach(function (tab) {
+        tab.created = false;
+        tab.loading = false;
+      });
+      var reconciled = 0;
+      var recoveryErrors = [];
+      for (var index = 0; index < liveTabs.length; index += 1) {
+        var savedTab = liveTabs[index];
+        var currentTab = browser.tabs.find(function (tab) { return tab.id === savedTab.id; });
+        if (!currentTab) {
+          recoveryErrors.push(savedTab.id + ": tab state missing");
+          continue;
+        }
+        try {
+          await invoke("browser_navigate", {
+            label: savedTab.label,
+            url: savedTab.url,
+            x: -10000,
+            y: -10000,
+            w: 1,
+            h: 1,
+          });
+          currentTab.created = true;
+          currentTab.loading = false;
+          reconciled += 1;
+        } catch (recoveryError) {
+          recoveryErrors.push(savedTab.id + ": " + String(recoveryError));
+        }
+      }
+      if (browser.tabs.some(function (tab) { return tab.id === originalActiveTabId; })) {
+        browser.activeTabId = originalActiveTabId;
+      }
+      var fullyReconciled = reconciled === liveTabs.length;
+      if (!fullyReconciled) {
+        browser.tabs.forEach(function (tab) {
+          tab.created = false;
+          tab.loading = false;
+        });
+      }
+      syncProjectBrowser();
+      saveWorkspaceSoon();
+      var recoveryStatus = "browser pane close failed; reconciled " + reconciled + "/" + liveTabs.length + " live tabs after possibly partial native teardown";
+      if (!fullyReconciled) recoveryStatus += "; all tabs left dormant";
+      if (recoveryErrors.length) recoveryStatus += "; recovery errors: " + recoveryErrors.join(", ");
+      recoveryStatus += "; close error: " + String(error);
+      setStatus(recoveryStatus, "error");
       return false;
     }
     var wasActive = state.activeThreadId === thread.id;
@@ -6932,9 +6987,12 @@
       setStatus("browser tab close failed: " + String(error), "error");
       return false;
     }
+    idx = browser.tabs.findIndex(function (t) { return t.id === tabId; }); if (idx < 0) return false;
+    var next = null;
     browser.tabs.splice(idx, 1);
-    if (browser.activeTabId === tabId) { var next = browser.tabs[Math.min(idx, browser.tabs.length - 1)] || null; browser.activeTabId = next ? next.id : null; }
+    if (browser.activeTabId === tabId) { next = browser.tabs[Math.min(idx, browser.tabs.length - 1)] || null; browser.activeTabId = next ? next.id : null; }
     renderBrowserTabs(); syncProjectBrowser(); saveWorkspaceSoon();
+    if (next && !next.created) await restoreDormantBrowserTab(project, next);
     return true;
   }
   async function restoreDormantBrowserTab(project, tab) {
