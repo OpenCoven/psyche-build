@@ -472,7 +472,28 @@ export async function replaceProjectPaneConfigPaneIdentity(
   return transactProjectPaneConfig(projectRoot, async ({ config, persist }) => {
     const panes = Array.isArray(config.panes) ? [...config.panes] : [];
     assertUniquePaneIds(panes, projectPaneConfigPath(projectRoot));
-    const exactIndex = panes.findIndex((candidate) => hasPaneRecordIdentity(candidate, expected));
+    const exactIndex = panes.findIndex((candidate) => {
+      const identity = paneRecordIdentity(candidate);
+      if (
+        !identity
+        || identity.id !== expected.id
+        || identity.paneId !== expected.paneId
+      ) {
+        return false;
+      }
+
+      if (!expected.tmuxServerIdentity) {
+        return true;
+      }
+
+      return Boolean(
+        identity.tmuxServerIdentity
+        && sameTmuxServerIdentity(
+          identity.tmuxServerIdentity,
+          expected.tmuxServerIdentity,
+        )
+      );
+    });
 
     if (exactIndex === -1) {
       const current = panes.find((candidate) => paneRecordId(candidate) === expected.id);
@@ -909,19 +930,24 @@ function hasPaneRecordIdentity(
   expected: ProjectPaneConfigPaneIdentity,
 ): boolean {
   const identity = paneRecordIdentity(value);
-  return (
-    identity?.id === expected.id
-    && identity.paneId === expected.paneId
-    && (
-      !expected.tmuxServerIdentity
-      || Boolean(
-        identity.tmuxServerIdentity
-        && sameTmuxServerIdentity(
-          identity.tmuxServerIdentity,
-          expected.tmuxServerIdentity,
-        )
-      )
-    )
+  if (
+    !identity
+    || identity.id !== expected.id
+    || identity.paneId !== expected.paneId
+  ) {
+    return false;
+  }
+
+  if (!identity.tmuxServerIdentity || !expected.tmuxServerIdentity) {
+    return (
+      identity.tmuxServerIdentity === undefined
+      && expected.tmuxServerIdentity === undefined
+    );
+  }
+
+  return sameTmuxServerIdentity(
+    identity.tmuxServerIdentity,
+    expected.tmuxServerIdentity,
   );
 }
 
