@@ -169,12 +169,16 @@ function discoveryHarness(
       var document = { visibilityState: initialVisibilityState };
       var covenDiscovery = PsycheSessions.createCovenDiscoveryState();
       var covenDiscoveryFlight = null;
+      var covenSessionCloseFlights = new Set();
       function renderSessionList() {}
+      function setStatus() {}
       ${functionSource(mainJs, 'covenDiscoveryScopes')}
       ${functionSource(mainJs, 'covenDiscoveryRoots')}
       ${functionSource(mainJs, 'refreshCovenSessions')}
+      ${functionSource(mainJs, 'closeCovenSession')}
       return {
         refresh: refreshCovenSessions,
+        close: closeCovenSession,
         setProjects: function (projects) { state.projects = projects; },
         setVisibility: function (value) { document.visibilityState = value; },
         discovery: function () { return covenDiscovery; },
@@ -191,7 +195,8 @@ function discoveryHarness(
     performance,
   );
   return { ...harness, requests, statusSamples, statusRefreshes: () => statusRefreshes } as {
-    refresh: () => Promise<unknown>;
+    refresh: (options?: { force?: boolean }) => Promise<unknown>;
+    close: (session: { id: string }) => Promise<boolean>;
     setProjects: (projects: Array<Record<string, unknown>>) => void;
     setVisibility: (value: string) => void;
     discovery: () => ReturnType<typeof PsycheSessions.createCovenDiscoveryState>;
@@ -265,6 +270,40 @@ describe('macOS Coven session lifecycle boundary', () => {
     });
     harness.requests[0].resolve({ status: 'ready', sessions: [] });
     await Promise.all([first, second]);
+  });
+
+  it('waits for a pre-kill discovery flight before forcing an authoritative refresh', async () => {
+    const harness = discoveryHarness([{ root: '/alpha', worktrees: [] }]);
+    const preKill = harness.refresh();
+    expect(harness.requests.map((request) => request.command)).toEqual(['coven_sessions']);
+
+    const closing = harness.close({ id: 'coven-1' });
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+    ]);
+    harness.requests[1].resolve(null);
+    await Promise.resolve();
+    expect(harness.requests).toHaveLength(2);
+
+    harness.requests[0].resolve({
+      status: 'ready',
+      sessions: [{
+        id: 'coven-1', projectRoot: '/alpha', status: 'running',
+        labels: ['source:psyche-build'],
+      }],
+    });
+    await preKill;
+    await Promise.resolve();
+    expect(harness.requests.map((request) => request.command)).toEqual([
+      'coven_sessions',
+      'coven_session_kill',
+      'coven_sessions',
+    ]);
+
+    harness.requests[2].resolve({ status: 'ready', sessions: [] });
+    await expect(closing).resolves.toBe(true);
+    expect(harness.discovery().sessionsByProject.get('/alpha') ?? []).toHaveLength(0);
   });
 
   it('coalesces an in-flight ownership set after project and worktree reordering', async () => {

@@ -429,7 +429,7 @@ function createRenderer(options: {
   activeThreadId?: string | null;
   openCovenSession?: (project: Project, session: RemoteSession) => unknown;
   invoke?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
-  refreshCovenSessions?: () => Promise<unknown>;
+  refreshCovenSessions?: (options?: { force?: boolean }) => Promise<unknown>;
   realEdit?: boolean;
   canvasThreadIds?: string[];
   focusSets?: Array<{ id: string; index: number; name: string; key: string; threadIds: string[] }>;
@@ -2797,6 +2797,7 @@ describe('Tauri Coven session project rail', () => {
         expect(renderer.invoke).toHaveBeenCalledTimes(1);
         expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
       });
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({ force: true });
       expect(renderer.invoke).toHaveBeenCalledWith('coven_session_kill', {
         sessionId: 'coven-1',
         session_id: 'coven-1',
@@ -2826,6 +2827,29 @@ describe('Tauri Coven session project rail', () => {
       expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
       expect(renderer.sessionListEl.querySelectorAll('.session-row')
         .some((candidate) => candidate.dataset.sessionId === session.id)).toBe(true);
+      expect(renderer.document.activeElement).toBe(row);
+      expect(renderer.sessionListEl.querySelectorAll('[data-tree-item]').filter(
+        (item) => item.getAttribute('tabindex') === '0',
+      )).toHaveLength(1);
+    });
+
+    it('does not steal focus moved to search while a failed Coven close is pending', async () => {
+      let rejectInvoke!: (error: Error) => void;
+      const pending = new Promise<never>((_resolve, reject) => { rejectInvoke = reject; });
+      const renderer = createRenderer({ sessions: [session], invoke: () => pending });
+      renderer.render();
+      const row = renderer.sessionListEl.querySelectorAll('.session-row')
+        .find((candidate) => candidate.dataset.sessionId === session.id)!;
+
+      await row.querySelector('.session-close')!.emit('click');
+      await row.querySelector('.session-close-confirm')!.emit('click');
+      renderer.sessionSearchEl.focus();
+      rejectInvoke(new Error('daemon refused'));
+      await vi.waitFor(() => expect(renderer.setStatus).toHaveBeenCalled());
+
+      expect(renderer.document.activeElement).toBe(renderer.sessionSearchEl);
+      expect(renderer.document.activeElement).not.toBe(row);
+      expect(renderer.refreshCovenSessions).not.toHaveBeenCalled();
     });
 
     it('deduplicates native stop calls while one session close is in flight', async () => {
@@ -2842,6 +2866,20 @@ describe('Tauri Coven session project rail', () => {
       resolveInvoke();
       expect(await first).toBe(true);
       expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows retrying a Coven close after a rejected native request settles', async () => {
+      const invoke = vi.fn()
+        .mockRejectedValueOnce(new Error('daemon refused'))
+        .mockResolvedValueOnce(null);
+      const renderer = createRenderer({ sessions: [session], invoke });
+
+      await expect(renderer.closeCovenSession(session)).resolves.toBe(false);
+      await expect(renderer.closeCovenSession(session)).resolves.toBe(true);
+
+      expect(renderer.invoke).toHaveBeenCalledTimes(2);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledTimes(1);
+      expect(renderer.refreshCovenSessions).toHaveBeenCalledWith({ force: true });
     });
 
     it('guards Delete on a focused Coven row without activating it', async () => {

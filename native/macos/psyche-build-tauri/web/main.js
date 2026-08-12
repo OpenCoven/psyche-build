@@ -402,7 +402,7 @@
       return sessions.concat(covenDiscovery.allSessionsByProject.get(root) || []);
     }, []);
   }
-  async function refreshCovenSessions() {
+  async function refreshCovenSessions(options) {
     if (document.visibilityState === "hidden" || state.projects.length === 0) {
       return covenDiscovery;
     }
@@ -417,8 +417,14 @@
       return left.projectRoot < right.projectRoot ? -1 :
         (left.projectRoot > right.projectRoot ? 1 : 0);
     }));
-    if (covenDiscoveryFlight && covenDiscoveryFlight.key === requestKey) {
-      return covenDiscoveryFlight.promise;
+    if (covenDiscoveryFlight) {
+      if (options && options.force) {
+        try {
+          await covenDiscoveryFlight.promise;
+        } catch (_) {}
+        return refreshCovenSessions();
+      }
+      if (covenDiscoveryFlight.key === requestKey) return covenDiscoveryFlight.promise;
     }
     var started = PsycheSessions.beginCovenRequest(covenDiscovery);
     covenDiscovery = started.state;
@@ -476,7 +482,7 @@
     covenSessionCloseFlights.add(id);
     try {
       await invoke("coven_session_kill", { sessionId: id, session_id: id });
-      await refreshCovenSessions();
+      await refreshCovenSessions({ force: true });
       return true;
     } catch (error) {
       setStatus("Stop and close failed: " + String(error), "error");
@@ -4804,8 +4810,23 @@
     paint();
     confirm.addEventListener("click", function (event) {
       event.stopPropagation();
+      var confirmOwnedFocus = document.activeElement === confirm;
+      var treeKey = host.dataset.treeKey || "";
       disarmSessionClose({ restoreFocus: false });
-      onConfirm();
+      var result = onConfirm();
+      if (!confirmOwnedFocus || !result || typeof result.then !== "function") return;
+      Promise.resolve(result).then(function (succeeded) {
+        if (succeeded !== false) return;
+        var active = document.activeElement;
+        if (active && active !== document.body) return;
+        var items = sessionListEl.querySelectorAll("[data-tree-item]");
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].dataset.treeKey === treeKey && items[i].isConnected) {
+            focusSessionTreeItem(items[i]);
+            return;
+          }
+        }
+      });
     });
     close.hidden = true;
     host.appendChild(confirm);
@@ -5674,7 +5695,7 @@
                 covenClose.textContent = "×";
                 function armCovenClose() {
                   armSessionClose(row, covenClose, rowModel.title, function () {
-                    closeCovenSession(rowModel.value);
+                    return closeCovenSession(rowModel.value);
                   });
                 }
                 covenClose.addEventListener("click", function (event) {
