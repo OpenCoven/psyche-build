@@ -26,7 +26,10 @@ import { SIDEBAR_WIDTH } from './utils/layoutManager.js';
 import { validateSystemRequirements, printValidationResults } from './utils/systemCheck.js';
 import { getUntrackedPanes } from './utils/shellPaneDetection.js';
 import { runFirstRunOnboardingIfNeeded } from './utils/onboarding.js';
-import { atomicWriteJson } from './utils/atomicWrite.js';
+import {
+  mutateProjectPaneConfig,
+  readProjectPaneConfig,
+} from './services/ProjectPaneConfig.js';
 import { buildDevWatchCommand, buildDevWatchRespawnCommand } from './utils/devWatchCommand.js';
 import { shouldUseQuietDevWatchExit } from './utils/devWatchExit.js';
 import {
@@ -89,6 +92,10 @@ import {
   groupCovenSessionsByProject,
 } from './workspace/tuiSnapshot.js';
 import os from 'node:os';
+import {
+  acknowledgeWorktreeRecoveryMarker,
+  listWorktreeRecoveryMarkers,
+} from './services/WorktreeRecoveryMarker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -117,6 +124,55 @@ function getArgValue(flag: string): string | null {
 
 function isDoctorMode(): boolean {
   return process.argv.slice(2)[0] === 'doctor';
+}
+
+function isRecoveryMode(): boolean {
+  return process.argv.slice(2)[0] === 'recover';
+}
+
+async function handleRecoveryCli(): Promise<number> {
+  const args = process.argv.slice(3);
+  const projectFlagIndex = args.indexOf('--project');
+  const projectRoot = projectFlagIndex >= 0
+    ? args[projectFlagIndex + 1]
+    : process.cwd();
+  if (!projectRoot) {
+    console.error('psyche recover requires a project path after --project');
+    return 1;
+  }
+
+  const acknowledgeIndex = args.indexOf('--acknowledge');
+  if (acknowledgeIndex >= 0) {
+    const markerId = args[acknowledgeIndex + 1];
+    if (!markerId) {
+      console.error('psyche recover --acknowledge requires a marker ID');
+      return 1;
+    }
+    const removed = await acknowledgeWorktreeRecoveryMarker(projectRoot, markerId);
+    console.log(
+      removed
+        ? `Acknowledged worktree recovery marker ${markerId}.`
+        : `No worktree recovery marker found for ${markerId}.`,
+    );
+    return removed ? 0 : 1;
+  }
+
+  const markers = await listWorktreeRecoveryMarkers(projectRoot);
+  if (markers.length === 0) {
+    console.log('No worktree recovery markers found.');
+    return 0;
+  }
+
+  for (const marker of markers) {
+    console.log([
+      `${marker.id} ${marker.operation}`,
+      `  worktree: ${marker.worktreePath}`,
+      `  pane: ${marker.pane.id} (${marker.pane.paneId})`,
+      `  reason: ${marker.reason}`,
+      `  ${marker.operatorInstructions}`,
+    ].join('\n'));
+  }
+  return 2;
 }
 
 async function handleDoctorCli(): Promise<number> {
@@ -227,25 +283,20 @@ class Psyche {
     // First-run onboarding (tmux config + OpenRouter API key)
     await runFirstRunOnboardingIfNeeded();
 
-    // Initialize config file if it doesn't exist
-    if (!await this.fileExists(this.panesFile)) {
-      const initialConfig = {
+    // The shared pane/settings registry is initialized through the same
+    // cross-process lease used by the daemon and TUI mutations. A corrupt or
+    // unreadable file deliberately aborts startup rather than being replaced.
+    await mutateProjectPaneConfig(this.projectRoot, (config) => {
+      config.projectName ??= this.projectName;
+      config.projectRoot ??= this.projectRoot;
+      config.panes ??= [];
+      config.sidebarProjects ??= [{
         projectName: this.projectName,
         projectRoot: this.projectRoot,
-        panes: [],
-        sidebarProjects: [
-          {
-            projectName: this.projectName,
-            projectRoot: this.projectRoot,
-          },
-        ],
-        settings: {},
-        lastUpdated: new Date().toISOString(),
-        controlPaneId: undefined,
-        controlPaneSize: 40  // Sidebar width
-      };
-      await fs.writeFile(this.panesFile, JSON.stringify(initialConfig, null, 2));
-    }
+      }];
+      config.lastUpdated ??= new Date().toISOString();
+      config.controlPaneSize ??= SIDEBAR_WIDTH;
+    });
 
     const inTmux = process.env.TMUX !== undefined;
     const isDev = process.env.PSYCHE_DEV === 'true';
@@ -410,9 +461,9 @@ class Psyche {
       const tmuxService = TmuxService.getInstance();
       controlPaneId = await tmuxService.getCurrentPaneId();
 
-      // Load existing config
-      const configContent = await fs.readFile(this.panesFile, 'utf-8');
-      const config = JSON.parse(configContent);
+      // Read the shared registry without a write side effect. Every mutation
+      // below targets only the field it owns through ProjectPaneConfig.
+      const config = await readProjectPaneConfig(this.projectRoot) as any;
 
       // Ensure panes array exists
       if (!config.panes) {
@@ -461,9 +512,11 @@ class Psyche {
         await tmuxService.resizePane(controlPaneId, { width: SIDEBAR_WIDTH });
         // Refresh client
         await tmuxService.refreshClient();
-        // Save updated config
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+          freshConfig.controlPaneId = nextControlPaneId;
+          freshConfig.controlPaneSize = SIDEBAR_WIDTH;
+          freshConfig.lastUpdated = new Date().toISOString();
+        });
       }
 
       // Create welcome pane if there are no psyche panes and no existing welcome pane
@@ -525,8 +578,13 @@ class Psyche {
           // Clear stale welcome pane ID from config
           const staleWelcomePaneId = config.welcomePaneId;
           config.welcomePaneId = undefined;
-          config.lastUpdated = new Date().toISOString();
-          await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+          await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+            if (freshConfig.welcomePaneId !== staleWelcomePaneId) {
+              return;
+            }
+            freshConfig.welcomePaneId = undefined;
+            freshConfig.lastUpdated = new Date().toISOString();
+          });
           LogService.getInstance().debug(
             `Cleared stale welcome pane ID ${staleWelcomePaneId} from config`,
             'Setup'
@@ -586,14 +644,25 @@ class Psyche {
 
       if (!hasValidWelcomePane && welcomePaneIdsInSession.length > 0) {
         const recoveredWelcomePaneId = welcomePaneIdsInSession[0];
-        config.welcomePaneId = recoveredWelcomePaneId;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
-        hasValidWelcomePane = true;
-        LogService.getInstance().warn(
-          `Recovered untracked welcome pane ${recoveredWelcomePaneId} from tmux state`,
-          'Setup'
+        const recovered = await mutateProjectPaneConfig(
+          this.projectRoot,
+          (freshConfig) => {
+            if (freshConfig.welcomePaneId) {
+              return false;
+            }
+            freshConfig.welcomePaneId = recoveredWelcomePaneId;
+            freshConfig.lastUpdated = new Date().toISOString();
+            return true;
+          },
         );
+        if (recovered.result) {
+          config.welcomePaneId = recoveredWelcomePaneId;
+          hasValidWelcomePane = true;
+          LogService.getInstance().warn(
+            `Recovered untracked welcome pane ${recoveredWelcomePaneId} from tmux state`,
+            'Setup'
+          );
+        }
       }
 
       if (hasValidWelcomePane && config.welcomePaneId) {
@@ -628,10 +697,23 @@ class Psyche {
           // Create new welcome pane
           const welcomePaneId = await createWelcomePane(controlPaneId, this.projectRoot);
           if (welcomePaneId) {
-            config.welcomePaneId = welcomePaneId;
-            config.lastUpdated = new Date().toISOString();
-            await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
-            LogService.getInstance().info(`Created welcome pane: ${welcomePaneId}`, 'Setup');
+            const persisted = await mutateProjectPaneConfig(
+              this.projectRoot,
+              (freshConfig) => {
+                if (freshConfig.welcomePaneId) {
+                  return false;
+                }
+                freshConfig.welcomePaneId = welcomePaneId;
+                freshConfig.lastUpdated = new Date().toISOString();
+                return true;
+              },
+            );
+            if (persisted.result) {
+              config.welcomePaneId = welcomePaneId;
+              LogService.getInstance().info(`Created welcome pane: ${welcomePaneId}`, 'Setup');
+            } else {
+              await destroyWelcomePane(welcomePaneId);
+            }
           }
         } else {
           // Welcome pane exists from previous session - fix the layout
@@ -647,9 +729,15 @@ class Psyche {
         // If welcome pane exists but there are other panes, destroy it
         LogService.getInstance().info('Destroying welcome pane because other panes exist', 'Setup');
         await destroyWelcomePane(config.welcomePaneId);
+        const destroyedWelcomePaneId = config.welcomePaneId;
         config.welcomePaneId = undefined;
-        config.lastUpdated = new Date().toISOString();
-        await fs.writeFile(this.panesFile, JSON.stringify(config, null, 2));
+        await mutateProjectPaneConfig(this.projectRoot, (freshConfig) => {
+          if (freshConfig.welcomePaneId !== destroyedWelcomePaneId) {
+            return;
+          }
+          freshConfig.welcomePaneId = undefined;
+          freshConfig.lastUpdated = new Date().toISOString();
+        });
       }
     } catch (error) {
       // Ignore errors in sidebar setup - will work without it
@@ -1154,41 +1242,45 @@ class Psyche {
     }
 
     try {
-      const configRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const config: PsycheConfig = JSON.parse(configRaw);
-      const existingPanes = Array.isArray(config.panes) ? config.panes : [];
-      const latestConfigRaw = await fs.readFile(context.sessionConfigPath, 'utf-8');
-      const latestConfig: PsycheConfig = JSON.parse(latestConfigRaw);
-      const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
-      const normalizedProjects = normalizeSidebarProjects(
-        latestConfig.sidebarProjects,
-        latestPanes,
+      const mutation = await mutateProjectPaneConfig(
         context.sessionProjectRoot,
-        context.sessionProjectName
+        (configRecord) => {
+          const latestConfig = configRecord as unknown as PsycheConfig;
+          const latestPanes = Array.isArray(latestConfig.panes) ? latestConfig.panes : [];
+          const normalizedProjects = normalizeSidebarProjects(
+            latestConfig.sidebarProjects,
+            latestPanes,
+            context.sessionProjectRoot,
+            context.sessionProjectName
+          );
+          if (hasSidebarProject(normalizedProjects, this.projectRoot)) {
+            return false;
+          }
+
+          latestConfig.sidebarProjects = addSidebarProject(normalizedProjects, {
+            projectName: this.projectName,
+            projectRoot: this.projectRoot,
+            colorTheme: getAutoSidebarProjectColorTheme(
+              normalizedProjects,
+              {
+                projectRoot: this.projectRoot,
+              },
+              (targetProjectRoot) =>
+                getSidebarProjectColorTheme(normalizedProjects, targetProjectRoot)
+                || new SettingsManager(targetProjectRoot).getSettings().colorTheme
+            ),
+            colorThemeSource: 'auto',
+          });
+          latestConfig.lastUpdated = new Date().toISOString();
+          return true;
+        }
       );
-      if (hasSidebarProject(normalizedProjects, this.projectRoot)) {
+      if (!mutation.result) {
         console.log(chalk.yellow(
           `Project '${this.projectName}' is already in session '${sessionName}'.`
         ));
         return true;
       }
-
-      latestConfig.sidebarProjects = addSidebarProject(normalizedProjects, {
-        projectName: this.projectName,
-        projectRoot: this.projectRoot,
-        colorTheme: getAutoSidebarProjectColorTheme(
-          normalizedProjects,
-          {
-            projectRoot: this.projectRoot,
-          },
-          (targetProjectRoot) =>
-            getSidebarProjectColorTheme(normalizedProjects, targetProjectRoot)
-            || new SettingsManager(targetProjectRoot).getSettings().colorTheme
-        ),
-        colorThemeSource: 'auto',
-      });
-      latestConfig.lastUpdated = new Date().toISOString();
-      await atomicWriteJson(context.sessionConfigPath, latestConfig);
 
       console.log(chalk.hex(COLORS.success)(
         `Added project '${this.projectName}' to session '${sessionName}' sidebar.`
@@ -1535,6 +1627,10 @@ class Psyche {
     const { runMcpServer } = await import('./mcp/server.js');
     await runMcpServer();
     return;
+  }
+
+  if (isRecoveryMode()) {
+    process.exit(await handleRecoveryCli());
   }
 
   const remotePaneActionArg = getArgValue('--remote-pane-action');

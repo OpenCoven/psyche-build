@@ -1,16 +1,13 @@
-import { execSync } from 'child_process';
+import { runProcess } from './runProcess.js';
 
 export const callClaudeCode = async (prompt: string): Promise<string | null> => {
   try {
-    const result = execSync(
-      `echo "${prompt.replace(/"/g, '\\"')}" | claude --no-interactive --max-turns 1 2>/dev/null | head -n 5`,
-      {
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: 5000,
-      }
-    );
-    const lines = result.trim().split('\n');
+    const result = await runProcess('claude', {
+      args: ['--no-interactive', '--max-turns', '1'],
+      input: prompt,
+      timeoutMs: 5000,
+    });
+    const lines = result.stdout.trim().split('\n').slice(0, 5);
     const response = lines.join(' ').trim();
     return response || null;
   } catch {

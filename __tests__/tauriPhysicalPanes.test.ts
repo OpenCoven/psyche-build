@@ -32,6 +32,27 @@ function functionSource(name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function cssDeclarations(selector: string) {
+  const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const normalizedSelector = selector.replace(/\s+/g, ' ').trim();
+  const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+  const declarations = new Map<string, string>();
+  let found = false;
+  for (const match of source.matchAll(rulePattern)) {
+    if (match[1].replace(/\s+/g, ' ').trim() !== normalizedSelector) continue;
+    found = true;
+    for (const declaration of match[2].split(';').map((item) => item.trim()).filter(Boolean)) {
+      const separator = declaration.indexOf(':');
+      declarations.set(
+        declaration.slice(0, separator).trim(),
+        declaration.slice(separator + 1).replace(/\s+/g, ' ').trim(),
+      );
+    }
+  }
+  if (found) return declarations;
+  throw new Error(`missing CSS rule ${selector}`);
+}
+
 function compileFunction<T extends (...args: never[]) => unknown>(
   source: string,
   dependencies: Record<string, unknown>,
@@ -380,13 +401,26 @@ describe('Tauri physical terminal panes', () => {
     expect(mountTerminal).toMatch(/pane\.dataset\.threadId = thread\.id/);
     expect(mountTerminal).toMatch(/className = "terminal-pane-header"/);
     expect(mountTerminal).toMatch(/title\.id = "terminal-pane-title-" \+ thread\.id/);
-    expect(mountTerminal).toMatch(/pane\.setAttribute\("aria-labelledby", title\.id\)/);
+    expect(mountTerminal).not.toContain('aria-labelledby');
     expect(mountTerminal).toMatch(/className = "terminal-pane-body"/);
     expect(mountTerminal).toMatch(/className = "term-instance"/);
     expect(mountTerminal).toMatch(/title = "Stop and close terminal"/);
     expect(mountTerminal).toMatch(/"Stop and close " \+ thread\.name/);
     expect(mountTerminal).toMatch(/thread\.pane = pane[\s\S]*thread\.host = container[\s\S]*renderPaneWorkspace\(\)/);
     expect(mountTerminal).not.toMatch(/terminalHost\.appendChild\(container\)/);
+  });
+
+  it('uses the shared accessible-name fallback for terminal, Web, and tool panes', () => {
+    for (const mount of ['mountTerminal', 'mountBrowserPane', 'mountToolPane']) {
+      const source = functionSource(mount);
+      expect(source).not.toContain('aria-labelledby');
+      expect(source).toMatch(
+        /thread\.pane = pane[\s\S]*thread\.paneTitle = title[\s\S]*syncThreadPaneMetadata\(thread\)/,
+      );
+    }
+    expect(functionSource('syncThreadPaneMetadata')).toMatch(
+      /applyPaneStatus\(thread\.pane, thread\.status\)[\s\S]*thread\.pane\.setAttribute\(\s*"aria-label"/,
+    );
   });
 
   it('focuses from pane chrome without duplicating body focus or racing close', () => {
@@ -547,24 +581,42 @@ describe('Tauri physical terminal panes', () => {
 
   it('keeps mounted pane metadata current for status and rename changes', () => {
     const attributes = new Map<string, string>();
-    const statusAttributes = new Map<string, string>();
+    const paneAttributes = new Map<string, string>();
+    const branch = {
+      classList: { contains: (name: string) => name === 'terminal-pane-branch' },
+      dataset: {} as Record<string, string>,
+      firstElementChild: null as null | {
+        classList: { contains: (name: string) => boolean };
+        dataset: Record<string, string>;
+      },
+    };
+    const paneClasses = new Set(['terminal-pane']);
     const thread = {
       id: 'thread-a', projectId: 'project', name: 'Psyche', status: 'starting',
-      paneTitle: { textContent: '' },
-      paneStatus: {
-        textContent: '', className: '', title: '',
-        setAttribute: (name: string, value: string) => statusAttributes.set(name, value),
+      pane: {
+        dataset: {} as Record<string, string>,
+        classList: { contains: (name: string) => paneClasses.has(name) },
+        parentElement: branch,
+        setAttribute: (name: string, value: string) => paneAttributes.set(name, value),
+        removeAttribute: (name: string) => { paneAttributes.delete(name); },
       },
+      paneTitle: { textContent: '' },
       paneClose: { setAttribute: (name: string, value: string) => attributes.set(name, value) },
     };
-    const applyPaneStatus = compileFunction<(element: unknown, status: string) => void>(
+    branch.firstElementChild = thread.pane;
+    const applyPaneStatus = compileFunction<(element: unknown, status: string) => string>(
       functionSource('applyPaneStatus'),
+      {},
+    );
+    const syncPaneBranchStatusChrome = compileFunction<(element: unknown) => void>(
+      functionSource('syncPaneBranchStatusChrome'),
       {},
     );
     const syncThreadPaneMetadata = compileFunction<(value: typeof thread) => void>(
       functionSource('syncThreadPaneMetadata'),
       {
         applyPaneStatus,
+        syncPaneBranchStatusChrome,
         threadLaneLabel: () => 'main',
         // No pane tree in this harness: the span/maximise controls have nothing
         // to reflect, which is exactly the detached-pane case.
@@ -574,18 +626,45 @@ describe('Tauri physical terminal panes', () => {
         syncPaneMaxControl: () => undefined,
       },
     );
-    // Running is shown as a dot, so the label moves to the class and aria-label
-    // and the visible text goes away.
+    syncThreadPaneMetadata(thread);
+    expect(thread.pane.dataset.status).toBe('starting');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status starting');
+    expect(paneAttributes.get('aria-description')).toBe('Status: starting');
+    expect(branch.dataset.status).toBe('starting');
+
     thread.status = 'running';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('');
-    expect(thread.paneStatus.className).toBe('terminal-pane-status running');
-    expect(statusAttributes.get('aria-label')).toBe('running');
-    // Every other state keeps its word.
+    expect(thread.pane.dataset.status).toBe('running');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status running');
+    expect(paneAttributes.get('aria-description')).toBe('Status: running');
+    expect('status' in branch.dataset).toBe(false);
+
+    thread.status = 'failed';
+    syncThreadPaneMetadata(thread);
+    expect(thread.pane.dataset.status).toBe('failed');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status failed');
+    expect(paneAttributes.get('aria-description')).toBe('Status: failed');
+    expect(branch.dataset.status).toBe('failed');
+
     thread.status = 'exited';
     syncThreadPaneMetadata(thread);
-    expect(thread.paneStatus.textContent).toBe('exited');
-    expect(thread.paneStatus.className).toBe('terminal-pane-status exited');
+    expect(thread.pane.dataset.status).toBe('exited');
+    expect(paneAttributes.get('aria-label')).toBe('Psyche, status exited');
+    expect(paneAttributes.get('aria-description')).toBe('Status: exited');
+    expect(branch.dataset.status).toBe('exited');
+
+    thread.status = 'paused';
+    syncThreadPaneMetadata(thread);
+    expect('status' in thread.pane.dataset).toBe(false);
+    expect(paneAttributes.get('aria-label')).toBe('Psyche');
+    expect(paneAttributes.has('aria-description')).toBe(false);
+    expect('status' in branch.dataset).toBe(false);
+
+    thread.status = '';
+    syncThreadPaneMetadata(thread);
+    expect('status' in thread.pane.dataset).toBe(false);
+    expect(paneAttributes.get('aria-label')).toBe('Psyche');
+    expect(paneAttributes.has('aria-description')).toBe(false);
 
     const renameThread = compileFunction<(id: string, name: string) => boolean>(
       functionSource('renameThread'),
@@ -599,8 +678,11 @@ describe('Tauri physical terminal panes', () => {
         statusLevel: () => 'ok',
       },
     );
+    thread.status = 'running';
     expect(renameThread(thread.id, 'Renamed')).toBe(true);
     expect(thread.paneTitle.textContent).toBe('Renamed');
+    expect(paneAttributes.get('aria-label')).toBe('Renamed, status running');
+    expect(paneAttributes.get('aria-description')).toBe('Status: running');
     expect(attributes.get('aria-label')).toBe('Stop and close Renamed');
 
     expect(functionSource('spawnPty')).toMatch(/thread\.status = "running";[\s\S]*syncThreadPaneMetadata\(thread\)/);
@@ -1162,6 +1244,51 @@ describe('Tauri physical terminal panes', () => {
     expect(refreshes).toBe(1);
   });
 
+  it('restores an existing Coven layout leaf during passive worktree selection', async () => {
+    const project = { id: 'project', selectedWorktreePath: '/old', lastActiveThreadId: 'shell-a' };
+    const thread = { id: 'thread-coven', kind: 'coven-attach' };
+    const state = { activeProjectId: project.id, activeThreadId: 'stale-thread' as string | null };
+    let renders = 0;
+    let refreshes = 0;
+    const renderPaneWorkspace = () => { renders += 1; };
+    const activatePaneLayoutFocus = compileFunction<(
+      value: typeof project, path: string,
+    ) => void>(functionSource('activatePaneLayoutFocus'), {
+      paneLayoutFor: () => ({
+        root: PsychePanes.createLeaf('leaf-a', thread.id),
+        focusedLeafId: 'leaf-a',
+      }),
+      PsychePanes,
+      findThread: () => thread,
+      state,
+      renderPaneWorkspace,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+    const activateProjectWorktree = compileFunction<(
+      value: typeof project, path: string,
+    ) => Promise<boolean>>(functionSource('activateProjectWorktree'), {
+      showTerminalView: async () => true,
+      state,
+      setActiveProject: async () => true,
+      activatePaneLayoutFocus,
+      renderPaneWorkspace,
+      renderPanel: () => undefined,
+      currentPanel: () => 'browser',
+      loadAgentSkills: () => undefined,
+      refreshSidebar: () => undefined,
+      syncProjectBrowser: () => undefined,
+      saveWorkspaceSoon: () => undefined,
+      refreshStatusController: () => { refreshes += 1; },
+    });
+
+    await expect(activateProjectWorktree(project, '/target')).resolves.toBe(true);
+    expect(project.selectedWorktreePath).toBe('/target');
+    expect(project.lastActiveThreadId).toBe(thread.id);
+    expect(state.activeThreadId).toBe(thread.id);
+    expect(renders).toBe(1);
+    expect(refreshes).toBe(1);
+  });
+
   it('refreshes an inactive-project worktree switch once after nested project activation', async () => {
     const project = {
       id: 'project',
@@ -1178,7 +1305,7 @@ describe('Tauri physical terminal panes', () => {
         hidden: false,
       }],
     };
-    const options = { ensureCoven: false };
+    const options = { refreshStatus: true };
     const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
     let refreshes = 0;
     const setActiveProject = compileFunction<(
@@ -1200,8 +1327,6 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => null,
-      setStatus: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => { refreshes += 1; },
     });
@@ -1229,10 +1354,75 @@ describe('Tauri physical terminal panes', () => {
     expect(state.activeThreadId).toBe('thread-a');
     expect(project.selectedWorktreePath).toBe('/target');
     expect(focusCalls).toEqual([
-      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+      { id: 'thread-a', options: { refreshStatus: false } },
     ]);
     expect(refreshes).toBe(1);
-    expect(options).toEqual({ ensureCoven: false });
+    expect(options).toEqual({ refreshStatus: true });
+  });
+
+  it('restores a visible local Coven pane during passive project activation', async () => {
+    const project = {
+      id: 'project',
+      selectedWorktreePath: '/target',
+      lastActiveThreadId: 'thread-chat',
+    };
+    const state = {
+      activeProjectId: 'other',
+      activeThreadId: 'stale-thread' as string | null,
+      threads: [
+        {
+          id: 'thread-chat',
+          kind: 'coven-chat',
+          projectId: project.id,
+          worktreePath: '/target',
+          hidden: false,
+        },
+        {
+          id: 'thread-attach',
+          kind: 'coven-attach',
+          projectId: project.id,
+          worktreePath: '/target',
+          hidden: false,
+        },
+      ],
+    };
+    const focusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
+    let renderCalls = 0;
+    let sidebarCalls = 0;
+    let tabCalls = 0;
+    let syncCalls = 0;
+    const setActiveProject = compileFunction<(
+      id: string,
+      callOptions?: Record<string, unknown>,
+    ) => Promise<boolean>>(functionSource('setActiveProject'), {
+      state,
+      showTerminalView: async () => true,
+      findProject: () => project,
+      restoreProjectLayout: () => undefined,
+      loadAgentSkills: () => undefined,
+      activeWorkspaceRoot: (value: typeof project) => value.selectedWorktreePath,
+      focusThread: async (id: string, focusOptions?: Record<string, unknown>) => {
+        focusCalls.push({ id, options: focusOptions });
+        state.activeThreadId = id;
+        return true;
+      },
+      renderPaneWorkspace: () => { renderCalls += 1; },
+      refreshSidebar: () => { sidebarCalls += 1; },
+      refreshTabs: () => { tabCalls += 1; },
+      syncProjectBrowser: () => { syncCalls += 1; },
+      saveWorkspaceSoon: () => undefined,
+    });
+
+    await expect(setActiveProject(project.id)).resolves.toBe(true);
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBe('thread-chat');
+    expect(focusCalls).toEqual([
+      { id: 'thread-chat', options: { refreshStatus: false } },
+    ]);
+    expect(renderCalls).toBe(0);
+    expect(sidebarCalls).toBe(0);
+    expect(tabCalls).toBe(0);
+    expect(syncCalls).toBe(1);
   });
 
   it('refreshes direct focusThread by default and allows batched suppression', async () => {
@@ -1313,8 +1503,6 @@ describe('Tauri physical terminal panes', () => {
       refreshSidebar: () => undefined,
       refreshTabs: () => undefined,
       syncProjectBrowser: () => undefined,
-      ensureProjectCoven: async () => null,
-      setStatus: () => undefined,
       saveWorkspaceSoon: () => undefined,
       refreshStatusController: () => { refreshes.count += 1; },
     });
@@ -1335,7 +1523,7 @@ describe('Tauri physical terminal panes', () => {
         hidden: false,
       }],
     };
-    const defaultOptions = { ensureCoven: false };
+    const defaultOptions = { refreshStatus: true };
     const defaultFocusCalls: Array<{ id: string; options: Record<string, unknown> | undefined }> = [];
     const defaultRefreshes = { count: 0 };
     const setActiveProject = createSetActiveProject(
@@ -1348,10 +1536,10 @@ describe('Tauri physical terminal panes', () => {
     await expect(setActiveProject(directProject.id, defaultOptions)).resolves.toBe(true);
     expect(defaultState.activeProjectId).toBe(directProject.id);
     expect(defaultFocusCalls).toEqual([
-      { id: 'thread-a', options: { ensureCoven: false, refreshStatus: false } },
+      { id: 'thread-a', options: { refreshStatus: false } },
     ]);
     expect(defaultRefreshes.count).toBe(1);
-    expect(defaultOptions).toEqual({ ensureCoven: false });
+    expect(defaultOptions).toEqual({ refreshStatus: true });
 
     const suppressedState = {
       activeProjectId: 'other',
@@ -1383,35 +1571,39 @@ describe('Tauri physical terminal panes', () => {
     expect(suppressedOptions).toEqual({ refreshStatus: false });
   });
 
-  it('accepts guarded /new-thread creation only after revealing the terminal', async () => {
-    const terminalHost = { hidden: true };
-    let spawned = 0;
-    const runNewThreadCommand = compileFunction<() => Promise<{ kind: string } | null>>(
+  it('routes /new-thread through ensureProjectCoven(activeProject())', async () => {
+    const project = { id: 'project', root: '/repo' };
+    let ensured: typeof project | null = null;
+    const result = { kind: 'coven-chat' };
+    const runNewThreadCommand = compileFunction<() => Promise<typeof result | null>>(
       functionSource('runNewThreadCommand'),
       {
-        spawnCovenThread: async () => {
-          terminalHost.hidden = false;
-          expect(terminalHost.hidden).toBe(false);
-          spawned += 1;
-          return { kind: 'coven-chat' };
+        activeProject: () => project,
+        ensureProjectCoven: async (value: typeof project | null) => {
+          ensured = value;
+          return result;
         },
       },
     );
-    await expect(runNewThreadCommand()).resolves.toEqual({ kind: 'coven-chat' });
-    expect(spawned).toBe(1);
+    await expect(runNewThreadCommand()).resolves.toBe(result);
+    expect(ensured).toBe(project);
     expect(mainJs).toMatch(/cmd: "\/new-thread"[\s\S]*?run: runNewThreadCommand/);
   });
 
-  it('cancels /new-thread without creating a thread or PTY', async () => {
-    let spawned = 0;
+  it('resolves null from /new-thread when there is no active project', async () => {
+    let ensured: null = null;
     const runNewThreadCommand = compileFunction<() => Promise<null>>(
       functionSource('runNewThreadCommand'),
       {
-        spawnCovenThread: async () => null,
+        activeProject: () => null,
+        ensureProjectCoven: async (value: null) => {
+          ensured = value;
+          return null;
+        },
       },
     );
     await expect(runNewThreadCommand()).resolves.toBeNull();
-    expect(spawned).toBe(0);
+    expect(ensured).toBeNull();
   });
 
   it('accepts guarded /new-psyche creation with its distinct spawn path', async () => {
@@ -1773,15 +1965,15 @@ describe('Tauri physical terminal panes', () => {
   });
 
   describe('pane frame', () => {
-    it('gives the header a track per child so its buttons never clip', () => {
-      // Seven since the attention chip joined: a header with more children than
-      // tracks wraps the close button onto a second row, which is exactly the
-      // state a pane is in when it most needs to look deliberate.
+    it('gives terminal headers six tracks and web/tool panes their own five-track override', () => {
       expect(stylesCss).toMatch(
-        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto auto;/s,
+        /\.terminal-pane-header\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto auto;/s,
+      );
+      expect(stylesCss).toMatch(
+        /\.terminal-pane:is\(\.is-web,\s*\.is-tool\)\s+\.terminal-pane-header\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto auto;/s,
       );
       expect(functionSource('mountTerminal')).toMatch(
-        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(status\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
+        /header\.appendChild\(glyph\);[\s\S]*header\.appendChild\(label\);[\s\S]*header\.appendChild\(attention\);[\s\S]*header\.appendChild\(span\);[\s\S]*header\.appendChild\(maximize\);[\s\S]*header\.appendChild\(close\)/,
       );
     });
 
@@ -1797,11 +1989,186 @@ describe('Tauri physical terminal panes', () => {
       expect(stylesCss).toMatch(/\.terminal-pane\s*\{[^}]*min-width:\s*var\(--pane-min-w\);[^}]*min-height:\s*var\(--pane-min-h\);/s);
     });
 
-    it('words every status but running, which stays a static dot', () => {
-      expect(stylesCss).toMatch(/\.terminal-pane-status\s*\{[^}]*border-radius:\s*999px;/s);
-      expect(stylesCss).toMatch(/\.terminal-pane-status\.running\s*\{[^}]*border-radius:\s*50%;/s);
-      // Board 5 gives the only pulse to "needs you"; running is steady.
-      expect(stylesCss).not.toMatch(/\.terminal-pane-status\.running\s*\{[^}]*animation:/s);
+    it('renders exception status as pane glow instead of a header status chip', () => {
+      const legacyStatusToken = ['terminal', 'pane', 'status'].join('-');
+      const startingSelector =
+        '.terminal-pane-branch[data-status="starting"]';
+      const failedSelector =
+        '.terminal-pane-branch[data-status="failed"]';
+      const exitedSelector =
+        '.terminal-pane-branch[data-status="exited"]';
+      const glowSelector =
+        '.terminal-pane-branch:is([data-status="starting"], [data-status="failed"], [data-status="exited"])';
+      const rootStartingSelector =
+        '.terminal-host > .terminal-pane[data-status="starting"]:not(.needs-attention)';
+      const rootFailedSelector =
+        '.terminal-host > .terminal-pane[data-status="failed"]:not(.needs-attention)';
+      const rootExitedSelector =
+        '.terminal-host > .terminal-pane[data-status="exited"]:not(.needs-attention)';
+      const rootGlowSelector =
+        '.terminal-host > .terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
+      const focusedRootGlowSelector =
+        '.terminal-host > .terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)';
+
+      expect(functionSource('mountTerminal')).not.toContain(legacyStatusToken);
+      expect(functionSource('mountBrowserPane')).not.toContain(legacyStatusToken);
+      expect(functionSource('mountToolPane')).not.toContain(legacyStatusToken);
+      expect(stylesCss).not.toContain(legacyStatusToken);
+      expect(stylesCss).not.toMatch(/\.terminal-pane-branch:has\(/);
+      expect(cssDeclarations(startingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
+      expect(cssDeclarations(failedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
+      expect(cssDeclarations(exitedSelector).get('--pane-status-rgb')).toBe('138, 132, 153');
+      expect(cssDeclarations(rootStartingSelector).get('--pane-status-rgb')).toBe('251, 191, 36');
+      expect(cssDeclarations(rootFailedSelector).get('--pane-status-rgb')).toBe('248, 113, 113');
+      expect(cssDeclarations(rootExitedSelector).get('--pane-status-rgb')).toBe('138, 132, 153');
+      expect(stylesCss).not.toMatch(/\[data-status="running"\]/);
+      expect(cssDeclarations(glowSelector)).toEqual(new Map([
+        ['position', 'relative'],
+        ['z-index', '1'],
+        ['border-radius', '4px'],
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--pane-status-rgb), 0.2), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations(rootGlowSelector)).toEqual(new Map([
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--pane-status-rgb), 0.2), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations(focusedRootGlowSelector)).toEqual(new Map([
+        ['border-color', 'rgba(var(--rgb-accent), 0.55)'],
+        [
+          'box-shadow',
+          '0 0 0 1px rgba(var(--rgb-accent), 0.22), 0 0 12px rgba(var(--pane-status-rgb), 0.24)',
+        ],
+      ]));
+      expect(cssDeclarations('.terminal-pane.focused')).toEqual(new Map([
+        ['border-color', 'rgba(var(--rgb-accent), 0.55)'],
+        ['box-shadow', '0 0 0 1px rgba(var(--rgb-accent), 0.22)'],
+      ]));
+      expect(() => cssDeclarations(
+        '.terminal-pane:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
+      )).toThrow();
+      expect(() => cssDeclarations(
+        '.terminal-pane.focused:is([data-status="starting"], [data-status="failed"], [data-status="exited"]):not(.needs-attention)',
+      )).toThrow();
+    });
+
+    it('hosts single and maximized root leaves directly on the pane canvas', () => {
+      expect(functionSource('renderPaneNode')).toMatch(
+        /if \(node\.type === "leaf"\)[\s\S]*return thread && thread\.pane \? thread\.pane : document\.createDocumentFragment\(\);/,
+      );
+      expect(functionSource('renderPaneWorkspace')).toMatch(
+        /var root = effectivePaneRoot\(layout\);[\s\S]*terminalHost\.appendChild\(renderPaneNode\(root, splitRatios\)\);/,
+      );
+      expect(functionSource('effectivePaneRoot')).toMatch(
+        /if \(layout\.maximizedLeafId\)[\s\S]*if \(maximized\) return maximized;/,
+      );
+    });
+
+    it('clips pane subtrees and owns the glow on each direct leaf branch', () => {
+      expect(cssDeclarations('.terminal-pane-branch').get('overflow')).toBe('hidden');
+      expect(cssDeclarations('.terminal-pane').get('overflow')).toBe('hidden');
+      expect(functionSource('renderPaneNode')).toMatch(
+        /first\.className = "terminal-pane-branch";[\s\S]*first\.appendChild\(renderPaneNode\(node\.first, splitRatios\)\);\s*syncPaneBranchStatusChrome\(first\);[\s\S]*second\.className = "terminal-pane-branch";[\s\S]*second\.appendChild\(renderPaneNode\(node\.second, splitRatios\)\);\s*syncPaneBranchStatusChrome\(second\)/,
+      );
+      expect(stylesCss).not.toMatch(
+        /\.terminal-pane-branch\s*\{[^}]*overflow:\s*visible;/s,
+      );
+    });
+
+    it('seeds replacement branches from current pane status without moving focus state', () => {
+      type FakeElement = {
+        className: string;
+        classList: { contains: (name: string) => boolean };
+        dataset: Record<string, string>;
+        style: Record<string, string>;
+        children: FakeElement[];
+        parentElement: FakeElement | null;
+        firstElementChild: FakeElement | null;
+        appendChild: (child: FakeElement) => FakeElement;
+      };
+      const createElement = (): FakeElement => {
+        let className = '';
+        const element = {
+          classList: {
+            contains: (name: string) => className.split(/\s+/).includes(name),
+          },
+          dataset: {} as Record<string, string>,
+          style: {} as Record<string, string>,
+          children: [] as FakeElement[],
+          parentElement: null as FakeElement | null,
+          appendChild(child: FakeElement) {
+            child.parentElement = element;
+            element.children.push(child);
+            return child;
+          },
+          get firstElementChild() {
+            return element.children[0] || null;
+          },
+          get className() {
+            return className;
+          },
+          set className(value: string) {
+            className = value;
+          },
+        };
+        return element;
+      };
+      const startingPane = createElement();
+      startingPane.className = 'terminal-pane focused';
+      startingPane.dataset.status = 'starting';
+      const failedPane = createElement();
+      failedPane.className = 'terminal-pane';
+      failedPane.dataset.status = 'failed';
+      const threads = new Map([
+        ['thread-a', { pane: startingPane }],
+        ['thread-b', { pane: failedPane }],
+      ]);
+      const syncPaneBranchStatusChrome = compileFunction<(branch: FakeElement) => void>(
+        functionSource('syncPaneBranchStatusChrome'),
+        {},
+      );
+      const renderPaneNode = compileFunction<(
+        node: Record<string, unknown>, ratios: Map<string, number>,
+      ) => FakeElement>(functionSource('renderPaneNode'), {
+        findThread: (id: string) => threads.get(id),
+        browserSurface: null,
+        gitSurfaceEl: null,
+        document: {
+          createElement,
+          createDocumentFragment: createElement,
+        },
+        createPaneDivider: () => createElement(),
+        syncPaneBranchStatusChrome,
+      });
+      const tree = {
+        id: 'split-a',
+        type: 'split',
+        orientation: 'column',
+        ratio: 0.5,
+        first: { type: 'leaf', threadId: 'thread-a' },
+        second: { type: 'leaf', threadId: 'thread-b' },
+      };
+
+      const initial = renderPaneNode(tree, new Map());
+      expect(initial.children[0].dataset.status).toBe('starting');
+      expect(initial.children[2].dataset.status).toBe('failed');
+      expect(startingPane.classList.contains('focused')).toBe(true);
+
+      startingPane.dataset.status = 'running';
+      failedPane.className = 'terminal-pane needs-attention';
+      const replacement = renderPaneNode(tree, new Map());
+      expect('status' in replacement.children[0].dataset).toBe(false);
+      expect('status' in replacement.children[2].dataset).toBe(false);
+
+      startingPane.dataset.status = 'exited';
+      failedPane.className = 'terminal-pane';
+      const cleared = renderPaneNode(tree, new Map());
+      expect(cleared.children[0].dataset.status).toBe('exited');
+      expect(cleared.children[2].dataset.status).toBe('failed');
     });
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {

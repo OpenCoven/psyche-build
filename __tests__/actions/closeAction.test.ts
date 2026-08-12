@@ -9,7 +9,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { closePane } from '../../src/actions/implementations/closeAction.js';
-import { createMockPane, createShellPane, createWorktreePane } from '../fixtures/mockPanes.js';
+import type { PsychePane } from '../../src/types.js';
+import {
+  createMockPane,
+  createShellPane,
+  createWorktreePane,
+  mockTmuxServerIdentity,
+} from '../fixtures/mockPanes.js';
 import { createMockContext } from '../fixtures/mockContext.js';
 import { expectChoice, expectSuccess, expectError } from '../helpers/actionAssertions.js';
 
@@ -181,6 +187,461 @@ describe('closeAction', () => {
   });
 
   describe('close execution - kill_only', () => {
+    const oldServerGeneration = {
+      pid: 111,
+      processStartIdentity: 'Thu Aug  7 19:00:00 2026',
+      socketPath: '/tmp/tmux-501/default',
+      sessionId: '$1',
+    };
+    const currentServerGeneration = {
+      pid: 222,
+      processStartIdentity: 'Thu Aug  7 20:00:00 2026',
+      socketPath: '/tmp/tmux-501/default',
+      sessionId: '$1',
+    };
+
+    it('removes an old-server record without killing a reused pane ID', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: oldServerGeneration,
+        testPaneId: '%43',
+        testWindowId: '@7',
+        testTmuxServerIdentity: oldServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from('%42\n%43\n'));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(context.panes).toEqual([]);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane') || String(command).includes('kill-window')
+      )).toBe(false);
+    });
+
+    it('tears down a uniquely owned pane in the same tmux server generation', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      let alive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return alive ? '%42\n' : '';
+        if (command.includes('kill-pane')) {
+          alive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      expect(vi.mocked(execSync)).toHaveBeenCalledWith(
+        expect.stringContaining("tmux kill-pane -t '%42'"),
+        expect.anything(),
+      );
+    });
+
+    it('does not inherit a rebound primary generation for legacy background IDs', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testPaneId: '%legacy-test',
+        testWindowId: '@legacy-test',
+        testTmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return '%42\n%legacy-test\n';
+        if (command.includes('list-windows')) return '@legacy-test\n';
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'worktree cleanup was not started');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane') || String(command).includes('kill-window')
+      )).toBe(false);
+      expect(context.panes).toEqual([pane]);
+    });
+
+    it('kills a current primary pane without targeting its stale background generation', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testPaneId: '%old-test',
+        testWindowId: '@old-test',
+        testTmuxServerIdentity: oldServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      let primaryAlive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          return primaryAlive ? '%42\n%old-test\n' : '%old-test\n';
+        }
+        if (command.includes('list-windows')) return '@old-test\n';
+        if (command.includes("kill-pane -t '%42'")) {
+          primaryAlive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync)).toHaveBeenCalledWith(
+        expect.stringContaining("tmux kill-pane -t '%42'"),
+        expect.anything(),
+      );
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('%old-test') && String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('@old-test') && String(command).includes('kill-window')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
+    it('does not kill a reused pane when tmux generation changes immediately before teardown', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      let reads = 0;
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => {
+          reads += 1;
+          return reads === 1 ? currentServerGeneration : oldServerGeneration;
+        },
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '%42\n' : Buffer.from('')
+      ));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
+    it('never kills a live unversioned legacy pane record', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '%42\n' : Buffer.from('')
+      ));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'worktree cleanup was not started');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([pane]);
+    });
+
+    it('removes an absent unversioned legacy record without killing its ID', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: undefined,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => (
+        command.includes('list-panes') ? '' : Buffer.from('')
+      ));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        String(command).includes('kill-pane')
+      )).toBe(false);
+      expect(context.panes).toEqual([]);
+    });
+
+    it('aborts before teardown and refreshes UI when the exact pane identity was rebound', async () => {
+      const pane = createWorktreePane({ id: 'psyche-identity', paneId: '%42' });
+      const refreshPanes = vi.fn(async () => {});
+      const context = createMockContext([pane], {
+        refreshPanes,
+        removePaneIdentitiesFromConfig: vi.fn(async () => {
+          throw new Error('Pane identity conflict for "psyche-identity"');
+        }),
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from('%42\n'));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectError(result, 'Close aborted');
+      expect(refreshPanes).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        typeof command === 'string' && command.includes('kill-pane')
+      )).toBe(false);
+    });
+
+    it('includes the tmux generation in exact close removal', async () => {
+      const pane = createWorktreePane({
+        id: 'psyche-generation',
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+      });
+      const removePaneIdentitiesFromConfig = vi.fn(async (identities) => {
+        expect(Array.from(identities)).toEqual([{
+          id: pane.id,
+          paneId: pane.paneId,
+          tmuxServerIdentity: currentServerGeneration,
+        }]);
+        return [];
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+        removePaneIdentitiesFromConfig,
+      });
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      const result = await choice.onSelect!('kill_only');
+
+      expectSuccess(result, 'closed successfully');
+      expect(removePaneIdentitiesFromConfig).toHaveBeenCalledOnce();
+    });
+
+    it('verified-kills owned test and dev windows before removing the pane record', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testWindowId: '@7',
+        testTmuxServerIdentity: currentServerGeneration,
+        devWindowId: '@8',
+        devTmuxServerIdentity: currentServerGeneration,
+      });
+      const context = createMockContext([pane], {
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      const liveWindows = new Set(['@7', '@8']);
+      let paneAlive = true;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-windows')) {
+          return [...liveWindows].join('\n');
+        }
+        if (command.includes('kill-window')) {
+          const windowId = command.match(/-t '([^']+)'/)?.[1];
+          if (windowId) liveWindows.delete(windowId);
+          return Buffer.from('');
+        }
+        if (command.includes('list-panes')) {
+          return paneAlive ? '%42\n' : '';
+        }
+        if (command.includes('kill-pane')) {
+          paneAlive = false;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      const commands = vi.mocked(execSync).mock.calls
+        .map(([command]) => String(command));
+      expect(commands.findIndex((command) => command.includes("kill-window -t '@7'")))
+        .toBeLessThan(commands.findIndex((command) => command.includes("kill-pane -t '%42'")));
+      expect(commands.some((command) => command.includes("kill-window -t '@8'"))).toBe(true);
+      expect(context.panes).toEqual([]);
+    });
+
+    it('uses fresh locked background pane/window fields rather than stale UI fields', async () => {
+      const stalePane = createWorktreePane({
+        paneId: '%42',
+        tmuxServerIdentity: currentServerGeneration,
+        testPaneId: '%stale-test',
+        testWindowId: '@stale-test',
+        testTmuxServerIdentity: currentServerGeneration,
+        devPaneId: '%stale-dev',
+        devWindowId: '@stale-dev',
+        devTmuxServerIdentity: currentServerGeneration,
+      });
+      const freshPane = {
+        ...stalePane,
+        testPaneId: '%fresh-test',
+        testWindowId: '@fresh-test',
+        devPaneId: '%fresh-dev',
+        devWindowId: '@fresh-dev',
+      };
+      const livePanes = new Set(['%42', '%fresh-test', '%fresh-dev']);
+      const liveWindows = new Set(['@fresh-test', '@fresh-dev']);
+      const removePaneIdentitiesFromConfig = vi.fn(async (
+        _identities: unknown,
+        beforeRemove?: (
+          panes?: readonly PsychePane[],
+          exactPanes?: readonly PsychePane[],
+        ) => Promise<void> | void,
+      ) => {
+        await beforeRemove?.([], [freshPane]);
+        return [];
+      });
+      const context = createMockContext([stalePane], {
+        removePaneIdentitiesFromConfig,
+        getTmuxServerIdentity: () => currentServerGeneration,
+      });
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return [...livePanes].join('\n');
+        if (command.includes('list-windows')) return [...liveWindows].join('\n');
+        if (command.includes('kill-pane')) {
+          const paneId = command.match(/-t '([^']+)'/)?.[1];
+          if (paneId) livePanes.delete(paneId);
+          return Buffer.from('');
+        }
+        if (command.includes('kill-window')) {
+          const windowId = command.match(/-t '([^']+)'/)?.[1];
+          if (windowId) liveWindows.delete(windowId);
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(stalePane, context);
+      await choice.onSelect!('kill_only');
+
+      const commands = vi.mocked(execSync).mock.calls
+        .map(([command]) => String(command));
+      expect(commands.some((command) => command.includes("kill-pane -t '%fresh-test'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-pane -t '%fresh-dev'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-window -t '@fresh-test'"))).toBe(true);
+      expect(commands.some((command) => command.includes("kill-window -t '@fresh-dev'"))).toBe(true);
+      expect(commands.some((command) => command.includes('stale-test'))).toBe(false);
+      expect(commands.some((command) => command.includes('stale-dev'))).toBe(false);
+    });
+
+    it('preserves the record when a transient tmux probe cannot confirm absence', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          throw new Error('tmux probe timed out');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_only');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
+    it('preserves the record and skips worktree cleanup when an owned dev window is unknown', async () => {
+      const pane = createWorktreePane({
+        paneId: '%42',
+        devWindowId: '@8',
+        worktreePath: '/test/project/.psyche/worktrees/feature',
+      });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-windows')) {
+          throw new Error('tmux window probe timed out');
+        }
+        if (command.includes('list-panes')) {
+          return '%42\n';
+        }
+        if (command.includes('kill-pane')) {
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_and_clean');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
+    it('removes a record when tmux confirms the pane is already absent', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) return '';
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ controlPaneId: '%0' }));
+
+      const choice = await closePane(pane, context);
+      await choice.onSelect!('kill_only');
+
+      expect(savePanesSpy).toHaveBeenCalled();
+      expect(vi.mocked(execSync).mock.calls.some(([command]) =>
+        typeof command === 'string' && command.includes('kill-pane')
+      )).toBe(false);
+    });
+
+    it('keeps the record when kill outcome cannot be verified', async () => {
+      const pane = createWorktreePane({ paneId: '%42' });
+      const context = createMockContext([pane]);
+      const savePanesSpy = vi.spyOn(context, 'savePanes');
+      let killAttempted = false;
+      vi.mocked(execSync).mockImplementation((command: string) => {
+        if (command.includes('list-panes')) {
+          if (!killAttempted) return '%42\n';
+          throw new Error('tmux probe timed out after kill');
+        }
+        if (command.includes('kill-pane')) {
+          killAttempted = true;
+          return Buffer.from('');
+        }
+        return Buffer.from('');
+      });
+
+      const choice = await closePane(pane, context);
+      const execution = await choice.onSelect!('kill_only');
+
+      expectError(execution, 'Could not confirm pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
     it('should remove pane from tracking when kill_only selected', async () => {
       const pane1 = createWorktreePane({ id: 'psyche-1' });
       const pane2 = createWorktreePane({ id: 'psyche-2' });
@@ -196,7 +657,7 @@ describe('closeAction', () => {
       await result.onSelect!('kill_only');
 
       // Verify pane was removed
-      expect(savePanesSpy).toHaveBeenCalledWith([pane2]);
+      expect(savePanesSpy).toHaveBeenCalledWith([pane2], [pane1, pane2]);
     });
 
     it('should call onPaneRemove callback with tmux pane ID', async () => {
@@ -385,6 +846,46 @@ describe('closeAction', () => {
 
       const cleanupJob = mockEnqueueCleanup.mock.calls.at(-1)?.[0];
       expect(cleanupJob?.deleteBranch).toBe(false);
+    });
+
+    it('merges the freshly persisted panes before deciding whether cleanup is safe', async () => {
+      const sharedWorktreePath = '/test/project/.psyche/worktrees/shared';
+      const closingPane = createWorktreePane({
+        id: 'tui-close',
+        paneId: '%42',
+        worktreePath: sharedWorktreePath,
+      });
+      const daemonPane = createWorktreePane({
+        id: 'daemon-pane',
+        paneId: '%43',
+        worktreePath: sharedWorktreePath,
+      });
+      const mockContext = createMockContext([closingPane]);
+      mockContext.removePaneIdentitiesFromConfig = vi.fn(async (
+        _identities,
+        beforeRemove,
+      ) => {
+        await beforeRemove?.();
+        return [daemonPane];
+      });
+
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      const result = await closePane(closingPane, mockContext);
+      await result.onSelect!('kill_and_clean');
+
+      expect(mockContext.removePaneIdentitiesFromConfig).toHaveBeenCalledWith(
+        [{
+          id: 'tui-close',
+          paneId: '%42',
+          tmuxServerIdentity: mockTmuxServerIdentity,
+        }],
+        expect.any(Function),
+      );
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
     });
   });
 

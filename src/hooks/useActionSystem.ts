@@ -7,18 +7,28 @@
 
 import { useState, useCallback, useMemo } from 'react';
 import { executeAction, PaneAction, type ActionContext } from '../actions/index.js';
-import type { ActionResult } from '../actions/types.js';
+import type { ActionResult, PaneLifecycleIdentity } from '../actions/types.js';
 import {
   handleActionResult,
   createInitialTUIState,
   type TUIActionState
 } from '../adapters/tuiActionHandler.js';
-import type { PsychePane } from '../types.js';
+import type { PsychePane, SavePanes } from '../types.js';
 import type { TrackProjectActivity } from '../types/activity.js';
 
 interface UseActionSystemParams {
   panes: PsychePane[];
-  savePanes: (panes: PsychePane[]) => Promise<void>;
+  savePanes: SavePanes;
+  removePaneFromConfig?: (paneId: string) => Promise<PsychePane[]>;
+  removePanesFromConfig?: (paneIds: Iterable<string>) => Promise<PsychePane[]>;
+  removePaneIdentitiesFromConfig?: (
+    identities: Iterable<PaneLifecycleIdentity>,
+    beforeRemove?: (
+      panes?: readonly PsychePane[],
+      exactPanes?: readonly PsychePane[],
+    ) => Promise<void> | void,
+  ) => Promise<PsychePane[]>;
+  refreshPanes?: () => Promise<void>;
   sessionName: string;
   projectName: string;
   defaultProjectRoot: string;
@@ -183,6 +193,10 @@ async function handleResultWithPopups(
 export default function useActionSystem({
   panes,
   savePanes,
+  removePaneFromConfig,
+  removePanesFromConfig,
+  removePaneIdentitiesFromConfig,
+  refreshPanes,
   sessionName,
   projectName,
   defaultProjectRoot,
@@ -201,10 +215,26 @@ export default function useActionSystem({
     sessionName,
     projectName,
     savePanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
+    refreshPanes,
     onPaneUpdate,
     onPaneRemove,
     onActionResult,
-  }), [panes, sessionName, projectName, savePanes, onPaneUpdate, onPaneRemove, onActionResult]);
+  }), [
+    panes,
+    sessionName,
+    projectName,
+    savePanes,
+    removePaneFromConfig,
+    removePanesFromConfig,
+    removePaneIdentitiesFromConfig,
+    refreshPanes,
+    onPaneUpdate,
+    onPaneRemove,
+    onActionResult,
+  ]);
 
   // Execute an action and handle the result
   const executeActionWithHandling = useCallback(async (

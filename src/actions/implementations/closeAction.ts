@@ -17,96 +17,173 @@ import { cleanupPromptFilesForSlug } from '../../utils/promptStore.js';
 import { buildDevWatchRespawnCommand } from '../../utils/devWatchCommand.js';
 import { isActiveDevSourcePath } from '../../utils/devSource.js';
 import { getPaneDisplayName } from '../../utils/paneTitle.js';
+import { paneReferencesWorktree } from '../../utils/paneWorktreeReference.js';
+import {
+  paneRecoveryInstructions,
+  tearDownFullPaneWithVerification,
+  verifyFullPaneAbsent,
+  type TmuxPanePresence,
+} from '../../utils/paneTeardown.js';
+import {
+  getCurrentTmuxServerIdentity,
+  sameTmuxServerIdentity,
+  type TmuxServerIdentity,
+} from '../../services/TmuxServerIdentity.js';
+import {
+  assessTmuxTeardownOwnership,
+} from '../../services/TmuxResourceOwnership.js';
 
-const PANE_KILL_VERIFY_DELAYS_MS = [50, 150, 300];
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function parseTmuxPaneIds(output: string | Buffer): Set<string> {
-  const ids = new Set<string>();
-
-  for (const line of output.toString().split('\n')) {
-    const match = line.trim().match(/^%\d+/);
-    if (match) {
-      ids.add(match[0]);
-    }
-  }
-
-  return ids;
-}
-
-function tmuxPaneExists(paneId: string): boolean {
+function probeTmuxPanePresence(paneId: string): TmuxPanePresence {
   try {
     const paneList = execSync('tmux list-panes -a -F "#{pane_id}"', {
       encoding: 'utf-8',
       stdio: 'pipe',
       timeout: 5000,
     });
-    return parseTmuxPaneIds(paneList).has(paneId);
+    return paneList
+      .toString()
+      .split('\n')
+      .map((line) => line.trim())
+      .map((line) => line.match(/^%\d+/)?.[0] || line)
+      .includes(paneId)
+      ? 'present'
+      : 'absent';
   } catch {
-    LogService.getInstance().debug(
-      `Could not verify pane ${paneId} exists, treating as already closed`,
+    LogService.getInstance().warn(
+      `Could not verify whether pane ${paneId} exists; preserving pane record and worktree`,
       'paneActions'
     );
-    return false;
+    return 'unknown';
   }
 }
 
-async function waitForTmuxPaneToClose(paneId: string): Promise<boolean> {
-  if (!tmuxPaneExists(paneId)) {
-    return true;
-  }
-
-  for (const delay of PANE_KILL_VERIFY_DELAYS_MS) {
-    await sleep(delay);
-    if (!tmuxPaneExists(paneId)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-async function killTmuxPaneReliably(pane: PsychePane): Promise<boolean> {
-  if (!tmuxPaneExists(pane.paneId)) {
-    LogService.getInstance().debug(
-      `Pane ${pane.paneId} already gone, skipping kill`,
-      'paneActions'
-    );
-    return true;
-  }
-
+function probeTmuxWindowPresence(windowId: string): TmuxPanePresence {
   try {
-    execSync(`tmux kill-pane -t '${pane.paneId}'`, {
+    const windowList = execSync('tmux list-windows -a -F "#{window_id}"', {
+      encoding: 'utf-8',
       stdio: 'pipe',
       timeout: 5000,
     });
-  } catch (killError) {
-    if (await waitForTmuxPaneToClose(pane.paneId)) {
-      return true;
-    }
-
-    LogService.getInstance().error(
-      `Error killing pane ${pane.paneId}`,
+    return windowList
+      .toString()
+      .split('\n')
+      .map((line) => line.trim())
+      .includes(windowId)
+      ? 'present'
+      : 'absent';
+  } catch {
+    LogService.getInstance().warn(
+      `Could not verify whether background window ${windowId} exists; preserving pane record and worktree`,
       'paneActions',
-      pane.id,
-      killError instanceof Error ? killError : undefined
     );
-    return false;
+    return 'unknown';
   }
+}
 
-  if (await waitForTmuxPaneToClose(pane.paneId)) {
-    return true;
-  }
-
-  LogService.getInstance().warn(
-    `Pane ${pane.paneId} still exists after kill attempt`,
-    'paneActions',
-    pane.id
+async function tearDownOwnedPane(
+  pane: PsychePane,
+  panes: readonly PsychePane[],
+  getCurrentGeneration: () => TmuxServerIdentity | undefined,
+) {
+  const currentGeneration = getCurrentGeneration();
+  const assessment = assessTmuxTeardownOwnership(
+    pane as PsychePane & Record<string, unknown>,
+    panes as Array<PsychePane & Record<string, unknown>>,
+    currentGeneration,
   );
-  return false;
+  const { ownership } = assessment;
+  if (ownership === 'stale-generation') {
+    // The exact config-CAS that invoked this callback removes only this old
+    // record. A reused ID in the new server must never receive a kill command.
+    return {
+      presence: 'absent' as const,
+      pane: { presence: 'absent' as const },
+      backgroundPanes: new Map(),
+      windows: new Map(),
+    };
+  }
+  if (ownership === 'unverified-generation' || ownership === 'ambiguous') {
+    return {
+      presence: 'unknown' as const,
+      error: ownership === 'ambiguous'
+        ? 'tmux resource ownership is ambiguous in the current server generation'
+        : 'current tmux server generation could not be verified',
+      pane: { presence: 'unknown' as const },
+      backgroundPanes: new Map(),
+      windows: new Map(),
+    };
+  }
+  if (ownership === 'legacy') {
+    // A legacy ID has no tmux generation, so it may name an unrelated pane
+    // after a server restart. Only remove the record when every resource is
+    // already proven absent; never issue a kill based on that ID alone.
+    return verifyFullPaneAbsent({
+      target: assessment.target,
+      probePane: (paneId) => probeTmuxPanePresence(paneId),
+      probeWindow: probeTmuxWindowPresence,
+    });
+  }
+  return tearDownFullPaneWithVerification({
+    target: assessment.target,
+    probePane: (paneId) => {
+      const generation = getCurrentGeneration();
+      if (!generation || !currentGeneration) return 'unknown';
+      if (!sameTmuxServerIdentity(generation, currentGeneration)) return 'absent';
+      return probeTmuxPanePresence(paneId);
+    },
+    killPane: (paneId) => {
+      const generation = getCurrentGeneration();
+      if (
+        !generation
+        || !currentGeneration
+        || !sameTmuxServerIdentity(generation, currentGeneration)
+      ) {
+        return;
+      }
+      execSync(`tmux kill-pane -t '${paneId}'`, {
+        stdio: 'pipe',
+        timeout: 5000,
+      });
+    },
+    probeWindow: (windowId) => {
+      const generation = getCurrentGeneration();
+      if (!generation || !currentGeneration) return 'unknown';
+      if (!sameTmuxServerIdentity(generation, currentGeneration)) return 'absent';
+      return probeTmuxWindowPresence(windowId);
+    },
+    killWindow: (windowId) => {
+      const generation = getCurrentGeneration();
+      if (
+        !generation
+        || !currentGeneration
+        || !sameTmuxServerIdentity(generation, currentGeneration)
+      ) {
+        return;
+      }
+      execSync(`tmux kill-window -t '${windowId}'`, {
+        stdio: 'pipe',
+        timeout: 5000,
+      });
+    },
+  });
+}
+
+function paneKeepsWorktreeActive(
+  candidate: PsychePane,
+  worktreePath: string,
+): boolean {
+  const legacyCwd = (candidate as unknown as { cwd?: unknown }).cwd;
+  return (
+    isActiveDevSourcePath(candidate.worktreePath, worktreePath)
+    || (
+      (
+        candidate.type === 'shell'
+        || Boolean(candidate.cwdReference)
+        || typeof legacyCwd === 'string'
+      )
+      && paneReferencesWorktree(candidate, worktreePath)
+    )
+  );
 }
 
 /**
@@ -125,7 +202,7 @@ export async function closePane(
 
   const siblingPanesOnWorktree = context.panes.filter(candidate =>
     candidate.id !== pane.id &&
-    isActiveDevSourcePath(candidate.worktreePath, pane.worktreePath)
+    paneKeepsWorktreeActive(candidate, pane.worktreePath!)
   );
 
   if (siblingPanesOnWorktree.length > 0) {
@@ -232,25 +309,60 @@ async function executeCloseOption(
     try {
       let startedBackgroundCleanup = false;
 
-      const updatedPanes = context.panes.filter(p => p.id !== pane.id);
+      let updatedPanes = context.panes.filter(p => p.id !== pane.id);
 
-      // Kill and verify the tmux pane before mutating pane state or deleting
-      // the worktree. Sending C-c first can drop an agent back to a shell if
-      // kill-pane fails, so close the pane directly and treat a surviving pane
-      // as a failed close.
-      const paneClosed = await killTmuxPaneReliably(pane);
-      if (!paneClosed) {
+      // The identity check, background-window teardown, pane teardown, and
+      // record removal execute under one config lease. A concurrent rebind is
+      // therefore detected before this action can kill its replacement.
+      if (!context.removePaneIdentitiesFromConfig) {
+        throw new Error('Close requires exact pane identity removal support');
+      }
+      try {
+        updatedPanes = await context.removePaneIdentitiesFromConfig(
+          [{
+            id: pane.id,
+            paneId: pane.paneId,
+            ...(pane.tmuxServerIdentity
+              ? { tmuxServerIdentity: pane.tmuxServerIdentity }
+              : {}),
+          }],
+          async (_panes, exactPanes) => {
+            // ProjectPaneConfig always supplies this fresh record. The
+            // snapshot fallback preserves legacy ActionContext adapters that
+            // predate the second guard argument; production close paths never
+            // take it.
+            const current = exactPanes?.[0] || pane;
+            // The config lease has already revalidated this exact identity.
+            // Read its current background pane/window fields here rather than
+            // tearing down a stale UI snapshot after a concurrent update.
+            const teardown = await tearDownOwnedPane(
+              current,
+              (_panes || []) as PsychePane[],
+              () => (
+                context.getTmuxServerIdentity?.()
+                ?? getCurrentTmuxServerIdentity()
+              ),
+            );
+            if (teardown.presence !== 'absent') {
+              const message = teardown.presence === 'unknown'
+                ? `Could not confirm pane "${paneName}" and all owned background windows closed; pane record and worktree were preserved. ${
+                  paneRecoveryInstructions(pane.paneId, panesFile)
+                }`
+                : `Failed to close pane "${paneName}" or an owned background window; worktree cleanup was not started`;
+              throw new Error(message);
+            }
+          },
+        );
+      } catch (error) {
+        await context.refreshPanes?.();
         return {
           type: 'error',
-          message: `Failed to close pane "${paneName}"; worktree cleanup was not started`,
+          message: `Close aborted; pane identity or teardown changed. ${
+            error instanceof Error ? error.message : String(error)
+          }`,
           dismissable: true,
         };
       }
-
-      // Remove from config only after tmux confirms the pane is gone. The
-      // lifecycle close marker suppresses recreation while the close is in
-      // progress.
-      await context.savePanes(updatedPanes);
 
       // Best-effort cleanup of any stored prompt files for this pane slug
       // (including leftovers from interrupted launches).
@@ -267,7 +379,9 @@ async function executeCloseOption(
       if (pane.worktreePath && (option === 'kill_and_clean' || option === 'kill_clean_branch')) {
         // Check if sibling panes still share this worktree
         // updatedPanes already excludes the current pane, so any match = active sibling
-        const siblingPanes = updatedPanes.filter(p => p.worktreePath === pane.worktreePath);
+        const siblingPanes = updatedPanes.filter((candidate) =>
+          paneKeepsWorktreeActive(candidate, pane.worktreePath!)
+        );
         if (siblingPanes.length > 0) {
           // Skip worktree/branch deletion — other panes still using it
           LogService.getInstance().info(
@@ -288,6 +402,8 @@ async function executeCloseOption(
               pane,
               paneProjectRoot,
               mainRepoPath,
+              configPath: panesFile,
+              currentProjectRoot: sessionProjectRoot,
               deleteBranch: option === 'kill_clean_branch',
             });
             startedBackgroundCleanup = true;
@@ -366,7 +482,7 @@ async function executeCloseOption(
       const hasRemainingPaneForWorktree = Boolean(
         pane.worktreePath &&
         updatedPanes.some(candidate =>
-          isActiveDevSourcePath(candidate.worktreePath, pane.worktreePath)
+          paneKeepsWorktreeActive(candidate, pane.worktreePath!)
         )
       );
 

@@ -22,10 +22,10 @@ describe('dev watch tooling', () => {
     expect(existsSync(path.join(projectRoot, 'scripts', 'dev-watch-run.js'))).toBe(true);
   });
 
-  it('requires a Node version that supports the watched runtime flag', () => {
+  it('requires a Node version supported by runtime dependencies and Corepack', () => {
     const packageJson = readPackageJson();
 
-    expect(packageJson.engines?.node).toBe('>=18.11.0');
+    expect(packageJson.engines?.node).toBe('>=20.10.0');
   });
 
   it('shuts down the dev watch session when either child exits cleanly', () => {

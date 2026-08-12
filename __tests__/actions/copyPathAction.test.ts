@@ -7,15 +7,16 @@ import { copyPath } from '../../src/actions/implementations/copyPathAction.js';
 import { createMockPane, createShellPane } from '../fixtures/mockPanes.js';
 import { createMockContext } from '../fixtures/mockContext.js';
 import { expectSuccess, expectError, expectInfo } from '../helpers/actionAssertions.js';
-import { execSync } from 'child_process';
 
-vi.mock('child_process', () => ({
-  execSync: vi.fn(),
+const runProcessMock = vi.fn();
+vi.mock('../../src/utils/runProcess.js', () => ({
+  runProcess: (...args: unknown[]) => runProcessMock(...args),
 }));
 
 describe('copyPathAction', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    runProcessMock.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
   });
 
   it('should copy worktree path to clipboard successfully', async () => {
@@ -24,15 +25,11 @@ describe('copyPathAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     const result = await copyPath(mockPane, mockContext);
 
-    // Verify clipboard copy command
-    expect(execSync).toHaveBeenCalledWith(
-      'echo "/test/project/.psyche/worktrees/my-feature" | pbcopy',
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith('pbcopy', {
+      input: '/test/project/.psyche/worktrees/my-feature',
+    });
 
     // Verify success result with path in message
     expectSuccess(result, '/test/project/.psyche/worktrees/my-feature');
@@ -63,9 +60,7 @@ describe('copyPathAction', () => {
     const mockContext = createMockContext([mockPane]);
 
     // Mock clipboard command failure
-    vi.mocked(execSync).mockImplementation(() => {
-      throw new Error('pbcopy not found');
-    });
+    runProcessMock.mockRejectedValue(new Error('pbcopy not found'));
 
     const result = await copyPath(mockPane, mockContext);
 
@@ -79,15 +74,11 @@ describe('copyPathAction', () => {
     });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     await copyPath(mockPane, mockContext);
 
-    // Verify path is properly quoted
-    expect(execSync).toHaveBeenCalledWith(
-      expect.stringContaining('project name with spaces'),
-      { stdio: 'pipe' }
-    );
+    expect(runProcessMock).toHaveBeenCalledWith('pbcopy', {
+      input: '/test/project name with spaces/.psyche/worktrees/my-feature',
+    });
   });
 
   it('should handle very long paths', async () => {
@@ -95,11 +86,19 @@ describe('copyPathAction', () => {
     const mockPane = createMockPane({ worktreePath: longPath });
     const mockContext = createMockContext([mockPane]);
 
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
-
     const result = await copyPath(mockPane, mockContext);
 
     expectSuccess(result);
     expect(result.message).toContain(longPath);
+  });
+
+  it('sends shell metacharacters to pbcopy as exact stdin bytes', async () => {
+    const hostilePath = '$(touch sentinel) `backtick` "quote"; newline\n--leading-dash';
+    const mockPane = createMockPane({ worktreePath: hostilePath });
+    const mockContext = createMockContext([mockPane]);
+
+    await copyPath(mockPane, mockContext);
+
+    expect(runProcessMock).toHaveBeenCalledWith('pbcopy', { input: hostilePath });
   });
 });
