@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -43,6 +43,43 @@ function sidebarHeadHtml(source: string) {
   const match = source.match(/<div class="sidebar-head">([\s\S]*?)<\/div>/);
   if (!match) throw new Error('missing sidebar-head');
   return match[0];
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function compileFunction<T extends (...args: never[]) => unknown>(
+  source: string,
+  name: string,
+  dependencies: Record<string, unknown>,
+) {
+  const names = Object.keys(dependencies);
+  const values = Object.values(dependencies);
+  return Function(
+    ...names,
+    `"use strict"; return (${functionSource(source, name)});`,
+  )(...values) as T;
+}
+
+function ruleBlock(source: string, selector: string) {
+  const match = source.match(
+    new RegExp(`(^|\\n)${escapeRegExp(selector)}\\s*\\{([^}]*)\\}`, 's'),
+  );
+  return match?.[2] ?? null;
+}
+
+function createMockButton() {
+  const attributes = new Map<string, string>();
+  return {
+    hidden: false,
+    setAttribute(name: string, value: string) {
+      attributes.set(name, value);
+    },
+    getAttribute(name: string) {
+      return attributes.get(name) ?? null;
+    },
+  };
 }
 
 describe('Tauri project/worktree/pane rail', () => {
@@ -112,6 +149,79 @@ describe('Tauri project/worktree/pane rail', () => {
 
   it('ships a byte-identical browser-loadable Psyche titlebar icon asset', () => {
     expect(packagedTitlebarMark.equals(sourceTitlebarMark)).toBe(true);
+  });
+
+  it('marks both titlebar zones as drag regions while keeping the sidebar toggle clickable', () => {
+    const titlebar = titlebarHtml(indexHtml);
+    const sidebarShell = titlebar.match(/<div class="titlebar-sidebar"[\s\S]*?<\/div>/)?.[0] ?? '';
+
+    expect(titlebar).toContain('<header class="titlebar" data-tauri-drag-region>');
+    expect(titlebar).toContain('<div class="titlebar-sidebar" data-tauri-drag-region>');
+    expect(titlebar).toContain('<div class="titlebar-workspace" data-tauri-drag-region>');
+    expect(sidebarShell).toContain('<span class="traffic-gutter" aria-hidden="true"></span>');
+    expect(ruleBlock(styles, '.titlebar-sidebar-toggle')).toMatch(/-webkit-app-region:\s*no-drag;/);
+  });
+
+  it('syncs both sidebar toggle controls with the collapsed state', () => {
+    const sidebarCollapseEl = createMockButton();
+    const sidebarExpandEl = createMockButton();
+    const syncSidebarToggleState = compileFunction<
+      (collapsed: boolean) => void
+    >(mainJs, 'syncSidebarToggleState', {
+      sidebarCollapseEl,
+      sidebarExpandEl,
+    });
+
+    syncSidebarToggleState(true);
+    expect(sidebarCollapseEl.getAttribute('aria-label')).toBe('Expand sidebar');
+    expect(sidebarCollapseEl.getAttribute('aria-pressed')).toBe('true');
+    expect(sidebarExpandEl.hidden).toBe(false);
+    expect(sidebarExpandEl.getAttribute('aria-label')).toBe('Expand sidebar');
+    expect(sidebarExpandEl.getAttribute('aria-pressed')).toBe('true');
+
+    syncSidebarToggleState(false);
+    expect(sidebarCollapseEl.getAttribute('aria-label')).toBe('Collapse sidebar');
+    expect(sidebarCollapseEl.getAttribute('aria-pressed')).toBe('false');
+    expect(sidebarExpandEl.hidden).toBe(true);
+    expect(sidebarExpandEl.getAttribute('aria-label')).toBe('Expand sidebar');
+    expect(sidebarExpandEl.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('routes sidebar state changes and handlers through the shared toggle helper', () => {
+    const syncSidebarToggleState = vi.fn();
+    const closeNewPaneMenu = vi.fn();
+    const scheduleVisiblePaneFit = vi.fn();
+    const syncBrowserBounds = vi.fn();
+    const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const appEl = { dataset: { sidebar: 'open' as 'open' | 'collapsed' } };
+    const sidebarMiniEl = { hidden: true };
+    const setSidebarOpen = compileFunction<(open: boolean) => void>(mainJs, 'setSidebarOpen', {
+      appEl,
+      sidebarMiniEl,
+      syncSidebarToggleState,
+      closeNewPaneMenu,
+      requestAnimationFrame,
+      scheduleVisiblePaneFit,
+      syncBrowserBounds,
+    });
+
+    setSidebarOpen(true);
+    expect(appEl.dataset.sidebar).toBe('open');
+    expect(sidebarMiniEl.hidden).toBe(true);
+    expect(syncSidebarToggleState).toHaveBeenLastCalledWith(false);
+
+    setSidebarOpen(false);
+    expect(appEl.dataset.sidebar).toBe('collapsed');
+    expect(sidebarMiniEl.hidden).toBe(false);
+    expect(syncSidebarToggleState).toHaveBeenLastCalledWith(true);
+    expect(closeNewPaneMenu).toHaveBeenCalledTimes(1);
+    expect(scheduleVisiblePaneFit).toHaveBeenCalledTimes(2);
+    expect(syncBrowserBounds).toHaveBeenCalledTimes(2);
+    expect(mainJs).toContain('onRailClick("sidebar-collapse", function () { toggleSidebar(); });');
+    expect(mainJs).toContain('onRailClick("sidebar-expand", function () { setSidebarOpen(true); });');
   });
 
   it('discovers canonical Git worktrees through a read-only native command', () => {

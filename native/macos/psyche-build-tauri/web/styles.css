@@ -799,7 +799,6 @@ kbd {
   min-width: 0;
   height: var(--titlebar-h);
   background: var(--sidebar-surface);
-  border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   user-select: none;
 }

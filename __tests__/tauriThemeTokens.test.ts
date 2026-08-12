@@ -97,6 +97,10 @@ describe('theme tokens', () => {
     expect(ruleBlock('.workbench')).toMatch(/background:\s*var\(--sidebar-surface\);/);
   });
 
+  it('keeps the shared titlebar/workspace seam borderless', () => {
+    expect(stylesCss).not.toMatch(/\.titlebar\s*\{[^}]*border-bottom\s*:/s);
+  });
+
   it('keeps the detail surface square on the bottom edge with only the inward top-left curve', () => {
     const detail = ruleBlock('.detail') ?? '';
     expect(detail).toMatch(/border-radius:\s*var\(--workspace-radius\)\s+0\s+0\s+0;/);

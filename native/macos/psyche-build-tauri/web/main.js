@@ -7889,11 +7889,18 @@
 
   function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
   function syncSidebarToggleState(collapsed) {
+    var titlebarLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
     if (sidebarCollapseEl) {
-      sidebarCollapseEl.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+      sidebarCollapseEl.setAttribute("title", titlebarLabel + " (⌘B)");
+      sidebarCollapseEl.setAttribute("aria-label", titlebarLabel);
       sidebarCollapseEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
     }
-    if (sidebarExpandEl) sidebarExpandEl.hidden = !collapsed;
+    if (sidebarExpandEl) {
+      sidebarExpandEl.hidden = !collapsed;
+      sidebarExpandEl.setAttribute("title", "Expand sidebar (⌘B)");
+      sidebarExpandEl.setAttribute("aria-label", "Expand sidebar");
+      sidebarExpandEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
   }
   function setSidebarOpen(open) {
     if (!appEl) return;
@@ -7908,7 +7915,7 @@
   }
   function toggleSidebar() { setSidebarOpen(!sidebarOpen()); }
 
-  onRailClick("sidebar-collapse", function () { setSidebarOpen(false); });
+  onRailClick("sidebar-collapse", function () { toggleSidebar(); });
   onRailClick("sidebar-expand", function () { setSidebarOpen(true); });
   if (sidebarMiniEl) {
     sidebarMiniEl.addEventListener("click", function (event) {
