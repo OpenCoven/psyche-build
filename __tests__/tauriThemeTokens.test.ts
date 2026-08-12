@@ -31,6 +31,13 @@ function customProperties(block: string) {
   return [...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]).sort();
 }
 
+function ruleBlock(selector: string) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matches = [...stylesCss.matchAll(new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`, 'gs'))];
+  const match = matches[matches.length - 1];
+  return match ? match[2] : null;
+}
+
 /** Channel spread: 0 is pure grey, larger is more saturated. */
 function chroma(triplet: string) {
   const channels = triplet.split(',').map((n) => Number(n.trim()));
@@ -70,5 +77,31 @@ describe('theme tokens', () => {
     const term = block.match(/--rgb-term:\s*([0-9,\s]+);/);
     expect(term).not.toBeNull();
     expect(chroma(term![1])).toBeGreaterThanOrEqual(MIN_DEFAULT_CHROMA);
+  });
+
+  it('declares the Dia shell surface tokens in :root', () => {
+    expect(stylesCss).toContain(
+      '--sidebar-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.55));',
+    );
+    expect(stylesCss).toContain(
+      '--workspace-surface: rgba(var(--rgb-deep), calc(var(--bg-opacity) * 0.72));',
+    );
+    expect(stylesCss).toContain('--workspace-radius: 18px;');
+  });
+
+  it('maps titlebar and workspace surfaces onto the correct shell regions', () => {
+    expect(ruleBlock('.titlebar-sidebar')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+    expect(ruleBlock('.sidebar')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+    expect(ruleBlock('.titlebar-workspace')).toMatch(/background:\s*var\(--workspace-surface\);/);
+    expect(ruleBlock('.detail')).toMatch(/background:\s*var\(--workspace-surface\);/);
+    expect(ruleBlock('.workbench')).toMatch(/background:\s*var\(--sidebar-surface\);/);
+  });
+
+  it('keeps the detail surface square on the bottom edge with only the inward top-left curve', () => {
+    const detail = ruleBlock('.detail') ?? '';
+    expect(detail).toMatch(/border-radius:\s*var\(--workspace-radius\)\s+0\s+0\s+0;/);
+    expect(detail).not.toMatch(/border-bottom-left-radius\s*:/);
+    expect(detail).not.toMatch(/border-bottom-right-radius\s*:/);
+    expect(detail).not.toMatch(/border-top-right-radius\s*:/);
   });
 });

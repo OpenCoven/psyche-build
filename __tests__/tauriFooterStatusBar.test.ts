@@ -202,6 +202,12 @@ describe('Tauri footer status bar shell', () => {
   it('defines the exact 26px footer rail CSS contract', () => {
     expect(stylesCss).toMatch(/--status-h:\s*26px;/);
     expect(stylesCss).toMatch(
+      /\.titlebar\s*\{[^}]*grid-template-columns:\s*var\(--sidebar-w\)\s+minmax\(0,\s*1fr\);/s
+    );
+    expect(stylesCss).toMatch(
+      /\.app\[data-sidebar="collapsed"\]\s+\.titlebar\s*\{[^}]*grid-template-columns:\s*var\(--mini-rail-w\)\s+minmax\(0,\s*1fr\);/s
+    );
+    expect(stylesCss).toMatch(
       /\.app\s*\{[^}]*grid-template-rows:\s*var\(--titlebar-h\)\s+minmax\(0,\s*1fr\)\s+auto;/s
     );
     expect(stylesCss).toMatch(

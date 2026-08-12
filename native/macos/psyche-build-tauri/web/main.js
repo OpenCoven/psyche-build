@@ -834,6 +834,8 @@
   var appEl = document.getElementById("app");
   var sidebarEl = document.getElementById("sidebar");
   var sidebarMiniEl = document.getElementById("sidebar-mini");
+  var sidebarCollapseEl = document.getElementById("sidebar-collapse");
+  var sidebarExpandEl = document.getElementById("sidebar-expand");
   var sidebarResizeEl = document.getElementById("sidebar-resize");
   var dockMiniEl = document.getElementById("rail-right");
   var newPaneMenuEl = document.getElementById("new-pane-menu");
@@ -6009,7 +6011,7 @@
       target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
       target.tagName === "SELECT" || target.isContentEditable
     );
-    if (event.key === "/" && !editing && sidebarTab === "sessions") {
+    if (event.key === "/" && !editing && sidebarTab === "sessions" && sessionSearchEl) {
       event.preventDefault();
       sessionSearchRestoreKey = sessionTreeFocusKey;
       sessionSearchEl.focus();
@@ -7886,10 +7888,18 @@
   // ============================================================
 
   function sidebarOpen() { return !appEl || appEl.dataset.sidebar !== "collapsed"; }
+  function syncSidebarToggleState(collapsed) {
+    if (sidebarCollapseEl) {
+      sidebarCollapseEl.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+      sidebarCollapseEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    }
+    if (sidebarExpandEl) sidebarExpandEl.hidden = !collapsed;
+  }
   function setSidebarOpen(open) {
     if (!appEl) return;
     appEl.dataset.sidebar = open ? "open" : "collapsed";
     if (sidebarMiniEl) sidebarMiniEl.hidden = open;
+    syncSidebarToggleState(!open);
     if (!open) closeNewPaneMenu();
     requestAnimationFrame(function () {
       scheduleVisiblePaneFit();

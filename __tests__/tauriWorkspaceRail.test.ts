@@ -6,6 +6,12 @@ const root = process.cwd();
 const indexHtml = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
 const mainJs = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/main.js'), 'utf8');
 const styles = readFileSync(join(root, 'native/macos/psyche-build-tauri/web/styles.css'), 'utf8');
+const packagedTitlebarMark = readFileSync(
+  join(root, 'native/macos/psyche-build-tauri/web/assets/psyche-mark.png'),
+);
+const sourceTitlebarMark = readFileSync(
+  join(root, 'native/macos/psyche-build-tauri/src-tauri/icons/32x32.png'),
+);
 const tauri = readFileSync(join(root, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
 const sessionModel = readFileSync(
   join(root, 'native/macos/psyche-build-tauri/web/sessions/session-model.mjs'),
@@ -27,11 +33,50 @@ function functionSource(source: string, name: string) {
   throw new Error(`unterminated function ${name}`);
 }
 
+function titlebarHtml(source: string) {
+  const match = source.match(/<header class="titlebar"[\s\S]*?<\/header>/);
+  if (!match) throw new Error('missing titlebar');
+  return match[0];
+}
+
+function sidebarHeadHtml(source: string) {
+  const match = source.match(/<div class="sidebar-head">([\s\S]*?)<\/div>/);
+  if (!match) throw new Error('missing sidebar-head');
+  return match[0];
+}
+
 describe('Tauri project/worktree/pane rail', () => {
-  it('ships pinned sidebar controls and honest navigation semantics contracts', () => {
+  it('ships the Dia-inspired two-zone native shell and pinned sidebar controls', () => {
+    const titlebar = titlebarHtml(indexHtml);
+    const sidebarHead = sidebarHeadHtml(indexHtml);
+
     expect(indexHtml).toContain('class="sidebar-controls"');
-    expect(indexHtml).toContain('class="session-search-wrap has-tooltip"');
-    expect(indexHtml).toContain('<kbd class="session-search-key">/</kbd>');
+    expect(titlebar).toContain('class="titlebar-sidebar"');
+    expect(titlebar).toContain('class="titlebar-workspace"');
+    expect(titlebar).toContain('src="./assets/psyche-mark.png"');
+    expect(titlebar).toContain('class="titlebar-brand-name">Psyche</span>');
+    expect(titlebar).toContain('id="sidebar-collapse"');
+    expect(titlebar).toContain('onerror="this.remove()"');
+    for (const removedId of [
+      'daemon-status',
+      'shell-status',
+      'help-toggle',
+      'back',
+      'forward',
+      'reload',
+      'url',
+      'open-external',
+    ]) {
+      expect(titlebar).not.toContain(`id="${removedId}"`);
+    }
+
+    expect(indexHtml).not.toContain('id="session-search"');
+    expect(styles).not.toMatch(/\.session-search(?:\s|\{|\.)/);
+    expect(styles).not.toMatch(/\.session-search-wrap(?:\s|\{|\.)/);
+    expect(styles).not.toMatch(/\.session-search-key(?:\s|\{|\.)/);
+
+    expect(sidebarHead).toContain('id="rail-new-tab"');
+    expect(sidebarHead).not.toContain('id="sidebar-collapse"');
     expect(indexHtml).not.toContain('session-filter-btn');
 
     const filterRowMatch = indexHtml.match(
@@ -59,7 +104,14 @@ describe('Tauri project/worktree/pane rail', () => {
     expect(renderSessionList).toContain('sessionListEl.setAttribute("aria-multiselectable", "true")');
     expect(renderSessionList).toContain('sessionListEl.removeAttribute("aria-multiselectable")');
     expect(indexHtml).toMatch(/id="rail-new-tab"[^>]*aria-label="Create a new session"/);
-    expect(indexHtml).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
+    expect(titlebar).toMatch(/id="sidebar-collapse"[^>]*aria-label="Collapse sidebar"/);
+    expect(indexHtml).toMatch(/aria-label="Sidebar sections"/);
+    expect(indexHtml).toMatch(/data-sidebar-tab="sessions"/);
+    expect(indexHtml).toMatch(/data-sidebar-tab="files"/);
+  });
+
+  it('ships a byte-identical browser-loadable Psyche titlebar icon asset', () => {
+    expect(packagedTitlebarMark.equals(sourceTitlebarMark)).toBe(true);
   });
 
   it('discovers canonical Git worktrees through a read-only native command', () => {
@@ -206,22 +258,17 @@ describe('Tauri project/worktree/pane rail', () => {
     );
   });
 
-  it('wires visit-local search, persisted filters, summaries, and shortcut guidance', () => {
-    expect(indexHtml).toMatch(/id="session-search"[^>]*aria-keyshortcuts="\/"/);
-    expect(indexHtml).toContain('data-tooltip="Press / to search sessions"');
+  it('wires persisted sidebar filters and summaries without the removed search chrome', () => {
+    expect(indexHtml).not.toContain('session-search');
     expect(mainJs).toContain('var sidebarTab = settings.sidebarTab;');
     expect(mainJs).toContain('var sessionTypeFilter = settings.sessionFilter;');
     expect(mainJs).toContain('function setSessionTypeFilter(value, options)');
     expect(mainJs).toContain('settings.sessionFilter = sessionTypeFilter;');
     expect(mainJs).toContain('setSidebarTab(settings.sidebarTab, { persist: false });');
     expect(mainJs).toContain('setSessionTypeFilter(settings.sessionFilter, { persist: false });');
-    expect(mainJs).toContain('PsycheSessions.matchTextRanges');
-    expect(mainJs).toContain('session-result-summary');
-    expect(mainJs).toContain('Clear search');
     expect(mainJs).toContain('Reset filter');
     expect(mainJs).not.toContain('settings.sessionSearch');
     expect(styles).toMatch(/\.session-filter\.is-active\s*\{/);
-    expect(styles).toMatch(/\.session-search-key\s*\{/);
   });
 
   it('validates sidebar settings and persists collapsed project state', () => {
