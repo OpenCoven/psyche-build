@@ -4,19 +4,19 @@ import { describe, expect, test } from 'vitest';
 
 const libSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/lib.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs',
 );
 const mainSourcePath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/web/main.js',
+  'native/desktop/psyche-build-tauri/web/main.js',
 );
 const cargoTomlPath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/Cargo.toml',
+  'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml',
 );
 const covenSessionsPath = resolve(
   process.cwd(),
-  'native/macos/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
+  'native/desktop/psyche-build-tauri/src-tauri/src/coven_sessions.rs',
 );
 
 function bracedBody(source: string, start: number): string {
@@ -79,7 +79,7 @@ describe('Tauri workspace metrics native contract', () => {
       /#\[tauri::command\]\s*async\s+fn\s+workspace_metrics\s*\(\s*state:\s*State<'_,\s*MetricsState>\s*,\s*scope:\s*Option<MetricsScope>\s*,?\s*\)\s*->\s*Result<MetricsSnapshot,\s*String>/,
     );
     expect(workspaceMetrics).toMatch(
-      /let\s+tracked(?:_ptys|_sessions)\s*=\s*\{\s*let\s+guard\s*=\s*SESSIONS\.lock\(\)\s*;[\s\S]*?filter_map\(\s*\|\(thread_id,\s*session\)\|\s*\{[\s\S]*?session\.pid\.map\(\|pid\|\s*\{[\s\S]*?TrackedPty::new\(\s*thread_id\.clone\(\)\s*,\s*pid\s*,\s*session\.spawn_time_unix_secs\s*\)[\s\S]*?\}\)[\s\S]*?\}\s*\)[\s\S]*?\}/,
+      /let\s+tracked(?:_ptys|_sessions)\s*=\s*\{\s*let\s+guard\s*=\s*(?:SESSIONS|PTY_LIFECYCLES)\.lock\(\)\s*;[\s\S]*?filter_map\(\s*\|\(thread_id,\s*session\)\|\s*\{[\s\S]*?session\.pid\.map\(\|pid\|\s*\{[\s\S]*?TrackedPty::new\(\s*thread_id\.clone\(\)\s*,\s*pid\s*,\s*session\.spawn_time_unix_secs\s*\)[\s\S]*?\}\)[\s\S]*?\}\s*\)[\s\S]*?\}/,
     );
     expect(workspaceMetrics).toMatch(/let\s+collector\s*=\s*state\.collector\.clone\(\)\s*;/);
     expect(workspaceMetrics).toMatch(/tauri::async_runtime::spawn_blocking\s*\(\s*move\s*\|\|\s*\{/);

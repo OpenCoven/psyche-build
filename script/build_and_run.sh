@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TAURI_DIR="$ROOT_DIR/native/macos/psyche-build-tauri"
+TAURI_DIR="$ROOT_DIR/native/desktop/psyche-build-tauri"
 # Process name (CFBundleExecutable), used by pkill/pgrep. This is the cargo
 # binary name, which the product rename did not change.
 APP_NAME="psyche-build-tauri"

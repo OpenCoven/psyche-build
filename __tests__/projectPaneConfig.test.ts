@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -107,6 +107,75 @@ describe('project pane config mutation', () => {
     expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([replacement]);
   });
 
+  it('does not let a generation-less identity remove a generation-tagged replacement', async () => {
+    const projectRoot = createProject();
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const replacement = {
+      id: 'psyche-exact',
+      paneId: '%1',
+      slug: 'replacement',
+      tmuxServerIdentity: {
+        pid: 222,
+        processStartIdentity: 'new-start',
+        socketPath: '/tmux.sock',
+        sessionId: '$2',
+      },
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [replacement];
+    });
+
+    await expect(removeProjectPaneConfigPaneIdentities(projectRoot, [{
+      id: 'psyche-exact',
+      paneId: '%1',
+    }])).rejects.toThrow(/identity conflict/);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([replacement]);
+  });
+
+  it('does not let a canonical-root alias bypass generation-safe replacement', async () => {
+    const projectRoot = createProject();
+    const aliasRoot = `${projectRoot}-alias`;
+    symlinkSync(projectRoot, aliasRoot, 'dir');
+    roots.push(aliasRoot);
+    const configPath = join(projectRoot, '.psyche', 'psyche.config.json');
+    const oldGeneration = {
+      pid: 111,
+      processStartIdentity: 'old-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$1',
+    };
+    const newGeneration = {
+      pid: 222,
+      processStartIdentity: 'new-server-start',
+      socketPath: '/tmux.sock',
+      sessionId: '$2',
+    };
+    const original = {
+      id: 'psyche-restored',
+      paneId: '%1',
+      slug: 'restored',
+      prompt: '',
+      tmuxServerIdentity: oldGeneration,
+    };
+    await mutateProjectPaneConfig(projectRoot, (config) => {
+      config.panes = [original];
+    });
+
+    await expect(replaceProjectPaneConfigPaneIdentity(
+      aliasRoot,
+      { id: 'psyche-restored', paneId: '%1' },
+      {
+        id: 'psyche-restored',
+        paneId: '%9',
+        slug: 'restored',
+        prompt: '',
+        tmuxServerIdentity: newGeneration,
+      },
+    )).rejects.toThrow(/identity conflict/);
+
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).panes).toEqual([original]);
+  });
+
   it('rebinds a restored pane to its new tmux generation without inheriting stale background resources', async () => {
     const projectRoot = createProject();
     const oldGeneration = {
@@ -148,7 +217,11 @@ describe('project pane config mutation', () => {
 
     const replacement = await replaceProjectPaneConfigPaneIdentity(
       projectRoot,
-      { id: 'psyche-restored', paneId: '%1' },
+      {
+        id: 'psyche-restored',
+        paneId: '%1',
+        tmuxServerIdentity: oldGeneration,
+      },
       {
         id: 'psyche-restored',
         paneId: '%9',

@@ -4,15 +4,15 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const indexHtml = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'),
   'utf8',
 );
 const stylesCss = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'),
   'utf8',
 );
 void indexHtml;
@@ -97,6 +97,17 @@ describe('Tauri agent picker', () => {
     const createCalls: Array<Record<string, unknown>> = [];
     const registryArgs = ['--fixture-arg'];
     const project: PickerProject = { id: 'project', root: '/repo' };
+    let commandReads = 0;
+    const entry = {
+      id: 'codex',
+      label: 'Codex CLI',
+      get command() {
+        commandReads += 1;
+        return commandReads === 1 ? 'codex-normalized' : 'codex-diverged';
+      },
+      args: registryArgs,
+      kind: 'agent-codex',
+    };
     const spawnAgentThread = compileFunction<(
       agentId: string,
       project?: PickerProject,
@@ -106,9 +117,7 @@ describe('Tauri agent picker', () => {
         activeProject: () => project,
         selectedWorktree: () => ({ path: '/repo/worktree' }),
         showTerminalView: async () => true,
-        agentLaunchOptions: () => [
-          { id: 'codex', label: 'Codex CLI', command: 'codex', args: registryArgs, kind: 'agent-codex' },
-        ],
+        agentLaunchOptions: () => [entry],
         state: { env: { coven_path: '/opt/homebrew/bin/coven' } },
         setStatus: () => undefined,
         createThread: (options: Record<string, unknown>) => {
@@ -126,7 +135,7 @@ describe('Tauri agent picker', () => {
     expect(created).toMatchObject({
       name: 'Codex CLI',
       kind: 'agent-codex',
-      command: 'codex',
+      command: 'codex-normalized',
       args: ['--fixture-arg'],
       launchKind: null,
       projectRoot: '/repo',
@@ -135,6 +144,7 @@ describe('Tauri agent picker', () => {
     });
     expect(created.args).toEqual(registryArgs);
     expect(created.args).not.toBe(registryArgs);
+    expect(commandReads).toBe(1);
   });
 
   it('delegates Coven Code launches to ensureProjectCoven(project)', async () => {

@@ -4,11 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const libRs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'),
   'utf8',
 );
 const mainJs = readFileSync(
-  join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'),
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
   'utf8',
 );
 const COVEN_SESSION_ID = '12345678-1234-4abc-8def-1234567890ab';
@@ -101,6 +101,61 @@ describe('Tauri Coven launch project scope', () => {
     const deduplicate = addProject.indexOf('state.projects.find');
     expect(canonicalize).toBeGreaterThanOrEqual(0);
     expect(deduplicate).toBeGreaterThan(canonicalize);
+  });
+
+  it('clears the previous pane when adding a new project without auto-launching Coven', async () => {
+    const state = {
+      projects: [{ id: 'old', root: '/old' }],
+      activeProjectId: 'old',
+      activeThreadId: 'old-thread' as string | null,
+    };
+    const calls: string[] = [];
+    const project = {
+      id: 'new-project',
+      root: '/new',
+      selectedWorktreePath: '/new',
+      worktrees: [],
+      browsersByWorktree: {},
+    };
+    const addProject = compileFunction<(root: string) => Promise<typeof project | null>>(
+      functionSource('addProject'),
+      {
+        canonicalProjectPath: async () => '/new',
+        state,
+        settings: { maxProjects: 10 },
+        HARD_MAX_PROJECTS: 10,
+        setStatus: () => undefined,
+        showTerminalView: async () => true,
+        makeProjectId: () => project.id,
+        ensureProjectLayout: () => undefined,
+        restoreProjectLayout: () => { calls.push('layout'); },
+        renderPaneWorkspace: () => { calls.push(`panes:${state.activeThreadId}`); },
+        refreshSidebar: () => { calls.push('sidebar'); },
+        refreshTabs: () => { calls.push('tabs'); },
+        refreshProjectWorktrees: async () => { calls.push('worktrees'); },
+        syncProjectBrowser: () => { calls.push('browser'); },
+        saveWorkspaceSoon: () => { calls.push('save'); },
+        startCovenPolling: () => { calls.push('poll'); },
+        refreshStatusController: () => { calls.push('status'); },
+      },
+    );
+
+    const added = await addProject('/new');
+
+    expect(added).toMatchObject({ id: project.id, root: project.root });
+    expect(state.activeProjectId).toBe(project.id);
+    expect(state.activeThreadId).toBeNull();
+    expect(calls).toEqual([
+      'layout',
+      'panes:null',
+      'sidebar',
+      'tabs',
+      'worktrees',
+      'browser',
+      'save',
+      'poll',
+      'status',
+    ]);
   });
 
   it('canonicalizes saved roots concurrently before restoring projects', () => {
@@ -1248,6 +1303,7 @@ describe('native Coven launch routing', () => {
         showTerminalView: async () => true,
         findProject: () => project,
         restoreProjectLayout: () => undefined,
+        clearPassiveCovenPaneFocus: () => undefined,
         loadAgentSkills: () => undefined,
         activeWorkspaceRoot: () => '/repo',
         focusThread: async () => true,
@@ -1331,10 +1387,12 @@ describe('native Coven launch routing', () => {
     };
     const state = { threads: [thread], activeThreadId: thread.id };
     const pendingDataBuffers = new Map<string, Uint8Array[]>();
-    const starts: Array<'fail' | 'run'> = ['fail', 'run', 'run'];
+    const starts: Array<'fail' | 'run' | 'cleanup'> = ['fail', 'run', 'cleanup', 'run'];
     const invoke = async (command: string) => {
       if (command !== 'pty_start') return undefined;
-      if (starts.shift() === 'fail') throw new Error('coven unavailable');
+      const outcome = starts.shift();
+      if (outcome === 'fail') throw new Error('coven unavailable');
+      if (outcome === 'cleanup') throw new Error("thread 'thread-1' cleanup in progress");
       return undefined;
     };
     const dependencies = {
@@ -1383,6 +1441,9 @@ describe('native Coven launch routing', () => {
     expect(handlePtyExit({ thread_id: thread.id })).toBe(true);
     expect(thread.status).toBe('exited');
     expect(thread.startInFlight).toBe(false);
+    await expect(retryThread(thread.id)).resolves.toBe(false);
+    expect(thread.status).toBe('exited');
+    expect(thread.ptyStarted).toBe(false);
     await expect(retryThread(thread.id)).resolves.toBe(true);
     expect(thread.status).toBe('running');
     expect(state.threads).toEqual([thread]);

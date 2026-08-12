@@ -3,12 +3,27 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const repoRoot = process.cwd();
-const mainJs = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/main.js'), 'utf8');
-const stylesCss = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/styles.css'), 'utf8');
-const tauriLib = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
-const indexHtml = readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/web/index.html'), 'utf8');
+const mainJs = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/web/main.js'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+const stylesCss = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/styles.css'), 'utf8');
+const tauriLib = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/lib.rs'), 'utf8');
+const tauriCargo = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml'),
+  'utf8'
+);
+const platformMod = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/platform/mod.rs'),
+  'utf8'
+);
+const macosPlatform = readFileSync(
+  join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/src/platform/macos.rs'),
+  'utf8'
+);
+const indexHtml = readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/web/index.html'), 'utf8');
 const tauriConfig = JSON.parse(
-  readFileSync(join(repoRoot, 'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
+  readFileSync(join(repoRoot, 'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json'), 'utf8')
 );
 const forbiddenContextualTabFn = new RegExp(`function\\s+${'createContextual' + 'Tab'}\\(\\)`);
 const forbiddenBrowserNewTabShortcut = new RegExp(`${'browser:shortcut-' + 'new' + '-tab'}`);
@@ -77,41 +92,51 @@ describe('Tauri desktop tab shortcuts', () => {
     expect(tauriLib).toMatch(/if\s+!created\s*\{[\s\S]*?webview\.navigate\(parsed_url\)/);
   });
 
-  it('reports PTY exit codes and avoids machine-specific nvm paths', () => {
+  it('reports PTY exit codes and keeps PATH augmentation behind the platform boundary', () => {
     expect(tauriLib).toMatch(/status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\)/);
-    expect(tauriLib).toMatch(/static\s+AUGMENTED_PATH:\s*Lazy<String>\s*=\s*Lazy::new\(compute_augmented_path\);/);
-    expect(tauriLib).toMatch(/fn\s+augmented_path\(\)\s*->\s*&'static\s+str/);
-    expect(tauriLib).toMatch(/fn\s+compute_augmented_path\(\)\s*->\s*String/);
-    expect(tauriLib).toMatch(/let\s+mut\s+parts:\s*Vec<PathBuf>\s*=\s*Vec::new\(\);/);
-    expect(tauriLib).toMatch(/for\s+p\s+in\s+std::env::split_paths\(&existing\)[\s\S]*?parts\.push\(p\);[\s\S]*?for\s+extra\s+in\s+extras/);
-    expect(tauriLib).toMatch(/std::env::join_paths\(&parts\)/);
-    expect(tauriLib).toMatch(/\.unwrap_or_else\(\|_\|\s+existing\.clone\(\)\)/);
-    const augmentedPathFunction = tauriLib.match(
-      /fn\s+compute_augmented_path\(\)\s*->\s*String\s*\{[\s\S]*?\n\}\n\nfn\s+push_path_if_dir/
-    )?.[0];
-    expect(augmentedPathFunction).toBeTruthy();
-    expect(augmentedPathFunction).not.toMatch(
-      /std::env::join_paths\(&parts\)[\s\S]*?\.unwrap_or_default\(\)/
+    expect(tauriLib).toMatch(
+      /fn\s+app_environment\(\)\s*->\s*AppEnvironment[\s\S]*?let\s+\(default_shell,\s*default_shell_args\)\s*=\s*platform::default_shell\(\);/
     );
-    expect(tauriLib).toMatch(/for\s+dir\s+in\s+std::env::split_paths\(augmented_path\(\)\)/);
-    expect(tauriLib).toMatch(/fn\s+newest_nvm_node_bin\(/);
-    expect(tauriLib).not.toMatch(/\.nvm\/versions\/node\/v\d+\.\d+\.\d+\/bin/);
+    expect(tauriLib).toMatch(
+      /fn\s+which_on_path\(binary:\s*&str\)\s*->\s*Option<String>\s*\{\s*let\s+path\s*=\s*platform::augmented_path\(\);\s*for\s+dir\s+in\s+std::env::split_paths\(&path\)/s
+    );
+    expect(platformMod).toMatch(
+      /pub\s+fn\s+augmented_path\(\)\s*->\s*OsString\s*\{\s*target::augmented_path\(\)\s*\}/s
+    );
+    expect(macosPlatform).toMatch(/fn\s+augmented_path\(\)\s*->\s*OsString\s*\{/);
+    expect(macosPlatform).toMatch(/let\s+mut\s+parts\s*=\s*split_and_deduplicate_paths\(&existing\);/);
+    expect(macosPlatform).toMatch(/std::env::join_paths\(&parts\)\.unwrap_or\(existing\)/);
+    expect(macosPlatform).toMatch(/fn\s+newest_nvm_node_bin\(/);
+    expect(macosPlatform).toMatch(/apply_vibrancy/);
+    expect(macosPlatform).not.toMatch(/PATH\.split\(|join\(":"\)|split\(":"\)/);
+    expect(macosPlatform).not.toMatch(/\.nvm\/versions\/node\/v\d+\.\d+\.\d+\/bin/);
   });
 
   it('keeps Tauri backend shared-state operations grouped correctly', () => {
-    expect(tauriLib).toMatch(/static\s+STARTING_SESSIONS:/);
+    expect(tauriLib).toMatch(
+      /static\s+PTY_LIFECYCLES:\s*Lazy<Mutex<PtyLifecycleRegistry<PtySession>>>/
+    );
+    expect(tauriLib).not.toMatch(/static\s+STARTING_SESSIONS:/);
     expect(tauriLib).toMatch(/let\s+pending_start\s*=\s*PendingPtyStart::reserve\(&thread_id\)\?/);
     expect(tauriLib).toMatch(
-      /guard\.insert\(\s*thread_id\.clone\(\),[\s\S]*?\);\s*\}\s*drop\(pending_start\);/
+      /pending_start\.install\(\s*PtySession\s*\{[\s\S]*?terminator:[\s\S]*?\}\s*\)/
     );
     expect(tauriLib).toMatch(
-      /let\s+data_thread\s*=\s*std::thread::spawn[\s\S]*?app_for_data\.emit\("pty:data",\s*payload\)/
+      /pump\.start_worker[\s\S]*?app_for_output[\s\S]*?\.emit\("pty:data-batch",\s*payload\)/
+    );
+    expect(tauriLib).not.toMatch(/\.emit\(\s*"pty:data"/);
+    expect(tauriLib).toMatch(
+      /let\s+\(reader_done_tx,\s*reader_done_rx\)\s*=\s*std::sync::mpsc::sync_channel\(1\);[\s\S]*?reader_done_tx\.send\(reader_result\)/
     );
     expect(tauriLib).toMatch(
-      /let\s+code\s*=\s*status\.ok\(\)\.map\(\|s\|\s*s\.exit_code\(\)\s+as\s+i32\);[\s\S]*?let\s+_\s*=\s*data_thread\.join\(\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
+      /let\s+outcome\s*=\s*coordinate_exit_shutdown\(\s*&mut shutdown,\s*EXIT_DRAIN_TIMEOUT\s*\);[\s\S]*?app_for_exit\.emit\(\s*"pty:exit"/
+    );
+    expect(tauriLib).not.toMatch(/data_thread\.join\(\)/);
+    expect(tauriLib).toMatch(
+      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*PTY_LIFECYCLES\.lock\(\);[\s\S]*?guard[\s\S]*?\.live\(&thread_id\)[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
     );
     expect(tauriLib).toMatch(
-      /let\s+writer\s*=\s*\{[\s\S]*?let\s+guard\s*=\s*SESSIONS\.lock\(\);[\s\S]*?Arc::clone\(&session\.writer\)[\s\S]*?\};[\s\S]*?let\s+mut\s+writer\s*=\s*writer\.lock\(\);/
+      /app_for_exit\.emit\([\s\S]*?"pty:exit"[\s\S]*?generation:\s*exit_token\.generation[\s\S]*?PTY_LIFECYCLES\.lock\(\)\.finish_exit\(&exit_token\)/
     );
     expect(tauriLib).toMatch(/fn\s+agent_skill_source_rank\(source:\s*&str\)\s*->\s*u8/);
     expect(tauriLib).toMatch(/"project"\s*=>\s*0,[\s\S]*?"user"\s*=>\s*1,[\s\S]*?"plugin"\s*=>\s*2/);
@@ -120,6 +145,90 @@ describe('Tauri desktop tab shortcuts', () => {
     );
     expect(tauriLib).toMatch(/out\.dedup_by\(\|a,\s*b\|\s*a\.name\s*==\s*b\.name\s*&&\s*a\.kind\s*==\s*b\.kind\)/);
     expect(tauriLib).not.toMatch(/let\s+_\s*=\s*app\.get_webview_window\("main"\);/);
+  });
+
+  it('queries and validates the current Unix PTY foreground group before bounded escalation', () => {
+    expect(tauriLib).toMatch(/portable_pty::\{[^}]*ChildKiller/);
+    expect(tauriLib).toMatch(/child\.clone_killer\(\)/);
+    expect(tauriLib).toMatch(/child\.process_id\(\)/);
+    expect(tauriLib).toMatch(/master\.process_group_leader\(\)/);
+    expect(tauriLib).toContain('master.as_raw_fd()');
+    expect(tauriLib).toContain('libc::tcgetpgrp');
+    expect(tauriLib).toContain('libc::tcgetsid');
+    expect(tauriLib).toContain('libc::getsid');
+    expect(tauriLib).toContain('libc::getpgid');
+    expect(tauriLib).toMatch(/libc::SIGHUP[\s\S]*libc::SIGCONT[\s\S]*libc::SIGKILL/);
+    expect(tauriLib).not.toContain('UNIX_PTY_TERMINATION_GRACE');
+    expect(tauriLib).toMatch(
+      /for\s+signal\s+in\s+\[libc::SIGHUP,\s*libc::SIGCONT,\s*libc::SIGKILL\][\s\S]*?observe_termination\([^)]*identity[^)]*\)[\s\S]*?verified_unix_process_groups/
+    );
+    expect(tauriLib).toContain('original_session');
+    expect(tauriLib).toContain('original_group');
+    expect(tauriLib).toMatch(/reader_cancellation\.cancel\(\)/);
+  });
+
+  it('disables the Unix raw-PID fallback before the exit watcher can wait or reap', () => {
+    expect(tauriLib).toMatch(
+      /fn\s+wait_for_child<[^>]+>[\s\S]*?disable_pid_fallback_before_wait\(\);[\s\S]*?wait\(\)/
+    );
+    const watcherStart = tauriLib.indexOf('let exit_terminator = terminator;');
+    const waitStart = tauriLib.indexOf('exit_terminator.wait_for_child(|| child.wait())', watcherStart);
+    const shutdownStart = tauriLib.indexOf('PtyExitShutdown::new(', waitStart);
+    expect(watcherStart).toBeGreaterThanOrEqual(0);
+    expect(waitStart).toBeGreaterThan(watcherStart);
+    expect(shutdownStart).toBeGreaterThan(waitStart);
+  });
+
+  it('owns a kill-on-close Windows Job Object and terminates it before ConPTY teardown', () => {
+    expect(tauriCargo).toMatch(
+      /\[target\.'cfg\(windows\)'\.dependencies\][\s\S]*windows-sys\s*=\s*\{[^}]*version\s*=\s*"=0\.59\.0"[^}]*Win32_Foundation[^}]*Win32_Security[^}]*Win32_System_JobObjects[^}]*Win32_System_Threading/
+    );
+    expect(tauriLib).toContain('const WINDOWS_REQUIRED_PROCESS_RIGHTS: u32 = 0x0101;');
+    expect(tauriLib).toContain('const WINDOWS_JOB_KILL_ON_CLOSE_LIMIT: u32 = 0x2000;');
+    expect(tauriLib).toMatch(/OpenProcess\(\s*WINDOWS_REQUIRED_PROCESS_RIGHTS/);
+    expect(tauriLib).toContain('CreateJobObjectW');
+    expect(tauriLib).toContain('JobObjectExtendedLimitInformation');
+    expect(tauriLib).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
+    expect(tauriLib).toContain('SetInformationJobObject');
+    expect(tauriLib).toContain('AssignProcessToJobObject');
+    expect(tauriLib).toContain('TerminateJobObject');
+    expect(tauriLib).toContain('TerminateProcess');
+    expect(tauriLib).toContain('CloseHandle');
+    expect(tauriLib).toContain('WindowsExternalJobRestriction');
+    expect(tauriLib).toMatch(/impl<[^>]*>\s+Drop\s+for\s+OwnedTerminationResource/);
+    expect(tauriLib).toMatch(/if\s+result\s*!=\s*0\s*\{\s*Ok\(\(\)\)/);
+    expect(tauriLib).toMatch(
+      /let\s+result\s*=\s*unsafe\s*\{\s*TerminateJobObject\(self\.raw_handle\(\),\s*1\)\s*\};\s*check_windows_bool\(result,\s*std::io::Error::last_os_error\)/
+    );
+    const windowsStart = tauriLib.search(
+      /#\[cfg\(windows\)\]\r?\nfn terminate_platform_process/,
+    );
+    expect(windowsStart).toBeGreaterThanOrEqual(0);
+    const windowsEnd = tauriLib.indexOf('\n#[cfg', windowsStart + 1);
+    const windowsTermination = tauriLib.slice(
+      windowsStart,
+      windowsEnd === -1 ? undefined : windowsEnd
+    );
+    expect(windowsTermination).toContain('process_tree.terminate()');
+    expect(windowsTermination).not.toContain('killer.kill()');
+    expect(windowsTermination).not.toContain('libc::');
+
+    const stopStart = tauriLib.indexOf('fn terminate_pty_session(');
+    const stopEnd = tauriLib.indexOf('\npub fn recent_pty_transport_snapshot', stopStart);
+    const stopSource = tauriLib.slice(stopStart, stopEnd);
+    expect(stopSource.indexOf('session.terminator.terminate()')).toBeGreaterThanOrEqual(0);
+    expect(stopSource.indexOf('drop(session)')).toBeGreaterThan(
+      stopSource.indexOf('session.terminator.terminate()')
+    );
+
+    const shutdownHooksStart = tauriLib.indexOf('impl ExitShutdownHooks for PtyExitShutdown');
+    const timeoutStart = tauriLib.indexOf('fn terminate_process(&mut self)', shutdownHooksStart);
+    const timeoutEnd = tauriLib.indexOf('fn finish_terminated_cleanup', timeoutStart);
+    const timeoutSource = tauriLib.slice(timeoutStart, timeoutEnd);
+    expect(timeoutSource.indexOf('self.terminator.terminate()')).toBeGreaterThanOrEqual(0);
+    expect(timeoutSource.indexOf('self.begin_matching_exit()')).toBeGreaterThan(
+      timeoutSource.indexOf('self.terminator.terminate()')
+    );
   });
 
   it('keeps the Tauri app CSP free of broad unsafe allowances', () => {

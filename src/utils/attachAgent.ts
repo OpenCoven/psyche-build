@@ -474,7 +474,13 @@ async function removeFailedAttachedPane(
     let teardown: VerifiedPaneTeardownResult | undefined;
     await compareAndRemoveProjectPaneConfigPaneIdentities(
       sessionProjectRoot,
-      [{ id: pane.id, paneId }],
+      [{
+        id: pane.id,
+        paneId,
+        ...(pane.tmuxServerIdentity
+          ? { tmuxServerIdentity: pane.tmuxServerIdentity }
+          : {}),
+      }],
       async () => {
         teardown = await killAttachedPane(
           tmuxService,

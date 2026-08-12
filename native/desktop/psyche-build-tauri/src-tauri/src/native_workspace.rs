@@ -5474,15 +5474,30 @@ pub(crate) fn workspace_default_path() -> Result<PathBuf, String> {
     workspace_path_from_home()
 }
 
+#[cfg(unix)]
+fn ensure_workspace_storage_supported() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_workspace_storage_supported() -> Result<(), String> {
+    Err(
+        "native workspace persistence is unavailable on this platform because secure atomic writes are not implemented"
+            .to_string(),
+    )
+}
+
 #[tauri::command]
 pub(crate) fn workspace_load(webview: tauri::Webview) -> Result<Option<Value>, String> {
     ensure_trusted_workspace_caller(webview.label())?;
+    ensure_workspace_storage_supported()?;
     load_workspace_from(&workspace_default_path()?)
 }
 
 #[tauri::command]
 pub(crate) fn workspace_save(webview: tauri::Webview, workspace: Value) -> Result<(), String> {
     ensure_trusted_workspace_caller(webview.label())?;
+    ensure_workspace_storage_supported()?;
     save_workspace_to(&workspace_default_path()?, &workspace)
 }
 
@@ -5495,7 +5510,7 @@ fn ensure_trusted_workspace_caller(label: &str) -> Result<(), String> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -5517,6 +5532,19 @@ mod tests {
             "sessions": [],
             "paneLayouts": [],
         })
+    }
+
+    #[cfg(all(test, not(unix)))]
+    mod non_unix_tests {
+        use super::*;
+
+        #[test]
+        fn workspace_storage_fails_closed_without_secure_atomic_writes() {
+            assert_eq!(
+                ensure_workspace_storage_supported().unwrap_err(),
+                "native workspace persistence is unavailable on this platform because secure atomic writes are not implemented",
+            );
+        }
     }
 
     fn temp_path(name: &str) -> (TempDir, PathBuf) {

@@ -17,12 +17,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const TAURI_CWD = 'native/macos/psyche-build-tauri';
-const CARGO_MANIFEST_PATH = 'native/macos/psyche-build-tauri/src-tauri/Cargo.toml';
+const TAURI_CWD = 'native/desktop/psyche-build-tauri';
+const CARGO_MANIFEST_PATH = 'native/desktop/psyche-build-tauri/src-tauri/Cargo.toml';
 const BUNDLE_RELATIVE_PATH =
-  'native/macos/psyche-build-tauri/src-tauri/target/release/bundle/macos';
+  'native/desktop/psyche-build-tauri/src-tauri/target/release/bundle/macos';
 const PRODUCTION_TAURI_CONFIG_RELATIVE_PATH =
-  'native/macos/psyche-build-tauri/src-tauri/tauri.conf.json';
+  'native/desktop/psyche-build-tauri/src-tauri/tauri.conf.json';
 
 const CHANNEL_CONFIG = {
   stable: {
@@ -81,7 +81,7 @@ const DEV_SOURCE_PATHSPECS = [
   ':(top,glob)**',
   ':(top,glob,exclude)**/target/**',
   ':(top,glob,exclude)**/node_modules/**',
-  ':(top,glob,exclude)native/macos/psyche-build-tauri/web/*.bundle.js',
+  ':(top,glob,exclude)native/desktop/psyche-build-tauri/web/*.bundle.js',
 ];
 
 export function parseBuildArguments(argv) {
@@ -439,7 +439,7 @@ export async function buildDevAppSnapshot(input, overrides = {}) {
   const devConfigPath = path.resolve(input.devConfigPath);
   const targetDir = path.join(
     sourceRoot,
-    'native/macos/psyche-build-tauri/src-tauri/target',
+    'native/desktop/psyche-build-tauri/src-tauri/target',
   );
   const lockPath = path.join(targetDir, '.psyche-build-dev.lock');
   const randomUUID = overrides.randomUUID ?? createRandomUUID;
