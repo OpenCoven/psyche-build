@@ -1164,7 +1164,9 @@ body.split-resizing[data-axis="y"] { cursor: row-resize; }
 }
 .terminal-pane-branch {
   flex-basis: 0;
-  overflow: hidden;
+  /* The pane clips its own terminal/browser contents; the branch must not clip
+     frame effects that extend into the divider gutter. */
+  overflow: visible;
 }
 .terminal-pane {
   display: grid;

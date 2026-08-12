@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { chromium } from '@playwright/test';
 import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
@@ -1822,6 +1823,128 @@ describe('Tauri physical terminal panes', () => {
         /\.terminal-pane\.focused:is\(\[data-status="starting"\], \[data-status="failed"\], \[data-status="exited"\]\):not\(\.needs-attention\)\s*\{[^}]*animation:/s,
       );
     });
+
+    it('renders a tiled status glow through its branch without leaking pane content', async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage({
+          viewport: { width: 500, height: 220 },
+          deviceScaleFactor: 1,
+        });
+        await page.setContent(`
+          <style>${stylesCss}</style>
+          <style>
+            html, body {
+              margin: 0;
+              background: rgb(0, 0, 0) !important;
+            }
+            #probe-stage {
+              width: 406px;
+              height: 137px;
+              margin: 40px;
+            }
+            #probe-stage > .terminal-pane-split {
+              width: 100%;
+              height: 100%;
+            }
+            #probe-stage .terminal-pane {
+              background: rgb(0, 0, 0);
+            }
+          </style>
+          <div id="probe-stage"></div>
+        `);
+
+        await page.evaluate((renderSource) => {
+          const browserDocument = (globalThis as any).document;
+          const makePane = (id: string, status: string) => {
+            const pane = browserDocument.createElement('div');
+            pane.className = 'terminal-pane';
+            pane.dataset.threadId = id;
+            pane.dataset.status = status;
+            return pane;
+          };
+          const firstPane = makePane('thread-failed', 'failed');
+          const leakProbe = browserDocument.createElement('div');
+          Object.assign(leakProbe.style, {
+            position: 'absolute',
+            top: '50px',
+            right: '-6px',
+            width: '6px',
+            height: '20px',
+            background: 'rgb(0, 255, 0)',
+          });
+          firstPane.appendChild(leakProbe);
+
+          const threads = new Map([
+            ['thread-failed', { kind: 'term', pane: firstPane }],
+            ['thread-running', { kind: 'term', pane: makePane('thread-running', 'running') }],
+          ]);
+          const findThread = (id: string) => threads.get(id);
+          const browserSurface = null;
+          const gitSurfaceEl = null;
+          const createPaneDivider = () => {
+            const divider = browserDocument.createElement('div');
+            divider.className = 'terminal-pane-divider is-row';
+            return divider;
+          };
+          const renderPaneNode = eval(`(${renderSource})`);
+          const root = {
+            id: 'split-a',
+            type: 'split',
+            orientation: 'row',
+            ratio: 0.5,
+            first: { id: 'leaf-a', type: 'leaf', threadId: 'thread-failed' },
+            second: { id: 'leaf-b', type: 'leaf', threadId: 'thread-running' },
+          };
+          browserDocument.getElementById('probe-stage')?.appendChild(
+            renderPaneNode(root, new Map([['split-a', 0.5]])),
+          );
+        }, functionSource('renderPaneNode'));
+
+        const branchOverflow = await page.locator('.terminal-pane-branch').first().evaluate(
+          (branch) => (globalThis as any).getComputedStyle(branch).overflow as string,
+        );
+        const paneOverflow = await page.locator('.terminal-pane[data-status="failed"]').evaluate(
+          (pane) => (globalThis as any).getComputedStyle(pane).overflow as string,
+        );
+        const screenshot = await page.screenshot();
+        const pixels = await page.evaluate(async (source) => {
+          const browserDocument = (globalThis as any).document;
+          const image = new (globalThis as any).Image();
+          image.src = source;
+          await image.decode();
+          const canvas = browserDocument.createElement('canvas');
+          canvas.width = image.width;
+          canvas.height = image.height;
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('missing canvas context');
+          context.drawImage(image, 0, 0);
+          return Array.from<number>(
+            context.getImageData(241, 90, 4, 20).data as ArrayLike<number>,
+          );
+        }, `data:image/png;base64,${screenshot.toString('base64')}`);
+        const rgba = Array.from(
+          { length: pixels.length / 4 },
+          (_, index) => pixels.slice(index * 4, index * 4 + 4),
+        );
+        const strongestRed = rgba.reduce(
+          (best, pixel) => (
+            pixel[0] - Math.max(pixel[1], pixel[2])
+              > best[0] - Math.max(best[1], best[2])
+              ? pixel
+              : best
+          ),
+          [0, 0, 0, 0],
+        );
+
+        expect(branchOverflow).toBe('visible');
+        expect(paneOverflow).toBe('hidden');
+        expect(strongestRed[0]).toBeGreaterThan(strongestRed[1] + 4);
+        expect(Math.max(...rgba.map((pixel) => pixel[1]))).toBeLessThan(100);
+      } finally {
+        await browser.close();
+      }
+    }, 15_000);
 
     it('double-clicking the header enters focus mode, but not on its buttons', () => {
       expect(functionSource('mountTerminal')).toMatch(
