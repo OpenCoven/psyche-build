@@ -1204,7 +1204,9 @@ describe('Tauri workspace panels', () => {
     expect(functionSource('closeToolPane')).toContain('closeThread(thread.id)');
     expect(functionSource('renderSessionList')).toContain('requestThreadClose(thread)');
     expect(functionSource('requestThreadClose')).toContain('closeThread(thread.id)');
-    expect(mainJs).toMatch(/cmd: "\/close"[\s\S]{0,180}closeThread\(state\.activeThreadId\)/);
+    expect(mainJs).toMatch(
+      /cmd: "\/close"[\s\S]{0,180}requestThreadClose\(findThread\(state\.activeThreadId\)\)/,
+    );
   });
 
   describe('voice call bar', () => {
